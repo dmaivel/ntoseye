@@ -145,14 +145,14 @@ bool lua::initialize()
                                     sol::error err = result;
                                     std::print("{}\n", err.what());
 
-                                    return cmd::status(cmd::status_code::script_failed_during_run);
+                                    return cmd::status::script_failed_during_run();
                                 }
                                 else {
                                     return result;
                                 }
                             }
 
-                            return cmd::status{ cmd::status_code::script_callback_not_found, {} };
+                            return cmd::status::script_callback_not_found();
                         });
 
                         loaded_scripts_count++;
