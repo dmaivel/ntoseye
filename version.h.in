@@ -1,0 +1,6 @@
+#pragma once
+
+#define NTOSEYE_VERSION_MAJOR @ntoseye_VERSION_MAJOR@
+#define NTOSEYE_VERSION_MINOR @ntoseye_VERSION_MINOR@
+#define NTOSEYE_VERSION_PATCH @ntoseye_VERSION_PATCH@
+#define NTOSEYE_VERSION "@ntoseye_VERSION@"
