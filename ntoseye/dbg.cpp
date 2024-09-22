@@ -456,8 +456,6 @@ void dbg::install_builtin_commands()
             std::println("cs={} ss={} ds={} es={} fs={} gs={} efl={}", 
                 out::value_hex<4>(registers["cs"]), out::value_hex<4>(registers["ss"]), out::value_hex<4>(registers["ds"]), out::value_hex<4>(registers["es"]), out::value_hex<4>(registers["fs"]), out::value_hex<4>(registers["gs"]), out::value_hex<8>(registers["eflags"]));
 
-            auto symbol = closest_symbol(registers["rip"]);
-            std::println("{}+0x{:x}", symbol.first, symbol.second);
             cmd::attempt_callback(std::format("u {:x} L1", registers["rip"]), current_process);
             
             return cmd::status::success();

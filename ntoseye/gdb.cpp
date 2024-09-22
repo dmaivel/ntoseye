@@ -17,10 +17,6 @@
 
 // to-do: display error messages?
 
-FILE *gdb_in;
-FILE *gdb_out;
-pid_t gdb_pid = 0;
-
 bool in_breakpoint = false;
 bool signal_raised = false;
 
@@ -41,6 +37,7 @@ struct mi_entry {
 
     }
 
+    // strcmp equiv
     mi_entry& operator[](const std::string &name)
     {
         auto x = std::find_if(children.begin(), children.end(), [name](auto element){
@@ -58,6 +55,7 @@ struct mi_entry {
         return *x;
     }
 
+    // strstr equiv
     mi_entry& operator()(const std::string &name)
     {
         auto x = std::find_if(children.begin(), children.end(), [name](auto element){
@@ -167,70 +165,141 @@ struct mi_entry {
     }
 };
 
-bool send_command(const std::string& command) 
-{
-    if (!gdb_in) return false;
-    fprintf(gdb_in, "%s\n", command.c_str());
-    fflush(gdb_in);
-    return true;
-}
+class gdb_interface {
+public:
+    gdb_interface()
+    { 
 
-std::string read_output() 
-{
-    if (!gdb_out) return "";
-    char buffer[1024];
-    std::string output;
-    while (fgets(buffer, sizeof(buffer), gdb_out)) {
-        output += buffer;
-        if (strstr(buffer, "(gdb)") != nullptr) break;
     }
-    return output;
-}
+
+    ~gdb_interface()
+    {
+        close_pipes();
+    }
+
+    void in(const std::string &line)
+    {
+        if (!gdb_in)
+            return;
+
+        std::fprintf(gdb_in, "%s\n", line.c_str());
+        std::fflush(gdb_in);
+    }
+
+    // to-do: turn into std::expected if elapsed is implemented?
+    std::string out()
+    {
+        if (!gdb_out) 
+            return "";
+
+        char buffer[1024];
+        std::string output;
+
+        // to-do: count total iterations elapsed in case we get stuck here
+        while (std::fgets(buffer, sizeof(buffer), gdb_out)) {
+            output += buffer;
+            if (std::strstr(buffer, "(gdb)") != nullptr) break;
+        }
+
+        return output;
+    }
+
+    inline std::string in_out(const std::string &line)
+    {
+        in(line);
+        return out();
+    }
+
+    bool initialize()
+    {
+        int in_pipe[2], out_pipe[2];
+
+        if (pipe(in_pipe) == -1 || pipe(out_pipe) == -1)
+            return false;
+
+        gdb_pid = fork();
+        if (gdb_pid == -1)
+            return false;
+
+        if (gdb_pid == 0) {
+            dup2(in_pipe[0], STDIN_FILENO);
+            dup2(out_pipe[1], STDOUT_FILENO);
+            dup2(out_pipe[1], STDERR_FILENO);
+
+            close(in_pipe[0]);
+            close(in_pipe[1]);
+            close(out_pipe[0]);
+            close(out_pipe[1]);
+
+            execlp("gdb", "gdb", "--quiet", "--interpreter=mi", nullptr);
+            exit(1);
+        }
+
+        // parent process
+        close(in_pipe[0]);
+        close(out_pipe[1]);
+
+        gdb_in = fdopen(in_pipe[1], "w");
+        gdb_out = fdopen(out_pipe[0], "r");
+
+        if (!gdb_in || !gdb_out)
+            return false;
+
+        return true;
+    }
+
+    void close_pipes()
+    {
+        if (gdb_in) 
+            fclose(gdb_in);
+        if (gdb_out) 
+            fclose(gdb_out);
+
+        if (gdb_pid > 0) {
+            kill(gdb_pid, SIGTERM);
+            waitpid(gdb_pid, nullptr, 0);
+        }
+
+        // prevent detaching more than once
+        gdb_in = 0;
+        gdb_out = 0;
+        gdb_pid = 0;
+    }
+
+    inline bool valid()
+    {
+        return gdb_pid != 0;
+    }
+
+    inline bool bad()
+    {
+        return gdb_pid == 0;
+    }
+
+    inline void sigint()
+    {
+        kill(gdb_pid, SIGINT);
+    }
+
+private:
+    FILE *gdb_in = nullptr;
+    FILE *gdb_out = nullptr;
+    pid_t gdb_pid = 0;
+};
+
+gdb_interface gdb_stream;
 
 bool gdb::initialize()
 {
-    int in_pipe[2], out_pipe[2];
-
-    if (pipe(in_pipe) == -1 || pipe(out_pipe) == -1)
-        return false;
-
-    gdb_pid = fork();
-    if (gdb_pid == -1)
-        return false;
-
-    if (gdb_pid == 0) {
-        dup2(in_pipe[0], STDIN_FILENO);
-        dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(out_pipe[1], STDERR_FILENO);
-
-        close(in_pipe[0]);
-        close(in_pipe[1]);
-        close(out_pipe[0]);
-        close(out_pipe[1]);
-
-        execlp("gdb", "gdb", "--quiet", "--interpreter=mi", nullptr);
-        exit(1);
-    }
-
-    // parent process
-    close(in_pipe[0]);
-    close(out_pipe[1]);
-
-    gdb_in = fdopen(in_pipe[1], "w");
-    gdb_out = fdopen(out_pipe[0], "r");
-
-    if (!gdb_in || !gdb_out)
+    if (!gdb_stream.initialize())
         return false;
 
     std::print("attempting to connect to gdbstub, this may take awhile...");
     std::fflush(stdout);
 
-    send_command("target remote localhost:1234");
-    send_command("c");
-
-    auto initial_message = read_output();
-    auto target_remote_result = read_output();
-    auto countinue_result = read_output();
+    auto initial_message = gdb_stream.out();
+    auto target_remote_result = gdb_stream.in_out("target remote localhost:1234");
+    auto countinue_result = gdb_stream.in_out("c");
 
     auto entry = mi_entry::construct(target_remote_result);
     for (const auto & x : entry.children) {
@@ -250,41 +319,27 @@ bool gdb::initialize()
 
 void gdb::detach()
 {
-    send_command("q");
-
-    if (gdb_in) 
-        fclose(gdb_in);
-    if (gdb_out) 
-        fclose(gdb_out);
-
-    if (gdb_pid > 0) {
-        kill(gdb_pid, SIGTERM);
-        waitpid(gdb_pid, nullptr, 0);
-    }
-
-    // prevent detaching more than once
-    gdb_in = 0;
-    gdb_out = 0;
-    gdb_pid = 0;
+    gdb_stream.in("q");
+    gdb_stream.close_pipes();
 }
 
 std::expected<uintptr_t, std::string> gdb::breakpoint()
 {
-    if (!gdb_pid)
+    if (gdb_stream.bad())
         return std::unexpected("feature not available");
 
     if (!signal_raised)
-        kill(gdb_pid, SIGINT);
+        gdb_stream.sigint();
     else
         signal_raised = false;
 
     if (in_breakpoint) {
-        read_output();
+        gdb_stream.out(); // discard
         return std::unexpected("breakpoint already established");
     }
 
     // apparently when user does CTRL+C, we don't have to send anything
-    auto output = mi_entry::construct(read_output());
+    auto output = mi_entry::construct(gdb_stream.out());
     uintptr_t addr = 0;
 
     in_breakpoint = true;
@@ -303,8 +358,7 @@ bool gdb::resume()
 {
     auto res = in_breakpoint;
     if (in_breakpoint) {
-        send_command("c");
-        read_output();
+        gdb_stream.in_out("c");
         in_breakpoint = false;
     }
 
@@ -325,8 +379,7 @@ std::expected<std::map<std::string, uintptr_t>, std::string> gdb::get_registers(
         return address;
     };
 
-    send_command("info registers");
-    auto output = mi_entry::construct(read_output());
+    auto output = mi_entry::construct(gdb_stream.in_out("info registers"));
 
     std::map<std::string, uintptr_t> result;
     result["rax"] = extract_value_from_line(output("rax"));
@@ -375,10 +428,7 @@ std::expected<int, std::string> gdb::get_current_thread()
     if (!in_breakpoint)
         return std::unexpected("breakpoint needed to get current thread");
 
-    send_command("thread");
-    auto entry = mi_entry::construct(read_output());
-
-    // entry.dump();
+    auto entry = mi_entry::construct(gdb_stream.in_out("thread"));
 
     for (const auto & x : entry.children) {
         if (x.content.contains("Current")) {
@@ -399,8 +449,7 @@ std::expected<bool, std::string> gdb::set_current_thread(int index)
     if (index >= processor_count || index < 0)
         return false;
 
-    send_command(std::format("thread {}", index + 1));
-    read_output();
+    gdb_stream.in_out(std::format("thread {}", index + 1));
     return true;
 }
 
