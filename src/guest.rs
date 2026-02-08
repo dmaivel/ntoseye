@@ -291,7 +291,7 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, kvm: &KvmHandle) -> Result<Option<VirtAddr>
 
             if pdpte.is_large_page() {
                 // Unlikely but just making sure
-                if is_ntoskrnl_pte(kvm, pdpte)? {
+                if let Ok(true) = is_ntoskrnl_pte(kvm, pdpte) {
                     return Ok(Some(VirtAddr::construct(pml4_index, pdpt_index, 0, 0)));
                 }
 
@@ -312,7 +312,7 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, kvm: &KvmHandle) -> Result<Option<VirtAddr>
                 }
 
                 if pde.is_large_page() {
-                    if is_ntoskrnl_pte(kvm, pde)? {
+                    if let Ok(true) = is_ntoskrnl_pte(kvm, pde) {
                         return Ok(Some(VirtAddr::construct(
                             pml4_index, pdpt_index, pd_index, 0,
                         )));
@@ -330,13 +330,15 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, kvm: &KvmHandle) -> Result<Option<VirtAddr>
                 };
 
                 for (pt_index, pte) in pt.into_iter().take(pte_count).enumerate() {
-                    if !pte.is_present() || !is_ntoskrnl_pte(kvm, pte)? {
+                    if !pte.is_present() {
                         continue;
                     }
 
-                    return Ok(Some(VirtAddr::construct(
-                        pml4_index, pdpt_index, pd_index, pt_index,
-                    )));
+                    if let Ok(true) = is_ntoskrnl_pte(kvm, pte) {
+                        return Ok(Some(VirtAddr::construct(
+                            pml4_index, pdpt_index, pd_index, pt_index,
+                        )));   
+                    }
                 }
             }
         }
