@@ -113,6 +113,20 @@ impl BreakpointManager {
         self.breakpoints.values().any(|bp| bp.enabled)
     }
 
+    // NOTE refreshing ensures local breakpoint state matches target state in case they were cleared,
+    // this should fix single stepping breaking every breakpoint proceeding the step..
+    pub fn refresh_enabled(&self, client: &mut GdbClient) -> Result<()> {
+        let mut enabled: Vec<_> = self.breakpoints.values().filter(|bp| bp.enabled).collect();
+        enabled.sort_by_key(|bp| bp.id);
+
+        for bp in enabled {
+            let _ = client.remove_breakpoint(bp.address.0, 1);
+            client.set_breakpoint(bp.address.0, 1)?;
+        }
+
+        Ok(())
+    }
+
     pub fn check_breakpoint_hit(&self, rip: u64, cr3: u64) -> BreakpointHitResult {
         let cr3_masked = cr3 & 0x000F_FFFF_FFFF_F000;
 

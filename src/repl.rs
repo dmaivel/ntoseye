@@ -960,6 +960,11 @@ pub fn start_repl(debugger: &mut DebuggerContext) -> Result<()> {
                                 continue;
                             }
 
+                            if let Err(e) = breakpoints.refresh_enabled(&mut client) {
+                                error!("failed to refresh breakpoints: {}", e);
+                                continue;
+                            }
+
                             if let Err(e) = client.continue_execution() {
                                 error!("failed to continue: {:?}", e);
                                 continue;
@@ -1085,6 +1090,16 @@ pub fn start_repl(debugger: &mut DebuggerContext) -> Result<()> {
                                                     {
                                                         error!(
                                                             "failed to re-enable breakpoint: {}",
+                                                            e
+                                                        );
+                                                        break;
+                                                    }
+
+                                                    if let Err(e) =
+                                                        breakpoints.refresh_enabled(&mut client)
+                                                    {
+                                                        error!(
+                                                            "failed to refresh breakpoints after step: {}",
                                                             e
                                                         );
                                                         break;
@@ -1500,6 +1515,10 @@ pub fn start_repl(debugger: &mut DebuggerContext) -> Result<()> {
                                 && let Err(e) = breakpoints.enable(&mut client, bp_id)
                             {
                                 error!("failed to re-enable breakpoint after step: {}", e);
+                            }
+
+                            if let Err(e) = breakpoints.refresh_enabled(&mut client) {
+                                error!("failed to refresh breakpoints after step: {}", e);
                             }
 
                             if let Ok(tid) = client.get_stopped_thread_id() {

@@ -219,7 +219,8 @@ fn is_valid_kernel_dtb(kvm: &KvmHandle, dtb: Dtb) -> Result<bool> {
 
     if let Some(xlat) = addr_space.virt_to_phys(KUSER_SHARED_DATA_VA)?
         && !xlat.user
-        && xlat.nx {
+        && xlat.nx
+    {
         Ok(true)
     } else {
         Ok(false)
@@ -337,7 +338,7 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, kvm: &KvmHandle) -> Result<Option<VirtAddr>
                     if let Ok(true) = is_ntoskrnl_pte(kvm, pte) {
                         return Ok(Some(VirtAddr::construct(
                             pml4_index, pdpt_index, pd_index, pt_index,
-                        )));   
+                        )));
                     }
                 }
             }

@@ -1,6 +1,6 @@
 [package]
 name = "ntoseye"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 authors = [ "dmaivel" ]
 description = "Windows kernel debugger for Linux hosts running Windows under KVM/QEMU"
