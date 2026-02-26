@@ -754,10 +754,14 @@ pub fn start_repl(debugger: &mut DebuggerContext) -> Result<()> {
                             };
 
                             let mut data: Vec<u8> = vec![0u8; range.len()];
-                            debugger
+                            if let Err(e) = debugger
                                 .get_current_process()
                                 .memory(&debugger.kvm)
-                                .read_bytes(range.start, &mut data)?;
+                                .read_bytes(range.start, &mut data)
+                            {
+                                println!("{e}\n");
+                                continue;
+                            }
 
                             hexdump(range.start, &data);
                         }
@@ -776,10 +780,14 @@ pub fn start_repl(debugger: &mut DebuggerContext) -> Result<()> {
                             };
 
                             let mut bytes: Vec<u8> = vec![0u8; range.len()];
-                            debugger
+                            if let Err(e) = debugger
                                 .get_current_process()
                                 .memory(&debugger.kvm)
-                                .read_bytes(range.start, &mut bytes)?;
+                                .read_bytes(range.start, &mut bytes)
+                            {
+                                println!("{e}\n");
+                                continue;
+                            }
 
                             let mut decoder = Decoder::with_ip(
                                 64, /* TODO dont hardcode for WOW64 process? */

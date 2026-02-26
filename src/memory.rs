@@ -82,17 +82,27 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         Self { backend, dtb }
     }
 
-    fn read_pt_entry(&self, table_base: PhysAddr, index: usize) -> Result<PageTableEntry> {
-        self.backend.read(table_base + 8 * index as u64)
+    fn read_pt_entry(&self, table_base: PhysAddr, index: usize) -> Result<Option<PageTableEntry>> {
+        match self.backend.read(table_base + 8 * index as u64) {
+            Ok(entry) => Ok(Some(entry)),
+            Err(Error::BadPhysicalAddress(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn virt_to_phys(&self, va: VirtAddr) -> Result<Option<Translation>> {
-        let pml4e = self.read_pt_entry(self.dtb, va.pml4_index())?;
+        let Some(pml4e) = self.read_pt_entry(self.dtb, va.pml4_index())? else {
+            return Ok(None);
+        };
+
         if !pml4e.is_present() {
             return Ok(None);
         }
 
-        let pdpte = self.read_pt_entry(pml4e.page_frame(), va.pdpt_index())?;
+        let Some(pdpte) = self.read_pt_entry(pml4e.page_frame(), va.pdpt_index())? else {
+            return Ok(None);
+        };
+
         if !pdpte.is_present() {
             return Ok(None);
         }
@@ -101,7 +111,10 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(Some(Translation::new_huge(pml4e, pdpte, va)));
         }
 
-        let pde = self.read_pt_entry(pdpte.page_frame(), va.pd_index())?;
+        let Some(pde) = self.read_pt_entry(pdpte.page_frame(), va.pd_index())? else {
+            return Ok(None);
+        };
+
         if !pde.is_present() {
             return Ok(None);
         }
@@ -110,7 +123,10 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(Some(Translation::new_large(pml4e, pdpte, pde, va)));
         }
 
-        let pte = self.read_pt_entry(pde.page_frame(), va.pt_index())?;
+        let Some(pte) = self.read_pt_entry(pde.page_frame(), va.pt_index())? else {
+            return Ok(None);
+        };
+
         if !pte.is_present() {
             return Ok(None);
         }
