@@ -61,6 +61,7 @@ mod tests {
             bug_check_code: 0x7e,
             bug_check_parameters: [1, 2, 3, 4],
             offset_prcb_context: None,
+            number_processors: 1,
             context: crate::dmp::DmpContext {
                 rax: 0, rbx: 0, rcx: 0, rdx: 0, rsi: 0, rdi: 0,
                 rbp: 0, rsp: 0, r8: 0, r9: 0, r10: 0, r11: 0,

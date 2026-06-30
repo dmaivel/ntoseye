@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::context;
 use crate::memory::PAGE_SIZE;
+use crate::session::processor_index_from_backend_thread_id;
 use crate::target::Target;
 use crate::types::{PhysAddr, VirtAddr};
 
@@ -58,6 +59,7 @@ pub struct DmpInfo {
     pub bug_check_parameters: [u64; 4],
     pub context: DmpContext,
     pub offset_prcb_context: Option<u16>,
+    pub number_processors: u32,
 }
 
 pub struct DmpMem {
@@ -91,6 +93,7 @@ impl DmpMem {
             bug_check_code: hdr.bug_check_code,
             bug_check_parameters: hdr.bug_check_code_parameters,
             offset_prcb_context,
+            number_processors: hdr.number_processors.max(1),
             context: DmpContext {
                 rax: ctx.rax,
                 rbx: ctx.rbx,
@@ -190,16 +193,39 @@ impl MemoryOps<PhysAddr> for DmpMem {
 
 pub struct DmpBackend {
     register_map: RegisterMap,
-    register_data: Vec<u8>,
+    per_cpu_registers: Vec<Vec<u8>>,
+    current_processor: usize,
+    number_processors: u32,
     prcb_context_offset: Option<u16>,
 }
 
 impl DmpBackend {
     pub fn new(info: &DmpInfo) -> Self {
         let register_map = context::build_register_map();
+        let n = info.number_processors.max(1) as usize;
 
+        let cpu0_data = Self::build_register_buffer(&info.context, info.directory_table_base);
+
+        let mut per_cpu = Vec::with_capacity(n);
+        per_cpu.push(cpu0_data);
+        for _ in 1..n {
+            let mut data = vec![0u8; context::REGISTER_BUFFER_SIZE];
+            data[context::OFFSET_CR3..context::OFFSET_CR3 + 8]
+                .copy_from_slice(&info.directory_table_base.to_le_bytes());
+            per_cpu.push(data);
+        }
+
+        Self {
+            register_map,
+            per_cpu_registers: per_cpu,
+            current_processor: 0,
+            number_processors: info.number_processors,
+            prcb_context_offset: info.offset_prcb_context,
+        }
+    }
+
+    fn build_register_buffer(ctx: &DmpContext, directory_table_base: u64) -> Vec<u8> {
         let mut data = vec![0u8; context::REGISTER_BUFFER_SIZE];
-        let ctx = &info.context;
 
         macro_rules! put_u64 {
             ($off:expr, $val:expr) => {
@@ -247,37 +273,39 @@ impl DmpBackend {
         put_u64!(context::OFFSET_DR3, ctx.dr3);
         put_u64!(context::OFFSET_DR6, ctx.dr6);
         put_u64!(context::OFFSET_DR7, ctx.dr7);
-        // CR3 from the header's DirectoryTableBase
-        put_u64!(context::OFFSET_CR3, info.directory_table_base);
+        put_u64!(context::OFFSET_CR3, directory_table_base);
 
-        Self {
-            register_map,
-            register_data: data,
-            prcb_context_offset: info.offset_prcb_context,
-        }
+        data
     }
 
-    fn read_prcb_context(&mut self, target: &Target, prcb_ctx_offset: u16) -> Result<()> {
+    fn read_prcb_contexts(&mut self, target: &Target, prcb_ctx_offset: u16) -> Result<()> {
         let memory = target.guest.ntoskrnl.memory();
         let processor_block = target.guest.ntoskrnl.symbol("KiProcessorBlock")?.address();
-        let prcb: VirtAddr = memory.read(processor_block)?;
-        if prcb.is_zero() {
-            return Err(Error::DebugInfo("KiProcessorBlock[0] is null".into()));
+
+        for i in 0..self.per_cpu_registers.len() {
+            let prcb: VirtAddr = memory.read(processor_block + (i as u64) * 8)?;
+            if prcb.is_zero() {
+                eprintln!("warning: KiProcessorBlock[{i}] is null, skipping");
+                continue;
+            }
+
+            let context_ptr: VirtAddr = memory.read(prcb + prcb_ctx_offset as u64)?;
+            if context_ptr.is_zero() {
+                eprintln!("warning: PRCB[{i}] Context pointer is null, skipping");
+                continue;
+            }
+
+            let mut ctx_buf = vec![0u8; context::CONTEXT_SIZE];
+            if let Err(e) = memory.read_bytes(context_ptr, &mut ctx_buf) {
+                eprintln!("warning: failed to read PRCB[{i}] context: {e}");
+                continue;
+            }
+
+            let regs = &mut self.per_cpu_registers[i];
+            let saved_cr3 = regs[context::OFFSET_CR3..context::OFFSET_CR3 + 8].to_vec();
+            regs[..context::CONTEXT_SIZE].copy_from_slice(&ctx_buf);
+            regs[context::OFFSET_CR3..context::OFFSET_CR3 + 8].copy_from_slice(&saved_cr3);
         }
-
-        // The offset points to a _CONTEXT pointer inside _KPRCB
-        let context_ptr: VirtAddr = memory.read(prcb + prcb_ctx_offset as u64)?;
-        if context_ptr.is_zero() {
-            return Err(Error::DebugInfo("PRCB Context pointer is null".into()));
-        }
-
-        let mut ctx_buf = vec![0u8; context::CONTEXT_SIZE];
-        memory.read_bytes(context_ptr, &mut ctx_buf)?;
-
-        let saved_cr3 = self.register_data[context::OFFSET_CR3..context::OFFSET_CR3 + 8].to_vec();
-        self.register_data[..context::CONTEXT_SIZE].copy_from_slice(&ctx_buf);
-        self.register_data[context::OFFSET_CR3..context::OFFSET_CR3 + 8]
-            .copy_from_slice(&saved_cr3);
 
         Ok(())
     }
@@ -294,8 +322,8 @@ impl DebugBackend for DmpBackend {
         let Some(offset) = self.prcb_context_offset else {
             return;
         };
-        if let Err(e) = self.read_prcb_context(target, offset) {
-            eprintln!("warning: could not read PRCB context from dump: {e}");
+        if let Err(e) = self.read_prcb_contexts(target, offset) {
+            eprintln!("warning: could not read PRCB contexts from dump: {e}");
         }
     }
 
@@ -311,8 +339,8 @@ impl DebugBackend for DmpBackend {
             BackendCapability::unsupported(DebugCapability::InterruptTarget),
             BackendCapability::unsupported(DebugCapability::SingleStep),
             BackendCapability::unsupported(DebugCapability::WriteRegisters),
-            BackendCapability::unsupported(DebugCapability::ThreadList),
-            BackendCapability::unsupported(DebugCapability::ThreadSelection),
+            BackendCapability::supported(DebugCapability::ThreadList),
+            BackendCapability::supported(DebugCapability::ThreadSelection),
             BackendCapability::unsupported(DebugCapability::KernelBreakpoints),
             BackendCapability::unsupported(DebugCapability::UserModeBreakpoints),
             BackendCapability::unsupported(DebugCapability::TargetReloadDetection),
@@ -324,7 +352,7 @@ impl DebugBackend for DmpBackend {
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
-        Ok(self.register_data.clone())
+        Ok(self.per_cpu_registers[self.current_processor].clone())
     }
 
     fn write_registers(&mut self, _data: &[u8]) -> Result<()> {
@@ -360,15 +388,27 @@ impl DebugBackend for DmpBackend {
     }
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
-        Err(Self::unsupported("context enumeration"))
+        Ok((0..self.number_processors as u16)
+            .map(|i| format!("p1.{:x}", i + 1))
+            .collect())
     }
 
-    fn set_current_thread(&mut self, _thread_id: &str) -> Result<()> {
-        Err(Self::unsupported("context selection"))
+    fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
+        let processor = processor_index_from_backend_thread_id(thread_id).ok_or_else(|| {
+            Error::DebugInfo(format!("invalid thread id: {thread_id}"))
+        })?;
+        if (processor as u32) >= self.number_processors {
+            return Err(Error::DebugInfo(format!(
+                "processor {} out of range (dump has {} processor(s))",
+                processor, self.number_processors
+            )));
+        }
+        self.current_processor = processor as usize;
+        Ok(())
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
-        Ok("1".to_string())
+        Ok(format!("p1.{:x}", self.current_processor as u16 + 1))
     }
 
     fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {
@@ -390,6 +430,7 @@ mod tests {
             bug_check_code: 0x50,
             bug_check_parameters: [0xdead, 0, 0, 0],
             offset_prcb_context: None,
+            number_processors: 1,
             context: DmpContext {
                 rax: 0x1111111111111111,
                 rbx: 0x2222222222222222,
@@ -458,6 +499,8 @@ mod tests {
 
         assert!(is_supported(DebugCapability::MemoryIntrospection));
         assert!(is_supported(DebugCapability::ReadRegisters));
+        assert!(is_supported(DebugCapability::ThreadList));
+        assert!(is_supported(DebugCapability::ThreadSelection));
         assert!(!is_supported(DebugCapability::ExecutionControl));
         assert!(!is_supported(DebugCapability::SingleStep));
         assert!(!is_supported(DebugCapability::WriteRegisters));
@@ -509,6 +552,24 @@ mod tests {
         assert_eq!(map.read_u64("rdi", &data).unwrap(), 0x6666666666666666);
         assert_eq!(map.read_u64("rbp", &data).unwrap(), 0x7777777777777777);
         assert_eq!(map.read_u64("ss", &data).unwrap(), 0x18);
+    }
+
+    #[test]
+    fn dmp_backend_thread_list_and_switching() {
+        let mut info = make_test_info();
+        info.number_processors = 4;
+        let mut backend = DmpBackend::new(&info);
+
+        let threads = backend.thread_list().unwrap();
+        assert_eq!(threads, vec!["p1.1", "p1.2", "p1.3", "p1.4"]);
+
+        assert_eq!(backend.stopped_thread_id().unwrap(), "p1.1");
+
+        backend.set_current_thread("p1.3").unwrap();
+        assert_eq!(backend.stopped_thread_id().unwrap(), "p1.3");
+
+        assert!(backend.set_current_thread("p1.5").is_err());
+        assert!(backend.set_current_thread("garbage").is_err());
     }
 
     #[test]
