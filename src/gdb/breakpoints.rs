@@ -224,7 +224,7 @@ impl BreakpointManager {
 
         match bp.backend {
             BreakpointBackend::GuestMemoryPatch { original_byte } => {
-                let memory = AddressSpace::new(&debugger.kvm, dtb);
+                let memory = AddressSpace::new(&debugger.phys, dtb);
                 memory.write_bytes(bp.address, &[original_byte])?;
                 client.note_breakpoint_uninstalled(bp.address.0);
                 bp.enabled = false;
@@ -329,7 +329,7 @@ impl BreakpointManager {
                 // Capture the displaced byte before the kernel writes the int3,
                 // so display paths can mask it back out (the kernel owns the
                 // original byte but never hands it to us)
-                let memory = AddressSpace::new(&debugger.kvm, debugger.current_dtb());
+                let memory = AddressSpace::new(&debugger.phys, debugger.current_dtb());
                 let mut original = [0u8; 1];
                 memory.read_bytes(address, &mut original)?;
                 client.set_breakpoint(address.0)?;
@@ -338,7 +338,7 @@ impl BreakpointManager {
                 })
             }
             BreakpointScope::Process { dtb, .. } => {
-                let memory = AddressSpace::new(&debugger.kvm, *dtb);
+                let memory = AddressSpace::new(&debugger.phys, *dtb);
                 let mut original = [0u8; 1];
                 memory.read_bytes(address, &mut original)?;
                 memory.write_bytes(address, &[0xcc])?;
@@ -363,7 +363,7 @@ impl BreakpointManager {
                 client.set_breakpoint(bp.address.0)
             }
             (BreakpointScope::Process { dtb, .. }, BreakpointBackend::GuestMemoryPatch { .. }) => {
-                let memory = AddressSpace::new(&debugger.kvm, *dtb);
+                let memory = AddressSpace::new(&debugger.phys, *dtb);
                 memory.write_bytes(bp.address, &[0xcc])?;
                 client.note_breakpoint_installed(bp.address.0);
                 Ok(())
@@ -385,7 +385,7 @@ impl BreakpointManager {
                 BreakpointScope::Process { dtb, .. },
                 BreakpointBackend::GuestMemoryPatch { original_byte },
             ) => {
-                let memory = AddressSpace::new(&debugger.kvm, *dtb);
+                let memory = AddressSpace::new(&debugger.phys, *dtb);
                 memory.write_bytes(bp.address, &[*original_byte])?;
                 client.note_breakpoint_uninstalled(bp.address.0);
                 Ok(())
@@ -396,7 +396,7 @@ impl BreakpointManager {
 
     fn validate_breakpoint_target(debugger: &Target, address: VirtAddr) -> Result<()> {
         let module = Self::find_kernel_module_containing_address(debugger, address);
-        let memory = AddressSpace::new(&debugger.kvm, debugger.current_dtb());
+        let memory = AddressSpace::new(&debugger.phys, debugger.current_dtb());
         let translation = memory
             .virt_to_phys(address)?
             .ok_or(Error::BadVirtualAddress(address))?;

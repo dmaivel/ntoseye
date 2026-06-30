@@ -184,9 +184,9 @@ pub fn print_disasm_context(
     let post_bytes: u64 = 64;
     let start_addr = rip.saturating_sub(pre_bytes);
     let total_len = (pre_bytes + post_bytes) as usize;
-    let active_memory = AddressSpace::new(&debugger.kvm, trace.active_dtb);
+    let active_memory = AddressSpace::new(&debugger.phys, trace.active_dtb);
     let code_dtb = preferred_code_dtb(trace, rip);
-    let code_memory = AddressSpace::new(&debugger.kvm, code_dtb);
+    let code_memory = AddressSpace::new(&debugger.phys, code_dtb);
 
     let mut bytes = vec![0u8; total_len];
     if active_memory

@@ -1059,6 +1059,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "kdmp-parser"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "306a7a411a48095f0500bc6f552456c6dcc0360c876d3d32787650e57201ca98"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1244,6 +1250,7 @@ dependencies = [
  "hex",
  "iced-x86",
  "indicatif",
+ "kdmp-parser",
  "linkme",
  "memmap2",
  "nix 0.30.1",
@@ -1599,7 +1606,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

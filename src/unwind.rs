@@ -33,7 +33,7 @@ use crate::{
     backend::MemoryOps,
     gdb::RegisterMap,
     guest::{ModuleInfo, PeImage, ProcessInfo, read_pe_image, read_pe_image_from_file},
-    host::KvmHandle,
+    phys::PhysMem,
     memory::AddressSpace,
     symbols::SymbolStore,
     target::Target,
@@ -164,9 +164,9 @@ enum Unwound {
 
 struct StackTracer<'a> {
     trace: &'a ThreadTraceContext,
-    kvm: &'a KvmHandle,
+    phys: &'a PhysMem,
     symbols: &'a SymbolStore,
-    memory: AddressSpace<'a, KvmHandle>,
+    memory: AddressSpace<'a, PhysMem>,
     modules: HashMap<(Dtb, u64), CachedModule>,
 }
 
@@ -347,7 +347,7 @@ fn ensure_frame_module_symbols(
         let _ =
             debugger
                 .guest
-                .load_symbols_for_modules(&debugger.kvm, &debugger.symbols, modules, dtb);
+                .load_symbols_for_modules(&debugger.phys, &debugger.symbols, modules, dtb);
     }
 }
 
@@ -427,9 +427,9 @@ impl<'a> StackTracer<'a> {
     fn new(debugger: &'a Target, trace: &'a ThreadTraceContext) -> Self {
         Self {
             trace,
-            kvm: &debugger.kvm,
+            phys: &debugger.phys,
             symbols: &debugger.symbols,
-            memory: AddressSpace::new(&debugger.kvm, trace.active_dtb),
+            memory: AddressSpace::new(&debugger.phys, trace.active_dtb),
             modules: HashMap::new(),
         }
     }
@@ -790,7 +790,7 @@ impl<'a> StackTracer<'a> {
             return Some(());
         }
 
-        let image_memory = AddressSpace::new(self.kvm, module.dtb);
+        let image_memory = AddressSpace::new(self.phys, module.dtb);
         let image = read_pe_image(module.info.base_address, &image_memory).ok()?;
         let executable_ranges = executable_ranges(&image);
 

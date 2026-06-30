@@ -10,14 +10,14 @@ use crate::{
         Guest, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, StructRef, WinObject,
         section_name_at,
     },
-    host::KvmHandle,
+    phys::PhysMem,
     memory::{AddressSpace, PAGE_SIZE},
     symbols::{ParsedType, SymbolIndex, SymbolStore, TypeInfo},
     types::{Dtb, PageTableEntry, Value, VirtAddr},
 };
 
 pub struct Target {
-    pub kvm: Arc<KvmHandle>,
+    pub phys: Arc<PhysMem>,
     pub symbols: Arc<SymbolStore>,
     pub guest: Guest,
     pub current_process: Option<WinObject>,
@@ -483,15 +483,21 @@ pub struct PteWalk {
 
 impl Target {
     pub fn new() -> Result<Self> {
-        let kvm = Arc::new(KvmHandle::new()?);
-        let symbols = Arc::new(SymbolStore::new());
-        let guest = Guest::new(kvm.clone(), symbols.clone())?;
+        Self::with_phys(Arc::new(PhysMem::kvm()?))
+    }
 
-        // load symbols for all kernel modules (ntoskrnl is already loaded, this adds others)
-        let _ = guest.load_all_kernel_module_symbols(&kvm, &symbols);
+    pub fn with_phys(phys: Arc<PhysMem>) -> Result<Self> {
+        let symbols = Arc::new(SymbolStore::new());
+        let guest = if let Some(info) = phys.dmp_info() {
+            Guest::new_with_dtb(phys.clone(), symbols.clone(), info.directory_table_base)?
+        } else {
+            Guest::new(phys.clone(), symbols.clone())?
+        };
+
+        let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
 
         Ok(Self {
-            kvm,
+            phys,
             symbols,
             guest,
             current_process: None,
@@ -657,7 +663,7 @@ impl Target {
 
         let symbol_report =
             self.guest
-                .load_all_process_module_symbols(&self.kvm, &self.symbols, &process_info);
+                .load_all_process_module_symbols(&self.phys, &self.symbols, &process_info);
 
         let winobj = self.guest.winobj_from_process_info(&process_info)?;
 
@@ -856,7 +862,7 @@ impl Target {
         let previous_base_address = self.guest.ntoskrnl.base_address;
         let previous_dtb = self.guest.ntoskrnl.dtb();
         let guest = Guest::new_with_kernel_base_hint(
-            self.kvm.clone(),
+            self.phys.clone(),
             self.symbols.clone(),
             kernel_base_hint,
         )?;
@@ -872,7 +878,7 @@ impl Target {
 
         let (symbol_report, symbol_error) = match self
             .guest
-            .load_all_kernel_module_symbols(&self.kvm, &self.symbols)
+            .load_all_kernel_module_symbols(&self.phys, &self.symbols)
         {
             Ok(report) => (Some(report), None),
             Err(e) => (None, Some(e.to_string())),
@@ -896,7 +902,7 @@ impl Target {
     }
 
     pub fn rediscovered_kernel_identity_changed(&self) -> Result<bool> {
-        let guest = Guest::new(self.kvm.clone(), self.symbols.clone())?;
+        let guest = Guest::new(self.phys.clone(), self.symbols.clone())?;
         Ok(
             guest.ntoskrnl.base_address != self.guest.ntoskrnl.base_address
                 || guest.ntoskrnl.dtb() != self.guest.ntoskrnl.dtb(),
@@ -905,7 +911,7 @@ impl Target {
 
     pub fn refresh_kernel_module_symbols(&self) -> Result<ModuleSymbolLoadReport> {
         self.guest
-            .load_missing_kernel_module_symbols(&self.kvm, &self.symbols)
+            .load_missing_kernel_module_symbols(&self.phys, &self.symbols)
     }
 
     pub fn current_dtb(&self) -> Dtb {
@@ -2130,7 +2136,7 @@ impl Target {
         &self,
         process: &ProcessInfo,
     ) -> Result<Vec<MemoryRegionInfo>> {
-        let memory = AddressSpace::new(&self.kvm, process.dtb);
+        let memory = AddressSpace::new(&self.phys, process.dtb);
         let types = self.guest.ntoskrnl.types_in(process.dtb);
         let eprocess_layout = self.guest.ntoskrnl.types().layout("_EPROCESS")?;
         let vad_root_base = process.eprocess_va + eprocess_layout.field_offset("VadRoot")?;
@@ -2180,7 +2186,7 @@ impl Target {
     }
 
     fn read_vad_root(&self, dtb: Dtb, vad_root_base: VirtAddr) -> Result<VirtAddr> {
-        let memory = AddressSpace::new(&self.kvm, dtb);
+        let memory = AddressSpace::new(&self.phys, dtb);
         let types = self.guest.ntoskrnl.types_in(dtb);
 
         if let Ok(tree_layout) = types.layout("_RTL_AVL_TREE")

@@ -6,6 +6,7 @@ pub mod bugchecks;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod dbg_backend;
+pub mod dmp;
 pub mod diagnostics;
 pub mod disasm;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod kd;
 pub mod mcp;
 pub mod memory;
 pub mod memory_backend;
+pub mod phys;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod repl;

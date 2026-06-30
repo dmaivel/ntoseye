@@ -19,7 +19,9 @@ use crate::expr::Expr;
 use crate::gdb::breakpoints::Breakpoint as CoreBreakpoint;
 use crate::gdb::GdbClient;
 use crate::kd::KdBackend;
+use crate::dmp::DmpBackend;
 use crate::memory_backend::MemoryBackend;
+use crate::phys::PhysMem;
 use crate::repl::ReplState;
 use crate::session::{ContinueOutcome, Session};
 use crate::symbols::{FieldValue, ParsedType, TypeInfo, le_uint};
@@ -2645,31 +2647,42 @@ impl Struct {
 
 /// Attach to a guest and return a [`Debugger`].
 ///
-/// `backend` is one of `"kd"` (default), `"gdb"`, or `"memory"`. `connect` is
-/// the backend target (socket path / address); the per-backend default is used
-/// when omitted.
+/// `backend` is one of `"kd"` (default), `"gdb"`, `"memory"`, or `"dmp"`.
+/// `connect` is the backend target: socket path / address for kd/gdb, or
+/// dump file path for dmp; the per-backend default is used when omitted
+/// (except dmp, which requires a path).
 #[pyfunction]
 #[pyo3(signature = (backend="kd", connect=None))]
 fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
-    // `connect` takes the single-instance lock before building the backend, so a
-    // second attach (here or against a running CLI) fails fast rather than racing
-    // on the handshake the first session owns.
-    let inner = Session::connect(|| {
-        let be: Box<dyn DebugBackend> = match backend {
-            "gdb" => Box::new(GdbClient::connect(connect.unwrap_or("127.0.0.1:1234"))?),
-            "kd" => Box::new(KdBackend::connect(
-                connect.unwrap_or("/tmp/ntoseye-kd.sock"),
-            )?),
-            "memory" => Box::new(MemoryBackend::new()),
-            other => {
-                return Err(Error::DebugInfo(format!(
-                    "unknown backend '{other}': expected 'kd', 'gdb', or 'memory'"
-                )));
-            }
-        };
-        Ok(be)
-    })
-    .map_err(err)?;
+    let inner = if backend == "dmp" {
+        let path = connect.ok_or_else(|| {
+            err(Error::DebugInfo(
+                "dmp backend requires a dump file path via connect=".into(),
+            ))
+        })?;
+        let phys = Arc::new(PhysMem::dmp(std::path::Path::new(path)).map_err(err)?);
+        let info = phys.dmp_info().expect("dmp_info for DMP").clone();
+        Session::connect(phys, || Ok(Box::new(DmpBackend::new(&info)) as Box<dyn DebugBackend>))
+            .map_err(err)?
+    } else {
+        let phys = Arc::new(PhysMem::kvm().map_err(err)?);
+        Session::connect(phys, || {
+            let be: Box<dyn DebugBackend> = match backend {
+                "gdb" => Box::new(GdbClient::connect(connect.unwrap_or("127.0.0.1:1234"))?),
+                "kd" => Box::new(KdBackend::connect(
+                    connect.unwrap_or("/tmp/ntoseye-kd.sock"),
+                )?),
+                "memory" => Box::new(MemoryBackend::new()),
+                other => {
+                    return Err(Error::DebugInfo(format!(
+                        "unknown backend '{other}': expected 'kd', 'gdb', 'memory', or 'dmp'"
+                    )));
+                }
+            };
+            Ok(be)
+        })
+        .map_err(err)?
+    };
     Ok(Debugger {
         inner: SessionHandle::Owned(Box::new(inner)),
     })

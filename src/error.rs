@@ -139,6 +139,12 @@ pub enum Error {
 
     #[error("Bad physical address: {0:x}")]
     BadPhysicalAddress(PhysAddr),
+
+    #[error("crash dump is read-only")]
+    ReadOnlyDump,
+
+    #[error("invalid crash dump: {0}")]
+    InvalidDump(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

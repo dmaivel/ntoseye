@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Mnemonic};
 use single_instance::SingleInstance;
 
+use std::sync::Arc;
+
 use crate::backend::MemoryOps;
 use crate::bugchecks::{CURRENT_KERNEL_RELOAD_WINDOW, looks_like_kernel_pointer};
 use crate::dbg_backend::{
@@ -17,6 +19,7 @@ use crate::gdb::breakpoints::Breakpoint;
 use crate::gdb::{BreakpointHitResult, BreakpointManager, RegisterMap};
 use crate::kd::trace_enabled;
 use crate::memory::AddressSpace;
+use crate::phys::PhysMem;
 use crate::target::{ReloadReport, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
@@ -260,13 +263,13 @@ impl Session {
     /// lock is taken *before* `make_backend` runs, so a second instance fails fast
     /// instead of racing on the transport handshake. Backend selection
     /// (gdb/kd/memory) stays a frontend concern, in the closure.
-    pub fn connect<F>(make_backend: F) -> Result<Self>
+    pub fn connect<F>(phys: Arc<PhysMem>, make_backend: F) -> Result<Self>
     where
         F: FnOnce() -> Result<Box<dyn DebugBackend>>,
     {
         let guard = acquire_instance_guard()?;
         let backend = make_backend()?;
-        let mut session = Self::new(backend)?;
+        let mut session = Self::new(phys, backend)?;
         session._instance_guard = Some(guard);
         Ok(session)
     }
@@ -275,8 +278,8 @@ impl Session {
     /// guest [`Target`] view internally. The lower-level, *unguarded* constructor
     /// (tests / embedders that manage their own locking); hosts attach via
     /// [`Self::connect`], which takes the single-instance lock first.
-    pub fn new(mut backend: Box<dyn DebugBackend>) -> Result<Self> {
-        let target = Target::new()?;
+    pub fn new(phys: Arc<PhysMem>, mut backend: Box<dyn DebugBackend>) -> Result<Self> {
+        let target = Target::with_phys(phys)?;
         let register_map = backend.register_map().clone();
 
         // Seed the selected thread from the backend when it exposes register
@@ -415,7 +418,7 @@ impl Session {
         let cr3 = self.register_map.read_u64("cr3", &regs).unwrap_or(0);
         let trace = resolve_thread_trace_context(&self.target, cr3);
         let code_dtb = preferred_code_dtb(&trace, rip);
-        let memory = AddressSpace::new(&self.target.kvm, code_dtb);
+        let memory = AddressSpace::new(&self.target.phys, code_dtb);
         let mut bytes = [0u8; 16];
         memory.read_bytes(VirtAddr(rip), &mut bytes)?;
         self.breakpoints

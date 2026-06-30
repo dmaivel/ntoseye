@@ -1,12 +1,17 @@
 use argh::{FromArgValue, FromArgs};
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use crate::{
     dbg_backend::DebugBackend,
     diagnostics,
+    dmp::DmpBackend,
     error::{Error, Result},
     gdb::GdbClient,
     kd::KdBackend,
     memory_backend::MemoryBackend,
+    phys::PhysMem,
     repl::start_repl,
     session, symbols, virsh,
 };
@@ -59,6 +64,11 @@ struct Args {
     /// backend connection target. Defaults: '127.0.0.1:1234' for gdb, '/tmp/ntoseye-kd.sock' for kd; unused by memory.
     #[argh(option, long = "connect")]
     connect: Option<String>,
+
+    /// open a Windows kernel crash dump (.dmp) for offline analysis instead of attaching to a live VM
+    #[argh(option, long = "dump")]
+    dump: Option<PathBuf>,
+
     #[argh(subcommand)]
     command: Option<Command>,
 }
@@ -235,9 +245,20 @@ fn run() -> Result<()> {
         };
     }
 
-    // `connect` takes the single-instance lock before building the backend, so a
-    // second ntoseye fails fast instead of racing on the transport handshake.
-    let mut ctx = session::Session::connect(|| -> Result<Box<dyn DebugBackend>> {
+    if let Some(dump_path) = &args.dump {
+        let phys = Arc::new(PhysMem::dmp(dump_path)?);
+        let info = phys
+            .dmp_info()
+            .expect("dmp_info must be Some for DMP backend")
+            .clone();
+        let mut ctx = session::Session::connect(phys, || -> Result<Box<dyn DebugBackend>> {
+            Ok(Box::new(DmpBackend::new(&info)))
+        })?;
+        return start_repl(&mut ctx);
+    }
+
+    let phys = Arc::new(PhysMem::kvm()?);
+    let mut ctx = session::Session::connect(phys, || -> Result<Box<dyn DebugBackend>> {
         Ok(match args.backend {
             BackendKind::Gdb => {
                 let addr = args.connect.as_deref().unwrap_or("127.0.0.1:1234");

@@ -15,6 +15,7 @@ Windows kernel debugger for Linux hosts running Windows under KVM/QEMU. Essentia
 - PDB fetching & parsing for offsets
 - Breakpointing (kernel, usermode)
 - Bugcheck analysis (decodes the bug check code, parameters, and faulting site on a guest crash)
+- Crash dump analysis (`--dump` opens a Windows kernel `.dmp` file for offline inspection)
 - Three backends: Windows KD over a serial pipe (KDCOM, default), QEMU's `gdbstub`, and passive memory introspection (see [Choosing a backend](#choosing-a-backend))
 - [Python SDK](#python-sdk)
 - [Custom commands](#custom-commands)
@@ -221,6 +222,25 @@ ntoseye --backend memory
 ```
 
 Execution control, registers, execution-context selection, breakpoints, debug output, bugcheck stops, and reload detection are unavailable in this mode. Run `capabilities` in the REPL for the exact backend feature matrix.
+
+### Crash dump
+
+Analyse a Windows kernel crash dump (`.dmp`) offline, without a running VM:
+
+```bash
+ntoseye --dump /path/to/MEMORY.DMP
+```
+
+Full and kernel memory dumps are supported. The dump's `DirectoryTableBase` and `CONTEXT` record are used automatically — for BSOD dumps the crash registers, stack trace, and bugcheck analysis are available; live system dumps (bugcheck 0x161) have memory but no exception context.
+
+Available commands include `ps`, `lm`, `dt`, `dq`/`db`/`dd`, `x`, `ev`, `drivers`, and `s`. Execution control, breakpoints, and register/memory writes are not available (the dump is read-only).
+
+The Python SDK supports dump analysis as well:
+
+```python
+import ntoseye
+dbg = ntoseye.attach("dmp", connect="/path/to/MEMORY.DMP")
+```
 
 ### Recommended guest tweaks
 

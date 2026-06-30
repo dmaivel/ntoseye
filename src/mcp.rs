@@ -23,6 +23,7 @@ use crate::expr::Expr;
 use crate::gdb::GdbClient;
 use crate::kd::KdBackend;
 use crate::memory_backend::MemoryBackend;
+use crate::phys::PhysMem;
 use crate::session::{ContinueOutcome, Session};
 use crate::symbols::{FieldValue, TypeInfo};
 use crate::target::{kthread_state_name, wait_reason_name};
@@ -86,19 +87,22 @@ fn spawn_session(
         // `connect` takes the single-instance lock (on this actor thread, where
         // the `!Send` session lives) before building the backend, so the MCP
         // server refuses to attach if another ntoseye already owns the VM.
-        let built = Session::connect(|| {
-            let backend: Box<dyn DebugBackend> = match backend.as_str() {
-                "gdb" => Box::new(GdbClient::connect(
-                    connect.as_deref().unwrap_or("127.0.0.1:1234"),
-                )?),
-                "kd" => Box::new(KdBackend::connect(
-                    connect.as_deref().unwrap_or("/tmp/ntoseye-kd.sock"),
-                )?),
-                "memory" => Box::new(MemoryBackend::new()),
-                other => return Err(Error::DebugInfo(format!("unknown backend '{other}'"))),
-            };
-            Ok(backend)
-        })
+        let built = (|| {
+            let phys = Arc::new(PhysMem::kvm()?);
+            Session::connect(phys, || {
+                let backend: Box<dyn DebugBackend> = match backend.as_str() {
+                    "gdb" => Box::new(GdbClient::connect(
+                        connect.as_deref().unwrap_or("127.0.0.1:1234"),
+                    )?),
+                    "kd" => Box::new(KdBackend::connect(
+                        connect.as_deref().unwrap_or("/tmp/ntoseye-kd.sock"),
+                    )?),
+                    "memory" => Box::new(MemoryBackend::new()),
+                    other => return Err(Error::DebugInfo(format!("unknown backend '{other}'"))),
+                };
+                Ok(backend)
+            })
+        })()
         .map_err(|e| e.to_string());
 
         let mut ctx = match built {
