@@ -280,6 +280,7 @@ impl Session {
     /// [`Self::connect`], which takes the single-instance lock first.
     pub fn new(phys: Arc<PhysMem>, mut backend: Box<dyn DebugBackend>) -> Result<Self> {
         let target = Target::with_phys(phys)?;
+        backend.initialize_from_target(&target);
         let register_map = backend.register_map().clone();
 
         // Seed the selected thread from the backend when it exposes register

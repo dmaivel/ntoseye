@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::Result;
 use crate::gdb::RegisterMap;
+use crate::target::Target;
 use crate::types::VirtAddr;
 
 /// One captured line of guest debug output (DbgPrint / kernel printf), with the
@@ -271,6 +272,11 @@ pub trait DebugBackend {
     /// Notify the backend about a breakpoint patched outside `set_breakpoint`
     fn note_breakpoint_installed(&mut self, _addr: u64) {}
     fn note_breakpoint_uninstalled(&mut self, _addr: u64) {}
+
+    /// Called once after the [`Target`] is constructed, giving the backend a
+    /// chance to read guest state that requires symbol resolution. DmpBackend
+    /// uses this to extract per-CPU registers from the PRCB ContextFrame.
+    fn initialize_from_target(&mut self, _target: &Target) {}
 
     /// Notify the backend about guest rediscovery progress after a transport
     /// reload. Backends can use this to tune reconnect assistance while booting.

@@ -2,7 +2,10 @@ use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
+use kdmp_parser::gxa::Gva;
 use kdmp_parser::parse::KernelDumpParser;
+use kdmp_parser::structs::KdDebuggerData64;
+use kdmp_parser::virt;
 use memmap2::Mmap;
 
 use crate::backend::MemoryOps;
@@ -11,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::context;
 use crate::memory::PAGE_SIZE;
+use crate::target::Target;
 use crate::types::{PhysAddr, VirtAddr};
 
 #[derive(Debug, Clone)]
@@ -53,6 +57,7 @@ pub struct DmpInfo {
     pub bug_check_code: u32,
     pub bug_check_parameters: [u64; 4],
     pub context: DmpContext,
+    pub offset_prcb_context: Option<u16>,
 }
 
 pub struct DmpMem {
@@ -79,10 +84,13 @@ impl DmpMem {
         let hdr = parser.headers();
         let ctx = parser.context_record();
 
+        let offset_prcb_context = Self::read_prcb_context_offset(&parser);
+
         let info = DmpInfo {
             directory_table_base: hdr.directory_table_base,
             bug_check_code: hdr.bug_check_code,
             bug_check_parameters: hdr.bug_check_code_parameters,
+            offset_prcb_context,
             context: DmpContext {
                 rax: ctx.rax,
                 rbx: ctx.rbx,
@@ -118,6 +126,14 @@ impl DmpMem {
         };
 
         Ok(Self { mmap, pages, info })
+    }
+
+    fn read_prcb_context_offset(parser: &KernelDumpParser) -> Option<u16> {
+        let reader = virt::Reader::new(parser);
+        let kdbg_va: Gva = parser.headers().kd_debugger_data_block.into();
+        let kdbg: KdDebuggerData64 = reader.try_read_struct(kdbg_va).ok()??;
+        let off = kdbg.offset_prcb_context;
+        if off > 0 { Some(off) } else { None }
     }
 
     pub fn info(&self) -> &DmpInfo {
@@ -175,6 +191,7 @@ impl MemoryOps<PhysAddr> for DmpMem {
 pub struct DmpBackend {
     register_map: RegisterMap,
     register_data: Vec<u8>,
+    prcb_context_offset: Option<u16>,
 }
 
 impl DmpBackend {
@@ -236,7 +253,33 @@ impl DmpBackend {
         Self {
             register_map,
             register_data: data,
+            prcb_context_offset: info.offset_prcb_context,
         }
+    }
+
+    fn read_prcb_context(&mut self, target: &Target, prcb_ctx_offset: u16) -> Result<()> {
+        let memory = target.guest.ntoskrnl.memory();
+        let processor_block = target.guest.ntoskrnl.symbol("KiProcessorBlock")?.address();
+        let prcb: VirtAddr = memory.read(processor_block)?;
+        if prcb.is_zero() {
+            return Err(Error::DebugInfo("KiProcessorBlock[0] is null".into()));
+        }
+
+        // The offset points to a _CONTEXT pointer inside _KPRCB
+        let context_ptr: VirtAddr = memory.read(prcb + prcb_ctx_offset as u64)?;
+        if context_ptr.is_zero() {
+            return Err(Error::DebugInfo("PRCB Context pointer is null".into()));
+        }
+
+        let mut ctx_buf = vec![0u8; context::CONTEXT_SIZE];
+        memory.read_bytes(context_ptr, &mut ctx_buf)?;
+
+        let saved_cr3 = self.register_data[context::OFFSET_CR3..context::OFFSET_CR3 + 8].to_vec();
+        self.register_data[..context::CONTEXT_SIZE].copy_from_slice(&ctx_buf);
+        self.register_data[context::OFFSET_CR3..context::OFFSET_CR3 + 8]
+            .copy_from_slice(&saved_cr3);
+
+        Ok(())
     }
 
     fn unsupported(operation: &str) -> Error {
@@ -247,6 +290,15 @@ impl DmpBackend {
 }
 
 impl DebugBackend for DmpBackend {
+    fn initialize_from_target(&mut self, target: &Target) {
+        let Some(offset) = self.prcb_context_offset else {
+            return;
+        };
+        if let Err(e) = self.read_prcb_context(target, offset) {
+            eprintln!("warning: could not read PRCB context from dump: {e}");
+        }
+    }
+
     fn register_map(&self) -> &RegisterMap {
         &self.register_map
     }
@@ -337,6 +389,7 @@ mod tests {
             directory_table_base: 0x1ad000,
             bug_check_code: 0x50,
             bug_check_parameters: [0xdead, 0, 0, 0],
+            offset_prcb_context: None,
             context: DmpContext {
                 rax: 0x1111111111111111,
                 rbx: 0x2222222222222222,
