@@ -237,6 +237,7 @@ fn run() -> Result<()> {
                 mcp::run(
                     backend.to_string(),
                     args.connect.clone(),
+                    args.dump.clone(),
                     mcp_args.http.clone(),
                     mcp_args.unsafe_http,
                 )

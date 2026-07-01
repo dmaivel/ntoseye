@@ -11,6 +11,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use crate::backend::MemoryOps;
 use crate::bugchecks::{analyze_bugcheck, current_bugcheck};
 use crate::dbg_backend::DebugBackend;
+use crate::dmp::DmpBackend;
 use crate::error::Error;
 use crate::expr::Expr;
 use crate::gdb::GdbClient;
@@ -72,6 +74,7 @@ fn cleanup_session(ctx: &mut Session) {
 fn spawn_session(
     backend: String,
     connect: Option<String>,
+    dump: Option<PathBuf>,
 ) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Arc<AtomicBool>)> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
@@ -84,24 +87,40 @@ fn spawn_session(
     let service_pending_actor = service_pending.clone();
 
     std::thread::spawn(move || {
-        // `connect` takes the single-instance lock (on this actor thread, where
-        // the `!Send` session lives) before building the backend, so the MCP
-        // server refuses to attach if another ntoseye already owns the VM.
+        let is_dump = dump.is_some();
+
         let built = (|| {
-            let phys = Arc::new(PhysMem::kvm()?);
-            Session::connect(phys, || {
-                let backend: Box<dyn DebugBackend> = match backend.as_str() {
-                    "gdb" => Box::new(GdbClient::connect(
-                        connect.as_deref().unwrap_or("127.0.0.1:1234"),
-                    )?),
-                    "kd" => Box::new(KdBackend::connect(
-                        connect.as_deref().unwrap_or("/tmp/ntoseye-kd.sock"),
-                    )?),
-                    "memory" => Box::new(MemoryBackend::new()),
-                    other => return Err(Error::DebugInfo(format!("unknown backend '{other}'"))),
-                };
-                Ok(backend)
-            })
+            if let Some(dump_path) = &dump {
+                let phys = Arc::new(PhysMem::dmp(dump_path)?);
+                let info = phys
+                    .dmp_info()
+                    .expect("dmp_info must be Some for DMP backend")
+                    .clone();
+                Session::connect(phys, || -> crate::error::Result<Box<dyn DebugBackend>> {
+                    Ok(Box::new(DmpBackend::new(&info)))
+                })
+            } else {
+                // `connect` takes the single-instance lock (on this actor thread,
+                // where the `!Send` session lives) before building the backend, so
+                // the MCP server refuses to attach if another ntoseye already owns
+                // the VM.
+                let phys = Arc::new(PhysMem::kvm()?);
+                Session::connect(phys, || {
+                    let backend: Box<dyn DebugBackend> = match backend.as_str() {
+                        "gdb" => Box::new(GdbClient::connect(
+                            connect.as_deref().unwrap_or("127.0.0.1:1234"),
+                        )?),
+                        "kd" => Box::new(KdBackend::connect(
+                            connect.as_deref().unwrap_or("/tmp/ntoseye-kd.sock"),
+                        )?),
+                        "memory" => Box::new(MemoryBackend::new()),
+                        other => {
+                            return Err(Error::DebugInfo(format!("unknown backend '{other}'")))
+                        }
+                    };
+                    Ok(backend)
+                })
+            }
         })()
         .map_err(|e| e.to_string());
 
@@ -116,11 +135,10 @@ fn spawn_session(
             }
         };
 
-        // Unlike the REPL (which pauses at its prompt), the MCP keeps the guest
-        // running for the session; the connect handshake broke the target in, so
-        // resume now. Live introspection reads go through /dev/kvm; tools that need
-        // a stopped target say so and ask the client to call `interrupt` first.
-        if !ctx.backend.is_running() {
+        // For live targets the MCP keeps the guest running between tool calls;
+        // tools that need a stopped target ask the client to call `interrupt`
+        // first. Dumps are always halted — skip the resume.
+        if !is_dump && !ctx.backend.is_running() {
             let _ = ctx.backend.continue_execution();
         }
 
@@ -131,10 +149,6 @@ fn spawn_session(
         loop {
             match rx.blocking_recv() {
                 Some(Command::Run { job, reply }) => {
-                    // DIAGNOSTIC: every tool call submits exactly one Run job, so
-                    // this logs whether the actor runs anything while you believe
-                    // the session is idle (e.g. a client auto-probing tools).
-                    // Gated on the same env as the kd traces so it interleaves.
                     if std::env::var_os("NTOSEYE_KD_TRACE").is_some() {
                         eprintln!("mcp: actor: running a tool job");
                     }
@@ -2363,6 +2377,7 @@ fn check_http_bind_policy(addr: &str, unsafe_http: bool) -> anyhow::Result<()> {
 pub fn run(
     backend: String,
     connect: Option<String>,
+    dump: Option<PathBuf>,
     http: Option<String>,
     unsafe_http: bool,
 ) -> anyhow::Result<()> {
@@ -2370,9 +2385,10 @@ pub fn run(
         check_http_bind_policy(addr, unsafe_http)?;
     }
 
+    let label = if dump.is_some() { "dump" } else { &backend };
     // The stdio transport speaks MCP on stdout, so all logging goes to stderr.
-    eprintln!("ntoseye-mcp: attaching ({backend})...");
-    let (tx, service_pending) = spawn_session(backend, connect)?;
+    eprintln!("ntoseye-mcp: attaching ({label})...");
+    let (tx, service_pending) = spawn_session(backend, connect, dump)?;
     // A sender kept aside so we can drive teardown even after the service (which
     // owns its own sender) is dropped.
     let shutdown_tx = tx.clone();
