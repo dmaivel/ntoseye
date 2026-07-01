@@ -91,21 +91,36 @@ fn spawn_session(
 
         let built = (|| {
             if let Some(dump_path) = &dump {
+                let target = std::fs::canonicalize(dump_path)
+                    .unwrap_or_else(|_| dump_path.clone())
+                    .display()
+                    .to_string();
                 let phys = Arc::new(PhysMem::dmp(dump_path)?);
                 let info = phys
                     .dmp_info()
                     .expect("dmp_info must be Some for DMP backend")
                     .clone();
-                Session::connect(phys, || -> crate::error::Result<Box<dyn DebugBackend>> {
-                    Ok(Box::new(DmpBackend::new(&info)))
-                })
+                Session::connect(
+                    phys,
+                    &target,
+                    || -> crate::error::Result<Box<dyn DebugBackend>> {
+                        Ok(Box::new(DmpBackend::new(&info)))
+                    },
+                )
             } else {
-                // `connect` takes the single-instance lock (on this actor thread,
-                // where the `!Send` session lives) before building the backend, so
-                // the MCP server refuses to attach if another ntoseye already owns
-                // the VM.
+                let target = match backend.as_str() {
+                    "gdb" => connect
+                        .as_deref()
+                        .unwrap_or("127.0.0.1:1234")
+                        .to_string(),
+                    "kd" => connect
+                        .as_deref()
+                        .unwrap_or("/tmp/ntoseye-kd.sock")
+                        .to_string(),
+                    _ => "kvm".to_string(),
+                };
                 let phys = Arc::new(PhysMem::kvm()?);
-                Session::connect(phys, || {
+                Session::connect(phys, &target, || {
                     let backend: Box<dyn DebugBackend> = match backend.as_str() {
                         "gdb" => Box::new(GdbClient::connect(
                             connect.as_deref().unwrap_or("127.0.0.1:1234"),

@@ -2660,13 +2660,24 @@ fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
                 "dmp backend requires a dump file path via connect=".into(),
             ))
         })?;
+        let target = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| std::path::PathBuf::from(path))
+            .display()
+            .to_string();
         let phys = Arc::new(PhysMem::dmp(std::path::Path::new(path)).map_err(err)?);
         let info = phys.dmp_info().expect("dmp_info for DMP").clone();
-        Session::connect(phys, || Ok(Box::new(DmpBackend::new(&info)) as Box<dyn DebugBackend>))
-            .map_err(err)?
+        Session::connect(phys, &target, || {
+            Ok(Box::new(DmpBackend::new(&info)) as Box<dyn DebugBackend>)
+        })
+        .map_err(err)?
     } else {
+        let target = match backend {
+            "gdb" => connect.unwrap_or("127.0.0.1:1234").to_string(),
+            "kd" => connect.unwrap_or("/tmp/ntoseye-kd.sock").to_string(),
+            _ => "kvm".to_string(),
+        };
         let phys = Arc::new(PhysMem::kvm().map_err(err)?);
-        Session::connect(phys, || {
+        Session::connect(phys, &target, || {
             let be: Box<dyn DebugBackend> = match backend {
                 "gdb" => Box::new(GdbClient::connect(connect.unwrap_or("127.0.0.1:1234"))?),
                 "kd" => Box::new(KdBackend::connect(

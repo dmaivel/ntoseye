@@ -258,16 +258,19 @@ pub struct Session {
 }
 
 impl Session {
-    /// Acquire the single-instance lock, connect a backend via `make_backend`,
-    /// and build the owned session; the guarded attach path every host uses. The
-    /// lock is taken *before* `make_backend` runs, so a second instance fails fast
-    /// instead of racing on the transport handshake. Backend selection
-    /// (gdb/kd/memory) stays a frontend concern, in the closure.
-    pub fn connect<F>(phys: Arc<PhysMem>, make_backend: F) -> Result<Self>
+    /// Acquire the single-instance lock for `target`, connect a backend via
+    /// `make_backend`, and build the owned session; the guarded attach path
+    /// every host uses. `target` identifies the backend resource (socket path,
+    /// address, dump file …) so that instances targeting *different* resources
+    /// can coexist while two instances on the *same* resource still conflict.
+    /// The lock is taken *before* `make_backend` runs, so a second instance
+    /// fails fast instead of racing on the transport handshake. Backend
+    /// selection (gdb/kd/memory) stays a frontend concern, in the closure.
+    pub fn connect<F>(phys: Arc<PhysMem>, target: &str, make_backend: F) -> Result<Self>
     where
         F: FnOnce() -> Result<Box<dyn DebugBackend>>,
     {
-        let guard = acquire_instance_guard()?;
+        let guard = acquire_instance_guard(target)?;
         let backend = make_backend()?;
         let mut session = Self::new(phys, backend)?;
         session._instance_guard = Some(guard);
@@ -1509,17 +1512,20 @@ impl Session {
     }
 }
 
-/// Process-wide guard that one ntoseye session owns the VM at a time; a second
-/// attach against the same backend would corrupt both. Held inside [`Session`]
-/// for its lifetime (see [`Session::connect`]); dropping it releases the lock.
+/// Per-target guard that one ntoseye session owns a given backend resource at a
+/// time; a second attach against the same target would corrupt both. Held
+/// inside [`Session`] for its lifetime (see [`Session::connect`]); dropping it
+/// releases the lock.
 struct InstanceGuard(#[allow(dead_code)] SingleInstance);
 
-/// Take the single-instance lock, or [`Error::AlreadyRunning`] if another ntoseye
-/// already holds it. Internal to [`Session::connect`], which calls it before
-/// connecting a backend so a second instance fails fast rather than racing on
-/// the transport handshake.
-fn acquire_instance_guard() -> Result<InstanceGuard> {
-    let instance = SingleInstance::new("ntoseye").map_err(|err| {
+/// Take the single-instance lock for `target`, or [`Error::AlreadyRunning`] if
+/// another ntoseye already holds it. `target` is the backend resource identifier
+/// (socket path, address, dump file …) so instances on *different* targets can
+/// coexist. Internal to [`Session::connect`], which calls it before connecting
+/// a backend so a second instance fails fast rather than racing on the transport
+/// handshake.
+fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
+    let instance = SingleInstance::new(&format!("ntoseye-{target}")).map_err(|err| {
         Error::DebugInfo(format!("failed to create single-instance guard: {err:?}"))
     })?;
     if !instance.is_single() {

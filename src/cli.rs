@@ -247,38 +247,57 @@ fn run() -> Result<()> {
     }
 
     if let Some(dump_path) = &args.dump {
+        let target = std::fs::canonicalize(dump_path)
+            .unwrap_or_else(|_| dump_path.clone())
+            .display()
+            .to_string();
         let phys = Arc::new(PhysMem::dmp(dump_path)?);
         let info = phys
             .dmp_info()
             .expect("dmp_info must be Some for DMP backend")
             .clone();
-        let mut ctx = session::Session::connect(phys, || -> Result<Box<dyn DebugBackend>> {
-            Ok(Box::new(DmpBackend::new(&info)))
-        })?;
+        let mut ctx =
+            session::Session::connect(phys, &target, || -> Result<Box<dyn DebugBackend>> {
+                Ok(Box::new(DmpBackend::new(&info)))
+            })?;
         return start_repl(&mut ctx);
     }
 
+    let target = match args.backend {
+        BackendKind::Gdb => args
+            .connect
+            .as_deref()
+            .unwrap_or("127.0.0.1:1234")
+            .to_string(),
+        BackendKind::Kd => args
+            .connect
+            .as_deref()
+            .unwrap_or("/tmp/ntoseye-kd.sock")
+            .to_string(),
+        BackendKind::Memory => "kvm".to_string(),
+    };
     let phys = Arc::new(PhysMem::kvm()?);
-    let mut ctx = session::Session::connect(phys, || -> Result<Box<dyn DebugBackend>> {
-        Ok(match args.backend {
-            BackendKind::Gdb => {
-                let addr = args.connect.as_deref().unwrap_or("127.0.0.1:1234");
-                Box::new(GdbClient::connect(addr)?)
-            }
-            BackendKind::Kd => {
-                let path = args.connect.as_deref().unwrap_or("/tmp/ntoseye-kd.sock");
-                Box::new(KdBackend::connect(path)?)
-            }
-            BackendKind::Memory => {
-                if args.connect.is_some() {
-                    return Err(Error::DebugInfo(
-                        "memory backend does not use --connect".to_string(),
-                    ));
+    let mut ctx =
+        session::Session::connect(phys, &target, || -> Result<Box<dyn DebugBackend>> {
+            Ok(match args.backend {
+                BackendKind::Gdb => {
+                    let addr = args.connect.as_deref().unwrap_or("127.0.0.1:1234");
+                    Box::new(GdbClient::connect(addr)?)
                 }
-                Box::new(MemoryBackend::new())
-            }
-        })
-    })?;
+                BackendKind::Kd => {
+                    let path = args.connect.as_deref().unwrap_or("/tmp/ntoseye-kd.sock");
+                    Box::new(KdBackend::connect(path)?)
+                }
+                BackendKind::Memory => {
+                    if args.connect.is_some() {
+                        return Err(Error::DebugInfo(
+                            "memory backend does not use --connect".to_string(),
+                        ));
+                    }
+                    Box::new(MemoryBackend::new())
+                }
+            })
+        })?;
     start_repl(&mut ctx)
 }
 
