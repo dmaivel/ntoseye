@@ -1083,7 +1083,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Disassemble 1-128 instructions at an address in the current address space; returns {ip, hex, asm, comment} rows"
+        description = "Disassemble 1-128 instructions at an address in the current address space; returns {instructions:[{ip, hex, asm, comment}]}"
     )]
     async fn disassemble(
         &self,
@@ -1096,7 +1096,7 @@ impl NtoseyeMcp {
                 let rows = ctx
                     .disassemble(VirtAddr(addr), count)
                     .map_err(ToolError::from)?;
-                let arr = rows
+                let arr: Vec<Value> = rows
                     .iter()
                     .map(|r| {
                         serde_json::json!({
@@ -1107,14 +1107,14 @@ impl NtoseyeMcp {
                         })
                     })
                     .collect();
-                Ok(Value::Array(arr))
+                Ok(serde_json::json!({ "instructions": arr }))
             })
             .await?;
         json_result(v)
     }
 
     #[tool(
-        description = "Walk the current thread's call stack; limit default 64, range 1-256. Returns {ip, sp, symbol, source} frames (source: current/unwind/scan). Requires the VM halted (call interrupt first, or be stopped at a breakpoint)."
+        description = "Walk the current thread's call stack; limit default 64, range 1-256. Returns {frames:[{ip, sp, symbol, source}]} (source: current/unwind/scan). Requires the VM halted (call interrupt first, or be stopped at a breakpoint)."
     )]
     async fn backtrace(
         &self,
@@ -1125,7 +1125,7 @@ impl NtoseyeMcp {
             .run(move |ctx| {
                 require_halted(ctx, "backtrace")?;
                 let trace = ctx.backtrace(limit).map_err(ToolError::from)?;
-                let arr = trace
+                let arr: Vec<Value> = trace
                     .frames
                     .iter()
                     .map(|f| {
@@ -1137,7 +1137,7 @@ impl NtoseyeMcp {
                         })
                     })
                     .collect();
-                Ok(Value::Array(arr))
+                Ok(serde_json::json!({ "frames": arr }))
             })
             .await?;
         json_result(v)
@@ -1703,12 +1703,12 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "List the backend's capability matrix - which debug operations the current transport (kd/gdb/memory) supports - as [{capability, label, supported}]. Check before a state-changing op (e.g. usermode breakpoints)."
+        description = "List the backend's capability matrix - which debug operations the current transport (kd/gdb/memory/dump) supports - as {capabilities:[{capability, label, supported}]}. Check before a state-changing op (e.g. usermode breakpoints)."
     )]
     async fn capabilities(&self) -> Result<CallToolResult, McpError> {
         let v = self
             .run(|ctx| {
-                let arr = ctx
+                let arr: Vec<Value> = ctx
                     .capabilities()
                     .iter()
                     .map(|c| {
@@ -1719,7 +1719,7 @@ impl NtoseyeMcp {
                         })
                     })
                     .collect();
-                Ok(Value::Array(arr))
+                Ok(serde_json::json!({ "capabilities": arr }))
             })
             .await?;
         json_result(v)
@@ -2008,7 +2008,7 @@ impl NtoseyeMcp {
     async fn list_breakpoints(&self) -> Result<CallToolResult, McpError> {
         let v = self
             .run(|ctx| {
-                let arr = ctx
+                let arr: Vec<Value> = ctx
                     .list_breakpoints()
                     .iter()
                     .map(|b| {
@@ -2023,7 +2023,7 @@ impl NtoseyeMcp {
                         })
                     })
                     .collect();
-                Ok(Value::Array(arr))
+                Ok(serde_json::json!({ "breakpoints": arr }))
             })
             .await?;
         json_result(v)
