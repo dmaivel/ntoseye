@@ -10,6 +10,7 @@ use memmap2::Mmap;
 
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
+use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::context;
@@ -74,8 +75,7 @@ impl DmpMem {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
 
-        let parser = KernelDumpParser::new(path)
-            .map_err(|e| Error::InvalidDump(e.to_string()))?;
+        let parser = KernelDumpParser::new(path).map_err(|e| Error::InvalidDump(e.to_string()))?;
 
         let mut pages: Vec<(u64, u64)> = parser
             .physmem()
@@ -197,6 +197,11 @@ pub struct DmpBackend {
     current_processor: usize,
     number_processors: u32,
     prcb_context_offset: Option<u16>,
+    // The dump header's CONTEXT record (the crashing CPU's) and DTB, kept so
+    // the crash context can be re-seated after the PRCB pass (see
+    // `select_crash_processor`)
+    header_context: DmpContext,
+    directory_table_base: u64,
 }
 
 impl DmpBackend {
@@ -221,6 +226,8 @@ impl DmpBackend {
             current_processor: 0,
             number_processors: info.number_processors,
             prcb_context_offset: info.offset_prcb_context,
+            header_context: info.context.clone(),
+            directory_table_base: info.directory_table_base,
         }
     }
 
@@ -285,29 +292,53 @@ impl DmpBackend {
         for i in 0..self.per_cpu_registers.len() {
             let prcb: VirtAddr = memory.read(processor_block + (i as u64) * 8)?;
             if prcb.is_zero() {
-                eprintln!("warning: KiProcessorBlock[{i}] is null, skipping");
+                diagnostics::eprint_warning(format!("KiProcessorBlock[{i}] is null, skipping"));
                 continue;
             }
 
             let context_ptr: VirtAddr = memory.read(prcb + prcb_ctx_offset as u64)?;
             if context_ptr.is_zero() {
-                eprintln!("warning: PRCB[{i}] Context pointer is null, skipping");
+                diagnostics::eprint_warning(format!("PRCB[{i}] Context pointer is null, skipping"));
                 continue;
             }
 
             let mut ctx_buf = vec![0u8; context::CONTEXT_SIZE];
             if let Err(e) = memory.read_bytes(context_ptr, &mut ctx_buf) {
-                eprintln!("warning: failed to read PRCB[{i}] context: {e}");
+                diagnostics::eprint_warning(format!("failed to read PRCB[{i}] context: {e}"));
                 continue;
             }
 
-            let regs = &mut self.per_cpu_registers[i];
-            let saved_cr3 = regs[context::OFFSET_CR3..context::OFFSET_CR3 + 8].to_vec();
-            regs[..context::CONTEXT_SIZE].copy_from_slice(&ctx_buf);
-            regs[context::OFFSET_CR3..context::OFFSET_CR3 + 8].copy_from_slice(&saved_cr3);
+            // The copy stops at CONTEXT_SIZE, so the control-register tail
+            // (CR3, seeded at construction) is untouched
+            self.per_cpu_registers[i][..context::CONTEXT_SIZE].copy_from_slice(&ctx_buf);
         }
 
         Ok(())
+    }
+
+    /// Land the user on the bugchecking CPU, the way WinDbg opens a dump. The
+    /// header CONTEXT record belongs to the crashing processor but doesn't say
+    /// which one it is, so match it against the per-CPU PRCB contexts. If
+    /// nothing matches (odd dump), re-seat the header context on CPU 0 so the
+    /// crash registers are what the user sees first, not whatever PRCB[0] held.
+    fn select_crash_processor(&mut self) {
+        // Live-system dumps (bugcheck 0x161) carry no exception context
+        if self.header_context.rip == 0 {
+            return;
+        }
+
+        let matches_header = |regs: &Vec<u8>| {
+            buffer_u64(regs, context::OFFSET_RIP) == self.header_context.rip
+                && buffer_u64(regs, context::OFFSET_RSP) == self.header_context.rsp
+        };
+        match self.per_cpu_registers.iter().position(matches_header) {
+            Some(i) => self.current_processor = i,
+            None => {
+                self.per_cpu_registers[0] =
+                    Self::build_register_buffer(&self.header_context, self.directory_table_base);
+                self.current_processor = 0;
+            }
+        }
     }
 
     fn unsupported(operation: &str) -> Error {
@@ -317,14 +348,19 @@ impl DmpBackend {
     }
 }
 
+fn buffer_u64(buf: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap())
+}
+
 impl DebugBackend for DmpBackend {
     fn initialize_from_target(&mut self, target: &Target) {
         let Some(offset) = self.prcb_context_offset else {
             return;
         };
         if let Err(e) = self.read_prcb_contexts(target, offset) {
-            eprintln!("warning: could not read PRCB contexts from dump: {e}");
+            diagnostics::eprint_warning(format!("could not read PRCB contexts from dump: {e}"));
         }
+        self.select_crash_processor();
     }
 
     fn register_map(&self) -> &RegisterMap {
@@ -394,9 +430,8 @@ impl DebugBackend for DmpBackend {
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
-        let processor = processor_index_from_backend_thread_id(thread_id).ok_or_else(|| {
-            Error::DebugInfo(format!("invalid thread id: {thread_id}"))
-        })?;
+        let processor = processor_index_from_backend_thread_id(thread_id)
+            .ok_or_else(|| Error::DebugInfo(format!("invalid thread id: {thread_id}")))?;
         if (processor as u32) >= self.number_processors {
             return Err(Error::DebugInfo(format!(
                 "processor {} out of range (dump has {} processor(s))",
@@ -493,8 +528,7 @@ mod tests {
         let caps = backend.capabilities();
 
         let is_supported = |cap: DebugCapability| -> bool {
-            caps.iter()
-                .any(|c| c.capability == cap && c.supported)
+            caps.iter().any(|c| c.capability == cap && c.supported)
         };
 
         assert!(is_supported(DebugCapability::MemoryIntrospection));
@@ -574,7 +608,6 @@ mod tests {
 
     #[test]
     fn dmp_mem_lookup_page() {
-        // Test the binary search logic directly
         let pages = vec![
             (0x0000u64, 0x2000u64),
             (0x1000, 0x3000),
@@ -582,25 +615,64 @@ mod tests {
             (0x5000, 0x5000),
             (0x10000, 0x6000),
         ];
+        let mem = DmpMem::new_for_test(pages, make_test_info());
 
-        // Simulate lookup
-        let lookup = |gpa: u64| -> Option<u64> {
-            let page_gpa = gpa & !(PAGE_SIZE as u64 - 1);
-            pages
-                .binary_search_by_key(&page_gpa, |&(g, _)| g)
-                .ok()
-                .map(|idx| pages[idx].1)
-        };
-
-        assert_eq!(lookup(0x0000), Some(0x2000));
-        assert_eq!(lookup(0x0100), Some(0x2000));
-        assert_eq!(lookup(0x0FFF), Some(0x2000));
-        assert_eq!(lookup(0x1000), Some(0x3000));
-        assert_eq!(lookup(0x1500), Some(0x3000));
-        assert_eq!(lookup(0x5000), Some(0x5000));
+        assert_eq!(mem.lookup_page(0x0000), Some(0x2000));
+        assert_eq!(mem.lookup_page(0x0100), Some(0x2000));
+        assert_eq!(mem.lookup_page(0x0FFF), Some(0x2000));
+        assert_eq!(mem.lookup_page(0x1000), Some(0x3000));
+        assert_eq!(mem.lookup_page(0x1500), Some(0x3000));
+        assert_eq!(mem.lookup_page(0x5000), Some(0x5000));
         // Page not present in dump
-        assert_eq!(lookup(0x3000), None);
-        assert_eq!(lookup(0x4000), None);
-        assert_eq!(lookup(0x8000), None);
+        assert_eq!(mem.lookup_page(0x3000), None);
+        assert_eq!(mem.lookup_page(0x4000), None);
+        assert_eq!(mem.lookup_page(0x8000), None);
+    }
+
+    #[test]
+    fn crash_processor_selected_from_matching_prcb_context() {
+        let mut info = make_test_info();
+        info.number_processors = 4;
+        let mut backend = DmpBackend::new(&info);
+
+        // Simulate the PRCB pass: CPU 2 holds the crashing context, the others
+        // (including CPU 0, which starts as the header context) hold idle ones
+        for (i, regs) in backend.per_cpu_registers.iter_mut().enumerate() {
+            let (rip, rsp) = if i == 2 {
+                (info.context.rip, info.context.rsp)
+            } else {
+                (0xfffff800aaaa0000 + i as u64, 0xfffff800bbbb0000 + i as u64)
+            };
+            regs[context::OFFSET_RIP..context::OFFSET_RIP + 8].copy_from_slice(&rip.to_le_bytes());
+            regs[context::OFFSET_RSP..context::OFFSET_RSP + 8].copy_from_slice(&rsp.to_le_bytes());
+        }
+
+        backend.select_crash_processor();
+        assert_eq!(backend.current_processor, 2);
+        assert_eq!(backend.stopped_thread_id().unwrap(), "p1.3");
+    }
+
+    #[test]
+    fn crash_processor_falls_back_to_header_context() {
+        let mut info = make_test_info();
+        info.number_processors = 2;
+        let mut backend = DmpBackend::new(&info);
+
+        // No PRCB context matches the header record (CPU 0's got clobbered)
+        for regs in backend.per_cpu_registers.iter_mut() {
+            regs[context::OFFSET_RIP..context::OFFSET_RIP + 8]
+                .copy_from_slice(&0xfffff800cccc0000u64.to_le_bytes());
+        }
+
+        backend.select_crash_processor();
+        assert_eq!(backend.current_processor, 0);
+        let data = backend.read_registers().unwrap();
+        let map = backend.register_map().clone();
+        assert_eq!(map.read_u64("rip", &data).unwrap(), info.context.rip);
+        assert_eq!(map.read_u64("rax", &data).unwrap(), info.context.rax);
+        assert_eq!(
+            map.read_u64("cr3", &data).unwrap(),
+            info.directory_table_base
+        );
     }
 }

@@ -2,7 +2,7 @@
 members = ["ntoseye-py"]
 
 [workspace.package]
-version = "0.16.1"
+version = "0.17.0"
 
 [package]
 name = "ntoseye"
@@ -68,7 +68,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 # CORS for the HTTP transport so browser MCP clients arent blocked
 tower-http = { version = "0.6", default-features = false, features = ["cors"], optional = true }
 anyhow = { version = "1", optional = true }
-kdmp-parser = "0.8"
+# Pinned: 0.8.2 uses the unstable `cfg_select!` macro and does not build on
+# stable Rust; unpin once the crate's MSRV works on stable again
+kdmp-parser = "=0.8.1"
 
 [features]
 # `python-embed` is on by default so a plain `cargo install ntoseye` / `cargo

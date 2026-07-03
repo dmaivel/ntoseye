@@ -23,7 +23,7 @@ use crate::dmp::DmpBackend;
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
 use crate::repl::ReplState;
-use crate::session::{ContinueOutcome, Session};
+use crate::session::{ContinueOutcome, Session, SessionLock};
 use crate::symbols::{FieldValue, ParsedType, TypeInfo, le_uint};
 use crate::target::{
     AddressModule as CoreAddressModule, MemoryRegionInfo,
@@ -2651,6 +2651,11 @@ impl Struct {
 /// `connect` is the backend target: socket path / address for kd/gdb, or
 /// dump file path for dmp; the per-backend default is used when omitted
 /// (except dmp, which requires a path).
+///
+/// kd/gdb take the exclusive control lock before building the backend, so a
+/// second live attach (here or against a running CLI) fails fast rather than
+/// racing on the handshake the first session owns; memory/dmp are passive and
+/// coexist with anything.
 #[pyfunction]
 #[pyo3(signature = (backend="kd", connect=None))]
 fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
@@ -2660,24 +2665,19 @@ fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
                 "dmp backend requires a dump file path via connect=".into(),
             ))
         })?;
-        let target = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| std::path::PathBuf::from(path))
-            .display()
-            .to_string();
         let phys = Arc::new(PhysMem::dmp(std::path::Path::new(path)).map_err(err)?);
         let info = phys.dmp_info().expect("dmp_info for DMP").clone();
-        Session::connect(phys, &target, || {
+        Session::connect(phys, SessionLock::None, || {
             Ok(Box::new(DmpBackend::new(&info)) as Box<dyn DebugBackend>)
         })
         .map_err(err)?
     } else {
-        let target = match backend {
-            "gdb" => connect.unwrap_or("127.0.0.1:1234").to_string(),
-            "kd" => connect.unwrap_or("/tmp/ntoseye-kd.sock").to_string(),
-            _ => "kvm".to_string(),
+        let lock = match backend {
+            "memory" => SessionLock::None,
+            _ => SessionLock::Exclusive,
         };
         let phys = Arc::new(PhysMem::kvm().map_err(err)?);
-        Session::connect(phys, &target, || {
+        Session::connect(phys, lock, || {
             let be: Box<dyn DebugBackend> = match backend {
                 "gdb" => Box::new(GdbClient::connect(connect.unwrap_or("127.0.0.1:1234"))?),
                 "kd" => Box::new(KdBackend::connect(

@@ -26,7 +26,7 @@ use crate::gdb::GdbClient;
 use crate::kd::KdBackend;
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
-use crate::session::{ContinueOutcome, Session};
+use crate::session::{ContinueOutcome, Session, SessionLock};
 use crate::symbols::{FieldValue, TypeInfo};
 use crate::target::{kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
@@ -89,12 +89,13 @@ fn spawn_session(
     std::thread::spawn(move || {
         let is_dump = dump.is_some();
 
+        // `connect` takes the instance lock (on this actor thread, where the
+        // `!Send` session lives) before building the backend: kd/gdb take the
+        // exclusive control lock so the MCP server refuses to attach if another
+        // ntoseye already drives a VM; dumps and passive memory introspection
+        // are safe alongside anything and take none.
         let built = (|| {
             if let Some(dump_path) = &dump {
-                let target = std::fs::canonicalize(dump_path)
-                    .unwrap_or_else(|_| dump_path.clone())
-                    .display()
-                    .to_string();
                 let phys = Arc::new(PhysMem::dmp(dump_path)?);
                 let info = phys
                     .dmp_info()
@@ -102,25 +103,18 @@ fn spawn_session(
                     .clone();
                 Session::connect(
                     phys,
-                    &target,
+                    SessionLock::None,
                     || -> crate::error::Result<Box<dyn DebugBackend>> {
                         Ok(Box::new(DmpBackend::new(&info)))
                     },
                 )
             } else {
-                let target = match backend.as_str() {
-                    "gdb" => connect
-                        .as_deref()
-                        .unwrap_or("127.0.0.1:1234")
-                        .to_string(),
-                    "kd" => connect
-                        .as_deref()
-                        .unwrap_or("/tmp/ntoseye-kd.sock")
-                        .to_string(),
-                    _ => "kvm".to_string(),
+                let lock = match backend.as_str() {
+                    "memory" => SessionLock::None,
+                    _ => SessionLock::Exclusive,
                 };
                 let phys = Arc::new(PhysMem::kvm()?);
-                Session::connect(phys, &target, || {
+                Session::connect(phys, lock, || {
                     let backend: Box<dyn DebugBackend> = match backend.as_str() {
                         "gdb" => Box::new(GdbClient::connect(
                             connect.as_deref().unwrap_or("127.0.0.1:1234"),
@@ -164,6 +158,10 @@ fn spawn_session(
         loop {
             match rx.blocking_recv() {
                 Some(Command::Run { job, reply }) => {
+                    // DIAGNOSTIC: every tool call submits exactly one Run job, so
+                    // this logs whether the actor runs anything while you believe
+                    // the session is idle (e.g. a client auto-probing tools).
+                    // Gated on the same env as the kd traces so it interleaves.
                     if std::env::var_os("NTOSEYE_KD_TRACE").is_some() {
                         eprintln!("mcp: actor: running a tool job");
                     }
@@ -193,7 +191,16 @@ fn spawn_session(
     }
 }
 
-type SharedSession = Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Command>>>>;
+/// The one shared session slot all transports funnel into. `Opening` reserves
+/// the slot while `open_dump` builds a session off-thread, so a concurrent
+/// `open_dump` can't race the vacancy check and leak a second actor.
+enum SessionSlot {
+    Vacant,
+    Opening,
+    Active(mpsc::UnboundedSender<Command>),
+}
+
+type SharedSession = Arc<std::sync::Mutex<SessionSlot>>;
 
 #[derive(Clone)]
 struct NtoseyeMcp {
@@ -818,19 +825,28 @@ impl NtoseyeMcp {
     {
         let tx = {
             let guard = self.session.lock().unwrap();
-            guard.as_ref().ok_or_else(|| {
-                McpError::invalid_request(
-                    "no debugger session is active; call open_dump to load a crash dump",
-                    None,
-                )
-            })?.clone()
+            match &*guard {
+                SessionSlot::Active(tx) => tx.clone(),
+                SessionSlot::Opening => {
+                    return Err(McpError::invalid_request(
+                        "a debugger session is still opening; retry shortly",
+                        None,
+                    ));
+                }
+                SessionSlot::Vacant => {
+                    return Err(McpError::invalid_request(
+                        "no debugger session is active; call open_dump to load a crash dump",
+                        None,
+                    ));
+                }
+            }
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(Command::Run {
-                job: Box::new(job),
-                reply: reply_tx,
-            })
-            .map_err(|_| McpError::internal_error("debugger session is gone", None))?;
+            job: Box::new(job),
+            reply: reply_tx,
+        })
+        .map_err(|_| McpError::internal_error("debugger session is gone", None))?;
         reply_rx
             .await
             .map_err(|_| McpError::internal_error("debugger session dropped the request", None))?
@@ -2297,31 +2313,52 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Open a Windows kernel crash dump (.dmp) file for offline analysis. Must be called before any other tool when the server was started without --dump/--connect. Only one session can be active at a time. Returns status, path, processor count, and bugcheck analysis if applicable."
+        description = "Open a Windows kernel crash dump (.dmp) file for offline analysis; the path is a local file on the debugger host. Must be called before any other tool when the server was started with --no-attach. Only one session can be active at a time. Returns status, path, processor count, and bugcheck analysis if applicable."
     )]
     async fn open_dump(
         &self,
         Parameters(OpenDumpArgs { path }): Parameters<OpenDumpArgs>,
     ) -> Result<CallToolResult, McpError> {
+        // Claim the slot before the (slow, off-thread) open so a concurrent
+        // open_dump fails fast instead of racing us and leaking an actor
         {
-            let guard = self.session.lock().unwrap();
-            if guard.is_some() {
-                return Err(McpError::invalid_request(
-                    "a debugger session is already active",
-                    None,
-                ));
+            let mut guard = self.session.lock().unwrap();
+            match *guard {
+                SessionSlot::Vacant => *guard = SessionSlot::Opening,
+                _ => {
+                    return Err(McpError::invalid_request(
+                        "a debugger session is already active",
+                        None,
+                    ));
+                }
             }
         }
 
         let dump_path = PathBuf::from(&path);
-        let (tx, _service_pending) = tokio::task::spawn_blocking(move || {
+        let built = match tokio::task::spawn_blocking(move || {
             spawn_session(String::new(), None, Some(dump_path))
         })
         .await
-        .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
-        .map_err(|e| McpError::internal_error(format!("failed to open dump: {e}"), None))?;
+        {
+            Ok(r) => {
+                r.map_err(|e| McpError::internal_error(format!("failed to open dump: {e}"), None))
+            }
+            Err(e) => Err(McpError::internal_error(
+                format!("spawn_blocking failed: {e}"),
+                None,
+            )),
+        };
 
-        *self.session.lock().unwrap() = Some(tx);
+        // A dump can't hit breakpoints or stop, so no service ticker is needed
+        let tx = match built {
+            Ok((tx, _service_pending)) => tx,
+            Err(e) => {
+                *self.session.lock().unwrap() = SessionSlot::Vacant;
+                return Err(e);
+            }
+        };
+
+        *self.session.lock().unwrap() = SessionSlot::Active(tx);
 
         let v = self
             .run(move |ctx| {
@@ -2451,6 +2488,7 @@ pub fn run(
     backend: String,
     connect: Option<String>,
     dump: Option<PathBuf>,
+    no_attach: bool,
     http: Option<String>,
     unsafe_http: bool,
 ) -> anyhow::Result<()> {
@@ -2458,21 +2496,25 @@ pub fn run(
         check_http_bind_policy(addr, unsafe_http)?;
     }
 
-    let session: SharedSession = Arc::new(std::sync::Mutex::new(None));
-    let eager = dump.is_some() || connect.is_some();
-
-    if eager {
+    // The stdio transport speaks MCP on stdout, so all logging goes to stderr.
+    let session: SharedSession = Arc::new(std::sync::Mutex::new(SessionSlot::Vacant));
+    if no_attach {
+        eprintln!("ntoseye-mcp: starting without a session (open_dump loads a crash dump)");
+    } else {
         let label = if dump.is_some() { "dump" } else { &backend };
         eprintln!("ntoseye-mcp: attaching ({label})...");
         let (tx, service_pending) = spawn_session(backend, connect, dump)?;
-        *session.lock().unwrap() = Some(tx.clone());
+        *session.lock().unwrap() = SessionSlot::Active(tx.clone());
         spawn_service_ticker(tx, service_pending);
-    } else {
-        eprintln!("ntoseye-mcp: starting without a session (use open_dump to load a crash dump)");
     }
 
+    // Shared with the handlers so shutdown can interrupt an in-flight
+    // `wait_for_stop` (otherwise the actor stays busy and never reaches
+    // cleanup, leaving the VM frozen).
     let interrupt = Arc::new(AtomicBool::new(false));
     let interrupt_for_signal = interrupt.clone();
+    // Slot kept aside so we can drive teardown of whichever session is active
+    // by then (eager or opened later via open_dump).
     let session_for_shutdown = session.clone();
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -2494,6 +2536,8 @@ pub fn run(
             }
         };
 
+        // Serve until the client disconnects (or the server errors), or until
+        // Ctrl+C; either way fall through to teardown.
         let result = tokio::select! {
             r = serve => r,
             _ = tokio::signal::ctrl_c() => {
@@ -2502,9 +2546,18 @@ pub fn run(
             }
         };
 
+        // Ask the actor to remove our breakpoints and resume the VM before we
+        // exit, so Ctrl+C doesn't leave a live guest frozen with int3s
+        // installed (a no-op for dumps). Set the interrupt first so any
+        // in-flight wait returns and the actor is free to process the Shutdown.
         eprintln!("ntoseye-mcp: cleaning up...");
         interrupt_for_signal.store(true, Ordering::Relaxed);
-        if let Some(tx) = session_for_shutdown.lock().unwrap().as_ref() {
+        // Clone the sender out so the slot's mutex isn't held across the await
+        let shutdown_tx = match &*session_for_shutdown.lock().unwrap() {
+            SessionSlot::Active(tx) => Some(tx.clone()),
+            _ => None,
+        };
+        if let Some(tx) = shutdown_tx {
             let (ack_tx, ack_rx) = oneshot::channel();
             if tx.send(Command::Shutdown { ack: ack_tx }).is_ok() {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx).await;
@@ -2514,6 +2567,12 @@ pub fn run(
     })
 }
 
+/// Background servicing ticker: periodically nudge the actor to service the
+/// guest while idle (see [`Command::Service`]), so a wrong-process hit on a
+/// shared-page breakpoint doesn't leave it frozen between tool calls.
+/// `service_pending` keeps at most one `Service` queued even if the actor is
+/// busy in a long wait; the thread exits once the actor's channel closes
+/// (send fails).
 fn spawn_service_ticker(
     tx: mpsc::UnboundedSender<Command>,
     service_pending: Arc<AtomicBool>,
@@ -2533,7 +2592,7 @@ fn spawn_service_ticker(
 
 /// Serve the Streamable HTTP transport on `addr`, mounting the MCP service at
 /// `/mcp`. Every HTTP session gets a clone of the handler (cheap; it holds only
-/// the actor's channel sender), so all connections funnel to the one live
+/// the shared session slot), so all connections funnel to the one live
 /// debugger session.
 async fn serve_http(
     session: SharedSession,
