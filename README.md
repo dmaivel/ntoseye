@@ -261,6 +261,14 @@ From a real BSOD, Windows writes `C:\Windows\MEMORY.DMP` on the boot after the c
 
 Force the crash with Sysinternals NotMyFault or the `CrashOnCtrlScroll` registry switch. If the guest is booted in debug mode with a debugger attached, continue past the bugcheck (`g`) — otherwise Windows waits in the debugger instead of writing the dump.
 
+Copy the dump out to the host with [guestfs-tools](https://libguestfs.org/) while the guest is shut off:
+
+```bash
+virt-copy-out -d <domain> /Windows/MEMORY.DMP /tmp/
+```
+
+(or use any guest→host channel — an SMB/virtiofs share, scp, …)
+
 ### Recommended guest tweaks
 
 Although not required, disabling memory paging and compression in the guest avoids memory-related issues. This only needs to be done once per Windows installation (Administrator PowerShell):
