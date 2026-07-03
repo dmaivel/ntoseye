@@ -6,6 +6,7 @@ use crate::{
     types::{Dtb, PhysAddr, VirtAddr},
 };
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -26,7 +27,10 @@ use std::{
     mem::size_of,
     path::{Path, PathBuf},
     ptr,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use std::{fmt, io::Cursor};
 
@@ -313,10 +317,29 @@ fn download_job(job: &DownloadJob, pb: ProgressBar) -> Result<()> {
     if let Some(parent) = job.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = File::create(&job.path)?;
+
+    // Download to a unique temp file and rename into place. Writing the final
+    // path directly truncates it in place, which corrupts the file under
+    // concurrent duplicate jobs and rips pages out from under any existing
+    // mmap of it (--force-download-symbols re-downloads loaded PDBs); a rename
+    // leaves prior mappings on the old inode intact.
+    static DOWNLOAD_SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp_path = job.path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        DOWNLOAD_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let mut file = File::create(&tmp_path)?;
     let mut downloaded = pb.wrap_read(response);
 
-    std::io::copy(&mut downloaded, &mut file)?;
+    let copied = std::io::copy(&mut downloaded, &mut file);
+    drop(file);
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+    std::fs::rename(&tmp_path, &job.path)?;
     pb.finish_and_clear();
 
     Ok(())
@@ -1038,8 +1061,19 @@ impl SymbolStore {
         let cursor = Cursor::new(static_slice);
         let pdb = pdb2::PDB::open(cursor)?;
 
-        self.mmaps.insert(guid, mmap);
-        self.pdbs.insert(guid, pdb.into());
+        // Exactly one loader may win per guid: parallel loads of two modules
+        // sharing a PDB both get past the contains_key fast path, and a plain
+        // insert would replace the winner's Arc<Mmap>, unmapping pages the
+        // stored PDB's 'static cursor still points into (a cold-cache SIGSEGV).
+        // The loser drops its own pdb+mmap pair instead. `build_index` takes
+        // the pdbs shard again, so it must run after the entry guard drops.
+        match self.pdbs.entry(guid) {
+            Entry::Occupied(_) => return Ok(()),
+            Entry::Vacant(entry) => {
+                self.mmaps.insert(guid, mmap);
+                entry.insert(pdb.into());
+            }
+        }
         self.build_index(guid);
 
         Ok(())
