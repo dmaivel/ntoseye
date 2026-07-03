@@ -453,6 +453,12 @@ impl DebugBackend for DmpBackend {
     fn is_running(&self) -> bool {
         false
     }
+
+    // The default tries to leave the VM running, which a static snapshot can't
+    // (and needn't) do
+    fn prepare_for_exit(&mut self, _leave_running: bool) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -564,6 +570,15 @@ mod tests {
         assert!(backend.step().is_err());
         assert!(backend.set_breakpoint(0x1000).is_err());
         assert!(backend.remove_breakpoint(0x1000).is_err());
+    }
+
+    #[test]
+    fn dmp_backend_exit_is_clean() {
+        // Frontend quit must not trip over the default "leave the VM running"
+        // exit behavior (a dump can't continue)
+        let info = make_test_info();
+        let mut backend = DmpBackend::new(&info);
+        assert!(backend.prepare_for_exit(true).is_ok());
     }
 
     #[test]

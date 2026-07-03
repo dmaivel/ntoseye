@@ -86,21 +86,25 @@ pub fn run_interactive() -> Result<()> {
     };
 
     let xml = dump_xml(&domain.name)?;
-    let (plan, transports) = match action {
+    let (plan, transports, vmcoreinfo) = match action {
         VirshAction::Configure => {
             let Some(transports) = prompt_transports()? else {
                 return cancel_virsh_edit();
             };
+            let vmcoreinfo = prompt_confirm(
+                "Enable crash-dump generation (vmcoreinfo, used by 'virsh dump --format=win-dmp')?",
+            )?;
             (
-                apply_transport_config(&xml, &transports, KD_SOCKET)?,
+                apply_transport_config(&xml, &transports, KD_SOCKET, vmcoreinfo)?,
                 transports,
+                vmcoreinfo,
             )
         }
-        VirshAction::Remove => (remove_debug_transports(&xml), Vec::new()),
+        VirshAction::Remove => (remove_debug_transports(&xml), Vec::new(), false),
     };
     if plan.xml == xml {
         println!("No XML changes needed for '{}'.", domain.name);
-        print_next_steps(action, &transports);
+        print_next_steps(action, &transports, vmcoreinfo, &domain.name);
         return Ok(());
     }
 
@@ -125,7 +129,7 @@ pub fn run_interactive() -> Result<()> {
 
     println!("defined '{}'", domain.name);
     println!("backup saved: {}", backup_path.display());
-    print_next_steps(action, &transports);
+    print_next_steps(action, &transports, vmcoreinfo, &domain.name);
     Ok(())
 }
 
@@ -258,7 +262,12 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-fn print_next_steps(action: VirshAction, transports: &[VirshTransport]) {
+fn print_next_steps(
+    action: VirshAction,
+    transports: &[VirshTransport],
+    vmcoreinfo: bool,
+    domain: &str,
+) {
     match action {
         VirshAction::Configure => {
             if transports.contains(&VirshTransport::Kd) {
@@ -268,6 +277,11 @@ fn print_next_steps(action: VirshAction, transports: &[VirshTransport]) {
                 println!("  bcdedit /dbgsettings serial debugport:1 baudrate:115200");
                 println!("  Restart-Computer");
             }
+            if vmcoreinfo {
+                println!();
+                println!("guest setup still required for crash dumps:");
+                println!("  install the virtio-win 'fwcfg' driver (QEMU FWCfg Device)");
+            }
             println!();
             println!("run:");
             if transports.contains(&VirshTransport::Kd) {
@@ -275,6 +289,12 @@ fn print_next_steps(action: VirshAction, transports: &[VirshTransport]) {
             }
             if transports.contains(&VirshTransport::Gdb) {
                 println!("  ntoseye --backend gdb");
+            }
+            if vmcoreinfo {
+                println!();
+                println!("generate and open a dump:");
+                println!("  virsh dump {domain} /tmp/win.dmp --memory-only --format=win-dmp");
+                println!("  ntoseye --dump /tmp/win.dmp");
             }
         }
         VirshAction::Remove => {
@@ -289,6 +309,7 @@ fn apply_transport_config(
     xml: &str,
     transports: &[VirshTransport],
     kd_socket: &str,
+    vmcoreinfo: bool,
 ) -> Result<XmlPlan> {
     let mut changes = Vec::new();
     let mut out = xml.to_string();
@@ -307,7 +328,46 @@ fn apply_transport_config(
         out = remove_ntoseye_kd_devices(&out, &mut changes);
     }
 
+    // Declining is a no-op rather than a removal: vmcoreinfo isn't
+    // ntoseye-owned, so a later reconfigure shouldn't silently strip it
+    if vmcoreinfo {
+        out = ensure_vmcoreinfo(&out, &mut changes)?;
+    }
+
     Ok(XmlPlan { xml: out, changes })
+}
+
+/// Enable the domain's `vmcoreinfo` feature, which QEMU's Windows crash-dump
+/// writer (`virsh dump --format=win-dmp`) requires. The guest half is the
+/// virtio-win `fwcfg` driver; without either, QEMU reports "invalid vmcoreinfo
+/// note size".
+fn ensure_vmcoreinfo(xml: &str, changes: &mut Vec<String>) -> Result<String> {
+    if xml.contains("<vmcoreinfo") {
+        return Ok(xml.to_string());
+    }
+
+    if let Some(close) = xml.find("</features>") {
+        let indent = line_indent(xml, close);
+        let line_start = xml[..close].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+        let insert = format!("{indent}  <vmcoreinfo state=\"on\"/>\n");
+        let mut out = String::with_capacity(xml.len() + insert.len());
+        out.push_str(&xml[..line_start]);
+        out.push_str(&insert);
+        out.push_str(&xml[line_start..]);
+        changes.push("enable vmcoreinfo (crash-dump generation)".to_string());
+        return Ok(out);
+    }
+
+    let domain_close = xml
+        .find("</domain>")
+        .ok_or_else(|| Error::DebugInfo("domain XML missing </domain>".to_string()))?;
+    let block = "  <features>\n    <vmcoreinfo state=\"on\"/>\n  </features>\n";
+    let mut out = String::with_capacity(xml.len() + block.len());
+    out.push_str(&xml[..domain_close]);
+    out.push_str(block);
+    out.push_str(&xml[domain_close..]);
+    changes.push("enable vmcoreinfo (crash-dump generation)".to_string());
+    Ok(out)
 }
 
 fn remove_debug_transports(xml: &str) -> XmlPlan {
@@ -586,7 +646,8 @@ mod tests {
 
     #[test]
     fn kd_replaces_first_serial_with_unix_socket() {
-        let plan = apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET).unwrap();
+        let plan =
+            apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(plan.xml.contains(r#"<serial type="unix">"#));
         assert!(plan.xml.contains(r#"path="/tmp/ntoseye-kd.sock""#));
         assert!(plan.xml.contains(r#"port="0""#));
@@ -595,7 +656,8 @@ mod tests {
 
     #[test]
     fn gdb_adds_qemu_namespace_and_args() {
-        let plan = apply_transport_config(BASE_XML, &[VirshTransport::Gdb], KD_SOCKET).unwrap();
+        let plan =
+            apply_transport_config(BASE_XML, &[VirshTransport::Gdb], KD_SOCKET, false).unwrap();
         assert!(
             plan.xml
                 .contains(r#"xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0""#)
@@ -606,7 +668,7 @@ mod tests {
 
     #[test]
     fn remove_debug_transports_removes_ntoseye_debug_transport() {
-        let kd = apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET).unwrap();
+        let kd = apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
         let memory = remove_debug_transports(&kd.xml);
         assert!(!memory.xml.contains("ntoseye-kd.sock"));
     }
@@ -664,8 +726,9 @@ mod tests {
 
     #[test]
     fn switching_to_kd_removes_gdbstub_args() {
-        let gdb = apply_transport_config(BASE_XML, &[VirshTransport::Gdb], KD_SOCKET).unwrap();
-        let kd = apply_transport_config(&gdb.xml, &[VirshTransport::Kd], KD_SOCKET).unwrap();
+        let gdb =
+            apply_transport_config(BASE_XML, &[VirshTransport::Gdb], KD_SOCKET, false).unwrap();
+        let kd = apply_transport_config(&gdb.xml, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(!kd.xml.contains(r#"<qemu:arg value="-s"/>"#));
         assert!(!kd.xml.contains(r#"<qemu:arg value="-S"/>"#));
     }
@@ -676,11 +739,62 @@ mod tests {
             BASE_XML,
             &[VirshTransport::Kd, VirshTransport::Gdb],
             KD_SOCKET,
+            false,
         )
         .unwrap();
         assert!(plan.xml.contains(r#"<serial type="unix">"#));
         assert!(plan.xml.contains(r#"<qemu:arg value="-s"/>"#));
         assert!(plan.xml.contains(r#"<qemu:arg value="-S"/>"#));
+    }
+
+    #[test]
+    fn vmcoreinfo_inserted_into_existing_features() {
+        let xml = r#"<domain type="kvm">
+  <name>windows</name>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <devices>
+  </devices>
+</domain>
+"#;
+        let plan = apply_transport_config(xml, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+        assert!(
+            plan.xml
+                .contains("    <vmcoreinfo state=\"on\"/>\n  </features>")
+        );
+        assert!(
+            plan.changes
+                .contains(&"enable vmcoreinfo (crash-dump generation)".to_string())
+        );
+    }
+
+    #[test]
+    fn vmcoreinfo_creates_features_block_when_missing() {
+        let plan =
+            apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+        assert!(plan.xml.contains("<features>"));
+        assert!(plan.xml.contains(r#"<vmcoreinfo state="on"/>"#));
+    }
+
+    #[test]
+    fn vmcoreinfo_is_idempotent_and_never_removed() {
+        let once =
+            apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+        // Re-run with vmcoreinfo enabled: no duplicate, no change recorded
+        let twice =
+            apply_transport_config(&once.xml, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+        assert_eq!(twice.xml.matches("<vmcoreinfo").count(), 1);
+        assert!(
+            !twice
+                .changes
+                .contains(&"enable vmcoreinfo (crash-dump generation)".to_string())
+        );
+        // Declining later leaves the existing feature alone
+        let declined =
+            apply_transport_config(&once.xml, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
+        assert!(declined.xml.contains(r#"<vmcoreinfo state="on"/>"#));
     }
 
     #[test]
@@ -725,7 +839,7 @@ mod tests {
     #[test]
     fn replace_first_serial_inserts_when_missing() {
         let xml = r#"<domain><devices></devices></domain>"#;
-        let plan = apply_transport_config(xml, &[VirshTransport::Kd], KD_SOCKET).unwrap();
+        let plan = apply_transport_config(xml, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(plan.xml.contains(r#"<serial type="unix">"#));
         assert!(plan.xml.contains(r#"path="/tmp/ntoseye-kd.sock""#));
     }

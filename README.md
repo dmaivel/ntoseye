@@ -244,6 +244,23 @@ dbg = ntoseye.attach("dmp", connect="/path/to/MEMORY.DMP")
 
 So does the MCP server: pass `--dump` at startup (`ntoseye --dump /path/to/MEMORY.DMP mcp`), or start it with `ntoseye mcp --no-attach` and let the client load a dump later via the `open_dump` tool.
 
+#### Generating dumps
+
+From the host, without crashing the guest (produces a live system dump, bugcheck 0x161):
+
+```bash
+virsh dump <domain> /tmp/win.dmp --memory-only --format=win-dmp
+```
+
+This needs the domain's `vmcoreinfo` feature (`ntoseye virsh` can enable it) and the virtio-win `fwcfg` driver installed in the guest — without them QEMU fails with `invalid vmcoreinfo note size`.
+
+From a real BSOD, Windows writes `C:\Windows\MEMORY.DMP` on the boot after the crash (System Properties → Startup and Recovery → "Kernel memory dump"). The dump is staged through the page file, so pick one:
+
+- keep a page file on `C:` at least as large as the dump (in the Virtual Memory dialog, click **Set** before OK — it silently discards the change otherwise), or
+- keep paging disabled (see [Recommended guest tweaks](#recommended-guest-tweaks)) and configure a dedicated dump file instead, under `HKLM\SYSTEM\CurrentControlSet\Control\CrashControl`: `DedicatedDumpFile` (REG_SZ, e.g. `C:\dedicated.sys`) and `DumpFileSize` (DWORD, MB).
+
+Force the crash with Sysinternals NotMyFault or the `CrashOnCtrlScroll` registry switch. If the guest is booted in debug mode with a debugger attached, continue past the bugcheck (`g`) — otherwise Windows waits in the debugger instead of writing the dump.
+
 ### Recommended guest tweaks
 
 Although not required, disabling memory paging and compression in the guest avoids memory-related issues. This only needs to be done once per Windows installation (Administrator PowerShell):
@@ -253,6 +270,8 @@ Get-CimInstance Win32_PageFileSetting | Remove-CimInstance
 Disable-MMAgent -MemoryCompression
 Restart-Computer
 ```
+
+Note: BSOD crash dumps are staged through the page file, so with paging disabled Windows won't write `MEMORY.DMP` unless you set a dedicated dump file — see [Generating dumps](#generating-dumps).
 
 ## Python SDK
 
