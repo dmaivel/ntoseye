@@ -1,6 +1,24 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("This application only runs on Linux hosts.");
 
+pub const DEFAULT_GDB_ADDR: &str = "127.0.0.1:1234";
+pub const DEFAULT_KD_SOCKET: &str = "/tmp/ntoseye-kd.sock";
+
+pub fn resolve_target(backend: &str, connect: Option<&str>) -> Option<String> {
+    match backend {
+        "gdb" => Some(connect.unwrap_or(DEFAULT_GDB_ADDR).to_string()),
+        "kd" => Some(connect.unwrap_or(DEFAULT_KD_SOCKET).to_string()),
+        "memory" => None,
+        other => {
+            eprintln!(
+                "warning: unknown backend \"{other}\"; instance locking disabled \
+                 (add it to resolve_target)"
+            );
+            None
+        }
+    }
+}
+
 pub mod backend;
 pub mod bugchecks;
 #[cfg(feature = "cli")]

@@ -242,7 +242,7 @@ import ntoseye
 dbg = ntoseye.attach("dmp", connect="/path/to/MEMORY.DMP")
 ```
 
-So does the MCP server: pass `--dump` at startup (`ntoseye --dump /path/to/MEMORY.DMP mcp`), or start it with `ntoseye mcp --no-attach` and let the client load a dump later via the `open_dump` tool.
+So does the MCP server: pass `--dump` at startup (`ntoseye --dump /path/to/MEMORY.DMP mcp`), or start it with `ntoseye mcp` (no flags) and let the client load a dump later via the `open_dump` tool.
 
 #### Generating dumps
 

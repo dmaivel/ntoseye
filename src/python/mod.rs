@@ -23,7 +23,7 @@ use crate::dmp::DmpBackend;
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
 use crate::repl::ReplState;
-use crate::session::{ContinueOutcome, Session, SessionLock};
+use crate::session::{ContinueOutcome, Session};
 use crate::symbols::{FieldValue, ParsedType, TypeInfo, le_uint};
 use crate::target::{
     AddressModule as CoreAddressModule, MemoryRegionInfo,
@@ -2652,10 +2652,10 @@ impl Struct {
 /// dump file path for dmp; the per-backend default is used when omitted
 /// (except dmp, which requires a path).
 ///
-/// kd/gdb take the exclusive control lock before building the backend, so a
-/// second live attach (here or against a running CLI) fails fast rather than
-/// racing on the handshake the first session owns; memory/dmp are passive and
-/// coexist with anything.
+/// kd/gdb take a per-target instance lock before building the backend, so a
+/// second live attach against the same target (here or against a running CLI)
+/// fails fast rather than racing on the handshake the first session owns;
+/// memory/dmp are passive and coexist with anything.
 #[pyfunction]
 #[pyo3(signature = (backend="kd", connect=None))]
 fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
@@ -2667,22 +2667,17 @@ fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
         })?;
         let phys = Arc::new(PhysMem::dmp(std::path::Path::new(path)).map_err(err)?);
         let info = phys.dmp_info().expect("dmp_info for DMP").clone();
-        Session::connect(phys, SessionLock::None, || {
+        Session::connect(phys, None, || {
             Ok(Box::new(DmpBackend::new(&info)) as Box<dyn DebugBackend>)
         })
         .map_err(err)?
     } else {
-        let lock = match backend {
-            "memory" => SessionLock::None,
-            _ => SessionLock::Exclusive,
-        };
+        let target = crate::resolve_target(backend, connect);
         let phys = Arc::new(PhysMem::kvm().map_err(err)?);
-        Session::connect(phys, lock, || {
+        Session::connect(phys, target.as_deref(), || {
             let be: Box<dyn DebugBackend> = match backend {
-                "gdb" => Box::new(GdbClient::connect(connect.unwrap_or("127.0.0.1:1234"))?),
-                "kd" => Box::new(KdBackend::connect(
-                    connect.unwrap_or("/tmp/ntoseye-kd.sock"),
-                )?),
+                "gdb" => Box::new(GdbClient::connect(target.as_deref().unwrap())?),
+                "kd" => Box::new(KdBackend::connect(target.as_deref().unwrap())?),
                 "memory" => Box::new(MemoryBackend::new()),
                 other => {
                     return Err(Error::DebugInfo(format!(

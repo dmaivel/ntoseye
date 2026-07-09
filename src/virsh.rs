@@ -9,10 +9,8 @@ use dialoguer::{Confirm, Select};
 
 use crate::{
     error::{Error, Result},
-    symbols,
+    symbols, DEFAULT_KD_SOCKET as KD_SOCKET,
 };
-
-const KD_SOCKET: &str = "/tmp/ntoseye-kd.sock";
 const QEMU_NS: &str = "http://libvirt.org/schemas/domain/qemu/1.0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

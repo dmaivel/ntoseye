@@ -119,8 +119,8 @@ pub enum Error {
     )]
     PtraceDenied { pid: i32, scope: String },
 
-    #[error("Another instance of ntoseye is running")]
-    AlreadyRunning,
+    #[error("Another instance of ntoseye is already attached to {0}")]
+    AlreadyRunning(String),
 
     #[error("Data doesn't fit in buffer")]
     BufferNotEnough,

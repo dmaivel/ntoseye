@@ -13,8 +13,7 @@ use crate::{
     memory_backend::MemoryBackend,
     phys::PhysMem,
     repl::start_repl,
-    session::{self, SessionLock},
-    symbols, virsh,
+    session, symbols, virsh,
 };
 #[cfg(feature = "mcp")]
 use crate::mcp;
@@ -66,7 +65,7 @@ struct Args {
     #[argh(option, long = "connect")]
     connect: Option<String>,
 
-    /// open a Windows kernel crash dump (.dmp) for offline analysis instead of attaching to a live VM; conflicts with --connect
+    /// open a Windows kernel crash dump (.dmp) for offline analysis instead of attaching to a live VM
     #[argh(option, long = "dump")]
     dump: Option<PathBuf>,
 
@@ -94,12 +93,6 @@ struct McpCommand {
     /// instead of stdio, for web MCP clients that connect over the network
     #[argh(option, long = "http")]
     http: Option<String>,
-
-    /// start without attaching to anything; the server has no debugger session
-    /// until the client loads a crash dump via the open_dump tool. Conflicts
-    /// with --dump/--connect.
-    #[argh(switch, long = "no-attach")]
-    no_attach: bool,
 
     /// allow Streamable HTTP to bind to a non-loopback address and accept any
     /// browser origin (CORS); exposes debugger control tools to the network, so
@@ -243,11 +236,6 @@ fn run() -> Result<()> {
             Command::Virsh(_) => virsh::run_interactive(),
             #[cfg(feature = "mcp")]
             Command::Mcp(mcp_args) => {
-                if mcp_args.no_attach && (args.dump.is_some() || args.connect.is_some()) {
-                    return Err(Error::DebugInfo(
-                        "--no-attach conflicts with --dump/--connect".to_string(),
-                    ));
-                }
                 let backend = match args.backend {
                     BackendKind::Gdb => "gdb",
                     BackendKind::Kd => "kd",
@@ -257,7 +245,6 @@ fn run() -> Result<()> {
                     backend.to_string(),
                     args.connect.clone(),
                     args.dump.clone(),
-                    mcp_args.no_attach,
                     mcp_args.http.clone(),
                     mcp_args.unsafe_http,
                 )
@@ -272,43 +259,48 @@ fn run() -> Result<()> {
             .dmp_info()
             .expect("dmp_info must be Some for DMP backend")
             .clone();
-        // A dump is read-only, so no instance lock: any number of sessions can
-        // analyse dumps alongside a live debugger
+        // A dump is read-only, so no per-target lock: any number of sessions
+        // can analyse dumps alongside a live debugger.
         let mut ctx = session::Session::connect(
             phys,
-            SessionLock::None,
+            None,
             || -> Result<Box<dyn DebugBackend>> { Ok(Box::new(DmpBackend::new(&info))) },
         )?;
         return start_repl(&mut ctx);
     }
 
-    // kd/gdb drive live run control, so they take the exclusive control lock;
-    // passive memory introspection coexists with anything
-    let lock = match args.backend {
-        BackendKind::Gdb | BackendKind::Kd => SessionLock::Exclusive,
-        BackendKind::Memory => SessionLock::None,
+    // kd/gdb take a per-target instance lock so a second ntoseye can't
+    // attach to the same backend resource; passive memory introspection
+    // passes None and coexists with anything.
+    let backend_str = match args.backend {
+        BackendKind::Gdb => "gdb",
+        BackendKind::Kd => "kd",
+        BackendKind::Memory => "memory",
     };
+    let target = crate::resolve_target(backend_str, args.connect.as_deref());
     let phys = Arc::new(PhysMem::kvm()?);
-    let mut ctx = session::Session::connect(phys, lock, || -> Result<Box<dyn DebugBackend>> {
-        Ok(match args.backend {
-            BackendKind::Gdb => {
-                let addr = args.connect.as_deref().unwrap_or("127.0.0.1:1234");
-                Box::new(GdbClient::connect(addr)?)
-            }
-            BackendKind::Kd => {
-                let path = args.connect.as_deref().unwrap_or("/tmp/ntoseye-kd.sock");
-                Box::new(KdBackend::connect(path)?)
-            }
-            BackendKind::Memory => {
-                if args.connect.is_some() {
-                    return Err(Error::DebugInfo(
-                        "memory backend does not use --connect".to_string(),
-                    ));
+    let mut ctx = session::Session::connect(
+        phys,
+        target.as_deref(),
+        || -> Result<Box<dyn DebugBackend>> {
+            Ok(match args.backend {
+                BackendKind::Gdb => {
+                    Box::new(GdbClient::connect(target.as_deref().unwrap())?)
                 }
-                Box::new(MemoryBackend::new())
-            }
-        })
-    })?;
+                BackendKind::Kd => {
+                    Box::new(KdBackend::connect(target.as_deref().unwrap())?)
+                }
+                BackendKind::Memory => {
+                    if args.connect.is_some() {
+                        return Err(Error::DebugInfo(
+                            "memory backend does not use --connect".to_string(),
+                        ));
+                    }
+                    Box::new(MemoryBackend::new())
+                }
+            })
+        },
+    )?;
     start_repl(&mut ctx)
 }
 

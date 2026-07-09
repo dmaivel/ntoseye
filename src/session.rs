@@ -251,40 +251,34 @@ pub struct Session {
     /// `wait_for_stop` returns this as the proper event instead of a bare
     /// "halted", and `resume` clears it. `None` whenever the host is up to date.
     parked_stop: Option<ContinueOutcome>,
-    /// The single-instance control lock, held for the session's lifetime so a
-    /// second ntoseye can't drive the same VM. `Some` via [`Self::connect`]
-    /// with [`SessionLock::Exclusive`], `None` for passive sessions and the
-    /// unguarded [`Self::new`].
+    /// Per-target single-instance lock, held for the session's lifetime so a
+    /// second ntoseye can't attach to the same backend resource. `Some` via
+    /// [`Self::connect`] (every host's attach path), `None` via the unguarded
+    /// [`Self::new`].
     _instance_guard: Option<InstanceGuard>,
 }
 
-/// How a new session guards against concurrent ntoseye instances. Control
-/// transports (kd/gdb) take one host-wide exclusive lock: two debuggers driving
-/// live run control would corrupt each other, and we can't tell whether two
-/// transports point at the same VM, so any kd/gdb pair conflicts. Passive
-/// targets (memory introspection, crash dumps) are safe to run alongside
-/// anything and take no lock.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SessionLock {
-    Exclusive,
-    None,
-}
-
 impl Session {
-    /// Take the instance lock `lock` asks for, connect a backend via
-    /// `make_backend`, and build the owned session; the guarded attach path
-    /// every host uses. Any lock is taken *before* `make_backend` runs, so a
-    /// second instance fails fast instead of racing on the transport handshake.
-    /// Backend selection (gdb/kd/memory/dmp) stays a frontend concern, in the
-    /// closure.
-    pub fn connect<F>(phys: Arc<PhysMem>, lock: SessionLock, make_backend: F) -> Result<Self>
+    /// Optionally acquire the single-instance lock for `target`, connect a
+    /// backend via `make_backend`, and build the owned session; the guarded
+    /// attach path every host uses.
+    ///
+    /// `target` identifies the backend resource (socket path, address) so that
+    /// instances targeting *different* resources can coexist while two instances
+    /// on the *same* resource still conflict. Pass `None` for read-only
+    /// backends (crash dumps, passive memory) that are safe to share. The lock
+    /// is taken *before* `make_backend` runs, so a second instance fails fast
+    /// instead of racing on the transport handshake. Backend selection
+    /// (gdb/kd/memory/dmp) stays a frontend concern, in the closure.
+    pub fn connect<F>(
+        phys: Arc<PhysMem>,
+        target: Option<&str>,
+        make_backend: F,
+    ) -> Result<Self>
     where
         F: FnOnce() -> Result<Box<dyn DebugBackend>>,
     {
-        let guard = match lock {
-            SessionLock::Exclusive => Some(acquire_instance_guard()?),
-            SessionLock::None => None,
-        };
+        let guard = target.map(acquire_instance_guard).transpose()?;
         let backend = make_backend()?;
         let mut session = Self::new(phys, backend)?;
         session._instance_guard = guard;
@@ -1526,24 +1520,93 @@ impl Session {
     }
 }
 
-/// Guard that one ntoseye session controls a live VM at a time; a second
-/// control-transport attach would corrupt both (see [`SessionLock`]). Held
+/// Per-target guard that one ntoseye session owns a given backend resource at a
+/// time; a second attach against the same target would corrupt both. Held
 /// inside [`Session`] for its lifetime (see [`Session::connect`]); dropping it
 /// releases the lock.
 struct InstanceGuard(#[allow(dead_code)] SingleInstance);
 
-/// Take the single-instance control lock, or [`Error::AlreadyRunning`] if
-/// another ntoseye already holds it. Internal to [`Session::connect`], which
-/// calls it before connecting a backend so a second instance fails fast rather
-/// than racing on the transport handshake.
-fn acquire_instance_guard() -> Result<InstanceGuard> {
-    let instance = SingleInstance::new("ntoseye").map_err(|err| {
+/// Take the single-instance lock for `target`, or [`Error::AlreadyRunning`] if
+/// another ntoseye already holds it. `target` is the backend resource identifier
+/// (socket path, address, dump file) so instances on *different* targets can
+/// coexist. Internal to [`Session::connect`], which calls it before connecting
+/// a backend so a second instance fails fast rather than racing on the transport
+/// handshake.
+fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
+    let canonical = canonicalize_target(target);
+    let key = format!("ntoseye-{:016x}", fnv1a_64(canonical.as_bytes()));
+    let instance = SingleInstance::new(&key).map_err(|err| {
         Error::DebugInfo(format!("failed to create single-instance guard: {err:?}"))
     })?;
     if !instance.is_single() {
-        return Err(Error::AlreadyRunning);
+        return Err(Error::AlreadyRunning(canonical));
     }
     Ok(InstanceGuard(instance))
+}
+
+/// Normalize a target identifier for lock-key stability: equivalent targets
+/// must produce the same canonical string. Existing filesystem entries
+/// (sockets, files) are resolved first so that different relative paths to
+/// the same socket produce the same key.
+fn canonicalize_target(target: &str) -> String {
+    if let Some(normalized) = normalize_host_port(target) {
+        return normalized;
+    }
+    let path = std::path::Path::new(target);
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon.to_string_lossy().into_owned();
+    }
+    let full = if path.is_relative() {
+        std::env::current_dir().unwrap_or_default().join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let mut out = std::path::PathBuf::new();
+    for component in full.components() {
+        match component {
+            std::path::Component::RootDir => out.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(s) => out.push(s),
+            _ => {}
+        }
+    }
+    out.to_string_lossy().into_owned()
+}
+
+/// Detect `host:port` targets and normalize the host component so that
+/// `localhost:1234` and `127.0.0.1:1234` map to the same lock key.
+fn normalize_host_port(target: &str) -> Option<String> {
+    let (host, port_str) = target.rsplit_once(':')?;
+    if host.contains('/') {
+        return None;
+    }
+    // Reject bare (unbracketed) IPv6 — the host part would contain extra
+    // colons (e.g. "fe80:" from "fe80::5678").
+    if host.contains(':') && !host.starts_with('[') {
+        return None;
+    }
+    let _port: u16 = port_str.parse().ok()?;
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    let host = match host.as_str() {
+        "localhost" | "ip6-localhost" | "::1" => "127.0.0.1",
+        other => other,
+    };
+    Some(format!("{host}:{port_str}"))
+}
+
+fn fnv1a_64(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// Parse a backend vCPU/thread id (`p1.<one-based-hex>`) into a zero-based
