@@ -47,7 +47,7 @@ linkme = "0.3"
 # pyo3 SDK + embedded interpreter, gated behind the `python` features. abi3 so
 # the wheel works against any Python 3.9+; per build the embed/extension toggle
 # (auto-initialize vs extension-module) selects how libpython is linked.
-pyo3 = { version = "0.28.3", features = ["abi3-py39"], optional = true }
+pyo3 = { version = "0.29.0", features = ["abi3-py39"], optional = true }
 
 # Interactive CLI deps, gated behind the `cli` feature; the wheel builds without it
 ctrlc = { version = "3.4", optional = true }

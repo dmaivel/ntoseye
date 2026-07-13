@@ -17,4 +17,4 @@ crate-type = ["cdylib"]
 # owns the `PyInit__ntoseye` symbol. `python-extension` resolves libpython at
 # load (wheel), `default-features = false` drops the cli/mcp deps.
 ntoseye_core = { package = "ntoseye", path = "..", default-features = false, features = ["python-extension"] }
-pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py39"] }
