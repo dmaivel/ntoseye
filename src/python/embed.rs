@@ -122,6 +122,8 @@ fn install_repl_module<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
     ntoseye.add("Debugger", py.get_type::<Debugger>())?;
     ntoseye.add("Struct", py.get_type::<Struct>())?;
     ntoseye.add("Type", py.get_type::<Type>())?;
+    ntoseye.add("NtoseyeError", py.get_type::<super::NtoseyeError>())?;
+    ntoseye.add("MemoryAccessError", py.get_type::<super::MemoryAccessError>())?;
     ntoseye.add("__version__", env!("CARGO_PKG_VERSION"))?;
     ntoseye.setattr("__path__", PyList::empty(py))?;
 
