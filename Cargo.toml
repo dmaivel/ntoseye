@@ -37,7 +37,7 @@ thiserror = "2.0.18"
 hex = "0.4.3"
 derive_more = { version = "2.1.1", features = ["full"] }
 pdb2 = "0.10.1"
-spin = "0.10.0"
+spin = "0.12.1"
 dashmap = "6.1.0"
 nucleo-matcher = "0.3.1"
 single-instance = "0.3.3"
