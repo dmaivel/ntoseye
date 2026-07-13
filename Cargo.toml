@@ -41,7 +41,7 @@ spin = "0.12.1"
 dashmap = "6.1.0"
 nucleo-matcher = "0.3.1"
 single-instance = "0.3.3"
-winnow = "0.7"
+winnow = "1.0"
 linkme = "0.3"
 
 # pyo3 SDK + embedded interpreter, gated behind the `python` features. abi3 so
