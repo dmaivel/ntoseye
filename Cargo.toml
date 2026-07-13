@@ -30,7 +30,7 @@ owo-colors = "4.2.3"
 pelite = "0.10.0"
 # rustls, not the default native-tls, to avoid linking system OpenSSL (portable wheel)
 reqwest = { version = "0.12.28", default-features = false, features = [ "blocking", "rustls-tls", "charset", "http2" ] }
-tabled = { version = "0.20.0", features = [ "ansi" ] }
+tabled = { version = "0.21.0", features = [ "ansi" ] }
 zerocopy = { version = "0.8.31", features = [ "derive" ] }
 rayon = "1.11.0"
 thiserror = "2.0.18"
