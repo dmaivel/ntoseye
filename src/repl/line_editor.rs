@@ -66,6 +66,7 @@ fn make_suggestions(
             match_indices: None,
             span: Span::new(span_start, pos),
             append_whitespace: false,
+            display_override: None,
         })
         .collect()
 }
@@ -159,6 +160,7 @@ impl Completer for MyCompleter {
                             match_indices: None,
                             span: Span::new(0, pos),
                             append_whitespace: true,
+                            display_override: None,
                         })
                     } else {
                         None
@@ -178,6 +180,7 @@ impl Completer for MyCompleter {
                             match_indices: None,
                             span: Span::new(0, pos),
                             append_whitespace: true,
+                            display_override: None,
                         });
                     }
                 }
@@ -194,6 +197,7 @@ impl Completer for MyCompleter {
                             match_indices: None,
                             span: Span::new(0, pos),
                             append_whitespace: true,
+                            display_override: None,
                         });
                     }
                 }
@@ -278,6 +282,7 @@ impl MyCompleter {
                         match_indices: None,
                         span: Span::new(input.span_start, input.pos),
                         append_whitespace: false,
+                    display_override: None,
                     })
                     .collect()
             }
@@ -318,6 +323,7 @@ impl MyCompleter {
                             match_indices: None,
                             span: Span::new(input.span_start, input.pos),
                             append_whitespace: false,
+                        display_override: None,
                         }
                     })
                     .collect()
@@ -336,6 +342,7 @@ impl MyCompleter {
                         match_indices: None,
                         span: Span::new(input.span_start, input.pos),
                         append_whitespace: false,
+                    display_override: None,
                     })
                     .collect()
             }
@@ -355,6 +362,7 @@ impl MyCompleter {
                             match_indices: None,
                             span: Span::new(input.span_start, input.pos),
                             append_whitespace: false,
+                        display_override: None,
                         }
                     })
                     .collect()
@@ -380,6 +388,7 @@ impl MyCompleter {
                         match_indices: None,
                         span: Span::new(input.arg_start, input.pos),
                         append_whitespace: false,
+                    display_override: None,
                     })
                     .collect()
             }
@@ -401,6 +410,7 @@ impl MyCompleter {
                 match_indices: None,
                 span: Span::new(input.span_start, input.pos),
                 append_whitespace: false,
+            display_override: None,
             })
             .collect()
     }
@@ -523,6 +533,7 @@ impl MyCompleter {
                 match_indices: None,
                 span: Span::new(input.span_start, input.pos),
                 append_whitespace: false,
+            display_override: None,
             })
             .collect()
     }
@@ -540,6 +551,7 @@ impl MyCompleter {
                 match_indices: None,
                 span: Span::new(input.span_start, input.pos),
                 append_whitespace: false,
+            display_override: None,
             })
             .collect()
     }

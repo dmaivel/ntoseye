@@ -436,6 +436,7 @@ pub fn start_repl(ctx: &mut Session) -> Result<()> {
                     error!("VM is already paused");
                 }
             }
+            _ => {}
         }
     }
 
