@@ -25,7 +25,7 @@ required-features = ["cli"]
 iced-x86 = "1.21.0"
 indicatif = "0.18.3"
 memmap2 = "0.9.9"
-nix = { version = "0.30.1", features = [ "process", "uio" ] }
+nix = { version = "0.31.3", features = [ "process", "uio" ] }
 owo-colors = "4.2.3"
 pelite = "0.10.0"
 # rustls, not the default native-tls, to avoid linking system OpenSSL (portable wheel)
