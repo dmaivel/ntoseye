@@ -193,7 +193,8 @@ pub fn handle_debug_io_with_output<T: Read + Write, W: Write>(
             prompt,
         }) => {
             output.write_all(prompt)?;
-            send_empty_debug_io_response(framing, processor_level, processor)?;
+            let response = get_string_auto_response(prompt);
+            send_debug_io_response(framing, processor_level, processor, response)?;
         }
         None => {}
     }
@@ -244,15 +245,27 @@ pub fn parse_debug_io(payload: &[u8]) -> Option<DebugIo<'_>> {
     }
 }
 
-fn send_empty_debug_io_response<T: Read + Write>(
+fn get_string_auto_response(prompt: &[u8]) -> &'static [u8] {
+    let text = std::str::from_utf8(prompt).unwrap_or("");
+    if text.contains("(bic)") || text.contains("(BiC)") {
+        b"b"
+    } else {
+        b""
+    }
+}
+
+fn send_debug_io_response<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor_level: u16,
     processor: u16,
+    response: &[u8],
 ) -> Result<()> {
-    let mut reply = [0u8; DBGKD_DEBUG_IO_HEADER_SIZE];
+    let mut reply = vec![0u8; DBGKD_DEBUG_IO_HEADER_SIZE + response.len()];
     write_u32(&mut reply, 0, DBGKD_GET_STRING_API);
     write_u16(&mut reply, 4, processor_level);
     write_u16(&mut reply, 6, processor);
+    write_u32(&mut reply, 12, response.len() as u32);
+    reply[DBGKD_DEBUG_IO_HEADER_SIZE..].copy_from_slice(response);
     framing.send_data(PACKET_TYPE_KD_DEBUG_IO, &reply)
 }
 
