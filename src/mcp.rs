@@ -267,6 +267,7 @@ impl Drop for InterruptResetGuard {
 #[derive(Clone)]
 struct NtoseyeMcp {
     session: SharedSession,
+    #[allow(dead_code)] // accessed by the #[tool_router] macro expansion
     tool_router: ToolRouter<Self>,
     /// Flipped on shutdown so an in-flight `wait_for_stop` bails out promptly and
     /// the actor can run cleanup (resume the VM) before exit.
