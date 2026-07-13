@@ -66,7 +66,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "io-std", 
 tokio-util = { version = "0.7", default-features = false, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
 # CORS for the HTTP transport so browser MCP clients arent blocked
-tower-http = { version = "0.6", default-features = false, features = ["cors"], optional = true }
+tower-http = { version = "0.7", default-features = false, features = ["cors"], optional = true }
 anyhow = { version = "1", optional = true }
 kdmp-parser = "0.8"
 
