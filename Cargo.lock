@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "ntoseye"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "argh",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "ntoseye-py"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "ntoseye",
  "pyo3",
