@@ -26,7 +26,7 @@ pub struct KvmHandle {
  * TODO (possibly?)
  * 1. rename KvmHandle to KvmProcess
  * 2. add new type, KvmSharedMemory
- * 2a. this new type will work in conjuction with QEMU's shared memory feature
+ * 2a. this new type will work in conjunction with QEMU's shared memory feature
  * 2b. this new type will allow us to use mmap and access memory directly, instead of process_vm_read/write
  * 3. ensure all APIs within this repos are using MemoryOps, not KvmHandle..
  * 4. if we are keeping KvmProcess instead of forcing users to use shared memory (so keep a safe fallback),

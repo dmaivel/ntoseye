@@ -3656,7 +3656,7 @@ pub fn bugcheck_descriptor(code: u32) -> Option<BugcheckDescriptor> {
         0x000001d0 => Some(BugcheckDescriptor {
             name: "ACPI_FIRMWARE_WATCHDOG_TIMEOUT",
             description: Some(
-                "ACPI driver failed to complete an operation in expected alloted time.",
+                "ACPI driver failed to complete an operation in expected allotted time.",
             ),
             arguments: [
                 "pointer to AMLI Context",
