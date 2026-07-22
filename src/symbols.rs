@@ -37,6 +37,28 @@ use std::{fmt, io::Cursor};
 // NOTE global is probably fine here?
 pub static FORCE_DOWNLOADS: OnceLock<bool> = OnceLock::new();
 
+pub static PDB_SERVERS: OnceLock<Vec<String>> = OnceLock::new();
+
+const DEFAULT_SYMBOL_SERVER: &str = "https://msdl.microsoft.com/download/symbols";
+
+fn pdb_servers() -> &'static [String] {
+    static RESOLVED: OnceLock<Vec<String>> = OnceLock::new();
+    RESOLVED.get_or_init(|| {
+        let mut servers = PDB_SERVERS.get().cloned().unwrap_or_default();
+        if let Ok(env_val) = std::env::var("NTOSEYE_PDB_SERVERS") {
+            servers.extend(
+                env_val
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+            );
+        }
+        servers.push(DEFAULT_SYMBOL_SERVER.to_string());
+        servers
+    })
+}
+
 #[derive(Default, Clone)]
 pub struct SymbolIndex {
     /// Symbol/type names, sorted and deduped. Matched fuzzily by `search`
@@ -189,7 +211,7 @@ mod tests {
 /// Information needed to download a PDB file
 #[derive(Debug, Clone)]
 pub struct DownloadJob {
-    pub url: String,
+    pub urls: Vec<String>,
     pub path: PathBuf,
     pub filename: String,
 }
@@ -306,8 +328,23 @@ fn download_job(job: &DownloadJob, pb: ProgressBar) -> Result<()> {
         return Ok(());
     }
 
-    let response = reqwest::blocking::get(&job.url)?;
-    let response = response.error_for_status()?;
+    let mut last_err = None;
+    for url in &job.urls {
+        match reqwest::blocking::get(url).and_then(|r| r.error_for_status()) {
+            Ok(response) => {
+                return download_response(job, response, pb);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("DownloadJob.urls must not be empty").into())
+}
+
+fn download_response(
+    job: &DownloadJob,
+    response: reqwest::blocking::Response,
+    pb: ProgressBar,
+) -> Result<()> {
     let total_size = response.content_length().unwrap_or(0);
 
     pb.set_style(download_progress_style()?);
@@ -547,6 +584,12 @@ impl LoadedModule {
 
     fn contains_address(&self, address: VirtAddr) -> bool {
         address.0 >= self.base_address.0 && address.0 < self.end_address().0
+    }
+}
+
+impl Default for SymbolStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -830,7 +873,7 @@ impl SymbolStore {
 
         let guid = guid_to_u128(guid);
         let job = DownloadJob {
-            url,
+            urls,
             path,
             filename: format!("{}.pdb", stem),
         };
@@ -860,15 +903,16 @@ impl SymbolStore {
     ) -> Result<DownloadJob> {
         let server_name = Self::symbol_server_file_name(image_file_name);
         let image_id = format!("{time_date_stamp:08X}{size_of_image:X}");
-        let url = format!(
-            "https://msdl.microsoft.com/download/symbols/{}/{}/{}",
-            server_name, image_id, server_name
-        );
+        let index_path = format!("{}/{}/{}", server_name, image_id, server_name);
+        let urls: Vec<String> = pdb_servers()
+            .iter()
+            .map(|base| format!("{}/{}", base.trim_end_matches('/'), index_path))
+            .collect();
         let storage_dir = images_directory().ok_or(Error::StorageNotFound)?;
         let path = storage_dir.join(format!("{}.{}", image_id, server_name));
 
         Ok(DownloadJob {
-            url,
+            urls,
             path,
             filename: server_name.to_string(),
         })
@@ -1852,7 +1896,7 @@ fn variant_to_i64(v: &pdb2::Variant) -> i64 {
         pdb2::Variant::I8(x) => x as i64,
         pdb2::Variant::I16(x) => x as i64,
         pdb2::Variant::I32(x) => x as i64,
-        pdb2::Variant::I64(x) => x as i64,
+        pdb2::Variant::I64(x) => x,
     }
 }
 

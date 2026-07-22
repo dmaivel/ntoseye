@@ -50,6 +50,12 @@ struct Args {
     #[argh(switch, long = "force-download-symbols")]
     redownload_symbols: bool,
 
+    /// additional PDB symbol server URL (repeatable; tried before the Microsoft
+    /// default). Uses the standard symbol-server path convention:
+    /// {server}/{filename}/{guid}{age}/{filename}
+    #[argh(option, long = "pdb-server")]
+    pdb_server: Vec<String>,
+
     /// help instructions with enabling gdbstub in qemu
     #[argh(switch, long = "gdbstub-instructions")]
     gdbstub_instructions: bool,
@@ -101,6 +107,12 @@ struct McpCommand {
     /// cross-origin requests are restricted to loopback origins.
     #[argh(switch, long = "unsafe-http")]
     unsafe_http: bool,
+
+    /// additional PDB symbol server URL (repeatable; tried before the Microsoft
+    /// default). Same as the top-level --pdb-server; can be placed before or
+    /// after the 'mcp' subcommand.
+    #[argh(option, long = "pdb-server")]
+    pdb_server: Vec<String>,
 }
 
 #[derive(FromArgs)]
@@ -224,6 +236,19 @@ fn run() -> Result<()> {
         .map_err(|_| {
             Error::DebugInfo("symbol download flag was initialized before startup".into())
         })?;
+
+    // Merge top-level and subcommand --pdb-server lists (the subcommand may
+    // carry its own, e.g. `ntoseye mcp --pdb-server URL`).
+    let mut pdb_servers = args.pdb_server;
+    #[cfg(feature = "mcp")]
+    if let Some(Command::Mcp(ref mcp_args)) = args.command {
+        pdb_servers.extend(mcp_args.pdb_server.clone());
+    }
+    if !pdb_servers.is_empty() {
+        symbols::PDB_SERVERS.set(pdb_servers).map_err(|_| {
+            Error::DebugInfo("PDB server list was initialized before startup".into())
+        })?;
+    }
 
     if args.dump.is_some() && args.connect.is_some() {
         return Err(Error::DebugInfo(
