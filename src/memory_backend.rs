@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::types::VirtAddr;
 
+#[derive(Default)]
 pub struct MemoryBackend {
     register_map: RegisterMap,
 }

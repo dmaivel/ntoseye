@@ -874,7 +874,7 @@ fn hex_of(slice: &[u8]) -> String {
 /// Rejects odd length and non-hex digits as invalid params.
 fn bytes_of_hex(s: &str) -> Result<Vec<u8>, ToolError> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(invalid_request("hex must have an even number of digits"));
     }
     (0..s.len())
@@ -1089,7 +1089,7 @@ fn filetime_to_iso(ft: u64) -> Option<String> {
     // Unix epoch is 11644473600 seconds after that.
     const EPOCH_DIFF: i64 = 11_644_473_600;
     let secs = (ft / 10_000_000) as i64 - EPOCH_DIFF;
-    if secs < 0 || secs > 253_402_300_799 {
+    if !(0..=253_402_300_799).contains(&secs) {
         return None;
     }
     let s = secs % 60;

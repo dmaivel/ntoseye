@@ -813,10 +813,11 @@ impl SymbolStore {
             guid.Data4[7],
         );
 
-        let url = format!(
-            "https://msdl.microsoft.com/download/symbols/{}/{}{:X}/{}",
-            server_name, guid_str, age, server_name
-        );
+        let index_path = format!("{}/{}{:X}/{}", server_name, guid_str, age, server_name);
+        let urls: Vec<String> = pdb_servers()
+            .iter()
+            .map(|base| format!("{}/{}", base.trim_end_matches('/'), index_path))
+            .collect();
 
         let stem = server_name
             .rsplit_once('.')

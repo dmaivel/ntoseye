@@ -613,6 +613,7 @@ impl Session {
     /// - the kernel base no longer reads `MZ`: an *undetected* reboot; the guest
     ///   rebooted (new KASLR base) but no wait loop has classified it yet, so our
     ///   cached base/symbols are stale and reads land at garbage addresses.
+    ///
     /// The first is the `coherent` flag the reload notification carries; the
     /// second is the cheap 2-byte guard that stops `status`/enumeration from
     /// reporting a stale base as usable (the early-boot case is unaffected; the

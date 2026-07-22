@@ -866,7 +866,7 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        println!("  {:<16} {:<7} {}", "IRP", "Source", "Details");
+        println!("  {:<16} {:<7} Details", "IRP", "Source");
         for h in &hits {
             let details = if h.source == "thread" {
                 format!(

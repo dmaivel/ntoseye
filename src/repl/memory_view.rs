@@ -40,6 +40,10 @@ impl AddressRange {
         Ok(AddressRange { start, end })
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
     pub fn len(&self) -> usize {
         (self.end.0 - self.start.0) as usize
     }

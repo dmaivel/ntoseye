@@ -11,6 +11,8 @@ use pyo3::exceptions::{PyAttributeError, PyKeyError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 
+type DisassemblyRow = (u64, String, String, Option<String>);
+
 use crate::backend::MemoryOps;
 use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck};
 use crate::dbg_backend::{DebugBackend, WatchpointAccess};
@@ -1531,11 +1533,7 @@ impl Debugger {
     /// Disassemble `count` instructions at `addr` in the current address space.
     /// Returns `(ip, hex_bytes, asm, comment)` tuples; our own breakpoint `int3`
     /// bytes are masked and branch/rip-relative targets get symbol comments.
-    fn disassemble(
-        &self,
-        addr: u64,
-        count: usize,
-    ) -> PyResult<Vec<(u64, String, String, Option<String>)>> {
+    fn disassemble(&self, addr: u64, count: usize) -> PyResult<Vec<DisassemblyRow>> {
         let rows = self.inner.disassemble(VirtAddr(addr), count).map_err(err)?;
         Ok(rows
             .into_iter()
@@ -2486,7 +2484,7 @@ impl Struct {
                 let (pos, len) = (*pos as u32, *len as u32);
                 // Touch only the bytes the bitfield actually spans, so we never
                 // clobber neighbouring fields that share the storage unit.
-                let sz = (((pos + len + 7) / 8).clamp(1, 8)) as usize;
+                let sz = ((pos + len).div_ceil(8).clamp(1, 8)) as usize;
                 let mut buf = vec![0u8; sz];
                 mem.read_bytes(VirtAddr(addr), &mut buf).map_err(err)?;
                 let mask = if len >= 64 {
@@ -2509,11 +2507,11 @@ impl Struct {
             }
             _ => {
                 let sz = field.size as usize;
-                if matches!(sz, 1 | 2 | 4 | 8) {
-                    if let Ok(v) = value.extract::<u64>() {
-                        let bytes = v.to_le_bytes();
-                        return mem.write_bytes(VirtAddr(addr), &bytes[..sz]).map_err(err);
-                    }
+                if matches!(sz, 1 | 2 | 4 | 8)
+                    && let Ok(v) = value.extract::<u64>()
+                {
+                    let bytes = v.to_le_bytes();
+                    return mem.write_bytes(VirtAddr(addr), &bytes[..sz]).map_err(err);
                 }
                 let bytes: Vec<u8> = value.extract().map_err(|_| {
                     raise(format!(
