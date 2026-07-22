@@ -35,6 +35,9 @@ pub struct ModuleInfo {
     pub base_address: VirtAddr,
     pub size: u32,
     pub time_date_stamp: Option<u32>,
+    pub checksum: Option<u32>,
+    pub file_version: Option<String>,
+    pub product_version: Option<String>,
 }
 
 impl ModuleInfo {
@@ -46,11 +49,25 @@ impl ModuleInfo {
             base_address,
             size,
             time_date_stamp: None,
+            checksum: None,
+            file_version: None,
+            product_version: None,
         }
     }
 
     pub fn with_time_date_stamp(mut self, tds: u32) -> Self {
         self.time_date_stamp = Some(tds);
+        self
+    }
+
+    pub fn with_checksum(mut self, cs: u32) -> Self {
+        self.checksum = Some(cs);
+        self
+    }
+
+    pub fn with_version_info(mut self, file_ver: String, product_ver: String) -> Self {
+        self.file_version = Some(file_ver);
+        self.product_version = Some(product_ver);
         self
     }
 
@@ -229,6 +246,160 @@ pub fn section_name_at<'a, B: MemoryOps<PhysAddr>>(
         }
     }
     None
+}
+
+/// Read VS_FIXEDFILEINFO from a PE image's resource section in guest memory.
+///
+/// Reads only the header page + the `.rsrc` section (not the full image) to
+/// extract file version and product version strings. Returns `None` if the
+/// image has no resources, the resource section is paged out, or no
+/// RT_VERSION resource is present.
+pub fn read_pe_version_info<B: MemoryOps<PhysAddr>>(
+    base: VirtAddr,
+    memory: &memory::AddressSpace<'_, B>,
+) -> Option<(String, String)> {
+    use pelite::image::IMAGE_DIRECTORY_ENTRY_RESOURCE;
+
+    let mut header_buf = [0u8; 0x1000];
+    memory.read_bytes(base, &mut header_buf).ok()?;
+    let view = PeView::from_bytes(&header_buf).ok()?;
+
+    let rsrc_dir = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_RESOURCE)?;
+    let rsrc_rva = rsrc_dir.VirtualAddress;
+    let rsrc_size = (rsrc_dir.Size as usize).min(256 * 1024);
+    if rsrc_size < 16 {
+        return None;
+    }
+
+    let mut rsrc_buf = vec![0u8; rsrc_size];
+    memory
+        .read_bytes(VirtAddr(base.0 + rsrc_rva as u64), &mut rsrc_buf)
+        .ok()?;
+
+    let data_entry_rva = find_rt_version_data_entry(&rsrc_buf, rsrc_rva)?;
+
+    let ver_rva = read_u32_at(&rsrc_buf, data_entry_rva)?;
+    let ver_size = read_u32_at(&rsrc_buf, data_entry_rva + 4)? as usize;
+    if !(52..=32 * 1024).contains(&ver_size) {
+        return None;
+    }
+
+    let ver_offset_in_rsrc = (ver_rva as usize).checked_sub(rsrc_rva as usize)?;
+    let ver_data = rsrc_buf.get(ver_offset_in_rsrc..ver_offset_in_rsrc + ver_size)?;
+
+    parse_vs_fixedfileinfo(ver_data)
+}
+
+const RT_VERSION: u32 = 16;
+const VS_FIXEDFILEINFO_SIGNATURE: u32 = 0xFEEF04BD;
+
+/// Navigate the resource directory tree (3 levels) to find the
+/// IMAGE_RESOURCE_DATA_ENTRY for the first RT_VERSION resource.
+/// Returns the offset within `rsrc` of the data entry (which holds
+/// the RVA and size of the VS_VERSION_INFO blob).
+fn find_rt_version_data_entry(rsrc: &[u8], rsrc_rva: u32) -> Option<usize> {
+    // Level 0: root directory — find type entry for RT_VERSION
+    let type_entry = find_resource_id_entry(rsrc, 0, RT_VERSION)?;
+    // Level 1: name directory — take first entry
+    let name_entry = first_resource_entry(rsrc, type_entry)?;
+    // Level 2: language directory — take first entry
+    let lang_entry = first_resource_entry(rsrc, name_entry)?;
+
+    // lang_entry should point to a data entry (bit 31 clear)
+    if lang_entry & 0x8000_0000 != 0 {
+        return None;
+    }
+    let data_entry_off = lang_entry as usize;
+    if data_entry_off + 16 > rsrc.len() {
+        return None;
+    }
+
+    // Validate: the RVA should fall within the resource section
+    let rva = read_u32_at(rsrc, data_entry_off)?;
+    if rva < rsrc_rva || (rva as usize - rsrc_rva as usize) >= rsrc.len() {
+        return None;
+    }
+    Some(data_entry_off)
+}
+
+/// Scan an IMAGE_RESOURCE_DIRECTORY at `dir_off` for an entry with the
+/// given resource ID. Returns the OffsetToData/OffsetToDirectory value
+/// from the matching entry (with the high bit preserved).
+fn find_resource_id_entry(rsrc: &[u8], dir_off: usize, target_id: u32) -> Option<u32> {
+    if dir_off + 16 > rsrc.len() {
+        return None;
+    }
+    let num_named = read_u16_at(rsrc, dir_off + 12)? as usize;
+    let num_id = read_u16_at(rsrc, dir_off + 14)? as usize;
+    let entries_start = dir_off + 16;
+    for i in num_named..(num_named + num_id) {
+        let entry_off = entries_start + i * 8;
+        let id = read_u32_at(rsrc, entry_off)?;
+        if id == target_id {
+            return read_u32_at(rsrc, entry_off + 4);
+        }
+    }
+    None
+}
+
+/// Return the OffsetToData of the first entry in the directory at the
+/// offset encoded in `parent_entry` (which must have bit 31 set for a
+/// subdirectory).
+fn first_resource_entry(rsrc: &[u8], parent_entry: u32) -> Option<u32> {
+    if parent_entry & 0x8000_0000 == 0 {
+        return None;
+    }
+    let dir_off = (parent_entry & 0x7FFF_FFFF) as usize;
+    if dir_off + 16 > rsrc.len() {
+        return None;
+    }
+    let num_named = read_u16_at(rsrc, dir_off + 12)? as usize;
+    let num_id = read_u16_at(rsrc, dir_off + 14)? as usize;
+    if num_named + num_id == 0 {
+        return None;
+    }
+    let first_entry_off = dir_off + 16;
+    read_u32_at(rsrc, first_entry_off + 4)
+}
+
+fn parse_vs_fixedfileinfo(data: &[u8]) -> Option<(String, String)> {
+    // Search for VS_FIXEDFILEINFO signature
+    let sig_bytes = VS_FIXEDFILEINFO_SIGNATURE.to_le_bytes();
+    let pos = data.windows(4).position(|w| w == sig_bytes)?;
+    if pos + 52 > data.len() {
+        return None;
+    }
+    let info = &data[pos..];
+
+    let file_ver_minor = u16::from_le_bytes([info[8], info[9]]);
+    let file_ver_major = u16::from_le_bytes([info[10], info[11]]);
+    let file_ver_build = u16::from_le_bytes([info[12], info[13]]);
+    let file_ver_patch = u16::from_le_bytes([info[14], info[15]]);
+
+    let prod_ver_minor = u16::from_le_bytes([info[16], info[17]]);
+    let prod_ver_major = u16::from_le_bytes([info[18], info[19]]);
+    let prod_ver_build = u16::from_le_bytes([info[20], info[21]]);
+    let prod_ver_patch = u16::from_le_bytes([info[22], info[23]]);
+
+    let file_ver = format!(
+        "{}.{}.{}.{}",
+        file_ver_major, file_ver_minor, file_ver_patch, file_ver_build
+    );
+    let prod_ver = format!(
+        "{}.{}.{}.{}",
+        prod_ver_major, prod_ver_minor, prod_ver_patch, prod_ver_build
+    );
+    Some((file_ver, prod_ver))
+}
+
+fn read_u16_at(buf: &[u8], off: usize) -> Option<u16> {
+    buf.get(off..off + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+}
+
+fn read_u32_at(buf: &[u8], off: usize) -> Option<u32> {
+    buf.get(off..off + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Build a complete (hole-free) `PeImage` from an on-disk PE file by mapping its
@@ -652,7 +823,14 @@ fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>>
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "<unknown>".to_string());
-    Ok(Some(ModuleInfo::new(name, dll_base, size_of_image)))
+    let mut info = ModuleInfo::new(name, dll_base, size_of_image);
+    if let Ok(tds) = record.read_field::<u32>("TimeDateStamp") {
+        info = info.with_time_date_stamp(tds);
+    }
+    if let Ok(cs) = record.read_field::<u32>("CheckSum") {
+        info = info.with_checksum(cs);
+    }
+    Ok(Some(info))
 }
 
 pub struct Guest {
@@ -1141,6 +1319,15 @@ impl Guest {
             }
         }
 
+        let process_mem = self.ntoskrnl.sibling(info.dtb, VirtAddr(0));
+        let memory = process_mem.memory();
+        for module in &mut modules {
+            if let Some((file_ver, prod_ver)) = read_pe_version_info(module.base_address, &memory) {
+                module.file_version = Some(file_ver);
+                module.product_version = Some(prod_ver);
+            }
+        }
+
         Ok(modules)
     }
 
@@ -1167,6 +1354,14 @@ impl Guest {
         {
             if let Some(module) = module_info_from_record(&record?)? {
                 modules.push(module);
+            }
+        }
+
+        let memory = self.ntoskrnl.memory();
+        for module in &mut modules {
+            if let Some((file_ver, prod_ver)) = read_pe_version_info(module.base_address, &memory) {
+                module.file_version = Some(file_ver);
+                module.product_version = Some(prod_ver);
             }
         }
 

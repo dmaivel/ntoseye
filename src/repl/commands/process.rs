@@ -760,6 +760,7 @@ impl ReplState<'_> {
                     "Start".to_string(),
                     "End".to_string(),
                     "Module".to_string(),
+                    "Version".to_string(),
                     "Symbols".to_string(),
                     "Source".to_string(),
                     "Image".to_string(),
@@ -778,6 +779,7 @@ impl ReplState<'_> {
                         format!("{}  ", ui::addr(module.base_address.0)),
                         format!("{}  ", ui::addr(module.end_address().0)),
                         format!("{}  ", module.short_name),
+                        format!("{}  ", module.file_version.as_deref().unwrap_or("-")),
                         format!(
                             "{}  ",
                             self.ctx

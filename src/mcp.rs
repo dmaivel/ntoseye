@@ -972,13 +972,26 @@ fn frame_json(f: &StackFrame) -> Value {
 }
 
 fn module_json(m: &ModuleInfo) -> Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "name": m.name,
         "short_name": m.short_name,
         "base": hex(m.base_address.0),
         "end": hex(m.end_address().0),
         "size": m.size,
-    })
+    });
+    if let Some(tds) = m.time_date_stamp {
+        v["time_date_stamp"] = hex(tds as u64).into();
+    }
+    if let Some(cs) = m.checksum {
+        v["checksum"] = hex(cs as u64).into();
+    }
+    if let Some(ref fv) = m.file_version {
+        v["file_version"] = fv.clone().into();
+    }
+    if let Some(ref pv) = m.product_version {
+        v["product_version"] = pv.clone().into();
+    }
+    v
 }
 
 fn exception_json(exc: &DmpException) -> Value {
@@ -1223,7 +1236,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "List loaded kernel modules (optional name filter; paged via offset/limit) as {total, offset, returned, has_more, next_offset?, modules:[{name, short_name, base, end, size}]}"
+        description = "List loaded kernel modules (optional name filter; paged via offset/limit) as {total, offset, returned, has_more, next_offset?, modules:[{name, short_name, base, end, size, time_date_stamp?, checksum?, file_version?, product_version?}]}"
     )]
     async fn kernel_modules(
         &self,
@@ -2089,7 +2102,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "List loaded modules for the current inspection scope: the attached process's user-mode modules when attached (attach_process), otherwise the kernel module list. Optional name filter; paged via offset/limit. Returns {total, offset, returned, has_more, next_offset?, modules:[{name, short_name, base, end, size}]}. Use kernel_modules to list kernel modules regardless of attach state."
+        description = "List loaded modules for the current inspection scope: the attached process's user-mode modules when attached (attach_process), otherwise the kernel module list. Optional name filter; paged via offset/limit. Returns {total, offset, returned, has_more, next_offset?, modules:[{name, short_name, base, end, size, time_date_stamp?, checksum?, file_version?, product_version?}]}. Use kernel_modules to list kernel modules regardless of attach state."
     )]
     async fn modules(
         &self,

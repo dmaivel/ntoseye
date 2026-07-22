@@ -73,12 +73,13 @@ const DATA_BLOCK_SIZE: usize = 16;
 
 // Driver list: DRIVER_ENTRY64 structures, 0x90 bytes each.
 // Layout: NameOffset(u32) reserved[52] DllBase(u64) EntryPoint(u64)
-//         SizeOfImage(u64) reserved[56] TimeDateStamp(u64)
+//         SizeOfImage(u64) reserved[48] CheckSum(u64) TimeDateStamp(u64)
 const DRIVER_ENTRY_SIZE: usize = 0x90;
 const DRIVER_OFF_NAME_OFFSET: usize = 0x00;
 const DRIVER_OFF_DLL_BASE: usize = 0x38;
 const DRIVER_OFF_ENTRY_POINT: usize = 0x40;
 const DRIVER_OFF_SIZE_OF_IMAGE: usize = 0x48;
+const DRIVER_OFF_CHECKSUM: usize = 0x80;
 const DRIVER_OFF_TIME_DATE_STAMP: usize = 0x88;
 
 // Unloaded driver entry: DUMP_UNLOADED_DRIVERS64 (0x38 bytes)
@@ -103,6 +104,7 @@ pub struct TriageDriver {
     pub base: u64,
     pub entry_point: u64,
     pub size: u32,
+    pub checksum: u32,
     pub time_date_stamp: u32,
 }
 
@@ -110,6 +112,7 @@ impl TriageDriver {
     pub fn to_module_info(&self) -> ModuleInfo {
         ModuleInfo::new(self.name.clone(), VirtAddr(self.base), self.size)
             .with_time_date_stamp(self.time_date_stamp)
+            .with_checksum(self.checksum)
     }
 }
 
@@ -360,6 +363,7 @@ pub fn parse_drivers(mmap: &[u8]) -> Vec<TriageDriver> {
 
         let entry_point = read_u64(mmap, entry_off + DRIVER_OFF_ENTRY_POINT);
         let size = read_u32(mmap, entry_off + DRIVER_OFF_SIZE_OF_IMAGE);
+        let checksum = read_u32(mmap, entry_off + DRIVER_OFF_CHECKSUM);
         let time_date_stamp = read_u32(mmap, entry_off + DRIVER_OFF_TIME_DATE_STAMP);
         let name_offset = read_u32(mmap, entry_off + DRIVER_OFF_NAME_OFFSET) as usize;
 
@@ -374,6 +378,7 @@ pub fn parse_drivers(mmap: &[u8]) -> Vec<TriageDriver> {
             base,
             entry_point,
             size,
+            checksum,
             time_date_stamp,
         });
     }
