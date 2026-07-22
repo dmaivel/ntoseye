@@ -1252,7 +1252,7 @@ impl NtoseyeMcp {
             .run(move |ctx| {
                 let mods = ctx
                     .target
-                    .kernel_modules()
+                    .kernel_modules_with_versions()
                     .map_err(|e| enumeration_error(ctx, e))?;
                 let f = filter.as_deref().map(str::to_ascii_lowercase);
                 let matched: Vec<_> = mods
@@ -2118,7 +2118,7 @@ impl NtoseyeMcp {
             .run(move |ctx| {
                 let mods = ctx
                     .target
-                    .modules()
+                    .modules_with_versions()
                     .map_err(|e| enumeration_error(ctx, e))?;
                 let f = filter.as_deref().map(str::to_ascii_lowercase);
                 let matched: Vec<_> = mods
@@ -2782,7 +2782,7 @@ impl NtoseyeMcp {
                     None
                 };
 
-                let all_mods = ctx.target.kernel_modules().unwrap_or_default();
+                let all_mods = ctx.target.kernel_modules_with_versions().unwrap_or_default();
                 let modules_total = all_mods.len();
                 let mods: Vec<Value> = all_mods.iter().take(200).map(module_json).collect();
 

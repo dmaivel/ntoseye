@@ -618,6 +618,14 @@ impl Target {
         }
     }
 
+    pub fn kernel_modules_with_versions(&self) -> Result<Vec<ModuleInfo>> {
+        let mut mods = self.kernel_modules()?;
+        if let Ok(g) = self.guest() {
+            g.populate_kernel_module_versions(&mut mods);
+        }
+        Ok(mods)
+    }
+
     /// Loaded modules in the current inspection scope: the attached process's
     /// user-mode modules when attached to a process, otherwise the kernel module
     /// list. Shared by the REPL `lm`, the SDK, and MCP.
@@ -626,6 +634,17 @@ impl Target {
             Some(process) => self.guest()?.process_modules(process),
             None => self.kernel_modules(),
         }
+    }
+
+    pub fn modules_with_versions(&self) -> Result<Vec<ModuleInfo>> {
+        let mut mods = self.modules()?;
+        if let Ok(g) = self.guest() {
+            match &self.current_process_info {
+                Some(info) => g.populate_process_module_versions(&mut mods, info),
+                None => g.populate_kernel_module_versions(&mut mods),
+            }
+        }
+        Ok(mods)
     }
 
     fn triage_modules(&self) -> Result<Vec<ModuleInfo>> {

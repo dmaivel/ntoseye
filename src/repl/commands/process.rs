@@ -584,7 +584,7 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let modules = match self.ctx.target.kernel_modules() {
+        let modules = match self.ctx.target.kernel_modules_with_versions() {
             Ok(modules) => modules,
             Err(e) => {
                 error!("failed to enumerate kernel modules: {}", e);
@@ -753,7 +753,7 @@ impl ReplState<'_> {
             None => self.ctx.target.kernel_dtb(),
         };
 
-        match self.ctx.target.modules() {
+        match self.ctx.target.modules_with_versions() {
             Ok(modules) => {
                 let mut builder = Builder::default();
                 builder.push_record(vec![

@@ -371,23 +371,25 @@ fn parse_vs_fixedfileinfo(data: &[u8]) -> Option<(String, String)> {
     }
     let info = &data[pos..];
 
-    let file_ver_minor = u16::from_le_bytes([info[8], info[9]]);
-    let file_ver_major = u16::from_le_bytes([info[10], info[11]]);
-    let file_ver_build = u16::from_le_bytes([info[12], info[13]]);
-    let file_ver_patch = u16::from_le_bytes([info[14], info[15]]);
+    // dwFileVersionMS: HIWORD = Major, LOWORD = Minor
+    // dwFileVersionLS: HIWORD = Build, LOWORD = Revision
+    let file_minor = u16::from_le_bytes([info[8], info[9]]);
+    let file_major = u16::from_le_bytes([info[10], info[11]]);
+    let file_revision = u16::from_le_bytes([info[12], info[13]]);
+    let file_build = u16::from_le_bytes([info[14], info[15]]);
 
-    let prod_ver_minor = u16::from_le_bytes([info[16], info[17]]);
-    let prod_ver_major = u16::from_le_bytes([info[18], info[19]]);
-    let prod_ver_build = u16::from_le_bytes([info[20], info[21]]);
-    let prod_ver_patch = u16::from_le_bytes([info[22], info[23]]);
+    let prod_minor = u16::from_le_bytes([info[16], info[17]]);
+    let prod_major = u16::from_le_bytes([info[18], info[19]]);
+    let prod_revision = u16::from_le_bytes([info[20], info[21]]);
+    let prod_build = u16::from_le_bytes([info[22], info[23]]);
 
     let file_ver = format!(
         "{}.{}.{}.{}",
-        file_ver_major, file_ver_minor, file_ver_patch, file_ver_build
+        file_major, file_minor, file_build, file_revision
     );
     let prod_ver = format!(
         "{}.{}.{}.{}",
-        prod_ver_major, prod_ver_minor, prod_ver_patch, prod_ver_build
+        prod_major, prod_minor, prod_build, prod_revision
     );
     Some((file_ver, prod_ver))
 }
@@ -400,6 +402,18 @@ fn read_u16_at(buf: &[u8], off: usize) -> Option<u16> {
 fn read_u32_at(buf: &[u8], off: usize) -> Option<u32> {
     buf.get(off..off + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn populate_module_versions<B: MemoryOps<PhysAddr>>(
+    modules: &mut [ModuleInfo],
+    memory: &memory::AddressSpace<'_, B>,
+) {
+    for module in modules.iter_mut() {
+        if let Some((file_ver, prod_ver)) = read_pe_version_info(module.base_address, memory) {
+            module.file_version = Some(file_ver);
+            module.product_version = Some(prod_ver);
+        }
+    }
 }
 
 /// Build a complete (hole-free) `PeImage` from an on-disk PE file by mapping its
@@ -1319,15 +1333,6 @@ impl Guest {
             }
         }
 
-        let process_mem = self.ntoskrnl.sibling(info.dtb, VirtAddr(0));
-        let memory = process_mem.memory();
-        for module in &mut modules {
-            if let Some((file_ver, prod_ver)) = read_pe_version_info(module.base_address, &memory) {
-                module.file_version = Some(file_ver);
-                module.product_version = Some(prod_ver);
-            }
-        }
-
         Ok(modules)
     }
 
@@ -1357,15 +1362,22 @@ impl Guest {
             }
         }
 
-        let memory = self.ntoskrnl.memory();
-        for module in &mut modules {
-            if let Some((file_ver, prod_ver)) = read_pe_version_info(module.base_address, &memory) {
-                module.file_version = Some(file_ver);
-                module.product_version = Some(prod_ver);
-            }
-        }
-
         Ok(modules)
+    }
+
+    pub fn populate_kernel_module_versions(&self, modules: &mut [ModuleInfo]) {
+        let memory = self.ntoskrnl.memory();
+        populate_module_versions(modules, &memory);
+    }
+
+    pub fn populate_process_module_versions(
+        &self,
+        modules: &mut [ModuleInfo],
+        info: &ProcessInfo,
+    ) {
+        let process_mem = self.ntoskrnl.sibling(info.dtb, VirtAddr(0));
+        let memory = process_mem.memory();
+        populate_module_versions(modules, &memory);
     }
 
     fn is_session_space(addr: VirtAddr) -> bool {
