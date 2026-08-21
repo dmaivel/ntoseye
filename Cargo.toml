@@ -2,14 +2,14 @@
 members = ["ntoseye-py"]
 
 [workspace.package]
-version = "0.21.0"
+version = "0.22.0"
 
 [package]
 name = "ntoseye"
 version.workspace = true
 edition = "2024"
 authors = [ "dmaivel" ]
-description = "Windows kernel debugger for Linux hosts running Windows under KVM/QEMU"
+description = "Windows kernel debugger for Linux hosts running Windows under KVM/QEMU and VMware"
 license = "MIT"
 repository = "https://github.com/dmaivel/ntoseye"
 readme = "README.md"

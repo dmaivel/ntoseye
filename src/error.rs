@@ -123,14 +123,16 @@ pub enum Error {
     #[error("Process image not found")]
     MissingImage,
 
-    #[error("No memory regions found in kvm")]
+    #[error("No memory regions found in VM process (QEMU/KVM or vmware-vmx)")]
     NoKvmRegions,
 
-    #[error("KVM process not found")]
+    #[error(
+        "VM process not found\n  KVM (QEMU): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open — is the VM powered on?"
+    )]
     KvmNotFound,
 
     #[error(
-        "permission denied reading from KVM process (PID {pid}).\n\
+        "permission denied reading from VM process (PID {pid}).\n\
          /proc/sys/kernel/yama/ptrace_scope is currently {scope}. to allow attaching, run:\n    \
              echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope\n\
          (or run ntoseye as root)"
