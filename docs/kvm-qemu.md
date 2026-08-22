@@ -2,24 +2,6 @@
 
 libvirt/virt-manager users can configure the debug transport automatically: run `ntoseye virsh`, pick the domain, choose _configure debug transports_, then the backend. `ntoseye virsh` can also remove ntoseye-managed debug transports later. Prefer editing the XML yourself? Follow the sections below.
 
-## GDB stub
-
-Fallback backend for guests that are not configured for Windows KD. Expose QEMU's gdbstub on `127.0.0.1:1234`, then run with `--backend gdb` (do not enable kernel debug mode in the guest; see [Choosing a backend](backends.md)).
-
-Plain QEMU: append `-s -S` to the qemu command.
-
-virt-manager: add the following to the XML configuration:
-
-```xml
-<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">
-  ...
-  <qemu:commandline>
-    <qemu:arg value="-s"/>
-    <qemu:arg value="-S"/>
-  </qemu:commandline>
-</domain>
-```
-
 ## KD over a serial socket
 
 Default backend. In the guest, enable kernel debugging (run as Administrator, then reboot):
@@ -64,6 +46,27 @@ Then connect: `ntoseye`.
     <qemu:arg value="socket,id=kd,path=/tmp/ntoseye-kd.sock,server=on,wait=off"/>
     <qemu:arg value="-serial"/>
     <qemu:arg value="chardev:kd"/>
+  </qemu:commandline>
+</domain>
+```
+
+## GDB stub
+
+Fallback backend for guests that are not configured for Windows KD. Expose QEMU's gdbstub on `127.0.0.1:1234`, then run with `--backend gdb`.
+
+> [!NOTE]
+> Do not enable kernel debug mode (`bcdedit /debug on`) in the guest when using the `gdb` backend. That setting is only for the `kd` backend, and the `gdb` backend's whole advantage is that the guest is unaware it is being debugged. With debug mode on, the kernel changes behaviour (anti-debug code, PatchGuard) and expects a KD debugger to service breaks, while nothing on the GDB side answers the KD transport, so the guest can hang on `DbgBreakPoint` or exceptions. Leave debug mode off.
+
+Plain QEMU: append `-s -S` to the qemu command.
+
+virt-manager: add the following to the XML configuration:
+
+```xml
+<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">
+  ...
+  <qemu:commandline>
+    <qemu:arg value="-s"/>
+    <qemu:arg value="-S"/>
   </qemu:commandline>
 </domain>
 ```

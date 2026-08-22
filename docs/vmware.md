@@ -2,19 +2,6 @@
 
 Power the VM off before editing its `.vmx` file, and only keep one VMware VM powered on while using `ntoseye`.
 
-## GDB stub
-
-VMware Workstation provides its own GDB remote stub. Add the following to the VM's `.vmx` file:
-
-```ini
-debugStub.listen.guest64 = "TRUE"
-debugStub.port.guest64 = "1234"
-```
-
-Then run with `--backend gdb` (do not enable kernel debug mode in the guest; see [Choosing a backend](backends.md)).
-
-Legacy VMware stubs that do not expose an AMD64 XML target description are unsupported; use KD or the `memory` backend instead.
-
 ## KD over a serial socket
 
 In the guest, enable kernel debugging (run as Administrator, then reboot):
@@ -38,6 +25,19 @@ serial0.yieldOnMsrRead = "TRUE"
 If another virtual serial device already occupies COM1, configure the next `serialN` entry and use the corresponding `debugport:N+1`.
 
 Then connect: `ntoseye`.
+
+## GDB stub
+
+VMware Workstation provides its own GDB remote stub. Add the following to the VM's `.vmx` file:
+
+```ini
+debugStub.listen.guest64 = "TRUE"
+debugStub.port.guest64 = "1234"
+```
+
+Then run with `--backend gdb`. Do not enable kernel debug mode in the guest; see the [GDB backend warning](kvm-qemu.md#gdb-stub).
+
+Legacy VMware stubs that do not expose an AMD64 XML target description are unsupported; use KD or the `memory` backend instead.
 
 ## Memory introspection
 
