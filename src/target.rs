@@ -898,7 +898,7 @@ impl Target {
     }
 
     pub fn new() -> Result<Self> {
-        Self::with_phys(Arc::new(PhysMem::kvm()?))
+        Self::with_phys(Arc::new(PhysMem::live()?))
     }
 
     pub fn with_phys(phys: Arc<PhysMem>) -> Result<Self> {
@@ -943,7 +943,14 @@ impl Target {
             let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
         } else if let Some(ref modules) = triage_modules {
             let dtb = DTB_IDENTITY;
-            let _ = Guest::load_module_symbols(&phys, &symbols, modules.clone(), dtb, false, Arch::Amd64);
+            let _ = Guest::load_module_symbols(
+                &phys,
+                &symbols,
+                modules.clone(),
+                dtb,
+                false,
+                Arch::Amd64,
+            );
         }
 
         let triage_fallback = if guest.is_none() {

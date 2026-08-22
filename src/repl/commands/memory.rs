@@ -431,10 +431,7 @@ impl ReplState<'_> {
             // AMD64: function extent from the image's runtime-function entries.
             Arch::Amd64 => {
                 let Some((start, end)) = function_range(&self.ctx.target, &trace, address.0) else {
-                    error!(
-                        "no runtime-function entry contains {}",
-                        ui::addr(address.0)
-                    );
+                    error!("no runtime-function entry contains {}", ui::addr(address.0));
                     return Ok(());
                 };
                 let Some(len) = end

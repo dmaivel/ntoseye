@@ -10,6 +10,7 @@ use crate::types::{PhysAddr, VirtAddr};
 #[derive(Debug, Error)]
 pub enum Error {
     // Handle crate errors
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Nix(#[from] nix::Error),
 
@@ -92,7 +93,7 @@ pub enum Error {
         candidates: Vec<String>,
     },
 
-    #[error("Unsupported target architecture: {0}; ntoseye supports AMD64 targets only")]
+    #[error("Unsupported target architecture: {0}")]
     UnsupportedArchitecture(String),
 
     #[error("No symbol found near {0:x}")]
@@ -125,13 +126,13 @@ pub enum Error {
     #[error("Process image not found")]
     MissingImage,
 
-    #[error("No memory regions found in VM process (QEMU/KVM or vmware-vmx)")]
-    NoKvmRegions,
+    #[error("no usable guest RAM mapping found in the VM process")]
+    NoVmMemoryRegion,
 
     #[error(
         "VM process not found\n  KVM (QEMU/Linux): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open — is the VM powered on?\n  macOS (UTM): no qemu-aarch64-softmmu process found — is the VM powered on?"
     )]
-    KvmNotFound,
+    VmNotFound,
 
     #[error(
         "permission denied accessing VM process (PID {pid}): {detail}\n\
@@ -144,7 +145,7 @@ pub enum Error {
 
     #[error(
         "permission denied reading from VM process (PID {pid}).\n\
-         /proc/sys/kernel/yama/ptrace_scope is currently {scope}. to allow attaching, run:\n    \
+         /proc/sys/kernel/yama/ptrace_scope is currently {scope}. To allow attaching, run:\n    \
              echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope\n\
          (or run ntoseye as root)"
     )]

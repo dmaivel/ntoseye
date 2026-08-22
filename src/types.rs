@@ -219,9 +219,9 @@ impl PageTableEntry {
     // --- AArch64 stage-1 descriptor interpretation (4 KiB granule) ---
     //
     // bits[1:0]: 0b00 invalid, 0b01 block (L0-L2), 0b11 table (L0-L2) /
-    //            page (L3). AP[2] (bit 7) selects user access, AP[1] (bit 6)
-    //            read-only at EL1, UXN (bit 54) unprivileged execute-never.
-    //            Output address is bits [47:12] (48-bit PA space).
+    // page (L3). Leaf descriptors carry AP[2:1], PXN, and UXN; table
+    // descriptors carry the hierarchical APTable, PXNTable, and UXNTable
+    // restrictions. Output address bits [47:12] support a 48-bit PA space.
     pub const fn arm64_is_valid(self) -> bool {
         self.0 & 0b11 != 0
     }
@@ -239,26 +239,36 @@ impl PageTableEntry {
         self.0 & (1 << 7) != 0
     }
 
-    /// UXN: Windows marks kernel code UXN (not executable from EL0), mirroring
-    /// EL1 execute-never (PXN, bit 53). Not usable on its own to decide
-    /// kernel executability: PXN is architecturally ignored for EL1 fetches
-    /// translated via TTBR1 (Windows sets PXNTable on its kernel tables and
-    /// still runs). See `arm64_is_uxn` for the EL0-gating attribute.
-    pub const fn arm64_is_nx(self) -> bool {
+    /// Privileged execute-never (PXN, bit 53) on a block/page descriptor.
+    pub const fn arm64_is_pxn(self) -> bool {
         self.0 & (1 << 53) != 0
     }
 
-    /// EL0 execute-never (UXN, bit 54): whether *user mode* may execute this
-    /// page. Windows sets UXN on all kernel pages; it cannot decide kernel
-    /// executability (the kernel runs its own TTBR1 mappings regardless —
-    /// PXN is architecturally ignored for EL1 fetches via TTBR1).
+    /// Unprivileged execute-never (UXN, bit 54) on a block/page descriptor.
     pub const fn arm64_is_uxn(self) -> bool {
         self.0 & (1 << 54) != 0
     }
 
-
     pub const fn arm64_is_writable(self) -> bool {
         self.0 & (1 << 6) == 0
+    }
+
+    /// APTable[0] (bit 61) forbids EL0 access through a child table.
+    pub const fn arm64_table_allows_user(self) -> bool {
+        self.0 & (1 << 61) == 0
+    }
+
+    /// APTable[1] (bit 62) makes child mappings read-only.
+    pub const fn arm64_table_allows_write(self) -> bool {
+        self.0 & (1 << 62) == 0
+    }
+
+    pub const fn arm64_table_is_pxn(self) -> bool {
+        self.0 & (1 << 59) != 0
+    }
+
+    pub const fn arm64_table_is_uxn(self) -> bool {
+        self.0 & (1 << 60) != 0
     }
 }
 

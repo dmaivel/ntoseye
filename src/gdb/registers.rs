@@ -27,8 +27,10 @@ impl RegisterMap {
     /// backends (like KD) that build their register layout from a fixed
     /// struct rather than parsing a target description.
     pub fn from_registers(registers: Vec<RegisterInfo>) -> Self {
-        let mut map = RegisterMap::default();
-        map.step_size = 1;
+        let mut map = RegisterMap {
+            step_size: 1,
+            ..RegisterMap::default()
+        };
         for reg in registers {
             map.by_name.insert(reg.name.clone(), reg.clone());
             map.ordered.push(reg);
@@ -122,8 +124,10 @@ impl RegisterMap {
     }
 
     pub fn parse_target_xml(xml: &str) -> Self {
-        let mut map = RegisterMap::default();
-        map.step_size = 1;
+        let mut map = RegisterMap {
+            step_size: 1,
+            ..RegisterMap::default()
+        };
         let mut current_offset: usize = 0;
         let mut next_regnum: Option<usize> = None;
 

@@ -179,7 +179,7 @@ fn parse_thread_id_for_processor_count(tid: &str, processor_count: u16) -> Resul
     Ok(processor)
 }
 
-fn should_advance_rip_before_continue(exception_code: u32, managed_breakpoint_stop: bool) -> bool {
+fn should_advance_pc_before_continue(exception_code: u32, managed_breakpoint_stop: bool) -> bool {
     exception_code == STATUS_BREAKPOINT && !managed_breakpoint_stop
 }
 
@@ -436,9 +436,11 @@ impl KdBackend {
         let reported_stop = Arc::new(AtomicBool::new(false));
         let pump_reported_stop = Arc::clone(&reported_stop);
         let pump_debug_log = self.debug_log.clone();
+        let arch = self.arch;
         let join = std::thread::spawn(move || {
             run_pump(
                 framing,
+                arch,
                 stop_tx,
                 pump_shutdown,
                 pump_reported_stop,
@@ -684,22 +686,26 @@ impl KdBackend {
         }
     }
 
-    /// KD reports raw int3 stops with RIP still pointing at the int3
-    fn advance_rip_past_int3(&mut self, processor: u16) -> Result<()> {
+    /// KD reports software-breakpoint stops with the program counter still
+    /// pointing at the breakpoint instruction.
+    fn advance_pc_past_breakpoint(&mut self, processor: u16) -> Result<()> {
         let context_flags = self.context_flags();
         let flags_offset = self.context_flags_offset();
         let mut ctx = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::get_context(framing, processor, context_flags)
         })?;
-        let rip = self.register_map.read_u64("rip", &ctx)?;
+        let pc = self.register_map.read_u64("rip", &ctx)?;
         kd_trace!(
-            "kd: advance_rip: p{} read rip={:#x}, ctx.len={}",
+            "kd: advance_pc: p{} read pc={:#x}, ctx.len={}",
             processor + 1,
-            rip,
+            pc,
             ctx.len()
         );
-        self.register_map
-            .write_u64("rip", &mut ctx, rip.wrapping_add(self.register_map.breakpoint_step_size() as u64))?;
+        self.register_map.write_u64(
+            "rip",
+            &mut ctx,
+            pc.wrapping_add(self.register_map.breakpoint_step_size() as u64),
+        )?;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::set_context(framing, processor, &ctx, flags_offset)
         })?;
@@ -709,13 +715,13 @@ impl KdBackend {
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
                     api::get_context(framing, processor, context_flags)
                 })
-                && let Ok(verify_rip) = self.register_map.read_u64("rip", &verify_ctx)
+                && let Ok(verify_pc) = self.register_map.read_u64("rip", &verify_ctx)
             {
                 kd_trace!(
-                    "kd: advance_rip: p{} wrote {:#x}, read back {:#x}",
+                    "kd: advance_pc: p{} wrote {:#x}, read back {:#x}",
                     processor + 1,
-                    rip.wrapping_add(self.register_map.breakpoint_step_size() as u64),
-                    verify_rip
+                    pc.wrapping_add(self.register_map.breakpoint_step_size() as u64),
+                    verify_pc
                 );
             }
         }
@@ -936,11 +942,11 @@ impl KdBackend {
 
     fn continue_stopped_for_exit(&mut self) -> Result<()> {
         let processor = self.last_stop_processor;
-        if should_advance_rip_before_continue(
+        if should_advance_pc_before_continue(
             self.last_exception_code,
             self.last_stop_was_managed_breakpoint,
         ) {
-            self.advance_rip_past_int3(processor)?;
+            self.advance_pc_past_breakpoint(processor)?;
         }
         self.continue_preserving_dr7(processor, api::DBG_CONTINUE, false)?;
         self.record_running();
@@ -1003,13 +1009,9 @@ impl DebugBackend for KdBackend {
         "kd"
     }
 
-    fn target_arch(&self) -> Arch {
-        self.arch
-    }
-
     fn set_kernel_dtb(&mut self, dtb: u64) {
         self.kernel_dtb_override = dtb;
-        kd_trace!("kd: kernel DTB (TTBR1) = {dtb:#x}");
+        kd_trace!("kd: kernel page-table root = {dtb:#x}");
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
@@ -1133,6 +1135,9 @@ impl DebugBackend for KdBackend {
         access: HwBreakpointAccess,
         len: u8,
     ) -> Result<()> {
+        if !self.supports_watchpoints() {
+            return Err(Error::NotSupported);
+        }
         // DR state is per-processor, so program every CPU: watched code can run
         // anywhere. The shared transaction prevents an untracked partial set.
         self.update_dr_slot_on_all_processors(slot, "install", |backend| {
@@ -1141,6 +1146,9 @@ impl DebugBackend for KdBackend {
     }
 
     fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+        if !self.supports_watchpoints() {
+            return Err(Error::NotSupported);
+        }
         // A failed disable/remove must leave the manager's still-enabled entry
         // truthful, so clearing receives the same rollback guarantee as set.
         self.update_dr_slot_on_all_processors(slot, "clear", |backend| backend.apply_dr_clear(slot))
@@ -1154,8 +1162,14 @@ impl DebugBackend for KdBackend {
 
     fn optional_capabilities(&self) -> Vec<BackendCapability> {
         vec![
-            BackendCapability::supported(DebugCapability::UserModeBreakpoints),
-            BackendCapability::supported(DebugCapability::Watchpoints),
+            BackendCapability {
+                capability: DebugCapability::UserModeBreakpoints,
+                supported: self.supports_user_mode_breakpoints(),
+            },
+            BackendCapability {
+                capability: DebugCapability::Watchpoints,
+                supported: self.supports_watchpoints(),
+            },
             BackendCapability::supported(DebugCapability::TargetReloadDetection),
             BackendCapability::supported(DebugCapability::KernelBaseHint),
             BackendCapability::supported(DebugCapability::BugcheckDetection),
@@ -1225,7 +1239,7 @@ impl DebugBackend for KdBackend {
         let mut drained = 0u32;
         loop {
             let resume_processor = self.last_stop_processor;
-            if should_advance_rip_before_continue(
+            if should_advance_pc_before_continue(
                 self.last_exception_code,
                 self.last_stop_was_managed_breakpoint,
             ) {
@@ -1234,7 +1248,7 @@ impl DebugBackend for KdBackend {
                     resume_processor + 1,
                     self.last_exception_code,
                 );
-                self.advance_rip_past_int3(resume_processor)?;
+                self.advance_pc_past_breakpoint(resume_processor)?;
             } else {
                 kd_trace!(
                     "kd: continue: not advancing p{} (last_exception_code={:#x}, managed_bp={})",
@@ -1267,16 +1281,19 @@ impl DebugBackend for KdBackend {
                 .set_read_timeout(Some(DRAIN_POLL))?;
             let mut saw_kd_refresh = false;
             let debug_log = self.debug_log.clone();
+            let arch = self.arch;
             let result = await_state_change(
                 self.framing()?,
-                Some(&mut saw_kd_refresh),
-                false,
-                None,
-                None,
-                Some(drain_deadline),
-                Some(&debug_log),
+                AwaitStateOptions {
+                    arch,
+                    saw_kd_refresh: Some(&mut saw_kd_refresh),
+                    surface_all: false,
+                    bugcheck: None,
+                    bugcheck_capture: None,
+                    deadline: Some(drain_deadline),
+                    debug_log: Some(&debug_log),
+                },
             );
-            let _ = self.framing()?.transport_mut().set_read_timeout(None);
 
             match result {
                 Ok(stop) => {
@@ -1348,7 +1365,8 @@ impl DebugBackend for KdBackend {
             }
         } else {
             // Stopped, or running via a bare step: drive the break-in inline
-            breakin_and_wait(self.framing()?, Duration::from_secs(10))?
+            let arch = self.arch;
+            breakin_and_wait(self.framing()?, arch, Duration::from_secs(10))?
         };
         self.record_stop(&stop);
         Ok(stop_event(stop))
@@ -1369,6 +1387,7 @@ impl DebugBackend for KdBackend {
             return Ok(stop_event(stop));
         }
         let debug_log = self.debug_log.clone();
+        let arch = self.arch;
         // Blocking wait: give the socket a timeout long enough to be a block
         // (the request paths leave their shorter timeouts in place, and the
         // restore-to-none setsockopt is macOS-racy).
@@ -1378,12 +1397,15 @@ impl DebugBackend for KdBackend {
             .set_read_timeout(Some(blocking_read_timeout()));
         let stop = await_state_change(
             self.framing()?,
-            None,
-            false,
-            None,
-            None,
-            None,
-            Some(&debug_log),
+            AwaitStateOptions {
+                arch,
+                saw_kd_refresh: None,
+                surface_all: false,
+                bugcheck: None,
+                bugcheck_capture: None,
+                deadline: None,
+                debug_log: Some(&debug_log),
+            },
         )?;
         let stop = self.mark_known_breakin_stop(stop);
         self.record_stop(&stop);
@@ -1423,17 +1445,19 @@ impl DebugBackend for KdBackend {
             .set_read_timeout(Some(timeout))?;
         let mut saw_kd_refresh = false;
         let debug_log = self.debug_log.clone();
+        let arch = self.arch;
         let result = await_state_change(
             self.framing()?,
-            Some(&mut saw_kd_refresh),
-            false,
-            None,
-            None,
-            Some(Instant::now() + timeout),
-            Some(&debug_log),
+            AwaitStateOptions {
+                arch,
+                saw_kd_refresh: Some(&mut saw_kd_refresh),
+                surface_all: false,
+                bugcheck: None,
+                bugcheck_capture: None,
+                deadline: Some(Instant::now() + timeout),
+                debug_log: Some(&debug_log),
+            },
         );
-        // Restore blocking mode regardless of how the wait turned out
-        let _ = self.framing()?.transport_mut().set_read_timeout(None);
 
         let stop = match result {
             Ok(stop) => stop,
@@ -1534,7 +1558,72 @@ mod tests {
         assert_eq!(detect_arch(0xaa64).unwrap(), Arch::Arm64);
         let error = detect_arch(0x014c).unwrap_err();
         assert!(error.to_string().contains("I386 KD target"));
-        assert!(error.to_string().contains("supports AMD64 targets only"));
+    }
+
+    #[test]
+    fn transparent_arm64_state_change_uses_arm64_continue_layout() {
+        let (mut kernel, host) = UnixStream::pair().unwrap();
+        let stop = StateChange {
+            processor: 2,
+            number_processors: 4,
+            new_state: DBG_KD_LOAD_SYMBOLS_STATE_CHANGE,
+            exception_code: 0,
+            exception_first_chance: None,
+            exception_address: None,
+            program_counter: 0xffff_f800_1234_5678,
+            kernel_base_hint: None,
+            is_bugcheck: false,
+            bugcheck: None,
+            target_reloaded: false,
+            assisted_breakin: false,
+        };
+        let handle = std::thread::spawn(move || {
+            let mut framing = KdFraming::new(host);
+            continue_transparent_state_change(&mut framing, Arch::Arm64, &stop)
+        });
+
+        let packet = read_wire_packet(&mut kernel);
+        let packet_id = u32::from_le_bytes(packet[8..12].try_into().unwrap());
+        let request = &packet[WIRE_HEADER_SIZE..];
+        assert_eq!(
+            u32::from_le_bytes(request[0..4].try_into().unwrap()),
+            api::DBGKD_CONTINUE_API2
+        );
+        assert_eq!(
+            u32::from_le_bytes(request[16..20].try_into().unwrap()),
+            api::DBG_CONTINUE
+        );
+        assert_eq!(&request[20..24], &[0; 4]);
+        assert_eq!(&request[24..40], &[0; 16]);
+
+        kernel
+            .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, packet_id))
+            .unwrap();
+        kernel.flush().unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn arm64_capabilities_exclude_amd64_only_breakpoints() {
+        let (_kernel, host) = UnixStream::pair().unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.arch = Arch::Arm64;
+
+        for capability in [
+            DebugCapability::UserModeBreakpoints,
+            DebugCapability::Watchpoints,
+        ] {
+            assert!(
+                backend
+                    .capabilities()
+                    .iter()
+                    .any(|entry| { entry.capability == capability && !entry.supported })
+            );
+        }
+        assert!(matches!(
+            backend.set_hardware_breakpoint(0, 0x1000, HwBreakpointAccess::Write, 4),
+            Err(Error::NotSupported)
+        ));
     }
 
     struct Loopback {
@@ -1879,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_debug_io_get_string_extracts_prompt() {
+    fn parse_debug_io_get_string_reads_full_header() {
         let mut payload = vec![0u8; DBGKD_DEBUG_IO_HEADER_SIZE];
         payload[0..4].copy_from_slice(&DBGKD_GET_STRING_API.to_le_bytes());
         payload[4..6].copy_from_slice(&0x33u16.to_le_bytes());
@@ -1919,10 +2008,10 @@ mod tests {
     }
 
     #[test]
-    fn continue_advance_policy_skips_only_raw_int3() {
-        assert!(should_advance_rip_before_continue(STATUS_BREAKPOINT, false));
-        assert!(!should_advance_rip_before_continue(STATUS_BREAKPOINT, true));
-        assert!(!should_advance_rip_before_continue(0x8000_0004, false)); // STATUS_SINGLE_STEP
+    fn continue_advance_policy_skips_only_unmanaged_software_breakpoints() {
+        assert!(should_advance_pc_before_continue(STATUS_BREAKPOINT, false));
+        assert!(!should_advance_pc_before_continue(STATUS_BREAKPOINT, true));
+        assert!(!should_advance_pc_before_continue(0x8000_0004, false)); // STATUS_SINGLE_STEP
     }
 
     #[test]
@@ -2434,6 +2523,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -2476,6 +2566,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -2685,8 +2776,8 @@ mod tests {
             target_reloaded: false,
             assisted_breakin: false,
         });
-        // A single-step last stop keeps `continue_stopped_for_exit` from issuing
-        // advance_rip's GetContext, so this mock only needs to ACK the continue.
+        // A single-step last stop avoids GetContext before the exit continue,
+        // so this mock only needs to acknowledge the continue request.
         backend.last_exception_code = STATUS_SINGLE_STEP;
         backend.last_stop_was_managed_breakpoint = false;
 
@@ -2725,6 +2816,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     reported_stop,
@@ -2797,6 +2889,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -2848,6 +2941,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -2910,6 +3004,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -2958,6 +3053,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -3007,6 +3103,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -3052,12 +3149,15 @@ mod tests {
             let mut saw_refresh = false;
             let stop = await_state_change(
                 &mut framing,
-                Some(&mut saw_refresh),
-                false,
-                None,
-                None,
-                None,
-                None,
+                AwaitStateOptions {
+                    arch: Arch::Amd64,
+                    saw_kd_refresh: Some(&mut saw_refresh),
+                    surface_all: false,
+                    bugcheck: None,
+                    bugcheck_capture: None,
+                    deadline: None,
+                    debug_log: None,
+                },
             )
             .expect("await_state_change failed");
             (saw_refresh, stop)
@@ -3140,6 +3240,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -3216,6 +3317,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),
@@ -3296,6 +3398,7 @@ mod tests {
             std::thread::spawn(move || {
                 run_pump(
                     framing,
+                    Arch::Amd64,
                     tx,
                     shutdown,
                     Arc::new(AtomicBool::new(false)),

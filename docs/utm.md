@@ -17,9 +17,8 @@ For a Windows 11 ARM64 VM under [UTM](https://mac.getutm.app) (QEMU/HVF).
    The path must match the `--connect` path below, as UTM sandboxes QEMU, so the socket lives inside the QEMUHelper container, not `/tmp`.
 3. `ntoseye` must run as root on macOS to read the VM's memory. Connect to that same socket:
    ```bash
-   sudo -E ntoseye --backend kd --connect ~/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock
+   sudo ntoseye --backend kd --connect "$HOME/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock"
    ```
-   (`sudo -E` preserves `HOME` so the `~` expands for the sandbox path; on first attach the kernel waits at `nt!DbgBreakPoint` on the idle processor.)
 
 ## Memory introspection
 

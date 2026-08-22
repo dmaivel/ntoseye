@@ -13,11 +13,10 @@ WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macO
 - Kernel and usermode debugging
 - Public/private PDB symbols, source lines, and scoped local-variable metadata
 - Deferred, conditional, pass-count, one-shot, and command-action breakpoints
-- Hardware watchpoints
+- AMD64 hardware watchpoints
 - Integrated bugcheck, exception, verifier, WHEA, and crash-dump analysis
-- Three backends: Window's `KDCOM`, QEMU's `gdbstub`, and passive memory introspection 
-- [Python SDK](docs/python-sdk.md)
-- [Custom commands](docs/custom-commands.md)
+- Three backends: Windows KD, QEMU's GDB stub, and passive memory introspection
+- [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)
 
 ### Supported Windows
@@ -26,7 +25,7 @@ WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macO
 
 ### Disclaimer
 
-`ntoseye` needs to download symbols and images to initialize required offsets, it will only download symbols from Microsoft's official symbol server. Config, cache, and REPL state live under `~/.ntoseye`:
+`ntoseye` downloads symbols and images from Microsoft's official symbol server when required. Config, cache, and REPL state live under `~/.ntoseye`:
 
 - `~/.ntoseye/commands/` for custom scripted commands
 - `~/.ntoseye/images/` for binaries downloaded from the VM

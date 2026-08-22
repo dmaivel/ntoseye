@@ -1993,9 +1993,6 @@ impl SymbolStore {
         path.rsplit(['\\', '/']).next().unwrap_or(path)
     }
 
-    // TODO (everywhere) use MemoryOps, not KvmHandle...
-    // TODO (everywhere) propagate errors with format!
-    // NOTE dont check for more than 1 CV entry, there shouldn't be more than 1
     pub fn load_from_binary(&self, object: &mut WinObject, name: &str) -> Result<Option<u128>> {
         let view = object.view().ok_or(Error::ViewFailed)?;
         if name.eq_ignore_ascii_case("ntoskrnl.exe")
@@ -2090,9 +2087,8 @@ impl SymbolStore {
         base_address: VirtAddr,
         arch: Arch,
     ) -> Result<ModuleSymbolDiscovery> {
-        // Module PE headers are read in their own address space: kernel
-        // modules use the kernel root, process modules the process root, so
-        // both TTBR halves can share the given `dtb` on ARM64.
+        // `dtb` is the root for the module's own VA half: the kernel root for
+        // kernel modules and the process root for user modules.
         let addr_space = match arch {
             Arch::Amd64 => memory::AddressSpace::new(backend, dtb),
             Arch::Arm64 => memory::AddressSpace::new_arm64(backend, dtb, dtb),

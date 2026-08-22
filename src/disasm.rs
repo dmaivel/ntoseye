@@ -248,10 +248,8 @@ fn arm64_reg_text(reg: bad64::Reg, arrspec: Option<bad64::ArrSpec>, lane: bool) 
     let mut text = reg.to_string();
     if let Some(arsp) = arrspec {
         text.push_str(arsp.suffix(reg));
-        if lane {
-            if let Some(l) = arsp.lane() {
-                text.push_str(&format!("[{l}]"));
-            }
+        if lane && let Some(l) = arsp.lane() {
+            text.push_str(&format!("[{l}]"));
         }
     }
     text
@@ -437,7 +435,6 @@ fn arm64_operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
     t.into_vec()
 }
 
-/// Symbol comment for an AArch64 direct branch: `b`/`bl`/`b.cond` with an
 /// Symbol comment for an AArch64 PC-relative target. bad64 models every
 /// PC-relative destination — branches (`b`/`bl`/`b.cond`), register
 /// conditional branches (`cbz`/`cbnz`/`tbz`/`tbnz`), and address loads
@@ -451,7 +448,7 @@ fn arm64_pcrel_comment(
     use bad64::{Imm, Operand};
     let target = instruction.operands().iter().find_map(|op| match op {
         Operand::Label(imm) => Some(match imm {
-            Imm::Signed(v) => *v as i64,
+            Imm::Signed(v) => *v,
             Imm::Unsigned(v) => *v as i64,
         }),
         _ => None,
@@ -493,7 +490,9 @@ mod tests {
         // Deterministic pseudo-random sweep: check every decodable word.
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         for i in 0..65536u64 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let word = (state >> 32) as u32;
             let Ok(ins) = bad64::decode(word, 0x2000 + 4 * i) else {
                 continue;

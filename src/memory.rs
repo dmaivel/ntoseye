@@ -29,30 +29,16 @@ pub struct AddressSpace<'a, B: MemoryOps<PhysAddr>> {
     arm64: bool,
 }
 
-/// Trace AArch64 page-table walk failures (`NTOSEYE_MEM_TRACE=1`): prints the
-/// VA, the translation root used, and the descriptor chain up to the failing
-/// level, so a live target's mapping can be debugged against the walker.
-pub fn arm64_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_MEM_TRACE").is_some())
-}
-
 pub struct Translation {
-    #[allow(dead_code)]
     pub address: PhysAddr,
-    #[allow(dead_code)]
     pub large: bool,
-    #[allow(dead_code)]
     pub writable: bool,
-    #[allow(dead_code)]
     pub user: bool,
-    /// Execute-never for the CPU privilege level that would actually run the
-    /// page: x64 NX for AMD64; on AArch64, EL0-gating UXN (PXN is ignored for
-    /// EL1 fetches via TTBR1, so it cannot decide kernel executability).
+    /// Effective execute-never for the selected address-space half: AMD64 NX,
+    /// AArch64 PXN for TTBR1 addresses, or AArch64 UXN for TTBR0 addresses.
     pub nx: bool,
-    /// AArch64 only: UXN (bit 54), the EL0 execute-never attribute of the
-    /// leaf descriptor. `false` on AMD64.
-    #[allow(dead_code)]
+    /// Effective AArch64 UXN, including ancestor UXNTable restrictions.
+    /// Always `false` on AMD64.
     pub uxn: bool,
 }
 
@@ -106,13 +92,15 @@ impl Translation {
 
     /// AArch64 1 GiB block descriptor at level 1.
     pub const fn arm64_huge(l0: PageTableEntry, l1: PageTableEntry, va: VirtAddr) -> Self {
+        let pxn = l0.arm64_table_is_pxn() || l1.arm64_is_pxn();
+        let uxn = l0.arm64_table_is_uxn() || l1.arm64_is_uxn();
         Self {
             address: l1.arm64_page_frame() + va.huge_page_offset(),
             large: true,
-            writable: l0.arm64_is_writable() && l1.arm64_is_writable(),
-            user: l0.arm64_is_user() && l1.arm64_is_user(),
-            nx: l0.arm64_is_nx() || l1.arm64_is_nx(),
-            uxn: l1.arm64_is_uxn(),
+            writable: l0.arm64_table_allows_write() && l1.arm64_is_writable(),
+            user: l0.arm64_table_allows_user() && l1.arm64_is_user(),
+            nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
+            uxn,
         }
     }
 
@@ -123,13 +111,19 @@ impl Translation {
         l2: PageTableEntry,
         va: VirtAddr,
     ) -> Self {
+        let pxn = l0.arm64_table_is_pxn() || l1.arm64_table_is_pxn() || l2.arm64_is_pxn();
+        let uxn = l0.arm64_table_is_uxn() || l1.arm64_table_is_uxn() || l2.arm64_is_uxn();
         Self {
             address: l2.arm64_page_frame() + va.large_page_offset(),
             large: true,
-            writable: l0.arm64_is_writable() && l1.arm64_is_writable() && l2.arm64_is_writable(),
-            user: l0.arm64_is_user() && l1.arm64_is_user() && l2.arm64_is_user(),
-            nx: l0.arm64_is_nx() || l1.arm64_is_nx() || l2.arm64_is_nx(),
-            uxn: l2.arm64_is_uxn(),
+            writable: l0.arm64_table_allows_write()
+                && l1.arm64_table_allows_write()
+                && l2.arm64_is_writable(),
+            user: l0.arm64_table_allows_user()
+                && l1.arm64_table_allows_user()
+                && l2.arm64_is_user(),
+            nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
+            uxn,
         }
     }
 
@@ -141,16 +135,27 @@ impl Translation {
         l3: PageTableEntry,
         va: VirtAddr,
     ) -> Self {
+        let pxn = l0.arm64_table_is_pxn()
+            || l1.arm64_table_is_pxn()
+            || l2.arm64_table_is_pxn()
+            || l3.arm64_is_pxn();
+        let uxn = l0.arm64_table_is_uxn()
+            || l1.arm64_table_is_uxn()
+            || l2.arm64_table_is_uxn()
+            || l3.arm64_is_uxn();
         Self {
             address: l3.arm64_page_frame() + va.page_offset(),
             large: false,
-            writable: l0.arm64_is_writable()
-                && l1.arm64_is_writable()
-                && l2.arm64_is_writable()
+            writable: l0.arm64_table_allows_write()
+                && l1.arm64_table_allows_write()
+                && l2.arm64_table_allows_write()
                 && l3.arm64_is_writable(),
-            user: l0.arm64_is_user() && l1.arm64_is_user() && l2.arm64_is_user() && l3.arm64_is_user(),
-            nx: l0.arm64_is_nx() || l1.arm64_is_nx() || l2.arm64_is_nx() || l3.arm64_is_nx(),
-            uxn: l3.arm64_is_uxn(),
+            user: l0.arm64_table_allows_user()
+                && l1.arm64_table_allows_user()
+                && l2.arm64_table_allows_user()
+                && l3.arm64_is_user(),
+            nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
+            uxn,
         }
     }
 }
@@ -208,13 +213,6 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(None);
         };
         if !l0.arm64_is_valid() || l0.arm64_is_block() {
-            if arm64_trace_enabled() {
-                eprintln!(
-                    "arm64-walk: {va:#x} root={root:#x} L0[{}]={:#x} -> unmapped",
-                    va.pml4_index(),
-                    l0.0
-                );
-            }
             // 512 GiB L0 blocks are not used by Windows; treat as unmapped.
             return Ok(None);
         }
@@ -223,14 +221,6 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(None);
         };
         if !l1.arm64_is_valid() {
-            if arm64_trace_enabled() {
-                eprintln!(
-                    "arm64-walk: {va:#x} L1[{}]={:#x} -> unmapped (l0={:#x})",
-                    va.pdpt_index(),
-                    l1.0,
-                    l0.0
-                );
-            }
             return Ok(None);
         }
         if l1.arm64_is_block() {
@@ -241,15 +231,6 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(None);
         };
         if !l2.arm64_is_valid() {
-            if arm64_trace_enabled() {
-                eprintln!(
-                    "arm64-walk: {va:#x} L2[{}]={:#x} -> unmapped (l0={:#x} l1={:#x})",
-                    va.pd_index(),
-                    l2.0,
-                    l0.0,
-                    l1.0
-                );
-            }
             return Ok(None);
         }
         if l2.arm64_is_block() {
@@ -259,17 +240,8 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         let Some(l3) = self.read_pt_entry(l2.arm64_page_frame(), va.pt_index())? else {
             return Ok(None);
         };
-        if !l3.arm64_is_valid() {
-            if arm64_trace_enabled() {
-                eprintln!(
-                    "arm64-walk: {va:#x} L3[{}]={:#x} -> unmapped (l0={:#x} l1={:#x} l2={:#x})",
-                    va.pt_index(),
-                    l3.0,
-                    l0.0,
-                    l1.0,
-                    l2.0
-                );
-            }
+        // At L3 only 0b11 is a page descriptor; 0b01 is reserved.
+        if l3.0 & 0b11 != 0b11 {
             return Ok(None);
         }
         Ok(Some(Translation::arm64_page(l0, l1, l2, l3, va)))
@@ -295,14 +267,6 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         };
 
         if !pml4e.is_present() {
-            if arm64_trace_enabled() {
-                eprintln!(
-                    "mem-walk: {va:#x} dtb={:#x} amd64 PML4[{}]={:#x} -> unmapped",
-                    self.dtb,
-                    va.pml4_index(),
-                    pml4e.0
-                );
-            }
             return Ok(None);
         }
 
@@ -351,21 +315,8 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
 
             let translation = match self.virt_to_phys(curr_vaddr)? {
                 Some(translation) => translation,
-                None => {
-                    if arm64_trace_enabled() {
-                        eprintln!(
-                            "mem-read: {curr_vaddr:#x} arch={} dtb={:#x} kernel_dtb={:#x} -> unmapped",
-                            if self.arm64 { "arm64" } else { "amd64" },
-                            self.dtb,
-                            self.kernel_dtb.unwrap_or(0),
-                        );
-                    }
-                    if offset > 0 {
-                        return Err(Error::PartialRead(offset));
-                    } else {
-                        return Err(Error::BadVirtualAddress(curr_vaddr));
-                    }
-                }
+                None if offset > 0 => return Err(Error::PartialRead(offset)),
+                None => return Err(Error::BadVirtualAddress(curr_vaddr)),
             };
 
             let bytes_available = PAGE_SIZE - curr_vaddr.page_offset() as usize;
@@ -461,5 +412,33 @@ mod tests {
         assert_eq!(buf[0], 0xF0);
         assert_eq!(buf[0x10], 0x00); // 0x1000 & 0xFF
         assert_eq!(buf[0x1F], 0x0F); // 0x100F & 0xFF
+    }
+
+    #[test]
+    fn arm64_translation_applies_table_attribute_restrictions() {
+        let l0 = PageTableEntry(0b11 | (1 << 61) | (1 << 62) | (1 << 60));
+        let table = PageTableEntry(0b11);
+        let page = PageTableEntry(0b11 | (1 << 7) | 0x1234_5000);
+
+        let translation = Translation::arm64_page(l0, table, table, page, VirtAddr(0x2000));
+
+        assert_eq!(translation.address, 0x1234_5000);
+        assert!(!translation.user);
+        assert!(!translation.writable);
+        assert!(translation.uxn);
+        assert!(translation.nx);
+    }
+
+    #[test]
+    fn arm64_translation_uses_pxn_for_kernel_addresses() {
+        let l0 = PageTableEntry(0b11 | (1 << 59));
+        let table = PageTableEntry(0b11);
+        let page = PageTableEntry(0b11 | 0x1234_5000);
+
+        let translation =
+            Translation::arm64_page(l0, table, table, page, VirtAddr(0xffff_f800_0000_2000));
+
+        assert!(translation.nx);
+        assert!(!translation.uxn);
     }
 }

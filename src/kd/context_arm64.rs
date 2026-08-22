@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! ARM64 `CONTEXT` offsets. Layout reference: the public `ARM64_NT_CONTEXT`
 //! (winnt.h):
 //!

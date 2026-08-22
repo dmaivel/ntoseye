@@ -161,7 +161,7 @@ pub enum StepKind {
     RunTo(VirtAddr),
 }
 
-/// Arch-neutral summary of the instruction at RIP, for run-control planning.
+/// Architecture-neutral summary of the instruction at the program counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentInstruction {
     /// Whether the instruction is a call (`call` on AMD64, `bl`/`blr` on ARM64).
@@ -556,46 +556,43 @@ impl Session {
         update_target_context_from_registers(&mut self.target, &self.register_map, registers);
     }
 
-    /// Decode the instruction at the current thread's RIP, masking our own
-    /// breakpoint `int3` bytes and reading through the thread's *preferred code
-    /// DTB* (so a user-mode RIP decodes from the process address space, not the
-    /// kernel's). Selects the current thread first; the VM must be halted.
+    /// Decode the instruction at the current thread's program counter, masking
+    /// any software-breakpoint patch and reading through the thread's preferred
+    /// code DTB. Selects the current thread first; the VM must be halted.
     pub fn current_instruction(&mut self) -> Result<CurrentInstruction> {
         self.require_live_register_context()?;
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
-        let rip = self.register_map.read_u64("rip", &regs)?;
+        let pc = self.register_map.read_u64("rip", &regs)?;
         let cr3 = self.register_map.read_u64("cr3", &regs).unwrap_or(0);
         let trace = resolve_thread_trace_context(&self.target, cr3);
-        let code_dtb = preferred_code_dtb(&trace, rip);
+        let code_dtb = preferred_code_dtb(&trace, pc);
         let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
-        memory.read_bytes(VirtAddr(rip), &mut bytes)?;
+        memory.read_bytes(VirtAddr(pc), &mut bytes)?;
         self.breakpoints
-            .mask_breakpoint_bytes(VirtAddr(rip), &mut bytes, trace.active_dtb);
+            .mask_breakpoint_bytes(VirtAddr(pc), &mut bytes, trace.active_dtb);
 
         if self.target.arch() == Arch::Arm64 {
-            let Ok(instruction) = bad64::decode(
-                u32::from_le_bytes(bytes[..4].try_into().unwrap()),
-                rip,
-            ) else {
+            let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let Ok(instruction) = bad64::decode(word, pc) else {
                 return Err(Error::DebugInfo(format!(
-                    "failed to decode instruction at {rip:#x}"
+                    "failed to decode instruction at {pc:#x}"
                 )));
             };
             let mnem = instruction.op().mnem();
             // `bl`/`blr` are the call forms; AArch64 instructions are 4 bytes.
             return Ok(CurrentInstruction {
                 is_call: mnem == "bl" || mnem == "blr",
-                next_ip: rip + 4,
+                next_ip: pc + 4,
             });
         }
 
-        let mut decoder = Decoder::with_ip(64, &bytes, rip, DecoderOptions::NONE);
+        let mut decoder = Decoder::with_ip(64, &bytes, pc, DecoderOptions::NONE);
         let instruction = decoder.decode();
         if instruction.code() == Code::INVALID {
             return Err(Error::DebugInfo(format!(
-                "failed to decode instruction at {rip:#x}"
+                "failed to decode instruction at {pc:#x}"
             )));
         }
         Ok(CurrentInstruction {

@@ -65,11 +65,11 @@ struct Args {
     #[argh(switch, long = "kd-instructions")]
     kd_instructions: bool,
 
-    /// debugger backend: 'kd' (Windows KD over serial pipe, default), 'gdb' (QEMU gdbstub), or 'memory' (passive /dev/kvm introspection)
+    /// debugger backend: 'kd' (Windows KD over serial, default), 'gdb' (QEMU GDB stub), or 'memory' (passive live-VM introspection)
     #[argh(option, short = 'b', long = "backend", default = "BackendKind::Kd")]
     backend: BackendKind,
 
-    /// backend connection target. Defaults: '127.0.0.1:1234' for gdb, '/tmp/ntoseye-kd.sock' for kd; unused by memory.
+    /// backend target: GDB address or KD socket path; unused by memory
     #[argh(option, long = "connect")]
     connect: Option<String>,
 
@@ -216,9 +216,12 @@ In the VM settings, add to 'Arguments (QEMU)':
 
 -chardev socket,id=kd,path=/Users/YOU/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock,server=on,wait=off -serial chardev:kd
 
-then connect with --connect to that same path. Windows on ARM64 is
-supported (machine 0xAA64); Secure Boot must be disabled (remove the
-VM's TPM device) for bcdedit /debug on to work.";
+then connect to that path as root:
+
+sudo ntoseye --backend kd --connect \"$HOME/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock\"
+
+Windows ARM64 is supported (machine 0xAA64). Secure Boot must be
+disabled for bcdedit /debug on to work.";
 
 pub fn main() {
     if let Err(e) = run() {
@@ -320,7 +323,7 @@ fn run() -> Result<()> {
         BackendKind::Memory => "memory",
     };
     let target = resolve_target(backend_str, args.connect.as_deref());
-    let phys = Arc::new(PhysMem::kvm()?);
+    let phys = Arc::new(PhysMem::live()?);
     let mut ctx = session::Session::connect(
         phys,
         target.as_deref(),

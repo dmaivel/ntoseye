@@ -114,7 +114,7 @@ fn spawn_session(
                 })
             } else {
                 let target = resolve_target(backend.as_str(), connect.as_deref());
-                let phys = Arc::new(PhysMem::kvm()?);
+                let phys = Arc::new(PhysMem::live()?);
                 Session::connect(phys, target.as_deref(), || {
                     let backend: Box<dyn DebugBackend> = match backend.as_str() {
                         "gdb" => Box::new(GdbClient::connect(target.as_deref().unwrap())?),

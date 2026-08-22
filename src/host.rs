@@ -25,7 +25,7 @@ mod platform {
         Vmware,
     }
 
-    pub struct KvmHandle {
+    pub struct VmHandle {
         memory: MemoryRegion,
         pid: Pid,
         hv: HvKind,
@@ -86,10 +86,10 @@ mod platform {
         if let Some(pid) = find_vmware_pid() {
             return Ok((pid, HvKind::Vmware));
         }
-        Err(Error::KvmNotFound)
+        Err(Error::VmNotFound)
     }
 
-    fn kvm_primary_memory(pid: i32) -> Result<MemoryRegion> {
+    fn primary_memory_region(pid: i32) -> Result<MemoryRegion> {
         let maps = File::open(format!("/proc/{}/maps", pid)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 Error::PtraceDenied {
@@ -123,7 +123,7 @@ mod platform {
                 })
             })
             .max_by_key(|r| r.length)
-            .ok_or(Error::NoKvmRegions)?;
+            .ok_or(Error::NoVmMemoryRegion)?;
 
         Ok(region)
     }
@@ -172,10 +172,10 @@ mod platform {
         }
     }
 
-    impl KvmHandle {
+    impl VmHandle {
         pub fn new() -> Result<Self> {
             let (pid, hv) = find_vm_pid()?;
-            let memory = kvm_primary_memory(pid)?;
+            let memory = primary_memory_region(pid)?;
             let nix_pid = Pid::from_raw(pid);
             probe_ptrace_access(nix_pid, memory.start)?;
             Ok(Self {
@@ -193,19 +193,31 @@ mod platform {
         pub fn ram_size(&self) -> u64 {
             self.memory.length
         }
-    }
-
-    impl MemoryOps<PhysAddr> for KvmHandle {
-        fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
-            let hva = self.memory.start + gpa_to_offset(self.hv, addr);
-            if hva + buf.len() as u64 > self.memory.end {
+        fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
+            let hva = self
+                .memory
+                .start
+                .checked_add(gpa_to_offset(self.hv, addr))
+                .ok_or(Error::BadPhysicalAddress(addr))?;
+            let end = hva
+                .checked_add(len as u64)
+                .ok_or(Error::BadPhysicalAddress(addr))?;
+            if end > self.memory.end {
                 return Err(Error::BadPhysicalAddress(addr));
             }
+            Ok(hva)
+        }
+    }
+
+    impl MemoryOps<PhysAddr> for VmHandle {
+        fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+            let hva = self.host_address(addr, buf.len())?;
             let remote_iov = RemoteIoVec {
                 base: hva as usize,
                 len: buf.len(),
             };
-            let bytes_read = process_vm_readv(self.pid, &mut [IoSliceMut::new(buf)], &[remote_iov])?;
+            let bytes_read =
+                process_vm_readv(self.pid, &mut [IoSliceMut::new(buf)], &[remote_iov])?;
             if bytes_read != buf.len() {
                 return Err(Error::PartialRead(bytes_read));
             }
@@ -213,10 +225,7 @@ mod platform {
         }
 
         fn write_bytes(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
-            let hva = self.memory.start + gpa_to_offset(self.hv, addr);
-            if hva + buf.len() as u64 > self.memory.end {
-                return Err(Error::BadPhysicalAddress(addr));
-            }
+            let hva = self.host_address(addr, buf.len())?;
             let remote_iov = RemoteIoVec {
                 base: hva as usize,
                 len: buf.len(),
@@ -261,7 +270,7 @@ mod platform {
     use crate::error::{Error, Result};
     use crate::types::PhysAddr;
 
-    pub struct KvmHandle {
+    pub struct VmHandle {
         task: u32,
         memory: MemoryRegion,
     }
@@ -274,6 +283,7 @@ mod platform {
     /// `struct vm_region_submap_info_64` (v2) from xnu
     /// `osfmk/mach/vm_region.h`. Layout is fixed by the MIG boundary; the
     /// count constant is hard-coded at 20 there.
+    #[derive(Default)]
     #[repr(C)]
     struct VmRegionSubmapInfo64 {
         protection: i32,
@@ -307,6 +317,7 @@ mod platform {
     unsafe extern "C" {
         fn mach_task_self() -> u32;
         fn task_for_pid(target_task: u32, pid: i32, task: *mut u32) -> i32;
+        fn mach_port_deallocate(task: u32, name: u32) -> i32;
         fn mach_vm_read_overwrite(
             target_task: u32,
             address: u64,
@@ -389,28 +400,7 @@ mod platform {
         loop {
             let mut size: u64 = 0;
             let mut depth: u32 = 8;
-            let mut info = VmRegionSubmapInfo64 {
-                protection: 0,
-                max_protection: 0,
-                inheritance: 0,
-                offset: 0,
-                user_tag: 0,
-                pages_resident: 0,
-                pages_shared_now_private: 0,
-                pages_swapped_out: 0,
-                pages_dirtied: 0,
-                ref_count: 0,
-                shadow_depth: 0,
-                external_pager: 0,
-                share_mode: 0,
-                is_submap: 0,
-                behavior: 0,
-                object_id: 0,
-                user_wired_count: 0,
-                flags: 0,
-                pages_reusable: 0,
-                object_id_full: 0,
-            };
+            let mut info = VmRegionSubmapInfo64::default();
             let mut count = VM_REGION_SUBMAP_INFO_COUNT_64;
             let kr = unsafe {
                 mach_vm_region_recurse(
@@ -432,7 +422,9 @@ mod platform {
             // ascending, so the candidate span is always the last one).
             if info.protection & 0b11 == 0b11 {
                 let start = address;
-                let end = address + size;
+                let Some(end) = address.checked_add(size) else {
+                    break;
+                };
                 match spans.last_mut() {
                     Some(span) if span.end == start => {
                         span.end = end;
@@ -453,12 +445,12 @@ mod platform {
         spans
             .into_iter()
             .max_by_key(|span| span.length)
-            .ok_or(Error::NoKvmRegions)
+            .ok_or(Error::NoVmMemoryRegion)
     }
 
-    impl KvmHandle {
+    impl VmHandle {
         pub fn new() -> Result<Self> {
-            let pid = find_qemu_pid().ok_or(Error::KvmNotFound)?;
+            let pid = find_qemu_pid().ok_or(Error::VmNotFound)?;
             let task = task_for_vm_process(pid)?;
             let memory = primary_memory_region(task)?;
             // Probe access: a task port without read rights fails here with a
@@ -496,20 +488,26 @@ mod platform {
             Ok(offset)
         }
 
-        fn read_bytes_at(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
-            let hva = self.memory.start + self.gpa_offset(addr)?;
-            if hva + buf.len() as u64 > self.memory.end {
+        fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
+            let hva = self
+                .memory
+                .start
+                .checked_add(self.gpa_offset(addr)?)
+                .ok_or(Error::BadPhysicalAddress(addr))?;
+            let end = hva
+                .checked_add(len as u64)
+                .ok_or(Error::BadPhysicalAddress(addr))?;
+            if end > self.memory.end {
                 return Err(Error::BadPhysicalAddress(addr));
             }
+            Ok(hva)
+        }
+
+        fn read_bytes_at(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+            let hva = self.host_address(addr, buf.len())?;
             let mut out = 0u64;
             let kr = unsafe {
-                mach_vm_read_overwrite(
-                    self.task,
-                    hva,
-                    buf.len() as u64,
-                    buf.as_mut_ptr(),
-                    &mut out,
-                )
+                mach_vm_read_overwrite(self.task, hva, buf.len() as u64, buf.as_mut_ptr(), &mut out)
             };
             if kr != KERN_SUCCESS {
                 return Err(Error::BadPhysicalAddress(addr));
@@ -521,10 +519,7 @@ mod platform {
         }
 
         fn write_bytes_at(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
-            let hva = self.memory.start + self.gpa_offset(addr)?;
-            if hva + buf.len() as u64 > self.memory.end {
-                return Err(Error::BadPhysicalAddress(addr));
-            }
+            let hva = self.host_address(addr, buf.len())?;
             let kr = unsafe { mach_vm_write(self.task, hva, buf.as_ptr(), buf.len() as u64) };
             if kr != KERN_SUCCESS {
                 return Err(Error::BadPhysicalAddress(addr));
@@ -533,7 +528,15 @@ mod platform {
         }
     }
 
-    impl MemoryOps<PhysAddr> for KvmHandle {
+    impl Drop for VmHandle {
+        fn drop(&mut self) {
+            unsafe {
+                mach_port_deallocate(mach_task_self(), self.task);
+            }
+        }
+    }
+
+    impl MemoryOps<PhysAddr> for VmHandle {
         fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
             self.read_bytes_at(addr, buf)
         }
@@ -544,4 +547,4 @@ mod platform {
     }
 }
 
-pub use platform::KvmHandle;
+pub use platform::VmHandle;

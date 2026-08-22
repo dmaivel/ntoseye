@@ -351,12 +351,7 @@ pub fn print_disasm_context(
     breakpoints.mask_breakpoint_bytes(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
-    let rows = decode_disasm_context(
-        &bytes,
-        rip,
-        debugger.arch() == Arch::Arm64,
-        resolve,
-    );
+    let rows = decode_disasm_context(&bytes, rip, debugger.arch() == Arch::Arm64, resolve);
     render_rows(&rows, |ip| Some(ip == rip));
 }
 
@@ -499,7 +494,8 @@ mod tests {
     }
 
     #[test]
-    fn source_location_labels_recorded_and_local_paths() {        let recorded = SourceLocation {
+    fn source_location_labels_recorded_and_local_paths() {
+        let recorded = SourceLocation {
             file: r"C:\build\driver.c".into(),
             line: 42,
             column: Some(7),
