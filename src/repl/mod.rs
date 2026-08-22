@@ -188,7 +188,7 @@ pub fn print_backend_capability_warning(capabilities: &[BackendCapability]) {
     }
 
     diagnostics::print_warning(
-        "selected backend has reduced capabilities; run `capabilities` for details, or use KDCOM",
+        "selected backend has reduced capabilities; run `capabilities` for details",
     );
     println!();
 }

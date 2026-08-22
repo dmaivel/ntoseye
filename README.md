@@ -15,7 +15,7 @@ WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macO
 - Deferred, conditional, pass-count, one-shot, and command-action breakpoints
 - AMD64 hardware watchpoints
 - Integrated bugcheck, exception, verifier, WHEA, and crash-dump analysis
-- Three backends: Windows KD, QEMU's GDB stub, and passive memory introspection
+- [Three backends](docs/backends.md): Windows KD, QEMU's GDB stub, and passive memory introspection
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)
 
