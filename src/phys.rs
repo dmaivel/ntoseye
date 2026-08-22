@@ -30,6 +30,23 @@ impl PhysMem {
             _ => None,
         }
     }
+
+    /// Guest-physical address where RAM starts (below is firmware/MMIO):
+    /// x86 QEMU/VMware: 0; aarch64 QEMU `virt`: 0x4000_0000 (1 GiB).
+    pub fn ram_base(&self) -> u64 {
+        match self {
+            Self::Kvm(h) => h.ram_base(),
+            Self::Dmp(_) => 0,
+        }
+    }
+
+    /// Total mapped guest RAM size.
+    pub fn ram_size(&self) -> u64 {
+        match self {
+            Self::Kvm(h) => h.ram_size(),
+            Self::Dmp(_) => 0,
+        }
+    }
 }
 
 impl MemoryOps<PhysAddr> for PhysMem {

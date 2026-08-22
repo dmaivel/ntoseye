@@ -500,6 +500,10 @@ impl SymbolRef<'_> {
 pub struct WinObject {
     pub base_address: VirtAddr,
     dtb: Dtb,
+    arch: Arch,
+    /// AArch64 TTBR1 (kernel-space root). Equal to `dtb` for the kernel object
+    /// and AMD64; process siblings keep the kernel root for kernel-VA reads.
+    kernel_dtb: Dtb,
     binary_snapshot: Vec<u8>,
     pub guid: Option<u128>,
     phys: Arc<PhysMem>,
@@ -513,14 +517,30 @@ impl WinObject {
         dtb: Dtb,
         base_address: VirtAddr,
     ) -> Self {
+        Self::new_with_arch(phys, symbols, dtb, base_address, Arch::Amd64)
+    }
+
+    pub fn new_with_arch(
+        phys: Arc<PhysMem>,
+        symbols: Arc<SymbolStore>,
+        dtb: Dtb,
+        base_address: VirtAddr,
+        arch: Arch,
+    ) -> Self {
         Self {
             base_address,
             dtb,
+            arch,
+            kernel_dtb: dtb,
             binary_snapshot: Vec::new(),
             guid: None,
             phys,
             symbols,
         }
+    }
+
+    pub fn arch(&self) -> Arch {
+        self.arch
     }
 
     pub fn load_symbols(mut self) -> Result<Self> {
@@ -572,12 +592,16 @@ impl WinObject {
     /// base in a possibly different address space. Symbols aren't loaded yet
     /// (`guid` is `None`); call [`load_symbols`](Self::load_symbols) to attach.
     pub fn sibling(&self, dtb: Dtb, base_address: VirtAddr) -> WinObject {
-        WinObject::new(
-            Arc::clone(&self.phys),
-            Arc::clone(&self.symbols),
-            dtb,
+        WinObject {
             base_address,
-        )
+            dtb,
+            arch: self.arch,
+            kernel_dtb: self.kernel_dtb,
+            binary_snapshot: Vec::new(),
+            guid: None,
+            phys: Arc::clone(&self.phys),
+            symbols: Arc::clone(&self.symbols),
+        }
     }
 
     pub fn address_of(&self, rva: impl Into<u64>) -> VirtAddr {
@@ -585,7 +609,10 @@ impl WinObject {
     }
 
     pub fn memory(&self) -> memory::AddressSpace<'_, Arc<PhysMem>> {
-        memory::AddressSpace::new(&self.phys, self.dtb)
+        match self.arch {
+            Arch::Amd64 => memory::AddressSpace::new(&self.phys, self.dtb),
+            Arch::Arm64 => memory::AddressSpace::new_arm64(&self.phys, self.dtb, self.kernel_dtb),
+        }
     }
 
     pub fn symbol<S>(&self, name: S) -> Result<SymbolRef<'_>>
@@ -617,7 +644,10 @@ impl WinObject {
         if self.binary_snapshot.is_empty() {
             // Clone the Arc so the read borrow doesn't alias `&mut self`.
             let phys = Arc::clone(&self.phys);
-            let memory = AddressSpace::new(&phys, self.dtb);
+            let memory = match self.arch {
+                Arch::Amd64 => AddressSpace::new(&phys, self.dtb),
+                Arch::Arm64 => AddressSpace::new_arm64(&phys, self.dtb, self.kernel_dtb),
+            };
             self.binary_snapshot = read_pe_image(self.base_address, &memory).ok()?.bytes;
         }
 
@@ -690,7 +720,12 @@ impl<'a> Types<'a> {
         let record_ti = self.layout(record_type)?;
         let link_offset = record_ti.field_offset(link_field)?;
 
-        let mut current: VirtAddr = AddressSpace::new(&obj.phys, dtb).read(head)?;
+        let list_memory = |dtb: Dtb| match obj.arch {
+            Arch::Amd64 => AddressSpace::new(&obj.phys, dtb),
+            Arch::Arm64 => AddressSpace::new_arm64(&obj.phys, dtb, obj.kernel_dtb),
+        };
+
+        let mut current: VirtAddr = list_memory(dtb).read(head)?;
         let mut count = 0usize;
         const MAX: usize = 1000;
 
@@ -708,7 +743,7 @@ impl<'a> Types<'a> {
             };
 
             // Flink sits at offset 0 of the link's _LIST_ENTRY
-            match AddressSpace::new(&obj.phys, dtb).read::<VirtAddr>(current) {
+            match list_memory(dtb).read::<VirtAddr>(current) {
                 Ok(next) if next == current => current = head, // self-loop: stop after this
                 Ok(next) => current = next,
                 Err(e) => {
@@ -735,7 +770,10 @@ pub struct StructRef<'a> {
 
 impl<'a> StructRef<'a> {
     fn memory(&self) -> AddressSpace<'a, Arc<PhysMem>> {
-        AddressSpace::new(&self.obj.phys, self.dtb)
+        match self.obj.arch {
+            Arch::Amd64 => AddressSpace::new(&self.obj.phys, self.dtb),
+            Arch::Arm64 => AddressSpace::new_arm64(&self.obj.phys, self.dtb, self.obj.kernel_dtb),
+        }
     }
 
     /// The address this cursor sits at (e.g. to test a followed pointer for
@@ -879,8 +917,12 @@ pub struct Guest {
     pub ntoskrnl: WinObject,
 }
 
-fn is_valid_kernel_dtb(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
-    let kernel_pml4 = phys.read::<[PageTableEntry; 256]>(dtb + 8 * 256)?;
+fn is_valid_kernel_dtb_amd64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
+    let Ok(kernel_pml4) = phys.read::<[PageTableEntry; 256]>(dtb + 8 * 256) else {
+        // Candidate sits outside mapped guest RAM (below the aarch64 RAM
+        // base, in an MMIO hole, or past the end): not a kernel root.
+        return Ok(false);
+    };
 
     if kernel_pml4
         .into_iter()
@@ -906,14 +948,134 @@ fn is_valid_kernel_dtb(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
     }
 }
 
-fn find_kernel_dtb(phys: &PhysMem) -> Result<Option<Dtb>> {
-    for dtb in (0x1000..0x1000000).step_by(PAGE_SIZE) {
-        if is_valid_kernel_dtb(phys, dtb)? {
+fn find_kernel_dtb_amd64(phys: &PhysMem) -> Result<Option<Dtb>> {
+    let base = phys.ram_base();
+    for dtb in (base + 0x1000..base + 0x1000000).step_by(PAGE_SIZE) {
+        if is_valid_kernel_dtb_amd64(phys, dtb)? {
             return Ok(Some(dtb));
         }
     }
 
     Ok(None)
+}
+
+/// AArch64 kernel (TTBR1) root candidate: KUSER_SHARED_DATA must translate to
+/// the *actual* shared-data page. Windows maps KUSER user-accessible (AP[2]=1)
+/// and with UXN set, so attribute checks can't discriminate a real root from a
+/// random table that happens to translate something; the page content can —
+/// KUSER carries ImageNumberLow/High 0xaa64 at offset 0x2C and the
+/// "C:\Windows" system root at 0x30 (this ARM64 layout differs from x64's
+/// 0x20/0x38, so those offsets are checked exactly as observed).
+fn is_valid_kernel_dtb_arm64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
+    const KUSER_SHARED_DATA_VA: VirtAddr = VirtAddr::from_u64(0xfffff78000000000);
+
+    let addr_space = AddressSpace::new_arm64(phys, dtb, dtb);
+    let Some(xlat) = addr_space.virt_to_phys(KUSER_SHARED_DATA_VA)? else {
+        return Ok(false);
+    };
+    let mut buf = [0u8; 0x40];
+    if phys.read_bytes(xlat.address, &mut buf).is_err() {
+        return Ok(false);
+    }
+    Ok(buf[0x2C..0x30] == [0x64, 0xaa, 0x64, 0xaa]
+        && buf[0x30] == b'C'
+        && buf[0x32] == b':'
+        && buf[0x34] == b'\\')
+}
+
+/// Read the PE machine type of the kernel image found through `dtb` with the
+/// arch's walker, or `None` when no valid PE header is there. This is the
+/// definitive architecture check: a kernel image's machine must be 0x8664
+/// (AMD64) or 0xaa64 (ARM64), which an accidental page-table false positive
+/// cannot satisfy.
+fn kernel_machine_at(dtb: Dtb, phys: &PhysMem, arch: Arch) -> Result<Option<u16>> {
+    let base = match arch {
+        Arch::Amd64 => find_ntoskrnl_va(dtb, phys)?,
+        Arch::Arm64 => find_ntoskrnl_va_arm64(dtb, phys)?,
+    };
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let space = match arch {
+        Arch::Amd64 => AddressSpace::new(phys, dtb),
+        Arch::Arm64 => AddressSpace::new_arm64(phys, dtb, dtb),
+    };
+    // The base must read as a real DOS header ("MZ" + 0x90) through this
+    // walker — a page-table false positive cannot satisfy this plus a valid
+    // PE signature and matching machine type.
+    let mut dos = [0u8; 4];
+    if space.read_bytes(base, &mut dos).is_err() || dos != [0x4d, 0x5a, 0x90, 0x00] {
+        return Ok(None);
+    }
+    let lfanew: u32 = match space.read(base + 0x3Cu64) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if lfanew == 0 || lfanew > 0x1000 {
+        return Ok(None);
+    }
+    let mut sig = [0u8; 6];
+    if space.read_bytes(base + lfanew as u64, &mut sig).is_err() || &sig[..4] != b"PE\0\0" {
+        return Ok(None);
+    }
+    Ok(Some(u16::from_le_bytes([sig[4], sig[5]])))
+}
+
+/// Discover the kernel page-table root and guest architecture. The AMD64
+/// descriptor format is tried first (the historical default), but a candidate
+/// only counts when the kernel image found through it is genuinely an AMD64
+/// PE: an AArch64 guest's TTBR1 tables can false-positive the x64 descriptor
+/// checks (Windows maps its own page tables), and the weak MZ+POOLCODE page
+/// heuristic can match a data page. The PE machine type is the tie-breaker.
+pub fn find_kernel(phys: &PhysMem) -> Result<Option<(Dtb, Arch)>> {
+    if let Some(dtb) = find_kernel_dtb_amd64(phys)?
+        && matches!(kernel_machine_at(dtb, phys, Arch::Amd64)?, Some(0x8664))
+    {
+        return Ok(Some((dtb, Arch::Amd64)));
+    }
+    for dtb in find_kernel_dtb_arm64_candidates(phys)? {
+        if matches!(kernel_machine_at(dtb, phys, Arch::Arm64)?, Some(0xaa64)) {
+            return Ok(Some((dtb, Arch::Arm64)));
+        }
+    }
+    Ok(None)
+}
+
+/// Scan all of guest RAM for AArch64 TTBR1 roots: page-aligned pages whose
+/// L0 entry for KUSER_SHARED_DATA (index 495) is a table descriptor pointing
+/// inside RAM, and whose full translation of KUSER_SHARED_DATA is kernel-only
+/// (AP[2]=0, UXN). The strict prefilter makes scanning the whole 8 GiB cheap
+/// and keeps false positives rare; the caller validates each candidate's
+/// kernel image machine type before accepting it.
+fn find_kernel_dtb_arm64_candidates(phys: &PhysMem) -> Result<Vec<Dtb>> {
+    const KUSER_L0_INDEX: u64 = 495;
+    const MAX_CANDIDATES: usize = 32;
+    let base = phys.ram_base();
+    let ram_end = base + phys.ram_size();
+    let mut out = Vec::new();
+    for dtb in (base + 0x1000..ram_end).step_by(PAGE_SIZE) {
+        let Ok(entry) = phys.read::<PageTableEntry>(dtb + 8 * KUSER_L0_INDEX) else {
+            continue;
+        };
+        // Table descriptor (bits[1:0] = 0b11) whose table lies in RAM.
+        if entry.0 & 0b11 != 0b11 {
+            continue;
+        }
+        let frame = entry.arm64_page_frame();
+        if frame < base || frame >= ram_end {
+            continue;
+        }
+        if is_valid_kernel_dtb_arm64(phys, dtb)? {
+            if crate::memory::arm64_trace_enabled() {
+                eprintln!("arm64-scan: candidate TTBR1 = {dtb:#x}");
+            }
+            out.push(dtb);
+            if out.len() >= MAX_CANDIDATES {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn is_ntoskrnl_header(header: &[u8]) -> bool {
@@ -927,7 +1089,9 @@ fn is_ntoskrnl_pte(phys: &PhysMem, pte: PageTableEntry) -> Result<bool> {
         return Ok(false);
     }
 
-    let header = phys.read::<[u8; 0x1000]>(pte.page_frame())?;
+    let Ok(header) = phys.read::<[u8; 0x1000]>(pte.page_frame()) else {
+        return Ok(false);
+    };
     Ok(is_ntoskrnl_header(&header))
 }
 
@@ -937,7 +1101,9 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
 
     let pml4e_count = KERNEL_VA_MAX.pml4_index() - KERNEL_VA_MIN.pml4_index() + 1;
 
-    let kernel_pml4 = phys.read::<[PageTableEntry; 256]>(kernel_dtb + 8 * 256)?;
+    let Ok(kernel_pml4) = phys.read::<[PageTableEntry; 256]>(kernel_dtb + 8 * 256) else {
+        return Ok(None);
+    };
     for (rel_pml4_index, pml4e) in kernel_pml4
         .into_iter()
         .enumerate()
@@ -949,7 +1115,9 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
         if !pml4e.is_present() {
             continue;
         }
-        let pdpt = phys.read::<[PageTableEntry; 512]>(pml4e.page_frame())?;
+        let Ok(pdpt) = phys.read::<[PageTableEntry; 512]>(pml4e.page_frame()) else {
+            continue;
+        };
 
         let pdpte_count = if pml4_index == pml4e_count - 1 {
             KERNEL_VA_MAX.pdpt_index() + 1
@@ -971,7 +1139,9 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
                 continue;
             }
 
-            let pd = phys.read::<[PageTableEntry; 512]>(pdpte.page_frame())?;
+            let Ok(pd) = phys.read::<[PageTableEntry; 512]>(pdpte.page_frame()) else {
+                continue;
+            };
 
             let pde_count = if pdpt_index == pdpte_count - 1 {
                 KERNEL_VA_MAX.pd_index() + 1
@@ -994,7 +1164,9 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
                     continue;
                 }
 
-                let pt = phys.read::<[PageTableEntry; 512]>(pde.page_frame())?;
+                let Ok(pt) = phys.read::<[PageTableEntry; 512]>(pde.page_frame()) else {
+                    continue;
+                };
 
                 let pte_count = if pd_index == pde_count - 1 {
                     KERNEL_VA_MAX.pt_index() + 1
@@ -1010,6 +1182,145 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
                     if let Ok(true) = is_ntoskrnl_pte(phys, pte) {
                         return Ok(Some(VirtAddr::construct(
                             pml4_index, pdpt_index, pd_index, pt_index,
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn is_ntoskrnl_pte_arm64(phys: &PhysMem, pte: PageTableEntry) -> Result<bool> {
+    // Kernel code pages: AP[2]=0 (not user), PXN=0 (executable from EL1).
+    // (UXN is always set on Windows kernel pages, so it cannot identify code.)
+    if pte.arm64_is_user() || !pte.arm64_is_nx() {
+        return Ok(false);
+    }
+
+    is_ntoskrnl_header_at(phys, pte.arm64_page_frame())
+}
+
+/// Whether the physical page at `frame` holds the ntoskrnl PE header
+/// (MZ + POOLCODE marker). Tolerant of unreadable/unmapped frames.
+fn is_ntoskrnl_header_at(phys: &PhysMem, frame: u64) -> Result<bool> {
+    let Ok(header) = phys.read::<[u8; 0x1000]>(frame) else {
+        return Ok(false);
+    };
+    Ok(is_ntoskrnl_header(&header))
+}
+
+/// Same bounded kernel-VA scan as [`find_ntoskrnl_va`] but interpreting
+/// AArch64 descriptors (TTBR1 root, 4 KiB granule). The VA index math is
+/// identical to x64's four 9-bit levels.
+fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>> {
+    // Cover every kernel L0 slot (496..511, the whole 48-bit kernel half):
+    // KASLR can load ntoskrnl anywhere in it (this guest loads at slot 497,
+    // 0xfffff8009b400000), unlike the AMD64 scan whose narrow fffff800..f808
+    // range matches x64's fixed low-kernel slot.
+    const KERNEL_VA_MIN: VirtAddr = VirtAddr::from_u64(0xfffff80000000000);
+    const KERNEL_VA_MAX: VirtAddr = VirtAddr::from_u64(0xffffff8000000000);
+
+    let pml4e_count = KERNEL_VA_MAX.pml4_index() - KERNEL_VA_MIN.pml4_index() + 1;
+
+    let Ok(kernel_table) = phys.read::<[PageTableEntry; 256]>(kernel_dtb + 8 * 256) else {
+        return Ok(None);
+    };
+    for (rel_index, l0) in kernel_table
+        .into_iter()
+        .enumerate()
+        .skip(KERNEL_VA_MIN.pml4_index() - 256)
+        .take(pml4e_count)
+    {
+        let pml4_index = 256 + rel_index;
+
+        if !l0.arm64_is_valid() || l0.arm64_is_block() {
+            continue;
+        }
+        let Ok(l1_table) = phys.read::<[PageTableEntry; 512]>(l0.arm64_page_frame()) else {
+            continue;
+        };
+
+        let l1_count = if pml4_index == pml4e_count - 1 {
+            KERNEL_VA_MAX.pdpt_index() + 1
+        } else {
+            512
+        };
+
+        for (l1_index, l1) in l1_table.into_iter().take(l1_count).enumerate() {
+            if !l1.arm64_is_valid() {
+                continue;
+            }
+
+            if l1.arm64_is_block() {
+                // 1 GiB block — unlikely for ntoskrnl, but scan its 2 MiB
+                // aligned pages anyway (the image base can sit anywhere in it).
+                let block = l1.arm64_page_frame();
+                for pt2 in 0..512u64 {
+                    if is_ntoskrnl_header_at(phys, block + pt2 * (2 << 20))? {
+                        return Ok(Some(VirtAddr::construct(
+                            pml4_index,
+                            l1_index,
+                            (pt2 >> 9) as usize,
+                            (pt2 & 0x1FF) as usize,
+                        )));
+                    }
+                }
+                continue;
+            }
+
+            let Ok(l2_table) = phys.read::<[PageTableEntry; 512]>(l1.arm64_page_frame()) else {
+                continue;
+            };
+
+            let l2_count = if l1_index == l1_count - 1 {
+                KERNEL_VA_MAX.pd_index() + 1
+            } else {
+                512
+            };
+
+            for (l2_index, l2) in l2_table.into_iter().take(l2_count).enumerate() {
+                if !l2.arm64_is_valid() {
+                    continue;
+                }
+
+                if l2.arm64_is_block() {
+                    // A 2 MiB block; the kernel image base is not necessarily at
+                    // the block start (this guest loads ntoskrnl 0x200000 into a
+                    // 2 MiB block), so probe every 4 KiB page of the block.
+                    let block = l2.arm64_page_frame();
+                    for pt_index in 0..512u64 {
+                        if is_ntoskrnl_header_at(phys, block + pt_index * 0x1000)? {
+                            return Ok(Some(VirtAddr::construct(
+                                pml4_index,
+                                l1_index,
+                                l2_index,
+                                pt_index as usize,
+                            )));
+                        }
+                    }
+                    continue;
+                }
+
+                let Ok(l3_table) = phys.read::<[PageTableEntry; 512]>(l2.arm64_page_frame()) else {
+                    continue;
+                };
+
+                let l3_count = if l2_index == l2_count - 1 {
+                    KERNEL_VA_MAX.pt_index() + 1
+                } else {
+                    512
+                };
+
+                for (l3_index, l3) in l3_table.into_iter().take(l3_count).enumerate() {
+                    if !l3.arm64_is_valid() {
+                        continue;
+                    }
+
+                    if let Ok(true) = is_ntoskrnl_pte_arm64(phys, l3) {
+                        return Ok(Some(VirtAddr::construct(
+                            pml4_index, l1_index, l2_index, l3_index,
                         )));
                     }
                 }
@@ -1071,15 +1382,25 @@ fn find_ntoskrnl_va_triage(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<Vir
 }
 
 fn find_ntoskrnl(phys: Arc<PhysMem>, symbols: Arc<SymbolStore>) -> Result<Option<WinObject>> {
-    let Some(kernel_dtb) = find_kernel_dtb(&phys)? else {
+    let Some((kernel_dtb, arch)) = find_kernel(&phys)? else {
         return Ok(None);
     };
 
-    let Some(ntoskrnl_va) = find_ntoskrnl_va(kernel_dtb, &phys)? else {
+    let ntoskrnl_va = match arch {
+        Arch::Amd64 => find_ntoskrnl_va(kernel_dtb, &phys)?,
+        Arch::Arm64 => find_ntoskrnl_va_arm64(kernel_dtb, &phys)?,
+    };
+    let Some(ntoskrnl_va) = ntoskrnl_va else {
         return Ok(None);
     };
 
-    Ok(Some(WinObject::new(phys, symbols, kernel_dtb, ntoskrnl_va)))
+    Ok(Some(WinObject::new_with_arch(
+        phys,
+        symbols,
+        kernel_dtb,
+        ntoskrnl_va,
+        arch,
+    )))
 }
 
 impl Guest {
@@ -1113,8 +1434,8 @@ impl Guest {
         kernel_base_hint: Option<VirtAddr>,
     ) -> Result<Self> {
         let ntoskrnl = if let Some(kernel_base) = kernel_base_hint {
-            let kernel_dtb = find_kernel_dtb(&phys)?.ok_or(Error::NtoskrnlNotFound)?;
-            WinObject::new(phys, symbols, kernel_dtb, kernel_base)
+            let (kernel_dtb, arch) = find_kernel(&phys)?.ok_or(Error::NtoskrnlNotFound)?;
+            WinObject::new_with_arch(phys, symbols, kernel_dtb, kernel_base, arch)
         } else {
             find_ntoskrnl(phys, symbols)?.ok_or(Error::NtoskrnlNotFound)?
         }
@@ -1139,10 +1460,21 @@ impl Guest {
     ) -> Result<Self> {
         let is_triage = kernel_dtb == DTB_IDENTITY;
 
+        // Dumps carry the machine type; live sessions reach this only from
+        // discovery, which already resolved the arch.
+        let arch = phys
+            .dmp_info()
+            .and_then(|info| info.system_info.as_ref())
+            .and_then(|si| Arch::from_machine_type(si.machine_image_type as u16))
+            .unwrap_or(Arch::Amd64);
+
         let ntoskrnl_va = if is_triage {
             find_ntoskrnl_va_triage(kernel_dtb, &phys)?
         } else {
-            find_ntoskrnl_va(kernel_dtb, &phys)?
+            match arch {
+                Arch::Amd64 => find_ntoskrnl_va(kernel_dtb, &phys)?,
+                Arch::Arm64 => find_ntoskrnl_va_arm64(kernel_dtb, &phys)?,
+            }
         };
 
         // For triage dumps, fall back to kern_base from KDDEBUGGER_DATA64
@@ -1157,11 +1489,12 @@ impl Guest {
             None => return Err(Error::NtoskrnlNotFound),
         };
 
-        let obj = WinObject::new(
+        let obj = WinObject::new_with_arch(
             Arc::clone(&phys),
             Arc::clone(&symbols),
             kernel_dtb,
             ntoskrnl_va,
+            arch,
         );
 
         // Try normal symbol loading first; for triage dumps where the PE
@@ -1175,7 +1508,7 @@ impl Guest {
                     .cloned()
                     .ok_or(Error::NtoskrnlNotFound)?;
 
-                WinObject::new(phys, symbols, kernel_dtb, ntoskrnl_va)
+                WinObject::new_with_arch(phys, symbols, kernel_dtb, ntoskrnl_va, arch)
                     .load_symbols_from_module_info(
                         &driver.name,
                         driver.time_date_stamp,
@@ -1415,6 +1748,7 @@ impl Guest {
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
         skip_session_space: bool,
+        arch: Arch,
     ) -> Result<ModuleSymbolLoadReport> {
         let mut report = ModuleSymbolLoadReport::new(modules.len());
         let mut jobs_with_info: Vec<ModuleSymbolLoad> = Vec::new();
@@ -1433,7 +1767,7 @@ impl Guest {
                 continue;
             }
 
-            match symbols.extract_download_job(phys, dtb, &module.name, module.base_address) {
+            match symbols.extract_download_job(phys, dtb, &module.name, module.base_address, arch) {
                 Ok(ModuleSymbolDiscovery::Ready { job, guid, source }) => {
                     Self::queue_module_symbol_load(
                         symbols,
@@ -1601,7 +1935,7 @@ impl Guest {
             }
         }
         let dtb = self.ntoskrnl.dtb();
-        Self::load_module_symbols(phys, symbols, modules, dtb, true)
+        Self::load_module_symbols(phys, symbols, modules, dtb, true, self.ntoskrnl.arch())
     }
 
     pub fn load_missing_kernel_module_symbols(
@@ -1625,7 +1959,8 @@ impl Guest {
             })
             .collect::<Vec<_>>();
 
-        let mut report = Self::load_module_symbols(phys, symbols, missing, dtb, true)?;
+        let mut report =
+            Self::load_module_symbols(phys, symbols, missing, dtb, true, self.ntoskrnl.arch())?;
         report.unloaded = unloaded;
         Ok(report)
     }
@@ -1638,7 +1973,7 @@ impl Guest {
     ) -> Result<ModuleSymbolLoadReport> {
         let modules = self.process_modules(info)?;
         let dtb = info.dtb;
-        Self::load_module_symbols(phys, symbols, modules, dtb, false)
+        Self::load_module_symbols(phys, symbols, modules, dtb, false, self.ntoskrnl.arch())
     }
 
     /// Load symbols for an explicit set of modules under `dtb`. Used to lazily
@@ -1652,7 +1987,7 @@ impl Guest {
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
     ) -> Result<ModuleSymbolLoadReport> {
-        Self::load_module_symbols(phys, symbols, modules, dtb, false)
+        Self::load_module_symbols(phys, symbols, modules, dtb, false, self.ntoskrnl.arch())
     }
 }
 

@@ -2,14 +2,14 @@
 members = ["ntoseye-py"]
 
 [workspace.package]
-version = "0.22.0"
+version = "0.23.0"
 
 [package]
 name = "ntoseye"
 version.workspace = true
 edition = "2024"
 authors = [ "dmaivel" ]
-description = "Windows kernel debugger for Linux hosts running Windows under KVM/QEMU and VMware"
+description = "WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macOS (UTM)"
 license = "MIT"
 repository = "https://github.com/dmaivel/ntoseye"
 readme = "README.md"
@@ -23,6 +23,7 @@ required-features = ["cli"]
 
 [dependencies]
 iced-x86 = "1.21.0"
+bad64 = "0.12"
 indicatif = "0.18.3"
 memmap2 = "0.9.9"
 nix = { version = "0.31.3", features = [ "process", "uio" ] }
@@ -62,7 +63,7 @@ tokio-util = { version = "0.7", default-features = false, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
 tower-http = { version = "0.7", default-features = false, features = ["cors"], optional = true }
 anyhow = { version = "1", optional = true }
-kdmp-parser = "0.8"
+kdmp-parser = "=0.8.1"
 
 [features]
 default = ["cli", "mcp", "python-embed"]

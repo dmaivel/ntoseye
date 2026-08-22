@@ -15,6 +15,9 @@ pub struct RegisterInfo {
 pub struct RegisterMap {
     by_name: HashMap<String, RegisterInfo>,
     ordered: Vec<RegisterInfo>,
+    /// How many bytes the breakpoint instruction advances the program counter
+    /// when it executes: 1 for x86 `int3`, 4 for AArch64 `brk #0xF000`.
+    step_size: u8,
 }
 
 impl RegisterMap {
@@ -25,11 +28,22 @@ impl RegisterMap {
     /// struct rather than parsing a target description.
     pub fn from_registers(registers: Vec<RegisterInfo>) -> Self {
         let mut map = RegisterMap::default();
+        map.step_size = 1;
         for reg in registers {
             map.by_name.insert(reg.name.clone(), reg.clone());
             map.ordered.push(reg);
         }
         map
+    }
+
+    /// Program-counter advance caused by executing the arch's breakpoint
+    /// instruction (x86: 1 byte `int3`; AArch64: 4 byte `brk #0xF000`).
+    pub fn breakpoint_step_size(&self) -> u8 {
+        self.step_size
+    }
+
+    pub fn set_breakpoint_step_size(&mut self, step_size: u8) {
+        self.step_size = step_size;
     }
 
     pub fn read_u64<S>(&self, name: S, data: &[u8]) -> Result<u64>
@@ -109,6 +123,7 @@ impl RegisterMap {
 
     pub fn parse_target_xml(xml: &str) -> Self {
         let mut map = RegisterMap::default();
+        map.step_size = 1;
         let mut current_offset: usize = 0;
         let mut next_regnum: Option<usize> = None;
 

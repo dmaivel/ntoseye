@@ -13,9 +13,8 @@ use crate::dbg_backend::{
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::guest::{ModuleInfo, ProcessInfo, read_pe_image};
-use crate::memory::AddressSpace;
 use crate::target::Target;
-use crate::types::{Dtb, VirtAddr};
+use crate::types::{Arch, Dtb, VirtAddr};
 
 /// A hardware (debug-register) breakpoint's parameters: the access it traps on,
 /// the watch width in bytes, and which DR slot (0-3) it occupies.
@@ -210,22 +209,23 @@ impl BreakpointScope {
 ///   hardware breakpoints stay out of the int3-hit predicates.
 #[derive(Debug, Clone)]
 enum BreakpointBackend {
-    Kernel { original_byte: u8 },
-    GuestMemoryPatch { original_byte: u8 },
+    Kernel { original_bytes: Vec<u8> },
+    GuestMemoryPatch { original_bytes: Vec<u8> },
     Hardware,
     Deferred,
 }
 
 impl BreakpointBackend {
-    /// The instruction byte we displaced with the int3, so display paths can
-    /// overlay it and never show our own breakpoint. Hardware breakpoints
+    /// The instruction bytes we displaced with the breakpoint, so display
+    /// paths can overlay them and never show our own patch (1 byte for an
+    /// x86 `int3`, 4 for an AArch64 `brk #0xF000`). Hardware breakpoints
     /// displace nothing (they never reach the masking path).
-    fn original_byte(&self) -> u8 {
+    fn original_bytes(&self) -> &[u8] {
         match self {
-            Self::Kernel { original_byte } | Self::GuestMemoryPatch { original_byte } => {
-                *original_byte
+            Self::Kernel { original_bytes } | Self::GuestMemoryPatch { original_bytes } => {
+                original_bytes
             }
-            Self::Hardware | Self::Deferred => 0,
+            Self::Hardware | Self::Deferred => &[],
         }
     }
 }
@@ -277,7 +277,7 @@ impl BreakpointManager {
         let backend = match hardware {
             Some(_) => BreakpointBackend::Hardware,
             None => BreakpointBackend::Kernel {
-                original_byte: 0x90,
+                original_bytes: vec![0x90],
             },
         };
         self.breakpoints.insert(
@@ -779,10 +779,10 @@ impl BreakpointManager {
             return Ok(());
         }
 
-        match bp.backend {
-            BreakpointBackend::GuestMemoryPatch { original_byte } => {
-                let memory = AddressSpace::new(&debugger.phys, dtb);
-                memory.write_bytes(bp.address, &[original_byte])?;
+        match &bp.backend {
+            BreakpointBackend::GuestMemoryPatch { original_bytes } => {
+                let memory = debugger.address_space(dtb);
+                memory.write_bytes(bp.address, original_bytes)?;
                 client.note_breakpoint_uninstalled(bp.address.0);
                 bp.enabled = false;
                 Ok(())
@@ -1200,7 +1200,11 @@ impl BreakpointManager {
             if bp.address.0 < start.0 || bp.address.0 >= end {
                 continue;
             }
-            buf[(bp.address.0 - start.0) as usize] = bp.backend.original_byte();
+            let offset = (bp.address.0 - start.0) as usize;
+            let bytes = bp.backend.original_bytes();
+            if offset + bytes.len() <= buf.len() {
+                buf[offset..offset + bytes.len()].copy_from_slice(bytes);
+            }
         }
     }
 
@@ -1270,16 +1274,24 @@ impl BreakpointManager {
                 // Capture the displaced byte before the kernel writes the int3,
                 // so display paths can mask it back out (the kernel owns the
                 // original byte but never hands it to us)
-                let memory = AddressSpace::new(&debugger.phys, debugger.current_dtb());
-                let mut original = [0u8; 1];
+                // Capture the displaced instruction before the kernel writes
+                // the breakpoint, so display paths can mask it back out (the
+                // kernel owns the original bytes but never hands them to us).
+                // x86 `int3` displaces 1 byte; AArch64 `brk #0xF000` displaces 4.
+                let memory = debugger.address_space(debugger.current_dtb());
+                let width = match debugger.arch() {
+                    Arch::Amd64 => 1,
+                    Arch::Arm64 => 4,
+                };
+                let mut original = vec![0u8; width];
                 memory.read_bytes(address, &mut original)?;
                 client.set_breakpoint(address.0)?;
                 Ok(BreakpointBackend::Kernel {
-                    original_byte: original[0],
+                    original_bytes: original,
                 })
             }
             BreakpointScope::Process { dtb, .. } => {
-                let memory = AddressSpace::new(&debugger.phys, *dtb);
+                let memory = debugger.address_space(*dtb);
                 let mut original = [0u8; 1];
                 memory.read_bytes(address, &mut original)?;
                 memory.write_bytes(address, &[0xcc])?;
@@ -1288,7 +1300,7 @@ impl BreakpointManager {
                 // separately for managed-BP bookkeeping at stop time.
                 client.note_breakpoint_installed(address.0);
                 Ok(BreakpointBackend::GuestMemoryPatch {
-                    original_byte: original[0],
+                    original_bytes: original.to_vec(),
                 })
             }
         }
@@ -1304,7 +1316,7 @@ impl BreakpointManager {
                 client.set_breakpoint(bp.address.0)
             }
             (BreakpointScope::Process { dtb, .. }, BreakpointBackend::GuestMemoryPatch { .. }) => {
-                let memory = AddressSpace::new(&debugger.phys, *dtb);
+                let memory = debugger.address_space(*dtb);
                 memory.write_bytes(bp.address, &[0xcc])?;
                 client.note_breakpoint_installed(bp.address.0);
                 Ok(())
@@ -1330,10 +1342,10 @@ impl BreakpointManager {
             }
             (
                 BreakpointScope::Process { dtb, .. },
-                BreakpointBackend::GuestMemoryPatch { original_byte },
+                BreakpointBackend::GuestMemoryPatch { original_bytes },
             ) => {
-                let memory = AddressSpace::new(&debugger.phys, *dtb);
-                memory.write_bytes(bp.address, &[*original_byte])?;
+                let memory = debugger.address_space(*dtb);
+                memory.write_bytes(bp.address, original_bytes)?;
                 client.note_breakpoint_uninstalled(bp.address.0);
                 Ok(())
             }
@@ -1355,17 +1367,29 @@ impl BreakpointManager {
             BreakpointScope::Kernel => debugger.kernel_dtb(),
             BreakpointScope::Process { dtb, .. } => *dtb,
         };
-        let memory = AddressSpace::new(&debugger.phys, dtb);
+        let memory = debugger.address_space(dtb);
         let translation = memory
             .virt_to_phys(address)?
             .ok_or(Error::BadVirtualAddress(address))?;
 
-        if translation.nx {
+        // AArch64 executability cannot be read off a descriptor alone:
+        // - Kernel space (TTBR1, bit 55): PXN is architecturally ignored for
+        //   EL1 instruction fetches translated via TTBR1, and Windows sets
+        //   PXNTable on its kernel-space table descriptors; UXN gates only
+        //   EL0. Kernel breakpoints must never be refused on attributes.
+        // - User space (TTBR0): EL0 execution is gated by UXN (bit 54).
+        let nx = match (debugger.arch(), address.0 & (1 << 55) != 0) {
+            (Arch::Arm64, true) => false,
+            (Arch::Arm64, false) => translation.uxn,
+            _ => translation.nx,
+        };
+
+        if nx {
             let context = module
                 .as_ref()
                 .map(|module| module.short_name.as_str())
                 .unwrap_or("unknown");
-            return Err(Error::Rsp(format!(
+            return Err(Error::Breakpoint(format!(
                 "refusing breakpoint at {:#x}: target page is non-executable ({})",
                 address.0, context
             )));
@@ -1384,7 +1408,7 @@ impl BreakpointManager {
             });
 
             if !in_executable_section {
-                return Err(Error::Rsp(format!(
+                return Err(Error::Breakpoint(format!(
                     "refusing breakpoint at {:#x}: address falls in non-executable section of {}",
                     address.0, module.short_name
                 )));
@@ -1534,7 +1558,7 @@ mod tests {
                 temporary: false,
                 hardware: None,
                 backend: BreakpointBackend::Kernel {
-                    original_byte: 0x90,
+                    original_bytes: vec![0x90],
                 },
             },
         );
@@ -1573,7 +1597,7 @@ mod tests {
                 temporary: false,
                 hardware: None,
                 backend: BreakpointBackend::GuestMemoryPatch {
-                    original_byte: 0x90,
+                    original_bytes: vec![0x90],
                 },
             },
         );

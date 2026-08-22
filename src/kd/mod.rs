@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::framing::{BREAKIN_BYTE, KdFraming};
 use crate::session::clear_trap_flag;
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 
 macro_rules! kd_trace {
     ($($arg:tt)*) => {
@@ -47,6 +47,7 @@ pub fn trace_bytes_enabled() -> bool {
 
 pub mod api;
 pub mod context;
+pub mod context_arm64;
 pub mod framing;
 pub mod hwbp;
 
@@ -92,20 +93,20 @@ const DBG_KD_LOAD_SYMBOLS_STATE_CHANGE: u32 = 0x0000_3031;
 const DBG_KD_COMMAND_STRING_STATE_CHANGE: u32 = 0x0000_3032;
 
 const AMD64_DEBUG_CONTROL_SPACE_KSPECIAL: u64 = 2;
-const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 
-fn require_amd64_machine(machine_type: u16) -> Result<()> {
-    if machine_type == IMAGE_FILE_MACHINE_AMD64 {
-        return Ok(());
+fn detect_arch(machine_type: u16) -> Result<Arch> {
+    match Arch::from_machine_type(machine_type) {
+        Some(arch) => Ok(arch),
+        None => {
+            let name = match machine_type {
+                0x014c => "I386",
+                _ => "unknown",
+            };
+            Err(Error::UnsupportedArchitecture(format!(
+                "{name} KD target (machine {machine_type:#06x})"
+            )))
+        }
     }
-    let name = match machine_type {
-        0x014c => "I386",
-        0xaa64 => "ARM64",
-        _ => "unknown",
-    };
-    Err(Error::UnsupportedArchitecture(format!(
-        "{name} KD target (machine {machine_type:#06x})"
-    )))
 }
 const KSPECIAL_REGISTERS_CR0_OFFSET: usize = 0x00;
 const KSPECIAL_REGISTERS_CR2_OFFSET: usize = 0x08;
@@ -285,6 +286,10 @@ pub struct KdBackend {
     breakin_clone: UnixStream,
     pump: Option<PumpHandle>,
     register_map: RegisterMap,
+    arch: Arch,
+    /// ARM64 kernel page-table root (TTBR1_EL1), provided by the session after
+    /// guest discovery; fills the synthetic `cr3` register slot.
+    kernel_dtb_override: u64,
     processor_count: u16,
     current_processor: u16,
     pending_stop: Option<StateChange>,
@@ -344,7 +349,11 @@ impl KdBackend {
                 probe_initial_request(&mut framing, initial_stop.processor)?
             }
         };
-        require_amd64_machine(version.machine_type)?;
+        let arch = detect_arch(version.machine_type)?;
+        let register_map = match arch {
+            Arch::Amd64 => context::build_register_map(),
+            Arch::Arm64 => context_arm64::build_register_map(),
+        };
         // The first state-change often arrives with KD's SYNC bit set. That is
         // the baseline connection, not a target reload for the REPL to surface.
         framing.take_peer_reset_seen();
@@ -370,7 +379,9 @@ impl KdBackend {
             framing: Some(framing),
             breakin_clone,
             pump: None,
-            register_map: context::build_register_map(),
+            register_map,
+            arch,
+            kernel_dtb_override: 0,
             processor_count: initial_stop.number_processors.max(1),
             current_processor: initial_stop.processor,
             last_stop_processor: initial_stop.processor,
@@ -659,10 +670,26 @@ impl KdBackend {
         self.special_register_cache.clear();
     }
 
+    fn context_flags(&self) -> u32 {
+        match self.arch {
+            Arch::Amd64 => context::CONTEXT_ALL,
+            Arch::Arm64 => context_arm64::CONTEXT_ALL,
+        }
+    }
+
+    fn context_flags_offset(&self) -> usize {
+        match self.arch {
+            Arch::Amd64 => context::OFFSET_CONTEXT_FLAGS,
+            Arch::Arm64 => context_arm64::OFFSET_CONTEXT_FLAGS,
+        }
+    }
+
     /// KD reports raw int3 stops with RIP still pointing at the int3
     fn advance_rip_past_int3(&mut self, processor: u16) -> Result<()> {
+        let context_flags = self.context_flags();
+        let flags_offset = self.context_flags_offset();
         let mut ctx = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::get_context(framing, processor)
+            api::get_context(framing, processor, context_flags)
         })?;
         let rip = self.register_map.read_u64("rip", &ctx)?;
         kd_trace!(
@@ -672,22 +699,22 @@ impl KdBackend {
             ctx.len()
         );
         self.register_map
-            .write_u64("rip", &mut ctx, rip.wrapping_add(1))?;
+            .write_u64("rip", &mut ctx, rip.wrapping_add(self.register_map.breakpoint_step_size() as u64))?;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::set_context(framing, processor, &ctx)
+            api::set_context(framing, processor, &ctx, flags_offset)
         })?;
         if trace_enabled() {
             // Read back to verify it took
             if let Ok(verify_ctx) =
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-                    api::get_context(framing, processor)
+                    api::get_context(framing, processor, context_flags)
                 })
                 && let Ok(verify_rip) = self.register_map.read_u64("rip", &verify_ctx)
             {
                 kd_trace!(
                     "kd: advance_rip: p{} wrote {:#x}, read back {:#x}",
                     processor + 1,
-                    rip.wrapping_add(1),
+                    rip.wrapping_add(self.register_map.breakpoint_step_size() as u64),
                     verify_rip
                 );
             }
@@ -865,23 +892,46 @@ impl KdBackend {
     }
 
     fn append_control_registers(&mut self, ctx: &mut Vec<u8>) -> Result<()> {
-        let special = self.read_special_registers()?;
-        append_control_registers_from_special(ctx, special)
+        match self.arch {
+            Arch::Amd64 => {
+                let special = self.read_special_registers()?;
+                append_control_registers_from_special(ctx, special)
+            }
+            Arch::Arm64 => {
+                // The ARM64 CONTEXT carries no TTBR; fill the synthetic `cr3`
+                // slot (TTBR1_EL1) from guest discovery.
+                ctx.resize(context_arm64::REGISTER_BUFFER_SIZE, 0);
+                ctx[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
+                    .copy_from_slice(&self.kernel_dtb_override.to_le_bytes());
+                Ok(())
+            }
+        }
     }
 
     fn continue_preserving_dr7(&mut self, processor: u16, status: u32, trace: bool) -> Result<()> {
-        if !self.special_register_cache.contains_key(&processor) {
-            let special = self.read_special_registers_uncached(processor)?;
-            self.special_register_cache.insert(processor, special);
+        match self.arch {
+            Arch::Amd64 => {
+                if !self.special_register_cache.contains_key(&processor) {
+                    let special = self.read_special_registers_uncached(processor)?;
+                    self.special_register_cache.insert(processor, special);
+                }
+                let special = self
+                    .special_register_cache
+                    .get(&processor)
+                    .expect("cache holds processor; we just inserted it on miss");
+                let dr7 = wire::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET);
+                with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+                    api::continue_api2(framing, processor, status, trace, dr7)
+                })
+            }
+            Arch::Arm64 => {
+                // ARM64_DBGKD_CONTROL_SET has no Dr7 field; the kernel
+                // single-steps via MDSCR when TraceFlag is set.
+                with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+                    api::continue_api2_arm64(framing, processor, status, trace)
+                })
+            }
         }
-        let special = self
-            .special_register_cache
-            .get(&processor)
-            .expect("cache holds processor; we just inserted it on miss");
-        let dr7 = wire::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET);
-        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::continue_api2(framing, processor, status, trace, dr7)
-        })
     }
 
     fn continue_stopped_for_exit(&mut self) -> Result<()> {
@@ -953,34 +1003,71 @@ impl DebugBackend for KdBackend {
         "kd"
     }
 
+    fn target_arch(&self) -> Arch {
+        self.arch
+    }
+
+    fn set_kernel_dtb(&mut self, dtb: u64) {
+        self.kernel_dtb_override = dtb;
+        kd_trace!("kd: kernel DTB (TTBR1) = {dtb:#x}");
+    }
+
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         kd_trace!(
             "kd: read_registers: GetContext on p{}",
             self.current_processor + 1
         );
         let processor = self.current_processor;
+        let context_flags = self.context_flags();
         let mut ctx = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::get_context(framing, processor)
+            api::get_context(framing, processor, context_flags)
         })?;
         kd_trace!("kd: read_registers: got {} context bytes", ctx.len());
         self.append_control_registers(&mut ctx)?;
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());
+        if trace_enabled() {
+            let cr3 = self.register_map.read_u64("cr3", &ctx).unwrap_or(0);
+            let pc = self.register_map.read_u64("pc", &ctx).unwrap_or(0);
+            let sp = self.register_map.read_u64("sp", &ctx).unwrap_or(0);
+            kd_trace!("kd: read_registers: cr3={cr3:#x} pc={pc:#x} sp={sp:#x}");
+        }
         Ok(ctx)
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
-        let context = context_payload(data)?;
         let processor = self.current_processor;
-        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::set_context(framing, processor, context)
-        })?;
+        match self.arch {
+            Arch::Amd64 => {
+                let context = context_payload(data)?;
+                with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+                    api::set_context(framing, processor, context, context::OFFSET_CONTEXT_FLAGS)
+                })?;
 
-        // KD restores hardware-breakpoint state from KSPECIAL_REGISTERS, not
-        // the CONTEXT debug-register fields. Keep both views coherent so DR6
-        // clearing and DR7 updates survive ContinueApi2.
-        let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        update_special_debug_registers_from_context(&mut special, data)?;
-        self.write_special_registers(special)
+                // KD restores hardware-breakpoint state from KSPECIAL_REGISTERS,
+                // not the CONTEXT debug-register fields. Keep both views
+                // coherent so DR6 clearing and DR7 updates survive ContinueApi2.
+                let mut special = self.read_special_registers_uncached(self.current_processor)?;
+                update_special_debug_registers_from_context(&mut special, data)?;
+                self.write_special_registers(special)
+            }
+            Arch::Arm64 => {
+                if data.len() < context_arm64::CONTEXT_SIZE {
+                    return Err(Error::Kd(format!(
+                        "ARM64 CONTEXT buffer too short: {} bytes, expected {}",
+                        data.len(),
+                        context_arm64::CONTEXT_SIZE
+                    )));
+                }
+                with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+                    api::set_context(
+                        framing,
+                        processor,
+                        &data[..context_arm64::CONTEXT_SIZE],
+                        context_arm64::OFFSET_CONTEXT_FLAGS,
+                    )
+                })
+            }
+        }
     }
 
     fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
@@ -1034,7 +1121,9 @@ impl DebugBackend for KdBackend {
     }
 
     fn supports_watchpoints(&self) -> bool {
-        true
+        // AArch64 has no x86-style debug registers; hardware watchpoints would
+        // need DBGWCR/DBGWVR support in the KD transport.
+        self.arch == Arch::Amd64
     }
 
     fn set_hardware_breakpoint(
@@ -1058,7 +1147,9 @@ impl DebugBackend for KdBackend {
     }
 
     fn supports_user_mode_breakpoints(&self) -> bool {
-        true
+        // GuestMemoryPatch user-mode breakpoints write an x86 `int3`; the
+        // AArch64 equivalent (4-byte `brk #0xF000`) is not wired up yet.
+        self.arch == Arch::Amd64
     }
 
     fn optional_capabilities(&self) -> Vec<BackendCapability> {
@@ -1278,6 +1369,13 @@ impl DebugBackend for KdBackend {
             return Ok(stop_event(stop));
         }
         let debug_log = self.debug_log.clone();
+        // Blocking wait: give the socket a timeout long enough to be a block
+        // (the request paths leave their shorter timeouts in place, and the
+        // restore-to-none setsockopt is macOS-racy).
+        let _ = self
+            .framing()?
+            .transport_mut()
+            .set_read_timeout(Some(blocking_read_timeout()));
         let stop = await_state_change(
             self.framing()?,
             None,
@@ -1431,10 +1529,11 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn kd_rejects_non_amd64_targets_before_context_access() {
-        assert!(require_amd64_machine(IMAGE_FILE_MACHINE_AMD64).is_ok());
-        let error = require_amd64_machine(0xaa64).unwrap_err();
-        assert!(error.to_string().contains("ARM64 KD target"));
+    fn kd_detects_amd64_and_arm64_machine_types() {
+        assert_eq!(detect_arch(0x8664).unwrap(), Arch::Amd64);
+        assert_eq!(detect_arch(0xaa64).unwrap(), Arch::Arm64);
+        let error = detect_arch(0x014c).unwrap_err();
+        assert!(error.to_string().contains("I386 KD target"));
         assert!(error.to_string().contains("supports AMD64 targets only"));
     }
 
@@ -2081,6 +2180,8 @@ mod tests {
             breakin_clone,
             pump: Some(pump),
             register_map: context::build_register_map(),
+            arch: Arch::Amd64,
+            kernel_dtb_override: 0,
             processor_count: 1,
             current_processor: 0,
             pending_stop: None,
@@ -2107,6 +2208,8 @@ mod tests {
             breakin_clone,
             pump: None,
             register_map: context::build_register_map(),
+            arch: Arch::Amd64,
+            kernel_dtb_override: 0,
             processor_count: 1,
             current_processor: 0,
             pending_stop: None,

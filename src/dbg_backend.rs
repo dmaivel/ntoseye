@@ -7,7 +7,7 @@ use crate::dmp::TriageCrashInfo;
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::target::Target;
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 
 /// One captured line of guest debug output (DbgPrint / kernel printf), with the
 /// host wall-clock time it completed and a monotonic sequence number used as the
@@ -411,6 +411,17 @@ pub trait DebugBackend {
     fn name(&self) -> &'static str {
         "dbg"
     }
+
+    /// Guest architecture the backend is driving (AMD64 by default; the KD
+    /// backend derives it from `DBGKD_GET_VERSION`'s machine type).
+    fn target_arch(&self) -> Arch {
+        Arch::Amd64
+    }
+
+    /// Provide the kernel page-table root (CR3 on AMD64, TTBR1_EL1 on ARM64)
+    /// once guest discovery resolves it, so register snapshots can expose the
+    /// DTB. No-op on backends whose register file carries the DTB natively.
+    fn set_kernel_dtb(&mut self, _dtb: u64) {}
 
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;

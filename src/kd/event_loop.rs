@@ -15,6 +15,7 @@ use crate::kd::api;
 use crate::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
 };
+use crate::kd::trace_enabled;
 use crate::kd::wire::{read_u16, read_u32, read_u64};
 use crate::types::VirtAddr;
 
@@ -243,19 +244,27 @@ pub fn is_temporary_io_error(kind: ErrorKind) -> bool {
     matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
+/// Run a KD request under `timeout`, then leave the socket with that timeout
+/// still set. The restore-to-blocking `setsockopt(SO_RCVTIMEO)` is
+/// deliberately NOT performed: on macOS, a second `SO_RCVTIMEO` setsockopt
+/// while the peer concurrently writes (which is inherent to KD — the kernel
+/// streams replies/prints) intermittently fails with EINVAL, and every
+/// subsequent operation sets its own timeout before reading anyway. Blocking
+/// waits set an explicit long timeout ([`blocking_read_timeout`]).
 pub fn with_framing_read_timeout_raw<R>(
     framing: &mut KdFraming<UnixStream>,
     timeout: Duration,
     f: impl FnOnce(&mut KdFraming<UnixStream>) -> Result<R>,
 ) -> Result<R> {
     framing.transport_mut().set_read_timeout(Some(timeout))?;
-    let result = f(framing);
-    let restore = framing.transport_mut().set_read_timeout(None);
-    match (result, restore) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err.into()),
-    }
+    f(framing)
+}
+
+/// Long-enough read timeout to behave like a blocking read (an hour; never
+/// fires in practice). Used where the KD protocol wants an unbounded wait
+/// (`wait_for_stop`) without the macOS-racy restore dance.
+pub const fn blocking_read_timeout() -> Duration {
+    Duration::from_secs(3600)
 }
 
 pub fn with_framing_read_timeout<R>(
@@ -300,19 +309,17 @@ pub fn is_transparent_state_change(new_state: u32) -> bool {
 }
 
 /// Acknowledge a non-exception wait-state-change (load-symbols / command-string)
-/// by sending a continue, so the kernel resumes past it. Preserves the framing's
-/// current read timeout (the pump runs with a short one)
+/// by sending a continue, so the kernel resumes past it. The request timeout is
+/// set for the exchange and left in place (restoring is macOS-racy; the next
+/// operation re-establishes its own timeout).
 pub fn continue_transparent_state_change(
     framing: &mut KdFraming<UnixStream>,
     stop: &StateChange,
 ) -> Result<()> {
-    let prev = framing.transport_mut().read_timeout().ok().flatten();
     framing
         .transport_mut()
         .set_read_timeout(Some(KD_REQUEST_TIMEOUT))?;
-    let result = continue_preserving_dr7(framing, stop.processor, api::DBG_CONTINUE, false);
-    let _ = framing.transport_mut().set_read_timeout(prev);
-    result
+    continue_preserving_dr7(framing, stop.processor, api::DBG_CONTINUE, false)
 }
 
 /// Read `KernelDr7` from the processor's `KSPECIAL_REGISTERS` and continue
@@ -379,6 +386,22 @@ pub fn await_state_change(
         let pkt = framing.recv_data()?;
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_CHANGE64 => {
+                if trace_enabled() {
+                    eprintln!(
+                        "kd: state-change payload ({} bytes):",
+                        pkt.payload.len()
+                    );
+                    for chunk in pkt.payload.chunks(16) {
+                        eprintln!(
+                            "    {}",
+                            chunk
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
+                }
                 let mut stop = parse_state_change(&pkt.payload)?;
                 target_reloaded |= framing.take_peer_reset_seen();
                 stop.target_reloaded = target_reloaded;

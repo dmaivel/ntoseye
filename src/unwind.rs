@@ -40,7 +40,7 @@ use crate::{
     symbols::{SourceLocation, SymbolStore},
     target::{SavedThreadRegisters, Target, ThreadInfo},
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
-    types::{Dtb, VirtAddr},
+    types::{Arch, Dtb, VirtAddr},
 };
 
 const CR3_PAGE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -425,6 +425,9 @@ pub fn build_stacktrace(
     regs: &[u8],
     limit: usize,
 ) -> StackTrace {
+    if debugger.arch() == Arch::Arm64 {
+        return build_stacktrace_arm64(debugger, register_map, regs, limit);
+    }
     let cr3 = register_map.read_u64("cr3", regs).unwrap_or(0);
     let trace = resolve_thread_trace_context(debugger, cr3);
     build_stacktrace_seeded(
@@ -434,6 +437,63 @@ pub fn build_stacktrace(
         FrameSource::Current,
         limit,
     )
+}
+
+/// Strip AArch64 pointer-authentication bits (bits 63:56) from a return
+/// address: sign-extend the 56-bit canonical address back to 64 bits.
+fn strip_pac(addr: u64) -> u64 {
+    ((addr << 8) as i64 >> 8) as u64
+}
+
+/// ARM64 backtrace via the frame-pointer (x29) chain: each frame stores the
+/// previous FP at `[fp]` and the return address at `[fp+8]`. Windows ARM64
+/// kernel code keeps frame pointers enabled, so this is reliable; PAC-signed
+/// return addresses are stripped.
+fn build_stacktrace_arm64(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    limit: usize,
+) -> StackTrace {
+    let cr3 = register_map.read_u64("cr3", regs).unwrap_or(0);
+    let trace = resolve_thread_trace_context(debugger, cr3);
+    let seed_pc = register_map.read_u64("rip", regs).unwrap_or(0);
+    let seed_sp = register_map.read_u64("rsp", regs).unwrap_or(0);
+    let mut raw: Vec<(u64, u64, FrameSource)> = vec![(seed_sp, seed_pc, FrameSource::Current)];
+
+    let memory = debugger.address_space(trace.active_dtb);
+    let mut fp = register_map.read_u64("fp", regs).unwrap_or(0);
+    for _ in 0..MAX_UNWIND_FRAMES {
+        let mut buf = [0u8; 16];
+        if memory.read_bytes(VirtAddr(fp), &mut buf).is_err() {
+            break;
+        }
+        let next_fp = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let ra = strip_pac(u64::from_le_bytes(buf[8..16].try_into().unwrap()));
+        if ra == 0 || next_fp == 0 || next_fp <= fp {
+            break;
+        }
+        raw.push((fp + 16, ra, FrameSource::Unwind));
+        fp = next_fp;
+    }
+
+    ensure_frame_module_symbols(debugger, &trace, raw.iter().map(|(_, ip, _)| *ip));
+
+    let mut stacktrace = StackTrace::default();
+    for (sp, ip, source) in raw {
+        record_stack_frame(
+            &mut stacktrace,
+            limit,
+            StackFrame {
+                sp,
+                ip,
+                symbol: format_symbol(debugger, &trace, ip),
+                source,
+                source_location: frame_source_location(debugger, &trace, ip),
+            },
+        );
+    }
+    stacktrace
 }
 
 fn switch_seed_is_plausible(thread: &ThreadInfo, seed: &RegisterContext) -> bool {
@@ -609,7 +669,14 @@ fn ensure_frame_module_symbols(
         let _ = if let Some(g) = debugger.guest.as_ref() {
             g.load_symbols_for_modules(&debugger.phys, &debugger.symbols, modules, dtb)
         } else {
-            Guest::load_module_symbols(&debugger.phys, &debugger.symbols, modules, dtb, false)
+            Guest::load_module_symbols(
+                &debugger.phys,
+                &debugger.symbols,
+                modules,
+                dtb,
+                false,
+                debugger.arch(),
+            )
         };
     }
 }
@@ -707,7 +774,7 @@ impl<'a> StackTracer<'a> {
             trace,
             phys: &debugger.phys,
             symbols: &debugger.symbols,
-            memory: AddressSpace::new(&debugger.phys, trace.active_dtb),
+            memory: debugger.address_space(trace.active_dtb),
             modules: HashMap::new(),
         }
     }

@@ -7,7 +7,6 @@ use std::io::{Read, Write};
 
 use crate::dbg_backend::ContinueDisposition;
 use crate::error::{Error, Result};
-use crate::kd::context;
 use crate::kd::{
     framing::{
         DataPacket, KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
@@ -198,10 +197,13 @@ pub fn get_version<T: Read + Write>(framing: &mut KdFraming<T>, processor: u16) 
     })
 }
 
-pub fn get_context<T: Read + Write>(framing: &mut KdFraming<T>, processor: u16) -> Result<Vec<u8>> {
+pub fn get_context<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    context_flags: u32,
+) -> Result<Vec<u8>> {
     let mut header = make_header(DBGKD_GET_CONTEXT, processor);
-    // Zero means "no register groups"; ask for the full AMD64 context
-    write_u32(&mut header, UNION_OFFSET, context::CONTEXT_ALL);
+    write_u32(&mut header, UNION_OFFSET, context_flags);
     let (parsed, _, data) = send_manipulate(framing, &header, &[])?;
     check_status(&parsed, DBGKD_GET_CONTEXT)?;
     Ok(data)
@@ -212,11 +214,12 @@ pub fn set_context<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor: u16,
     context: &[u8],
+    context_flags_offset: usize,
 ) -> Result<()> {
     let mut header = make_header(DBGKD_SET_CONTEXT, processor);
     // The kernel reads ContextFlags from both the union and the CONTEXT
-    if context.len() >= 0x34 {
-        let flags = read_u32(context, 0x30);
+    if context.len() >= context_flags_offset + 4 {
+        let flags = read_u32(context, context_flags_offset);
         write_u32(&mut header, UNION_OFFSET, flags);
     }
     let (parsed, _, _) = send_manipulate(framing, &header, context)?;
@@ -343,6 +346,28 @@ pub fn continue_api2<T: Read + Write>(
     Ok(())
 }
 
+/// `DbgKdContinueApi2` for ARM64 targets. `ARM64_DBGKD_CONTROL_SET` packs
+/// { ContinueStatus u32, TraceFlag u32, CurrentSymbolStart u64,
+///   CurrentSymbolEnd u64 } — there is no Dr7 field (AArch64 has no x86-style
+/// debug registers; watchpoints use DBGWCR/DBGWVR). The kernel performs
+/// single-stepping via MDSCR_EL1 when TraceFlag is set.
+pub fn continue_api2_arm64<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    continue_status: u32,
+    trace: bool,
+) -> Result<()> {
+    let mut header = make_header(DBGKD_CONTINUE_API2, processor);
+    write_u32(&mut header, UNION_OFFSET, continue_status);
+    write_u32(&mut header, UNION_OFFSET + 4, if trace { 1 } else { 0 });
+    // CurrentSymbolStart/End stay zero.
+    let payload_len = MANIPULATE_HEADER_SIZE;
+    let mut payload = Vec::with_capacity(payload_len);
+    payload.extend_from_slice(&header);
+    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
+    Ok(())
+}
+
 /// `DbgKdSwitchProcessor`: switch which processor subsequent register /
 /// memory operations target. The kernel does *not* send a reply; it expects
 /// the host to pick a different processor and resume the manipulate loop
@@ -357,6 +382,7 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Read, Write};
 
+    use crate::kd::context;
     use crate::kd::framing::{
         KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE,
     };
@@ -532,7 +558,7 @@ mod tests {
         );
 
         let mut framing = KdFraming::new(Loopback::new(stream));
-        let ctx = get_context(&mut framing, 0).unwrap();
+        let ctx = get_context(&mut framing, 0, context::CONTEXT_ALL).unwrap();
         assert_eq!(ctx, ctx_bytes);
 
         let out = &framing.transport_ref().outbound;
@@ -672,7 +698,7 @@ mod tests {
         );
 
         let mut framing = KdFraming::new(Loopback::new(stream));
-        let err = get_context(&mut framing, 0).unwrap_err();
+        let err = get_context(&mut framing, 0, context::CONTEXT_ALL).unwrap_err();
         match err {
             Error::Kd(msg) => assert!(msg.contains("processor mismatch")),
             other => panic!("unexpected error: {other:?}"),

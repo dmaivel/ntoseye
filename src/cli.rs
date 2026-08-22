@@ -40,7 +40,8 @@ impl FromArgValue for BackendKind {
 }
 
 #[derive(FromArgs)]
-/// Windows kernel debugger for Linux hosts running Windows under KVM/QEMU
+/// Windows kernel debugger for Linux (KVM/QEMU, VMware) and macOS (UTM) hosts
+/// running Windows — WinDbg for Linux and macOS
 struct Args {
     /// print version information
     #[argh(switch, short = 'v', long = "version")]
@@ -207,7 +208,17 @@ ntoseye --connect /tmp/ntoseye-kd.sock
 ntoseye waits 8 seconds for the initial KD handshake by default.
 For unusually slow guests, override it with:
 
-NTOSEYE_KD_TIMEOUT=20 ntoseye";
+NTOSEYE_KD_TIMEOUT=20 ntoseye
+
+macOS (UTM): UTM sandboxes QEMU (even the unsigned build), so the
+socket must live inside UTM's QEMUHelper container instead of /tmp.
+In the VM settings, add to 'Arguments (QEMU)':
+
+-chardev socket,id=kd,path=/Users/YOU/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock,server=on,wait=off -serial chardev:kd
+
+then connect with --connect to that same path. Windows on ARM64 is
+supported (machine 0xAA64); Secure Boot must be disabled (remove the
+VM's TPM device) for bcdedit /debug on to work.";
 
 pub fn main() {
     if let Err(e) = run() {

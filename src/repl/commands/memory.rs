@@ -6,7 +6,7 @@ use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::symbols::{FieldValue, ParsedType};
-use crate::types::{Value, VirtAddr};
+use crate::types::{Arch, Value, VirtAddr};
 use crate::ui;
 use crate::unwind::{
     format_symbol, function_range, resolve_thread_trace_context, try_format_symbol,
@@ -402,9 +402,13 @@ impl ReplState<'_> {
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
 
-        // TODO dont hardcode 64-bit for WOW64 process? / support other formats?
-        let mut formatter = disasm_formatter();
-        let rows = decode_rows(&bytes, start_addr.0, None, &mut formatter, resolve);
+        let rows = match self.ctx.target.arch() {
+            Arch::Amd64 => {
+                let mut formatter = disasm_formatter();
+                decode_rows(&bytes, start_addr.0, None, &mut formatter, resolve)
+            }
+            Arch::Arm64 => decode_rows_arm64(&bytes, start_addr.0, None, resolve),
+        };
         render_rows(&rows, |_| None);
         println!();
 
@@ -423,19 +427,28 @@ impl ReplState<'_> {
 
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
-        let Some((start, end)) = function_range(&self.ctx.target, &trace, address.0) else {
-            error!(
-                "no x64 runtime-function entry contains {}",
-                ui::addr(address.0)
-            );
-            return Ok(());
-        };
-        let Some(len) = end
-            .checked_sub(start)
-            .and_then(|len| usize::try_from(len).ok())
-        else {
-            error!("invalid function range {start:#x}..{end:#x}");
-            return Ok(());
+        let (start, len) = match self.ctx.target.arch() {
+            // AMD64: function extent from the image's runtime-function entries.
+            Arch::Amd64 => {
+                let Some((start, end)) = function_range(&self.ctx.target, &trace, address.0) else {
+                    error!(
+                        "no runtime-function entry contains {}",
+                        ui::addr(address.0)
+                    );
+                    return Ok(());
+                };
+                let Some(len) = end
+                    .checked_sub(start)
+                    .and_then(|len| usize::try_from(len).ok())
+                else {
+                    error!("invalid function range {start:#x}..{end:#x}");
+                    return Ok(());
+                };
+                (start, len)
+            }
+            // ARM64: function extents need .pdata unpacking (not implemented);
+            // disassemble a bounded run from the address instead.
+            Arch::Arm64 => (address.0, 64 * 4),
         };
         const MAX_FUNCTION_BYTES: usize = 1024 * 1024;
         if len == 0 || len > MAX_FUNCTION_BYTES {
@@ -451,8 +464,13 @@ impl ReplState<'_> {
             return Ok(());
         }
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
-        let mut formatter = disasm_formatter();
-        let rows = decode_rows(&bytes, start, None, &mut formatter, resolve);
+        let rows = match self.ctx.target.arch() {
+            Arch::Amd64 => {
+                let mut formatter = disasm_formatter();
+                decode_rows(&bytes, start, None, &mut formatter, resolve)
+            }
+            Arch::Arm64 => decode_rows_arm64(&bytes, start, None, resolve),
+        };
         render_rows(&rows, |_| None);
         println!();
 
