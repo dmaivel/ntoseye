@@ -84,11 +84,19 @@ The default and recommended backend is `kd` (KDCOM), which runs Windows KD over 
    ```
 4. Start the VM, then run `ntoseye`.
 
-For guests that aren't configured for KD, see [Choosing a backend](docs/backends.md) for the `gdb` and `memory` alternatives. macOS/UTM setup and the `memory` backend are documented there too.
+### Not using Linux or virt-manager?
 
-The debugger is self-documented: run `ntoseye --help` for command-line arguments, and press tab in the REPL for completions and descriptions of commands, symbols, and types.
+- Plain QEMU/KVM or libvirt without virt-manager: follow the [KVM/QEMU setup guide](docs/kvm-qemu.md).
+- VMware Workstation on Linux: follow the [VMware setup guide](docs/vmware.md).
+- macOS on Apple Silicon: follow the [UTM setup guide](docs/utm.md).
+
+### Not sure which backend to use?
+
+See the [backend comparison table](docs/backends.md).
 
 # Documentation
+
+The debugger is self-documented: run `ntoseye --help` for command-line arguments, and press tab in the REPL for completions and descriptions of commands, symbols, and types.
 
 - [REPL usage](docs/usage.md): expressions, radix, breakpoints, watchpoints, aliases
 - [Symbols and source](docs/symbols.md): private PDBs, `.sympath`/`.srcpath`, source breakpoints
