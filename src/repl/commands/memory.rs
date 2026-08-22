@@ -427,25 +427,16 @@ impl ReplState<'_> {
 
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
-        let (start, len) = match self.ctx.target.arch() {
-            // AMD64: function extent from the image's runtime-function entries.
-            Arch::Amd64 => {
-                let Some((start, end)) = function_range(&self.ctx.target, &trace, address.0) else {
-                    error!("no runtime-function entry contains {}", ui::addr(address.0));
-                    return Ok(());
-                };
-                let Some(len) = end
-                    .checked_sub(start)
-                    .and_then(|len| usize::try_from(len).ok())
-                else {
-                    error!("invalid function range {start:#x}..{end:#x}");
-                    return Ok(());
-                };
-                (start, len)
-            }
-            // ARM64: function extents need .pdata unpacking (not implemented);
-            // disassemble a bounded run from the address instead.
-            Arch::Arm64 => (address.0, 64 * 4),
+        let Some((start, end)) = function_range(&self.ctx.target, &trace, address.0) else {
+            error!("no runtime-function entry contains {}", ui::addr(address.0));
+            return Ok(());
+        };
+        let Some(len) = end
+            .checked_sub(start)
+            .and_then(|len| usize::try_from(len).ok())
+        else {
+            error!("invalid function range {start:#x}..{end:#x}");
+            return Ok(());
         };
         const MAX_FUNCTION_BYTES: usize = 1024 * 1024;
         if len == 0 || len > MAX_FUNCTION_BYTES {
