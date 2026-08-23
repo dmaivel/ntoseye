@@ -897,7 +897,6 @@ mod tests {
         assert!(require_amd64_dump(IMAGE_FILE_MACHINE_AMD64).is_ok());
         let error = require_amd64_dump(0x014c).unwrap_err();
         assert!(error.to_string().contains("I386 crash dump"));
-        assert!(error.to_string().contains("supports AMD64 targets only"));
     }
 
     fn make_test_info() -> DmpInfo {

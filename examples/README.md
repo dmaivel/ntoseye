@@ -1,3 +1,6 @@
 # Examples
 
-Standalone [Python SDK](../README.md#python-sdk) scripts. Run one directly, e.g. `python list_processes.py`, against a guest with the debug transport up.
+Example Python scripts for the [ntoseye SDK](../docs/sdk.md):
+
+- [`commands/`](commands/): custom REPL commands to drop into `~/.ntoseye/commands/`
+- [`standalone/`](standalone/): standalone scripts that attach to a guest directly

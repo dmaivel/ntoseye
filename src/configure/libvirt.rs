@@ -1,51 +1,33 @@
 use std::{
     fs,
+    io::ErrorKind,
     path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dialoguer::{Confirm, Select};
-
 use crate::{
-    DEFAULT_KD_SOCKET as KD_SOCKET,
+    DEFAULT_GDB_ADDR, DEFAULT_KD_SOCKET as KD_SOCKET,
     error::{Error, Result},
-    symbols,
 };
+
+use super::{
+    Action, ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
+    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, backup_file, shell_quote,
+};
+
 const QEMU_NS: &str = "http://libvirt.org/schemas/domain/qemu/1.0";
+const BACKENDS: &[BackendSelection] = &[
+    BackendSelection::Kd,
+    BackendSelection::Gdb,
+    BackendSelection::KdAndGdb,
+    BackendSelection::Memory,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VirshAction {
-    Configure,
-    Remove,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VirshTransport {
+enum DebugTransport {
     Kd,
     Gdb,
-}
-
-impl VirshTransport {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Kd => "kd",
-            Self::Gdb => "gdb",
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Self::Kd => "KDCOM serial socket",
-            Self::Gdb => "QEMU gdbstub",
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Domain {
-    name: String,
-    state: String,
 }
 
 struct XmlPlan {
@@ -53,91 +35,112 @@ struct XmlPlan {
     changes: Vec<String>,
 }
 
-pub fn run_interactive() -> Result<()> {
-    let domains = list_domains()?;
-    if domains.is_empty() {
-        return Err(Error::DebugInfo("virsh reported no domains".to_string()));
+pub(super) struct Libvirt;
+
+impl Configurator for Libvirt {
+    fn name(&self) -> &'static str {
+        "KVM/libvirt"
     }
 
-    let domain_items = domains
-        .iter()
-        .map(|domain| format!("{} ({})", domain.name, domain.state))
-        .collect::<Vec<_>>();
-    let Some(domain_idx) = prompt_select("Domain", &domain_items)? else {
-        return cancel_virsh_edit();
-    };
-    let domain = &domains[domain_idx];
-    if !domain.state.eq_ignore_ascii_case("shut off") {
-        return Err(Error::DebugInfo(format!(
-            "domain '{}' is {}; shut it down before editing persistent XML",
-            domain.name, domain.state
-        )));
-    }
-
-    let action_items = vec![
-        "configure debug transports".to_string(),
-        "remove ntoseye debug transports".to_string(),
-    ];
-    let action = match prompt_select("Action", &action_items)? {
-        Some(0) => VirshAction::Configure,
-        Some(1) => VirshAction::Remove,
-        _ => return cancel_virsh_edit(),
-    };
-
-    let xml = dump_xml(&domain.name)?;
-    let (plan, transports, vmcoreinfo) = match action {
-        VirshAction::Configure => {
-            let Some(transports) = prompt_transports()? else {
-                return cancel_virsh_edit();
-            };
-            let vmcoreinfo = prompt_confirm(
-                "Enable crash-dump generation (vmcoreinfo, used by 'virsh dump --format=win-dmp')?",
-            )?;
-            (
-                apply_transport_config(&xml, &transports, KD_SOCKET, vmcoreinfo)?,
-                transports,
-                vmcoreinfo,
-            )
+    fn probe(&self) -> ProbeStatus {
+        match Command::new("virsh").arg("--version").output() {
+            Err(error) if error.kind() == ErrorKind::NotFound => ProbeStatus::NotDetected,
+            Err(error) => ProbeStatus::Unavailable(error.to_string()),
+            Ok(output) if !output.status.success() => {
+                ProbeStatus::Unavailable(command_detail(&output))
+            }
+            Ok(_) => match list_domains() {
+                Ok(domains) => ProbeStatus::Detected(format!(
+                    "{} virtual machine{}",
+                    domains.len(),
+                    if domains.len() == 1 { "" } else { "s" }
+                )),
+                Err(error) => ProbeStatus::Unavailable(error.to_string()),
+            },
         }
-        VirshAction::Remove => (remove_debug_transports(&xml), Vec::new(), false),
-    };
-    if plan.xml == xml {
-        println!("No XML changes needed for '{}'.", domain.name);
-        print_next_steps(action, &transports, vmcoreinfo, &domain.name);
-        return Ok(());
     }
 
-    println!("changes");
-    for change in &plan.changes {
-        println!("  - {change}");
-    }
-    println!();
-
-    let backup_path = backup_path(&domain.name)?;
-    println!("backup: {}", backup_path.display());
-    println!("changes apply to the next VM start");
-    if !prompt_confirm("Apply changes?")? {
-        return cancel_virsh_edit();
+    fn guests(&self) -> Result<Vec<Guest>> {
+        list_domains()
     }
 
-    fs::write(&backup_path, &xml)?;
-    let define_path = write_define_xml(&domain.name, &plan.xml)?;
-    let define_result = virsh(["define", define_path.to_string_lossy().as_ref()]);
-    let _ = fs::remove_file(&define_path);
-    define_result?;
+    fn inspect(&self, guest: &Guest) -> Result<GuestInspection> {
+        Ok(inspect_xml(&dump_xml(&guest.id)?))
+    }
 
-    println!("defined '{}'", domain.name);
-    println!("backup saved: {}", backup_path.display());
-    print_next_steps(action, &transports, vmcoreinfo, &domain.name);
-    Ok(())
+    fn supported_backends(&self) -> &'static [BackendSelection] {
+        BACKENDS
+    }
+
+    fn supports_vmcoreinfo(&self) -> bool {
+        true
+    }
+
+    fn plan(&self, guest: &Guest, request: ConfigureRequest) -> Result<Box<dyn ConfigurationPlan>> {
+        let original = dump_xml(&guest.id)?;
+        let xml_plan = match request.action {
+            Action::Configure => {
+                let backend = request.backend.ok_or_else(|| {
+                    Error::DebugInfo("configure request is missing a backend".to_string())
+                })?;
+                let mut transports = Vec::with_capacity(2);
+                if backend.kd() {
+                    transports.push(DebugTransport::Kd);
+                }
+                if backend.gdb() {
+                    transports.push(DebugTransport::Gdb);
+                }
+                apply_transport_config(&original, &transports, KD_SOCKET, request.vmcoreinfo)?
+            }
+            Action::Remove => remove_debug_transports(&original),
+        };
+        let instructions = libvirt_instructions(&xml_plan.xml, request, &guest.id);
+        Ok(Box::new(LibvirtPlan {
+            domain: guest.id.clone(),
+            original,
+            planned: xml_plan,
+            request,
+            instructions,
+        }))
+    }
 }
 
-fn cancel_virsh_edit() -> Result<()> {
-    println!("cancelled");
-    Ok(())
+struct LibvirtPlan {
+    domain: String,
+    original: String,
+    planned: XmlPlan,
+    request: ConfigureRequest,
+    instructions: Instructions,
 }
 
-fn list_domains() -> Result<Vec<Domain>> {
+impl ConfigurationPlan for LibvirtPlan {
+    fn changes(&self) -> &[String] {
+        &self.planned.changes
+    }
+
+    fn instructions(&self) -> &Instructions {
+        &self.instructions
+    }
+
+    fn apply(&self) -> Result<ApplyResult> {
+        let backup = backup_file("libvirt", &self.domain, "xml", self.original.as_bytes())?;
+        let define_path = write_define_xml(&self.domain, &self.planned.xml)?;
+        let define_result = virsh(["define", define_path.to_string_lossy().as_ref()]);
+        let _ = fs::remove_file(&define_path);
+        define_result?;
+
+        let applied = dump_xml(&self.domain)?;
+        if let Err(error) = verify_applied_config(&applied, self.request) {
+            return Err(Error::DebugInfo(format!(
+                "{error}; original configuration is backed up at {}",
+                backup.display()
+            )));
+        }
+        Ok(ApplyResult { backup })
+    }
+}
+
+fn list_domains() -> Result<Vec<Guest>> {
     let names = virsh(["list", "--all", "--name"])?;
     let mut domains = Vec::new();
     for name in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
@@ -147,8 +150,10 @@ fn list_domains() -> Result<Vec<Domain>> {
             .unwrap_or("unknown")
             .trim()
             .to_string();
-        domains.push(Domain {
+        domains.push(Guest {
+            id: name.to_string(),
             name: name.to_string(),
+            stopped: state.eq_ignore_ascii_case("shut off"),
             state,
         });
     }
@@ -160,90 +165,37 @@ fn dump_xml(domain: &str) -> Result<String> {
 }
 
 fn virsh<const N: usize>(args: [&str; N]) -> Result<String> {
-    let output = Command::new("virsh").args(args).output().map_err(|err| {
+    let output = Command::new("virsh").args(args).output().map_err(|error| {
         Error::DebugInfo(format!(
-            "failed to run virsh: {err}; install libvirt clients or adjust PATH"
+            "failed to run virsh: {error}; install libvirt clients or adjust PATH"
         ))
     })?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(Error::DebugInfo(format!("virsh failed: {detail}")));
+        return Err(Error::DebugInfo(format!(
+            "virsh failed: {}",
+            command_detail(&output)
+        )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn prompt_select(prompt: &str, items: &[String]) -> Result<Option<usize>> {
-    let mut choices = items.to_vec();
-    choices.push("cancel".to_string());
-    let selected = Select::new()
-        .with_prompt(prompt)
-        .items(&choices)
-        .default(0)
-        .interact()
-        .map_err(prompt_error)?;
-    if selected == items.len() {
-        Ok(None)
+fn command_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
-        Ok(Some(selected))
+        stderr
     }
-}
-
-fn prompt_transports() -> Result<Option<Vec<VirshTransport>>> {
-    let items = vec![
-        format!(
-            "{} ({})",
-            VirshTransport::Kd.label(),
-            VirshTransport::Kd.description()
-        ),
-        format!(
-            "{} ({})",
-            VirshTransport::Gdb.label(),
-            VirshTransport::Gdb.description()
-        ),
-        format!(
-            "{} + {}",
-            VirshTransport::Kd.label(),
-            VirshTransport::Gdb.label()
-        ),
-    ];
-    match prompt_select("Debug transport", &items)? {
-        Some(0) => Ok(Some(vec![VirshTransport::Kd])),
-        Some(1) => Ok(Some(vec![VirshTransport::Gdb])),
-        Some(2) => Ok(Some(vec![VirshTransport::Kd, VirshTransport::Gdb])),
-        _ => Ok(None),
-    }
-}
-
-fn prompt_confirm(prompt: &str) -> Result<bool> {
-    Confirm::new()
-        .with_prompt(prompt)
-        .default(false)
-        .interact()
-        .map_err(prompt_error)
-}
-
-fn prompt_error(error: dialoguer::Error) -> Error {
-    Error::DebugInfo(format!("interactive prompt failed: {error}"))
-}
-
-fn backup_path(domain: &str) -> Result<PathBuf> {
-    let root = symbols::ntoseye_home().ok_or(Error::StorageNotFound)?;
-    let dir = root.join("virsh-backups");
-    fs::create_dir_all(&dir)?;
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| Error::DebugInfo(format!("system clock error: {err}")))?
-        .as_secs();
-    Ok(dir.join(format!("{}-{ts}.xml", sanitize_filename(domain))))
 }
 
 fn write_define_xml(domain: &str, xml: &str) -> Result<PathBuf> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| Error::DebugInfo(format!("system clock error: {error}")))?
+        .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "ntoseye-{}-{}.xml",
-        sanitize_filename(domain),
-        std::process::id()
+        "ntoseye-{}-{timestamp}.xml",
+        sanitize_filename(domain)
     ));
     fs::write(&path, xml)?;
     Ok(path)
@@ -261,59 +213,108 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-fn print_next_steps(
-    action: VirshAction,
-    transports: &[VirshTransport],
-    vmcoreinfo: bool,
-    domain: &str,
-) {
-    match action {
-        VirshAction::Configure => {
-            if transports.contains(&VirshTransport::Kd) {
-                println!();
-                println!("guest setup still required for KD:");
-                println!("  bcdedit /debug on");
-                println!("  bcdedit /dbgsettings serial debugport:1 baudrate:115200");
-                println!("  Restart-Computer");
+fn libvirt_instructions(xml: &str, request: ConfigureRequest, domain: &str) -> Instructions {
+    if request.action == Action::Remove {
+        return Instructions::default();
+    }
+    let backend = request.backend.expect("configure requests have a backend");
+    let mut instructions = Instructions::default();
+    if backend.kd() {
+        let debug_port = debug_port_for_socket(xml, KD_SOCKET).unwrap_or(1);
+        instructions.guest = vec![
+            "bcdedit /debug on".to_string(),
+            format!("bcdedit /dbgsettings serial debugport:{debug_port} baudrate:115200"),
+            "Restart-Computer".to_string(),
+        ];
+        instructions
+            .run
+            .push(ConfiguredTarget::kd(KD_SOCKET, debug_port, false).run_command());
+    }
+    if backend.gdb() {
+        instructions
+            .run
+            .push(ConfiguredTarget::gdb(DEFAULT_GDB_ADDR).run_command());
+    }
+    if request.vmcoreinfo {
+        instructions.notes.push(
+            "Install the virtio-win 'fwcfg' driver in the guest for crash dumps.".to_string(),
+        );
+        instructions.run.push(format!(
+            "virsh dump {} /tmp/win.dmp --memory-only --format=win-dmp",
+            shell_quote(domain)
+        ));
+        instructions
+            .run
+            .push("ntoseye --dump /tmp/win.dmp".to_string());
+    }
+    instructions
+}
+
+fn verify_applied_config(xml: &str, request: ConfigureRequest) -> Result<()> {
+    let has_kd = debug_port_for_socket(xml, KD_SOCKET).is_some();
+    let has_gdb = has_qemu_arg(xml, "-s") && has_qemu_arg(xml, "-S");
+    match request.action {
+        Action::Remove if has_kd || has_gdb => Err(Error::DebugInfo(
+            "libvirt did not remove every ntoseye transport".to_string(),
+        )),
+        Action::Remove => Ok(()),
+        Action::Configure => {
+            let backend = request.backend.expect("configure requests have a backend");
+            if has_kd != backend.kd() || has_gdb != backend.gdb() {
+                return Err(Error::DebugInfo(
+                    "libvirt did not retain the requested debug transports".to_string(),
+                ));
             }
-            if vmcoreinfo {
-                println!();
-                println!("guest setup still required for crash dumps:");
-                println!("  install the virtio-win 'fwcfg' driver (QEMU FWCfg Device)");
+            if request.vmcoreinfo && !xml.contains("<vmcoreinfo state=\"on\"") {
+                return Err(Error::DebugInfo(
+                    "libvirt did not retain vmcoreinfo".to_string(),
+                ));
             }
-            println!();
-            println!("run:");
-            if transports.contains(&VirshTransport::Kd) {
-                println!("  ntoseye");
-            }
-            if transports.contains(&VirshTransport::Gdb) {
-                println!("  ntoseye --backend gdb");
-            }
-            if vmcoreinfo {
-                println!();
-                println!("generate and open a dump:");
-                println!("  virsh dump {domain} /tmp/win.dmp --memory-only --format=win-dmp");
-                println!("  ntoseye --dump /tmp/win.dmp");
-            }
-        }
-        VirshAction::Remove => {
-            println!();
-            println!("run:");
-            println!("  ntoseye --backend memory");
+            Ok(())
         }
     }
 }
 
+fn inspect_xml(xml: &str) -> GuestInspection {
+    let mut targets = Vec::with_capacity(2);
+    if let Some(port) = debug_port_for_socket(xml, KD_SOCKET) {
+        targets.push(ConfiguredTarget::kd(KD_SOCKET, port, false));
+    }
+    if has_qemu_arg(xml, "-s") && has_qemu_arg(xml, "-S") {
+        targets.push(ConfiguredTarget::gdb(DEFAULT_GDB_ADDR));
+    }
+    GuestInspection { targets }
+}
+
+fn debug_port_for_socket(xml: &str, socket: &str) -> Option<usize> {
+    let mut cursor = 0;
+    while let Some((start, end)) = find_tag_block(xml, cursor, "serial") {
+        let serial = &xml[start..end];
+        if serial_source_path(serial).as_deref() == Some(socket) {
+            let (target_start, target_end) = find_tag_block(serial, 0, "target")?;
+            let port = tag_attr(&serial[target_start..target_end], "port")?;
+            return port.parse::<usize>().ok().map(|port| port + 1);
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn serial_source_path(serial: &str) -> Option<String> {
+    let (start, end) = find_tag_block(serial, 0, "source")?;
+    tag_attr(&serial[start..end], "path")
+}
+
 fn apply_transport_config(
     xml: &str,
-    transports: &[VirshTransport],
+    transports: &[DebugTransport],
     kd_socket: &str,
     vmcoreinfo: bool,
 ) -> Result<XmlPlan> {
     let mut changes = Vec::new();
     let mut out = xml.to_string();
 
-    if transports.contains(&VirshTransport::Gdb) {
+    if transports.contains(&DebugTransport::Gdb) {
         out = ensure_qemu_namespace(&out, &mut changes)?;
         out = ensure_qemu_args(&out, &["-s", "-S"], &mut changes)?;
     } else {
@@ -321,8 +322,8 @@ fn apply_transport_config(
         out = remove_empty_qemu_commandline(&out, &mut changes);
     }
 
-    if transports.contains(&VirshTransport::Kd) {
-        out = replace_first_serial_or_insert(&out, kd_socket, &mut changes)?;
+    if transports.contains(&DebugTransport::Kd) {
+        out = ensure_kd_serial(&out, kd_socket, &mut changes)?;
     } else {
         out = remove_ntoseye_kd_devices(&out, &mut changes);
     }
@@ -499,25 +500,27 @@ fn remove_empty_qemu_commandline(xml: &str, changes: &mut Vec<String>) -> String
     out
 }
 
-fn replace_first_serial_or_insert(
-    xml: &str,
-    socket: &str,
-    changes: &mut Vec<String>,
-) -> Result<String> {
-    let serial = kd_serial_xml("    ", socket);
-    if let Some((start, end)) = find_tag_block(xml, 0, "serial") {
-        let indent = line_indent(xml, start);
-        let replacement = kd_serial_xml(&indent, socket);
-        let mut out = String::with_capacity(xml.len() - (end - start) + replacement.len());
-        out.push_str(&xml[..start]);
-        out.push_str(&replacement);
-        out.push_str(&xml[end..]);
-        changes.push(format!(
-            "replace first serial device with KD socket {socket} (COM1)"
-        ));
-        return Ok(out);
+fn ensure_kd_serial(xml: &str, socket: &str, changes: &mut Vec<String>) -> Result<String> {
+    let mut used_ports = Vec::new();
+    let mut cursor = 0;
+    while let Some((start, end)) = find_tag_block(xml, cursor, "serial") {
+        let serial = &xml[start..end];
+        if serial_source_path(serial).as_deref() == Some(socket) {
+            return Ok(xml.to_string());
+        }
+        if let Some((target_start, target_end)) = find_tag_block(serial, 0, "target")
+            && let Some(port) = tag_attr(&serial[target_start..target_end], "port")
+                .and_then(|port| port.parse::<usize>().ok())
+        {
+            used_ports.push(port);
+        }
+        cursor = end;
     }
 
+    let port = (0..)
+        .find(|port| !used_ports.contains(port))
+        .expect("an unused serial port exists");
+    let serial = kd_serial_xml("    ", socket, port);
     let devices_close = xml
         .find("</devices>")
         .ok_or_else(|| Error::DebugInfo("domain XML missing </devices>".to_string()))?;
@@ -525,7 +528,10 @@ fn replace_first_serial_or_insert(
     out.push_str(&xml[..devices_close]);
     out.push_str(&serial);
     out.push_str(&xml[devices_close..]);
-    changes.push(format!("add KD serial socket {socket} (COM1)"));
+    changes.push(format!(
+        "add KD serial socket {socket} (COM{}) while preserving existing serial devices",
+        port + 1
+    ));
     Ok(out)
 }
 
@@ -571,11 +577,11 @@ fn device_uses_kd_socket(device: &str) -> bool {
     false
 }
 
-fn kd_serial_xml(indent: &str, socket: &str) -> String {
+fn kd_serial_xml(indent: &str, socket: &str, port: usize) -> String {
     format!(
         "{indent}<serial type=\"unix\">\n\
 {indent}  <source mode=\"bind\" path=\"{}\"/>\n\
-{indent}  <target type=\"isa-serial\" port=\"0\"/>\n\
+{indent}  <target type=\"isa-serial\" port=\"{port}\"/>\n\
 {indent}</serial>\n",
         escape_attr(socket)
     )
@@ -644,19 +650,62 @@ mod tests {
 "#;
 
     #[test]
-    fn kd_replaces_first_serial_with_unix_socket() {
+    fn kd_preserves_existing_serial_and_uses_next_port() {
         let plan =
-            apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
+            apply_transport_config(BASE_XML, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(plan.xml.contains(r#"<serial type="unix">"#));
         assert!(plan.xml.contains(r#"path="/tmp/ntoseye-kd.sock""#));
-        assert!(plan.xml.contains(r#"port="0""#));
-        assert!(!plan.xml.contains(r#"<serial type="pty">"#));
+        assert!(plan.xml.contains(r#"port="1""#));
+        assert!(plan.xml.contains(r#"<serial type="pty">"#));
+        assert_eq!(debug_port_for_socket(&plan.xml, KD_SOCKET), Some(2));
+    }
+
+    #[test]
+    fn kd_configuration_is_idempotent() {
+        let once =
+            apply_transport_config(BASE_XML, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
+        let twice =
+            apply_transport_config(&once.xml, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
+        assert_eq!(twice.xml, once.xml);
+        assert!(twice.changes.is_empty());
+    }
+
+    #[test]
+    fn inspection_recovers_configured_transports() {
+        let plan = apply_transport_config(
+            BASE_XML,
+            &[DebugTransport::Kd, DebugTransport::Gdb],
+            KD_SOCKET,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_xml(&plan.xml).targets,
+            [
+                ConfiguredTarget::kd(KD_SOCKET, 2, false),
+                ConfiguredTarget::gdb(DEFAULT_GDB_ADDR),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_commands_omit_default_backend_and_endpoints() {
+        let instructions = libvirt_instructions(
+            BASE_XML,
+            ConfigureRequest {
+                action: Action::Configure,
+                backend: Some(BackendSelection::KdAndGdb),
+                vmcoreinfo: false,
+            },
+            "windows",
+        );
+        assert_eq!(instructions.run, ["ntoseye", "ntoseye --backend gdb"]);
     }
 
     #[test]
     fn gdb_adds_qemu_namespace_and_args() {
         let plan =
-            apply_transport_config(BASE_XML, &[VirshTransport::Gdb], KD_SOCKET, false).unwrap();
+            apply_transport_config(BASE_XML, &[DebugTransport::Gdb], KD_SOCKET, false).unwrap();
         assert!(
             plan.xml
                 .contains(r#"xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0""#)
@@ -667,9 +716,10 @@ mod tests {
 
     #[test]
     fn remove_debug_transports_removes_ntoseye_debug_transport() {
-        let kd = apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
+        let kd = apply_transport_config(BASE_XML, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
         let memory = remove_debug_transports(&kd.xml);
         assert!(!memory.xml.contains("ntoseye-kd.sock"));
+        assert!(memory.xml.contains(r#"<serial type="pty">"#));
     }
 
     #[test]
@@ -726,8 +776,8 @@ mod tests {
     #[test]
     fn switching_to_kd_removes_gdbstub_args() {
         let gdb =
-            apply_transport_config(BASE_XML, &[VirshTransport::Gdb], KD_SOCKET, false).unwrap();
-        let kd = apply_transport_config(&gdb.xml, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
+            apply_transport_config(BASE_XML, &[DebugTransport::Gdb], KD_SOCKET, false).unwrap();
+        let kd = apply_transport_config(&gdb.xml, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(!kd.xml.contains(r#"<qemu:arg value="-s"/>"#));
         assert!(!kd.xml.contains(r#"<qemu:arg value="-S"/>"#));
     }
@@ -736,7 +786,7 @@ mod tests {
     fn selected_transports_can_enable_kd_and_gdb_together() {
         let plan = apply_transport_config(
             BASE_XML,
-            &[VirshTransport::Kd, VirshTransport::Gdb],
+            &[DebugTransport::Kd, DebugTransport::Gdb],
             KD_SOCKET,
             false,
         )
@@ -758,7 +808,7 @@ mod tests {
   </devices>
 </domain>
 "#;
-        let plan = apply_transport_config(xml, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+        let plan = apply_transport_config(xml, &[DebugTransport::Kd], KD_SOCKET, true).unwrap();
         assert!(
             plan.xml
                 .contains("    <vmcoreinfo state=\"on\"/>\n  </features>")
@@ -772,7 +822,7 @@ mod tests {
     #[test]
     fn vmcoreinfo_creates_features_block_when_missing() {
         let plan =
-            apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+            apply_transport_config(BASE_XML, &[DebugTransport::Kd], KD_SOCKET, true).unwrap();
         assert!(plan.xml.contains("<features>"));
         assert!(plan.xml.contains(r#"<vmcoreinfo state="on"/>"#));
     }
@@ -780,10 +830,10 @@ mod tests {
     #[test]
     fn vmcoreinfo_is_idempotent_and_never_removed() {
         let once =
-            apply_transport_config(BASE_XML, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+            apply_transport_config(BASE_XML, &[DebugTransport::Kd], KD_SOCKET, true).unwrap();
         // Re-run with vmcoreinfo enabled: no duplicate, no change recorded
         let twice =
-            apply_transport_config(&once.xml, &[VirshTransport::Kd], KD_SOCKET, true).unwrap();
+            apply_transport_config(&once.xml, &[DebugTransport::Kd], KD_SOCKET, true).unwrap();
         assert_eq!(twice.xml.matches("<vmcoreinfo").count(), 1);
         assert!(
             !twice
@@ -792,7 +842,7 @@ mod tests {
         );
         // Declining later leaves the existing feature alone
         let declined =
-            apply_transport_config(&once.xml, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
+            apply_transport_config(&once.xml, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(declined.xml.contains(r#"<vmcoreinfo state="on"/>"#));
     }
 
@@ -838,7 +888,7 @@ mod tests {
     #[test]
     fn replace_first_serial_inserts_when_missing() {
         let xml = r#"<domain><devices></devices></domain>"#;
-        let plan = apply_transport_config(xml, &[VirshTransport::Kd], KD_SOCKET, false).unwrap();
+        let plan = apply_transport_config(xml, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(plan.xml.contains(r#"<serial type="unix">"#));
         assert!(plan.xml.contains(r#"path="/tmp/ntoseye-kd.sock""#));
     }

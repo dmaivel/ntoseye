@@ -223,8 +223,8 @@ pub fn print_bugcheck_summary(debugger: &Target, info: Option<&BugcheckInfo>) {
     print_bugcheck_summary_from_memory(debugger);
 }
 
-/// Read and display `nt!KiBugCheckData` (BugCheckCode + 4 parameters). The
-/// guest is frozen mid-bugcheck, so this is readable over `/dev/kvm`.
+/// Read and display `nt!KiBugCheckData` (BugCheckCode + 4 parameters) through
+/// the live guest-memory view while the VM is frozen mid-bugcheck.
 pub fn print_bugcheck_summary_from_memory(debugger: &Target) {
     match resolve_current_bugcheck(debugger) {
         CurrentBugcheckResolution::Resolved(analysis) => print_bugcheck_analysis(&analysis),

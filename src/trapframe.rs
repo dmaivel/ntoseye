@@ -7,7 +7,6 @@
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::memory::AddressSpace;
 use crate::symbols::{TypeInfo, le_uint};
 use crate::target::{SavedThreadRegisters, Target};
 use crate::types::{Dtb, VirtAddr};
@@ -124,7 +123,7 @@ fn read_frame_bytes(
         .find_type_across_modules(dtb, type_name)
         .ok_or_else(|| Error::StructNotFound(type_name.to_string()))?;
     let mut buf = vec![0u8; layout.size];
-    AddressSpace::new(&debugger.phys, dtb).read_bytes(address, &mut buf)?;
+    debugger.address_space(dtb).read_bytes(address, &mut buf)?;
     Ok((layout, buf))
 }
 
@@ -189,7 +188,7 @@ pub fn decode_kswitch_frame_seed(
         .find_type_across_modules(dtb, KSWITCH_FRAME_TYPE)
         .ok_or_else(|| Error::StructNotFound(KSWITCH_FRAME_TYPE.to_string()))?;
     let mut buf = vec![0u8; layout.size];
-    AddressSpace::new(&debugger.phys, dtb).read_bytes(address, &mut buf)?;
+    debugger.address_space(dtb).read_bytes(address, &mut buf)?;
     decode_kswitch_frame(&layout, address, &buf)
 }
 

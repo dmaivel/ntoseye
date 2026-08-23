@@ -15,8 +15,9 @@ use crate::kd::api;
 use crate::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
 };
+use crate::kd::trace_enabled;
 use crate::kd::wire::{read_u16, read_u32, read_u64};
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 
 use super::{
     AMD64_DEBUG_CONTROL_SPACE_KSPECIAL, BUGCHECK_MANUALLY_INITIATED_CRASH,
@@ -169,7 +170,7 @@ pub fn poll_for_initial_break(
 
     let mut attempts = 0u32;
     let mut next_progress_at = Instant::now() + KD_INITIAL_PROGRESS_INTERVAL;
-    let result = loop {
+    loop {
         match initial_handshake_stimulus(attempts) {
             InitialHandshakeStimulus::BreakIn => framing.send_breakin()?,
             InitialHandshakeStimulus::Reset => {
@@ -180,7 +181,20 @@ pub fn poll_for_initial_break(
         attempts += 1;
 
         // Initial handshake: surface whatever state-change arrives first
-        match await_state_change(framing, None, true, None, None, None, None) {
+        // The architecture is not known yet; `surface_all` guarantees this
+        // path never sends an architecture-specific continue request.
+        match await_state_change(
+            framing,
+            AwaitStateOptions {
+                arch: Arch::Amd64,
+                saw_kd_refresh: None,
+                surface_all: true,
+                bugcheck: None,
+                bugcheck_capture: None,
+                deadline: None,
+                debug_log: None,
+            },
+        ) {
             Ok(stop) => break Ok(stop),
             Err(Error::Io(e))
                 if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
@@ -212,20 +226,29 @@ pub fn poll_for_initial_break(
             }
             Err(e) => break Err(e),
         }
-    };
-
-    let _ = framing.transport_mut().set_read_timeout(None);
-    result
+    }
 }
 
 /// Send one break-in byte and wait for the resulting state-change
 pub fn breakin_and_wait(
     framing: &mut KdFraming<UnixStream>,
+    arch: Arch,
     budget: Duration,
 ) -> Result<StateChange> {
     framing.send_breakin()?;
     framing.transport_mut().set_read_timeout(Some(budget))?;
-    let result = match await_state_change(framing, None, false, None, None, None, None) {
+    match await_state_change(
+        framing,
+        AwaitStateOptions {
+            arch,
+            saw_kd_refresh: None,
+            surface_all: false,
+            bugcheck: None,
+            bugcheck_capture: None,
+            deadline: None,
+            debug_log: None,
+        },
+    ) {
         Ok(stop) => Ok(stop),
         Err(Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
             Err(Error::Kd(format!(
@@ -234,28 +257,34 @@ pub fn breakin_and_wait(
             )))
         }
         Err(e) => Err(e),
-    };
-    let _ = framing.transport_mut().set_read_timeout(None);
-    result
+    }
 }
 
 pub fn is_temporary_io_error(kind: ErrorKind) -> bool {
     matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
+/// Run a KD request under `timeout`, then leave the socket with that timeout
+/// still set. The restore-to-blocking `setsockopt(SO_RCVTIMEO)` is
+/// deliberately NOT performed: on macOS, a second `SO_RCVTIMEO` setsockopt
+/// while the peer concurrently writes (which is inherent to KD — the kernel
+/// streams replies/prints) intermittently fails with EINVAL, and every
+/// subsequent operation sets its own timeout before reading anyway. Blocking
+/// waits set an explicit long timeout ([`blocking_read_timeout`]).
 pub fn with_framing_read_timeout_raw<R>(
     framing: &mut KdFraming<UnixStream>,
     timeout: Duration,
     f: impl FnOnce(&mut KdFraming<UnixStream>) -> Result<R>,
 ) -> Result<R> {
     framing.transport_mut().set_read_timeout(Some(timeout))?;
-    let result = f(framing);
-    let restore = framing.transport_mut().set_read_timeout(None);
-    match (result, restore) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err.into()),
-    }
+    f(framing)
+}
+
+/// Long-enough read timeout to behave like a blocking read (an hour; never
+/// fires in practice). Used where the KD protocol wants an unbounded wait
+/// (`wait_for_stop`) without the macOS-racy restore dance.
+pub const fn blocking_read_timeout() -> Duration {
+    Duration::from_secs(3600)
 }
 
 pub fn with_framing_read_timeout<R>(
@@ -300,19 +329,21 @@ pub fn is_transparent_state_change(new_state: u32) -> bool {
 }
 
 /// Acknowledge a non-exception wait-state-change (load-symbols / command-string)
-/// by sending a continue, so the kernel resumes past it. Preserves the framing's
-/// current read timeout (the pump runs with a short one)
+/// by sending a continue, so the kernel resumes past it. The request timeout is
+/// set for the exchange and left in place (restoring is macOS-racy; the next
+/// operation re-establishes its own timeout).
 pub fn continue_transparent_state_change(
     framing: &mut KdFraming<UnixStream>,
+    arch: Arch,
     stop: &StateChange,
 ) -> Result<()> {
-    let prev = framing.transport_mut().read_timeout().ok().flatten();
     framing
         .transport_mut()
         .set_read_timeout(Some(KD_REQUEST_TIMEOUT))?;
-    let result = continue_preserving_dr7(framing, stop.processor, api::DBG_CONTINUE, false);
-    let _ = framing.transport_mut().set_read_timeout(prev);
-    result
+    match arch {
+        Arch::Amd64 => continue_preserving_dr7(framing, stop.processor, api::DBG_CONTINUE, false),
+        Arch::Arm64 => api::continue_api2_arm64(framing, stop.processor, api::DBG_CONTINUE, false),
+    }
 }
 
 /// Read `KernelDr7` from the processor's `KSPECIAL_REGISTERS` and continue
@@ -342,6 +373,16 @@ fn continue_preserving_dr7(
     api::continue_api2(framing, processor, continue_status, trace, dr7)
 }
 
+pub struct AwaitStateOptions<'a> {
+    pub arch: Arch,
+    pub saw_kd_refresh: Option<&'a mut bool>,
+    pub surface_all: bool,
+    pub bugcheck: Option<&'a mut bool>,
+    pub bugcheck_capture: Option<&'a mut BugcheckCapture>,
+    pub deadline: Option<Instant>,
+    pub debug_log: Option<&'a DebugLog>,
+}
+
 /// Receive packets until a state-change we should surface arrives.
 ///
 /// - `surface_all`: return the first state-change of any kind (initial handshake)
@@ -362,13 +403,17 @@ fn continue_preserving_dr7(
 /// minutes after a reboot. `None` waits indefinitely for a surfaceable change.
 pub fn await_state_change(
     framing: &mut KdFraming<UnixStream>,
-    mut saw_kd_refresh: Option<&mut bool>,
-    surface_all: bool,
-    mut bugcheck: Option<&mut bool>,
-    mut bugcheck_capture: Option<&mut BugcheckCapture>,
-    deadline: Option<Instant>,
-    debug_log: Option<&DebugLog>,
+    options: AwaitStateOptions<'_>,
 ) -> Result<StateChange> {
+    let AwaitStateOptions {
+        arch,
+        mut saw_kd_refresh,
+        surface_all,
+        mut bugcheck,
+        mut bugcheck_capture,
+        deadline,
+        debug_log,
+    } = options;
     let mut target_reloaded = false;
     loop {
         if let Some(deadline) = deadline
@@ -379,6 +424,19 @@ pub fn await_state_change(
         let pkt = framing.recv_data()?;
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_CHANGE64 => {
+                if trace_enabled() {
+                    eprintln!("kd: state-change payload ({} bytes):", pkt.payload.len());
+                    for chunk in pkt.payload.chunks(16) {
+                        eprintln!(
+                            "    {}",
+                            chunk
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
+                }
                 let mut stop = parse_state_change(&pkt.payload)?;
                 target_reloaded |= framing.take_peer_reset_seen();
                 stop.target_reloaded = target_reloaded;
@@ -410,7 +468,7 @@ pub fn await_state_change(
                     stop.new_state,
                     stop.program_counter
                 );
-                continue_transparent_state_change(framing, &stop)?;
+                continue_transparent_state_change(framing, arch, &stop)?;
             }
             PACKET_TYPE_KD_DEBUG_IO => {
                 let detect = saw_kd_refresh.is_some() || bugcheck.is_some();
@@ -492,6 +550,7 @@ pub struct PumpHandle {
 /// a cloned socket fd, so they don't need the framing this thread holds
 pub fn run_pump(
     mut framing: KdFraming<UnixStream>,
+    arch: Arch,
     stop_tx: mpsc::Sender<std::result::Result<StateChange, String>>,
     shutdown: Arc<AtomicBool>,
     reported_stop: Arc<AtomicBool>,
@@ -521,12 +580,15 @@ pub fn run_pump(
         // WouldBlock branch below, where assists are sent, never runs).
         match await_state_change(
             &mut framing,
-            None,
-            false,
-            Some(&mut bugcheck),
-            Some(&mut bugcheck_capture),
-            Some(Instant::now() + PUMP_POLL),
-            Some(&debug_log),
+            AwaitStateOptions {
+                arch,
+                saw_kd_refresh: None,
+                surface_all: false,
+                bugcheck: Some(&mut bugcheck),
+                bugcheck_capture: Some(&mut bugcheck_capture),
+                deadline: Some(Instant::now() + PUMP_POLL),
+                debug_log: Some(&debug_log),
+            },
         ) {
             Ok(mut stop) => {
                 stop.assisted_breakin = assisted_breakin_pending;
@@ -581,6 +643,5 @@ pub fn run_pump(
             }
         }
     }
-    let _ = framing.transport_mut().set_read_timeout(None);
     framing
 }

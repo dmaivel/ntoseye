@@ -21,7 +21,7 @@ use crate::{
         LocalVariableLocation, ParsedType, ProcedureLocal, SourceLocation, SymbolCandidate,
         SymbolIndex, SymbolStore, TypeInfo,
     },
-    types::{Dtb, PageTableEntry, Value, VirtAddr},
+    types::{Arch, Dtb, PageTableEntry, Value, VirtAddr},
 };
 
 pub struct Target {
@@ -898,7 +898,7 @@ impl Target {
     }
 
     pub fn new() -> Result<Self> {
-        Self::with_phys(Arc::new(PhysMem::kvm()?))
+        Self::with_phys(Arc::new(PhysMem::live()?))
     }
 
     pub fn with_phys(phys: Arc<PhysMem>) -> Result<Self> {
@@ -943,7 +943,14 @@ impl Target {
             let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
         } else if let Some(ref modules) = triage_modules {
             let dtb = DTB_IDENTITY;
-            let _ = Guest::load_module_symbols(&phys, &symbols, modules.clone(), dtb, false);
+            let _ = Guest::load_module_symbols(
+                &phys,
+                &symbols,
+                modules.clone(),
+                dtb,
+                false,
+                Arch::Amd64,
+            );
         }
 
         let triage_fallback = if guest.is_none() {
@@ -1571,7 +1578,14 @@ impl Target {
 
         match self.guest.as_ref() {
             Some(guest) => guest.load_symbols_for_modules(&self.phys, &self.symbols, modules, dtb),
-            None => Guest::load_module_symbols(&self.phys, &self.symbols, modules, dtb, false),
+            None => Guest::load_module_symbols(
+                &self.phys,
+                &self.symbols,
+                modules,
+                dtb,
+                false,
+                self.arch(),
+            ),
         }
     }
 
@@ -1590,7 +1604,30 @@ impl Target {
     /// Memory view for the active inspection address space. An explicit process
     /// attach wins; otherwise this follows the halted thread's CR3.
     pub fn context_memory(&self) -> AddressSpace<'_, PhysMem> {
-        AddressSpace::new(&self.phys, self.current_dtb())
+        self.address_space(self.current_dtb())
+    }
+
+    /// Guest architecture (AMD64 until the kernel is discovered).
+    pub fn arch(&self) -> Arch {
+        self.guest
+            .as_ref()
+            .map(|g| g.ntoskrnl.arch())
+            .unwrap_or(Arch::Amd64)
+    }
+
+    /// An address space rooted at `dtb` in the resolved guest architecture. On
+    /// ARM64 the kernel root (TTBR1) is threaded in so kernel-VA reads work
+    /// from any space; on AMD64 one CR3 covers both halves.
+    pub fn address_space(&self, dtb: Dtb) -> AddressSpace<'_, PhysMem> {
+        match self.arch() {
+            Arch::Amd64 => AddressSpace::new(&self.phys, dtb),
+            Arch::Arm64 => AddressSpace::new_arm64(&self.phys, dtb, self.kernel_dtb()),
+        }
+    }
+
+    /// Kernel-root address space (reads kernel VAs on both arches).
+    pub fn kernel_address_space(&self) -> AddressSpace<'_, PhysMem> {
+        self.address_space(self.kernel_dtb())
     }
 
     /// Symbol address space for an address in the active inspection context.
@@ -3827,7 +3864,7 @@ impl Target {
         process: &ProcessInfo,
     ) -> Result<Vec<MemoryRegionInfo>> {
         let guest = self.guest()?;
-        let memory = AddressSpace::new(&self.phys, process.dtb);
+        let memory = self.address_space(process.dtb);
         let types = guest.ntoskrnl.types_in(process.dtb);
         let eprocess_layout = guest.ntoskrnl.types().layout("_EPROCESS")?;
         let vad_root_base = process.eprocess_va + eprocess_layout.field_offset("VadRoot")?;
@@ -3877,7 +3914,7 @@ impl Target {
     }
 
     fn read_vad_root(&self, dtb: Dtb, vad_root_base: VirtAddr) -> Result<VirtAddr> {
-        let memory = AddressSpace::new(&self.phys, dtb);
+        let memory = self.address_space(dtb);
         let types = self.guest()?.ntoskrnl.types_in(dtb);
 
         if let Ok(tree_layout) = types.layout("_RTL_AVL_TREE")

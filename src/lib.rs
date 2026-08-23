@@ -1,5 +1,5 @@
-#[cfg(not(target_os = "linux"))]
-compile_error!("This application only runs on Linux hosts.");
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("This application only runs on Linux and macOS hosts.");
 
 pub const DEFAULT_GDB_ADDR: &str = "127.0.0.1:1234";
 pub const DEFAULT_KD_SOCKET: &str = "/tmp/ntoseye-kd.sock";
@@ -23,6 +23,8 @@ pub mod backend;
 pub mod bugchecks;
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "cli")]
+pub mod configure;
 pub mod dbg_backend;
 pub mod debugger_data;
 pub mod diagnostics;
@@ -53,5 +55,3 @@ pub mod ui;
 pub mod unwind;
 #[cfg(any(feature = "mcp", feature = "python"))]
 pub mod view;
-#[cfg(feature = "cli")]
-pub mod virsh;

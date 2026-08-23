@@ -85,6 +85,32 @@ pub type PhysAddr = u64;
 
 pub type Dtb = PhysAddr;
 
+/// Guest CPU architecture. Determines page-table descriptor interpretation and
+/// register-file layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Arch {
+    #[default]
+    Amd64,
+    Arm64,
+}
+
+impl Arch {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Amd64 => "AMD64",
+            Self::Arm64 => "ARM64",
+        }
+    }
+
+    pub fn from_machine_type(machine: u16) -> Option<Self> {
+        match machine {
+            0x8664 => Some(Self::Amd64),
+            0xaa64 => Some(Self::Arm64),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
 pub struct PageTableEntry(pub u64);
 
@@ -188,6 +214,61 @@ impl PageTableEntry {
             if self.0 & (1 << 63) != 0 { '-' } else { 'E' }, // NoExecute (inverted)
             if self.0 & 1 != 0 { 'V' } else { '-' }, // Valid
         )
+    }
+
+    // --- AArch64 stage-1 descriptor interpretation (4 KiB granule) ---
+    //
+    // bits[1:0]: 0b00 invalid, 0b01 block (L0-L2), 0b11 table (L0-L2) /
+    // page (L3). Leaf descriptors carry AP[2:1], PXN, and UXN; table
+    // descriptors carry the hierarchical APTable, PXNTable, and UXNTable
+    // restrictions. Output address bits [47:12] support a 48-bit PA space.
+    pub const fn arm64_is_valid(self) -> bool {
+        self.0 & 0b11 != 0
+    }
+
+    pub const fn arm64_is_block(self) -> bool {
+        self.0 & 0b11 == 0b01
+    }
+
+    /// Output address bits [47:12] (48-bit PA space), kept in place.
+    pub const fn arm64_page_frame(self) -> u64 {
+        self.0 & 0x0000_FFFF_FFFF_F000
+    }
+
+    pub const fn arm64_is_user(self) -> bool {
+        self.0 & (1 << 7) != 0
+    }
+
+    /// Privileged execute-never (PXN, bit 53) on a block/page descriptor.
+    pub const fn arm64_is_pxn(self) -> bool {
+        self.0 & (1 << 53) != 0
+    }
+
+    /// Unprivileged execute-never (UXN, bit 54) on a block/page descriptor.
+    pub const fn arm64_is_uxn(self) -> bool {
+        self.0 & (1 << 54) != 0
+    }
+
+    pub const fn arm64_is_writable(self) -> bool {
+        self.0 & (1 << 6) == 0
+    }
+
+    /// APTable[0] (bit 61) forbids EL0 access through a child table.
+    pub const fn arm64_table_allows_user(self) -> bool {
+        self.0 & (1 << 61) == 0
+    }
+
+    /// APTable[1] (bit 62) makes child mappings read-only.
+    pub const fn arm64_table_allows_write(self) -> bool {
+        self.0 & (1 << 62) == 0
+    }
+
+    pub const fn arm64_table_is_pxn(self) -> bool {
+        self.0 & (1 << 59) != 0
+    }
+
+    pub const fn arm64_table_is_uxn(self) -> bool {
+        self.0 & (1 << 60) != 0
     }
 }
 

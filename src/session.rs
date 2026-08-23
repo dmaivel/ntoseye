@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Mnemonic};
+use iced_x86::{Code, Decoder, DecoderOptions, Mnemonic};
 use single_instance::SingleInstance;
 
 use std::sync::Arc;
@@ -14,15 +14,15 @@ use crate::dbg_backend::{
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, LastEvent, StopEvent,
     WatchpointAccess,
 };
-use crate::disasm::{DisasmRow, decode_rows, disasm_formatter};
+use crate::disasm::{DisasmRow, decode_rows, decode_rows_arm64, disasm_formatter};
 use crate::error::{Error, Result};
 use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig};
 use crate::gdb::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, RegisterMap};
 use crate::kd::trace_enabled;
-use crate::memory::{AddressSpace, DTB_IDENTITY};
+use crate::memory::DTB_IDENTITY;
 use crate::phys::PhysMem;
 use crate::target::{ReloadReport, Target, ThreadInfo};
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     StackTrace, ThreadStackTrace, build_parked_thread_stack, build_stacktrace, preferred_code_dtb,
     resolve_thread_trace_context,
@@ -159,6 +159,15 @@ pub enum StepKind {
     Single,
     /// Run to this address (the return site of a `call`, or a caller frame).
     RunTo(VirtAddr),
+}
+
+/// Architecture-neutral summary of the instruction at the program counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurrentInstruction {
+    /// Whether the instruction is a call (`call` on AMD64, `bl`/`blr` on ARM64).
+    pub is_call: bool,
+    /// Address of the following instruction.
+    pub next_ip: u64,
 }
 
 /// How a stop landed relative to our breakpoints, decided by
@@ -379,6 +388,9 @@ impl Session {
         let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
         target.refresh_debugger_data(debugger_data_hint);
         backend.initialize_from_target(&target);
+        // ARM64 register snapshots expose TTBR1 via the synthetic `cr3` slot;
+        // hand the resolved kernel root to the backend so it can fill it.
+        backend.set_kernel_dtb(target.kernel_dtb());
         let register_map = backend.register_map().clone();
 
         // Seed the selected thread from the backend when it exposes register
@@ -544,32 +556,49 @@ impl Session {
         update_target_context_from_registers(&mut self.target, &self.register_map, registers);
     }
 
-    /// Decode the instruction at the current thread's RIP, masking our own
-    /// breakpoint `int3` bytes and reading through the thread's *preferred code
-    /// DTB* (so a user-mode RIP decodes from the process address space, not the
-    /// kernel's). Selects the current thread first; the VM must be halted.
-    pub fn current_instruction(&mut self) -> Result<Instruction> {
+    /// Decode the instruction at the current thread's program counter, masking
+    /// any software-breakpoint patch and reading through the thread's preferred
+    /// code DTB. Selects the current thread first; the VM must be halted.
+    pub fn current_instruction(&mut self) -> Result<CurrentInstruction> {
         self.require_live_register_context()?;
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
-        let rip = self.register_map.read_u64("rip", &regs)?;
+        let pc = self.register_map.read_u64("rip", &regs)?;
         let cr3 = self.register_map.read_u64("cr3", &regs).unwrap_or(0);
         let trace = resolve_thread_trace_context(&self.target, cr3);
-        let code_dtb = preferred_code_dtb(&trace, rip);
-        let memory = AddressSpace::new(&self.target.phys, code_dtb);
+        let code_dtb = preferred_code_dtb(&trace, pc);
+        let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
-        memory.read_bytes(VirtAddr(rip), &mut bytes)?;
+        memory.read_bytes(VirtAddr(pc), &mut bytes)?;
         self.breakpoints
-            .mask_breakpoint_bytes(VirtAddr(rip), &mut bytes, trace.active_dtb);
+            .mask_breakpoint_bytes(VirtAddr(pc), &mut bytes, trace.active_dtb);
 
-        let mut decoder = Decoder::with_ip(64, &bytes, rip, DecoderOptions::NONE);
+        if self.target.arch() == Arch::Arm64 {
+            let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let Ok(instruction) = bad64::decode(word, pc) else {
+                return Err(Error::DebugInfo(format!(
+                    "failed to decode instruction at {pc:#x}"
+                )));
+            };
+            let mnem = instruction.op().mnem();
+            // `bl`/`blr` are the call forms; AArch64 instructions are 4 bytes.
+            return Ok(CurrentInstruction {
+                is_call: mnem == "bl" || mnem == "blr",
+                next_ip: pc + 4,
+            });
+        }
+
+        let mut decoder = Decoder::with_ip(64, &bytes, pc, DecoderOptions::NONE);
         let instruction = decoder.decode();
         if instruction.code() == Code::INVALID {
             return Err(Error::DebugInfo(format!(
-                "failed to decode instruction at {rip:#x}"
+                "failed to decode instruction at {pc:#x}"
             )));
         }
-        Ok(instruction)
+        Ok(CurrentInstruction {
+            is_call: instruction.mnemonic() == Mnemonic::Call,
+            next_ip: instruction.next_ip(),
+        })
     }
 
     /// Compute the step-over plan for the current instruction: run to the
@@ -577,8 +606,8 @@ impl Session {
     /// decision used by the REPL `p` and [`Self::step_over`].
     pub fn step_over_target(&mut self) -> Result<StepKind> {
         let instruction = self.current_instruction()?;
-        if instruction.mnemonic() == Mnemonic::Call {
-            Ok(StepKind::RunTo(VirtAddr(instruction.next_ip())))
+        if instruction.is_call {
+            Ok(StepKind::RunTo(VirtAddr(instruction.next_ip)))
         } else {
             Ok(StepKind::Single)
         }
@@ -1176,8 +1205,13 @@ impl Session {
         let process = self.target.current_process()?;
         let dtb = process.dtb();
 
-        // x86-64 instructions are at most 15 bytes; over-read so `count` decode.
-        let mut buf = vec![0u8; count * 16];
+        // x86-64 instructions are at most 15 bytes; ARM64 is fixed 4 bytes.
+        // Over-read so `count` decode.
+        let overread = match self.target.arch() {
+            Arch::Amd64 => count * 16,
+            Arch::Arm64 => count * 4,
+        };
+        let mut buf = vec![0u8; overread];
         process.memory().read_bytes(addr, &mut buf)?;
         self.breakpoints.mask_breakpoint_bytes(addr, &mut buf, dtb);
 
@@ -1187,14 +1221,19 @@ impl Session {
                 .format_closest_symbol_for_address(dtb, VirtAddr(target))
                 .unwrap_or_default()
         };
-        let mut formatter = disasm_formatter();
-        Ok(decode_rows(
-            &buf,
-            addr.0,
-            Some(count),
-            &mut formatter,
-            resolve,
-        ))
+        match self.target.arch() {
+            Arch::Amd64 => {
+                let mut formatter = disasm_formatter();
+                Ok(decode_rows(
+                    &buf,
+                    addr.0,
+                    Some(count),
+                    &mut formatter,
+                    resolve,
+                ))
+            }
+            Arch::Arm64 => Ok(decode_rows_arm64(&buf, addr.0, Some(count), resolve)),
+        }
     }
 
     /// Walk the currently selected inspection context's call stack, returning
@@ -1829,6 +1868,13 @@ struct InstanceGuard(#[allow(dead_code)] SingleInstance);
 fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
     let canonical = canonicalize_target(target);
     let key = format!("ntoseye-{:016x}", fnv1a_64(canonical.as_bytes()));
+    // macOS: the single-instance crate treats the name as a filesystem path
+    // and creates the flock file in the current directory, littering wherever
+    // ntoseye was launched from. Anchor it in the OS temp dir. Linux uses an
+    // abstract unix socket and Windows a named mutex (no file on disk), so
+    // only macOS needs the path.
+    #[cfg(target_os = "macos")]
+    let key = std::env::temp_dir().join(&key).display().to_string();
     let instance = SingleInstance::new(&key).map_err(|err| {
         Error::DebugInfo(format!("failed to create single-instance guard: {err:?}"))
     })?;
@@ -2197,7 +2243,7 @@ pub fn rewind_threads_off_breakpoints(
         };
         let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
         let cr3 = register_map.read_u64("cr3", &regs).unwrap_or(0);
-        let Some(prev) = rip.checked_sub(1) else {
+        let Some(prev) = rip.checked_sub(register_map.breakpoint_step_size() as u64) else {
             continue;
         };
         if !matches!(

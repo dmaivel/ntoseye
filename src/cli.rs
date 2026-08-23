@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::mcp;
 use crate::resolve_target;
 use crate::{
+    configure,
     dbg_backend::DebugBackend,
     diagnostics,
     dmp::DmpBackend,
@@ -16,7 +17,7 @@ use crate::{
     memory_backend::MemoryBackend,
     phys::PhysMem,
     repl::{start_plain_repl, start_repl},
-    session, symbols, virsh,
+    session, symbols,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,7 +41,8 @@ impl FromArgValue for BackendKind {
 }
 
 #[derive(FromArgs)]
-/// Windows kernel debugger for Linux hosts running Windows under KVM/QEMU
+/// Windows kernel debugger for Linux (KVM/QEMU, VMware) and macOS (UTM) hosts
+/// running Windows — WinDbg for Linux and macOS
 struct Args {
     /// print version information
     #[argh(switch, short = 'v', long = "version")]
@@ -64,11 +66,11 @@ struct Args {
     #[argh(switch, long = "kd-instructions")]
     kd_instructions: bool,
 
-    /// debugger backend: 'kd' (Windows KD over serial pipe, default), 'gdb' (QEMU gdbstub), or 'memory' (passive /dev/kvm introspection)
+    /// debugger backend: 'kd' (Windows KD over serial, default), 'gdb' (QEMU GDB stub), or 'memory' (passive live-VM introspection)
     #[argh(option, short = 'b', long = "backend", default = "BackendKind::Kd")]
     backend: BackendKind,
 
-    /// backend connection target. Defaults: '127.0.0.1:1234' for gdb, '/tmp/ntoseye-kd.sock' for kd; unused by memory.
+    /// backend target: GDB address or KD socket path; unused by memory
     #[argh(option, long = "connect")]
     connect: Option<String>,
 
@@ -86,7 +88,8 @@ struct Args {
 #[derive(FromArgs)]
 #[argh(subcommand)]
 enum Command {
-    Virsh(VirshCommand),
+    Configure(ConfigureCommand),
+    Status(StatusCommand),
     #[cfg(feature = "mcp")]
     Mcp(McpCommand),
 }
@@ -119,9 +122,14 @@ struct McpCommand {
 }
 
 #[derive(FromArgs)]
-#[argh(subcommand, name = "virsh")]
-/// interactively edit libvirt XML for ntoseye debug backends
-struct VirshCommand {}
+#[argh(subcommand, name = "configure")]
+/// interactively configure a supported hypervisor for ntoseye
+struct ConfigureCommand {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "status")]
+/// inspect configured hypervisor transports and recover launch commands
+struct StatusCommand {}
 
 static GDBSTUB_INSTRUCTIONS: &str = "The gdb backend talks to QEMU's gdbstub instead of Windows KD.
 It does not require Windows debug mode, but it loses Windows-native
@@ -207,7 +215,20 @@ ntoseye --connect /tmp/ntoseye-kd.sock
 ntoseye waits 8 seconds for the initial KD handshake by default.
 For unusually slow guests, override it with:
 
-NTOSEYE_KD_TIMEOUT=20 ntoseye";
+NTOSEYE_KD_TIMEOUT=20 ntoseye
+
+macOS (UTM): UTM sandboxes QEMU (even the unsigned build), so the
+socket must live inside UTM's QEMUHelper container instead of /tmp.
+In the VM settings, add to 'Arguments (QEMU)':
+
+-chardev socket,id=kd,path=/Users/YOU/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock,server=on,wait=off -serial chardev:kd
+
+then connect to that path as root:
+
+sudo ntoseye --backend kd --connect \"$HOME/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock\"
+
+Windows ARM64 is supported (machine 0xAA64). Secure Boot must be
+disabled for bcdedit /debug on to work.";
 
 pub fn main() {
     if let Err(e) = run() {
@@ -261,7 +282,8 @@ fn run() -> Result<()> {
 
     if let Some(command) = args.command {
         return match command {
-            Command::Virsh(_) => virsh::run_interactive(),
+            Command::Configure(_) => configure::run_interactive(),
+            Command::Status(_) => configure::print_status(),
             #[cfg(feature = "mcp")]
             Command::Mcp(mcp_args) => {
                 let backend = match args.backend {
@@ -309,7 +331,7 @@ fn run() -> Result<()> {
         BackendKind::Memory => "memory",
     };
     let target = resolve_target(backend_str, args.connect.as_deref());
-    let phys = Arc::new(PhysMem::kvm()?);
+    let phys = Arc::new(PhysMem::live()?);
     let mut ctx = session::Session::connect(
         phys,
         target.as_deref(),

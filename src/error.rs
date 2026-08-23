@@ -10,6 +10,7 @@ use crate::types::{PhysAddr, VirtAddr};
 #[derive(Debug, Error)]
 pub enum Error {
     // Handle crate errors
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Nix(#[from] nix::Error),
 
@@ -43,9 +44,11 @@ pub enum Error {
 
     #[error("KD protocol failure: {0}")]
     Kd(String),
-
     #[error("KD protocol failure: kernel returned NTSTATUS {ntstatus:#x} for api {api:#x}")]
     KdStatus { ntstatus: u32, api: u32 },
+
+    #[error("breakpoint: {0}")]
+    Breakpoint(String),
 
     #[error("Register '{0}' not found")]
     RegisterNotFound(String),
@@ -90,7 +93,7 @@ pub enum Error {
         candidates: Vec<String>,
     },
 
-    #[error("Unsupported target architecture: {0}; ntoseye supports AMD64 targets only")]
+    #[error("Unsupported target architecture: {0}")]
     UnsupportedArchitecture(String),
 
     #[error("No symbol found near {0:x}")]
@@ -123,17 +126,26 @@ pub enum Error {
     #[error("Process image not found")]
     MissingImage,
 
-    #[error("No memory regions found in VM process (QEMU/KVM or vmware-vmx)")]
-    NoKvmRegions,
+    #[error("no usable guest RAM mapping found in the VM process")]
+    NoVmMemoryRegion,
 
     #[error(
-        "VM process not found\n  KVM (QEMU): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open — is the VM powered on?"
+        "VM process not found\n  KVM (QEMU/Linux): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open — is the VM powered on?\n  macOS (UTM): no qemu-aarch64-softmmu process found — is the VM powered on?"
     )]
-    KvmNotFound,
+    VmNotFound,
+
+    #[error(
+        "permission denied accessing VM process (PID {pid}): {detail}\n\
+         macOS restricts task_for_pid to root or the com.apple.security.cs.debugger entitlement.\n\
+         UTM's QEMU is a normal (sandboxed) third-party process, not SIP-protected, so run ntoseye as root:\n\
+         sudo ntoseye ...\n\
+         (or sign ntoseye with the debugger entitlement and approve it in System Settings > Privacy & Security > Developer Tools)"
+    )]
+    TaskForPidDenied { pid: i32, detail: String },
 
     #[error(
         "permission denied reading from VM process (PID {pid}).\n\
-         /proc/sys/kernel/yama/ptrace_scope is currently {scope}. to allow attaching, run:\n    \
+         /proc/sys/kernel/yama/ptrace_scope is currently {scope}. To allow attaching, run:\n    \
              echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope\n\
          (or run ntoseye as root)"
     )]

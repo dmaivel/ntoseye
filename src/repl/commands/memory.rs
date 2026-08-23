@@ -6,7 +6,7 @@ use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::symbols::{FieldValue, ParsedType};
-use crate::types::{Value, VirtAddr};
+use crate::types::{Arch, Value, VirtAddr};
 use crate::ui;
 use crate::unwind::{
     format_symbol, function_range, resolve_thread_trace_context, try_format_symbol,
@@ -402,9 +402,13 @@ impl ReplState<'_> {
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
 
-        // TODO dont hardcode 64-bit for WOW64 process? / support other formats?
-        let mut formatter = disasm_formatter();
-        let rows = decode_rows(&bytes, start_addr.0, None, &mut formatter, resolve);
+        let rows = match self.ctx.target.arch() {
+            Arch::Amd64 => {
+                let mut formatter = disasm_formatter();
+                decode_rows(&bytes, start_addr.0, None, &mut formatter, resolve)
+            }
+            Arch::Arm64 => decode_rows_arm64(&bytes, start_addr.0, None, resolve),
+        };
         render_rows(&rows, |_| None);
         println!();
 
@@ -424,10 +428,7 @@ impl ReplState<'_> {
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let Some((start, end)) = function_range(&self.ctx.target, &trace, address.0) else {
-            error!(
-                "no x64 runtime-function entry contains {}",
-                ui::addr(address.0)
-            );
+            error!("no runtime-function entry contains {}", ui::addr(address.0));
             return Ok(());
         };
         let Some(len) = end
@@ -451,8 +452,13 @@ impl ReplState<'_> {
             return Ok(());
         }
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
-        let mut formatter = disasm_formatter();
-        let rows = decode_rows(&bytes, start, None, &mut formatter, resolve);
+        let rows = match self.ctx.target.arch() {
+            Arch::Amd64 => {
+                let mut formatter = disasm_formatter();
+                decode_rows(&bytes, start, None, &mut formatter, resolve)
+            }
+            Arch::Arm64 => decode_rows_arm64(&bytes, start, None, resolve),
+        };
         render_rows(&rows, |_| None);
         println!();
 

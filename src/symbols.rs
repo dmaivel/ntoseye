@@ -3,7 +3,7 @@ use crate::{
     error::{Error, Result},
     guest::{ModuleInfo, WinObject},
     memory,
-    types::{Dtb, PhysAddr, VirtAddr},
+    types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -292,7 +292,14 @@ fn migrate_legacy_home(legacy: &Path, home: &Path) -> std::io::Result<Option<(Pa
 fn user_home_dir() -> Option<PathBuf> {
     std::env::var("SUDO_USER")
         .ok()
-        .map(|user| PathBuf::from(format!("/home/{user}")))
+        .filter(|user| !user.is_empty())
+        .map(|user| {
+            if cfg!(target_os = "macos") {
+                PathBuf::from(format!("/Users/{user}"))
+            } else {
+                PathBuf::from(format!("/home/{user}"))
+            }
+        })
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }
 
@@ -1986,12 +1993,11 @@ impl SymbolStore {
         path.rsplit(['\\', '/']).next().unwrap_or(path)
     }
 
-    // TODO (everywhere) use MemoryOps, not KvmHandle...
-    // TODO (everywhere) propagate errors with format!
-    // NOTE dont check for more than 1 CV entry, there shouldn't be more than 1
     pub fn load_from_binary(&self, object: &mut WinObject, name: &str) -> Result<Option<u128>> {
         let view = object.view().ok_or(Error::ViewFailed)?;
-        if name.eq_ignore_ascii_case("ntoskrnl.exe") && view.file_header().Machine != 0x8664 {
+        if name.eq_ignore_ascii_case("ntoskrnl.exe")
+            && !matches!(view.file_header().Machine, 0x8664 | 0xaa64)
+        {
             return Err(Error::UnsupportedArchitecture(format!(
                 "kernel image {} (machine {:#06x})",
                 name,
@@ -2079,8 +2085,14 @@ impl SymbolStore {
         dtb: Dtb,
         module_name: &str,
         base_address: VirtAddr,
+        arch: Arch,
     ) -> Result<ModuleSymbolDiscovery> {
-        let addr_space = memory::AddressSpace::new(backend, dtb);
+        // `dtb` is the root for the module's own VA half: the kernel root for
+        // kernel modules and the process root for user modules.
+        let addr_space = match arch {
+            Arch::Amd64 => memory::AddressSpace::new(backend, dtb),
+            Arch::Arm64 => memory::AddressSpace::new_arm64(backend, dtb, dtb),
+        };
         match self.extract_download_job_from_memory(&addr_space, base_address) {
             Ok(Some((job, guid))) => Ok(ModuleSymbolDiscovery::Ready {
                 job,

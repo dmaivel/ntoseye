@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """List running processes and loaded kernel modules.
 
-Uses the passive `memory` backend (read-only /dev/kvm introspection), so it
-never pauses or interferes with the guest.
+Uses the passive `memory` backend for read-only live-VM introspection, so it
+never pauses or otherwise interferes with the guest.
 
     python3 list_processes.py
     python3 list_processes.py --backend gdb --connect 127.0.0.1:1234

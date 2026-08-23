@@ -40,7 +40,7 @@ use crate::{
     symbols::{SourceLocation, SymbolStore},
     target::{SavedThreadRegisters, Target, ThreadInfo},
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
-    types::{Dtb, VirtAddr},
+    types::{Arch, Dtb, VirtAddr},
 };
 
 const CR3_PAGE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -290,38 +290,94 @@ fn frame_source_location(
         .symbols
         .source_location(module.dtb, VirtAddr(address))
 }
-/// Resolve the x64 runtime-function entry containing `address`.
+fn image_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+/// Decode an ARM64 `.pdata` entry's function length. Packed entries carry an
+/// 11-bit instruction count in the entry itself; unpacked entries point to an
+/// `.xdata` header whose low 18 bits carry the instruction count.
+fn arm64_function_length(image: &PeImage, unwind_data: u32) -> Option<u32> {
+    let instructions = match unwind_data & 0b11 {
+        0 => {
+            let xdata_rva = (unwind_data & !0b11) as usize;
+            let header = image_u32(image.present_slice(xdata_rva, 4)?, 0)?;
+            header & 0x3ffff
+        }
+        1 | 2 => (unwind_data >> 2) & 0x7ff,
+        _ => return None,
+    };
+    (instructions != 0).then(|| instructions * 4)
+}
+
+/// Find the ARM64 runtime-function entry containing `rva`. ARM64 `.pdata`
+/// records are sorted 8-byte `{BeginAddress, UnwindData}` pairs; unlike AMD64,
+/// the end address must be decoded from packed unwind data or the `.xdata`
+/// header.
+fn lookup_arm64_runtime_function(image: &PeImage, pdata: &[u8], rva: u32) -> Option<(u32, u32)> {
+    let count = pdata.len() / 8;
+    let mut low = 0usize;
+    let mut high = count;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let begin = image_u32(pdata, mid * 8)?;
+        if begin <= rva {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    let index = low.checked_sub(1)?;
+    let begin = image_u32(pdata, index * 8)?;
+    let unwind_data = image_u32(pdata, index * 8 + 4)?;
+    let end = begin.checked_add(arm64_function_length(image, unwind_data)?)?;
+    (rva >= begin && rva < end).then_some((begin, end))
+}
+
+/// Resolve the runtime-function entry containing `address`.
 ///
 /// PE exception metadata is the authoritative function boundary for `uf`: it
 /// remains correct when public symbols are sparse and avoids disassembling into
-/// the next function. A paged-out `.pdata` table is retried against the matched
-/// on-disk image through the same cache path used by the stack unwinder.
+/// the next function. A paged-out `.pdata` or `.xdata` range is retried against
+/// the matched on-disk image through the stack unwinder's image cache.
 pub fn function_range(
     debugger: &Target,
     trace: &ThreadTraceContext,
     address: u64,
 ) -> Option<(u64, u64)> {
-    fn range(image: &PeImage, base: u64, address: u64) -> Option<(u64, u64)> {
+    fn range(image: &PeImage, base: u64, address: u64, arch: Arch) -> Option<(u64, u64)> {
         let view = PeView::from_bytes(image.as_slice()).ok()?;
-        let functions = view.exception().ok()?;
         let rva = u32::try_from(address.checked_sub(base)?).ok()?;
-        let function = lookup_runtime_function(functions.image(), rva)?;
-        Some((
-            base + u64::from(function.BeginAddress),
-            base + u64::from(function.EndAddress),
-        ))
+        let (begin, end) = match arch {
+            Arch::Amd64 => {
+                let functions = view.exception().ok()?;
+                let function = lookup_runtime_function(functions.image(), rva)?;
+                (function.BeginAddress, function.EndAddress)
+            }
+            Arch::Arm64 => {
+                let directory = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_EXCEPTION)?;
+                let pdata = image
+                    .present_slice(directory.VirtualAddress as usize, directory.Size as usize)?;
+                lookup_arm64_runtime_function(image, pdata, rva)?
+            }
+        };
+        Some((base + u64::from(begin), base + u64::from(end)))
     }
 
     let mut tracer = StackTracer::new(debugger, trace);
     let base = tracer.module_containing(address)?.info.base_address.0;
+    let arch = debugger.arch();
     let image = tracer.module_image(address)?;
-    if let Some(found) = range(&image, base, address) {
+    if let Some(found) = range(&image, base, address, arch) {
         return Some(found);
     }
 
     if !image.is_complete() && tracer.upgrade_module_image(address) {
         let image = tracer.module_image(address)?;
-        return range(&image, base, address);
+        return range(&image, base, address, arch);
     }
 
     None
@@ -425,6 +481,9 @@ pub fn build_stacktrace(
     regs: &[u8],
     limit: usize,
 ) -> StackTrace {
+    if debugger.arch() == Arch::Arm64 {
+        return build_stacktrace_arm64(debugger, register_map, regs, limit);
+    }
     let cr3 = register_map.read_u64("cr3", regs).unwrap_or(0);
     let trace = resolve_thread_trace_context(debugger, cr3);
     build_stacktrace_seeded(
@@ -434,6 +493,63 @@ pub fn build_stacktrace(
         FrameSource::Current,
         limit,
     )
+}
+
+/// Strip AArch64 pointer-authentication bits (bits 63:56) from a return
+/// address: sign-extend the 56-bit canonical address back to 64 bits.
+fn strip_pac(addr: u64) -> u64 {
+    ((addr << 8) as i64 >> 8) as u64
+}
+
+/// ARM64 backtrace via the frame-pointer (x29) chain: each frame stores the
+/// previous FP at `[fp]` and the return address at `[fp+8]`. Windows ARM64
+/// kernel code keeps frame pointers enabled, so this is reliable; PAC-signed
+/// return addresses are stripped.
+fn build_stacktrace_arm64(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    limit: usize,
+) -> StackTrace {
+    let cr3 = register_map.read_u64("cr3", regs).unwrap_or(0);
+    let trace = resolve_thread_trace_context(debugger, cr3);
+    let seed_pc = register_map.read_u64("rip", regs).unwrap_or(0);
+    let seed_sp = register_map.read_u64("rsp", regs).unwrap_or(0);
+    let mut raw: Vec<(u64, u64, FrameSource)> = vec![(seed_sp, seed_pc, FrameSource::Current)];
+
+    let memory = debugger.address_space(trace.active_dtb);
+    let mut fp = register_map.read_u64("fp", regs).unwrap_or(0);
+    for _ in 0..MAX_UNWIND_FRAMES {
+        let mut buf = [0u8; 16];
+        if memory.read_bytes(VirtAddr(fp), &mut buf).is_err() {
+            break;
+        }
+        let next_fp = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let ra = strip_pac(u64::from_le_bytes(buf[8..16].try_into().unwrap()));
+        if ra == 0 || next_fp == 0 || next_fp <= fp {
+            break;
+        }
+        raw.push((fp + 16, ra, FrameSource::Unwind));
+        fp = next_fp;
+    }
+
+    ensure_frame_module_symbols(debugger, &trace, raw.iter().map(|(_, ip, _)| *ip));
+
+    let mut stacktrace = StackTrace::default();
+    for (sp, ip, source) in raw {
+        record_stack_frame(
+            &mut stacktrace,
+            limit,
+            StackFrame {
+                sp,
+                ip,
+                symbol: format_symbol(debugger, &trace, ip),
+                source,
+                source_location: frame_source_location(debugger, &trace, ip),
+            },
+        );
+    }
+    stacktrace
 }
 
 fn switch_seed_is_plausible(thread: &ThreadInfo, seed: &RegisterContext) -> bool {
@@ -609,7 +725,14 @@ fn ensure_frame_module_symbols(
         let _ = if let Some(g) = debugger.guest.as_ref() {
             g.load_symbols_for_modules(&debugger.phys, &debugger.symbols, modules, dtb)
         } else {
-            Guest::load_module_symbols(&debugger.phys, &debugger.symbols, modules, dtb, false)
+            Guest::load_module_symbols(
+                &debugger.phys,
+                &debugger.symbols,
+                modules,
+                dtb,
+                false,
+                debugger.arch(),
+            )
         };
     }
 }
@@ -707,7 +830,7 @@ impl<'a> StackTracer<'a> {
             trace,
             phys: &debugger.phys,
             symbols: &debugger.symbols,
-            memory: AddressSpace::new(&debugger.phys, trace.active_dtb),
+            memory: debugger.address_space(trace.active_dtb),
             modules: HashMap::new(),
         }
     }
@@ -1290,8 +1413,9 @@ fn slot_u16(codes: &[UnwindCodeSlot], index: usize) -> Option<u16> {
 mod tests {
     use super::{
         FrameSource, ParsedUnwindInfo, PeImage, RUNTIME_FUNCTION, RegisterContext, StackFrame,
-        StackTrace, UnwindCodeSlot, frame_base, lookup_runtime_function, parse_unwind_info,
-        record_stack_frame, slot_u16, unwind_slot_count,
+        StackTrace, UnwindCodeSlot, frame_base, lookup_arm64_runtime_function,
+        lookup_runtime_function, parse_unwind_info, record_stack_frame, slot_u16,
+        unwind_slot_count,
     };
     use crate::target::SavedThreadRegisters;
 
@@ -1325,6 +1449,33 @@ mod tests {
         assert!(lookup_runtime_function(&funcs, 0x350).is_none());
         // past the end of the table
         assert!(lookup_runtime_function(&funcs, 0x10000).is_none());
+    }
+
+    #[test]
+    fn lookup_arm64_runtime_function_decodes_packed_and_xdata_lengths() {
+        let mut image_bytes = vec![0u8; 0x2100];
+        // Full .xdata header: low 18 bits are a 0x80-byte function in 4-byte units.
+        image_bytes[0x2000..0x2004].copy_from_slice(&(0x80u32 / 4).to_le_bytes());
+        let image = PeImage::complete(image_bytes);
+
+        let mut pdata = Vec::new();
+        // Packed entry: flag 1 and a 0x40-byte function length.
+        pdata.extend_from_slice(&0x1000u32.to_le_bytes());
+        pdata.extend_from_slice(&(((0x40u32 / 4) << 2) | 1).to_le_bytes());
+        // Unpacked entry: flag 0 and an RVA to the .xdata header above.
+        pdata.extend_from_slice(&0x1100u32.to_le_bytes());
+        pdata.extend_from_slice(&0x2000u32.to_le_bytes());
+
+        assert_eq!(
+            lookup_arm64_runtime_function(&image, &pdata, 0x103c),
+            Some((0x1000, 0x1040))
+        );
+        assert!(lookup_arm64_runtime_function(&image, &pdata, 0x1040).is_none());
+        assert_eq!(
+            lookup_arm64_runtime_function(&image, &pdata, 0x117c),
+            Some((0x1100, 0x1180))
+        );
+        assert!(lookup_arm64_runtime_function(&image, &pdata, 0x1180).is_none());
     }
 
     #[test]

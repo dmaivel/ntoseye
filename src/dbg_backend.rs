@@ -403,7 +403,8 @@ impl BackendCapability {
     }
 }
 
-/// Debug transport abstraction; memory access stays on `/dev/kvm`
+/// Debug transport abstraction; guest memory access is provided separately by
+/// [`crate::phys::PhysMem`].
 pub trait DebugBackend {
     fn register_map(&self) -> &RegisterMap;
     /// Short lowercase transport name for status surfaces (e.g. the REPL
@@ -411,6 +412,11 @@ pub trait DebugBackend {
     fn name(&self) -> &'static str {
         "dbg"
     }
+
+    /// Provide the kernel page-table root (CR3 on AMD64, TTBR1_EL1 on ARM64)
+    /// once guest discovery resolves it, so register snapshots can expose the
+    /// DTB. No-op on backends whose register file carries the DTB natively.
+    fn set_kernel_dtb(&mut self, _dtb: u64) {}
 
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;

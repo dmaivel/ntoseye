@@ -2,10 +2,9 @@ use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
 use crate::gdb::{BreakpointManager, RegisterMap};
-use crate::memory::AddressSpace;
 use crate::symbols::SourceLocation;
 use crate::target::Target;
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 use crate::ui;
 use crate::unwind::{
     FrameSource, StackTrace, ThreadTraceContext, build_stacktrace, format_symbol,
@@ -105,10 +104,53 @@ pub fn format_rflags(flags: u64) -> String {
     }
 }
 
+/// AArch64 condition-flag summary aligned beneath the 16-hex-digit `cpsr`
+/// value: each flag letter sits under the hex digit that contains its bit
+/// (NZCV under the digit for bits 31-28, DAIF under the digits for bits 11-8
+/// and 7-4). Multiple flags in one digit are joined in bit order, pushing any
+/// later column right.
+fn format_cpsr(flags: u64) -> String {
+    const FLAGS: &[(u32, &str)] = &[
+        (31, "N"),
+        (30, "Z"),
+        (29, "C"),
+        (28, "V"),
+        (9, "D"),
+        (8, "A"),
+        (7, "I"),
+        (6, "F"),
+    ];
+    // Per hex-digit columns; digit 0 covers bits 63-60, digit 15 bits 3-0.
+    let mut columns: [Vec<&str>; 16] = std::array::from_fn(|_| Vec::new());
+    for (bit, name) in FLAGS {
+        if flags & (1u64 << bit) != 0 {
+            columns[15 - (bit / 4) as usize].push(name);
+        }
+    }
+    let mut line = vec![' '; 16];
+    for (idx, names) in columns.iter().enumerate() {
+        if names.is_empty() {
+            continue;
+        }
+        let text: String = names.concat();
+        let len = text.len();
+        if idx + len > line.len() {
+            continue;
+        }
+        for i in (idx..line.len() - len).rev() {
+            line[i + len] = line[i];
+        }
+        for (i, ch) in text.chars().enumerate() {
+            line[idx + i] = ch;
+        }
+    }
+    line.into_iter().collect()
+}
+
 /// Print the general-purpose register grid. `embedded` is true inside the
 /// break/status dump (`registers` section header, 2-space indent); standalone
 /// `registers` passes false so it reads flush-left with no header, matching
-/// `disasm`.
+/// `disasm`. The row layout follows the register map's architecture.
 pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) {
     let read_reg_value = |name: &str| register_map.read_u64(name, regs);
     let styled_value = |name: &str| -> String {
@@ -124,12 +166,55 @@ pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) 
             styled_value(name)
         )
     };
-    let rflags = read_reg_value("eflags").unwrap_or(0);
 
     let indent = if embedded { "  " } else { "" };
     if embedded {
         print_section("registers");
     }
+
+    // ARM64 register map: x0-x30 grid plus fp/lr/sp/pc and cpsr flags.
+    if read_reg_value("pc").is_ok() {
+        for row in [
+            ["x0", "x1", "x2", "x3"],
+            ["x4", "x5", "x6", "x7"],
+            ["x8", "x9", "x10", "x11"],
+            ["x12", "x13", "x14", "x15"],
+            ["x16", "x17", "x18", "x19"],
+            ["x20", "x21", "x22", "x23"],
+            ["x24", "x25", "x26", "x27"],
+        ] {
+            println!(
+                "{indent}{}   {}   {}   {}",
+                cell(row[0]),
+                cell(row[1]),
+                cell(row[2]),
+                cell(row[3])
+            );
+        }
+        println!(
+            "{indent}{}   {}   {}   {}",
+            cell("x28"),
+            cell("fp"),
+            cell("lr"),
+            cell("sp")
+        );
+        let cpsr = read_reg_value("cpsr").unwrap_or(0);
+        println!(
+            "{indent}{}   {} {}",
+            cell("pc"),
+            ui::muted("cpsr"),
+            styled_value("cpsr")
+        );
+        let flags = format_cpsr(cpsr);
+        if !flags.is_empty() {
+            // Align under the cpsr hex value: cell("pc") (4 + 16 chars) +
+            // the "   cpsr " label, i.e. 28 columns.
+            println!("{indent}                            {flags}");
+        }
+        return;
+    }
+
+    let rflags = read_reg_value("eflags").unwrap_or(0);
     for row in [
         ["rax", "rbx", "rcx"],
         ["rdx", "rsi", "rdi"],
@@ -156,7 +241,7 @@ pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) 
 
 // Decoding lives in core; the REPL owns the *rendering*
 // (`format_disasm_line`/`render_rows` below).
-pub use crate::disasm::{AsmToken, DisasmRow, decode_rows, disasm_formatter};
+pub use crate::disasm::{AsmToken, DisasmRow, decode_rows, decode_rows_arm64, disasm_formatter};
 
 /// Width of the byte column for a listing: the longest hex string among the
 /// rows about to be printed, so the asm column always aligns and never gets
@@ -221,8 +306,17 @@ const DISASM_CONTEXT_INSTRUCTIONS: usize = 7;
 fn decode_disasm_context(
     bytes_at_rip: &[u8],
     rip: u64,
+    arm64: bool,
     resolve: impl Fn(u64) -> String,
 ) -> Vec<DisasmRow> {
+    if arm64 {
+        return decode_rows_arm64(
+            bytes_at_rip,
+            rip,
+            Some(DISASM_CONTEXT_INSTRUCTIONS),
+            resolve,
+        );
+    }
     let mut formatter = disasm_formatter();
     decode_rows(
         bytes_at_rip,
@@ -241,9 +335,9 @@ pub fn print_disasm_context(
 ) {
     print_section("disasm");
 
-    let active_memory = AddressSpace::new(&debugger.phys, trace.active_dtb);
+    let active_memory = debugger.address_space(trace.active_dtb);
     let code_dtb = preferred_code_dtb(trace, rip);
-    let code_memory = AddressSpace::new(&debugger.phys, code_dtb);
+    let code_memory = debugger.address_space(code_dtb);
     let mut bytes = [0u8; DISASM_CONTEXT_BYTES];
 
     if active_memory.read_bytes(VirtAddr(rip), &mut bytes).is_err()
@@ -257,7 +351,7 @@ pub fn print_disasm_context(
     breakpoints.mask_breakpoint_bytes(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
-    let rows = decode_disasm_context(&bytes, rip, resolve);
+    let rows = decode_disasm_context(&bytes, rip, debugger.arch() == Arch::Arm64, resolve);
     render_rows(&rows, |ip| Some(ip == rip));
 }
 
@@ -382,10 +476,21 @@ mod tests {
     #[test]
     fn stop_disassembly_starts_at_rip_and_only_looks_forward() {
         let rip = 0xffff_f807_c0e1_3ae0;
-        let rows = decode_disasm_context(&[0x90; 8], rip, |_| String::new());
+        let rows = decode_disasm_context(&[0x90; 8], rip, false, |_| String::new());
         let ips = rows.iter().map(|row| row.ip).collect::<Vec<_>>();
 
         assert_eq!(ips, (rip..rip + 7).collect::<Vec<_>>());
+    }
+
+    /// Flag letters sit under the hex digits containing their bits:
+    /// 0x60000044 → Z,C (bits 30,29) under the '6' (cols 8-9), F (bit 6)
+    /// under the '4' (col 14).
+    #[test]
+    fn cpsr_flags_align_under_hex_digits() {
+        assert_eq!(format_cpsr(0x6000_0044), "        ZC    F ");
+        // N, A, I, F → "N" under the '8', "AIF" under the trailing '4's.
+        assert_eq!(format_cpsr(0x8000_01c4), "        N    AIF");
+        assert_eq!(format_cpsr(0x0000_0000), "                ");
     }
 
     #[test]

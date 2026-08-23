@@ -139,9 +139,8 @@ fn breakpoint_target_arg(
 
 /// A live debugging session. Owns the engine + backend; drive it from Python.
 ///
-/// `unsendable`: the session (backend channel, KVM handle) is single-threaded,
-/// so pyo3 pins it to the creating thread and panics on cross-thread access
-/// rather than us pretending it is `Send`/`Sync`.
+/// `unsendable`: the session and backend are single-threaded, so pyo3 pins the
+/// object to its creating thread instead of pretending it is `Send`/`Sync`.
 ///
 /// An owned session's single-instance lock (so a second `attach()`, here or in
 /// a running CLI, fails fast) lives inside `inner`, [`Session::connect`] takes
@@ -3163,7 +3162,7 @@ fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
         .map_err(err)?
     } else {
         let target = resolve_target(backend, connect);
-        let phys = Arc::new(PhysMem::kvm().map_err(err)?);
+        let phys = Arc::new(PhysMem::live().map_err(err)?);
         Session::connect(phys, target.as_deref(), || {
             let be: Box<dyn DebugBackend> = match backend {
                 "gdb" => Box::new(GdbClient::connect(target.as_deref().unwrap())?),

@@ -26,9 +26,9 @@ pub trait MemoryOps<A> {
     }
 }
 
-/// Lets a shared `Arc<B>` stand in anywhere a memory backend `B` is expected, so
-/// owners (e.g. `WinObject`) can hold an `Arc<KvmHandle>` without every reader
-/// signature changing.
+/// Lets a shared `Arc<B>` stand in anywhere a memory backend `B` is expected,
+/// so owners such as `WinObject` can share physical memory without changing
+/// every reader signature.
 impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
     fn read_bytes(&self, addr: A, buf: &mut [u8]) -> Result<()> {
         (**self).read_bytes(addr, buf)
