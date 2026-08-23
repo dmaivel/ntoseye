@@ -1,6 +1,6 @@
 # VMware Workstation
 
-Power the VM off before editing its `.vmx` file, and only keep one VMware VM powered on while using `ntoseye`.
+Run `ntoseye configure` to select a registered VMware VM and configure it automatically. It preserves existing serial devices, uses the next free guest COM port, backs up the `.vmx` file, and prints the matching guest instructions. Power the VM off before configuring it, and only keep one VMware VM powered on while using `ntoseye`. For manual configuration, follow the sections below.
 
 ## KD over a serial socket
 

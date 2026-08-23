@@ -1,6 +1,6 @@
 # KVM/QEMU
 
-libvirt/virt-manager users can configure the debug transport automatically: run `ntoseye virsh`, pick the domain, choose _configure debug transports_, then the backend. `ntoseye virsh` can also remove ntoseye-managed debug transports later. Prefer editing the XML yourself? Follow the sections below.
+Run `ntoseye configure` to configure a libvirt/virt-manager guest automatically. It preserves existing serial devices, uses the next free guest COM port, backs up the domain XML, and can remove ntoseye-managed transports later. The command prints guest instructions with the assigned debug port. For plain QEMU or manual configuration, follow the sections below.
 
 ## KD over a serial socket
 

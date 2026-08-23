@@ -1,6 +1,6 @@
 # UTM (macOS, Apple Silicon)
 
-For a Windows 11 ARM64 VM under [UTM](https://mac.getutm.app) (QEMU/HVF).
+For a Windows 11 ARM64 VM under [UTM](https://mac.getutm.app) (QEMU/HVF). Run `ntoseye configure` to select a stopped UTM VM, update its QEMU arguments through UTM's scripting API, back up the previous arguments, and print the guest and launch commands. For manual configuration, follow the steps below.
 
 ## KD over a serial socket
 

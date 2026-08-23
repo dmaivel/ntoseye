@@ -27,7 +27,7 @@ From the host, without crashing the guest (produces a live system dump, bugcheck
 virsh dump <domain> /tmp/win.dmp --memory-only --format=win-dmp
 ```
 
-This needs the domain's `vmcoreinfo` feature (`ntoseye virsh` can enable it) and the virtio-win `fwcfg` driver installed in the guest.
+This needs the domain's `vmcoreinfo` feature (`ntoseye configure` can enable it for libvirt guests) and the virtio-win `fwcfg` driver installed in the guest.
 
 From a real BSOD, Windows writes `C:\Windows\MEMORY.DMP` on the boot after the crash (System Properties > Startup and Recovery > "Kernel memory dump"). The dump is staged through the page file, so pick one:
 

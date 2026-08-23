@@ -76,7 +76,7 @@ fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
         io::ErrorKind::ConnectionRefused => format!(
             "GDB stub at '{addr}' is not accepting connections.\n\
              Start the VM with QEMU gdbstub enabled (-s -S), or pass --connect <addr> if the stub listens elsewhere.\n\
-             For libvirt guests, run `ntoseye virsh` and choose gdb.\n\
+             For supported hypervisors, run `ntoseye configure` and choose GDB.\n\
              If this guest is configured for Windows KD instead, use the default KD backend."
         ),
         io::ErrorKind::TimedOut => format!(

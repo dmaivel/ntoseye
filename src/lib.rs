@@ -23,6 +23,8 @@ pub mod backend;
 pub mod bugchecks;
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "cli")]
+pub mod configure;
 pub mod dbg_backend;
 pub mod debugger_data;
 pub mod diagnostics;
@@ -53,5 +55,3 @@ pub mod ui;
 pub mod unwind;
 #[cfg(any(feature = "mcp", feature = "python"))]
 pub mod view;
-#[cfg(feature = "cli")]
-pub mod virsh;

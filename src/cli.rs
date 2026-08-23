@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::mcp;
 use crate::resolve_target;
 use crate::{
+    configure,
     dbg_backend::DebugBackend,
     diagnostics,
     dmp::DmpBackend,
@@ -16,7 +17,7 @@ use crate::{
     memory_backend::MemoryBackend,
     phys::PhysMem,
     repl::{start_plain_repl, start_repl},
-    session, symbols, virsh,
+    session, symbols,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,7 +88,8 @@ struct Args {
 #[derive(FromArgs)]
 #[argh(subcommand)]
 enum Command {
-    Virsh(VirshCommand),
+    Configure(ConfigureCommand),
+    Status(StatusCommand),
     #[cfg(feature = "mcp")]
     Mcp(McpCommand),
 }
@@ -120,9 +122,14 @@ struct McpCommand {
 }
 
 #[derive(FromArgs)]
-#[argh(subcommand, name = "virsh")]
-/// interactively edit libvirt XML for ntoseye debug backends
-struct VirshCommand {}
+#[argh(subcommand, name = "configure")]
+/// interactively configure a supported hypervisor for ntoseye
+struct ConfigureCommand {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "status")]
+/// inspect configured hypervisor transports and recover launch commands
+struct StatusCommand {}
 
 static GDBSTUB_INSTRUCTIONS: &str = "The gdb backend talks to QEMU's gdbstub instead of Windows KD.
 It does not require Windows debug mode, but it loses Windows-native
@@ -275,7 +282,8 @@ fn run() -> Result<()> {
 
     if let Some(command) = args.command {
         return match command {
-            Command::Virsh(_) => virsh::run_interactive(),
+            Command::Configure(_) => configure::run_interactive(),
+            Command::Status(_) => configure::print_status(),
             #[cfg(feature = "mcp")]
             Command::Mcp(mcp_args) => {
                 let backend = match args.backend {

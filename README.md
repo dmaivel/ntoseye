@@ -69,26 +69,21 @@ cargo build --release --no-default-features --features cli,mcp
 
 ## Quickstart
 
-The default and recommended backend is `kd` (KDCOM), which runs Windows KD over a QEMU serial socket. For a libvirt/virt-manager guest, the fastest path is:
-
-1. Configure the VM transport with `ntoseye virsh`: pick the domain, choose _configure debug transports_, then `kd`. (Prefer editing the XML yourself? See [KVM/QEMU setup](docs/kvm-qemu.md).)
-2. In the guest, enable kernel debugging and reboot (Administrator PowerShell):
-   ```
-   bcdedit /debug on
-   bcdedit /dbgsettings serial debugport:1 baudrate:115200
-   Restart-Computer
-   ```
-3. On the host, relax ptrace scope so `ntoseye` can attach to QEMU (resets on reboot):
+1. Power off the Windows VM.
+2. Run `ntoseye configure` and select the hypervisor, virtual machine, and debugger backend. Note the `Run` command it prints.
+3. Start the VM, run the printed guest setup commands in Administrator PowerShell, and reboot.
+4. On Linux, allow `ntoseye` to inspect the hypervisor process. This resets on reboot:
    ```bash
    echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
    ```
-4. Start the VM, then run `ntoseye`.
+   Alternatively, prefix the printed `Run` command with `sudo`.
+5. Run the command saved in step 2.
 
-### Not using Linux or virt-manager?
+Run `ntoseye status` at any time to inspect configured transports, assigned guest ports, endpoints, and launch commands without changing a VM.
 
-- Plain QEMU/KVM or libvirt without virt-manager: follow the [KVM/QEMU setup guide](docs/kvm-qemu.md).
-- VMware Workstation on Linux: follow the [VMware setup guide](docs/vmware.md).
-- macOS on Apple Silicon: follow the [UTM setup guide](docs/utm.md).
+### Hypervisor setup
+
+`ntoseye configure` handles automatic setup for supported libvirt, VMware Workstation, and UTM guests. For plain QEMU or manual configuration, see the [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md) setup guides.
 
 ### Not sure which backend to use?
 
