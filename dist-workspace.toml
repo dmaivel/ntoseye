@@ -9,20 +9,17 @@ cargo-dist-version = "0.30.3"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell"]
-# Build each package with `-p <pkg>` instead of `--workspace`. Required here:
-# the workspace mixes pyo3 `auto-initialize` (binary, links libpython) with
-# `extension-module` (ntoseye-py wheel, no libpython). A --workspace build
-# unifies those features and the binary fails to link (undefined PyExc_* etc).
+# Build the distributed binary separately from the Python extension package,
+# and omit embedded Python from prebuilt archives so they remain portable.
 precise-builds = true
+default-features = false
+features = ["cli", "mcp"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["x86_64-unknown-linux-gnu"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
 # Path that installers should place binaries in
 install-path = "~/.local/bin/"
 # Whether to install an updater program
 install-updater = false
-# The binary defaults to in-REPL Python scripting (python-embed, like distro
-# gdb/lldb), so it links libpython: the build needs the python dev lib (apt dep
-# below) and the released binary needs a libpython3 at runtime (near-universal on
-# Linux; abi3 -> any Python 3.x).
-[dist.dependencies.apt]
-python3-dev = '*'

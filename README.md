@@ -45,11 +45,25 @@ WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macO
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dmaivel/ntoseye/releases/latest/download/ntoseye-installer.sh | sh
 ```
 
+Prebuilt release binaries include the CLI and MCP server but omit embedded Python for portability. Use a Cargo or source build for [in-REPL Python commands](docs/sdk.md).
+
 ## Install via cargo
 
 ```bash
 cargo install ntoseye
 ```
+
+`cargo install` and default source builds enable embedded Python and link against the local Python installation.
+
+## Install the Python SDK
+
+For standalone debugger automation from Python on Linux:
+
+```bash
+pip install ntoseye
+```
+
+The Python package exposes the debugger through `import ntoseye`; it does not install the `ntoseye` CLI. See the [Python SDK documentation](docs/sdk.md).
 
 ## Building
 
@@ -59,7 +73,7 @@ cd ntoseye
 cargo build --release
 ```
 
-The default build embeds Python for [in-REPL custom commands](docs/sdk.md), so it links libpython and needs the Python dev lib (`python3-dev` / `python3-devel`). To build without it:
+To build without embedded Python:
 
 ```bash
 cargo build --release --no-default-features --features cli,mcp

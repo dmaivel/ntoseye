@@ -29,7 +29,7 @@ The module is a native extension built with [maturin](https://www.maturin.rs/); 
 
 # Custom commands
 
-In addition to the standalone [Python SDK](#python-sdk), `ntoseye` can run Python commands inside the live REPL; the same SDK, but bound to the session you're already debugging rather than a separate attach. This requires a build with the embedded interpreter (which is enabled by default).
+In addition to the standalone [Python SDK](#python-sdk), `ntoseye` can run Python commands inside the live REPL; the same SDK, but bound to the session you're already debugging rather than a separate attach. This requires a build with the embedded interpreter, which is enabled by default for Cargo and source builds. Prebuilt release archives omit it for portability.
 
 Drop any `*.py` file in `~/.ntoseye/commands/`; they're auto-loaded at REPL startup. Run `reload-scripts` in the REPL to pick up edits without restarting.
 
