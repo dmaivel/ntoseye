@@ -1,14 +1,19 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 use dialoguer::{Confirm, Select};
 use owo_colors::OwoColorize;
 
+#[cfg(any(target_os = "linux", test))]
+use crate::DEFAULT_GDB_ADDR;
 use crate::{
-    DEFAULT_GDB_ADDR, DEFAULT_KD_SOCKET,
+    DEFAULT_KD_SOCKET,
     error::{Error, Result},
     symbols,
 };
@@ -29,16 +34,24 @@ pub(super) enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BackendSelection {
     Kd,
+    #[cfg(any(target_os = "linux", test))]
     Gdb,
+    #[cfg(any(target_os = "linux", test))]
     KdAndGdb,
     Memory,
 }
 
 impl BackendSelection {
     pub(super) fn kd(self) -> bool {
-        matches!(self, Self::Kd | Self::KdAndGdb)
+        match self {
+            Self::Kd => true,
+            #[cfg(any(target_os = "linux", test))]
+            Self::KdAndGdb => true,
+            _ => false,
+        }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn gdb(self) -> bool {
         matches!(self, Self::Gdb | Self::KdAndGdb)
     }
@@ -63,6 +76,7 @@ pub(super) enum ProbeStatus {
 pub(super) struct ConfigureRequest {
     pub action: Action,
     pub backend: Option<BackendSelection>,
+    #[cfg(any(target_os = "linux", test))]
     pub vmcoreinfo: bool,
 }
 
@@ -96,6 +110,7 @@ impl ConfiguredTarget {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn gdb(endpoint: impl Into<String>) -> Self {
         Self {
             backend: BackendSelection::Gdb,
@@ -108,8 +123,13 @@ impl ConfiguredTarget {
     fn label(&self) -> &'static str {
         match self.backend {
             BackendSelection::Kd => "KD",
+            #[cfg(any(target_os = "linux", test))]
             BackendSelection::Gdb => "GDB",
-            BackendSelection::KdAndGdb | BackendSelection::Memory => {
+            #[cfg(any(target_os = "linux", test))]
+            BackendSelection::KdAndGdb => {
+                unreachable!("status targets represent one configured backend")
+            }
+            BackendSelection::Memory => {
                 unreachable!("status targets represent one configured backend")
             }
         }
@@ -126,14 +146,20 @@ impl ConfiguredTarget {
             BackendSelection::Kd => {
                 format!("{executable} --connect {}", shell_quote(&self.endpoint))
             }
+            #[cfg(any(target_os = "linux", test))]
             BackendSelection::Gdb if self.endpoint == DEFAULT_GDB_ADDR => {
                 format!("{executable} --backend gdb")
             }
+            #[cfg(any(target_os = "linux", test))]
             BackendSelection::Gdb => format!(
                 "{executable} --backend gdb --connect {}",
                 shell_quote(&self.endpoint)
             ),
-            BackendSelection::KdAndGdb | BackendSelection::Memory => {
+            #[cfg(any(target_os = "linux", test))]
+            BackendSelection::KdAndGdb => {
+                unreachable!("status targets represent one configured backend")
+            }
+            BackendSelection::Memory => {
                 unreachable!("status targets represent one configured backend")
             }
         }
@@ -156,6 +182,7 @@ pub(super) trait Configurator {
     fn guests(&self) -> Result<Vec<Guest>>;
     fn inspect(&self, guest: &Guest) -> Result<GuestInspection>;
     fn supported_backends(&self) -> &'static [BackendSelection];
+    #[cfg(any(target_os = "linux", test))]
     fn supports_vmcoreinfo(&self) -> bool {
         false
     }
@@ -251,6 +278,7 @@ pub fn run_interactive() -> Result<()> {
         None
     };
 
+    #[cfg(any(target_os = "linux", test))]
     let vmcoreinfo = action == Action::Configure
         && configurator.supports_vmcoreinfo()
         && prompt_confirm(
@@ -261,6 +289,7 @@ pub fn run_interactive() -> Result<()> {
         ConfigureRequest {
             action,
             backend,
+            #[cfg(any(target_os = "linux", test))]
             vmcoreinfo,
         },
     )?;
@@ -378,7 +407,9 @@ fn backend_label(backend: BackendSelection) -> String {
         BackendSelection::Kd => {
             format!("KD (Windows kernel debugging) {}", "(recommended)".green())
         }
+        #[cfg(any(target_os = "linux", test))]
         BackendSelection::Gdb => "GDB (hypervisor debug stub)".to_string(),
+        #[cfg(any(target_os = "linux", test))]
         BackendSelection::KdAndGdb => "KD + GDB (configure both transports)".to_string(),
         BackendSelection::Memory => "Memory (passive introspection, no configuration)".to_string(),
     }
@@ -461,6 +492,7 @@ pub(super) fn backup_file(
     Ok(path)
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn atomic_replace(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::DebugInfo(format!(
