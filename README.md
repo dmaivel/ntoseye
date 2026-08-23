@@ -57,7 +57,7 @@ cargo install ntoseye
 
 ## Install the Python SDK
 
-For standalone debugger automation from Python on Linux:
+For standalone debugger automation from Python on Linux or Apple Silicon macOS:
 
 ```bash
 pip install ntoseye

@@ -26,20 +26,30 @@ maturin build --release --out dist
 pip install dist/ntoseye-*.whl
 ```
 
-## Releasing (portable wheel)
+## Releasing portable wheels
 
-A plain `maturin build` tags the wheel against the build host's glibc, so on a rolling-release distro it can demand a glibc newer than most users have. Build against an old glibc floor with [zig](https://www.maturin.rs/distribution#cross-compile-using-zig) so the wheel installs everywhere.
+Run `./build-wheel.sh` on each release platform. The script provisions a local `.venv` when needed, builds into a clean `dist/`, runs `twine check`, and verifies the wheel in a throwaway virtualenv.
 
-Run `./build-wheel.sh` to do it in one step (it provisions a local `.venv` with the build tools if no virtualenv is active, builds into a clean `dist/`, and runs `twine check`). The equivalent manual steps:
+- Linux builds use Zig and target `manylinux_2_17` so the wheel installs on non-EOL glibc distributions.
+- Apple Silicon macOS builds produce a native ARM64 wheel.
+
+Equivalent Linux build:
 
 ```sh
-pip install ziglang
-cd ntoseye-py
-rm -rf dist
+pip install maturin ziglang twine
 maturin build --release --zig --compatibility manylinux_2_17 --out dist
 ```
 
+Equivalent Apple Silicon macOS build:
+
 ```sh
-twine check dist/*
-twine upload dist/*
+pip install maturin twine
+maturin build --release --out dist
+```
+
+Check and publish either wheel:
+
+```sh
+python -m twine check dist/*
+python -m twine upload dist/*
 ```
