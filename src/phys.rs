@@ -4,15 +4,17 @@ use crate::backend::MemoryOps;
 use crate::dmp::{DmpInfo, DmpMem};
 use crate::error::Result;
 use crate::host::VmHandle;
+use crate::kd::KdMemory;
 use crate::types::PhysAddr;
 
-/// Guest physical memory backed by a live VM process or a crash dump. Built
-/// once at attach and shared via `Arc`; everything above (address spaces,
-/// symbol loading, unwinding) reads through it. `Dmp` is boxed because it is
-/// much larger than the live handle.
+/// Guest physical memory backed by a live VM process, KD transport, or crash
+/// dump. Built once at attach and shared via `Arc`; everything above (address
+/// spaces, symbol loading, unwinding) reads through it. `Dmp` is boxed because
+/// it is much larger than the live handle.
 pub enum PhysMem {
     Live(VmHandle),
     Dmp(Box<DmpMem>),
+    Remote(KdMemory),
 }
 
 impl PhysMem {
@@ -22,6 +24,10 @@ impl PhysMem {
 
     pub fn dmp(path: &Path) -> Result<Self> {
         Ok(Self::Dmp(Box::new(DmpMem::open(path)?)))
+    }
+
+    pub fn remote(memory: KdMemory) -> Self {
+        Self::Remote(memory)
     }
 
     pub fn dmp_info(&self) -> Option<&DmpInfo> {
@@ -36,7 +42,7 @@ impl PhysMem {
     pub fn ram_base(&self) -> u64 {
         match self {
             Self::Live(h) => h.ram_base(),
-            Self::Dmp(_) => 0,
+            Self::Dmp(_) | Self::Remote(_) => 0,
         }
     }
 
@@ -44,7 +50,7 @@ impl PhysMem {
     pub fn ram_size(&self) -> u64 {
         match self {
             Self::Live(h) => h.ram_size(),
-            Self::Dmp(_) => 0,
+            Self::Dmp(_) | Self::Remote(_) => 0,
         }
     }
 }
@@ -54,6 +60,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
         match self {
             Self::Live(h) => h.read_bytes(addr, buf),
             Self::Dmp(d) => d.read_bytes(addr, buf),
+            Self::Remote(kd) => kd.read_bytes(addr, buf),
         }
     }
 
@@ -61,6 +68,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
         match self {
             Self::Live(h) => h.write_bytes(addr, buf),
             Self::Dmp(d) => d.write_bytes(addr, buf),
+            Self::Remote(kd) => kd.write_bytes(addr, buf),
         }
     }
 }

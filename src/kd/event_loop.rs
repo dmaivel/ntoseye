@@ -1,6 +1,5 @@
 use std::env::VarError;
 use std::io::ErrorKind;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -9,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use owo_colors::OwoColorize;
 
+use super::transport::KdTransport;
 use crate::dbg_backend::DebugLog;
 use crate::error::{Error, Result};
 use crate::kd::api;
@@ -40,6 +40,17 @@ pub fn initial_handshake_stimulus(attempt: u32) -> InitialHandshakeStimulus {
         InitialHandshakeStimulus::BreakIn
     } else {
         InitialHandshakeStimulus::Reset
+    }
+}
+
+pub fn initial_handshake_stimulus_for_transport(
+    attempt: u32,
+    is_network: bool,
+) -> InitialHandshakeStimulus {
+    if is_network {
+        InitialHandshakeStimulus::BreakIn
+    } else {
+        initial_handshake_stimulus(attempt)
     }
 }
 
@@ -158,7 +169,7 @@ pub fn kd_initial_timeout() -> Result<Duration> {
 
 /// Initial break-in: send break-in first, then alternate RESET and break-in
 pub fn poll_for_initial_break(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     budget: Duration,
 ) -> Result<StateChange> {
     const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -167,11 +178,15 @@ pub fn poll_for_initial_break(
     framing
         .transport_mut()
         .set_read_timeout(Some(ATTEMPT_TIMEOUT))?;
+    let is_network = framing
+        .transport_mut()
+        .network_datagrams_received()
+        .is_some();
 
     let mut attempts = 0u32;
     let mut next_progress_at = Instant::now() + KD_INITIAL_PROGRESS_INTERVAL;
     loop {
-        match initial_handshake_stimulus(attempts) {
+        match initial_handshake_stimulus_for_transport(attempts, is_network) {
             InitialHandshakeStimulus::BreakIn => framing.send_breakin()?,
             InitialHandshakeStimulus::Reset => {
                 framing.send_reset()?;
@@ -210,18 +225,36 @@ pub fn poll_for_initial_break(
                     next_progress_at += KD_INITIAL_PROGRESS_INTERVAL;
                 }
                 if now >= deadline {
-                    break Err(Error::Kd(format!(
-                        "host serial socket is connected, but Windows KD did not send packets within {}s.\n\
-                         Check:\n\
-                           - Windows has `bcdedit /debug on` enabled\n\
-                           - `bcdedit /dbgsettings serial debugport:N baudrate:115200` matches the QEMU serial port\n\
-                           - the guest was rebooted after changing BCD settings\n\
-                           - the VM is not paused or suspended\n\
-                           - virt-manager/libvirt may reserve COM1 for its console serial; use debugport:2 if KD is wired as COM2\n\
-                           - set NTOSEYE_KD_TIMEOUT=<seconds> if the guest is unusually slow to reach KD\n\
-                           - use `--backend gdb` for gdbstub guests, or `--backend memory` for passive memory introspection",
-                        budget.as_secs()
-                    )));
+                    let message = match framing.transport_mut().network_datagrams_received() {
+                        Some(0) => format!(
+                            "KDNET listener received no UDP datagrams within {}s.\n\
+                             Check:\n\
+                               - Windows has `bcdedit /debug on` enabled\n\
+                               - `bcdedit /dbgsettings net hostip:HOST port:PORT` matches this listener\n\
+                               - the guest was rebooted after changing BCD settings\n\
+                               - the host firewall permits inbound UDP on the KDNET port\n\
+                               - the guest debug NIC and its `busparams` are supported and correct",
+                            budget.as_secs()
+                        ),
+                        Some(received) => format!(
+                            "KDNET listener received {received} UDP datagram(s), but none contained a usable target packet within {}s.\n\
+                             Check that Windows targets this UDP port and that `--kdnet-key` exactly matches the key printed by bcdedit",
+                            budget.as_secs()
+                        ),
+                        None => format!(
+                            "host serial socket is connected, but Windows KD did not send packets within {}s.\n\
+                             Check:\n\
+                               - Windows has `bcdedit /debug on` enabled\n\
+                               - `bcdedit /dbgsettings serial debugport:N baudrate:115200` matches the QEMU serial port\n\
+                               - the guest was rebooted after changing BCD settings\n\
+                               - the VM is not paused or suspended\n\
+                               - virt-manager/libvirt may reserve COM1 for its console serial; use debugport:2 if KD is wired as COM2\n\
+                               - set NTOSEYE_KD_TIMEOUT=<seconds> if the guest is unusually slow to reach KD\n\
+                               - use `--backend gdb` for gdbstub guests, or `--backend memory` for passive memory introspection",
+                            budget.as_secs()
+                        ),
+                    };
+                    break Err(Error::Kd(message));
                 }
             }
             Err(e) => break Err(e),
@@ -231,7 +264,7 @@ pub fn poll_for_initial_break(
 
 /// Send one break-in byte and wait for the resulting state-change
 pub fn breakin_and_wait(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     arch: Arch,
     budget: Duration,
 ) -> Result<StateChange> {
@@ -272,9 +305,9 @@ pub fn is_temporary_io_error(kind: ErrorKind) -> bool {
 /// subsequent operation sets its own timeout before reading anyway. Blocking
 /// waits set an explicit long timeout ([`blocking_read_timeout`]).
 pub fn with_framing_read_timeout_raw<R>(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     timeout: Duration,
-    f: impl FnOnce(&mut KdFraming<UnixStream>) -> Result<R>,
+    f: impl FnOnce(&mut KdFraming<KdTransport>) -> Result<R>,
 ) -> Result<R> {
     framing.transport_mut().set_read_timeout(Some(timeout))?;
     f(framing)
@@ -288,9 +321,9 @@ pub const fn blocking_read_timeout() -> Duration {
 }
 
 pub fn with_framing_read_timeout<R>(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     timeout: Duration,
-    f: impl FnOnce(&mut KdFraming<UnixStream>) -> Result<R>,
+    f: impl FnOnce(&mut KdFraming<KdTransport>) -> Result<R>,
 ) -> Result<R> {
     match with_framing_read_timeout_raw(framing, timeout, f) {
         Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => Err(Error::Kd(format!(
@@ -310,7 +343,7 @@ pub fn is_initial_resync_error(error: &Error) -> bool {
 }
 
 pub fn probe_initial_request(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     processor: u16,
 ) -> Result<api::Version> {
     with_framing_read_timeout_raw(framing, KD_INITIAL_PROBE_TIMEOUT, |framing| {
@@ -333,7 +366,7 @@ pub fn is_transparent_state_change(new_state: u32) -> bool {
 /// set for the exchange and left in place (restoring is macOS-racy; the next
 /// operation re-establishes its own timeout).
 pub fn continue_transparent_state_change(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     arch: Arch,
     stop: &StateChange,
 ) -> Result<()> {
@@ -352,7 +385,7 @@ pub fn continue_transparent_state_change(
 /// cache), hence the extra wire read; `KdBackend::continue_preserving_dr7`
 /// is the cached equivalent.
 fn continue_preserving_dr7(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     processor: u16,
     continue_status: u32,
     trace: bool,
@@ -402,7 +435,7 @@ pub struct AwaitStateOptions<'a> {
 /// starves the caller's own timeout, what used to pin the foreground actor for
 /// minutes after a reboot. `None` waits indefinitely for a surfaceable change.
 pub fn await_state_change(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     options: AwaitStateOptions<'_>,
 ) -> Result<StateChange> {
     let AwaitStateOptions {
@@ -510,7 +543,7 @@ pub fn await_state_change(
 }
 
 pub fn pump_assist_breakin(
-    framing: &mut KdFraming<UnixStream>,
+    framing: &mut KdFraming<KdTransport>,
     next_breakin: &mut Instant,
     breakin_count: &mut u32,
     reason: &str,
@@ -531,7 +564,7 @@ pub fn pump_assist_breakin(
 
 /// Handle to the background servicing pump (see [`run_pump`])
 pub struct PumpHandle {
-    pub join: JoinHandle<KdFraming<UnixStream>>,
+    pub join: JoinHandle<KdFraming<KdTransport>>,
     pub stop_rx: Receiver<std::result::Result<StateChange, String>>,
     pub shutdown: Arc<AtomicBool>,
     /// Set by the pump the instant it places a result in `stop_rx` and exits.
@@ -549,14 +582,14 @@ pub struct PumpHandle {
 /// Break-in bytes for an explicit interrupt are written from the foreground via
 /// a cloned socket fd, so they don't need the framing this thread holds
 pub fn run_pump(
-    mut framing: KdFraming<UnixStream>,
+    mut framing: KdFraming<KdTransport>,
     arch: Arch,
     stop_tx: mpsc::Sender<std::result::Result<StateChange, String>>,
     shutdown: Arc<AtomicBool>,
     reported_stop: Arc<AtomicBool>,
     reconnect_assist_delay: Option<Duration>,
     debug_log: DebugLog,
-) -> KdFraming<UnixStream> {
+) -> KdFraming<KdTransport> {
     // Flag the result the moment it lands in the channel, before we exit, so a
     // concurrent foreground `is_running()`/status read sees "stopped, undrained"
     // rather than the stale running value.

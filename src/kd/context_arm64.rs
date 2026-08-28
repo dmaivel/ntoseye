@@ -13,8 +13,8 @@
 //!
 //! The KD transport returns this same layout for `DBGKD_GET_CONTEXT`. A
 //! synthetic kernel-DTB slot (TTBR1_EL1, exposed as `cr3`) is appended after
-//! the CONTEXT and filled by the backend from guest discovery, mirroring how
-//! the AMD64 map appends CR0-CR8 from KSPECIAL_REGISTERS.
+//! the CONTEXT and filled from the session's resolved kernel page-table root,
+//! mirroring how the AMD64 map appends CR0-CR8 from KSPECIAL_REGISTERS.
 
 use crate::gdb::{RegisterInfo, RegisterMap};
 

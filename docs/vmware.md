@@ -26,6 +26,10 @@ If another virtual serial device already occupies COM1, configure the next `seri
 
 Then connect: `ntoseye`.
 
+## KDNET
+
+KDNET uses the guest's virtual NIC instead of a serial device. Choose a host IP that the guest can reach through its bridged, NAT, or host-only VMware network, then follow the common [KDNET guest and launch setup](backends.md#kdnet).
+
 ## GDB stub
 
 VMware Workstation provides its own GDB remote stub. Add the following to the VM's `.vmx` file:

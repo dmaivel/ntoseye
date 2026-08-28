@@ -194,12 +194,18 @@ class StopOutcome:
     def __contains__(self, key: str) -> bool: ...
     def __repr__(self) -> str: ...
 
-def attach(backend: str = "kd", connect: str | None = None) -> Debugger:
+def attach(
+    backend: str = "kd",
+    connect: str | None = None,
+    key: str | None = None,
+    memory_source: str = "auto",
+) -> Debugger:
     """Attach to a guest and return a `Debugger`.
 
-    `backend` is one of `"kd"` (default), `"gdb"`, or `"memory"`. `connect` is
-    the backend target (socket path / address); a per-backend default is used
-    when omitted.
+    `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
+    `"dmp"`. `connect` is the backend target (socket path / listen address); a
+    per-backend default is used when omitted. `key` is required for KDNET.
+    `memory_source` is `"auto"`, `"host"`, or `"kd"` for KD/KDNET.
     """
     ...
 

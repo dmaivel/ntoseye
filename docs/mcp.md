@@ -1,6 +1,6 @@
 # MCP integration
 
-`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server, exposing the debugger as tools to MCP clients. It reads the top-level `--backend`/`--connect` flags to choose how to attach, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Only one consumer of the VM can run at a time.
+`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server, exposing the debugger as tools to MCP clients. It reads the top-level `--backend`/`--connect`/`--kdnet-key` flags to choose how to attach, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Only one consumer of the VM can run at a time.
 
 The structured tool surface includes `inspect_trap_frame` and `set_watchpoint`; watchpoints report `stop: "watchpoint"` with access/length metadata and use the existing breakpoint lifecycle tools for list, disable, enable, and clear operations.
 
@@ -34,6 +34,8 @@ Top-level flags go before the `mcp` subcommand, e.g. to pin the backend and sock
   }
 }
 ```
+
+For KDNET, use `["--backend", "kdnet", "--kdnet-key", "1.2.3.4", "mcp"]`; add `["--memory-source", "kd"]` to force target-mediated memory and add `--connect` before `mcp` only when changing the default `0.0.0.0:50000` listener. The dynamic `open` tool exposes the same choice as `memory_source`.
 
 Use an absolute path for `command` (e.g. `../target/release/ntoseye`) if `ntoseye` isn't within `PATH`.
 

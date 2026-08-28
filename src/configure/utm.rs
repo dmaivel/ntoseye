@@ -11,9 +11,14 @@ use crate::error::{Error, Result};
 use super::{
     Action, ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
     ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, backup_file,
+    kdnet_instructions,
 };
 
-const BACKENDS: &[BackendSelection] = &[BackendSelection::Kd, BackendSelection::Memory];
+const BACKENDS: &[BackendSelection] = &[
+    BackendSelection::Kd,
+    BackendSelection::KdNet,
+    BackendSelection::Memory,
+];
 const RECORD_SEPARATOR: char = '\u{1e}';
 const FIELD_SEPARATOR: char = '\u{1f}';
 
@@ -116,12 +121,18 @@ impl Configurator for Utm {
         let changes = if configured == original {
             Vec::new()
         } else {
-            match request.action {
-                Action::Configure => vec![format!(
+            match (request.action, request.backend) {
+                (Action::Configure, Some(BackendSelection::Kd)) => vec![format!(
                     "configure UTM KD serial socket {} as guest COM1",
                     socket.display()
                 )],
-                Action::Remove => vec!["remove ntoseye KD arguments from UTM".to_string()],
+                (Action::Configure, Some(BackendSelection::KdNet)) => {
+                    vec!["remove UTM KD serial socket; KDNET uses the virtual NIC".to_string()]
+                }
+                (Action::Configure, _) => Vec::new(),
+                (Action::Remove, _) => {
+                    vec!["remove ntoseye KD arguments from UTM".to_string()]
+                }
             }
         };
         let instructions = utm_instructions(request, &socket);
@@ -221,20 +232,21 @@ fn plan_arguments(
         let backend = request.backend.ok_or_else(|| {
             Error::DebugInfo("configure request is missing a backend".to_string())
         })?;
-        if !backend.kd() {
+        if backend.kd() {
+            arguments.extend([
+                "-chardev".to_string(),
+                format!(
+                    "socket,id=kd,path={},server=on,wait=off",
+                    socket.to_string_lossy()
+                ),
+                "-serial".to_string(),
+                "chardev:kd".to_string(),
+            ]);
+        } else if backend != BackendSelection::KdNet {
             return Err(Error::DebugInfo(
-                "UTM only supports automatic configuration for the KD backend".to_string(),
+                "UTM only supports automatic configuration for KD and KDNET".to_string(),
             ));
         }
-        arguments.extend([
-            "-chardev".to_string(),
-            format!(
-                "socket,id=kd,path={},server=on,wait=off",
-                socket.to_string_lossy()
-            ),
-            "-serial".to_string(),
-            "chardev:kd".to_string(),
-        ]);
     }
     Ok(arguments)
 }
@@ -295,6 +307,19 @@ fn utm_socket_path() -> Result<PathBuf> {
 fn utm_instructions(request: ConfigureRequest, socket: &PathBuf) -> Instructions {
     if request.action == Action::Remove {
         return Instructions::default();
+    }
+    let backend = request.backend.expect("configure requests have a backend");
+    if backend == BackendSelection::KdNet {
+        let mut instructions = kdnet_instructions(request, false);
+        instructions.run[0].push_str(" --memory-source kd");
+        instructions.notes.push(
+            "Secure Boot must be disabled in UTM before Windows allows kernel debugging."
+                .to_string(),
+        );
+        instructions
+            .notes
+            .push("KD-backed memory needs no root access to the UTM process.".to_string());
+        return instructions;
     }
     let mut instructions = Instructions {
         guest: vec![
@@ -365,6 +390,16 @@ mod tests {
         ConfigureRequest {
             action,
             backend: (action == Action::Configure).then_some(BackendSelection::Kd),
+            kdnet_host: None,
+            vmcoreinfo: false,
+        }
+    }
+
+    fn kdnet_request() -> ConfigureRequest {
+        ConfigureRequest {
+            action: Action::Configure,
+            backend: Some(BackendSelection::KdNet),
+            kdnet_host: Some("192.168.64.1".parse().unwrap()),
             vmcoreinfo: false,
         }
     }
@@ -405,6 +440,26 @@ mod tests {
         assert_eq!(
             instructions.run,
             ["sudo ntoseye --connect '/Users/test/Library/ntoseye-kd.sock'"]
+        );
+    }
+
+    #[test]
+    fn kdnet_uses_virtual_nic_and_remote_memory() {
+        let socket = PathBuf::from("/Users/test/Library/ntoseye-kd.sock");
+        let planned =
+            plan_arguments(&["-nodefaults".to_string()], kdnet_request(), &socket).unwrap();
+        assert_eq!(planned, ["-nodefaults"]);
+        let instructions = utm_instructions(kdnet_request(), &socket);
+        assert_eq!(
+            instructions.run,
+            ["ntoseye --backend kdnet --kdnet-key KEY --memory-source kd"]
+        );
+        assert!(instructions.guest[1].contains("hostip:192.168.64.1 port:50000"));
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|note| note.contains("no root"))
         );
     }
 

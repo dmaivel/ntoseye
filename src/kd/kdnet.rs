@@ -1,0 +1,726 @@
+use std::io::{self, ErrorKind, Read, Write};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use aes::Aes256;
+use cbc::cipher::block_padding::NoPadding;
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
+use crate::error::{Error, Result};
+
+const MAGIC: &[u8; 4] = b"MDBG";
+const HEADER_SIZE: usize = 6;
+const METADATA_SIZE: usize = 8;
+const AUTH_TAG_SIZE: usize = 16;
+const CONTROL_RESPONSE_SIZE: usize = 322;
+const MAX_DATAGRAM_SIZE: usize = 8192;
+const MAX_KD_STREAM_SIZE: usize = 4017;
+const CHANNEL_DATA: u8 = 0;
+const CHANNEL_CONTROL: u8 = 1;
+const HOST_DIRECTION: u64 = 0x80;
+const CONTROL_PACKET_LEADER: u32 = 0x6969_6969;
+const PACKET_TYPE_KD_RESEND: u16 = 5;
+const DATA_PACKET_LEADER: u32 = 0x3030_3030;
+const PACKET_TRAILING_BYTE: u8 = 0xaa;
+
+type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
+type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
+type HmacSha256 = Hmac<Sha256>;
+
+/// Session state is negotiated once from the first valid control poke. Later
+/// control packets are keepalives; answering them with a new host key would
+/// rotate the data key while older data datagrams are still in flight.
+struct SessionState {
+    control_key: [u8; 32],
+    hmac_key: [u8; 32],
+    data_key: RwLock<Option<[u8; 32]>>,
+    peer: RwLock<Option<SocketAddr>>,
+    version: AtomicU8,
+    send_sequence: AtomicU64,
+}
+
+/// A stream adapter for Microsoft's encrypted KDNET-over-UDP transport.
+///
+/// KDNET carries one trailer-less KD packet per authenticated UDP datagram.
+/// This adapter restores KDCOM's stream and trailer semantics so the existing
+/// KD packet state machine can be shared without a second protocol stack.
+pub struct KdNetStream {
+    socket: UdpSocket,
+    state: Arc<SessionState>,
+    inbound: Vec<u8>,
+    inbound_offset: usize,
+    datagram: Vec<u8>,
+    received_datagrams: u64,
+    encoded: Vec<u8>,
+    last_outbound: Vec<u8>,
+    resend_requested: bool,
+    outbound: Vec<u8>,
+}
+
+impl KdNetStream {
+    pub fn bind(endpoint: &str, key: &str) -> Result<Self> {
+        let control_key = parse_key(key)?;
+        let bind_addr = resolve_bind_addr(endpoint)?;
+        let socket = UdpSocket::bind(bind_addr).map_err(|err| {
+            Error::Kd(format!(
+                "failed to bind KDNET listener on '{endpoint}': {err}"
+            ))
+        })?;
+        let mut hmac_key = control_key;
+        for byte in &mut hmac_key {
+            *byte = !*byte;
+        }
+        Ok(Self {
+            socket,
+            state: Arc::new(SessionState {
+                control_key,
+                hmac_key,
+                data_key: RwLock::new(None),
+                peer: RwLock::new(None),
+                version: AtomicU8::new(0),
+                send_sequence: AtomicU64::new(1),
+            }),
+            inbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+            inbound_offset: 0,
+            datagram: vec![0u8; MAX_DATAGRAM_SIZE],
+            received_datagrams: 0,
+            encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
+            last_outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+            resend_requested: false,
+            outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+        })
+    }
+
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            socket: self.socket.try_clone()?,
+            state: Arc::clone(&self.state),
+            inbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+            inbound_offset: 0,
+            datagram: vec![0u8; MAX_DATAGRAM_SIZE],
+            received_datagrams: 0,
+            encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
+            last_outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+            resend_requested: false,
+            outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+        })
+    }
+
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_read_timeout(timeout)
+    }
+
+    pub fn received_datagrams(&self) -> u64 {
+        self.received_datagrams
+    }
+
+    fn receive_packet(&mut self) -> io::Result<()> {
+        let mut datagram = std::mem::take(&mut self.datagram);
+        let result = self.receive_packet_with(&mut datagram);
+        self.datagram = datagram;
+        result
+    }
+
+    fn receive_packet_with(&mut self, datagram: &mut Vec<u8>) -> io::Result<()> {
+        loop {
+            datagram.resize(MAX_DATAGRAM_SIZE, 0);
+            let (size, source) = self.socket.recv_from(datagram)?;
+            self.received_datagrams = self.received_datagrams.saturating_add(1);
+            kd_trace!("kdnet: received {size}-byte UDP datagram from {source}");
+            if size < HEADER_SIZE + METADATA_SIZE + AUTH_TAG_SIZE {
+                continue;
+            }
+            datagram.truncate(size);
+            if &datagram[..4] != MAGIC {
+                continue;
+            }
+
+            let version = datagram[4];
+            let channel = datagram[5];
+            if let Some(peer) = *read_lock(&self.state.peer)?
+                && peer != source
+                && channel != CHANNEL_CONTROL
+            {
+                continue;
+            }
+            let key = match channel {
+                CHANNEL_CONTROL => self.state.control_key,
+                CHANNEL_DATA => match *read_lock(&self.state.data_key)? {
+                    Some(key) => key,
+                    // Pre-negotiation data can only be stale-session traffic;
+                    // dropping it lets the control handshake proceed.
+                    None => {
+                        kd_trace!("kdnet: dropping data datagram before key negotiation");
+                        continue;
+                    }
+                },
+                other => {
+                    kd_trace!("kdnet: dropping datagram on unknown channel {other:#x}");
+                    continue;
+                }
+            };
+            decrypt_payload(datagram, key)?;
+            let is_control = channel == CHANNEL_CONTROL;
+            if let Err(err) = verify_authentication(datagram, &self.state.hmac_key) {
+                if is_control {
+                    return Err(err);
+                }
+                // Data datagrams from a superseded session can arrive after a
+                // debugger restart. Drop them; an established session never
+                // renegotiates its data key for periodic control pokes.
+                kd_trace!("kdnet: dropping stale-session datagram: {err}");
+                continue;
+            }
+
+            if is_control {
+                self.handle_control_packet(datagram, source, version)?;
+                self.last_outbound.clear();
+                self.encoded.clear();
+                self.resend_requested = false;
+                continue;
+            }
+
+            let metadata =
+                u64::from_be_bytes(datagram[HEADER_SIZE..HEADER_SIZE + 8].try_into().unwrap());
+            if metadata & HOST_DIRECTION != 0 {
+                return Err(invalid_data(
+                    "KDNET packet has debugger-to-target direction",
+                ));
+            }
+            let padding = (metadata & 0x0f) as usize;
+            let payload_start = HEADER_SIZE + METADATA_SIZE;
+            let payload_end = datagram
+                .len()
+                .checked_sub(AUTH_TAG_SIZE + padding)
+                .filter(|end| *end >= payload_start)
+                .ok_or_else(|| invalid_data("KDNET packet has invalid padding"))?;
+
+            self.inbound.clear();
+            self.inbound
+                .extend_from_slice(&datagram[payload_start..payload_end]);
+            self.resend_requested = self.inbound.len() >= 6
+                && u32::from_le_bytes(self.inbound[..4].try_into().unwrap())
+                    == CONTROL_PACKET_LEADER
+                && u16::from_le_bytes(self.inbound[4..6].try_into().unwrap())
+                    == PACKET_TYPE_KD_RESEND;
+            if self.inbound.len() >= 4
+                && u32::from_le_bytes(self.inbound[..4].try_into().unwrap()) == DATA_PACKET_LEADER
+            {
+                self.inbound.push(PACKET_TRAILING_BYTE);
+            }
+            self.inbound_offset = 0;
+            return Ok(());
+        }
+    }
+
+    fn handle_control_packet(
+        &self,
+        datagram: &[u8],
+        source: SocketAddr,
+        version: u8,
+    ) -> io::Result<()> {
+        // kdnet.sys emits control pokes periodically while the target is
+        // stopped or running. They are not fresh negotiations. A second
+        // response would contain a different host key and make both peers
+        // switch data keys while packets using the old key are in flight.
+        if read_lock(&self.state.data_key)?.is_some() {
+            return Ok(());
+        }
+
+        let payload_end = datagram
+            .len()
+            .checked_sub(AUTH_TAG_SIZE)
+            .ok_or_else(|| invalid_data("truncated KDNET control packet"))?;
+        let plaintext = &datagram[HEADER_SIZE..payload_end];
+        if plaintext.len() < METADATA_SIZE + 2 + 32 {
+            return Err(invalid_data("truncated KDNET control handshake"));
+        }
+        let metadata = u64::from_be_bytes(plaintext[..METADATA_SIZE].try_into().unwrap());
+        if metadata & HOST_DIRECTION != 0 {
+            return Err(invalid_data("KDNET control packet has wrong direction"));
+        }
+
+        let client_key: &[u8] = &plaintext[METADATA_SIZE + 2..METADATA_SIZE + 2 + 32];
+        let sequence = metadata >> 8;
+
+        let mut response = [0u8; CONTROL_RESPONSE_SIZE];
+        response[0] = 1;
+        response[1] = 2;
+        response[2..34].copy_from_slice(client_key);
+        getrandom::fill(&mut response[34..66]).map_err(|err| {
+            io::Error::other(format!("KDNET random key generation failed: {err}"))
+        })?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(self.state.control_key);
+        hasher.update(response);
+        let data_key: [u8; 32] = hasher.finalize().into();
+
+        let packet = create_packet(
+            &response,
+            sequence,
+            CHANNEL_CONTROL,
+            version,
+            self.state.control_key,
+            &self.state.hmac_key,
+            true,
+        )?;
+        let sent = self.socket.send_to(&packet, source)?;
+        if sent != packet.len() {
+            return Err(io::Error::new(
+                ErrorKind::WriteZero,
+                "short KDNET control response",
+            ));
+        }
+
+        *write_lock(&self.state.peer)? = Some(source);
+        *write_lock(&self.state.data_key)? = Some(data_key);
+        self.state.version.store(version, Ordering::Relaxed);
+        self.state.send_sequence.store(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn local_addr(&self) -> SocketAddr {
+        self.socket.local_addr().unwrap()
+    }
+}
+
+impl Read for KdNetStream {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.inbound_offset == self.inbound.len() {
+            self.receive_packet()?;
+        }
+        let count = output
+            .len()
+            .min(self.inbound.len().saturating_sub(self.inbound_offset));
+        output[..count]
+            .copy_from_slice(&self.inbound[self.inbound_offset..self.inbound_offset + count]);
+        self.inbound_offset += count;
+        if self.inbound_offset == self.inbound.len() {
+            self.inbound.clear();
+            self.inbound_offset = 0;
+        }
+        Ok(count)
+    }
+}
+impl Write for KdNetStream {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        self.outbound.extend_from_slice(input);
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.outbound.is_empty() {
+            return Ok(());
+        }
+
+        let peer = *read_lock(&self.state.peer)?;
+        let data_key = *read_lock(&self.state.data_key)?;
+        let (Some(peer), Some(data_key)) = (peer, data_key) else {
+            // The target initiates KDNET with a control poke. KDCOM's initial
+            // break-in/reset stimuli have no peer or session key yet, so they
+            // are intentionally discarded until negotiation completes.
+            self.outbound.clear();
+            return Ok(());
+        };
+
+        if self.outbound.len() >= 16
+            && u32::from_le_bytes(self.outbound[..4].try_into().unwrap()) == DATA_PACKET_LEADER
+        {
+            let payload_len = u16::from_le_bytes(self.outbound[6..8].try_into().unwrap()) as usize;
+            let expected = 16 + payload_len + 1;
+            if self.outbound.len() != expected
+                || self.outbound.last().copied() != Some(PACKET_TRAILING_BYTE)
+            {
+                self.outbound.clear();
+                return Err(invalid_data("incomplete KDCOM data packet passed to KDNET"));
+            }
+            self.outbound.pop();
+        }
+
+        if self.outbound.len() >= 16 {
+            let packet_id = u32::from_le_bytes(self.outbound[8..12].try_into().unwrap());
+            let wire_checksum = u32::from_le_bytes(self.outbound[12..16].try_into().unwrap());
+            let computed_checksum = self.outbound[16..]
+                .iter()
+                .fold(0u32, |sum, byte| sum.wrapping_add(*byte as u32));
+            kd_trace!(
+                "kdnet: send KD bytes={} id={packet_id:#x} checksum={wire_checksum:#x}/{computed_checksum:#x}",
+                self.outbound.len()
+            );
+        }
+
+        // Always mint a fresh sequence: the target treats a repeated KDNET
+        // sequence as a duplicate to discard, so byte-identical replays would
+        // never be re-examined after a RESEND.
+        let sequence = self.state.send_sequence.fetch_add(1, Ordering::Relaxed);
+        create_packet_into(
+            &mut self.encoded,
+            &self.outbound,
+            sequence,
+            CHANNEL_DATA,
+            self.state.version.load(Ordering::Relaxed),
+            data_key,
+            &self.state.hmac_key,
+            true,
+        )?;
+        self.last_outbound.clear();
+        self.last_outbound.extend_from_slice(&self.outbound);
+        self.resend_requested = false;
+        let sent = self.socket.send_to(&self.encoded, peer)?;
+        self.outbound.clear();
+        if sent != self.encoded.len() {
+            return Err(io::Error::new(
+                ErrorKind::WriteZero,
+                "short KDNET packet write",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn resolve_bind_addr(endpoint: &str) -> Result<SocketAddr> {
+    endpoint
+        .to_socket_addrs()
+        .map_err(|err| Error::Kd(format!("invalid KDNET listen address '{endpoint}': {err}")))?
+        .next()
+        .ok_or_else(|| {
+            Error::Kd(format!(
+                "KDNET listen address '{endpoint}' resolved to nothing"
+            ))
+        })
+}
+
+fn parse_key(key: &str) -> Result<[u8; 32]> {
+    let mut components = key.split('.');
+    let mut decoded = [0u8; 32];
+    for index in 0..4 {
+        let component = components.next().ok_or_else(|| {
+            Error::Kd(
+                "invalid KDNET key: expected four base-36 components separated by periods".into(),
+            )
+        })?;
+        if component.is_empty()
+            || component.len() > 13
+            || !component.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(Error::Kd(format!(
+                "invalid KDNET key component '{}': expected 1-13 base-36 characters",
+                component
+            )));
+        }
+        let normalized = component.to_ascii_lowercase();
+        let value = u64::from_str_radix(&normalized, 36).map_err(|_| {
+            Error::Kd(format!(
+                "invalid KDNET key component '{}': value exceeds 64 bits",
+                component
+            ))
+        })?;
+        decoded[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    if components.next().is_some() {
+        return Err(Error::Kd(
+            "invalid KDNET key: expected four base-36 components separated by periods".into(),
+        ));
+    }
+    Ok(decoded)
+}
+
+fn create_packet(
+    kd_packet: &[u8],
+    sequence: u64,
+    channel: u8,
+    version: u8,
+    key: [u8; 32],
+    hmac_key: &[u8; 32],
+    from_host: bool,
+) -> io::Result<Vec<u8>> {
+    let mut packet = Vec::with_capacity(MAX_DATAGRAM_SIZE);
+    create_packet_into(
+        &mut packet,
+        kd_packet,
+        sequence,
+        channel,
+        version,
+        key,
+        hmac_key,
+        from_host,
+    )?;
+    Ok(packet)
+}
+
+fn create_packet_into(
+    packet: &mut Vec<u8>,
+    kd_packet: &[u8],
+    sequence: u64,
+    channel: u8,
+    version: u8,
+    key: [u8; 32],
+    hmac_key: &[u8; 32],
+    from_host: bool,
+) -> io::Result<()> {
+    let padding = (16 - ((METADATA_SIZE + kd_packet.len()) % 16)) % 16;
+    let authenticated_len = HEADER_SIZE + METADATA_SIZE + kd_packet.len() + padding;
+    packet.clear();
+    packet.resize(authenticated_len + AUTH_TAG_SIZE, 0);
+    packet[..4].copy_from_slice(MAGIC);
+    packet[4] = version;
+    packet[5] = channel;
+    let metadata = (sequence << 8) | if from_host { HOST_DIRECTION } else { 0 } | padding as u64;
+    packet[HEADER_SIZE..HEADER_SIZE + 8].copy_from_slice(&metadata.to_be_bytes());
+    packet[HEADER_SIZE + METADATA_SIZE..HEADER_SIZE + METADATA_SIZE + kd_packet.len()]
+        .copy_from_slice(kd_packet);
+
+    let mut mac = HmacSha256::new_from_slice(hmac_key)
+        .map_err(|_| io::Error::other("invalid KDNET HMAC key"))?;
+    mac.update(&packet[..authenticated_len]);
+    let tag = mac.finalize().into_bytes();
+    packet[authenticated_len..].copy_from_slice(&tag[..AUTH_TAG_SIZE]);
+
+    let (encrypted, tag) = packet[HEADER_SIZE..].split_at_mut(authenticated_len - HEADER_SIZE);
+    Aes256CbcEncryptor::new((&key).into(), (&tag[..AUTH_TAG_SIZE]).into())
+        .encrypt_padded_mut::<NoPadding>(encrypted, encrypted.len())
+        .map_err(|_| io::Error::other("KDNET encryption failed"))?;
+    Ok(())
+}
+
+fn decrypt_payload(packet: &mut [u8], key: [u8; 32]) -> io::Result<()> {
+    let encrypted_len = packet
+        .len()
+        .checked_sub(HEADER_SIZE + AUTH_TAG_SIZE)
+        .filter(|len| *len != 0 && len.is_multiple_of(16))
+        .ok_or_else(|| invalid_data("KDNET encrypted payload is not block-aligned"))?;
+    let (encrypted, tag) = packet[HEADER_SIZE..].split_at_mut(encrypted_len);
+    Aes256CbcDecryptor::new((&key).into(), (&tag[..AUTH_TAG_SIZE]).into())
+        .decrypt_padded_mut::<NoPadding>(encrypted)
+        .map_err(|_| invalid_data("KDNET decryption failed"))?;
+    Ok(())
+}
+
+fn verify_authentication(packet: &[u8], hmac_key: &[u8; 32]) -> io::Result<()> {
+    let authenticated_len = packet
+        .len()
+        .checked_sub(AUTH_TAG_SIZE)
+        .ok_or_else(|| invalid_data("truncated KDNET authentication tag"))?;
+    let mut mac = HmacSha256::new_from_slice(hmac_key)
+        .map_err(|_| io::Error::other("invalid KDNET HMAC key"))?;
+    mac.update(&packet[..authenticated_len]);
+    let expected = mac.finalize().into_bytes();
+    if bool::from(expected[..AUTH_TAG_SIZE].ct_eq(&packet[authenticated_len..])) {
+        Ok(())
+    } else {
+        Err(invalid_data("KDNET packet authentication failed"))
+    }
+}
+
+fn read_lock<T>(lock: &RwLock<T>) -> io::Result<std::sync::RwLockReadGuard<'_, T>> {
+    lock.read()
+        .map_err(|_| io::Error::other("KDNET session lock poisoned"))
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> io::Result<std::sync::RwLockWriteGuard<'_, T>> {
+    lock.write()
+        .map_err(|_| io::Error::other("KDNET session lock poisoned"))
+}
+
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_four_little_endian_base36_key_components() {
+        let key = parse_key("1.z.10.3w5e11264sgsf").unwrap();
+        assert_eq!(u64::from_le_bytes(key[0..8].try_into().unwrap()), 1);
+        assert_eq!(u64::from_le_bytes(key[8..16].try_into().unwrap()), 35);
+        assert_eq!(u64::from_le_bytes(key[16..24].try_into().unwrap()), 36);
+        assert_eq!(
+            u64::from_le_bytes(key[24..32].try_into().unwrap()),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_keys() {
+        for key in [
+            "1.2.3",
+            "1.2.3.4.5",
+            "1..3.4",
+            "1.2.3.!",
+            "1.2.3.3w5e11264sgsg",
+        ] {
+            assert!(parse_key(key).is_err(), "accepted {key}");
+        }
+    }
+
+    #[test]
+    fn packet_round_trip_authenticates_and_decrypts() {
+        let key = parse_key("1.2.3.4").unwrap();
+        let mut hmac_key = key;
+        hmac_key.iter_mut().for_each(|byte| *byte = !*byte);
+        let payload = b"0000kd-payload";
+        let mut packet = create_packet(payload, 7, CHANNEL_DATA, 5, key, &hmac_key, true).unwrap();
+        decrypt_payload(&mut packet, key).unwrap();
+        verify_authentication(&packet, &hmac_key).unwrap();
+        let metadata = u64::from_be_bytes(packet[6..14].try_into().unwrap());
+        let padding = (metadata & 0x0f) as usize;
+        assert_eq!(&packet[14..packet.len() - AUTH_TAG_SIZE - padding], payload);
+        assert_eq!(metadata >> 8, 7);
+        assert_ne!(metadata & HOST_DIRECTION, 0);
+    }
+
+    #[test]
+    fn negotiates_session_and_bridges_kd_stream_over_udp() {
+        let key = parse_key("1.2.3.4").unwrap();
+        let mut hmac_key = key;
+        hmac_key.iter_mut().for_each(|byte| *byte = !*byte);
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let host_addr = host.local_addr();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        target
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let mut kd_packet = vec![0u8; 19];
+        kd_packet[..4].copy_from_slice(&DATA_PACKET_LEADER.to_le_bytes());
+        kd_packet[4..6].copy_from_slice(&7u16.to_le_bytes());
+        kd_packet[6..8].copy_from_slice(&3u16.to_le_bytes());
+        kd_packet[8..12].copy_from_slice(&0x8080_0000u32.to_le_bytes());
+        kd_packet[12..16].copy_from_slice(&6u32.to_le_bytes());
+        kd_packet[16..].copy_from_slice(&[1, 2, 3]);
+        let target_kd_packet = kd_packet.clone();
+
+        let target_thread = std::thread::spawn(move || -> io::Result<Vec<u8>> {
+            let mut poke = [0u8; CONTROL_RESPONSE_SIZE];
+            poke[0] = 1;
+            poke[1] = 1;
+            for (index, byte) in poke[2..34].iter_mut().enumerate() {
+                *byte = index as u8;
+            }
+            let control = create_packet(&poke, 9, CHANNEL_CONTROL, 5, key, &hmac_key, false)?;
+            target.send_to(&control, host_addr)?;
+
+            let mut response = vec![0u8; MAX_DATAGRAM_SIZE];
+            let (response_len, _) = target.recv_from(&mut response)?;
+            response.truncate(response_len);
+            decrypt_payload(&mut response, key)?;
+            verify_authentication(&response, &hmac_key)?;
+            let metadata = u64::from_be_bytes(response[6..14].try_into().unwrap());
+            assert_ne!(metadata & HOST_DIRECTION, 0);
+            assert_eq!(metadata >> 8, 9);
+            let padding = (metadata & 0x0f) as usize;
+            let body = &response[14..response.len() - AUTH_TAG_SIZE - padding];
+            assert_eq!(body.len(), CONTROL_RESPONSE_SIZE);
+            assert_eq!(&body[2..34], &poke[2..34]);
+
+            let mut hasher = Sha256::new();
+            hasher.update(key);
+            hasher.update(body);
+            let data_key: [u8; 32] = hasher.finalize().into();
+            let mut periodic_poke = poke;
+            periodic_poke[2] ^= 0xff;
+            let periodic = create_packet(
+                &periodic_poke,
+                10,
+                CHANNEL_CONTROL,
+                5,
+                key,
+                &hmac_key,
+                false,
+            )?;
+            target.send_to(&periodic, host_addr)?;
+            let data = create_packet(
+                &target_kd_packet,
+                1,
+                CHANNEL_DATA,
+                5,
+                data_key,
+                &hmac_key,
+                false,
+            )?;
+            target.send_to(&data, host_addr)?;
+
+            let mut outbound = vec![0u8; MAX_DATAGRAM_SIZE];
+            let (outbound_len, _) = target.recv_from(&mut outbound)?;
+            outbound.truncate(outbound_len);
+            decrypt_payload(&mut outbound, data_key)?;
+            verify_authentication(&outbound, &hmac_key)?;
+            let metadata = u64::from_be_bytes(outbound[6..14].try_into().unwrap());
+            assert_ne!(metadata & HOST_DIRECTION, 0);
+            let padding = (metadata & 0x0f) as usize;
+            Ok(outbound[14..outbound.len() - AUTH_TAG_SIZE - padding].to_vec())
+        });
+
+        let mut bridged = vec![0u8; kd_packet.len() + 1];
+        host.read_exact(&mut bridged).unwrap();
+        assert_eq!(&bridged[..kd_packet.len()], kd_packet);
+        assert_eq!(bridged.last().copied(), Some(PACKET_TRAILING_BYTE));
+        assert_eq!(host.received_datagrams(), 3);
+        host.write_all(&bridged).unwrap();
+        host.flush().unwrap();
+        assert_eq!(target_thread.join().unwrap().unwrap(), kd_packet);
+    }
+
+    #[test]
+    fn resend_mints_fresh_sequence_with_same_kd_payload() {
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        let key2 = parse_key("1.2.3.4").unwrap();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        target
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        *write_lock(&host.state.peer).unwrap() = Some(target.local_addr().unwrap());
+        *write_lock(&host.state.data_key).unwrap() = Some(key2);
+        host.state.version.store(5, Ordering::Relaxed);
+
+        let mut kd_packet = vec![0u8; 17];
+        kd_packet[..4].copy_from_slice(&DATA_PACKET_LEADER.to_le_bytes());
+        kd_packet[4..6].copy_from_slice(&2u16.to_le_bytes());
+        kd_packet[8..12].copy_from_slice(&0x8080_0000u32.to_le_bytes());
+        kd_packet[16] = PACKET_TRAILING_BYTE;
+
+        host.write_all(&kd_packet).unwrap();
+        host.flush().unwrap();
+        let mut first = vec![0u8; MAX_DATAGRAM_SIZE];
+        let (first_len, _) = target.recv_from(&mut first).unwrap();
+        first.truncate(first_len);
+
+        host.resend_requested = true;
+        host.write_all(&kd_packet).unwrap();
+        host.flush().unwrap();
+        let mut second = vec![0u8; MAX_DATAGRAM_SIZE];
+        let (second_len, _) = target.recv_from(&mut second).unwrap();
+        second.truncate(second_len);
+
+        // Fresh sequence: datagrams differ, but decrypt to the same KD payload.
+        assert_ne!(second, first);
+        assert_eq!(host.state.send_sequence.load(Ordering::Relaxed), 3);
+        for pkt in [&mut first, &mut second] {
+            decrypt_payload(pkt, key2).unwrap();
+            verify_authentication(pkt, &host.state.hmac_key).unwrap();
+            assert_eq!(
+                &pkt[HEADER_SIZE + METADATA_SIZE..HEADER_SIZE + METADATA_SIZE + 16],
+                &kd_packet[..16]
+            );
+        }
+    }
+
+    #[test]
+    fn listener_binds_requested_udp_endpoint() {
+        let stream = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        assert!(stream.local_addr().port() != 0);
+    }
+}

@@ -11,11 +11,12 @@ WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macO
 
 - WinDbg-compatible REPL commands and hexadecimal expression radix
 - Kernel and usermode debugging
+- Remote debugging over encrypted KDNET
 - Public/private PDB symbols, source lines, and scoped local-variable metadata
 - Deferred, conditional, pass-count, one-shot, and command-action breakpoints
 - AMD64 hardware watchpoints
 - Integrated bugcheck, exception, verifier, WHEA, and crash-dump analysis
-- [Three backends](docs/backends.md): Windows KD, QEMU's GDB stub, and passive memory introspection
+- [Four backends](docs/backends.md): Windows KDCOM and KDNET, QEMU's GDB stub, and passive memory introspection
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)
 
@@ -109,7 +110,7 @@ The debugger is self-documented: run `ntoseye --help` for command-line arguments
 
 - [REPL usage](docs/usage.md): expressions, radix, breakpoints, watchpoints, aliases
 - [Symbols and source](docs/symbols.md): private PDBs, `.sympath`/`.srcpath`, source breakpoints
-- [Choosing a backend](docs/backends.md): kd/gdb/memory comparison, per-hypervisor setup for [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md)
+- [Choosing a backend](docs/backends.md): kd/kdnet/gdb/memory comparison, per-hypervisor setup for [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md)
 - [Crash dumps](docs/dumps.md): offline dump analysis, generating dumps, guest tweaks
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)

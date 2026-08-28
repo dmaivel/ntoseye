@@ -13,12 +13,14 @@ use crate::{
 
 use super::{
     Action, ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
-    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, backup_file, shell_quote,
+    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, backup_file,
+    kdnet_instructions, shell_quote,
 };
 
 const QEMU_NS: &str = "http://libvirt.org/schemas/domain/qemu/1.0";
 const BACKENDS: &[BackendSelection] = &[
     BackendSelection::Kd,
+    BackendSelection::KdNet,
     BackendSelection::Gdb,
     BackendSelection::KdAndGdb,
     BackendSelection::Memory,
@@ -27,6 +29,7 @@ const BACKENDS: &[BackendSelection] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DebugTransport {
     Kd,
+    KdNet,
     Gdb,
 }
 
@@ -86,6 +89,9 @@ impl Configurator for Libvirt {
                 let mut transports = Vec::with_capacity(2);
                 if backend.kd() {
                     transports.push(DebugTransport::Kd);
+                }
+                if backend == BackendSelection::KdNet {
+                    transports.push(DebugTransport::KdNet);
                 }
                 if backend.gdb() {
                     transports.push(DebugTransport::Gdb);
@@ -219,6 +225,9 @@ fn libvirt_instructions(xml: &str, request: ConfigureRequest, domain: &str) -> I
     }
     let backend = request.backend.expect("configure requests have a backend");
     let mut instructions = Instructions::default();
+    if backend == BackendSelection::KdNet {
+        instructions = kdnet_instructions(request, false);
+    }
     if backend.kd() {
         let debug_port = debug_port_for_socket(xml, KD_SOCKET).unwrap_or(1);
         instructions.guest = vec![
@@ -263,6 +272,11 @@ fn verify_applied_config(xml: &str, request: ConfigureRequest) -> Result<()> {
             if has_kd != backend.kd() || has_gdb != backend.gdb() {
                 return Err(Error::DebugInfo(
                     "libvirt did not retain the requested debug transports".to_string(),
+                ));
+            }
+            if backend == BackendSelection::KdNet && !kdnet_vendor_ready(xml) {
+                return Err(Error::DebugInfo(
+                    "libvirt did not retain the KDNET Hyper-V vendor override".to_string(),
                 ));
             }
             if request.vmcoreinfo && !xml.contains("<vmcoreinfo state=\"on\"") {
@@ -328,6 +342,10 @@ fn apply_transport_config(
         out = remove_ntoseye_kd_devices(&out, &mut changes);
     }
 
+    if transports.contains(&DebugTransport::KdNet) {
+        out = ensure_kdnet_vendor(&out, &mut changes)?;
+    }
+
     // Declining is a no-op rather than a removal: vmcoreinfo isn't
     // ntoseye-owned, so a later reconfigure shouldn't silently strip it
     if vmcoreinfo {
@@ -335,6 +353,90 @@ fn apply_transport_config(
     }
 
     Ok(XmlPlan { xml: out, changes })
+}
+
+fn ensure_kdnet_vendor(xml: &str, changes: &mut Vec<String>) -> Result<String> {
+    let Some((hyperv_start, hyperv_end)) = find_tag_block(xml, 0, "hyperv") else {
+        return Ok(xml.to_string());
+    };
+    let hyperv = &xml[hyperv_start..hyperv_end];
+    let opening_end = hyperv
+        .find('>')
+        .ok_or_else(|| Error::DebugInfo("malformed libvirt <hyperv> feature block".to_string()))?;
+    if tag_attr(&hyperv[..=opening_end], "state").as_deref() == Some("off")
+        || kdnet_vendor_ready_block(hyperv)
+    {
+        return Ok(xml.to_string());
+    }
+
+    let mut out = xml.to_string();
+    if let Some((vendor_start, vendor_end)) = find_tag_block(hyperv, 0, "vendor_id") {
+        out.replace_range(
+            hyperv_start + vendor_start..hyperv_start + vendor_end,
+            r#"<vendor_id state="on" value="KVMKVMKVM"/>"#,
+        );
+    } else {
+        let indent = line_indent(xml, hyperv_start);
+        let child_indent = format!("{indent}  ");
+        if hyperv.trim_end().ends_with("/>") {
+            let opening = hyperv
+                .trim_end()
+                .strip_suffix("/>")
+                .expect("self-closing hyperv block")
+                .trim_end();
+            out.replace_range(
+                hyperv_start..hyperv_end,
+                &format!(
+                    "{opening}>\n{child_indent}<vendor_id state=\"on\" value=\"KVMKVMKVM\"/>\n{indent}</hyperv>"
+                ),
+            );
+        } else {
+            let closing = hyperv.rfind("</hyperv>").ok_or_else(|| {
+                Error::DebugInfo("malformed libvirt <hyperv> feature block".to_string())
+            })?;
+            let line_start = hyperv[..closing]
+                .rfind('\n')
+                .map_or(closing, |newline| newline + 1);
+            let (insert_at, insertion) = if hyperv[line_start..closing].trim().is_empty() {
+                (
+                    line_start,
+                    format!("{child_indent}<vendor_id state=\"on\" value=\"KVMKVMKVM\"/>\n"),
+                )
+            } else {
+                (
+                    closing,
+                    format!(
+                        "\n{child_indent}<vendor_id state=\"on\" value=\"KVMKVMKVM\"/>\n{indent}"
+                    ),
+                )
+            };
+            out.insert_str(hyperv_start + insert_at, &insertion);
+        }
+    }
+    changes.push("set Hyper-V vendor ID to KVMKVMKVM for KDNET".to_string());
+    Ok(out)
+}
+
+fn kdnet_vendor_ready(xml: &str) -> bool {
+    let Some((start, end)) = find_tag_block(xml, 0, "hyperv") else {
+        return true;
+    };
+    let hyperv = &xml[start..end];
+    let Some(opening_end) = hyperv.find('>') else {
+        return false;
+    };
+    tag_attr(&hyperv[..=opening_end], "state").as_deref() == Some("off")
+        || kdnet_vendor_ready_block(hyperv)
+}
+
+fn kdnet_vendor_ready_block(hyperv: &str) -> bool {
+    let Some((start, end)) = find_tag_block(hyperv, 0, "vendor_id") else {
+        return false;
+    };
+    let vendor = &hyperv[start..end];
+    tag_attr(vendor, "state").as_deref() != Some("off")
+        && tag_attr(vendor, "value")
+            .is_some_and(|value| !value.is_empty() && value != "Microsoft Hv")
 }
 
 /// Enable the domain's `vmcoreinfo` feature, which QEMU's Windows crash-dump
@@ -671,6 +773,56 @@ mod tests {
     }
 
     #[test]
+    fn kdnet_sets_qemu_hyperv_vendor_and_is_idempotent() {
+        let xml = r#"<domain type="kvm">
+  <features>
+    <hyperv mode="custom">
+      <relaxed state="on"/>
+    </hyperv>
+  </features>
+  <devices/>
+</domain>
+"#;
+        let once = apply_transport_config(xml, &[DebugTransport::KdNet], KD_SOCKET, false).unwrap();
+        assert!(
+            once.xml
+                .contains("      <vendor_id state=\"on\" value=\"KVMKVMKVM\"/>\n    </hyperv>")
+        );
+        assert!(kdnet_vendor_ready(&once.xml));
+        let request = ConfigureRequest {
+            action: Action::Configure,
+            backend: Some(BackendSelection::KdNet),
+            kdnet_host: Some("192.168.122.1".parse().unwrap()),
+            vmcoreinfo: false,
+        };
+        verify_applied_config(&once.xml, request).unwrap();
+        assert_eq!(
+            libvirt_instructions(&once.xml, request, "windows").run,
+            ["ntoseye --backend kdnet --kdnet-key KEY"]
+        );
+        let twice =
+            apply_transport_config(&once.xml, &[DebugTransport::KdNet], KD_SOCKET, false).unwrap();
+        assert_eq!(twice.xml, once.xml);
+        assert!(twice.changes.is_empty());
+    }
+
+    #[test]
+    fn kdnet_preserves_existing_custom_hyperv_vendor() {
+        let xml = r#"<domain type="kvm">
+  <features>
+    <hyperv mode="custom">
+      <vendor_id state="on" value="customvendor"/>
+    </hyperv>
+  </features>
+  <devices/>
+</domain>
+"#;
+        let plan = apply_transport_config(xml, &[DebugTransport::KdNet], KD_SOCKET, false).unwrap();
+        assert_eq!(plan.xml, xml);
+        assert!(plan.changes.is_empty());
+    }
+
+    #[test]
     fn inspection_recovers_configured_transports() {
         let plan = apply_transport_config(
             BASE_XML,
@@ -695,6 +847,7 @@ mod tests {
             ConfigureRequest {
                 action: Action::Configure,
                 backend: Some(BackendSelection::KdAndGdb),
+                kdnet_host: None,
                 vmcoreinfo: false,
             },
             "windows",

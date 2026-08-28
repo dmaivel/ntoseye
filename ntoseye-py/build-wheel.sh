@@ -84,5 +84,3 @@ PY
 echo
 echo "Wheel ready in dist/:"
 ls -1 dist/*.whl
-echo
-echo "Publish with:  python -m twine upload dist/*"

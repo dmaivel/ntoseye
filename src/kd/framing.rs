@@ -18,6 +18,7 @@ pub const BREAKIN_BYTE: u8 = 0x62;
 
 const INITIAL_PACKET_ID: u32 = 0x80800000;
 const SYNC_PACKET_ID: u32 = 0x00000800;
+const KDNET_INITIAL_PACKET_ID: u32 = 0x80000000;
 
 const PACKET_MAX_SIZE: usize = 4000;
 const HEADER_SIZE: usize = 16;
@@ -88,6 +89,10 @@ pub struct KdFraming<T> {
     awaiting_reset_ack: bool,
     peer_reset_seen: bool,
     modules_changed: bool,
+    kdnet_packet_ids: bool,
+    /// KDNET remote-ID high-water mark; targets retransmit with identical
+    /// IDs, so anything not strictly greater is a duplicate to ACK and drop.
+    kdnet_remote_high_water: u32,
 }
 
 impl<T> KdFraming<T> {
@@ -114,6 +119,8 @@ impl<T: Read + Write> KdFraming<T> {
             awaiting_reset_ack: false,
             peer_reset_seen: false,
             modules_changed: false,
+            kdnet_packet_ids: false,
+            kdnet_remote_high_water: 0,
         }
     }
 
@@ -143,6 +150,30 @@ impl<T: Read + Write> KdFraming<T> {
         self.peer_reset_seen
     }
 
+    /// Select KDNET's packet-ID dialect: the debugger uses high-bit,
+    /// monotonically increasing even IDs while the target uses its own
+    /// monotonically increasing IDs. KD ACKs still echo the target's exact ID.
+    pub fn use_kdnet_packet_ids(&mut self) {
+        self.kdnet_packet_ids = true;
+        self.current_packet_id = KDNET_INITIAL_PACKET_ID;
+    }
+
+    fn reset_outbound_packet_id(&mut self) {
+        self.current_packet_id = if self.kdnet_packet_ids {
+            KDNET_INITIAL_PACKET_ID
+        } else {
+            INITIAL_PACKET_ID
+        };
+    }
+
+    fn remote_ack_id(&self, packet_id: u32) -> u32 {
+        if self.kdnet_packet_ids {
+            packet_id
+        } else {
+            packet_id & !SYNC_PACKET_ID
+        }
+    }
+
     /// Send an unframed break-in byte
     pub fn send_breakin(&mut self) -> Result<()> {
         self.transport.write_all(&[BREAKIN_BYTE])?;
@@ -152,7 +183,7 @@ impl<T: Read + Write> KdFraming<T> {
 
     /// Send KD_RESET and reset local packet IDs
     pub fn send_reset(&mut self) -> Result<()> {
-        self.current_packet_id = INITIAL_PACKET_ID;
+        self.reset_outbound_packet_id();
         self.remote_packet_id = INITIAL_PACKET_ID;
         self.queued_data.clear();
         self.awaiting_reset_ack = true;
@@ -161,7 +192,7 @@ impl<T: Read + Write> KdFraming<T> {
 
     fn handle_reset(&mut self, context: &str) -> Result<()> {
         kd_trace!("kd: {context}: got RESET, resyncing ids");
-        self.current_packet_id = INITIAL_PACKET_ID;
+        self.reset_outbound_packet_id();
         self.remote_packet_id = INITIAL_PACKET_ID;
         self.queued_data.clear();
         self.peer_reset_seen = true;
@@ -181,7 +212,8 @@ impl<T: Read + Write> KdFraming<T> {
             )));
         }
 
-        for attempt in 0..MAX_SEND_RETRIES {
+        let mut resend_streak = 0usize;
+        for attempt in 0..MAX_SEND_RETRIES.max(if self.kdnet_packet_ids { 24 } else { 0 }) {
             let header = Header {
                 leader: DATA_PACKET_LEADER,
                 packet_type,
@@ -220,8 +252,13 @@ impl<T: Read + Write> KdFraming<T> {
                             == (self.current_packet_id & !SYNC_PACKET_ID) =>
                     {
                         kd_trace!("kd: send_data: ACKed id={:#x}", packet_id);
-                        self.current_packet_id ^= 1;
-                        self.current_packet_id &= !SYNC_PACKET_ID;
+                        if self.kdnet_packet_ids {
+                            self.current_packet_id =
+                                self.current_packet_id.wrapping_add(2) | KDNET_INITIAL_PACKET_ID;
+                        } else {
+                            self.current_packet_id ^= 1;
+                            self.current_packet_id &= !SYNC_PACKET_ID;
+                        }
                         return Ok(());
                     }
                     Ok(Received::Reset) => {
@@ -229,6 +266,17 @@ impl<T: Read + Write> KdFraming<T> {
                         break;
                     }
                     Ok(Received::Resend) => {
+                        resend_streak += 1;
+                        // Retransmit with a fresh KDNET sequence while keeping
+                        // the KD packet ID stable. Bound a persistently
+                        // out-of-sync link instead of looping forever.
+                        if self.kdnet_packet_ids && resend_streak >= 24 {
+                            return Err(Error::Kd(format!(
+                                "target requested RESEND {resend_streak} times for a {}-byte KD packet; \
+                                 the KD packet stream did not resynchronize",
+                                payload.len()
+                            )));
+                        }
                         kd_trace!("kd: send_data: got RESEND, retransmitting");
                         break;
                     }
@@ -245,7 +293,7 @@ impl<T: Read + Write> KdFraming<T> {
                         packet_type,
                         payload,
                     }) => {
-                        let ack_id = packet_id & !SYNC_PACKET_ID;
+                        let ack_id = self.remote_ack_id(packet_id);
                         self.send_control(PACKET_TYPE_KD_ACKNOWLEDGE, ack_id)?;
                         if !self.accept_remote_packet(packet_id) {
                             kd_trace!(
@@ -280,6 +328,20 @@ impl<T: Read + Write> KdFraming<T> {
     /// thinking we were gone), so we realign to it unconditionally. A plain
     /// id that doesn't match the expected one is a stale retransmit to skip
     fn accept_remote_packet(&mut self, packet_id: u32) -> bool {
+        if self.kdnet_packet_ids {
+            let base = packet_id & !SYNC_PACKET_ID;
+            if packet_id & SYNC_PACKET_ID != 0 {
+                self.peer_reset_seen = true;
+                self.reset_outbound_packet_id();
+                self.kdnet_remote_high_water = base;
+                return true;
+            }
+            if base <= self.kdnet_remote_high_water {
+                return false;
+            }
+            self.kdnet_remote_high_water = base;
+            return true;
+        }
         let base = packet_id & !SYNC_PACKET_ID;
         let is_sync = packet_id & SYNC_PACKET_ID != 0;
         if is_sync {
@@ -316,9 +378,8 @@ impl<T: Read + Write> KdFraming<T> {
                     packet_id,
                     payload,
                 } => {
-                    // Kernel checks our ACK id against its CurrentPacketId
-                    // with SYNC masked off, so always strip SYNC here
-                    let ack_id = packet_id & !SYNC_PACKET_ID;
+                    // KDCOM masks SYNC in ACKs; KDNET requires the exact ID.
+                    let ack_id = self.remote_ack_id(packet_id);
                     self.send_control(PACKET_TYPE_KD_ACKNOWLEDGE, ack_id)?;
                     if !self.accept_remote_packet(packet_id) {
                         kd_trace!(
@@ -585,6 +646,26 @@ mod tests {
     }
 
     #[test]
+    fn send_data_advances_kdnet_packet_ids_by_two() {
+        let mut framing = KdFraming::new(Loopback::new(ack_for(KDNET_INITIAL_PACKET_ID)));
+        framing.use_kdnet_packet_ids();
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &[])
+            .unwrap();
+
+        let sent = Header::decode(
+            framing.transport.outbound[..HEADER_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(sent.packet_id, KDNET_INITIAL_PACKET_ID);
+        assert_eq!(
+            framing.current_packet_id,
+            KDNET_INITIAL_PACKET_ID.wrapping_add(2)
+        );
+    }
+
+    #[test]
     fn recv_data_returns_payload_and_acks() {
         let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
         let inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, INITIAL_PACKET_ID, &payload);
@@ -603,6 +684,51 @@ mod tests {
         assert_eq!(h.packet_id, INITIAL_PACKET_ID);
     }
 
+    #[test]
+    fn recv_data_accepts_kdnet_monotonic_packet_ids() {
+        let inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0xb6, b"kdnet");
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids();
+
+        let pkt = framing.recv_data().unwrap();
+        assert_eq!(pkt.payload, b"kdnet");
+
+        let ack = Header::decode(
+            framing.transport.outbound[..HEADER_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(ack.packet_type, PACKET_TYPE_KD_ACKNOWLEDGE);
+        assert_eq!(ack.packet_id, 0xb6);
+    }
+
+    #[test]
+    fn recv_data_resynchronizes_kdnet_and_echoes_sync_ack_exactly() {
+        let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, SYNC_PACKET_ID, b"sync");
+        inbound.extend(data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 2, b"next"));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids();
+        framing.current_packet_id = KDNET_INITIAL_PACKET_ID + 20;
+        framing.kdnet_remote_high_water = 0x100;
+
+        assert_eq!(framing.recv_data().unwrap().payload, b"sync");
+        assert!(framing.take_peer_reset_seen());
+        assert_eq!(framing.current_packet_id, KDNET_INITIAL_PACKET_ID);
+        assert_eq!(framing.recv_data().unwrap().payload, b"next");
+
+        let first_ack = Header::decode(
+            framing.transport.outbound[..HEADER_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        let second_ack = Header::decode(
+            framing.transport.outbound[HEADER_SIZE..2 * HEADER_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(first_ack.packet_id, SYNC_PACKET_ID);
+        assert_eq!(second_ack.packet_id, 2);
+    }
     #[test]
     fn recv_data_skips_garbage_before_leader() {
         let payload = vec![0x01, 0x02];

@@ -2,7 +2,7 @@
 
 Drive the debugger from Python with the `ntoseye` module: the same introspection and run-control surface as the REPL (memory/struct reads, expression eval, symbol/type lookup, disassembly, backtraces, trap-frame decoding, code breakpoints, data watchpoints, execution control, process enumeration), with Python owning the loop. `dbg.watchpoint(target, access="write"|"read_write", length=1|2|4|8)` returns the same live handle type as `dbg.breakpoint(...)`; `dbg.inspect_trap_frame()` decodes the current thread's saved `_KTRAP_FRAME`, or accepts an explicit address. The wheel is self-contained, so this needs neither the `ntoseye` CLI nor a build with the embedded interpreter.
 
-Data watchpoints currently require KD, apply globally across guest address spaces, and at most four can be active at a time.
+Data watchpoints currently require KD (KDCOM or KDNET), apply globally across guest address spaces, and at most four can be active at a time.
 
 ## Install via pip
 
@@ -17,6 +17,10 @@ import ntoseye
 
 # defaults to backend="kd", connect="/tmp/ntoseye-kd.sock"
 dbg = ntoseye.attach()
+
+# KDNET listens on 0.0.0.0:50000 unless connect= is supplied.
+# memory_source accepts "auto" (default), "host", or "kd".
+# dbg = ntoseye.attach(backend="kdnet", key="1.2.3.4", memory_source="kd")
 
 for proc in dbg.processes():  # _EPROCESS cursors
     print(proc.UniqueProcessId, proc.ImageFileName, hex(proc.addr))

@@ -21,7 +21,7 @@ use crate::error::Error;
 use crate::expr::Expr;
 use crate::gdb::GdbClient;
 use crate::gdb::breakpoints::Breakpoint as CoreBreakpoint;
-use crate::kd::KdBackend;
+use crate::kd::{KdBackend, KdMemorySource};
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
 use crate::repl::ReplState;
@@ -3136,18 +3136,42 @@ impl Struct {
 
 /// Attach to a guest and return a [`Debugger`].
 ///
-/// `backend` is one of `"kd"` (default), `"gdb"`, `"memory"`, or `"dmp"`.
-/// `connect` is the backend target: socket path / address for kd/gdb, or
+/// `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or `"dmp"`.
+/// `connect` is the backend target: socket path / address for kd/kdnet/gdb, or
 /// dump file path for dmp; the per-backend default is used when omitted
-/// (except dmp, which requires a path).
+/// (except dmp, which requires a path). `key` is required for kdnet.
+/// `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
 ///
-/// kd/gdb take a per-target instance lock before building the backend, so a
+/// kd/kdnet/gdb take a per-target instance lock before building the backend, so a
 /// second live attach against the same target (here or against a running CLI)
 /// fails fast rather than racing on the handshake the first session owns;
 /// memory/dmp are passive and coexist with anything.
 #[pyfunction]
-#[pyo3(signature = (backend="kd", connect=None))]
-fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
+#[pyo3(signature = (backend="kd", connect=None, key=None, memory_source="auto"))]
+fn attach(
+    backend: &str,
+    connect: Option<&str>,
+    key: Option<&str>,
+    memory_source: &str,
+) -> PyResult<Debugger> {
+    if backend == "kdnet" && key.is_none() {
+        return Err(err(Error::DebugInfo(
+            "kdnet backend requires key=\"w.x.y.z\"".to_string(),
+        )));
+    }
+    if backend != "kdnet" && key.is_some() {
+        return Err(err(Error::DebugInfo(
+            "key is only valid for the kdnet backend".to_string(),
+        )));
+    }
+    if !matches!(backend, "kd" | "kdnet") && memory_source != "auto" {
+        return Err(err(Error::DebugInfo(
+            "memory_source is only valid for kd and kdnet backends".to_string(),
+        )));
+    }
+    let memory_source = memory_source
+        .parse::<KdMemorySource>()
+        .map_err(|error| err(Error::DebugInfo(error)))?;
     let inner = if backend == "dmp" {
         let path = connect.ok_or_else(|| {
             err(Error::DebugInfo(
@@ -3162,21 +3186,38 @@ fn attach(backend: &str, connect: Option<&str>) -> PyResult<Debugger> {
         .map_err(err)?
     } else {
         let target = resolve_target(backend, connect);
-        let phys = Arc::new(PhysMem::live().map_err(err)?);
-        Session::connect(phys, target.as_deref(), || {
-            let be: Box<dyn DebugBackend> = match backend {
-                "gdb" => Box::new(GdbClient::connect(target.as_deref().unwrap())?),
-                "kd" => Box::new(KdBackend::connect(target.as_deref().unwrap())?),
-                "memory" => Box::new(MemoryBackend::new()),
-                other => {
-                    return Err(Error::DebugInfo(format!(
-                        "unknown backend '{other}': expected 'kd', 'gdb', 'memory', or 'dmp'"
-                    )));
-                }
-            };
-            Ok(be)
-        })
-        .map_err(err)?
+        if matches!(backend, "kd" | "kdnet") {
+            let endpoint = target
+                .as_deref()
+                .expect("KD/KDNET always resolves an endpoint");
+            Session::connect_kd(endpoint, memory_source, || match backend {
+                "kd" => KdBackend::connect(endpoint),
+                "kdnet" => KdBackend::connect_net(
+                    endpoint,
+                    key.ok_or_else(|| {
+                        Error::DebugInfo("kdnet backend requires key=\"w.x.y.z\"".to_string())
+                    })?,
+                ),
+                _ => unreachable!("non-KD backend excluded above"),
+            })
+            .map_err(err)?
+        } else {
+            let phys = Arc::new(PhysMem::live().map_err(err)?);
+            Session::connect(phys, target.as_deref(), || {
+                let be: Box<dyn DebugBackend> = match backend {
+                    "gdb" => Box::new(GdbClient::connect(target.as_deref().unwrap())?),
+                    "memory" => Box::new(MemoryBackend::new()),
+                    "kd" | "kdnet" => unreachable!("KD backends handled above"),
+                    other => {
+                        return Err(Error::DebugInfo(format!(
+                            "unknown backend '{other}': expected 'kd', 'kdnet', 'gdb', 'memory', or 'dmp'"
+                        )));
+                    }
+                };
+                Ok(be)
+            })
+            .map_err(err)?
+        }
     };
     Ok(Debugger {
         inner: SessionHandle::Owned(Box::new(inner)),

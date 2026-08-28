@@ -28,28 +28,11 @@ pip install dist/ntoseye-*.whl
 
 ## Releasing portable wheels
 
-Run `./build-wheel.sh` on each release platform. The script provisions a local `.venv` when needed, builds into a clean `dist/`, runs `twine check`, and verifies the wheel in a throwaway virtualenv.
+Release wheels are built by `.github/workflows/release.yml` on native GitHub runners:
 
-- Linux builds use Zig and target `manylinux_2_17` so the wheel installs on non-EOL glibc distributions.
-- Apple Silicon macOS builds produce a native ARM64 wheel.
+- Linux x86-64 uses Zig and targets `manylinux_2_17`.
+- Apple Silicon uses the native ARM64 `macos-14` runner.
 
-Equivalent Linux build:
+Both wheels are smoke-tested, attached to the GitHub Release, and published to PyPI with Trusted Publishing.
 
-```sh
-pip install maturin ziglang twine
-maturin build --release --zig --compatibility manylinux_2_17 --out dist
-```
-
-Equivalent Apple Silicon macOS build:
-
-```sh
-pip install maturin twine
-maturin build --release --out dist
-```
-
-Check and publish either wheel:
-
-```sh
-python -m twine check dist/*
-python -m twine upload dist/*
-```
+For local reproduction, `./build-wheel.sh` provisions a local `.venv`, builds into `dist/`, runs `twine check`, and installs/import-tests the wheel in a throwaway virtual environment. It does not publish.

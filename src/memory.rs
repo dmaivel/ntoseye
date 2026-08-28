@@ -415,6 +415,25 @@ mod tests {
     }
 
     #[test]
+    fn arm64_kernel_walk_uses_upper_half_of_combined_root_page() {
+        let mut data = vec![0u8; 0x6000];
+        let kernel_va = VirtAddr(0xffff_8000_0000_0000);
+        let root_page = 0x1000u64;
+        data[root_page as usize + kernel_va.pml4_index() * 8
+            ..root_page as usize + kernel_va.pml4_index() * 8 + 8]
+            .copy_from_slice(&(0x2000u64 | 0b11).to_le_bytes());
+        data[0x2000..0x2008].copy_from_slice(&(0x3000u64 | 0b11).to_le_bytes());
+        data[0x3000..0x3008].copy_from_slice(&(0x4000u64 | 0b11).to_le_bytes());
+        data[0x4000..0x4008].copy_from_slice(&(0x5000u64 | 0b11).to_le_bytes());
+        data[0x5000..0x5008].copy_from_slice(&0xDEAD_BEEF_CAFE_BABEu64.to_le_bytes());
+        let mem = FakePhysMem { data };
+        let space = AddressSpace::new_arm64(&mem, root_page, root_page);
+
+        let value: u64 = space.read(kernel_va).unwrap();
+
+        assert_eq!(value, 0xDEAD_BEEF_CAFE_BABE);
+    }
+    #[test]
     fn arm64_translation_applies_table_attribute_restrictions() {
         let l0 = PageTableEntry(0b11 | (1 << 61) | (1 << 62) | (1 << 60));
         let table = PageTableEntry(0b11);

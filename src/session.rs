@@ -18,7 +18,7 @@ use crate::disasm::{DisasmRow, decode_rows, decode_rows_arm64, disasm_formatter}
 use crate::error::{Error, Result};
 use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig};
 use crate::gdb::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, RegisterMap};
-use crate::kd::trace_enabled;
+use crate::kd::{KdBackend, KdMemorySource, trace_enabled};
 use crate::memory::DTB_IDENTITY;
 use crate::phys::PhysMem;
 use crate::target::{ReloadReport, Target, ThreadInfo};
@@ -379,12 +379,97 @@ impl Session {
         Ok(session)
     }
 
-    /// Build a session around an already-connected `backend`, constructing the
-    /// guest [`Target`] view internally. The lower-level, *unguarded* constructor
-    /// (tests / embedders that manage their own locking); hosts attach via
-    /// [`Self::connect`], which takes the single-instance lock first.
-    pub fn new(phys: Arc<PhysMem>, mut backend: Box<dyn DebugBackend>) -> Result<Self> {
-        let mut target = Target::with_phys(phys)?;
+    /// Connect KD/KDNET, select a validated memory source, and build the
+    /// session. `Auto` prefers matching host VM memory and safely falls back to
+    /// target-mediated KD physical-memory requests.
+    pub fn connect_kd<F>(
+        resource: &str,
+        memory_source: KdMemorySource,
+        make_backend: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce() -> Result<KdBackend>,
+    {
+        let guard = Some(acquire_instance_guard(resource)?);
+        let mut backend = make_backend()?;
+        let hints = backend.target_hints()?;
+
+        let host_phys = match memory_source {
+            KdMemorySource::Kd => None,
+            KdMemorySource::Host => {
+                let phys = Arc::new(PhysMem::live().map_err(|error| {
+                    Error::Kd(format!("host memory source unavailable: {error}"))
+                })?);
+                backend.validate_host_memory(&*phys, hints)?;
+                Some(phys)
+            }
+            KdMemorySource::Auto => match PhysMem::live() {
+                Ok(phys) => {
+                    let phys = Arc::new(phys);
+                    match backend.validate_host_memory(&*phys, hints) {
+                        Ok(()) => Some(phys),
+                        Err(error) => {
+                            eprintln!(
+                                "{}: host memory rejected ({error}); falling back to KD memory",
+                                backend.name()
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{}: host memory unavailable ({error}); falling back to KD memory",
+                        backend.name()
+                    );
+                    None
+                }
+            },
+        };
+
+        let (target, backend): (Target, Box<dyn DebugBackend>) = match host_phys {
+            Some(phys) => {
+                eprintln!(
+                    "{}: memory source host (validated VM-process memory)",
+                    backend.name()
+                );
+                (
+                    Target::with_remote_phys(
+                        phys,
+                        hints.kernel_dtb,
+                        hints.kernel_base,
+                        hints.arch,
+                    )?,
+                    Box::new(backend),
+                )
+            }
+            None => {
+                let (backend, memory) = backend.into_remote_memory();
+                let phys = Arc::new(PhysMem::remote(memory));
+                (
+                    Target::with_remote_phys(
+                        phys,
+                        hints.kernel_dtb,
+                        hints.kernel_base,
+                        hints.arch,
+                    )?,
+                    Box::new(backend),
+                )
+            }
+        };
+        let mut session = Self::new_with_target(target, backend)?;
+        session._instance_guard = guard;
+        Ok(session)
+    }
+
+    /// Build a session around an already-connected backend and physical-memory
+    /// source. Hosts normally use [`Self::connect`] or [`Self::connect_kd`].
+    pub fn new(phys: Arc<PhysMem>, backend: Box<dyn DebugBackend>) -> Result<Self> {
+        let target = Target::with_phys(phys)?;
+        Self::new_with_target(target, backend)
+    }
+
+    fn new_with_target(mut target: Target, mut backend: Box<dyn DebugBackend>) -> Result<Self> {
         let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
         target.refresh_debugger_data(debugger_data_hint);
         backend.initialize_from_target(&target);

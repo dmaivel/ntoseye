@@ -14,11 +14,12 @@ use crate::{
 use super::{
     Action, ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
     ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, atomic_replace,
-    backup_file,
+    backup_file, kdnet_instructions,
 };
 
 const BACKENDS: &[BackendSelection] = &[
     BackendSelection::Kd,
+    BackendSelection::KdNet,
     BackendSelection::Gdb,
     BackendSelection::KdAndGdb,
     BackendSelection::Memory,
@@ -230,6 +231,9 @@ fn vmware_instructions(request: ConfigureRequest, debug_port: Option<usize>) -> 
     }
     let backend = request.backend.expect("configure requests have a backend");
     let mut instructions = Instructions::default();
+    if backend == BackendSelection::KdNet {
+        instructions = kdnet_instructions(request, false);
+    }
     if backend.kd() {
         let debug_port = debug_port.expect("KD configuration has a serial port");
         instructions.guest = vec![
@@ -454,6 +458,16 @@ serial0.fileName = "/tmp/console.log"
         ConfigureRequest {
             action,
             backend,
+            kdnet_host: None,
+            vmcoreinfo: false,
+        }
+    }
+
+    fn kdnet_request() -> ConfigureRequest {
+        ConfigureRequest {
+            action: Action::Configure,
+            backend: Some(BackendSelection::KdNet),
+            kdnet_host: Some("192.168.56.1".parse().unwrap()),
             vmcoreinfo: false,
         }
     }
@@ -504,6 +518,21 @@ serial0.fileName = "/tmp/console.log"
             Some(2),
         );
         assert_eq!(instructions.run, ["ntoseye", "ntoseye --backend gdb"]);
+    }
+
+    #[test]
+    fn kdnet_needs_no_vmx_transport_and_prints_network_setup() {
+        let request = kdnet_request();
+        let (configured, changes, port) = plan_vmx(BASE_VMX, request).unwrap();
+        assert_eq!(configured, BASE_VMX);
+        assert!(changes.is_empty());
+        assert_eq!(port, None);
+        let instructions = vmware_instructions(request, None);
+        assert_eq!(
+            instructions.run,
+            ["ntoseye --backend kdnet --kdnet-key KEY"]
+        );
+        assert!(instructions.guest[1].contains("hostip:192.168.56.1 port:50000"));
     }
 
     #[test]

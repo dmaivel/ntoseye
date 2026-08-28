@@ -19,7 +19,7 @@ impl MemoryBackend {
 
     fn unsupported(operation: &str) -> Error {
         Error::DebugInfo(format!(
-            "memory backend does not support {operation}; use KDCOM or gdb for target control"
+            "memory backend does not support {operation}; use KD (KDCOM or KDNET) or gdb for target control"
         ))
     }
 }

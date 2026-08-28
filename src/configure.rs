@@ -1,5 +1,6 @@
 use std::{
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -7,7 +8,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
-use dialoguer::{Confirm, Select};
+use dialoguer::{Confirm, Input, Select};
 use owo_colors::OwoColorize;
 
 #[cfg(any(target_os = "linux", test))]
@@ -34,6 +35,7 @@ pub(super) enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BackendSelection {
     Kd,
+    KdNet,
     #[cfg(any(target_os = "linux", test))]
     Gdb,
     #[cfg(any(target_os = "linux", test))]
@@ -76,6 +78,7 @@ pub(super) enum ProbeStatus {
 pub(super) struct ConfigureRequest {
     pub action: Action,
     pub backend: Option<BackendSelection>,
+    pub kdnet_host: Option<Ipv4Addr>,
     #[cfg(any(target_os = "linux", test))]
     pub vmcoreinfo: bool,
 }
@@ -123,6 +126,9 @@ impl ConfiguredTarget {
     fn label(&self) -> &'static str {
         match self.backend {
             BackendSelection::Kd => "KD",
+            BackendSelection::KdNet => {
+                unreachable!("KDNET guest configuration is not host-inspectable")
+            }
             #[cfg(any(target_os = "linux", test))]
             BackendSelection::Gdb => "GDB",
             #[cfg(any(target_os = "linux", test))]
@@ -145,6 +151,9 @@ impl ConfiguredTarget {
             BackendSelection::Kd if self.endpoint == DEFAULT_KD_SOCKET => executable.to_string(),
             BackendSelection::Kd => {
                 format!("{executable} --connect {}", shell_quote(&self.endpoint))
+            }
+            BackendSelection::KdNet => {
+                unreachable!("KDNET guest configuration is not host-inspectable")
             }
             #[cfg(any(target_os = "linux", test))]
             BackendSelection::Gdb if self.endpoint == DEFAULT_GDB_ADDR => {
@@ -187,6 +196,28 @@ pub(super) trait Configurator {
         false
     }
     fn plan(&self, guest: &Guest, request: ConfigureRequest) -> Result<Box<dyn ConfigurationPlan>>;
+}
+
+pub(super) fn kdnet_instructions(request: ConfigureRequest, elevated: bool) -> Instructions {
+    let host = request
+        .kdnet_host
+        .expect("KDNET configure requests have a host IP");
+    let executable = if elevated { "sudo ntoseye" } else { "ntoseye" };
+    Instructions {
+        guest: vec![
+            "bcdedit /debug on".to_string(),
+            format!("bcdedit /dbgsettings net hostip:{host} port:50000"),
+            "Restart-Computer".to_string(),
+        ],
+        run: vec![format!("{executable} --backend kdnet --kdnet-key KEY")],
+        notes: vec![
+            format!(
+                "Prefer `kdnet.exe {host} 50000` when available; it validates the debug NIC and configures busparams."
+            ),
+            "Replace KEY with the four-part key printed by kdnet.exe or bcdedit.".to_string(),
+            "Permit inbound UDP port 50000 through the host firewall.".to_string(),
+        ],
+    }
 }
 
 pub fn run_interactive() -> Result<()> {
@@ -277,6 +308,14 @@ pub fn run_interactive() -> Result<()> {
     } else {
         None
     };
+    let kdnet_host = if backend == Some(BackendSelection::KdNet) {
+        Some(prompt_ipv4(
+            "Host IPv4 address reachable from the guest",
+            default_host_ipv4(),
+        )?)
+    } else {
+        None
+    };
 
     #[cfg(any(target_os = "linux", test))]
     let vmcoreinfo = action == Action::Configure
@@ -289,6 +328,7 @@ pub fn run_interactive() -> Result<()> {
         ConfigureRequest {
             action,
             backend,
+            kdnet_host,
             #[cfg(any(target_os = "linux", test))]
             vmcoreinfo,
         },
@@ -407,6 +447,7 @@ fn backend_label(backend: BackendSelection) -> String {
         BackendSelection::Kd => {
             format!("KD (Windows kernel debugging) {}", "(recommended)".green())
         }
+        BackendSelection::KdNet => "KDNET (encrypted network kernel debugging)".to_string(),
         #[cfg(any(target_os = "linux", test))]
         BackendSelection::Gdb => "GDB (hypervisor debug stub)".to_string(),
         #[cfg(any(target_os = "linux", test))]
@@ -460,6 +501,32 @@ pub(super) fn prompt_confirm(prompt: &str) -> Result<bool> {
         .default(false)
         .interact()
         .map_err(prompt_error)
+}
+
+fn prompt_ipv4(prompt: &str, default: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
+    let input = Input::<Ipv4Addr>::new().with_prompt(prompt);
+    match default {
+        Some(address) => input.default(address),
+        None => input,
+    }
+    .interact_text()
+    .map_err(prompt_error)
+}
+
+fn default_host_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    // UDP connect selects a route without sending traffic. The chosen local
+    // address is the best general default; users can override it for NATs with
+    // a special guest-visible gateway such as QEMU user networking.
+    socket.connect((Ipv4Addr::new(1, 1, 1, 1), 80)).ok()?;
+    socket.local_addr().ok().and_then(routable_ipv4)
+}
+
+fn routable_ipv4(address: SocketAddr) -> Option<Ipv4Addr> {
+    match address.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
 }
 
 fn prompt_error(error: dialoguer::Error) -> Error {
@@ -603,5 +670,46 @@ mod tests {
             render_guest_status(&guest, &GuestInspection::default()),
             "  Windows (stopped)\n    Debug backend: not configured\n"
         );
+    }
+
+    #[test]
+    fn kdnet_setup_uses_selected_host_and_runtime_key_placeholder() {
+        let instructions = kdnet_instructions(
+            ConfigureRequest {
+                action: Action::Configure,
+                backend: Some(BackendSelection::KdNet),
+                kdnet_host: Some(Ipv4Addr::new(192, 168, 122, 1)),
+                vmcoreinfo: false,
+            },
+            false,
+        );
+        assert_eq!(
+            instructions.guest,
+            [
+                "bcdedit /debug on",
+                "bcdedit /dbgsettings net hostip:192.168.122.1 port:50000",
+                "Restart-Computer",
+            ]
+        );
+        assert_eq!(
+            instructions.run,
+            ["ntoseye --backend kdnet --kdnet-key KEY"]
+        );
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|note| note.contains("kdnet.exe 192.168.122.1 50000"))
+        );
+    }
+
+    #[test]
+    fn default_host_address_accepts_only_non_loopback_ipv4() {
+        assert_eq!(
+            routable_ipv4("192.168.122.1:50000".parse().unwrap()),
+            Some(Ipv4Addr::new(192, 168, 122, 1))
+        );
+        assert_eq!(routable_ipv4("127.0.0.1:50000".parse().unwrap()), None);
+        assert_eq!(routable_ipv4("[::1]:50000".parse().unwrap()), None);
     }
 }

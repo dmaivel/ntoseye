@@ -13,7 +13,7 @@ use crate::{
     dmp::DmpBackend,
     error::{Error, Result},
     gdb::GdbClient,
-    kd::KdBackend,
+    kd::{KdBackend, KdMemorySource},
     memory_backend::MemoryBackend,
     phys::PhysMem,
     repl::{start_plain_repl, start_repl},
@@ -24,6 +24,7 @@ use crate::{
 enum BackendKind {
     Gdb,
     Kd,
+    KdNet,
     Memory,
 }
 
@@ -32,9 +33,10 @@ impl FromArgValue for BackendKind {
         match value {
             "gdb" => Ok(BackendKind::Gdb),
             "kd" => Ok(BackendKind::Kd),
+            "kdnet" => Ok(BackendKind::KdNet),
             "memory" => Ok(BackendKind::Memory),
             other => Err(format!(
-                "unknown backend '{other}': expected 'kd', 'gdb', or 'memory'"
+                "unknown backend '{other}': expected 'kd', 'kdnet', 'gdb', or 'memory'"
             )),
         }
     }
@@ -66,13 +68,21 @@ struct Args {
     #[argh(switch, long = "kd-instructions")]
     kd_instructions: bool,
 
-    /// debugger backend: 'kd' (Windows KD over serial, default), 'gdb' (QEMU GDB stub), or 'memory' (passive live-VM introspection)
+    /// debugger backend: 'kd' (Windows KD over serial, default), 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub), or 'memory' (passive live-VM introspection)
     #[argh(option, short = 'b', long = "backend", default = "BackendKind::Kd")]
     backend: BackendKind,
 
-    /// backend target: GDB address or KD socket path; unused by memory
+    /// backend target: GDB address, KD socket path, or KDNET listen address; unused by memory
     #[argh(option, long = "connect")]
     connect: Option<String>,
+
+    /// KDNET encryption key (four base-36 components); required by the kdnet backend
+    #[argh(option, long = "kdnet-key")]
+    kdnet_key: Option<String>,
+
+    /// KD/KDNET memory source: auto (validated host memory, then KD fallback), host, or kd
+    #[argh(option, long = "memory-source")]
+    memory_source: Option<KdMemorySource>,
 
     /// use a line-oriented REPL without terminal cursor queries, completion, or history
     #[argh(switch, long = "plain-repl")]
@@ -253,6 +263,27 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    if args.backend != BackendKind::KdNet && args.kdnet_key.is_some() {
+        return Err(Error::DebugInfo(
+            "--kdnet-key is only valid with --backend kdnet".to_string(),
+        ));
+    }
+    if !matches!(args.backend, BackendKind::Kd | BackendKind::KdNet) && args.memory_source.is_some()
+    {
+        return Err(Error::DebugInfo(
+            "--memory-source is only valid with --backend kd or --backend kdnet".to_string(),
+        ));
+    }
+    #[cfg(feature = "mcp")]
+    let may_defer_kdnet_key = matches!(&args.command, Some(Command::Mcp(_)));
+    #[cfg(not(feature = "mcp"))]
+    let may_defer_kdnet_key = false;
+    if args.backend == BackendKind::KdNet && args.kdnet_key.is_none() && !may_defer_kdnet_key {
+        return Err(Error::DebugInfo(
+            "--backend kdnet requires --kdnet-key <w.x.y.z>".to_string(),
+        ));
+    }
+
     print_home_migration();
 
     symbols::FORCE_DOWNLOADS
@@ -263,7 +294,10 @@ fn run() -> Result<()> {
 
     // Merge top-level and subcommand --pdb-server lists (the subcommand may
     // carry its own, e.g. `ntoseye mcp --pdb-server URL`).
+    #[cfg(feature = "mcp")]
     let mut pdb_servers = args.pdb_server;
+    #[cfg(not(feature = "mcp"))]
+    let pdb_servers = args.pdb_server;
     #[cfg(feature = "mcp")]
     if let Some(Command::Mcp(ref mcp_args)) = args.command {
         pdb_servers.extend(mcp_args.pdb_server.clone());
@@ -289,11 +323,14 @@ fn run() -> Result<()> {
                 let backend = match args.backend {
                     BackendKind::Gdb => "gdb",
                     BackendKind::Kd => "kd",
+                    BackendKind::KdNet => "kdnet",
                     BackendKind::Memory => "memory",
                 };
                 mcp::run(
                     backend.to_string(),
                     args.connect.clone(),
+                    args.kdnet_key.clone(),
+                    args.memory_source.unwrap_or(KdMemorySource::Auto),
                     args.dump.clone(),
                     mcp_args.http.clone(),
                     mcp_args.unsafe_http,
@@ -322,34 +359,54 @@ fn run() -> Result<()> {
         };
     }
 
-    // kd/gdb take a per-target instance lock so a second ntoseye can't
+    // kd/kdnet/gdb take a per-target instance lock so a second ntoseye can't
     // attach to the same backend resource; passive memory introspection
     // passes None and coexists with anything.
     let backend_str = match args.backend {
         BackendKind::Gdb => "gdb",
         BackendKind::Kd => "kd",
+        BackendKind::KdNet => "kdnet",
         BackendKind::Memory => "memory",
     };
     let target = resolve_target(backend_str, args.connect.as_deref());
-    let phys = Arc::new(PhysMem::live()?);
-    let mut ctx = session::Session::connect(
-        phys,
-        target.as_deref(),
-        || -> Result<Box<dyn DebugBackend>> {
-            Ok(match args.backend {
-                BackendKind::Gdb => Box::new(GdbClient::connect(target.as_deref().unwrap())?),
-                BackendKind::Kd => Box::new(KdBackend::connect(target.as_deref().unwrap())?),
-                BackendKind::Memory => {
-                    if args.connect.is_some() {
-                        return Err(Error::DebugInfo(
-                            "memory backend does not use --connect".to_string(),
-                        ));
+    let memory_source = args.memory_source.unwrap_or(KdMemorySource::Auto);
+    let mut ctx = if matches!(args.backend, BackendKind::Kd | BackendKind::KdNet) {
+        let endpoint = target
+            .as_deref()
+            .expect("KD/KDNET always resolves an endpoint");
+        session::Session::connect_kd(endpoint, memory_source, || match args.backend {
+            BackendKind::Kd => KdBackend::connect(endpoint),
+            BackendKind::KdNet => KdBackend::connect_net(
+                endpoint,
+                args.kdnet_key.as_deref().ok_or_else(|| {
+                    Error::DebugInfo("--backend kdnet requires --kdnet-key <w.x.y.z>".to_string())
+                })?,
+            ),
+            _ => unreachable!("non-KD backend excluded above"),
+        })?
+    } else {
+        let phys = Arc::new(PhysMem::live()?);
+        session::Session::connect(
+            phys,
+            target.as_deref(),
+            || -> Result<Box<dyn DebugBackend>> {
+                Ok(match args.backend {
+                    BackendKind::Gdb => Box::new(GdbClient::connect(target.as_deref().unwrap())?),
+                    BackendKind::Memory => {
+                        if args.connect.is_some() {
+                            return Err(Error::DebugInfo(
+                                "memory backend does not use --connect".to_string(),
+                            ));
+                        }
+                        Box::new(MemoryBackend::new())
                     }
-                    Box::new(MemoryBackend::new())
-                }
-            })
-        },
-    )?;
+                    BackendKind::Kd | BackendKind::KdNet => {
+                        unreachable!("KD backends handled above")
+                    }
+                })
+            },
+        )?
+    };
     if args.plain_repl {
         start_plain_repl(&mut ctx)
     } else {

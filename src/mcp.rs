@@ -25,7 +25,7 @@ use crate::error::Error;
 use crate::expr::Expr;
 use crate::gdb::GdbClient;
 use crate::guest::ModuleInfo;
-use crate::kd::KdBackend;
+use crate::kd::{KdBackend, KdMemorySource};
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
 use crate::session::{ContinueOutcome, RunStatus, Session};
@@ -83,6 +83,8 @@ fn cleanup_session(ctx: &mut Session) {
 fn spawn_session(
     backend: String,
     connect: Option<String>,
+    kdnet_key: Option<String>,
+    memory_source: KdMemorySource,
     dump: Option<PathBuf>,
 ) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Arc<AtomicBool>)> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -114,18 +116,34 @@ fn spawn_session(
                 })
             } else {
                 let target = resolve_target(backend.as_str(), connect.as_deref());
-                let phys = Arc::new(PhysMem::live()?);
-                Session::connect(phys, target.as_deref(), || {
-                    let backend: Box<dyn DebugBackend> = match backend.as_str() {
-                        "gdb" => Box::new(GdbClient::connect(target.as_deref().unwrap())?),
-                        "kd" => Box::new(KdBackend::connect(target.as_deref().unwrap())?),
-                        "memory" => Box::new(MemoryBackend::new()),
-                        other => {
-                            return Err(Error::DebugInfo(format!("unknown backend '{other}'")));
-                        }
-                    };
-                    Ok(backend)
-                })
+                if matches!(backend.as_str(), "kd" | "kdnet") {
+                    let endpoint = target
+                        .as_deref()
+                        .expect("KD/KDNET always resolves an endpoint");
+                    Session::connect_kd(endpoint, memory_source, || match backend.as_str() {
+                        "kd" => KdBackend::connect(endpoint),
+                        "kdnet" => KdBackend::connect_net(
+                            endpoint,
+                            kdnet_key.as_deref().ok_or_else(|| {
+                                Error::DebugInfo("kdnet backend requires a key".to_string())
+                            })?,
+                        ),
+                        _ => unreachable!("non-KD backend excluded above"),
+                    })
+                } else {
+                    let phys = Arc::new(PhysMem::live()?);
+                    Session::connect(phys, target.as_deref(), || {
+                        let backend: Box<dyn DebugBackend> = match backend.as_str() {
+                            "gdb" => Box::new(GdbClient::connect(target.as_deref().unwrap())?),
+                            "memory" => Box::new(MemoryBackend::new()),
+                            "kd" | "kdnet" => unreachable!("KD backends handled above"),
+                            other => {
+                                return Err(Error::DebugInfo(format!("unknown backend '{other}'")));
+                            }
+                        };
+                        Ok(backend)
+                    })
+                }
             }
         })()
         .map_err(|e| e.to_string());
@@ -647,13 +665,21 @@ struct OpenDumpArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OpenArgs {
     #[schemars(
-        description = "Backend to use: \"kd\" (KD over Unix socket), \"gdb\" (GDB remote stub), or \"memory\" (physical memory only, no debug transport)"
+        description = "Backend to use: \"kd\" (KD over Unix socket), \"kdnet\" (KDNET over encrypted UDP), \"gdb\" (GDB remote stub), or \"memory\" (physical memory only, no debug transport)"
     )]
     backend: String,
     #[schemars(
-        description = "Connection target: Unix socket path for kd (default /tmp/ntoseye-kd.sock), host:port for gdb (default 127.0.0.1:1234). Ignored for memory backend."
+        description = "Connection target: Unix socket path for kd (default /tmp/ntoseye-kd.sock), listen address for kdnet (default 0.0.0.0:50000), host:port for gdb (default 127.0.0.1:1234). Ignored for memory backend."
     )]
     connect: Option<String>,
+    #[schemars(
+        description = "KDNET encryption key as four base-36 components. Required only for the kdnet backend."
+    )]
+    key: Option<String>,
+    #[schemars(
+        description = "KD/KDNET memory source: \"auto\" (validated host memory, then KD fallback), \"host\", or \"kd\". Defaults to \"auto\"."
+    )]
+    memory_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2240,7 +2266,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "List the backend's capability matrix - which debug operations the current transport (kd/gdb/memory/dump) supports - as {capabilities:[{capability, label, supported}]}. Check before a state-changing op (e.g. usermode breakpoints)."
+        description = "List the backend's capability matrix - which debug operations the current transport (kd/kdnet/gdb/memory/dump) supports - as {capabilities:[{capability, label, supported}]}. Check before a state-changing op (e.g. usermode breakpoints)."
     )]
     async fn capabilities(&self) -> Result<CallToolResult, McpError> {
         let v = self
@@ -2902,7 +2928,13 @@ impl NtoseyeMcp {
 
         let dump_path = PathBuf::from(&path);
         let (tx, _service_pending) = tokio::task::spawn_blocking(move || {
-            spawn_session(String::new(), None, Some(dump_path))
+            spawn_session(
+                String::new(),
+                None,
+                None,
+                KdMemorySource::Auto,
+                Some(dump_path),
+            )
         })
         .await
         .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
@@ -2943,39 +2975,67 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Connect to a live Windows VM. Supported backends: \"kd\" (KD over Unix socket, default /tmp/ntoseye-kd.sock), \"gdb\" (GDB remote stub, default 127.0.0.1:1234), \"memory\" (physical memory only, no debug transport). Must be called before any other tool when the server was started without --backend/--connect/--dump. Only one session can be active at a time."
+        description = "Connect to a live Windows VM. Supported backends: \"kd\" (KD over Unix socket, default /tmp/ntoseye-kd.sock), \"kdnet\" (encrypted KD over UDP, default 0.0.0.0:50000), \"gdb\" (GDB remote stub, default 127.0.0.1:1234), \"memory\" (physical memory only, no debug transport). KDNET requires key. Must be called before any other tool when the server was started without --backend/--connect/--dump. Only one session can be active at a time."
     )]
     async fn open(
         &self,
-        Parameters(OpenArgs { backend, connect }): Parameters<OpenArgs>,
+        Parameters(OpenArgs {
+            backend,
+            connect,
+            key,
+            memory_source,
+        }): Parameters<OpenArgs>,
     ) -> Result<CallToolResult, McpError> {
         match backend.as_str() {
-            "kd" | "gdb" => {}
-            "memory" => {
-                if connect.is_some() {
+            "kd" | "gdb" => {
+                if key.is_some() {
                     return Err(invalid_params(
-                        "memory backend does not use 'connect'".to_string(),
+                        "'key' is only valid for the kdnet backend".to_string(),
+                    ));
+                }
+            }
+            "kdnet" => {
+                if key.is_none() {
+                    return Err(invalid_params("kdnet backend requires 'key'".to_string()));
+                }
+            }
+            "memory" => {
+                if connect.is_some() || key.is_some() {
+                    return Err(invalid_params(
+                        "memory backend does not use 'connect' or 'key'".to_string(),
                     ));
                 }
             }
             other => {
                 return Err(invalid_params(format!(
-                    "unknown backend \"{other}\": must be \"kd\", \"gdb\", or \"memory\""
+                    "unknown backend \"{other}\": must be \"kd\", \"kdnet\", \"gdb\", or \"memory\""
                 )));
             }
         }
+        if !matches!(backend.as_str(), "kd" | "kdnet") && memory_source.is_some() {
+            return Err(invalid_params(
+                "'memory_source' is only valid for kd and kdnet backends".to_string(),
+            ));
+        }
+        let memory_source = memory_source
+            .as_deref()
+            .unwrap_or("auto")
+            .parse::<KdMemorySource>()
+            .map_err(invalid_params)?;
 
         let opening = OpeningGuard::claim(&self.session)?;
 
         let backend_name = backend.clone();
         let connect_str = connect.clone();
-        let (tx, service_pending) =
-            tokio::task::spawn_blocking(move || spawn_session(backend_name, connect_str, None))
-                .await
-                .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
-                .map_err(|e| {
-                    McpError::internal_error(format!("failed to connect ({backend}): {e}"), None)
-                })?;
+        let key_str = key.clone();
+        let (tx, service_pending) = tokio::task::spawn_blocking(move || {
+            spawn_session(backend_name, connect_str, key_str, memory_source, None)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
+        .map_err(|e| {
+            McpError::internal_error(format!("failed to connect ({backend}): {e}"), None)
+        })?;
 
         let tx_for_ticker = tx.clone();
         opening.promote(tx)?;
@@ -3215,6 +3275,8 @@ fn check_http_bind_policy(addr: &str, unsafe_http: bool) -> anyhow::Result<()> {
 pub fn run(
     backend: String,
     connect: Option<String>,
+    kdnet_key: Option<String>,
+    memory_source: KdMemorySource,
     dump: Option<PathBuf>,
     http: Option<String>,
     unsafe_http: bool,
@@ -3225,14 +3287,18 @@ pub fn run(
 
     // The stdio transport speaks MCP on stdout, so all logging goes to stderr.
     let session: SharedSession = Arc::new(std::sync::Mutex::new(SessionSlot::Vacant));
-    let eager = dump.is_some() || connect.is_some() || backend == "memory";
+    let eager = dump.is_some()
+        || connect.is_some()
+        || backend == "memory"
+        || (backend == "kdnet" && kdnet_key.is_some());
 
     if eager {
         let is_dump = dump.is_some();
         let needs_ticker = !is_dump && backend != "memory";
         let label = if is_dump { "dump" } else { &backend };
         eprintln!("ntoseye-mcp: attaching ({label})...");
-        let (tx, service_pending) = spawn_session(backend, connect, dump)?;
+        let (tx, service_pending) =
+            spawn_session(backend, connect, kdnet_key, memory_source, dump)?;
         *session.lock().unwrap() = SessionSlot::Active(tx.clone());
         if needs_ticker {
             spawn_service_ticker(tx, service_pending);
@@ -3466,6 +3532,8 @@ mod tests {
             .open(Parameters(OpenArgs {
                 backend: "kd".into(),
                 connect: None,
+                key: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -3482,11 +3550,31 @@ mod tests {
             .open(Parameters(OpenArgs {
                 backend: "nope".into(),
                 connect: None,
+                key: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
         assert!(
             err.message.contains("unknown backend"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_kdnet_requires_key() {
+        let mcp = empty_mcp();
+        let err = mcp
+            .open(Parameters(OpenArgs {
+                backend: "kdnet".into(),
+                connect: None,
+                key: None,
+                memory_source: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("requires 'key'"),
             "unexpected error: {err:?}"
         );
     }
@@ -3498,6 +3586,8 @@ mod tests {
             .open(Parameters(OpenArgs {
                 backend: "memory".into(),
                 connect: Some("127.0.0.1:1234".into()),
+                key: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -3529,6 +3619,8 @@ mod tests {
             .open(Parameters(OpenArgs {
                 backend: "kd".into(),
                 connect: Some("/tmp/ntoseye-test-does-not-exist.sock".into()),
+                key: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -3547,6 +3639,8 @@ mod tests {
             .open(Parameters(OpenArgs {
                 backend: "kd".into(),
                 connect: Some("/tmp/ntoseye-test-default-does-not-exist.sock".into()),
+                key: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -3625,6 +3719,8 @@ mod tests {
             .open(Parameters(OpenArgs {
                 backend: "kd".into(),
                 connect: Some("/tmp/ntoseye-test-close-reopen-does-not-exist.sock".into()),
+                key: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();

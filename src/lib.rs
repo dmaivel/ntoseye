@@ -3,11 +3,13 @@ compile_error!("This application only runs on Linux and macOS hosts.");
 
 pub const DEFAULT_GDB_ADDR: &str = "127.0.0.1:1234";
 pub const DEFAULT_KD_SOCKET: &str = "/tmp/ntoseye-kd.sock";
+pub const DEFAULT_KDNET_ADDR: &str = "0.0.0.0:50000";
 
 pub fn resolve_target(backend: &str, connect: Option<&str>) -> Option<String> {
     match backend {
         "gdb" => Some(connect.unwrap_or(DEFAULT_GDB_ADDR).to_string()),
         "kd" => Some(connect.unwrap_or(DEFAULT_KD_SOCKET).to_string()),
+        "kdnet" => Some(connect.unwrap_or(DEFAULT_KDNET_ADDR).to_string()),
         "memory" => None,
         other => {
             eprintln!(

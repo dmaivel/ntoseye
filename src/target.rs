@@ -984,6 +984,41 @@ impl Target {
         })
     }
 
+    /// Build a target from KD-provided kernel metadata and KD-backed physical
+    /// memory. This bypasses host RAM scanning, which is unavailable for remote
+    /// or bare-metal targets.
+    pub fn with_remote_phys(
+        phys: Arc<PhysMem>,
+        kernel_dtb: Dtb,
+        kernel_base: VirtAddr,
+        arch: Arch,
+    ) -> Result<Self> {
+        let symbols = Arc::new(SymbolStore::new());
+        let ntoskrnl =
+            WinObject::new_with_arch(phys.clone(), symbols.clone(), kernel_dtb, kernel_base, arch)
+                .load_symbols()?;
+        ntoskrnl.register_as_kernel();
+        let guest = Guest { ntoskrnl };
+        let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
+
+        Ok(Self {
+            phys,
+            symbols,
+            guest: Some(guest),
+            debugger_data: None,
+            current_process: None,
+            current_process_info: None,
+            triage_fallback: None,
+            triage_modules_cache: None,
+            context_dtb_override: None,
+            registers: None,
+            windows_thread_selection: None,
+            user_vars: HashMap::new(),
+            results: Vec::new(),
+            results_origin: None,
+        })
+    }
+
     pub fn current_process(&self) -> Result<&WinObject> {
         match &self.current_process {
             Some(p) => Ok(p),

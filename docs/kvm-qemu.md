@@ -50,6 +50,18 @@ Then connect: `ntoseye`.
 </domain>
 ```
 
+## KDNET
+
+KDNET uses the guest's virtual NIC instead of a serial device. For a libvirt/QEMU VM using `<interface type="user">`, QEMU normally exposes the host to the guest as `10.0.2.2`; use that as the host address. For bridged networking, use the host's address on the bridged network.
+
+QEMU/KVM guests must not report the default `Microsoft Hv` hypervisor vendor. KDNET interprets that identity as real Hyper-V and selects Hyper-V's synthetic debug device, which QEMU does not provide. Keep the Hyper-V enlightenments but add this child to the libvirt `<hyperv>` block:
+
+```xml
+<vendor_id state="on" value="KVMKVMKVM"/>
+```
+
+Power the VM completely off and start it again after changing the CPU identity; a Windows reboot does not recreate the QEMU CPU. See OSR's [QEMU/KVM KDNET analysis](https://www.osr.com/blog/2021/10/05/using-windbg-over-kdnet-on-qemu-kvm/). Then follow the common [KDNET guest and launch setup](backends.md#kdnet) using the selected host address.
+
 ## GDB stub
 
 Fallback backend for guests that are not configured for Windows KD. Expose QEMU's gdbstub on `127.0.0.1:1234`, then run with `--backend gdb`.
