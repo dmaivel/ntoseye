@@ -44,6 +44,8 @@ pub enum Error {
 
     #[error("KD protocol failure: {0}")]
     Kd(String),
+    #[error("KD protocol failure: send exceeded retry budget: {0}")]
+    KdSendExhausted(String),
     #[error("KD protocol failure: kernel returned NTSTATUS {ntstatus:#x} for api {api:#x}")]
     KdStatus { ntstatus: u32, api: u32 },
 

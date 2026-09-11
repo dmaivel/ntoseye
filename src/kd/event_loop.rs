@@ -340,7 +340,7 @@ pub fn with_framing_read_timeout<R>(
 pub fn is_initial_resync_error(error: &Error) -> bool {
     match error {
         Error::Io(e) => is_temporary_io_error(e.kind()),
-        Error::Kd(message) => message == "send exceeded retry budget",
+        Error::KdSendExhausted(_) => true,
         _ => false,
     }
 }

@@ -260,7 +260,8 @@ impl<T: Read + Write> KdFraming<T> {
         }
 
         let mut resend_streak = 0usize;
-        for attempt in 0..MAX_SEND_RETRIES.max(if self.kdnet_packet_ids { 24 } else { 0 }) {
+        let attempts = MAX_SEND_RETRIES.max(if self.kdnet_packet_ids { 24 } else { 0 });
+        for attempt in 0..attempts {
             let header = Header {
                 leader: DATA_PACKET_LEADER,
                 packet_type,
@@ -315,7 +316,7 @@ impl<T: Read + Write> KdFraming<T> {
                         // the KD packet ID stable. Bound a persistently
                         // out-of-sync link instead of looping forever.
                         if self.kdnet_packet_ids && resend_streak >= 24 {
-                            return Err(Error::Kd(format!(
+                            return Err(Error::KdSendExhausted(format!(
                                 "target requested RESEND {resend_streak} times for a {}-byte KD packet; \
                                  the KD packet stream did not resynchronize",
                                 payload.len()
@@ -363,7 +364,10 @@ impl<T: Read + Write> KdFraming<T> {
             }
         }
 
-        Err(Error::Kd("send exceeded retry budget".into()))
+        Err(Error::KdSendExhausted(format!(
+            "no ACK for a {}-byte KD packet after {attempts} attempts",
+            payload.len()
+        )))
     }
 
     /// Decide whether an incoming data packet should be accepted, advancing
@@ -1055,6 +1059,20 @@ mod tests {
         // We should have written the data packet twice
         let expected_per_attempt = HEADER_SIZE + 1 + 1;
         assert_eq!(framing.transport.outbound.len(), expected_per_attempt * 2);
+    }
+
+    #[test]
+    fn persistent_kdnet_resend_is_a_resync_error() {
+        let inbound = (0..24)
+            .flat_map(|_| control_packet(PACKET_TYPE_KD_RESEND, 0))
+            .collect();
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
+        let err = framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
+            .unwrap_err();
+        assert!(matches!(err, Error::KdSendExhausted(_)), "{err}");
+        assert!(crate::kd::event_loop::is_initial_resync_error(&err));
     }
 
     #[test]
