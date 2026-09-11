@@ -22,7 +22,7 @@ const INITIAL_PACKET_ID: u32 = 0x80800000;
 const SYNC_PACKET_ID: u32 = 0x00000800;
 const KDNET_INITIAL_PACKET_ID: u32 = 0x80000000;
 
-const PACKET_MAX_SIZE: usize = 4000;
+pub const PACKET_MAX_SIZE: usize = 4000;
 const HEADER_SIZE: usize = 16;
 
 pub const PACKET_TYPE_KD_STATE_CHANGE64: u16 = 7;
@@ -381,13 +381,21 @@ impl<T: Read + Write> KdFraming<T> {
     /// restarted stream is signalled by the session rollover or by RESET.
     fn accept_remote_packet(&mut self, packet_id: u32) -> bool {
         if self.kdnet_packet_ids {
-            if self
+            // Serial-number order: ids are a u32 counter that wraps, so a
+            // fresh id is one a short (non-negative) distance ahead of the
+            // high-water mark, not one that is numerically larger.
+            let stale = self
                 .kdnet_remote_high_water
-                .is_some_and(|high| packet_id <= high)
-            {
+                .is_some_and(|high| (packet_id.wrapping_sub(high) as i32) <= 0);
+            if stale {
                 return false;
             }
             self.kdnet_remote_high_water = Some(packet_id);
+            // Live data from the peer proves the streams are in sync; a RESET we
+            // sent no longer needs an explicit RESET back (KDCOM answers with a
+            // retransmitted state-change instead), so a later peer-initiated
+            // RESET must be echoed rather than swallowed as our ack.
+            self.awaiting_reset_ack = false;
             return true;
         }
         let base = packet_id & !SYNC_PACKET_ID;
@@ -404,6 +412,7 @@ impl<T: Read + Write> KdFraming<T> {
             return false;
         }
         self.remote_packet_id = (base ^ 1) & !SYNC_PACKET_ID;
+        self.awaiting_reset_ack = false;
         true
     }
 

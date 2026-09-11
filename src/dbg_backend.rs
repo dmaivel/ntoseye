@@ -69,9 +69,10 @@ impl DebugLog {
     /// Invalid UTF-8 is replaced lossily so the ring always holds valid text.
     pub fn record(&self, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes);
-        let now = now_ms();
         let mut inner = self.inner.lock().unwrap();
-        inner.push_text(&text, now);
+        // Stamped under the lock so `seq` order and timestamps agree even when
+        // the foreground loop and the pump race to record.
+        inner.push_text(&text, now_ms());
     }
 
     /// Lines with `seq >= since_seq`, plus the cursor to resume after them.
@@ -96,6 +97,11 @@ impl DebugLog {
 }
 
 impl DebugLogInner {
+    /// A print with no newline is flushed as a line once it reaches this
+    /// size, so a guest that never terminates its output cannot grow the
+    /// partial buffer without bound.
+    const MAX_PARTIAL_LINE: usize = 4096;
+
     fn push_text(&mut self, text: &str, now_ms: u64) {
         for ch in text.chars() {
             if ch == '\n' {
@@ -107,6 +113,10 @@ impl DebugLogInner {
                 self.push_line(line, now_ms);
             } else {
                 self.partial.push(ch);
+                if self.partial.len() >= Self::MAX_PARTIAL_LINE {
+                    let line = std::mem::take(&mut self.partial);
+                    self.push_line(line, now_ms);
+                }
             }
         }
     }

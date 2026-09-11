@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! AMD64 `CONTEXT` offsets. Layout reference: ReactOS `sdk/include/xdk/amd64/ke.h`
 
 use crate::gdb::{RegisterInfo, RegisterMap};

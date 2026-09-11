@@ -374,11 +374,8 @@ impl GdbClient {
         Ok(bytes)
     }
 
-    #[allow(dead_code)]
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
-        let hex_data: String = data.iter().map(|b| format!("{:02x}", b)).collect();
-
-        let response = self.send_packet(&format!("G{}", hex_data))?;
+        let response = self.send_packet(&format!("G{}", hex::encode(data)))?;
 
         if response == "OK" {
             Ok(())
@@ -403,30 +400,10 @@ impl GdbClient {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn continue_at(&mut self, addr: u64) -> Result<()> {
-        self.send_command_no_reply(&format!("c{:x}", addr))?;
-        self.is_running = true;
-        Ok(())
-    }
-
     fn step(&mut self) -> Result<()> {
         self.send_command_no_reply("s")?;
         self.is_running = true;
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn step_at(&mut self, addr: u64) -> Result<()> {
-        self.send_command_no_reply(&format!("s{:x}", addr))?;
-        self.is_running = true;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn step_and_wait(&mut self) -> Result<String> {
-        self.step()?;
-        self.wait_for_stop()
     }
 
     fn wait_for_stop(&mut self) -> Result<String> {

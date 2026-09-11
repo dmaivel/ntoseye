@@ -7,7 +7,8 @@ pub struct RegisterInfo {
     pub name: String,
     pub offset: usize,
     pub size: usize,
-    #[allow(dead_code)]
+    /// Position in the stub's `g`/`G` packet, which is ordered by regnum,
+    /// not by where the target XML happens to list the register.
     pub regnum: usize,
 }
 
@@ -128,8 +129,8 @@ impl RegisterMap {
             step_size: 1,
             ..RegisterMap::default()
         };
-        let mut current_offset: usize = 0;
         let mut next_regnum: Option<usize> = None;
+        let mut registers = Vec::new();
 
         let xml = Self::strip_xml_comments(xml);
 
@@ -166,21 +167,27 @@ impl RegisterMap {
                         num
                     };
 
-                let reg = RegisterInfo {
+                registers.push(RegisterInfo {
                     name: name.to_string(),
-                    offset: current_offset,
+                    offset: 0,
                     size: size_bytes,
                     regnum,
-                };
-
-                current_offset += size_bytes;
-                map.by_name.insert(reg.name.clone(), reg.clone());
-                map.ordered.push(reg);
+                });
             }
 
             cursor = end;
         }
 
+        // The g packet packs registers in ascending regnum; the XML may list
+        // them in any order (and skip numbers).
+        registers.sort_by_key(|reg| reg.regnum);
+        let mut offset = 0;
+        for mut reg in registers {
+            reg.offset = offset;
+            offset += reg.size;
+            map.by_name.insert(reg.name.clone(), reg.clone());
+            map.ordered.push(reg);
+        }
         map
     }
 

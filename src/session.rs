@@ -2364,19 +2364,37 @@ pub fn set_current_thread_from_stop(
     }
 }
 
-/// Single-step the current thread and clear `TF` from its RFLAGS afterward.
-/// KVM sets `TF` when enabling `KVM_GUESTDBG_SINGLESTEP` but doesn't clear it
-/// when SINGLESTEP is removed; without this clear, the stepped thread keeps
-/// trapping after every instruction on resume. `DebugBackend::step` only
-/// *issues* the step, so it must be paired with a wait. Shared by the REPL and
-/// [`Session::step`].
+/// Single-step the current thread and clear `TF` from its RFLAGS afterward,
+/// returning the stop the step produced. KVM sets `TF` when enabling
+/// `KVM_GUESTDBG_SINGLESTEP` but doesn't clear it when SINGLESTEP is removed;
+/// without this clear, the stepped thread keeps trapping after every
+/// instruction on resume. `DebugBackend::step` only *issues* the step, so it
+/// must be paired with a wait. Shared by the REPL and [`Session::step`].
+///
+/// The stepped instruction can fault or bugcheck instead of trapping; that
+/// stop is returned as an error naming it, since a caller that treats it as a
+/// completed step (and, say, resumes) would run past a real event.
 pub fn step_one_and_clear_tf(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
 ) -> Result<()> {
     backend.step()?;
-    backend.wait_for_stop()?;
-    clear_trap_flag(backend, register_map)
+    let event = backend.wait_for_stop()?;
+    clear_trap_flag(backend, register_map)?;
+    if event.is_bugcheck {
+        return Err(Error::DebugInfo(
+            "target bugchecked while single-stepping".into(),
+        ));
+    }
+    if let Some(code) = event
+        .exception_code
+        .filter(|&code| code != STATUS_SINGLE_STEP && code != STATUS_BREAKPOINT)
+    {
+        return Err(Error::DebugInfo(format!(
+            "target raised exception {code:#x} while single-stepping"
+        )));
+    }
+    Ok(())
 }
 
 /// Clear the trap flag (`TF`, RFLAGS bit 8) on the currently selected thread,
@@ -2428,7 +2446,9 @@ pub fn step_over_current_breakpoint(
 ) -> Result<bool> {
     let regs = backend.read_registers()?;
     let rip = register_map.read_u64("rip", &regs)?;
-    let cr3 = register_map.read_u64("cr3", &regs)?;
+    // Only the shared-page fallback below needs the address space; a stub
+    // without `cr3` (or a non-x86 target) still gets the plain step-over.
+    let cr3 = register_map.read_u64("cr3", &regs).ok();
 
     // Scope-agnostic: a wrong-process hit on a shared-page BP still needs the
     // disable/step/enable dance so the wrong process can make forward progress.
@@ -2436,32 +2456,28 @@ pub fn step_over_current_breakpoint(
         return Ok(false);
     };
 
-    if let Err(err) = breakpoints.disable(backend, debugger, bp_id) {
-        if matches!(
-            err,
-            Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)
-        ) {
+    match (breakpoints.disable(backend, debugger, bp_id), cr3) {
+        (Ok(()), _) => {}
+        (Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)), Some(cr3)) => {
             breakpoints
                 .disable_guest_memory_patch_in_address_space(backend, debugger, bp_id, cr3)?;
-        } else {
-            return Err(err);
         }
+        (Err(err), _) => return Err(err),
     }
 
-    step_one_and_clear_tf(backend, register_map)?;
+    let stepped = step_one_and_clear_tf(backend, register_map);
 
-    if let Err(err) = breakpoints.enable(backend, debugger, bp_id) {
-        if matches!(
-            err,
-            Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)
-        ) {
+    // Re-arm whether or not the step worked: a failed step must not leave the
+    // site unpatched with the manager still believing it is enabled.
+    match breakpoints.enable(backend, debugger, bp_id) {
+        Ok(()) => {}
+        Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => {
             // Address space no longer exists; drop the breakpoint and move on.
-            breakpoints.discard(bp_id)?;
-        } else {
-            return Err(err);
+            breakpoints.discard(backend, bp_id)?;
         }
+        Err(err) => return stepped.and(Err(err)),
     }
-    Ok(true)
+    stepped.map(|()| true)
 }
 
 #[cfg(test)]

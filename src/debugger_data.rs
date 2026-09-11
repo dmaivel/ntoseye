@@ -399,9 +399,12 @@ fn read_register(registers: &[Option<u64>; 3], register: Register) -> Option<u64
 
 fn write_register(registers: &mut [Option<u64>; 3], register: Register, value: u64) -> Option<()> {
     let (slot, width) = register_slot(register)?;
+    // x86 semantics: 8/16-bit writes keep the register's upper bits, 32-bit
+    // writes zero-extend.
+    let previous = registers[slot].unwrap_or(0);
     registers[slot] = Some(match width {
-        1 => value & 0xff,
-        2 => value & 0xffff,
+        1 => (previous & !0xff) | (value & 0xff),
+        2 => (previous & !0xffff) | (value & 0xffff),
         4 => value & 0xffff_ffff,
         8 => value,
         _ => unreachable!(),

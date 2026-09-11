@@ -164,9 +164,16 @@ impl KdNetStream {
             }
             match channel {
                 CHANNEL_CONTROL => {
-                    decrypt_payload(datagram, self.state.control_key)?;
-                    verify_authentication(datagram, &self.state.hmac_key)?;
-                    self.handle_control_packet(datagram, source, version)?;
+                    // A poke that doesn't authenticate under our key is another
+                    // machine's (or garbage); dropping it is the same policy as
+                    // the data channel, so a stray datagram can't end the session.
+                    let handled = decrypt_payload(datagram, self.state.control_key)
+                        .and_then(|()| verify_authentication(datagram, &self.state.hmac_key))
+                        .and_then(|()| self.handle_control_packet(datagram, source, version));
+                    if let Err(err) = handled {
+                        kd_trace!("kdnet: dropping control datagram from {source}: {err}");
+                        continue;
+                    }
                     if self.deferred_breakin && read_lock(&self.state.data_key)?.is_some() {
                         self.deferred_breakin = false;
                         self.outbound.push(BREAKIN_BYTE);

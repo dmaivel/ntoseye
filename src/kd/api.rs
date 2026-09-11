@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // `DBGKD_MANIPULATE_STATE64` is 56 bytes: 12-byte prefix, 4 bytes padding,
 // then a 40-byte per-API union.
 
@@ -9,7 +7,7 @@ use crate::dbg_backend::ContinueDisposition;
 use crate::error::{Error, Result};
 use crate::kd::{
     framing::{
-        DataPacket, KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
+        KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
         PACKET_TYPE_KD_STATE_MANIPULATE,
     },
     handle_debug_io, handle_file_io,
@@ -88,17 +86,11 @@ impl ManipulateHeader {
 fn recv_manipulate_reply(
     framing: &mut KdFraming<impl Read + Write>,
     requested_processor: u16,
-) -> Result<(ManipulateHeader, Vec<u8>, Vec<u8>)> {
+) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
     loop {
         let pkt = framing.recv_data()?;
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_MANIPULATE => {
-                if pkt.payload.len() < MANIPULATE_HEADER_SIZE {
-                    return Err(Error::Kd(format!(
-                        "short manipulate reply: {} bytes",
-                        pkt.payload.len()
-                    )));
-                }
                 let parsed = ManipulateHeader::decode(&pkt.payload)?;
                 if parsed.processor != requested_processor {
                     return Err(Error::Kd(format!(
@@ -106,8 +98,14 @@ fn recv_manipulate_reply(
                         requested_processor, parsed.processor
                     )));
                 }
-                let reply_header = pkt.payload[..MANIPULATE_HEADER_SIZE].to_vec();
-                let reply_data = pkt.payload[MANIPULATE_HEADER_SIZE..].to_vec();
+                // `decode` checked the length; keep the payload's allocation
+                // for the data and copy only the fixed header out.
+                let mut reply_data = pkt.payload;
+                let reply_header: [u8; MANIPULATE_HEADER_SIZE] = reply_data
+                    [..MANIPULATE_HEADER_SIZE]
+                    .try_into()
+                    .expect("length checked by decode");
+                reply_data.drain(..MANIPULATE_HEADER_SIZE);
                 return Ok((parsed, reply_header, reply_data));
             }
             PACKET_TYPE_KD_DEBUG_IO => {
@@ -134,7 +132,7 @@ fn send_manipulate(
     framing: &mut KdFraming<impl Read + Write>,
     header: &[u8; MANIPULATE_HEADER_SIZE],
     data: &[u8],
-) -> Result<(ManipulateHeader, Vec<u8>, Vec<u8>)> {
+) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
     let requested_processor = read_u16(header, 6);
     let mut payload = Vec::with_capacity(MANIPULATE_HEADER_SIZE + data.len());
     payload.extend_from_slice(header);
@@ -157,10 +155,6 @@ fn check_status(header: &ManipulateHeader, api: u32) -> Result<()> {
         });
     }
     Ok(())
-}
-
-pub fn recv_packet<T: Read + Write>(framing: &mut KdFraming<T>) -> Result<DataPacket> {
-    framing.recv_data()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -361,13 +355,33 @@ pub fn write_physical_memory<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET + 8, len);
     let (parsed, reply_header, _) = send_manipulate(framing, &header, data)?;
     check_status(&parsed, DBGKD_WRITE_PHYSICAL_MEMORY)?;
-    let actual = read_u32(&reply_header, UNION_OFFSET + 12);
-    if actual > len || (len != 0 && actual == 0) {
+    written_len(&reply_header, len, "physical-memory", addr)
+}
+
+/// The byte count a write reply claims, rejecting one the target could not
+/// have performed (more than requested, or nothing for a non-empty request).
+fn written_len(reply_header: &[u8], requested: u32, what: &str, addr: u64) -> Result<u32> {
+    let actual = read_u32(reply_header, UNION_OFFSET + 12);
+    if actual > requested || (requested != 0 && actual == 0) {
         return Err(Error::Kd(format!(
-            "invalid physical-memory write at {addr:#x}: target reported {actual} for request {len}"
+            "invalid {what} write at {addr:#x}: target reported {actual} for request {requested}"
         )));
     }
     Ok(actual)
+}
+
+/// A request payload length as the wire's u32, rejecting what the framing
+/// could not carry anyway before any bytes are copied.
+fn wire_len(data: &[u8]) -> Result<u32> {
+    u32::try_from(data.len())
+        .ok()
+        .filter(|&len| len as usize <= PACKET_MAX_SIZE)
+        .ok_or_else(|| {
+            Error::Kd(format!(
+                "KD request payload too large: {} bytes",
+                data.len()
+            ))
+        })
 }
 
 /// `DbgKdReadControlSpaceApi`
@@ -382,6 +396,12 @@ pub fn read_control_space<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET + 8, len);
     let (parsed, _, data) = send_manipulate(framing, &header, &[])?;
     check_status(&parsed, DBGKD_READ_CONTROL_SPACE)?;
+    if data.len() < len as usize {
+        return Err(Error::Kd(format!(
+            "short control-space read at {base:#x}: got {} of {len} bytes",
+            data.len()
+        )));
+    }
     Ok(data)
 }
 
@@ -392,12 +412,13 @@ pub fn write_control_space<T: Read + Write>(
     base: u64,
     data: &[u8],
 ) -> Result<u32> {
+    let len = wire_len(data)?;
     let mut header = make_header(DBGKD_WRITE_CONTROL_SPACE, processor);
     write_u64(&mut header, UNION_OFFSET, base);
-    write_u32(&mut header, UNION_OFFSET + 8, data.len() as u32);
+    write_u32(&mut header, UNION_OFFSET + 8, len);
     let (parsed, reply_header, _) = send_manipulate(framing, &header, data)?;
     check_status(&parsed, DBGKD_WRITE_CONTROL_SPACE)?;
-    Ok(read_u32(&reply_header, UNION_OFFSET + 12))
+    written_len(&reply_header, len, "control-space", base)
 }
 
 /// `DbgKdWriteVirtualMemoryApi`
@@ -407,12 +428,13 @@ pub fn write_virtual_memory<T: Read + Write>(
     addr: u64,
     data: &[u8],
 ) -> Result<u32> {
+    let len = wire_len(data)?;
     let mut header = make_header(DBGKD_WRITE_VIRTUAL_MEMORY, processor);
     write_u64(&mut header, UNION_OFFSET, addr);
-    write_u32(&mut header, UNION_OFFSET + 8, data.len() as u32);
+    write_u32(&mut header, UNION_OFFSET + 8, len);
     let (parsed, reply_header, _) = send_manipulate(framing, &header, data)?;
     check_status(&parsed, DBGKD_WRITE_VIRTUAL_MEMORY)?;
-    Ok(read_u32(&reply_header, UNION_OFFSET + 12))
+    written_len(&reply_header, len, "virtual-memory", addr)
 }
 
 /// `DbgKdWriteBreakPointApi`
@@ -493,15 +515,6 @@ pub fn continue_api2_arm64<T: Read + Write>(
     let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&header);
     framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    Ok(())
-}
-
-/// `DbgKdSwitchProcessor`: switch which processor subsequent register /
-/// memory operations target. The kernel does *not* send a reply; it expects
-/// the host to pick a different processor and resume the manipulate loop
-pub fn switch_processor<T: Read + Write>(framing: &mut KdFraming<T>, target: u16) -> Result<()> {
-    let header = make_header(DBGKD_SWITCH_PROCESSOR, target);
-    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &header)?;
     Ok(())
 }
 

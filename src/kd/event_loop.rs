@@ -96,11 +96,25 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
     } else {
         None
     };
-    let number_processors_u32 = read_u32(payload, 8);
+    let processor = read_u16(payload, 6);
+    let number_processors = read_u32(payload, 8);
+    // Both drive thread ids and per-processor requests; a malformed count
+    // would fan out tens of thousands of requests, a bad index would target
+    // a CPU that doesn't exist. A zero count (seen on some state changes)
+    // means "at least this one".
+    let number_processors = u16::try_from(number_processors)
+        .ok()
+        .map(|count| count.max(1))
+        .filter(|&count| processor < count)
+        .ok_or_else(|| {
+            Error::Kd(format!(
+                "state change names processor {processor} of {number_processors}"
+            ))
+        })?;
     Ok(StateChange {
         new_state,
-        processor: read_u16(payload, 6),
-        number_processors: number_processors_u32.min(u16::MAX as u32) as u16,
+        processor,
+        number_processors,
         exception_code,
         exception_first_chance,
         exception_address,
@@ -619,7 +633,6 @@ pub fn advance_pc_past_breakpoint(
 /// user's break-in lands at the same instruction as the noise.
 pub struct ContinueDrain {
     resumed_from_rip: u64,
-    processor: u16,
     managed_bp_addresses: HashSet<u64>,
     breakin_addresses: HashSet<u64>,
     register_map: RegisterMap,
@@ -636,14 +649,12 @@ impl ContinueDrain {
 
     pub fn new(
         resumed_from_rip: u64,
-        processor: u16,
         managed_bp_addresses: HashSet<u64>,
         breakin_addresses: HashSet<u64>,
         register_map: RegisterMap,
     ) -> Self {
         Self {
             resumed_from_rip,
-            processor,
             managed_bp_addresses,
             breakin_addresses,
             register_map,
@@ -686,7 +697,6 @@ impl ContinueDrain {
     ) -> Result<()> {
         self.remaining -= 1;
         self.resumed_from_rip = stop.program_counter;
-        self.processor = stop.processor;
         kd_trace!(
             "kd: pump: absorbing re-break at {:#x} on p{} ({} left)",
             stop.program_counter,

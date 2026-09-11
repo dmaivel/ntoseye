@@ -172,7 +172,7 @@ fn normalize_kernel_dtb(arch: Arch, register_value: u64) -> Dtb {
 }
 
 fn thread_id_for(processor: u16) -> String {
-    format!("p1.{:x}", processor + 1)
+    format!("p1.{:x}", u32::from(processor) + 1)
 }
 
 fn parse_thread_id(tid: &str) -> Result<u16> {
@@ -849,7 +849,13 @@ impl KdBackend {
             managed_breakpoint_stop
         );
         self.current_processor = stop.processor;
-        self.processor_count = self.processor_count.max(stop.number_processors.max(1));
+        // A rebooted target reports its real count; between reboots the count
+        // never shrinks (no hot-unplug), so keep the high-water mark.
+        self.processor_count = if stop.target_reloaded {
+            stop.number_processors.max(1)
+        } else {
+            self.processor_count.max(stop.number_processors.max(1))
+        };
         self.last_stop_processor = stop.processor;
         self.last_exception_code = stop.exception_code;
         self.last_rip = stop.program_counter;
@@ -1467,27 +1473,30 @@ impl DebugBackend for KdBackend {
     }
 
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let handle = self
+        let handle = *self
             .bp_handles
-            .remove(&addr)
+            .get(&addr)
             .ok_or_else(|| Error::Kd(format!("no breakpoint tracked at {addr:#x}")))?;
-        self.managed_bp_addresses.remove(&addr);
         let processor = self.current_processor;
         let result = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::restore_breakpoint(framing, processor, handle)
         });
-        if let Err(Error::KdStatus { ntstatus, api }) = &result
-            && *ntstatus == STATUS_UNSUCCESSFUL
-            && *api == api::DBGKD_RESTORE_BREAKPOINT
-        {
-            kd_trace!(
-                "kd: restore breakpoint handle {} at {:#x} was already consumed",
-                handle,
-                addr
-            );
-            return Ok(());
+        match result {
+            Ok(()) => {}
+            Err(Error::KdStatus { ntstatus, api })
+                if ntstatus == STATUS_UNSUCCESSFUL && api == api::DBGKD_RESTORE_BREAKPOINT =>
+            {
+                kd_trace!(
+                    "kd: restore breakpoint handle {handle} at {addr:#x} was already consumed"
+                );
+            }
+            // Transport failure: the site may still be patched, so keep
+            // tracking it (a retry restores it; a hit there is still ours).
+            Err(e) => return Err(e),
         }
-        result
+        self.bp_handles.remove(&addr);
+        self.managed_bp_addresses.remove(&addr);
+        Ok(())
     }
 
     fn supports_watchpoints(&self) -> bool {
@@ -1618,7 +1627,6 @@ impl DebugBackend for KdBackend {
         // breakpoints are real. Nothing can change either while the VM runs.
         let drain = ContinueDrain::new(
             self.last_rip,
-            resume_processor,
             self.managed_bp_addresses.clone(),
             self.breakin_addresses.clone(),
             self.register_map.clone(),
@@ -3111,7 +3119,7 @@ mod tests {
         let mut nt = vec![0u8; 0x2000];
         put_u64(&mut nt, 0x1000, system);
         put_u64(&mut nt, 0x1008, system + LINKS as u64);
-        let mut process = |pid: u64, dtb: u64, name: &[u8], next: u64| {
+        let process = |pid: u64, dtb: u64, name: &[u8], next: u64| {
             let mut bytes = vec![0u8; 0x600];
             put_u64(&mut bytes, PID as usize, pid);
             put_u64(&mut bytes, DTB as usize, dtb);
@@ -3303,7 +3311,6 @@ mod tests {
         let drain = |managed: &[u64]| {
             ContinueDrain::new(
                 resumed_from,
-                0,
                 managed.iter().copied().collect(),
                 HashSet::from([breakin]),
                 context::build_register_map(),
@@ -3779,7 +3786,6 @@ mod tests {
         let real_stop = 0xfffff800_cafe0000;
         let drain = ContinueDrain::new(
             resumed_from,
-            0,
             HashSet::new(),
             HashSet::new(),
             context::build_register_map(),

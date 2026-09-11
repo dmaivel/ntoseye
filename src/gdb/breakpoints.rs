@@ -244,6 +244,17 @@ enum BreakpointBackend {
     Deferred,
 }
 
+/// The software breakpoint instruction we patch into guest code: x86 `int3`
+/// (one byte) or AArch64 `brk #0xF000` (four bytes, little-endian), the same
+/// opcode the kernel debugger uses so the guest reports it as a KD break.
+const fn breakpoint_opcode(arch: Arch) -> &'static [u8] {
+    match arch {
+        Arch::Amd64 => &[0xcc],
+        // 0xD43E0000 little-endian.
+        Arch::Arm64 => &[0x00, 0x00, 0x3E, 0xD4],
+    }
+}
+
 impl BreakpointBackend {
     /// The instruction bytes we displaced with the breakpoint, so display
     /// paths can overlay them and never show our own patch (1 byte for an
@@ -725,13 +736,25 @@ impl BreakpointManager {
         }
     }
 
-    pub fn discard(&mut self, id: u32) -> Result<Breakpoint> {
+    /// Forget a breakpoint whose site can no longer be restored (its address
+    /// space is gone). The backend is told so it stops treating a hit at the
+    /// stale address as ours.
+    pub fn discard(&mut self, client: &mut dyn DebugBackend, id: u32) -> Result<Breakpoint> {
         let bp = self.breakpoints.remove(&id).ok_or(Error::BPNotFound(id))?;
+        Self::forget_backend_site(client, &bp);
         self.one_shot_hits.remove(&id);
         if self.breakpoints.is_empty() {
             self.next_id = 0;
         }
         Ok(bp)
+    }
+
+    /// Drop the backend's bookkeeping for a host-patched site that is being
+    /// abandoned rather than restored (KD classifies stops by that set).
+    fn forget_backend_site(client: &mut dyn DebugBackend, bp: &Breakpoint) {
+        if matches!(bp.backend, BreakpointBackend::GuestMemoryPatch { .. }) {
+            client.note_breakpoint_uninstalled(bp.address.0);
+        }
     }
 
     pub fn enable(
@@ -1029,6 +1052,7 @@ impl BreakpointManager {
 
     fn defer_symbolic_sites_if(
         &mut self,
+        client: &mut dyn DebugBackend,
         mut site_is_unloaded: impl FnMut(&Breakpoint) -> bool,
     ) -> usize {
         let ids = self
@@ -1047,6 +1071,7 @@ impl BreakpointManager {
                 .expect("collected breakpoint exists");
             // The module mapping is already gone. Do not send a removal request
             // for its stale address: it may be unmapped or reused by now.
+            Self::forget_backend_site(client, bp);
             bp.resolved = false;
             bp.backend = BreakpointBackend::Deferred;
         }
@@ -1064,7 +1089,7 @@ impl BreakpointManager {
         debugger: &Target,
     ) -> Result<usize> {
         let kernel_dtb = debugger.kernel_dtb();
-        self.defer_symbolic_sites_if(|bp| {
+        self.defer_symbolic_sites_if(client, |bp| {
             let primary_dtb = Self::resolution_dtb(debugger, Some(&bp.scope));
             debugger
                 .symbols
@@ -1301,22 +1326,20 @@ impl BreakpointManager {
                 // Capture the displaced instruction before the kernel writes
                 // the breakpoint, so display paths can mask it back out. x86
                 // `int3` displaces one byte; AArch64 `brk #0xF000` displaces
-                // four.
-                let memory = debugger.address_space(debugger.current_dtb());
-                let width = match debugger.arch() {
-                    Arch::Amd64 => 1,
-                    Arch::Arm64 => 4,
-                };
-                let mut original = BreakpointPatch::new(width);
+                // four. Kernel code is read through the kernel's own tables: an
+                // attached process's (KVA-shadow) CR3 need not map it.
+                let memory = debugger.address_space(debugger.kernel_dtb());
+                let mut original = BreakpointPatch::new(breakpoint_opcode(debugger.arch()).len());
                 memory.read_bytes(address, original.as_mut_slice())?;
                 client.set_breakpoint(address.0)?;
                 Ok(BreakpointBackend::Kernel { original })
             }
             BreakpointScope::Process { dtb, .. } => {
                 let memory = debugger.address_space(*dtb);
-                let mut original = BreakpointPatch::new(1);
+                let opcode = breakpoint_opcode(debugger.arch());
+                let mut original = BreakpointPatch::new(opcode.len());
                 memory.read_bytes(address, original.as_mut_slice())?;
-                memory.write_bytes(address, &[0xcc])?;
+                memory.write_bytes(address, opcode)?;
                 // The kernel does not know about a breakpoint patched through
                 // host memory, so update the backend's stop bookkeeping.
                 client.note_breakpoint_installed(address.0);
@@ -1336,7 +1359,7 @@ impl BreakpointManager {
             }
             (BreakpointScope::Process { dtb, .. }, BreakpointBackend::GuestMemoryPatch { .. }) => {
                 let memory = debugger.address_space(*dtb);
-                memory.write_bytes(bp.address, &[0xcc])?;
+                memory.write_bytes(bp.address, breakpoint_opcode(debugger.arch()))?;
                 client.note_breakpoint_installed(bp.address.0);
                 Ok(())
             }
@@ -1818,7 +1841,7 @@ mod tests {
         assert!(manager.list().is_empty());
         assert_eq!(manager.breakpoint_id_at_address(0x2000), Some(4));
         assert_eq!(manager.one_shot_hit_ids(), vec![4]);
-        manager.discard(4).unwrap();
+        manager.discard(&mut SlotRecorder::new(), 4).unwrap();
         assert!(manager.one_shot_hit_ids().is_empty());
     }
 
@@ -1853,7 +1876,10 @@ mod tests {
             address_index: 0,
         });
 
-        assert_eq!(manager.defer_symbolic_sites_if(|bp| bp.id == 3), 1);
+        assert_eq!(
+            manager.defer_symbolic_sites_if(&mut SlotRecorder::new(), |bp| bp.id == 3),
+            1
+        );
 
         let deferred = manager.breakpoints.get(&3).unwrap();
         assert!(deferred.enabled);

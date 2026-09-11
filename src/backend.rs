@@ -9,7 +9,6 @@ use crate::types::{Dtb, VirtAddr};
 pub trait MemoryOps<A> {
     fn read_bytes(&self, addr: A, buf: &mut [u8]) -> Result<()>;
 
-    #[allow(dead_code)]
     fn write_bytes(&self, addr: A, buf: &[u8]) -> Result<()>;
 
     /// Read guest virtual memory resolved by the backend itself when it can
@@ -41,7 +40,6 @@ pub trait MemoryOps<A> {
         Ok(obj)
     }
 
-    #[allow(dead_code)]
     fn write<T: Copy + IntoBytes + Immutable>(&self, addr: A, val: &T) -> Result<()> {
         let slice = val.as_bytes();
         self.write_bytes(addr, slice)
