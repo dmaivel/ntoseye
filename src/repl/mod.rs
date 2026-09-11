@@ -455,37 +455,23 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         );
     }
 
-    let min_completion_width: u16 = 0;
-    let max_completion_width: u16 = 50;
-    let max_completion_height: u16 = 12;
-    let padding: u16 = 0;
-    let border: bool = true;
-    let cursor_offset: i16 = 0;
-    let description_mode: DescriptionMode = DescriptionMode::PreferRight;
-    let min_description_width: u16 = 0;
-    let max_description_width: u16 = 50;
-    let description_offset: u16 = 1;
-    let correct_cursor_pos: bool = false;
-
-    let mut ide_menu = IdeMenu::default()
+    // No border: reedline's `IdeMenu` sizes the description box from the rows
+    // free *before* the painter scrolls to make room for the menu, so with the
+    // prompt on the last terminal row (the normal case) a bordered description
+    // needs three rows it doesn't have yet and is dropped on the first Tab. A
+    // borderless one-line description fits the single row it is granted.
+    let ide_menu = IdeMenu::default()
         .with_name("completion_menu")
-        .with_min_completion_width(min_completion_width)
-        .with_max_completion_width(max_completion_width)
-        .with_max_completion_height(max_completion_height)
-        .with_padding(padding)
-        .with_cursor_offset(cursor_offset)
-        .with_description_mode(description_mode)
-        .with_min_description_width(min_description_width)
-        .with_max_description_width(max_description_width)
-        .with_description_offset(description_offset)
-        .with_correct_cursor_pos(correct_cursor_pos)
+        .with_max_completion_width(50)
+        .with_max_completion_height(12)
+        .with_padding(1)
+        .with_description_mode(DescriptionMode::PreferRight)
+        .with_min_description_width(0)
+        .with_max_description_width(50)
+        .with_description_offset(1)
+        .with_correct_cursor_pos(false)
         .with_marker(" ")
         .with_text_style(Style::new().fg(Color::LightGray));
-
-    if border {
-        ide_menu = ide_menu.with_default_border();
-    }
-
     let completion_menu = Box::new(ide_menu);
 
     let mut keybindings = default_emacs_keybindings();
