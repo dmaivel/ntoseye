@@ -605,7 +605,7 @@ impl DmpBackend {
             debugger_data_hint: info
                 .debugger_data_block
                 .map(|address| DebuggerDataCandidate {
-                    address: crate::types::VirtAddr(address),
+                    address: VirtAddr(address),
                     source: MetadataSource::DumpHeader,
                 }),
             triage_crash_info: None,

@@ -21,7 +21,7 @@ impl ReplState<'_> {
     /// of REPL state. A trailing WinDbg-style `gc` requests automatic resume.
     /// Recursive actions are bounded even when an alias resumes into another
     /// command breakpoint.
-    pub(crate) fn dispatch_breakpoint_action(&mut self, line: &str) -> Result<bool> {
+    pub fn dispatch_breakpoint_action(&mut self, line: &str) -> Result<bool> {
         if self.event_command_depth >= BREAKPOINT_ACTION_RECURSION_LIMIT {
             error!("breakpoint action recursion limit reached");
             return Ok(false);
@@ -68,7 +68,7 @@ impl ReplState<'_> {
     /// Execute a policy-owned exception command without allowing the command
     /// text to choose run control. The policy's typed final action (`break`,
     /// `gh`, or `gn`) is applied by the caller after this returns.
-    pub(crate) fn dispatch_exception_command(&mut self, line: &str) -> Result<()> {
+    pub fn dispatch_exception_command(&mut self, line: &str) -> Result<()> {
         if self.event_command_depth >= EXCEPTION_COMMAND_RECURSION_LIMIT {
             error!("exception command recursion limit reached");
             return Ok(());

@@ -992,6 +992,7 @@ mod tests {
     use super::*;
     use crate::bugchecks::{BugcheckArg, BugcheckFault};
     use crate::dmp::DmpContext;
+    use crate::error::Result;
     use crate::kd::context::REGISTER_BUFFER_SIZE;
     use crate::session::RunStatus;
     use crate::triage::TriageDriver;
@@ -1339,11 +1340,11 @@ mod tests {
     struct NoMemory;
 
     impl MemoryOps<VirtAddr> for NoMemory {
-        fn read_bytes(&self, _addr: VirtAddr, _buf: &mut [u8]) -> crate::error::Result<()> {
+        fn read_bytes(&self, _addr: VirtAddr, _buf: &mut [u8]) -> Result<()> {
             panic!("malformed header must be rejected before a record read")
         }
 
-        fn write_bytes(&self, _addr: VirtAddr, _buf: &[u8]) -> crate::error::Result<()> {
+        fn write_bytes(&self, _addr: VirtAddr, _buf: &[u8]) -> Result<()> {
             unreachable!()
         }
     }

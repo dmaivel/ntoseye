@@ -170,7 +170,7 @@ impl BreakpointScope {
         }
     }
 
-    pub(crate) fn matches_cr3(&self, cr3: u64) -> bool {
+    pub fn matches_cr3(&self, cr3: u64) -> bool {
         // Mask out the PCID (bits 0..11) and reserved/canonical bits
         // (52..63), leaving only the page-directory base physical frame.
         const CR3_PAGE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -294,7 +294,7 @@ impl BreakpointManager {
     /// module (session run-control) stage manager state without a live
     /// target.
     #[cfg(test)]
-    pub(crate) fn insert_for_test(
+    pub fn insert_for_test(
         &mut self,
         id: u32,
         address: VirtAddr,

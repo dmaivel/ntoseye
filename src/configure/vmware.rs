@@ -27,7 +27,7 @@ const BACKENDS: &[BackendSelection] = &[
 const GDB_ENABLED: &str = "debugStub.listen.guest64";
 const GDB_PORT: &str = "debugStub.port.guest64";
 
-pub(super) struct Vmware;
+pub struct Vmware;
 
 impl Configurator for Vmware {
     fn name(&self) -> &'static str {

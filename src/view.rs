@@ -5,6 +5,7 @@ use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::session::RunStatus;
 use crate::symbols::{
     LocalVariableLocation, ProcedureLocal, SourceLocation, SymbolCandidate, SymbolVisibility,
+    format_symbol_with_offset,
 };
 use crate::target::{
     AddressDescription, AddressModule, DeviceObjectDetail, DiagnosticMetric, DiagnosticValue,
@@ -998,9 +999,7 @@ pub fn symbol_search_match(symbol: &SymbolSearchMatch) -> View {
 pub fn nearest_symbol(address: VirtAddr, symbol: Option<(String, String, u32)>) -> View {
     let (formatted, module, name, offset) = match symbol {
         Some((module, name, offset)) => (
-            View::Str(crate::symbols::format_symbol_with_offset(
-                &module, &name, offset,
-            )),
+            View::Str(format_symbol_with_offset(&module, &name, offset)),
             View::Str(module),
             View::Str(name),
             View::Num(offset.into()),

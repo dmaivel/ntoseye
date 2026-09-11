@@ -27,6 +27,7 @@ use crate::diagnostics;
 #[cfg(feature = "cli")]
 use crate::error::Error;
 use crate::error::Result;
+use crate::expr::NumberRadix;
 use crate::guest::ModuleSymbolLoadReport;
 #[cfg(feature = "python")]
 use crate::python::embed;
@@ -223,7 +224,7 @@ pub struct ReplState<'a> {
     /// Nested automatic exception-command executions. Bounded so an event
     /// command that resumes into the same exception cannot recurse forever.
     pub event_command_depth: usize,
-    pub radix: crate::expr::NumberRadix,
+    pub radix: NumberRadix,
     pub line: String,
 }
 
@@ -268,7 +269,7 @@ impl<'a> ReplState<'a> {
             aliases: UserAliases::load(),
             exception_policies: ExceptionPolicyTable::default(),
             event_command_depth: 0,
-            radix: crate::expr::NumberRadix::Hexadecimal,
+            radix: NumberRadix::Hexadecimal,
             line: String::new(),
         };
         state.caches.refresh_expression_context(&state.ctx.target);
@@ -516,7 +517,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         aliases,
         exception_policies: ExceptionPolicyTable::default(),
         event_command_depth: 0,
-        radix: crate::expr::NumberRadix::Hexadecimal,
+        radix: NumberRadix::Hexadecimal,
         line: String::new(),
     };
     // The reload state machine lives on the Session now; seed it from the

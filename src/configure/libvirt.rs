@@ -38,7 +38,7 @@ struct XmlPlan {
     changes: Vec<String>,
 }
 
-pub(super) struct Libvirt;
+pub struct Libvirt;
 
 impl Configurator for Libvirt {
     fn name(&self) -> &'static str {

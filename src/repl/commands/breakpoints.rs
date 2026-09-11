@@ -766,6 +766,8 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
+    use crate::expr::ExprBinaryOp;
+    use crate::types::VirtAddr;
 
     fn bp_invocation<'a>(argv: &'a [&'a str]) -> CommandInvocation<'a> {
         CommandInvocation {
@@ -801,9 +803,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             expr.as_ref(),
-            Expr::Binary(left, crate::expr::ExprBinaryOp::Equal, right)
-                if matches!(left.as_ref(), Expr::Literal(crate::types::VirtAddr(0x10)))
-                    && matches!(right.as_ref(), Expr::Literal(crate::types::VirtAddr(0x10)))
+            Expr::Binary(left, ExprBinaryOp::Equal, right)
+                if matches!(left.as_ref(), Expr::Literal(VirtAddr(0x10)))
+                    && matches!(right.as_ref(), Expr::Literal(VirtAddr(0x10)))
         ));
     }
 }

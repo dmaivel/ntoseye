@@ -595,6 +595,7 @@ enum Received {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kd::event_loop::is_initial_resync_error;
     use std::io::{Cursor, Read, Write};
 
     /// In-memory transport: reads from a queued buffer, writes to a captured
@@ -1072,7 +1073,7 @@ mod tests {
             .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
             .unwrap_err();
         assert!(matches!(err, Error::KdSendExhausted(_)), "{err}");
-        assert!(crate::kd::event_loop::is_initial_resync_error(&err));
+        assert!(is_initial_resync_error(&err));
     }
 
     #[test]

@@ -1667,7 +1667,7 @@ impl Guest {
         Ok(list)
     }
 
-    pub(crate) fn memoized_drivers(
+    pub fn memoized_drivers(
         &self,
         walk: impl FnOnce() -> Result<Vec<DriverObjectInfo>>,
     ) -> Result<Vec<DriverObjectInfo>> {

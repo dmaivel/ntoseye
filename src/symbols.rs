@@ -1641,7 +1641,7 @@ impl SymbolStore {
     /// Register a module's layouts and public symbol RVAs without a PDB, for
     /// tests that drive guest walks over synthetic memory.
     #[cfg(test)]
-    pub(crate) fn inject_module_for_test(
+    pub fn inject_module_for_test(
         &self,
         guid: u128,
         types: Vec<TypeInfo>,

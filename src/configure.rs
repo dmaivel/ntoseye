@@ -27,13 +27,13 @@ mod utm;
 mod vmware;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Action {
+pub enum Action {
     Configure,
     Remove,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BackendSelection {
+pub enum BackendSelection {
     Kd,
     KdNet,
     #[cfg(any(target_os = "linux", test))]
@@ -44,7 +44,7 @@ pub(super) enum BackendSelection {
 }
 
 impl BackendSelection {
-    pub(super) fn kd(self) -> bool {
+    pub fn kd(self) -> bool {
         match self {
             Self::Kd => true,
             #[cfg(any(target_os = "linux", test))]
@@ -54,13 +54,13 @@ impl BackendSelection {
     }
 
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn gdb(self) -> bool {
+    pub fn gdb(self) -> bool {
         matches!(self, Self::Gdb | Self::KdAndGdb)
     }
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Guest {
+pub struct Guest {
     pub id: String,
     pub name: String,
     pub state: String,
@@ -68,14 +68,14 @@ pub(super) struct Guest {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum ProbeStatus {
+pub enum ProbeStatus {
     Detected(String),
     Unavailable(String),
     NotDetected,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ConfigureRequest {
+pub struct ConfigureRequest {
     pub action: Action,
     pub backend: Option<BackendSelection>,
     pub kdnet_host: Option<Ipv4Addr>,
@@ -84,19 +84,19 @@ pub(super) struct ConfigureRequest {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct Instructions {
+pub struct Instructions {
     pub guest: Vec<String>,
     pub run: Vec<String>,
     pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct GuestInspection {
+pub struct GuestInspection {
     pub targets: Vec<ConfiguredTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ConfiguredTarget {
+pub struct ConfiguredTarget {
     pub backend: BackendSelection,
     pub endpoint: String,
     pub guest_port: Option<usize>,
@@ -104,7 +104,7 @@ pub(super) struct ConfiguredTarget {
 }
 
 impl ConfiguredTarget {
-    pub(super) fn kd(endpoint: impl Into<String>, guest_port: usize, elevated: bool) -> Self {
+    pub fn kd(endpoint: impl Into<String>, guest_port: usize, elevated: bool) -> Self {
         Self {
             backend: BackendSelection::Kd,
             endpoint: endpoint.into(),
@@ -114,7 +114,7 @@ impl ConfiguredTarget {
     }
 
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn gdb(endpoint: impl Into<String>) -> Self {
+    pub fn gdb(endpoint: impl Into<String>) -> Self {
         Self {
             backend: BackendSelection::Gdb,
             endpoint: endpoint.into(),
@@ -175,17 +175,17 @@ impl ConfiguredTarget {
     }
 }
 
-pub(super) struct ApplyResult {
+pub struct ApplyResult {
     pub backup: PathBuf,
 }
 
-pub(super) trait ConfigurationPlan {
+pub trait ConfigurationPlan {
     fn changes(&self) -> &[String];
     fn instructions(&self) -> &Instructions;
     fn apply(&self) -> Result<ApplyResult>;
 }
 
-pub(super) trait Configurator {
+pub trait Configurator {
     fn name(&self) -> &'static str;
     fn probe(&self) -> ProbeStatus;
     fn guests(&self) -> Result<Vec<Guest>>;
@@ -198,7 +198,7 @@ pub(super) trait Configurator {
     fn plan(&self, guest: &Guest, request: ConfigureRequest) -> Result<Box<dyn ConfigurationPlan>>;
 }
 
-pub(super) fn kdnet_instructions(request: ConfigureRequest, elevated: bool) -> Instructions {
+pub fn kdnet_instructions(request: ConfigureRequest, elevated: bool) -> Instructions {
     let host = request
         .kdnet_host
         .expect("KDNET configure requests have a host IP");
@@ -479,7 +479,7 @@ fn print_instructions(instructions: &Instructions) {
     }
 }
 
-pub(super) fn prompt_select(prompt: &str, items: &[String]) -> Result<Option<usize>> {
+pub fn prompt_select(prompt: &str, items: &[String]) -> Result<Option<usize>> {
     let mut choices = items.to_vec();
     choices.push("cancel".to_string());
     let selected = Select::new()
@@ -495,7 +495,7 @@ pub(super) fn prompt_select(prompt: &str, items: &[String]) -> Result<Option<usi
     }
 }
 
-pub(super) fn prompt_confirm(prompt: &str) -> Result<bool> {
+pub fn prompt_confirm(prompt: &str) -> Result<bool> {
     Confirm::new()
         .with_prompt(prompt)
         .default(false)
@@ -538,7 +538,7 @@ fn cancelled() -> Result<()> {
     Ok(())
 }
 
-pub(super) fn backup_file(
+pub fn backup_file(
     hypervisor: &str,
     guest: &str,
     extension: &str,
@@ -560,7 +560,7 @@ pub(super) fn backup_file(
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn atomic_replace(path: &Path, contents: &[u8]) -> Result<()> {
+pub fn atomic_replace(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::DebugInfo(format!(
             "configuration path has no parent: {}",
@@ -586,7 +586,7 @@ pub(super) fn atomic_replace(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn shell_quote(value: &str) -> String {
+pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

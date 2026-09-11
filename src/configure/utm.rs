@@ -73,7 +73,7 @@ on run argv
 end run
 "#;
 
-pub(super) struct Utm;
+pub struct Utm;
 
 impl Configurator for Utm {
     fn name(&self) -> &'static str {

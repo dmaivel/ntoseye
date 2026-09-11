@@ -1,7 +1,8 @@
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::symbols::{
-    LocalVariableLocation, SourcePathMapping, SymbolSource, format_symbol_with_offset,
+    LocalVariableLocation, ModuleSymbolStatus, SourcePathMapping, SymbolSource,
+    format_symbol_with_offset,
 };
 use crate::target::UserVar;
 use crate::types::VirtAddr;
@@ -582,7 +583,7 @@ impl ReplState<'_> {
                 }
                 None => println!("  pdb     : -"),
             }
-            if let Some(crate::symbols::ModuleSymbolStatus::Failed(reason)) = status {
+            if let Some(ModuleSymbolStatus::Failed(reason)) = status {
                 println!("  error   : {}", reason);
             }
             println!();

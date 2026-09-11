@@ -19,7 +19,7 @@ use crate::{
     phys::PhysMem,
     symbols::{
         LocalVariableLocation, ParsedType, ProcedureLocal, SourceLocation, SymbolCandidate,
-        SymbolIndex, SymbolStore, TypeInfo,
+        SymbolIndex, SymbolStore, TypeInfo, format_symbol_with_offset,
     },
     types::{Arch, Dtb, PageTableEntry, Value, VirtAddr},
 };
@@ -1797,9 +1797,7 @@ impl Target {
 
     pub fn closest_symbol_current_context(&self, address: VirtAddr) -> Option<String> {
         self.nearest_symbol_current_context(address)
-            .map(|(module, name, offset)| {
-                crate::symbols::format_symbol_with_offset(&module, &name, offset)
-            })
+            .map(|(module, name, offset)| format_symbol_with_offset(&module, &name, offset))
     }
 
     /// Resolve cached source information using the active address space with the
@@ -4240,6 +4238,7 @@ mod tests {
         decode_token_privilege_bitmaps, select_object_header_candidate, select_thread_process_dtb,
         thread_owner_matches,
     };
+    use crate::error::Error;
     use crate::guest::ProcessInfo;
     use crate::types::VirtAddr;
 
@@ -4387,7 +4386,7 @@ mod tests {
         let (links, termination) = bounded_list_walk(VirtAddr(0), 8, |address| match address.0 {
             0 => Ok(VirtAddr(1)),
             1 => Ok(VirtAddr(2)),
-            _ => Err(crate::error::Error::DebugInfo("synthetic bad flink".into())),
+            _ => Err(Error::DebugInfo("synthetic bad flink".into())),
         });
         assert_eq!(links, vec![VirtAddr(1), VirtAddr(2)]);
         assert_eq!(
@@ -4486,7 +4485,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             &error,
-            crate::error::Error::StructNotFound(name)
+            Error::StructNotFound(name)
                 if name == "_OBJECT_HEADER_CREATOR_INFO"
         ));
     }
