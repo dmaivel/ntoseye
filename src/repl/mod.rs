@@ -33,7 +33,6 @@ use crate::guest::ModuleSymbolLoadReport;
 use crate::python::embed;
 use crate::session::Session;
 #[cfg(feature = "cli")]
-use crate::session::StopResolution;
 #[cfg(feature = "cli")]
 use crate::symbols::ntoseye_home;
 #[cfg(feature = "cli")]
@@ -590,24 +589,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     let was_running_on_exit = state.ctx.backend.is_running();
     let mut resume_on_exit = !was_running_on_exit;
     if was_running_on_exit && !state.ctx.breakpoints.list().is_empty() {
-        let settle = (|| -> Result<()> {
-            let mut event = match state.ctx.backend.try_wait_for_stop(REPL_STOP_POLL)? {
-                Some(event) => event,
-                None => state.ctx.backend.interrupt()?,
-            };
-            loop {
-                match state.ctx.classify_stop_event(event)? {
-                    StopResolution::Resumed => {
-                        event = state.ctx.backend.interrupt()?;
-                    }
-                    StopResolution::Breakpoint { .. }
-                    | StopResolution::Bugcheck { .. }
-                    | StopResolution::TargetReloaded { .. }
-                    | StopResolution::Stopped { .. } => return Ok(()),
-                }
-            }
-        })();
-        match settle {
+        match state.ctx.halt_for_exit() {
             Ok(()) => resume_on_exit = true,
             Err(error) => {
                 error!("failed to halt cleanly during exit: {error}");

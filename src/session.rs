@@ -279,6 +279,14 @@ const DTB_PAGE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 /// How often the run-control poll loop wakes to check for a stop.
 const CONTINUE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// How many noise stops [`Session::interrupt`] resumes past before surfacing
+/// whatever the target is doing.
+const INTERRUPT_MAX_RESUMES: usize = 8;
+
+/// How long [`Session::halt_for_exit`] gives an already-pending stop to land
+/// before breaking in.
+const EXIT_STOP_POLL: Duration = Duration::from_millis(200);
+
 /// How long a background `service_idle` pass spends absorbing caught stops before
 /// returning to the actor's job queue. Small so a real tool call is never held off
 /// for long; one buffered stop is drained immediately regardless, this only bounds
@@ -609,8 +617,14 @@ impl Session {
     /// Pause the VM and return the first meaningful stop. Every raw event routes
     /// through [`Self::classify_stop_event`], so an interrupt that races with a
     /// filtered breakpoint or reconnect-assist stop cannot bypass core state.
+    ///
+    /// Bounded: while the guest is rebooting (reconnect assist) or hammering a
+    /// wrong-process breakpoint, every break-in can classify as noise and be
+    /// resumed; after [`INTERRUPT_MAX_RESUMES`] of those the last stop is
+    /// surfaced as-is rather than spinning forever (the ^D exit path lives on
+    /// this).
     pub fn interrupt(&mut self) -> Result<StopEvent> {
-        loop {
+        for _ in 0..INTERRUPT_MAX_RESUMES {
             let event = self.backend.interrupt()?;
             match self.classify_stop_event(event)? {
                 StopResolution::Resumed => continue,
@@ -620,6 +634,18 @@ impl Session {
                 | StopResolution::Stopped { event, .. } => return Ok(event),
             }
         }
+        self.backend.interrupt()
+    }
+
+    /// Bring the target to a real halt before teardown: consume a stop that is
+    /// already pending if it is meaningful, else break in. The REPL's ^D path.
+    pub fn halt_for_exit(&mut self) -> Result<()> {
+        if let Some(event) = self.backend.try_wait_for_stop(EXIT_STOP_POLL)?
+            && !matches!(self.classify_stop_event(event)?, StopResolution::Resumed)
+        {
+            return Ok(());
+        }
+        self.interrupt().map(drop)
     }
 
     /// Align the inspection context to the currently selected thread's address
