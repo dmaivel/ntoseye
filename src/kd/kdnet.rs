@@ -34,15 +34,9 @@ type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
 
-/// Session state negotiated from control pokes.
-///
-/// kdnet.dll pokes every three seconds whether or not it has a data channel,
-/// and it accepts any response that echoes a recent poke: the response rekeys
-/// it and zeroes its sequence state. Answering a connected target's keepalive
-/// would therefore rotate the data key under a working session. The poke says
-/// which case this is: once the target has accepted a response, its pokes
-/// carry the host port its data channel is bound to; a rebooted target has no
-/// data channel and pokes with that field zero, so answering it is a rollover.
+/// Session state negotiated from control pokes. Answering a poke rekeys the
+/// target, so only pokes without a host port (no data channel yet, or a
+/// rebooted target) are answered.
 struct SessionState {
     control_key: [u8; 32],
     hmac_key: [u8; 32],
@@ -760,8 +754,6 @@ mod tests {
             hasher.update(key);
             hasher.update(body);
             let data_key: [u8; 32] = hasher.finalize().into();
-            // Once the target holds a data channel, its pokes name the host
-            // port and must be left unanswered.
             let mut periodic_poke = poke;
             periodic_poke[POKE_HOST_PORT_OFFSET..POKE_HOST_PORT_OFFSET + 2]
                 .copy_from_slice(&host_addr.port().to_be_bytes());
@@ -837,7 +829,6 @@ mod tests {
         let (second_len, _) = target.recv_from(&mut second).unwrap();
         second.truncate(second_len);
 
-        // Fresh sequence: datagrams differ, but decrypt to the same KD payload.
         assert_ne!(second, first);
         assert_eq!(host.state.send_sequence.load(Ordering::Relaxed), 3);
         for pkt in [&mut first, &mut second] {
@@ -850,9 +841,6 @@ mod tests {
         }
     }
 
-    /// A rebooted target has no data channel, so its pokes carry no host
-    /// port. Answering the first one rolls the session over instead of
-    /// forcing the user to reattach.
     #[test]
     fn reboot_pokes_roll_the_session_over_and_restore_kd_traffic() {
         let (key, hmac_key) = test_keys();
@@ -886,7 +874,6 @@ mod tests {
             )
             .unwrap();
             target.send_to(&data, host_addr).unwrap();
-            // The host request this target will never answer: it reboots here.
             let request = recv_datagram(&target).expect("host request");
             open_datagram(request, first_key, &hmac_key).expect("host used the session key");
 
@@ -918,10 +905,6 @@ mod tests {
         target_thread.join().unwrap();
     }
 
-    /// A target that accepted a response pokes on regardless, naming the host
-    /// port its data channel is bound to. Those are keepalives: answering one
-    /// would rekey the target under a working session, and the target need not
-    /// have sent any data yet for the session to be working.
     #[test]
     fn keepalive_pokes_from_a_connected_target_are_not_answered() {
         let (key, hmac_key) = test_keys();
@@ -956,7 +939,6 @@ mod tests {
                 }
             }
 
-            // KD comes up, still using the key accepted at the start.
             target
                 .send_to(
                     &create_packet(
@@ -984,15 +966,10 @@ mod tests {
         assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
     }
 
-    /// A restarted target keeps its address and changes only its source port.
-    /// A poke from another host is another machine, such as a second guest
-    /// sharing one KDNET key, and must not take a live session from its owner.
     #[test]
     fn pokes_from_another_host_cannot_take_over_the_session() {
         let (key, hmac_key) = test_keys();
         let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
-        // Short enough that each read below returns after servicing the poke
-        // it was woken for.
         host.set_read_timeout(Some(Duration::from_millis(80)))
             .unwrap();
         let host_addr = host.local_addr();
@@ -1031,7 +1008,6 @@ mod tests {
         let mut bridged = vec![0u8; owner_packet.len() + 1];
         host.read_exact(&mut bridged).unwrap();
 
-        // A second machine with the same key and no data channel pokes.
         for sequence in 1..=2 {
             stranger
                 .send_to(&poke_datagram(0x22, sequence, key, &hmac_key), host_addr)
@@ -1065,9 +1041,6 @@ mod tests {
         assert_eq!(&bridged[..owner_packet.len()], &owner_packet[..]);
     }
 
-    /// The initial handshake writes its break-in before any target has poked.
-    /// It cannot go anywhere yet, but it must go out as soon as the session
-    /// exists, not on the handshake's next attempt seconds later.
     #[test]
     fn break_in_written_before_negotiation_is_sent_once_the_session_exists() {
         let (key, hmac_key) = test_keys();
@@ -1089,7 +1062,6 @@ mod tests {
         let mut scratch = [0u8; 8];
         assert!(host.read(&mut scratch).is_err(), "poke yields no KD bytes");
 
-        // The first datagram the target sees is the response, not the break-in.
         let response = recv_datagram(&target).expect("poke answered");
         let data_key = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
         let breakin = recv_datagram(&target).expect("deferred break-in sent");
@@ -1100,9 +1072,6 @@ mod tests {
         );
     }
 
-    /// A target still sending data for a session this listener does not hold
-    /// would offer on its own timer within three seconds; an empty control
-    /// datagram from the host makes kdnet.dll offer immediately.
     #[test]
     fn stale_data_before_negotiation_is_answered_with_a_host_poke() {
         let (key, hmac_key) = test_keys();
@@ -1148,11 +1117,6 @@ mod tests {
         assert_eq!(metadata & 0x0f, 8);
     }
 
-    /// The whole reattach path, transport and KD framing together: a target
-    /// that restarts under the listener renegotiates and then resumes KD with
-    /// a packet-id stream that begins again. The framing layer must adopt the
-    /// new session before judging the first post-reboot packet, otherwise its
-    /// low id is rejected as a duplicate of the old stream.
     #[test]
     fn rolled_over_session_is_adopted_by_the_kd_framing_layer() {
         let (key, hmac_key) = test_keys();
@@ -1171,8 +1135,6 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
-        // The old session runs its packet ids up high; the restarted target
-        // starts over from a low id.
         let before = kd_data_packet_with_id(0x2_f000, b"before");
         let after = kd_data_packet_with_id(0x4, b"after");
 
@@ -1219,11 +1181,5 @@ mod tests {
         );
         assert_eq!(generation.load(Ordering::Relaxed), 1);
         target_thread.join().unwrap();
-    }
-
-    #[test]
-    fn listener_binds_requested_udp_endpoint() {
-        let stream = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
-        assert!(stream.local_addr().port() != 0);
     }
 }

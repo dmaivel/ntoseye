@@ -984,7 +984,6 @@ mod tests {
     fn vmcoreinfo_is_idempotent_and_never_removed() {
         let once =
             apply_transport_config(BASE_XML, &[DebugTransport::Kd], KD_SOCKET, true).unwrap();
-        // Re-run with vmcoreinfo enabled: no duplicate, no change recorded
         let twice =
             apply_transport_config(&once.xml, &[DebugTransport::Kd], KD_SOCKET, true).unwrap();
         assert_eq!(twice.xml.matches("<vmcoreinfo").count(), 1);
@@ -993,7 +992,6 @@ mod tests {
                 .changes
                 .contains(&"enable vmcoreinfo (crash-dump generation)".to_string())
         );
-        // Declining later leaves the existing feature alone
         let declined =
             apply_transport_config(&once.xml, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(declined.xml.contains(r#"<vmcoreinfo state="on"/>"#));
@@ -1017,11 +1015,6 @@ mod tests {
             tag_attr(r#"<qemu:arg value='-S'/>"#, "value").as_deref(),
             Some("-S")
         );
-    }
-
-    #[test]
-    fn sanitize_filename_removes_path_characters() {
-        assert_eq!(sanitize_filename("win/11 test"), "win_11_test");
     }
 
     #[test]

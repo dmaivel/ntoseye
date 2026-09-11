@@ -134,14 +134,8 @@ impl ReplCaches {
     }
 
     /// Rebuild the symbol/type/DTB completion caches after the active context
-    /// changes (kernel reload, process attach/detach).
-    ///
-    /// The merged symbol/type indexes are a function of the active DTB (the caches
-    /// are built coherently with `dtb` at init and on every change), and
-    /// rebuilding+sorting them is expensive. The continue loop calls this on every
-    /// stop, so a breakpoint on a hot function; e.g. `PeekMessageW`, hammered by
-    /// every message pump, would otherwise re-sort the whole index per hit. Skip
-    /// the rebuild when the context DTB hasn't moved.
+    /// changes (kernel reload, process attach/detach). Called on every stop, so
+    /// the expensive rebuild is skipped when the DTB hasn't moved.
     pub fn refresh_symbol_context(&self, debugger: &Target) {
         let new_dtb = debugger.current_dtb();
         if *self.dtb.read().unwrap() == new_dtb {
@@ -169,12 +163,8 @@ impl ReplCaches {
     }
 }
 
-/// A read-only loan of the REPL's [`Target`] to the tab completer for the
-/// duration of one `read_line`, so completions can enumerate guest lists on
-/// demand instead of the loop pre-walking them at every stop. The editor owns
-/// its completer for `'static`, which rules out a plain borrow; the loop
-/// [`lend`](Self::lend)s the target around each `read_line` and the completer
-/// sees it only inside that window. Mirrors the SDK's borrowed session handle.
+/// A read-only loan of the REPL's [`Target`] to the `'static` tab completer
+/// for the duration of one `read_line` ([`lend`](Self::lend)).
 #[derive(Clone, Default)]
 pub struct TargetLoan(Arc<Mutex<Option<LentTarget>>>);
 

@@ -15,8 +15,7 @@ pub fn print_section(title: &str) {
     outln!("\n{}", ui::label(title));
 }
 
-/// Begin a stop block: a blank line. The single seam marking every
-/// stop-output entry point, in case a heavier delimiter is ever wanted.
+/// Begin a stop block: a blank line.
 pub fn print_stop_separator() {
     outln!();
 }
@@ -488,7 +487,6 @@ mod tests {
     #[test]
     fn cpsr_flags_align_under_hex_digits() {
         assert_eq!(format_cpsr(0x6000_0044), "        ZC    F ");
-        // N, A, I, F → "N" under the '8', "AIF" under the trailing '4's.
         assert_eq!(format_cpsr(0x8000_01c4), "        N    AIF");
         assert_eq!(format_cpsr(0x0000_0000), "                ");
     }

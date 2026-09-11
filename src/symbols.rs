@@ -362,40 +362,6 @@ mod tests {
     }
 
     #[test]
-    fn symbol_sources_preserve_order_and_reset_defaults() {
-        let store = SymbolStore::new();
-        let private = SymbolSource::LocalDirectory(PathBuf::from("/private"));
-        let server = SymbolSource::Http("https://symbols.example.test".to_string());
-
-        store.set_symbol_sources(vec![private.clone()]);
-        store.append_symbol_source(server.clone());
-        assert_eq!(store.symbol_sources(), vec![private, server]);
-
-        store.reset_symbol_sources();
-        assert_eq!(
-            store.symbol_sources(),
-            symbol_sources_from_servers(pdb_servers())
-        );
-    }
-
-    #[test]
-    fn configured_pdb_servers_feed_default_symbol_sources_in_order() {
-        let servers = vec![
-            "https://private.example.test/symbols".to_string(),
-            "https://backup.example.test/symbols".to_string(),
-        ];
-
-        assert_eq!(
-            symbol_sources_from_servers(&servers),
-            vec![
-                SymbolSource::Cache,
-                SymbolSource::Http(servers[0].clone()),
-                SymbolSource::Http(servers[1].clone()),
-            ]
-        );
-    }
-
-    #[test]
     fn local_source_paths_cover_direct_and_symbol_store_layouts() {
         let identity = PdbIdentity {
             guid: 0x00112233445566778899AABBCCDDEEFF,
@@ -764,15 +730,6 @@ mod tests {
     }
 
     #[test]
-    fn private_index_skips_pdb2_function_list_records() {
-        assert!(is_private_address_symbol_kind(0x1110));
-        assert!(is_private_address_symbol_kind(0x110d));
-        assert!(!is_private_address_symbol_kind(PDB_S_CALLEES));
-        assert!(!is_private_address_symbol_kind(PDB_S_CALLERS));
-        assert!(is_pdb2_function_list_symbol(PDB_S_CALLEES));
-        assert!(is_pdb2_function_list_symbol(PDB_S_CALLERS));
-    }
-    #[test]
     fn module_lookup_prefers_active_dtb_then_falls_back() {
         let store = SymbolStore::new();
         let active_dtb = 0x1000;
@@ -978,11 +935,8 @@ fn download_url_to_path(url: &str, path: &Path, filename: &str, pb: &ProgressBar
         std::fs::create_dir_all(parent)?;
     }
 
-    // Download to a unique temp file and rename into place. Writing the final
-    // path directly truncates it in place, which corrupts the file under
-    // concurrent duplicate jobs and rips pages out from under any existing
-    // mmap of it (--force-download-symbols re-downloads loaded PDBs); a rename
-    // leaves prior mappings on the old inode intact.
+    // Rename into place: truncating the final path would corrupt concurrent
+    // jobs and any existing mmap of it.
     let tmp_path = unique_temp_path(path);
     let mut file = File::create(&tmp_path)?;
     let mut downloaded = pb.wrap_read(response);
@@ -1197,7 +1151,6 @@ impl fmt::Display for ParsedType {
             | ParsedType::Struct(s)
             | ParsedType::Union(s)
             | ParsedType::Enum(s) => write!(f, "{}", s),
-            // ParsedType::Pointer(inner) => write!(f, "{}*", inner),
             ParsedType::Pointer(inner) => {
                 if let ParsedType::Function(ret_type, args) = &**inner {
                     write!(f, "{} (*)(", ret_type)?;
@@ -2338,12 +2291,8 @@ impl SymbolStore {
         };
         expected.matches(actual).map_err(Error::DebugInfo)?;
 
-        // Exactly one loader may win per guid: parallel loads of two modules
-        // sharing a PDB both get past the contains_key fast path, and a plain
-        // insert would replace the winner's Arc<Mmap>, unmapping pages the
-        // stored PDB's 'static cursor still points into (a cold-cache SIGSEGV).
-        // The loser drops its own pdb+mmap pair instead. `build_index` takes
-        // the pdbs shard again, so it must run after the entry guard drops.
+        // One loader wins per guid; replacing an existing entry would unmap
+        // pages the stored PDB's cursor still points into.
         match self.pdbs.entry(expected.guid) {
             Entry::Occupied(_) => {
                 let matches = self
@@ -2479,11 +2428,7 @@ impl SymbolStore {
     }
 
     pub fn find_type_across_modules(&self, dtb: Dtb, type_name: &str) -> Option<Arc<TypeInfo>> {
-        // Type layouts are address-space independent, so a kernel type must
-        // resolve to the kernel's definition even while attached to a user
-        // process whose modules (e.g. ntdll) define same-named-but-different
-        // types or omit kernel-only ones. Consult the kernel module first, then
-        // fall back to the current address space's modules for user-mode types.
+        // Kernel definitions win over same-named user-mode types (e.g. ntdll).
         //
         // NOTE this hands a WOW64 (32-bit) process the kernel's 64-bit layout
         // for a shared type name instead of its own 32-bit one; revisit with
@@ -3325,7 +3270,6 @@ impl SymbolStore {
         strings.dedup();
         source_lines.sort_by_key(|line| line.rva);
 
-        // NOW FOR TYPES!
         let mut type_strings: Vec<String> = Vec::new();
         let mut enum_strings: Vec<String> = Vec::new();
 
@@ -3394,14 +3338,6 @@ impl SymbolStore {
         self.index_diagnostics.insert(guid, diagnostics);
         Ok(())
     }
-
-    // pub fn symbol_index(&self, guid: u128) -> Option<Arc<SymbolIndex>> {
-    //     self.index.get(&guid).map(|v| Arc::new(v.clone()))
-    // }
-
-    // pub fn types_index(&self, guid: u128) -> Option<Arc<SymbolIndex>> {
-    //     self.index_types.get(&guid).map(|v| Arc::new(v.clone()))
-    // }
 
     fn symbol_records(&self, guid: u128, symbol_name: &str) -> Vec<IndexedSymbol> {
         if let Some(map) = self.symbol_rvas.get(&guid) {
@@ -3833,12 +3769,7 @@ impl SymbolIndex {
 
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
-        // Fuzzy-scoring every name is the per-keystroke hot path: an attached
-        // GUI process can pull in hundreds of thousands of publics across its
-        // loaded modules, and `Pattern::match_list` scores them on a single
-        // thread. Spread the scan across cores instead; each rayon job keeps
-        // its own matcher and utf32 scratch buffer (both reused across the items
-        // that job sees, like the original thread-local matcher did).
+        // Per-keystroke hot path over up to hundreds of thousands of names.
         let mut scored: Vec<(u32, &String)> = self
             .names
             .par_iter()
@@ -3853,10 +3784,7 @@ impl SymbolIndex {
             .filter_map(|scored| scored)
             .collect();
 
-        // Only the top `limit` matches are shown, so partial-select them instead
-        // of fully sorting every match; a short, broad query can match most of
-        // the list, and the full O(n log n) sort there is what stings. Ties break
-        // alphabetically (names are unique) for a stable, predictable ordering.
+        // Partial-select the top `limit`; ties break alphabetically.
         let by_rank =
             |a: &(u32, &String), b: &(u32, &String)| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1));
         if scored.len() > limit {

@@ -315,12 +315,8 @@ pub fn is_temporary_io_error(kind: ErrorKind) -> bool {
 }
 
 /// Run a KD request under `timeout`, then leave the socket with that timeout
-/// still set. The restore-to-blocking `setsockopt(SO_RCVTIMEO)` is
-/// deliberately NOT performed: on macOS, a second `SO_RCVTIMEO` setsockopt
-/// while the peer concurrently writes (which is inherent to KD — the kernel
-/// streams replies/prints) intermittently fails with EINVAL, and every
-/// subsequent operation sets its own timeout before reading anyway. Blocking
-/// waits set an explicit long timeout ([`blocking_read_timeout`]).
+/// still set: restoring `SO_RCVTIMEO` races with peer writes on macOS, and
+/// every operation sets its own timeout before reading anyway.
 pub fn with_framing_read_timeout_raw<R>(
     framing: &mut KdFraming<KdTransport>,
     timeout: Duration,
@@ -330,9 +326,7 @@ pub fn with_framing_read_timeout_raw<R>(
     f(framing)
 }
 
-/// Long-enough read timeout to behave like a blocking read (an hour; never
-/// fires in practice). Used where the KD protocol wants an unbounded wait
-/// (`wait_for_stop`) without the macOS-racy restore dance.
+/// Read timeout long enough to behave like a blocking read.
 pub const fn blocking_read_timeout() -> Duration {
     Duration::from_secs(3600)
 }
@@ -379,9 +373,7 @@ pub fn is_transparent_state_change(new_state: u32) -> bool {
 }
 
 /// Acknowledge a non-exception wait-state-change (load-symbols / command-string)
-/// by sending a continue, so the kernel resumes past it. The request timeout is
-/// set for the exchange and left in place (restoring is macOS-racy; the next
-/// operation re-establishes its own timeout).
+/// by sending a continue, so the kernel resumes past it.
 pub fn continue_transparent_state_change(
     framing: &mut KdFraming<KdTransport>,
     arch: Arch,
@@ -446,11 +438,8 @@ pub struct AwaitStateOptions<'a> {
 ///
 /// `deadline` bounds the *total* time servicing transparent traffic: when it is
 /// reached between packets, the call returns a [`ErrorKind::TimedOut`] error so
-/// the caller treats it like an idle gap (hand the socket to the pump, schedule
-/// an assist poke, …). Without it, an uninterrupted stream of boot-time
-/// load-symbols / file-I/O packets keeps `recv_data` returning forever and
-/// starves the caller's own timeout, what used to pin the foreground actor for
-/// minutes after a reboot. `None` waits indefinitely for a surfaceable change.
+/// the caller treats it like an idle gap. `None` waits indefinitely for a
+/// surfaceable change.
 pub fn await_state_change(
     framing: &mut KdFraming<KdTransport>,
     options: AwaitStateOptions<'_>,
@@ -623,14 +612,10 @@ pub fn advance_pc_past_breakpoint(
     Ok(())
 }
 
-/// Stops the pump absorbs right after a continue. A break-in byte the kernel
-/// consumed while it was already stopped makes it re-break on its next clock
-/// tick, at the instruction it was resumed from or at the KD break-in
-/// instruction; those are debugger noise, resumed again without being
-/// reported. Managed breakpoints are never absorbed, nor is anything after
-/// the window closes, which it does at the first idle gap or after
-/// [`Self::WINDOW`], nor a stop once the foreground has asked for one: a
-/// user's break-in lands at the same instruction as the noise.
+/// Stops the pump absorbs right after a continue: a stale break-in byte makes
+/// the kernel re-break at the resumed-from instruction or the KD break-in
+/// instruction. Managed breakpoints, stops after the window closes, and stops
+/// the foreground asked for are never absorbed.
 pub struct ContinueDrain {
     resumed_from_rip: u64,
     managed_bp_addresses: HashSet<u64>,

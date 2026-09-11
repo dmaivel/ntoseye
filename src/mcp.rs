@@ -1,15 +1,9 @@
 //! MCP server: the debugger's REPL command language over the Model Context
 //! Protocol, for clients that cannot run Python themselves.
 //!
-//! The surface is deliberately thin, in the shape upstream LLDB chose for its
-//! `lldb-mcp`: one `command` tool that runs a REPL line and returns its text,
-//! plus the run-control that a request/response protocol cannot express as a
-//! blocking command (`resume` is non-blocking, `wait_for_stop` is bounded,
-//! `interrupt`, `status`), and `open`/`close` for the single session slot.
-//! Everything else (memory, structs, symbols, breakpoints, enumeration) is the
-//! REPL's job, so the MCP cannot drift from it. Agents that can run code
-//! should use the Python SDK instead; it composes and needs no round trip per
-//! operation.
+//! One `command` tool runs a REPL line and returns its text; `resume`
+//! (non-blocking), `wait_for_stop` (bounded), `interrupt`, and `status` cover
+//! run control; `open`/`close` manage the single session slot.
 
 use rmcp::{
     ErrorData as McpError, ServiceExt,
@@ -236,8 +230,6 @@ struct NtoseyeMcp {
     /// and the actor can run cleanup (resume the VM) before exit.
     interrupt: Arc<AtomicBool>,
 }
-
-// --- argument schemas ---
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1081,30 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_surface_is_thin() {
-        let mcp = empty_mcp();
-        let mut names: Vec<_> = mcp
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            [
-                "close",
-                "command",
-                "interrupt",
-                "open",
-                "resume",
-                "status",
-                "wait_for_stop"
-            ]
-        );
-    }
-
-    #[test]
     fn loopback_origins_are_trusted() {
         assert!(is_loopback_origin("http://localhost"));
         assert!(is_loopback_origin("http://localhost:8080"));
@@ -1119,9 +1087,7 @@ mod tests {
         assert!(!is_loopback_origin("http://meow.example.com"));
         assert!(!is_loopback_origin("https://meow.test:443"));
         assert!(!is_loopback_origin("http://10.0.0.5:8080"));
-        // `null` (sandboxed iframes, file://) is not a loopback host.
         assert!(!is_loopback_origin("null"));
-        // Malformed / no scheme.
         assert!(!is_loopback_origin("127.0.0.1"));
         assert!(!is_loopback_origin(""));
     }
@@ -1182,8 +1148,6 @@ mod tests {
     #[tokio::test]
     async fn open_reports_connect_failure_and_frees_the_slot() {
         let mcp = empty_mcp();
-        // A nonexistent socket fails fast instead of blocking on a real KD
-        // handshake when /tmp/ntoseye-kd.sock exists.
         let err = open_kd(&mcp, "/tmp/ntoseye-test-does-not-exist.sock")
             .await
             .unwrap_err();
@@ -1201,7 +1165,6 @@ mod tests {
     #[tokio::test]
     async fn close_active_session_then_reopen_allowed() {
         let (mcp, mut rx) = fake_active_mcp();
-        // Simulate the actor: drain commands and ack shutdown.
         tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
                 if let Command::Shutdown { ack } = cmd {

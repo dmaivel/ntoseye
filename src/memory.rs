@@ -65,8 +65,6 @@ impl TranslationCache {
     }
 }
 
-// 'a = lifetime of the borrow of the backend
-//  B = any type that implements phys mem
 pub struct AddressSpace<'a, B: MemoryOps<PhysAddr>> {
     backend: &'a B,
     dtb: Dtb,
@@ -469,7 +467,6 @@ mod tests {
     #[test]
     fn identity_dtb_skips_page_table_walk() {
         let mut data = vec![0u8; 0x2000];
-        // Plant recognizable bytes at VA/PA 0x1000
         data[0x1000..0x1008].copy_from_slice(&0xDEADBEEFCAFEBABEu64.to_le_bytes());
         let mem = FakePhysMem { data };
         let space = AddressSpace::new(&mem, DTB_IDENTITY);
@@ -482,7 +479,6 @@ mod tests {
     #[test]
     fn identity_dtb_cross_boundary_read() {
         let mut data = vec![0u8; 0x3000];
-        // Span across a 4K boundary: fill 0xFFF..0x1001
         for (i, byte) in data[0xFF0..0x1010].iter_mut().enumerate() {
             *byte = ((0xFF0 + i) & 0xFF) as u8;
         }

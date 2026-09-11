@@ -31,14 +31,9 @@ pub struct DebugOutputPage {
 }
 
 /// Thread-safe, bounded, line-oriented ring buffer of guest debug output.
-///
-/// Guest DbgPrint arrives as arbitrary byte chunks serviced from two threads
-/// (the foreground KD loop and the background pump that owns the socket while
-/// the VM runs), so this is a cheap cloneable shared handle. Text is accumulated
-/// and split on `\n`; each completed line is timestamped and assigned a
-/// monotonic `seq`. Reads are snapshot+cursor and never drain, so independent
-/// consumers (the REPL's live terminal stream, an MCP poller, a Python script)
-/// can each track their own position.
+/// Chunks are split on `\n`; each line gets a timestamp and a monotonic `seq`.
+/// Reads are snapshot+cursor and never drain, so consumers track their own
+/// position.
 #[derive(Clone)]
 pub struct DebugLog {
     inner: Arc<Mutex<DebugLogInner>>,
@@ -580,13 +575,9 @@ pub trait DebugBackend {
 
     fn is_running(&self) -> bool;
 
-    /// Whether a stop has been caught but not yet drained by the foreground (e.g.
-    /// the background servicer reported a stop into its channel and exited, but no
-    /// `wait_for_stop`/`interrupt` has consumed it). In that window `is_running()`
-    /// is still its last `continue` value, stale, so the VM is actually halted
-    /// even though `is_running()` says true. A read-only "where am I" surface uses
-    /// this to report the truth without consuming the stop. Default `false`:
-    /// backends that stop synchronously have no such window.
+    /// Whether a stop has been caught but not yet drained by the foreground; in
+    /// that window `is_running()` is stale. Default `false`: backends that stop
+    /// synchronously have no such window.
     fn has_pending_stop(&self) -> bool {
         false
     }
@@ -626,7 +617,6 @@ mod tests {
     #[test]
     fn debug_log_splits_lines_and_strips_crlf() {
         let log = DebugLog::new(16);
-        // Arrives in two chunks, the second completing a line split across them
         log.record(b"DriverEntry failed\r\nhello ");
         log.record(b"world\n");
         let page = log.read_since(0);
@@ -663,20 +653,15 @@ mod tests {
         let log = DebugLog::new(2);
         log.record(b"a\nb\nc\n");
         let page = log.read_since(0);
-        // Only the last two retained; seq 0 ("a") was evicted
         let texts: Vec<&str> = page.lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, vec!["b", "c"]);
-        // A reader still holding the evicted cursor learns it fell behind
         assert!(page.dropped);
-        // A reader caught up to the retained window does not
         assert!(!log.read_since(1).dropped);
     }
 
     #[test]
     fn validate_hw_execute_must_be_one_byte() {
-        // Execute at any address with len 1 is legal regardless of alignment.
         assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 1, 0x1003).is_ok());
-        // Any other length for an execute breakpoint is rejected (checked before length/alignment).
         assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 4, 0x1000).is_err());
         assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 2, 0x1000).is_err());
         assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 8, 0x1000).is_err());
@@ -684,7 +669,6 @@ mod tests {
 
     #[test]
     fn validate_hw_data_widths_when_aligned() {
-        // Every legal data width at a correctly aligned address is accepted.
         for access in [HwBreakpointAccess::Write, HwBreakpointAccess::ReadWrite] {
             assert!(validate_hw_breakpoint(access, 1, 0x1003).is_ok());
             assert!(validate_hw_breakpoint(access, 2, 0x1000).is_ok());
@@ -695,7 +679,6 @@ mod tests {
 
     #[test]
     fn validate_hw_rejects_invalid_lengths() {
-        // Lengths outside {1,2,4,8} are rejected for data breakpoints.
         for len in [0u8, 3, 5, 16] {
             assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, len, 0x1000).is_err());
             assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, len, 0x1000).is_err());
@@ -704,11 +687,9 @@ mod tests {
 
     #[test]
     fn validate_hw_requires_length_alignment() {
-        // An address not aligned to the watch length never fires in hardware, so it's rejected.
         assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 4, 0x1002).is_err());
         assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 2, 0x1001).is_err());
         assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, 8, 0x1004).is_err());
-        // Single-byte watches align to every address.
         assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 1, 0x1001).is_ok());
         assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, 1, 0x1003).is_ok());
     }

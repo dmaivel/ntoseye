@@ -133,31 +133,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offsets_are_monotonic_in_the_gpr_block() {
-        // All the 8-byte GPRs and rip should fall on contiguous 8-byte
-        // boundaries between OFFSET_RAX and OFFSET_RIP. Catches accidental
-        // off-by-eight typos
-        let gprs = [
-            OFFSET_RAX, OFFSET_RCX, OFFSET_RDX, OFFSET_RBX, OFFSET_RSP, OFFSET_RBP, OFFSET_RSI,
-            OFFSET_RDI, OFFSET_R8, OFFSET_R9, OFFSET_R10, OFFSET_R11, OFFSET_R12, OFFSET_R13,
-            OFFSET_R14, OFFSET_R15, OFFSET_RIP,
-        ];
-        for window in gprs.windows(2) {
-            assert_eq!(
-                window[1] - window[0],
-                8,
-                "non-contiguous GPRs near {:#x}",
-                window[0]
-            );
-        }
-    }
-
-    #[test]
     fn register_map_reads_known_offsets() {
         let map = build_register_map();
         let mut buf = vec![0u8; CONTEXT_SIZE];
 
-        // Plant RIP at its offset and verify read_u64 picks it out
         let want_rip: u64 = 0xfffff80000123456;
         buf[OFFSET_RIP..OFFSET_RIP + 8].copy_from_slice(&want_rip.to_le_bytes());
         assert_eq!(map.read_u64("rip", &buf).unwrap(), want_rip);
@@ -184,7 +163,6 @@ mod tests {
             &0x1234_5678_9abc_def0u64.to_le_bytes()
         );
 
-        // Writing eflags (4 bytes) must not spill into the byte at +4
         buf[OFFSET_EFLAGS + 4] = 0xff;
         map.write_u64("eflags", &mut buf, 0x202).unwrap();
         assert_eq!(

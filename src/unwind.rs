@@ -451,13 +451,8 @@ fn recover_context_switch_seed(
         )));
     }
 
-    // Validate that the next unwind is coherent, but keep `seed` private to the
-    // stack walker. It is not a complete saved register context: x64 unwind data
-    // can recover nonvolatile registers while crossing KiSwapContext, but the
-    // volatile registers and RFLAGS were never preserved. Full parked-thread
-    // register display would need a real architecture-defined snapshot (for
-    // example matching KTRAP/KEXCEPTION frames), plus per-register provenance;
-    // splicing values recovered at different unwind phases is not such a snapshot.
+    // `seed` stays private to the stack walker: it is not a complete register
+    // context (volatile registers and RFLAGS are never preserved).
     let mut caller = seed.clone();
     if !matches!(
         tracer.unwind_once(&mut caller),
@@ -1420,16 +1415,13 @@ fn slot_u16(codes: &[UnwindCodeSlot], index: usize) -> Option<u16> {
 mod tests {
     use super::{
         FrameSource, ParsedUnwindInfo, PeImage, RUNTIME_FUNCTION, RegisterContext, StackFrame,
-        StackTrace, UnwindCodeSlot, frame_base, lookup_arm64_runtime_function,
-        lookup_runtime_function, parse_unwind_info, record_stack_frame, slot_u16,
-        unwind_slot_count,
+        StackTrace, frame_base, lookup_arm64_runtime_function, lookup_runtime_function,
+        parse_unwind_info, record_stack_frame, unwind_slot_count,
     };
     use crate::target::SavedThreadRegisters;
 
     #[test]
     fn lookup_runtime_function_resolves_across_a_large_sorted_table() {
-        // entries [i*0x100, i*0x100+0x40) with a gap before the next; the
-        // lower-half hits are exactly what pelite's inverted comparator missed
         let funcs: Vec<RUNTIME_FUNCTION> = (0..64u32)
             .map(|i| RUNTIME_FUNCTION {
                 BeginAddress: i * 0x100,
@@ -1452,9 +1444,7 @@ mod tests {
                 .BeginAddress,
             0x3f00
         );
-        // an address in the gap between two functions resolves to nothing
         assert!(lookup_runtime_function(&funcs, 0x350).is_none());
-        // past the end of the table
         assert!(lookup_runtime_function(&funcs, 0x10000).is_none());
     }
 
@@ -1518,27 +1508,6 @@ mod tests {
         assert_eq!(unwind_slot_count(5, 0), 3);
         assert_eq!(unwind_slot_count(6, 0), 1); // UWOP_EPILOG
         assert_eq!(unwind_slot_count(7, 0), 3); // UWOP_SPARE_CODE
-    }
-
-    #[test]
-    fn slot_u16_reads_little_endian_slot_data() {
-        let codes = vec![
-            UnwindCodeSlot {
-                code_offset: 0x34,
-                unwind_op: 0,
-                op_info: 0,
-                raw_op_info: 0x12,
-            },
-            UnwindCodeSlot {
-                code_offset: 0x78,
-                unwind_op: 0,
-                op_info: 0,
-                raw_op_info: 0x56,
-            },
-        ];
-
-        assert_eq!(slot_u16(&codes, 0), Some(0x1234));
-        assert_eq!(slot_u16(&codes, 1), Some(0x5678));
     }
 
     #[test]

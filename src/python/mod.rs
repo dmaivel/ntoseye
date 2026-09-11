@@ -137,33 +137,21 @@ fn breakpoint_target_arg(
     ))
 }
 
-/// A live debugging session. Owns the engine + backend; drive it from Python.
-///
-/// `unsendable`: the session and backend are single-threaded, so pyo3 pins the
-/// object to its creating thread instead of pretending it is `Send`/`Sync`.
-///
-/// An owned session's single-instance lock (so a second `attach()`, here or in
-/// a running CLI, fails fast) lives inside `inner`, [`Session::connect`] takes
-/// it and releases when this object is dropped, not on `close()`. A borrowed
-/// handle holds no lock; the REPL owns the session and its lock.
+/// A live debugging session. `unsendable`: the session is single-threaded.
+/// An owned session's single-instance lock is released on drop, not `close()`;
+/// a borrowed handle holds no lock.
 #[pyclass(unsendable)]
 pub struct Debugger {
     inner: SessionHandle,
 }
 
 /// The `Session` a [`Debugger`] drives: one it owns (from [`attach`]) or one it
-/// borrows for the duration of a call (the in-REPL scripting path, via
-/// [`Debugger::from_session_ref`]). `Deref` lets every `Debugger` method reach
-/// the `Session` identically regardless of which it holds, so the whole SDK
-/// surface serves both entry points unchanged.
+/// borrows for the duration of a REPL command ([`Debugger::from_session_ref`]).
 enum SessionHandle {
     Owned(Box<Session>),
-    /// A live session owned elsewhere (the REPL). The pointer is only valid while
-    /// `valid` reads true: the dispatcher flips it false the moment the command
-    /// that handed out this handle returns (see [`Debugger::from_session_ref`] and
-    /// `embed::dispatch`). A script that stashes the `Debugger` (or any
-    /// `Struct`/`Type` derived from it) and reaches back later therefore panics
-    /// with a clear message
+    /// A session owned by the REPL. The pointer is only valid while `valid`
+    /// reads true; the dispatcher flips it false when the command returns, so a
+    /// stashed handle panics instead of dereferencing a dangling session.
     Borrowed {
         ptr: NonNull<Session>,
         valid: Arc<AtomicBool>,
@@ -994,8 +982,6 @@ impl StopOutcome {
 
 #[pymethods]
 impl Debugger {
-    // --- memory ---
-
     /// Read `len` bytes of guest virtual memory from the current address space.
     /// Our own breakpoint `int3` bytes are masked back to the original code, so a
     /// script sees the same bytes as `read_memory` over MCP and our `disassemble`.
@@ -1098,8 +1084,6 @@ impl Debugger {
         self.write(addr, &value.to_le_bytes())
     }
 
-    // --- expressions ---
-
     /// Evaluate a debugger expression (symbols, registers, arithmetic) to an
     /// address/integer.
     fn eval(&self, expr: &str) -> PyResult<u64> {
@@ -1107,8 +1091,6 @@ impl Debugger {
             .map(|v| v.0)
             .map_err(err)
     }
-
-    // --- registers ---
 
     /// Read a single register by name from the current thread context. Requires
     /// the VM halted (a running guest has no coherent register file).
@@ -1133,8 +1115,6 @@ impl Debugger {
         self.require_halted("write_register")?;
         self.inner.write_register(name, value).map_err(err)
     }
-
-    // --- execution control ---
 
     /// Resume the VM with an explicit exception acknowledgement. `not_handled`
     /// requires native transport support (currently KD). Steps past a
@@ -1302,8 +1282,6 @@ impl Debugger {
         self.inner.reload().map_err(err)
     }
 
-    // --- enumeration ---
-
     /// List running processes as `_EPROCESS` cursors. Read fields straight off
     /// each one (`proc.UniqueProcessId`, `proc.ImageFileName`, `proc.addr` (the
     /// EPROCESS VA)) or `proc.threads()` to walk its threads. `filter` (numeric
@@ -1347,8 +1325,6 @@ impl Debugger {
             ))),
         }
     }
-
-    // --- symbols & types ---
 
     /// Return every exact PDB symbol identity matching `name`, retaining
     /// module, visibility, and private-compiland provenance.
@@ -1791,8 +1767,6 @@ impl Debugger {
         view_list(py, &view::View::List(rows))
     }
 
-    // --- process context ---
-
     /// Switch the inspection context to a process by PID, so subsequent memory
     /// reads/searches/`read_struct` target that process's address space. Returns
     /// the process name.
@@ -1849,8 +1823,6 @@ impl Debugger {
         let rows = regions.iter().map(view::memory_region).collect();
         view_list(py, &view::View::List(rows))
     }
-
-    // --- enumeration: modules / drivers / threads ---
 
     /// Loaded kernel modules as `{name, short_name, base, end, size,
     /// time_date_stamp?, checksum?, file_version?, product_version?}` dicts.
@@ -1943,8 +1915,6 @@ impl Debugger {
             &view::debug_log(&self.inner.read_debug_output(since_seq)),
         )
     }
-
-    // --- breakpoints ---
 
     /// Set a code breakpoint from an address or debugger expression, with an
     /// optional break `condition` (normal expression grammar, re-evaluated each
@@ -2122,18 +2092,9 @@ impl Debugger {
 }
 
 impl Debugger {
-    /// Build a `Debugger` that *borrows* an existing live `Session` instead of
-    /// owning one: the in-REPL scripting entry point. It is the same SDK
-    /// surface (every typed method, `Struct`/`Type`, `run_command`), pointed at
-    /// the REPL's session rather than a freshly attached one, so scripts and
-    /// interactive commands can't diverge from the engine.
-    ///
-    /// Invariant the caller must uphold (mirrors LLDB's SB handles): the
-    /// returned `Debugger`, and any `Struct`/`Type` derived from it, must not be
-    /// used after `valid` is set false. The dispatcher constructs the handle,
-    /// runs one synchronous command under the GIL, and flips `valid` false on
-    /// return; a stashed handle then panics on next use rather than dereferencing
-    /// a dangling session.
+    /// Build a `Debugger` that borrows the REPL's live `Session`. The caller
+    /// must set `valid` false when the borrow ends; the handle (and any
+    /// `Struct`/`Type` derived from it) panics on use after that.
     pub fn from_session_ref(session: &mut Session, valid: Arc<AtomicBool>) -> Self {
         Debugger {
             inner: SessionHandle::Borrowed {
@@ -2856,23 +2817,14 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
 
-    // Proves the borrowed-handle lifetime guard without a live session: the
-    // guard checks the validity flag *before* dereferencing the pointer, so an
-    // invalidated handle panics rather than touching the (here dangling)
-    // pointer. This is the use-after-return path a stashed `Debugger`/`Struct`
-    // hits once its REPL command returns (the dispatcher flips the flag false).
-    // The valid-flag path needs a real session and is covered by the
-    // `examples/borrow_guard.py` REPL script.
     #[test]
     #[should_panic(expected = "must not be stashed")]
     fn invalidated_borrow_panics_instead_of_dereferencing() {
         let valid = Arc::new(AtomicBool::new(false));
         let handle = SessionHandle::Borrowed {
-            // Never read: the assert on `valid` fires first.
             ptr: NonNull::<Session>::dangling(),
             valid,
         };
-        // Triggers `Deref`, which must panic on the false flag.
         let _ = &*handle;
     }
 

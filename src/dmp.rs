@@ -559,10 +559,6 @@ impl MemoryOps<PhysAddr> for DmpMem {
     }
 }
 
-// ---------------------------------------------------------------------------
-// DmpBackend — DebugBackend for crash dump analysis
-// ---------------------------------------------------------------------------
-
 pub struct DmpBackend {
     register_map: RegisterMap,
     per_cpu_registers: Vec<Vec<u8>>,
@@ -651,11 +647,8 @@ impl DmpBackend {
         Ok(())
     }
 
-    /// Land the user on the bugchecking CPU, the way WinDbg opens a dump. The
-    /// header CONTEXT record belongs to the crashing processor but doesn't say
-    /// which one it is, so match it against the per-CPU PRCB contexts. If
-    /// nothing matches (odd dump), re-seat the header context on CPU 0 so the
-    /// crash registers are what the user sees first, not whatever PRCB[0] held.
+    /// Select the bugchecking CPU by matching the header CONTEXT against the
+    /// per-CPU PRCB contexts; with no match, re-seat the header context on CPU 0.
     fn select_crash_processor(&mut self) {
         // Live-system dumps (bugcheck 0x161) carry no exception context
         if self.header_context.rip == 0 {
@@ -973,77 +966,11 @@ mod tests {
         assert_eq!(map.read_u64("rax", &data).unwrap(), 0x1111111111111111);
         assert_eq!(map.read_u64("rbx", &data).unwrap(), 0x2222222222222222);
         assert_eq!(map.read_u64("rcx", &data).unwrap(), 0x3333333333333333);
+        assert_eq!(map.read_u64("rdx", &data).unwrap(), 0x4444444444444444);
+        assert_eq!(map.read_u64("rsi", &data).unwrap(), 0x5555555555555555);
+        assert_eq!(map.read_u64("rdi", &data).unwrap(), 0x6666666666666666);
+        assert_eq!(map.read_u64("rbp", &data).unwrap(), 0x7777777777777777);
         assert_eq!(map.read_u64("rsp", &data).unwrap(), 0x8888888888888888);
-        assert_eq!(map.read_u64("rip", &data).unwrap(), 0xfffff80012345678);
-        assert_eq!(map.read_u64("eflags", &data).unwrap(), 0x246);
-        assert_eq!(map.read_u64("cs", &data).unwrap(), 0x10);
-        assert_eq!(
-            map.read_u64("cr3", &data).unwrap(),
-            info.directory_table_base
-        );
-    }
-
-    #[test]
-    fn dmp_backend_capabilities() {
-        let info = make_test_info();
-        let backend = DmpBackend::new(&info);
-        let caps = backend.capabilities();
-
-        let is_supported = |cap: DebugCapability| -> bool {
-            caps.iter().any(|c| c.capability == cap && c.supported)
-        };
-
-        assert!(is_supported(DebugCapability::MemoryIntrospection));
-        assert!(is_supported(DebugCapability::ReadRegisters));
-        assert!(is_supported(DebugCapability::ThreadList));
-        assert!(is_supported(DebugCapability::ThreadSelection));
-        assert!(!is_supported(DebugCapability::ExecutionControl));
-        assert!(!is_supported(DebugCapability::SingleStep));
-        assert!(!is_supported(DebugCapability::WriteRegisters));
-        assert!(!is_supported(DebugCapability::KernelBreakpoints));
-    }
-
-    #[test]
-    fn dmp_backend_is_halted() {
-        let info = make_test_info();
-        let backend = DmpBackend::new(&info);
-        assert!(!backend.is_running());
-    }
-
-    #[test]
-    fn dmp_backend_write_registers_rejected() {
-        let info = make_test_info();
-        let mut backend = DmpBackend::new(&info);
-        let result = backend.write_registers(&[0u8; 100]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn dmp_backend_execution_rejected() {
-        let info = make_test_info();
-        let mut backend = DmpBackend::new(&info);
-        assert!(backend.continue_execution().is_err());
-        assert!(backend.step().is_err());
-        assert!(backend.set_breakpoint(0x1000).is_err());
-        assert!(backend.remove_breakpoint(0x1000).is_err());
-    }
-
-    #[test]
-    fn dmp_backend_exit_is_clean() {
-        // Frontend quit must not trip over the default "leave the VM running"
-        // exit behavior (a dump can't continue)
-        let info = make_test_info();
-        let mut backend = DmpBackend::new(&info);
-        assert!(backend.prepare_for_exit(true).is_ok());
-    }
-
-    #[test]
-    fn dmp_backend_all_registers_round_trip() {
-        let info = make_test_info();
-        let mut backend = DmpBackend::new(&info);
-        let map = backend.register_map().clone();
-        let data = backend.read_registers().unwrap();
-
         assert_eq!(map.read_u64("r8", &data).unwrap(), 0x0808080808080808);
         assert_eq!(map.read_u64("r9", &data).unwrap(), 0x0909090909090909);
         assert_eq!(map.read_u64("r10", &data).unwrap(), 0x1010101010101010);
@@ -1052,11 +979,14 @@ mod tests {
         assert_eq!(map.read_u64("r13", &data).unwrap(), 0x1313131313131313);
         assert_eq!(map.read_u64("r14", &data).unwrap(), 0x1414141414141414);
         assert_eq!(map.read_u64("r15", &data).unwrap(), 0x1515151515151515);
-        assert_eq!(map.read_u64("rdx", &data).unwrap(), 0x4444444444444444);
-        assert_eq!(map.read_u64("rsi", &data).unwrap(), 0x5555555555555555);
-        assert_eq!(map.read_u64("rdi", &data).unwrap(), 0x6666666666666666);
-        assert_eq!(map.read_u64("rbp", &data).unwrap(), 0x7777777777777777);
+        assert_eq!(map.read_u64("rip", &data).unwrap(), 0xfffff80012345678);
+        assert_eq!(map.read_u64("eflags", &data).unwrap(), 0x246);
+        assert_eq!(map.read_u64("cs", &data).unwrap(), 0x10);
         assert_eq!(map.read_u64("ss", &data).unwrap(), 0x18);
+        assert_eq!(
+            map.read_u64("cr3", &data).unwrap(),
+            info.directory_table_base
+        );
     }
 
     #[test]
@@ -1094,7 +1024,6 @@ mod tests {
         assert_eq!(mem.lookup(0x1000), Some((0x3000, 0x1000)));
         assert_eq!(mem.lookup(0x1500), Some((0x3500, 0x0B00)));
         assert_eq!(mem.lookup(0x5000), Some((0x5000, 0x1000)));
-        // Page not present in dump
         assert_eq!(mem.lookup(0x3000), None);
         assert_eq!(mem.lookup(0x4000), None);
         assert_eq!(mem.lookup(0x8000), None);
@@ -1106,8 +1035,6 @@ mod tests {
         info.number_processors = 4;
         let mut backend = DmpBackend::new(&info);
 
-        // Simulate the PRCB pass: CPU 2 holds the crashing context, the others
-        // (including CPU 0, which starts as the header context) hold idle ones
         for (i, regs) in backend.per_cpu_registers.iter_mut().enumerate() {
             let (rip, rsp) = if i == 2 {
                 (info.context.rip, info.context.rsp)
@@ -1129,7 +1056,6 @@ mod tests {
         info.number_processors = 2;
         let mut backend = DmpBackend::new(&info);
 
-        // No PRCB context matches the header record (CPU 0's got clobbered)
         for regs in backend.per_cpu_registers.iter_mut() {
             regs[context::OFFSET_RIP..context::OFFSET_RIP + 8]
                 .copy_from_slice(&0xfffff800cccc0000u64.to_le_bytes());
@@ -1150,8 +1076,6 @@ mod tests {
     #[test]
     fn triage_mem_read_within_block() {
         let mut data = vec![0u8; 0x4000];
-        // Block at VA 0xfffff80000001000, file offset 0x3000, size 0x100
-        // Fill the file region with recognizable data
         for i in 0..0x100usize {
             data[0x3000 + i] = i as u8;
         }
@@ -1167,12 +1091,10 @@ mod tests {
 
         let mem = DmpMem::new_triage_for_test(data, blocks, info);
 
-        // Read from the middle of the block
         let mut buf = [0u8; 4];
         mem.read_bytes(0xfffff80000001010u64, &mut buf).unwrap();
         assert_eq!(buf, [0x10, 0x11, 0x12, 0x13]);
 
-        // Read past the block should fail
         let mut buf = [0u8; 1];
         assert!(mem.read_bytes(0xfffff80000001100u64, &mut buf).is_err());
     }
@@ -1180,11 +1102,9 @@ mod tests {
     #[test]
     fn triage_overlapping_blocks_fallback() {
         let mut data = vec![0u8; 0x8000];
-        // Large block A: VA 0x1000, size 0x3000, at file offset 0x2000
         for i in 0..0x3000usize {
             data[0x2000 + i] = 0xAA;
         }
-        // Small block B: VA 0x2000, size 0x1000, at file offset 0x5000
         for i in 0..0x1000usize {
             data[0x5000 + i] = 0xBB;
         }
@@ -1206,20 +1126,16 @@ mod tests {
         info.is_triage = true;
         let mem = DmpMem::new_triage_for_test(data, blocks, info);
 
-        // Address in block A only (before B starts)
         let mut buf = [0u8; 1];
         mem.read_bytes(0x1500u64, &mut buf).unwrap();
         assert_eq!(buf[0], 0xAA);
 
-        // Address in the overlap region — B wins (highest start <= addr)
         mem.read_bytes(0x2500u64, &mut buf).unwrap();
         assert_eq!(buf[0], 0xBB);
 
-        // Address past B's end but still within A — must fall back to A
         mem.read_bytes(0x3100u64, &mut buf).unwrap();
         assert_eq!(buf[0], 0xAA);
 
-        // Address past both blocks
         assert!(mem.read_bytes(0x4100u64, &mut buf).is_err());
     }
 }

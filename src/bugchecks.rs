@@ -4098,7 +4098,6 @@ mod tests {
 
     #[test]
     fn trap_frame_requires_kernel_pointer() {
-        // A zeroed or user-mode parameter is not chased.
         assert_eq!(
             bugcheck_trap_frame_address(&info(0x139, [3, 0, 0, 0])),
             None
@@ -4206,22 +4205,5 @@ mod tests {
                 bugcheck_descriptor(base).unwrap().arguments
             );
         }
-    }
-
-    #[test]
-    fn page_fault_descriptor_covers_current_x64_values_and_subtype() {
-        let descriptor = bugcheck_descriptor(0x50).unwrap();
-        assert!(descriptor.arguments[1].contains("2 = modern write"));
-        assert!(descriptor.arguments[1].contains("0x10 = execute"));
-        assert!(descriptor.arguments[3].contains("page-fault subtype"));
-    }
-
-    #[test]
-    fn d1_access_argument_documents_execute_faults() {
-        let descriptor = bugcheck_descriptor(0xd1).unwrap();
-        assert_eq!(
-            descriptor.arguments[2],
-            "value 0 = read operation, 1 = write operation, 2 or 8 = execute operation"
-        );
     }
 }

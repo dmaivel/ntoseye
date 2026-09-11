@@ -709,9 +709,6 @@ mod tests {
         // TRIAGE_DUMP64 at 0x2000
         let triage_base = DUMP_HEADER64_SIZE;
 
-        // SizeOfDump — we'll set this after placing data
-        // CallStackOffset / SizeOfCallStack / TopOfStack — leave zeroed for this test
-
         // DataBlocksOffset — absolute file offset, right after triage header
         let db_offset: u32 = (DUMP_HEADER64_SIZE + 0x80) as u32;
         buf[triage_base + TRIAGE_DATA_BLOCKS_OFFSET..triage_base + TRIAGE_DATA_BLOCKS_OFFSET + 4]
@@ -719,7 +716,6 @@ mod tests {
         buf[triage_base + TRIAGE_DATA_BLOCKS_COUNT..triage_base + TRIAGE_DATA_BLOCKS_COUNT + 4]
             .copy_from_slice(&(blocks.len() as u32).to_le_bytes());
 
-        // Write data block entries — all offsets are absolute file offsets
         let mut data_cursor = (DUMP_HEADER64_SIZE + 0x200) as u32;
         for (i, block) in blocks.iter().enumerate() {
             let entry_off = db_offset as usize + i * DATA_BLOCK_SIZE;
@@ -727,7 +723,6 @@ mod tests {
             buf[entry_off + 8..entry_off + 12].copy_from_slice(&data_cursor.to_le_bytes());
             buf[entry_off + 12..entry_off + 16].copy_from_slice(&block.size.to_le_bytes());
 
-            // Place actual memory content at the absolute file offset
             if let Some((_, content)) = mem_regions.iter().find(|(a, _)| *a == block.address) {
                 let file_off = data_cursor as usize;
                 let len = content.len().min(block.size as usize);
@@ -737,7 +732,6 @@ mod tests {
             data_cursor += block.size;
         }
 
-        // SizeOfDump (triage section size)
         let total = data_cursor as usize - DUMP_HEADER64_SIZE + 0x200;
         buf[triage_base + TRIAGE_SIZE_OF_DUMP..triage_base + TRIAGE_SIZE_OF_DUMP + 4]
             .copy_from_slice(&(total as u32).to_le_bytes());
@@ -750,12 +744,10 @@ mod tests {
         let dump = make_triage_dump(&[], &[]);
         assert!(is_triage_dump(&dump));
 
-        // Wrong signature
         let mut bad = dump.clone();
         bad[0] = b'X';
         assert!(!is_triage_dump(&bad));
 
-        // Wrong dump type
         let mut bad = dump.clone();
         bad[OFF_DUMP_TYPE] = 0x01;
         assert!(!is_triage_dump(&bad));
@@ -794,7 +786,6 @@ mod tests {
         let (_, blocks) = parse_triage(&dump).unwrap();
 
         assert_eq!(blocks.len(), 2);
-        // Sorted by address
         assert!(blocks[0].address < blocks[1].address);
         assert_eq!(blocks[0].address, 0x1000);
         assert_eq!(blocks[1].address, 0x2000);

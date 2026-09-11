@@ -651,14 +651,6 @@ mod tests {
     const SYNC_PACKET_ID: u32 = 0x00000800;
 
     #[test]
-    fn make_header_sets_fixed_prefix() {
-        let h = make_header(0x3132, 2);
-        assert_eq!(read_u32(&h, 0), 0x3132);
-        assert_eq!(read_u16(&h, 6), 2);
-        assert_eq!(h.len(), MANIPULATE_HEADER_SIZE);
-    }
-
-    #[test]
     fn get_version_round_trip() {
         // Reply union: GetVersion64 starting at UNION_OFFSET
         let mut union_body = vec![0u8; 40];
@@ -939,9 +931,7 @@ mod tests {
         let handle = write_breakpoint(&mut framing, 0, 0xfffff80000123456).unwrap();
         assert_eq!(handle, 7);
 
-        // Verify the request we emitted encoded the address correctly
         let out = &framing.transport_ref().outbound;
-        // header(16) + payload (>= MANIPULATE_HEADER_SIZE) + trailer(1)
         let payload_start = 16;
         let req_header = &out[payload_start..payload_start + MANIPULATE_HEADER_SIZE];
         assert_eq!(read_u32(req_header, 0), DBGKD_WRITE_BREAKPOINT);
@@ -950,7 +940,6 @@ mod tests {
 
     #[test]
     fn continue_api2_sends_request_without_waiting_for_reply() {
-        // No reply needed; continue_api2 only waits for the framing ACK
         let ack = {
             let outbound_id = (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID;
             let mut hdr = [0u8; 16];

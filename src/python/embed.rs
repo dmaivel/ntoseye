@@ -303,7 +303,6 @@ mod tests {
                    register_command('pytest_hi', 'a help string', hi)\n";
         assert!(exec_script(src, "test.py").is_err());
 
-        // A syntactically broken script surfaces a stringified error, not a panic.
         assert!(exec_script("def (:\n", "bad.py").is_err());
         clear_commands();
     }

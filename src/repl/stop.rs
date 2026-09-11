@@ -413,7 +413,6 @@ pub fn surface_interrupt_stop(session: &mut Session, caches: &ReplCaches) -> Res
     }
 }
 
-// In core so the REPL and Python SDK share identical step semantics.
 pub use crate::session::step_one_and_clear_tf;
 pub use crate::session::step_over_current_breakpoint;
 

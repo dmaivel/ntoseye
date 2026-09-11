@@ -8,8 +8,6 @@ use crate::dbg_backend::BugcheckInfo;
 use crate::target::Target;
 use crate::ui;
 
-// Bugcheck *analysis* (descriptor lookup, fault site, KiBugCheckData decode)
-// lives in core, shared with the SDK/MCP; the REPL adds presentation.
 pub use crate::bugchecks::{
     BugcheckAnalysis, BugcheckTrapFrame, CURRENT_KERNEL_RELOAD_WINDOW, analyze_bugcheck,
     bugcheck_fault_ip, bugcheck_site, current_bugcheck, looks_like_kernel_pointer,

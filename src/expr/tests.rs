@@ -184,7 +184,6 @@ fn test_parse_cast_with_field_access() {
 #[test]
 fn test_parse_nested_field_access() {
     let expr = Expr::parse("(EPROCESS)PsInitialSystemProcess->Token->Value").unwrap();
-    // should parse as FieldAccess(FieldAccess(Cast(Symbol, EPROCESS), Token), Value)
     if let Expr::FieldAccess(inner, field2) = &expr {
         assert_eq!(field2, "Value");
         if let Expr::FieldAccess(inner2, field1) = inner.as_ref() {
@@ -232,7 +231,6 @@ fn test_parse_cast_with_arithmetic() {
 #[test]
 fn test_parse_cast_pointer_with_literal_and_field() {
     let expr = Expr::parse("(EPROCESS*)(0xffffe70c61240080)->Token").unwrap();
-    // should parse as FieldAccess(Cast(Literal(addr), Pointer(EPROCESS)), "Token")
     if let Expr::FieldAccess(inner, field) = &expr {
         assert_eq!(field, "Token");
         if let Expr::Cast(inner2, expr_type) = inner.as_ref() {
@@ -261,7 +259,6 @@ fn test_parse_cast_pointer_with_literal_and_field() {
 #[test]
 fn test_parse_cast_struct_with_literal_and_field() {
     let expr = Expr::parse("(EPROCESS)(0xffffe70c61240080)->Token").unwrap();
-    // should parse as FieldAccess(Cast(Literal(addr), EPROCESS), "Token")
     if let Expr::FieldAccess(inner, field) = &expr {
         assert_eq!(field, "Token");
         if let Expr::Cast(inner2, expr_type) = inner.as_ref() {
@@ -297,7 +294,6 @@ fn test_parse_grouped_deref() {
 
 #[test]
 fn test_parse_grouped_deref_with_field() {
-    // *(EPROCESS)(*sym)->Token should parse correctly
     let expr = Expr::parse("(_EPROCESS)(*PsInitialSystemProcess)->Token").unwrap();
     if let Expr::FieldAccess(inner, field) = &expr {
         assert_eq!(field, "Token");
@@ -331,7 +327,6 @@ fn test_parse_index_hex() {
 
 #[test]
 fn test_parse_field_then_index() {
-    // (TYPE)addr->field[2] should parse as Index(FieldAccess(Cast(...), field), 2)
     let expr = Expr::parse("(EPROCESS)addr->field[2]").unwrap();
     if let Expr::Index(inner, index) = &expr {
         assert_eq!(*index, 2);

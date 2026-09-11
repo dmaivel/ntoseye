@@ -170,8 +170,7 @@ impl ModuleSymbolLoadReport {
 /// A module image reconstructed from guest memory. Sections that were paged
 /// out, or that [`read_pe_image`] left unread, are zero-filled in `bytes`;
 /// their RVA ranges are recorded as `holes` so callers don't mistake a zeroed
-/// region for real data (which previously led to e.g. fabricated unwind frames
-/// or a wrong PDB GUID).
+/// region for real data.
 #[derive(Debug)]
 pub struct PeImage {
     bytes: Vec<u8>,
@@ -629,8 +628,6 @@ impl WinObject {
     }
 
     pub fn load_symbols(mut self) -> Result<Self> {
-        // Clone the Arc handles to a local so `load_from_binary` can take
-        // `&mut self` without aliasing the `self.symbols`/`self.phys` fields.
         let symbols = Arc::clone(&self.symbols);
         self.guid = symbols.load_from_binary(&mut self, "ntoskrnl.exe")?;
         Ok(self)
@@ -735,7 +732,6 @@ impl WinObject {
     // TODO bc shared memory might/isnt used, this needs to be mutable to ensure data is fresh :/
     pub fn view(&mut self) -> Option<PeView<'_>> {
         if self.image.is_none() {
-            // Clone the Arc so the read borrow doesn't alias `&mut self`.
             let phys = Arc::clone(&self.phys);
             let memory = self.address_space(&phys, self.dtb);
             self.image = Some(Arc::new(read_pe_image(self.base_address, &memory).ok()?));
@@ -1353,7 +1349,6 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
             }
 
             if pdpte.is_large_page() {
-                // Unlikely but just making sure
                 if let Ok(true) = is_ntoskrnl_pte(phys, pdpte) {
                     return Ok(Some(VirtAddr::construct(pml4_index, pdpt_index, 0, 0)));
                 }
@@ -1563,14 +1558,8 @@ fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<Virt
 fn find_ntoskrnl_va_triage(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>> {
     let space = AddressSpace::new(phys, kernel_dtb);
 
-    // Triage dumps include ntoskrnl's base in PsLoadedModuleList. We can
-    // read the PsLoadedModuleList VA from the header; the list entry itself
-    // is at nt!PsLoadedModuleList, which is inside ntoskrnl. The first
-    // entry in the list is ntoskrnl's own LDR_DATA_TABLE_ENTRY whose
-    // DllBase field gives us the base.
-    //
-    // But we don't have the offsets yet (no PDB). Instead, just try
-    // addresses from the data blocks that look like kernel-space PE headers.
+    // No PDB yet, so PsLoadedModuleList can't be walked; probe the data
+    // blocks for kernel-space PE headers instead.
     if let Some(dmp_info) = phys.dmp_info() {
         // Check triage driver base addresses first — ntoskrnl is typically
         // the first entry and this avoids scanning up to 4096 pages.
@@ -2392,25 +2381,21 @@ mod tests {
 
     #[test]
     fn pe_image_present_respects_holes_and_bounds() {
-        // 0x100 bytes with one paged-out hole at [0x40, 0x80)
         let hole = 0x40..0x80;
         let image = PeImage {
             bytes: vec![0u8; 0x100],
             holes: vec![hole],
         };
 
-        // fully outside the hole -> present
         assert!(image.is_present(0x00, 0x40));
         assert!(image.is_present(0x80, 0x80));
         assert!(image.present_slice(0x10, 0x10).is_some());
 
-        // any overlap with the hole -> absent (including straddling either edge)
         assert!(!image.is_present(0x40, 0x01));
         assert!(!image.is_present(0x3f, 0x02));
         assert!(!image.is_present(0x7f, 0x02));
         assert!(image.present_slice(0x38, 0x10).is_none());
 
-        // out of bounds -> absent, and overflow doesn't panic
         assert!(!image.is_present(0xf0, 0x20));
         assert!(!image.is_present(usize::MAX, 1));
     }

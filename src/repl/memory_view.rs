@@ -256,7 +256,6 @@ pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplay
             printed += 1;
         }
 
-        // pad remaining items if needed
         for _ in printed..items_per_row {
             match mode.item_format {
                 ItemFormat::Bytes => out!("   "),
@@ -336,7 +335,6 @@ mod tests {
     #[test]
     fn utf16_decodes_non_ascii_unit() {
         let mut out = Vec::new();
-        // U+4E2D in little-endian bytes, then a NUL unit.
         let terminated = push_string_units(&[0x2D, 0x4E, 0x00, 0x00], 2, 64, &mut out);
         assert!(terminated);
         assert_eq!(out, vec![0x4E2D]);
@@ -349,7 +347,6 @@ mod tests {
         assert!(!terminated);
         assert_eq!(out, vec![b'a' as u16, b'b' as u16, b'c' as u16]);
 
-        // Already at the cap: further input pushes nothing.
         let terminated = push_string_units(b"def\0", 1, 3, &mut out);
         assert!(!terminated);
         assert_eq!(out.len(), 3);
@@ -358,7 +355,6 @@ mod tests {
     #[test]
     fn buffer_exhaustion_ignores_incomplete_unit() {
         let mut out = Vec::new();
-        // Two whole UTF-16 units plus a trailing odd byte (incomplete unit).
         let terminated = push_string_units(b"A\0B\0C", 2, 64, &mut out);
         assert!(!terminated);
         assert_eq!(out, vec![0x41, 0x42]);
@@ -367,7 +363,6 @@ mod tests {
     #[test]
     fn streaming_accumulates_across_buffers() {
         let mut out = Vec::new();
-        // "Hi\0" in UTF-16, split across two page-bounded reads.
         let terminated = push_string_units(b"H\0i\0", 2, 64, &mut out);
         assert!(!terminated);
         let terminated = push_string_units(b"\0\0", 2, 64, &mut out);

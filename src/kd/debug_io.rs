@@ -180,10 +180,6 @@ pub fn handle_debug_io_with_output<T: Read + Write, W: Write>(
                     .windows(KD_REFRESH_MESSAGE.len())
                     .any(|w| w == KD_REFRESH_MESSAGE);
             if kd_refresh_seen {
-                // recv_data already ACKed this packet before we got here, so
-                // reaching this point means we serviced the refresh promptly.
-                // If the kernel still won't break in on its own afterwards,
-                // KdDebuggerNotPresent was already TRUE before the refresh
                 kd_trace!("kd: debug_io: refresh print read and ACKed");
             }
         }

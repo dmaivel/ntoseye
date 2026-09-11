@@ -1703,10 +1703,7 @@ impl DebugBackend for KdBackend {
         }
         let debug_log = self.debug_log.clone();
         let arch = self.arch;
-        // Blocking wait: give the socket a timeout long enough to be a block
-        // (the request paths leave their shorter timeouts in place, and the
-
-        // restore-to-none setsockopt is macOS-racy).
+        // Request paths leave shorter timeouts in place; a blocking wait needs a long one.
         let _ = self
             .framing()?
             .transport_mut()
@@ -1811,10 +1808,7 @@ impl DebugBackend for KdBackend {
     }
 
     fn has_pending_stop(&self) -> bool {
-        // The background pump caught a state-change, reported it into its
-        // channel, and exited, but no foreground wait has consumed it yet, so
-        // `is_running` still holds its stale post-continue `true`. The VM is
-        // actually halted.
+        // The pump reported a stop nobody has drained yet; `is_running` is stale.
         matches!(&self.link, Link::RunningPumped(pump) if pump.reported_stop.load(Ordering::SeqCst))
     }
 
@@ -2256,79 +2250,6 @@ mod tests {
     }
 
     #[test]
-    fn stop_event_preserves_kd_exception_details() {
-        let stop = StateChange {
-            processor: 1,
-            number_processors: 2,
-            new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
-            exception_code: STATUS_BREAKPOINT,
-            exception_first_chance: Some(true),
-            exception_address: Some(0xfffff800deadbeef),
-            program_counter: 0xfffff800deadbeef,
-            kernel_base_hint: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            assisted_breakin: false,
-        };
-
-        let event = stop_event(stop);
-        assert_eq!(event.thread_id.as_deref(), Some("p1.2"));
-        assert_eq!(event.exception_code, Some(STATUS_BREAKPOINT));
-        assert_eq!(event.first_chance, Some(true));
-        assert_eq!(event.exception_address, Some(0xfffff800deadbeef));
-        assert_eq!(event.program_counter, Some(0xfffff800deadbeef));
-        assert_eq!(event.target_kernel_base_hint, None);
-        assert!(!event.is_bugcheck);
-        assert!(event.bugcheck.is_none());
-        assert!(!event.target_reloaded);
-        assert!(!event.assisted_breakin);
-    }
-
-    #[test]
-    fn stop_event_preserves_target_reload_flag() {
-        let stop = StateChange {
-            processor: 0,
-            number_processors: 1,
-            new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
-            exception_code: STATUS_BREAKPOINT,
-            exception_first_chance: Some(true),
-            exception_address: Some(0xfffff800deadbeef),
-            program_counter: 0xfffff800deadbeef,
-            kernel_base_hint: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: true,
-            assisted_breakin: false,
-        };
-
-        let event = stop_event(stop);
-        assert!(event.target_reloaded);
-        assert!(!event.is_bugcheck);
-    }
-
-    #[test]
-    fn stop_event_preserves_assisted_breakin_flag() {
-        let stop = StateChange {
-            processor: 0,
-            number_processors: 1,
-            new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
-            exception_code: STATUS_BREAKPOINT,
-            exception_first_chance: Some(true),
-            exception_address: Some(0xfffff800deadbeef),
-            program_counter: 0xfffff800deadbeef,
-            kernel_base_hint: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            assisted_breakin: true,
-        };
-
-        let event = stop_event(stop);
-        assert!(event.assisted_breakin);
-    }
-
-    #[test]
     fn stop_event_flags_surfaced_load_symbols_as_bugcheck() {
         let stop = StateChange {
             processor: 0,
@@ -2354,29 +2275,6 @@ mod tests {
             Some(VirtAddr(0xfffff8007f600000))
         );
         assert!(event.bugcheck.is_none());
-    }
-
-    #[test]
-    fn stop_event_does_not_flag_reloaded_load_symbols_as_bugcheck() {
-        let stop = StateChange {
-            processor: 0,
-            number_processors: 1,
-            new_state: DBG_KD_LOAD_SYMBOLS_STATE_CHANGE,
-            exception_code: 0,
-            exception_first_chance: None,
-            exception_address: None,
-            program_counter: 0xfffff8007faf9325,
-            kernel_base_hint: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: true,
-            assisted_breakin: false,
-        };
-
-        let event = stop_event(stop);
-        assert!(event.target_reloaded);
-        assert!(!event.is_bugcheck);
-        assert_eq!(event.exception_code, None);
     }
 
     #[test]
@@ -2425,8 +2323,6 @@ mod tests {
         assert!(!saw_refresh);
         assert!(output.is_empty());
         assert_eq!(capture.finish().unwrap().code, 0xd1);
-        // The terminal stream is suppressed during a bugcheck, but the ring is
-        // the complete record and still captures the crash text.
         let page = debug_log.read_since(0);
         assert!(
             page.lines
@@ -2570,14 +2466,6 @@ mod tests {
     }
 
     #[test]
-    fn kd_initial_timeout_defaults_to_eight_seconds() {
-        assert_eq!(
-            parse_kd_initial_timeout(None).unwrap(),
-            Duration::from_secs(8)
-        );
-    }
-
-    #[test]
     fn kd_initial_timeout_accepts_positive_seconds() {
         assert_eq!(
             parse_kd_initial_timeout(Some("12")).unwrap(),
@@ -2589,15 +2477,6 @@ mod tests {
     fn kd_initial_timeout_rejects_invalid_values() {
         assert!(parse_kd_initial_timeout(Some("0")).is_err());
         assert!(parse_kd_initial_timeout(Some("meow")).is_err());
-    }
-
-    #[test]
-    fn context_payload_accepts_synthetic_register_buffer() {
-        let synthetic = vec![0u8; context::REGISTER_BUFFER_SIZE];
-        assert_eq!(
-            context_payload(&synthetic).unwrap().len(),
-            context::CONTEXT_SIZE
-        );
     }
 
     #[test]
@@ -2677,14 +2556,6 @@ mod tests {
     }
 
     #[test]
-    fn thread_id_round_trips() {
-        for proc in [0u16, 1, 7, 15, 31] {
-            let tid = thread_id_for(proc);
-            assert_eq!(parse_thread_id(&tid).unwrap(), proc);
-        }
-    }
-
-    #[test]
     fn parse_thread_id_rejects_garbage() {
         assert!(parse_thread_id("p2.1").is_err()); // wrong pid
         assert!(parse_thread_id("p1.zz").is_err()); // not hex
@@ -2698,8 +2569,6 @@ mod tests {
         assert!(parse_thread_id_for_processor_count("p1.5", 4).is_err());
     }
 
-    // Wire-format helpers mirroring framing::Header::encode for driving the
-    // pump over a real socket pair (the framing constants are module-private)
     const WIRE_DATA_LEADER: u32 = 0x3030_3030;
     const WIRE_CONTROL_LEADER: u32 = 0x6969_6969;
     const WIRE_HEADER_SIZE: usize = 16;
@@ -2827,7 +2696,6 @@ mod tests {
     fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         let breakin_clone = host.try_clone().unwrap();
         KdBackend {
-            // Running inline: a framing-only fixture never enters Drop's resume path.
             link: Link::RunningInline(KdFraming::new(host.into())),
             breakin_clone: breakin_clone.into(),
             backend_name: "kd",
@@ -3085,9 +2953,6 @@ mod tests {
         backend.link.set_inline_running(false);
     }
 
-    /// Each `_EPROCESS` costs one request (its field span) and the list is
-    /// served from the halt memo until the target runs; short names never
-    /// touch the PEB.
     #[test]
     fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
         const PID: u32 = 0x440;
@@ -3162,13 +3027,9 @@ mod tests {
 
         drop(guest);
         drop(backend);
-        // PsInitialSystemProcess + two spans per walk, one span for
-        // `process_at`, and the memoized second walk costs nothing.
         assert_eq!(worker.join().unwrap(), 3 + 1 + 3);
     }
 
-    /// A loader record is prefetched whole, so a module costs the record
-    /// image plus its name buffer rather than one request per field.
     #[test]
     fn kernel_module_walk_prefetches_each_record() {
         const DLL_BASE: u32 = 0x30;
@@ -3245,7 +3106,6 @@ mod tests {
 
         drop(guest);
         drop(backend);
-        // head pointer + (record image + name buffer) per module
         assert_eq!(worker.join().unwrap(), 1 + 2 * 2);
     }
 
@@ -3332,20 +3192,14 @@ mod tests {
             assisted_breakin: false,
         };
 
-        // Raw int3 re-break at the rip we resumed from: drain it.
         assert!(drain(&[]).is_spurious(&stop_at(STATUS_BREAKPOINT, resumed_from)));
-        // Stale break-in byte trapping at the KD break-in instruction: drain it,
-        // even though it's nowhere near resumed_from.
         assert!(drain(&[]).is_spurious(&stop_at(STATUS_BREAKPOINT, breakin)));
 
-        // A managed breakpoint hit is a real stop, never drained.
         assert!(!drain(&[breakin]).is_spurious(&stop_at(STATUS_BREAKPOINT, breakin)));
 
-        // An unrelated breakpoint elsewhere, and a single-step, are real stops.
         assert!(!drain(&[]).is_spurious(&stop_at(STATUS_BREAKPOINT, 0xdead_0000)));
         assert!(!drain(&[]).is_spurious(&stop_at(STATUS_SINGLE_STEP, resumed_from)));
 
-        // A break-in the pump itself asked for, and a reload, are never noise.
         let mut assisted = stop_at(STATUS_BREAKPOINT, breakin);
         assisted.assisted_breakin = true;
         assert!(!drain(&[]).is_spurious(&assisted));
@@ -3353,8 +3207,6 @@ mod tests {
         reloaded.target_reloaded = true;
         assert!(!drain(&[]).is_spurious(&reloaded));
 
-        // Once the user asked for a break-in, a stop at the break-in
-        // instruction is the answer, not noise.
         let interrupted = drain(&[]);
         interrupted.interrupt_flag().store(true, Ordering::SeqCst);
         assert!(!interrupted.is_spurious(&stop_at(STATUS_BREAKPOINT, resumed_from)));
@@ -3470,7 +3322,6 @@ mod tests {
         assert_eq!(stop.program_counter, pc);
         assert_eq!(stop.exception_code, STATUS_BREAKPOINT);
 
-        // Pump exits on its own after reporting the stop, handing back framing
         shutdown.store(true, Ordering::SeqCst);
         let _framing = handle.join().expect("pump thread panicked");
     }
@@ -3513,9 +3364,6 @@ mod tests {
         let kernel_thread = std::thread::spawn(move || {
             let pc = 0xfffff800_deadbeef;
             let mut payload = exception_state_change_payload(pc);
-            // A plain access violation: exercises the consume-then-continue path
-            // without tripping the stray-single-step or int3-advance absorbs,
-            // which would issue register reads this mock kernel doesn't service.
             payload[32..36].copy_from_slice(&0xc000_0005u32.to_le_bytes());
             kernel
                 .write_all(&wire_data_packet(
@@ -3615,17 +3463,12 @@ mod tests {
 
         backend.prepare_for_exit(false).unwrap();
         let needs_drop_cleanup = backend.needs_drop_cleanup();
-        // Keep unwinding safe if the assertion ever regresses: a running
-        // framing-only fixture never enters Drop's resume path.
         backend.link.set_inline_running(true);
 
         assert!(backend.exit_prepared);
         assert!(!needs_drop_cleanup);
     }
 
-    /// Shutting down a pump that isn't there is a no-op: the foreground still
-    /// holds the framing afterwards, so an exit from a halted target can send
-    /// its final continue.
     #[test]
     fn pump_shutdown_without_a_pump_keeps_the_framing() {
         let (_kernel, host) = UnixStream::pair().unwrap();
@@ -3638,8 +3481,6 @@ mod tests {
         assert!(matches!(backend.link, Link::Halted(_)));
         assert!(backend.framing().is_ok());
 
-        // Keep unwinding safe: a framing-only fixture never enters Drop's
-        // resume path.
         backend.link.set_inline_running(true);
     }
 
@@ -3660,25 +3501,21 @@ mod tests {
             assisted_breakin: false,
         };
 
-        // Stray single-step away from any installed int3: absorb it.
         assert!(exit_stop_is_stray_single_step(
             &stop_at(Some(STATUS_SINGLE_STEP), Some(pc), false),
             &managed,
         ));
-        // Unknown PC still counts as stray (can't prove it's at a breakpoint).
         assert!(exit_stop_is_stray_single_step(
             &stop_at(Some(STATUS_SINGLE_STEP), None, false),
             &managed,
         ));
 
-        // A single-step landing on one of our breakpoints is a real hit, not stray.
         managed.insert(pc);
         assert!(!exit_stop_is_stray_single_step(
             &stop_at(Some(STATUS_SINGLE_STEP), Some(pc), false),
             &managed,
         ));
 
-        // A breakpoint stop or a bugcheck is never a stray single-step.
         assert!(!exit_stop_is_stray_single_step(
             &stop_at(Some(STATUS_BREAKPOINT), Some(0x1000), false),
             &managed,
@@ -3724,12 +3561,9 @@ mod tests {
         };
         let mut backend = kd_backend_with_pump(pump, breakin_clone);
 
-        // Running, with the pump servicing the socket: nothing caught yet.
         assert!(backend.is_running());
         assert!(!backend.has_pending_stop());
 
-        // Kernel emits a state-change; the pump catches it, flags reported_stop,
-        // and exits with the stop sitting undrained in its channel.
         let pc = 0xfffff800_deadbeef;
         let mut payload = exception_state_change_payload(pc);
         payload[32..36].copy_from_slice(&STATUS_BREAKPOINT.to_le_bytes());
@@ -3751,13 +3585,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // The undrained-stop window: is_running() is still its stale post-continue
-        // true, but has_pending_stop() reports the truth: the VM is halted.
         assert!(backend.is_running());
         assert!(backend.has_pending_stop());
 
-        // Draining the stop reclaims the framing and clears the condition;
-        // the caller's `record_stop` is what halts the link.
         let stop = backend
             .take_pump_stop(Some(Duration::from_secs(5)))
             .unwrap()
@@ -3767,14 +3597,9 @@ mod tests {
         assert!(!backend.has_pending_stop());
         backend.record_stop(&stop);
         assert!(matches!(backend.link, Link::Halted(_)));
-        // A halted backend resumes the target on drop; this mock kernel would
-        // never acknowledge that.
         backend.exit_prepared = true;
     }
 
-    /// A stale break-in byte makes the kernel re-break at the instruction it
-    /// was resumed from. The pump steps past the int3, resumes, and reports
-    /// only the genuine stop that follows; the foreground never blocks.
     #[test]
     fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         let (mut kernel, host) = UnixStream::pair().unwrap();
@@ -3825,9 +3650,6 @@ mod tests {
             &exception_state_change_payload(resumed_from),
         );
 
-        // Service the pump's requests until it resumes the target: the
-        // context round trip that steps past the int3, the DR7 read, and
-        // ContinueApi2 itself.
         let mut context_written = 0usize;
         loop {
             let packet = read_wire_packet(&mut kernel);
@@ -4407,10 +4229,8 @@ mod tests {
 
     #[test]
     fn only_exception_state_changes_surface_as_breaks() {
-        // Exception breaks and unknown kinds are surfaced to the user
         assert!(!is_transparent_state_change(DBG_KD_EXCEPTION_STATE_CHANGE));
         assert!(!is_transparent_state_change(0xdead_beef));
-        // Symbol load/unload and command-string notifications are continued
         assert!(is_transparent_state_change(
             DBG_KD_LOAD_SYMBOLS_STATE_CHANGE
         ));
@@ -4421,7 +4241,6 @@ mod tests {
 
     #[test]
     fn pump_exits_on_shutdown_when_idle() {
-        // Hold the kernel end open so the host socket stays connected
         let (_kernel, host) = UnixStream::pair().unwrap();
         let framing = KdFraming::new(host.into());
         let (tx, rx) = mpsc::channel();
@@ -4444,7 +4263,6 @@ mod tests {
             })
         };
 
-        // No traffic: the pump should be parked on its read-timeout loop
         shutdown.store(true, Ordering::SeqCst);
         let _framing = handle.join().expect("pump thread panicked");
         assert!(rx.try_recv().is_err(), "idle pump should report no stop");

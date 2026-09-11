@@ -391,8 +391,6 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        // resolve branch / rip-relative targets the same way the break/status
-        // view does, so the `disasm` command's comments read identically
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
@@ -589,9 +587,6 @@ impl ReplState<'_> {
             None => 0x100,
         };
 
-        // The scan itself is the shared core primitive (`Target::search`), the
-        // same one the SDK and MCP `search` use; the REPL only adds the
-        // per-hit symbol line and the $0..$N result slots.
         let hits = match self.ctx.target.search(start_addr, &pattern, length) {
             Ok(hits) => hits,
             Err(e) => {
@@ -661,14 +656,8 @@ impl ReplState<'_> {
                     Value(type_info.size)
                 )]);
 
-                // Decode via the shared `decode_fields` (the path `read_struct`
-                // uses in the SDK/MCP) so `dt` and a struct read can't disagree.
-                // One whole-struct read, rendered from the decoded leaves; the
-                // offset/type columns and bitfield Y/N styling stay dt-specific.
                 let decoded: std::collections::HashMap<String, FieldValue> = if address.0 != 0 {
-                    // NOTE: one whole-struct read, not page-tolerant; fine for the
-                    // non-paged kernel structs dt targets, but a partially-resident
-                    // pageable struct with a paged-out tail would fail the read here
+                    // One whole-struct read, not page-tolerant.
                     let mut buf = vec![0u8; type_info.size];
                     match self
                         .ctx
@@ -778,8 +767,6 @@ mod tests {
 
     #[test]
     fn utf16_page_chunks_never_drop_an_unaligned_unit_byte() {
-        // An unaligned string with three bytes left in the page reads one full
-        // unit, then reads the straddling unit whole across the boundary.
         assert_eq!(page_bounded_unit_read_len(VirtAddr(0xffd), 8, 2), 2);
         assert_eq!(page_bounded_unit_read_len(VirtAddr(0xfff), 7, 2), 2);
     }

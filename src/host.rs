@@ -247,17 +247,9 @@ mod platform {
     }
 }
 
-/// macOS (UTM) host backend: introspect the QEMU process via Mach task ports.
-///
-/// UTM runs QEMU inside the sandboxed `com.utmapp.QEMUHelper` XPC service; the
-/// guest RAM is a plain anonymous mapping in the `qemu-aarch64-softmmu`
-/// process. We take the task port with `task_for_pid` and read/write guest
-/// physical memory with `mach_vm_read_overwrite` / `mach_vm_write`.
-///
-/// Access control: since macOS 10.14 `task_for_pid` requires the caller to run
-/// as root or carry the `com.apple.security.cs.debugger` entitlement. UTM's
-/// QEMU is a normal (sandboxed) third-party app — not SIP-protected — so
-/// running ntoseye with `sudo` is sufficient.
+/// macOS (UTM) host backend: guest RAM is an anonymous mapping in the QEMU
+/// process, read through its Mach task port (`task_for_pid` needs root or the
+/// `com.apple.security.cs.debugger` entitlement).
 #[cfg(target_os = "macos")]
 mod platform {
     use super::MemoryRegion;

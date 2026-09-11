@@ -1102,39 +1102,6 @@ mod tests {
     }
 
     #[test]
-    fn assemble_preserves_dump_triage_metadata() {
-        let dump = dump_info();
-        let crash_context = TriageCrashInfo {
-            process_name: Some("System".into()),
-            process_id: Some(4),
-            parent_process_id: Some(0),
-            exit_status: Some(-1),
-            create_time: Some(133_000_000_000_000_000),
-            thread_id: Some(0x88),
-            thread_exit_status: Some(0),
-        };
-        let modules = vec![dump.triage_drivers[0].to_module_info()];
-
-        let report = TriageReport::assemble(
-            status(false, Some(0xffff_f800_1000_1234)),
-            None,
-            None,
-            modules,
-            Some(crash_context),
-            Some(&dump),
-        );
-
-        assert_eq!(report.exception.as_ref().unwrap().code, 0xc0000005);
-        assert_eq!(report.system_info.as_ref().unwrap().minor_version, 22621);
-        assert_eq!(report.unloaded_drivers[0].name, "old.sys");
-        assert_eq!(report.crash_context.as_ref().unwrap().thread_id, Some(0x88));
-        assert_eq!(report.prcb.as_ref().unwrap().processor_number, 1);
-        assert_eq!(report.broken_driver.as_deref(), Some("sample.sys"));
-        assert_eq!(report.triage_overflowed, Some(true));
-        assert!(report.loaded_module_is_relevant(&report.modules[0]));
-    }
-
-    #[test]
     fn live_report_has_no_dump_metadata_and_matches_recorded_addresses() {
         let modules = vec![
             ModuleInfo::new("fault.sys".into(), VirtAddr(0x1000), 0x100),

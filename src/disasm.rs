@@ -466,7 +466,6 @@ mod tests {
     fn arm64_rows_reproduce_bad64_display() {
         let mut checked = 0;
 
-        // Real instructions from the live session.
         let real = [
             0xd43e0000u32, // brk #0xf000
             0xd65f03c0,    // ret
@@ -487,7 +486,6 @@ mod tests {
             checked += 1;
         }
 
-        // Deterministic pseudo-random sweep: check every decodable word.
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         for i in 0..65536u64 {
             state = state
@@ -520,26 +518,23 @@ mod tests {
     /// get none.
     #[test]
     fn arm64_pcrel_comments_resolve_targets() {
-        // b -0x2d8 at 0xfffff8009bb34ff8 → 0xfffff8009bb34498 (live session).
+        // b -0x2d8
         let ins = bad64::decode(0x17fffd28, 0xfffff8009bb34ff8).unwrap();
         let comment = arm64_pcrel_comment(&ins, |t| format!("SYM:{t:#x}"));
         assert_eq!(comment.as_deref(), Some("SYM:0xfffff8009bb34498"));
 
-        // cbnz w10, label (live session: the unlabeled break-message case).
+        // cbnz w10, label
         let ins = bad64::decode(0x35ffffca, 0xfffff8009b40c998).unwrap();
         let comment = arm64_pcrel_comment(&ins, |t| format!("SYM:{t:#x}"));
         assert_eq!(comment.as_deref(), Some("SYM:0xfffff8009b40c990"));
 
-        // adrp x0, page → page-aligned absolute target.
         let ins = bad64::decode(0x90000000, 0x1000).unwrap(); // adrp x0, #0
         let comment = arm64_pcrel_comment(&ins, |t| format!("{t:#x}"));
         assert_eq!(comment.as_deref(), Some("0x1000"));
 
-        // ret carries no PC-relative comment.
         let ins = bad64::decode(0xd65f03c0, 0x1000).unwrap();
         assert!(arm64_pcrel_comment(&ins, |_| String::new()).is_none());
 
-        // bl is a branch too (offset 5 << 2 from 0x2000 → 0x2014).
         let ins = bad64::decode(0x94000005, 0x2000).unwrap();
         let comment = arm64_pcrel_comment(&ins, |t| format!("{t:#x}"));
         assert_eq!(comment.as_deref(), Some("0x2014"));

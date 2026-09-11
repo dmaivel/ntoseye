@@ -1,7 +1,6 @@
 //! The single presentation layer for terminal styling. Domain types (e.g.
 //! `VirtAddr`) stay plain; everything that adds color goes through here, so the
-//! palette lives in one place and stays consistent. This is also the one spot
-//! that would gate `NO_COLOR` / non-TTY handling if we ever want it.
+//! palette lives in one place and stays consistent.
 
 use owo_colors::OwoColorize;
 use std::fmt::Display;
@@ -56,11 +55,8 @@ pub fn label(text: &str) -> String {
 }
 
 /// Style a disassembled instruction's [`AsmToken`](crate::disasm::AsmToken)s
-/// for the listing. Restrained on purpose: the mnemonic is bright magenta as
-/// the line's anchor, registers and immediates carry content color, and chrome
-/// (punctuation, size directives) recedes to muted. Kept minimal so it doesn't
-/// fight the yellow cursor, muted bytes, or blue symbol comment that share the
-/// line.
+/// for the listing: mnemonic as the anchor, registers and immediates in content
+/// color, punctuation muted.
 pub fn disasm_asm(tokens: &[AsmToken]) -> String {
     let mut out = String::new();
     for token in tokens {

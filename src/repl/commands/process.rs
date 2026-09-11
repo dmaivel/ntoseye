@@ -485,10 +485,6 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        // Route through Session::set_current_thread so the inspection context
-        // (registers + the thread's CR3 as the read/install DTB) is established
-        // uniformly with the SDK; the REPL layers the Windows-thread context and
-        // symbol-cache refresh on top.
         if let Err(e) = self.ctx.set_current_thread(vcpu) {
             error!("failed to switch to vCPU {}: {:?}", vcpu, e);
             return Ok(());

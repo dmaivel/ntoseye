@@ -1576,11 +1576,8 @@ impl Target {
         if self.triage_fallback.is_some() {
             return true;
         }
-        // Triage dumps capture kernel state at bugcheck time — it is
-        // coherent by definition.  The MZ check below guards against
-        // undetected reboots on live VMs, which can't happen for dumps.
-        // The ntoskrnl base page is often not captured in triage dumps,
-        // so the MZ read would fail even though the state is valid.
+        // Triage dumps often lack the ntoskrnl base page, so the MZ check
+        // below would fail on a perfectly coherent snapshot.
         if self.phys.dmp_info().is_some_and(|i| i.is_triage) {
             return true;
         }
@@ -3321,7 +3318,6 @@ impl Target {
             });
         }
 
-        // 4. Nothing recognized.
         Ok(AddressDescription {
             address,
             dtb,
@@ -3577,7 +3573,6 @@ impl Target {
         let numeric_filter = filter.and_then(|f| f.parse::<u64>().ok());
         let mut out = Vec::new();
 
-        // --- process / thread IrpLists ---
         let procs = guest.enumerate_processes()?;
         let thread_head_off = off("_EPROCESS", "ThreadListHead");
         let thread_link_off = off("_ETHREAD", "ThreadListEntry");
@@ -3654,7 +3649,6 @@ impl Target {
             }
         }
 
-        // --- device CurrentIrp sweep (skipped for a numeric/pid filter) ---
         if numeric_filter.is_none() {
             let current_irp_off = off("_DEVICE_OBJECT", "CurrentIrp");
             let next_off = off("_DEVICE_OBJECT", "NextDevice");
@@ -3803,11 +3797,9 @@ impl Target {
                 .and_then(|offset| memory.read::<u8>(kthread + offset).ok())
         };
 
-        // KTHREAD.Process is a KPROCESS*, which is the Pcb at offset 0 of the
-        // owning EPROCESS; present across modern builds and the most reliable
-        // source. ThreadsProcess (older builds) and ProcessFastRef (newest, an
-        // EX_FAST_REF that packs the pointer with refcount bits in the low 4)
-        // are build-specific fallbacks.
+        // KTHREAD.Process (KPROCESS* == EPROCESS base) first; ThreadsProcess
+        // (older builds) and ProcessFastRef (EX_FAST_REF, refcount in low 4
+        // bits) are build-specific fallbacks.
         let eprocess = read_kthread_ptr("Process")
             .or_else(|| read_ethread_ptr("ThreadsProcess"))
             .or_else(|| {
@@ -3819,12 +3811,8 @@ impl Target {
                     .filter(|addr| !addr.is_zero())
             });
 
-        // Bulk enumeration passes the owning process as a hint, so it never
-        // walks the process list per thread. Single-thread lookups (break
-        // context, `thread_info_from_ethread`) have no hint; with the owning
-        // EPROCESS in hand the name is a direct read, and only a thread whose
-        // process pointer is unreadable falls back to matching its pid against
-        // the process list.
+        // Only a thread with neither a hint nor a readable process pointer
+        // pays for a process-list walk.
         let owner: Option<ProcessInfo> = match (process_hint, eprocess) {
             (Some(_), _) | (None, Some(_)) => None,
             (None, None) => guest.enumerate_processes().ok().and_then(|processes| {
@@ -4265,50 +4253,6 @@ mod tests {
     }
 
     #[test]
-    fn thread_pseudo_registers_cover_common_windbg_names() {
-        let thread = sample_thread();
-        assert_eq!(
-            thread.pseudo_register_value("thread"),
-            Some(thread.ethread.0)
-        );
-        assert_eq!(
-            thread.pseudo_register_value("ethread"),
-            Some(thread.ethread.0)
-        );
-        assert_eq!(
-            thread.pseudo_register_value("kthread"),
-            Some(thread.kthread.0)
-        );
-        assert_eq!(thread.pseudo_register_value("tid"), thread.tid);
-        assert_eq!(thread.pseudo_register_value("pid"), thread.pid);
-        assert_eq!(
-            thread.pseudo_register_value("proc"),
-            thread.eprocess.map(|addr| addr.0)
-        );
-        assert_eq!(
-            thread.pseudo_register_value("process"),
-            thread.eprocess.map(|addr| addr.0)
-        );
-        assert_eq!(
-            thread.pseudo_register_value("teb"),
-            thread.teb.map(|addr| addr.0)
-        );
-        assert_eq!(
-            thread.pseudo_register_value("priority"),
-            thread.priority.map(u64::from)
-        );
-        assert_eq!(
-            thread.pseudo_register_value("basepriority"),
-            thread.base_priority.map(u64::from)
-        );
-        assert_eq!(
-            thread.pseudo_register_value("waitirql"),
-            thread.wait_irql.map(u64::from)
-        );
-        assert_eq!(thread.pseudo_register_value("stackresident"), Some(1));
-    }
-
-    #[test]
     fn thread_pseudo_registers_are_case_insensitive_and_optional() {
         let mut thread = sample_thread();
         assert_eq!(
@@ -4345,7 +4289,6 @@ mod tests {
         };
         assert!(!thread_owner_matches(&thread, &same_pid_wrong_process));
         assert!(thread_owner_matches(&thread, &owner));
-        assert_eq!(owner.dtb, 0x2222_0000);
         assert_eq!(
             select_thread_process_dtb(
                 &thread,

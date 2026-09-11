@@ -161,8 +161,6 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        // Step past a breakpoint at RIP, re-arm breakpoints, continue, and drop
-        // stale inspection caches; the canonical resume prologue lives in core.
         if let Err(e) = self.ctx.resume_with_disposition(disposition) {
             error!("failed to continue: {:?}", e);
             return Ok(());
@@ -356,9 +354,7 @@ impl ReplState<'_> {
                         }
                     }
                 }
-                Ok(None) => {
-                    // timeout
-                }
+                Ok(None) => {}
                 Err(e) => {
                     error!("error waiting for stop: {:?}", e);
                     break;
@@ -401,9 +397,6 @@ impl ReplState<'_> {
     }
 
     fn single_step(&mut self) -> Result<()> {
-        // The step itself (over-breakpoint dance, trap-flag clear, breakpoint
-        // re-arm, thread re-select) is the canonical `Session::step`;
-        // the REPL only adds the break-context display.
         if let Err(e) = self.ctx.step() {
             error!("failed to step: {:?}", e);
             return Ok(());
@@ -469,9 +462,6 @@ impl ReplState<'_> {
     }
 
     fn cmd_p(&mut self) -> Result<()> {
-        // The step-over decision (is the current insn a call? where does it
-        // return?) is shared with the SDKs; the REPL only differs in *how* it
-        // runs to the target, via its rich-display continue loop.
         match self.ctx.step_over_target() {
             Ok(StepKind::Single) => self.single_step(),
             Ok(StepKind::RunTo(target)) => self.run_to_temporary_code_breakpoint(target),

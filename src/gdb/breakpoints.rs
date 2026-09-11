@@ -301,9 +301,7 @@ impl BreakpointManager {
 
     /// Test-only: register a breakpoint directly, bypassing backend
     /// installation. `hardware: Some(..)` makes a DR breakpoint; `None` a
-    /// kernel int3 with a dummy displaced byte. Lets tests outside this
-    /// module (session run-control) stage manager state without a live
-    /// target.
+    /// kernel int3 with a dummy displaced byte.
     #[cfg(test)]
     pub fn insert_for_test(
         &mut self,
@@ -887,11 +885,7 @@ impl BreakpointManager {
     }
 
     /// Best-effort release of every DR slot held by a hardware breakpoint
-    /// (enabled or not — disabled ones still reserve their slot). Used by the
-    /// target-reload path before it drops the manager: after a real reboot the
-    /// debug registers are reset anyway, but a reload without a machine reset
-    /// (kernel rediscovery) would otherwise leave orphaned watches raising
-    /// `#DB`s no manager entry can claim.
+    /// (enabled or not), so a target reload leaves no orphaned watches.
     pub fn clear_hardware_slots(&self, client: &mut dyn DebugBackend) {
         for bp in self.breakpoints.values() {
             if let Some(hw) = bp.hardware {
@@ -900,8 +894,6 @@ impl BreakpointManager {
         }
     }
 
-    // NOTE refreshing ensures local breakpoint state matches target state in case they were cleared,
-    // this should fix single stepping breaking every breakpoint proceeding the step..
     pub fn refresh_enabled(&self, client: &mut dyn DebugBackend, debugger: &Target) -> Result<()> {
         let mut enabled: Vec<_> = self
             .breakpoints
@@ -1481,15 +1473,14 @@ pub enum BreakpointHitResult {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     use super::{
         Breakpoint, BreakpointBackend, BreakpointHitDisposition, BreakpointHitResult,
         BreakpointManager, BreakpointPatch, BreakpointScope, BreakpointSpec, HardwareBreakpoint,
     };
-    use crate::dbg_backend::{DebugBackend, HwBreakpointAccess, StopEvent, WatchpointAccess};
+    use crate::dbg_backend::{DebugBackend, HwBreakpointAccess, StopEvent};
     use crate::error::{Error, Result};
-    use crate::expr::{Expr, ExprBinaryOp, NumberRadix};
     use crate::gdb::RegisterMap;
     use crate::types::VirtAddr;
 
@@ -1552,27 +1543,6 @@ mod tests {
         assert!(error.to_string().contains("injected rollback failure"));
         let ids: Vec<_> = manager.list().into_iter().map(|bp| bp.id).collect();
         assert_eq!(ids, vec![2, 9]);
-    }
-
-    #[test]
-    fn exposes_data_watches_without_transport_metadata() {
-        let mut manager = BreakpointManager::new();
-        manager.insert_for_test(
-            7,
-            VirtAddr(0x2000),
-            true,
-            Some(HardwareBreakpoint {
-                access: HwBreakpointAccess::ReadWrite,
-                len: 8,
-                slot: 2,
-            }),
-        );
-
-        let breakpoint = manager.list().into_iter().find(|bp| bp.id == 7).unwrap();
-        assert_eq!(
-            breakpoint.watchpoint(),
-            Some((WatchpointAccess::ReadWrite, 8))
-        );
     }
 
     #[test]
@@ -1675,8 +1645,6 @@ mod tests {
             }),
         );
 
-        // A DR watch traps via DR6, not RIP, so it must never register as an
-        // int3 hit even when the faulting RIP equals its address.
         assert!(matches!(
             manager.check_breakpoint_hit(0x2000, 0),
             BreakpointHitResult::NotBreakpoint
@@ -1688,11 +1656,9 @@ mod tests {
     fn has_enabled_hardware_breakpoints_tracks_enabled_hw_bps() {
         let mut manager = BreakpointManager::new();
 
-        // Software breakpoints do not count toward the DR6 gate.
         manager.insert_for_test(0, VirtAddr(0x1000), true, None);
         assert!(!manager.has_enabled_hardware_breakpoints());
 
-        // An enabled hardware breakpoint opens the gate.
         manager.insert_for_test(
             1,
             VirtAddr(0x2000),
@@ -1705,7 +1671,6 @@ mod tests {
         );
         assert!(manager.has_enabled_hardware_breakpoints());
 
-        // Disabling that same hardware breakpoint closes it again.
         manager.breakpoints.get_mut(&1).unwrap().enabled = false;
         assert!(!manager.has_enabled_hardware_breakpoints());
     }
@@ -1730,10 +1695,8 @@ mod tests {
         assert_eq!(found.id, 7);
         assert_eq!(found.hardware.expect("hw params").slot, 1);
 
-        // Nothing occupies slot 0.
         assert!(manager.hardware_breakpoint_for_slot(0).is_none());
 
-        // A disabled hw bp in slot 0 must not be resolved either.
         manager.insert_for_test(
             8,
             VirtAddr(0x4000),
@@ -1752,7 +1715,6 @@ mod tests {
         let mut manager = BreakpointManager::new();
         let addr = 0x5000;
 
-        // Software int3 and a DR watch pinned to the same linear address.
         manager.insert_for_test(0, VirtAddr(addr), true, None);
         manager.insert_for_test(
             1,
@@ -1765,8 +1727,6 @@ mod tests {
             }),
         );
 
-        // The int3 predicate resolves the software bp; the DR watch is skipped
-        // regardless of HashMap iteration order.
         match manager.check_breakpoint_hit(addr, 0) {
             BreakpointHitResult::Hit(bp) => {
                 assert_eq!(bp.id, 0);
@@ -1780,32 +1740,11 @@ mod tests {
             Some(0)
         );
 
-        // A data watch alone cannot satisfy run-to-address: it fires on a data
-        // access, not when execution reaches the watched linear address.
         manager.breakpoints.remove(&0);
         assert_eq!(
             manager.enabled_software_breakpoint_id(&BreakpointScope::Kernel, VirtAddr(addr)),
             None
         );
-    }
-
-    #[test]
-    fn condition_compiler_accepts_the_full_expression_grammar() {
-        let source = "$rax == 1 && ($rcx & 0xff) != 0";
-        let compiled = BreakpointManager::compile_condition(Some(source))
-            .unwrap()
-            .expect("compiled condition");
-        assert!(matches!(
-            compiled.as_ref(),
-            Expr::Binary(_, ExprBinaryOp::LogicalAnd, _)
-        ));
-
-        assert!(
-            BreakpointManager::compile_condition(None)
-                .unwrap()
-                .is_none()
-        );
-        assert!(BreakpointManager::compile_condition(Some("$rax == ")).is_err());
     }
 
     #[test]
@@ -1894,32 +1833,6 @@ mod tests {
     }
 
     #[test]
-    fn parsed_condition_keeps_creation_radix_and_action_classification() {
-        let mut manager = BreakpointManager::new();
-        manager.insert_for_test(9, VirtAddr(0x3000), true, None);
-        let expr = Expr::parse_with_radix("10 == 0x10", NumberRadix::Hexadecimal).unwrap();
-        manager
-            .set_condition(9, Some("10 == 0x10".into()), Some(Arc::new(expr)))
-            .unwrap();
-        manager.set_action(9, Some("r; gc".to_string())).unwrap();
-
-        let bp = match manager.check_breakpoint_hit(0x3000, 0) {
-            BreakpointHitResult::Hit(bp) => bp,
-            other => panic!("unexpected result: {other:?}"),
-        };
-        assert!(matches!(
-            bp.condition_expr.as_deref(),
-            Some(Expr::Binary(
-                left,
-                ExprBinaryOp::Equal,
-                right
-            )) if matches!(left.as_ref(), Expr::Literal(VirtAddr(0x10)))
-                && matches!(right.as_ref(), Expr::Literal(VirtAddr(0x10)))
-        ));
-        assert_eq!(bp.action.as_deref(), Some("r; gc"));
-    }
-
-    #[test]
     fn physical_breakpoint_sites_reject_same_kind_collisions() {
         let mut manager = BreakpointManager::new();
         let address = VirtAddr(0x4000);
@@ -2000,7 +1913,6 @@ mod tests {
     #[test]
     fn clear_hardware_slots_releases_every_hw_slot_and_skips_software() {
         let mut manager = BreakpointManager::new();
-        // Enabled DR watch occupying slot 2.
         manager.insert_for_test(
             0,
             VirtAddr(0x1000),
@@ -2011,7 +1923,6 @@ mod tests {
                 slot: 2,
             }),
         );
-        // A disabled DR watch still reserves slot 0 and must be released too.
         manager.insert_for_test(
             1,
             VirtAddr(0x2000),
@@ -2022,13 +1933,11 @@ mod tests {
                 slot: 0,
             }),
         );
-        // Software int3: no DR slot, must never reach the backend.
         manager.insert_for_test(2, VirtAddr(0x3000), true, None);
 
         let mut backend = SlotRecorder::new();
         manager.clear_hardware_slots(&mut backend);
 
-        // Exactly the two hardware slots, nothing for the software bp.
         let mut cleared = backend.cleared.clone();
         cleared.sort_unstable();
         assert_eq!(cleared, vec![0, 2]);

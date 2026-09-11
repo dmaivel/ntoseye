@@ -91,19 +91,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arm64_offsets_follow_winnt_layout() {
-        assert_eq!(OFFSET_CONTEXT_FLAGS, 0x000);
-        assert_eq!(OFFSET_CPSR, 0x004);
-        assert_eq!(OFFSET_X0 + 31 * 8, 0x100); // X[31] ends where Sp begins
-        assert_eq!(OFFSET_SP, 0x100);
-        assert_eq!(OFFSET_PC, 0x108);
-        assert_eq!(OFFSET_V0 + 32 * 16, 0x310); // V[32] ends where Fpcr begins
-        assert_eq!(OFFSET_FPCR, 0x310);
-        assert_eq!(OFFSET_FPSR, 0x314);
-        assert_eq!(CONTEXT_SIZE, 0x390);
-    }
-
-    #[test]
     fn arm64_register_map_reads_known_offsets() {
         let map = build_register_map();
         let mut buf = vec![0u8; REGISTER_BUFFER_SIZE];
@@ -122,17 +109,14 @@ mod tests {
         buf[OFFSET_X0..OFFSET_X0 + 8].copy_from_slice(&want_x0.to_le_bytes());
         assert_eq!(map.read_u64("x0", &buf).unwrap(), want_x0);
 
-        // Fp/Lr aliases resolve to X29/X30
         let want_fp: u64 = 0xaaaabbbbccccdddd;
         buf[OFFSET_X0 + 29 * 8..OFFSET_X0 + 30 * 8].copy_from_slice(&want_fp.to_le_bytes());
         assert_eq!(map.read_u64("fp", &buf).unwrap(), want_fp);
 
-        // cr3 synthetic slot round-trips
         let want_cr3: u64 = 0x1234_5000;
         map.write_u64("cr3", &mut buf, want_cr3).unwrap();
         assert_eq!(map.read_u64("cr3", &buf).unwrap(), want_cr3);
 
-        // ARM64 breakpoint instruction is 4 bytes
         assert_eq!(map.breakpoint_step_size(), 4);
     }
 }

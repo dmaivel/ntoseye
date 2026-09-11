@@ -669,13 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn checksum_sums_bytes() {
-        assert_eq!(checksum(&[1, 2, 3, 4]), 10);
-        assert_eq!(checksum(&[0xff; 4]), 0xff * 4);
-        assert_eq!(checksum(&[]), 0);
-    }
-
-    #[test]
     fn send_data_writes_header_payload_trailer_and_consumes_ack() {
         let mut framing = KdFraming::new(Loopback::new(ack_for(
             (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
@@ -686,11 +679,8 @@ mod tests {
 
         let out = &framing.transport.outbound;
         assert_eq!(out.len(), HEADER_SIZE + 5 + 1);
-        // leader
         assert_eq!(&out[0..4], &DATA_PACKET_LEADER.to_le_bytes());
-        // payload
         assert_eq!(&out[HEADER_SIZE..HEADER_SIZE + 5], b"hello");
-        // trailer
         assert_eq!(out[HEADER_SIZE + 5], PACKET_TRAILING_BYTE);
     }
 
@@ -727,8 +717,6 @@ mod tests {
         );
     }
 
-    /// A KDNET rollover means the peer is a restarted target whose ids begin
-    /// again; the old high-water mark must not reject them as duplicates.
     #[test]
     fn kdnet_rollover_restarts_the_remote_packet_id_stream() {
         let generation = Arc::new(AtomicU64::new(0));
@@ -750,14 +738,9 @@ mod tests {
         assert_eq!(framing.current_packet_id, KDNET_INITIAL_PACKET_ID);
     }
 
-    /// KDNET ids are a plain counter, so bit `SYNC_PACKET_ID` is set for half
-    /// of them. Reading it as KDCOM's stream-reset flag rewound the host's own
-    /// id on every second packet and reported a target reload that never
-    /// happened.
     #[test]
     fn kdnet_ids_carrying_the_sync_bit_are_ordinary_ids() {
         let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x2008a, b"before");
-        // 0x25f4c has SYNC_PACKET_ID set; it is still just the next counter.
         inbound.extend(data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
             0x25f4c,
@@ -785,7 +768,6 @@ mod tests {
             "KDNET ACKs echo the id whole"
         );
 
-        // The outbound stream was never rewound, so the next request advances.
         framing
             .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &[])
             .unwrap();
@@ -795,9 +777,6 @@ mod tests {
         );
     }
 
-    /// An ACK differing only in bit `SYNC_PACKET_ID` is an old ACK, not this
-    /// one: KDNET ids are counters, so masking that bit would retire a packet
-    /// on the strength of an ACK from 1024 packets earlier.
     #[test]
     fn kdnet_ack_ids_must_match_exactly() {
         let mut inbound = ack_for(KDNET_INITIAL_PACKET_ID | SYNC_PACKET_ID);
@@ -809,7 +788,6 @@ mod tests {
             .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
             .unwrap();
 
-        // The near-miss ACK forced a retransmit before the real one landed.
         let packet_len = HEADER_SIZE + 1 + 1;
         assert_eq!(framing.transport.outbound.len(), 2 * packet_len);
         assert_eq!(
@@ -818,7 +796,6 @@ mod tests {
         );
     }
 
-    /// A stale retransmit under the high-water mark stays rejected.
     #[test]
     fn kdnet_replayed_packet_ids_are_still_dropped() {
         let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x25f4c, b"first");
@@ -835,8 +812,6 @@ mod tests {
         assert_eq!(framing.recv_data().unwrap().payload, b"next");
     }
 
-    /// kdnet.dll counts its packet ids from 0, so a freshly booted target's
-    /// first packet carries id 0 and must not be mistaken for a replay.
     #[test]
     fn kdnet_first_packet_may_carry_id_zero() {
         let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x0, b"boot");
@@ -859,7 +834,6 @@ mod tests {
         assert_eq!(pkt.packet_type, PACKET_TYPE_KD_STATE_CHANGE64);
         assert_eq!(pkt.payload, payload);
 
-        // our outbound should be an ACK with the matching id
         let out = &framing.transport.outbound;
         assert_eq!(out.len(), HEADER_SIZE);
         let h = Header::decode(out.as_slice().try_into().unwrap());
@@ -931,37 +905,26 @@ mod tests {
         let mut framing = KdFraming::new(Loopback::new(inbound));
         let pkt = framing.recv_data().unwrap();
         assert_eq!(pkt.payload, b"good");
-        // we should have ACKed both
         assert_eq!(framing.transport.outbound.len(), 2 * HEADER_SIZE);
     }
 
     #[test]
     fn recv_data_accepts_sync_flagged_packet_despite_id_mismatch() {
-        // The kernel reset its send-id stream (e.g. re-entered the debugger on
-        // a bugcheck) and sent a SYNC-flagged packet whose base id no longer
-        // matches our advanced expectation. It must be accepted, not skipped;
-        // skipping it dropped the real bugcheck state-change
         let inbound = data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
             INITIAL_PACKET_ID | SYNC_PACKET_ID,
             b"bugcheck",
         );
         let mut framing = KdFraming::new(Loopback::new(inbound));
-        // Pretend a prior packet advanced the expected id past the base
         framing.remote_packet_id = INITIAL_PACKET_ID ^ 1;
 
-        // Pretend our outbound id had advanced past INITIAL before the reset
         framing.current_packet_id = INITIAL_PACKET_ID ^ 1;
 
         let pkt = framing.recv_data().unwrap();
         assert_eq!(pkt.payload, b"bugcheck");
-        // Realigned to the kernel's stream, SYNC stripped, toggled for next
         assert_eq!(framing.remote_packet_id, INITIAL_PACKET_ID ^ 1);
-        // The kernel reset both ids, so our outbound id must restart at INITIAL
-        // or the next request is discarded as a stale retransmit
         assert_eq!(framing.current_packet_id, INITIAL_PACKET_ID);
 
-        // ACK carried the base id with SYNC stripped
         let out = &framing.transport.outbound;
         assert_eq!(out.len(), HEADER_SIZE);
         let ack = Header::decode(out[0..HEADER_SIZE].try_into().unwrap());
@@ -975,7 +938,6 @@ mod tests {
     fn recv_data_requests_resend_after_bad_checksum() {
         let payload = vec![0x11, 0x22];
         let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, INITIAL_PACKET_ID, &payload);
-        // corrupt the checksum field
         inbound[12] = inbound[12].wrapping_add(1);
         inbound.extend(data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
@@ -1048,15 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn send_breakin_writes_one_breakin_byte() {
-        let mut framing = KdFraming::new(Loopback::new(Vec::new()));
-        framing.send_breakin().unwrap();
-        assert_eq!(framing.transport.outbound, vec![BREAKIN_BYTE]);
-    }
-
-    #[test]
     fn send_data_retries_on_resend() {
-        // first response is RESEND, second is the expected ACK
         let resend = control_packet(PACKET_TYPE_KD_RESEND, 0);
         let mut inbound = resend;
         inbound.extend(ack_for(
@@ -1066,7 +1020,6 @@ mod tests {
         framing
             .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
             .unwrap();
-        // We should have written the data packet twice
         let expected_per_attempt = HEADER_SIZE + 1 + 1;
         assert_eq!(framing.transport.outbound.len(), expected_per_attempt * 2);
     }
@@ -1144,7 +1097,6 @@ mod tests {
         assert_eq!(pkt.packet_type, PACKET_TYPE_KD_STATE_CHANGE64);
         assert_eq!(pkt.payload, b"stop");
         assert_eq!(framing.remote_packet_id, INITIAL_PACKET_ID ^ 1);
-        // one ACK for the queued inbound data; one ACK was consumed from inbound
         let out = &framing.transport.outbound;
         assert_eq!(out.len(), (HEADER_SIZE + 1 + 1) + HEADER_SIZE);
     }

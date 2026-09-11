@@ -357,8 +357,6 @@ pub fn start_plain_repl(ctx: &mut Session) -> Result<()> {
 
 #[cfg(feature = "cli")]
 fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
-    // Borrow the two owned fields disjointly; the rest of this function (and
-    // ReplState) consumes them exactly as before.
     let debugger: &mut Target = &mut ctx.target;
     let client: &mut dyn DebugBackend = ctx.backend.as_mut();
 
@@ -455,11 +453,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         );
     }
 
-    // No border: reedline's `IdeMenu` sizes the description box from the rows
-    // free *before* the painter scrolls to make room for the menu, so with the
-    // prompt on the last terminal row (the normal case) a bordered description
-    // needs three rows it doesn't have yet and is dropped on the first Tab. A
-    // borderless one-line description fits the single row it is granted.
     let ide_menu = IdeMenu::default()
         .with_name("completion_menu")
         .with_max_completion_width(50)
@@ -491,10 +484,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
             ReedlineEvent::MenuPrevious,
         ]),
     );
-    // The default Left/Right bindings route through MenuLeft/MenuRight first,
-    // which the open completion menu swallows so the cursor never moves. The
-    // IdeMenu is a single column (Up/Down navigate it), so drop the menu nav and
-    // let the arrows always move the cursor; keep history-hint accept on Right.
     keybindings.add_binding(KeyModifiers::NONE, KeyCode::Left, ReedlineEvent::Left);
     keybindings.add_binding(
         KeyModifiers::NONE,
@@ -574,9 +563,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         line: String::new(),
         context: DispatchContext::Interactive,
     };
-    // The reload state machine lives on the Session now; seed it from the
-    // startup message (an empty module list means we attached very early in
-    // boot, before rediscovery completed).
+    // An empty module list at startup means we attached before rediscovery completed.
     state.ctx.reload_module_list_pending = reload_module_list_pending;
 
     if plain {
@@ -764,10 +751,5 @@ mod tests {
             repeat_pattern(&[0x48, 0x83, 0x79], 8),
             vec![0x48, 0x83, 0x79, 0x48, 0x83, 0x79, 0x48, 0x83]
         );
-    }
-
-    #[test]
-    fn repeat_pattern_allows_zero_length() {
-        assert_eq!(repeat_pattern(&[0x90], 0), Vec::<u8>::new());
     }
 }

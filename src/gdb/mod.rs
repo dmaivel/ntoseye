@@ -393,7 +393,6 @@ impl GdbClient {
     }
 
     fn continue_execution(&mut self) -> Result<()> {
-        // set continue thread to -1 (all threads)
         let _ = self.send_packet("Hc-1")?;
         self.send_command_no_reply("c")?;
         self.is_running = true;
@@ -607,11 +606,9 @@ impl GdbClient {
             let href = RegisterMap::extract_attr(element, "href");
 
             if let Some(filename) = href {
-                // fetch the included file
                 let included_xml = self.fetch_feature_file(filename)?;
                 result = format!("{}{}{}", &result[..start], included_xml, &result[end..]);
             } else {
-                // no href, just remove the include element
                 result = format!("{}{}", &result[..start], &result[end..]);
             }
         }
@@ -718,7 +715,6 @@ impl DebugBackend for GdbClient {
     fn try_wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>> {
         self.stream.set_read_timeout(Some(timeout))?;
         let result = GdbClient::try_wait_for_stop(self);
-        // restore blocking mode regardless of outcome
         let _ = self.stream.set_read_timeout(None);
         Ok(result?.map(|response| StopEvent {
             thread_id: Self::parse_stop_reply_thread_id(&response),

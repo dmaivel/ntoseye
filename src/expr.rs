@@ -198,11 +198,7 @@ impl Expr {
                 if let Some(value) = Self::parse_bare_hex_literal(name) {
                     return Ok(VirtAddr(value));
                 }
-                // Fall back to a register / builtin pseudo-register of the same
-                // name, so a bare `rip`/`rsp` resolves like the WinDbg `u rip`
-                // idiom (and not just the `$rip` form). A real symbol still wins
-                // above, so this only kicks in for an otherwise-unresolved name;
-                // registers are available only when the VM is halted.
+                // A bare `rip`/`rsp` resolves as a register when no symbol matches.
                 if let Some(value) = context.registers.as_ref().and_then(|r| r.get(name)) {
                     return Ok(VirtAddr(*value));
                 }

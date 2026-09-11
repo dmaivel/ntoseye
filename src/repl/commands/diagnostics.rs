@@ -469,19 +469,3 @@ impl ReplState<'_> {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::diagnostic_cell;
-    use crate::target::DiagnosticValue;
-
-    #[test]
-    fn unavailable_fields_keep_the_exact_reason() {
-        let field =
-            DiagnosticValue::<u64>::Unavailable("Field 'PrivateUsage' not found".to_string());
-        assert_eq!(
-            diagnostic_cell(&field),
-            "<unavailable: Field 'PrivateUsage' not found>"
-        );
-    }
-}

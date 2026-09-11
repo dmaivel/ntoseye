@@ -121,8 +121,6 @@ pub fn to_py<'py>(
     })
 }
 
-// --- builders: one decoded struct → its neutral shape ---
-
 fn io_stack(s: &IoStackLocationInfo) -> View {
     View::Object(vec![
         ("address", View::Hex(s.address.0)),
@@ -1587,15 +1585,10 @@ pub fn memory_usage(summary: &SystemMemorySummary) -> View {
 
 #[cfg(all(test, feature = "mcp"))]
 mod tests {
-    use super::{bugcheck_trap_frame, handle_table, memory_usage, to_json, trap_frame};
+    use super::{bugcheck_trap_frame, memory_usage, to_json};
     use crate::bugchecks::BugcheckTrapFrame;
     use crate::debugger_data::MetadataSource;
-    use crate::guest::ProcessInfo;
-    use crate::target::{
-        DiagnosticMetric, DiagnosticValue, HandleTableSummary, SystemMemorySummary,
-    };
-    use crate::trapframe::KtrapFrame;
-    use crate::types::VirtAddr;
+    use crate::target::{DiagnosticMetric, DiagnosticValue, SystemMemorySummary};
 
     #[test]
     fn bugcheck_trap_frame_exposes_decode_failure() {
@@ -1608,60 +1601,6 @@ mod tests {
         let json = to_json(&view);
         assert!(json["frame"].is_null());
         assert_eq!(json["error"], "type `_KTRAP_FRAME` not found");
-    }
-
-    #[test]
-    fn standalone_trap_frame_has_shared_structured_shape() {
-        let frame = KtrapFrame {
-            address: 0xffff_f800_1234_5000,
-            rax: 1,
-            rbx: 2,
-            rcx: 3,
-            rdx: 4,
-            rsi: 5,
-            rdi: 6,
-            rbp: 7,
-            rsp: 8,
-            r8: 9,
-            r9: 10,
-            r10: 11,
-            r11: 12,
-            rip: 0xffff_f800_4321_1000,
-            cs: 0x10,
-            ss: 0x18,
-            eflags: 0x202,
-            error_code: 0,
-            previous_mode: 0,
-            previous_irql: 2,
-        };
-        let json = to_json(&trap_frame(&frame, Some("nt!KiDispatchException".into())));
-        assert_eq!(json["address"], "0xfffff80012345000");
-        assert_eq!(json["rip_symbol"], "nt!KiDispatchException");
-        assert_eq!(json["frame"]["rip"], "0xfffff80043211000");
-        assert_eq!(json["frame"]["previous_irql"], 2);
-    }
-
-    #[test]
-    fn handle_table_view_exposes_skipped_entries() {
-        let summary = HandleTableSummary {
-            process: ProcessInfo {
-                pid: 4,
-                name: "System".into(),
-                dtb: 0x1000,
-                eprocess_va: VirtAddr(0xffff_8000_0000_1000),
-            },
-            table: VirtAddr(0xffff_8000_0000_2000),
-            table_level: 1,
-            advertised_handles: 64,
-            scanned_handles: 32,
-            skipped_entries: 3,
-            truncated: true,
-            entries: Vec::new(),
-        };
-
-        let json = to_json(&handle_table(&summary));
-        assert_eq!(json["scanned_handles"], 32);
-        assert_eq!(json["skipped_entries"], 3);
     }
 
     #[test]

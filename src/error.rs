@@ -9,7 +9,6 @@ use crate::types::{PhysAddr, VirtAddr};
 
 #[derive(Debug, Error)]
 pub enum Error {
-    // Handle crate errors
     #[cfg(target_os = "linux")]
     #[error(transparent)]
     Nix(#[from] nix::Error),
@@ -73,7 +72,6 @@ pub enum Error {
     #[error("{0}")]
     DebugInfo(String),
 
-    // Handle other errors
     #[error("PDB file not found for {0:?}")]
     PdbNotFound(PathBuf),
 

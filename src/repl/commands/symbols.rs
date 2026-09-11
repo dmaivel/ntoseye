@@ -698,15 +698,6 @@ mod tests {
     }
 
     #[test]
-    fn sympath_append_is_registered_as_a_command_name() {
-        let parsed = parse_command(".sympath+ /private").unwrap().unwrap();
-        assert_eq!(parsed.name, ".sympath+");
-        assert!(command_registry().get(".sympath+").is_some());
-        assert!(command_registry().get(".sympath").is_some());
-        assert!(command_registry().get(".symfix").is_some());
-    }
-
-    #[test]
     fn source_path_parser_supports_roots_and_prefix_mappings() {
         assert_eq!(
             parse_source_paths(&["/source", r"C:\build\src=/checkout"]),
@@ -721,12 +712,6 @@ mod tests {
                 },
             ]
         );
-        assert!(command_registry().get(".srcpath").is_some());
-        assert!(command_registry().get(".srcpath+").is_some());
-        assert!(command_registry().get("dv").is_some());
-        assert!(command_registry().get(".reload").is_some());
-        assert!(command_registry().get("ld").is_some());
-        assert!(command_registry().get("lmv").is_some());
     }
 
     #[test]

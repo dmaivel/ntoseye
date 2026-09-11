@@ -308,7 +308,6 @@ mod tests {
     #[test]
     fn short_buffer_is_an_error() {
         let layout = test_layout();
-        // Buffer ends before Rsp/SegSs.
         let buf = vec![0u8; 0x70];
         assert!(KtrapFrame::decode(&layout, 0, &buf).is_err());
     }

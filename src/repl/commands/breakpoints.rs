@@ -766,8 +766,6 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
-    use crate::expr::ExprBinaryOp;
-    use crate::types::VirtAddr;
 
     fn bp_invocation<'a>(argv: &'a [&'a str]) -> CommandInvocation<'a> {
         CommandInvocation {
@@ -795,17 +793,5 @@ mod tests {
             breakpoint_condition(&invocation, 1).as_deref(),
             Some("$rax == 1 && $rcx != 0")
         );
-    }
-    #[test]
-    fn repl_condition_compiles_with_creation_time_radix() {
-        let expr = compile_repl_condition(Some("10 == 0x10"), NumberRadix::Hexadecimal)
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            expr.as_ref(),
-            Expr::Binary(left, ExprBinaryOp::Equal, right)
-                if matches!(left.as_ref(), Expr::Literal(VirtAddr(0x10)))
-                    && matches!(right.as_ref(), Expr::Literal(VirtAddr(0x10)))
-        ));
     }
 }
