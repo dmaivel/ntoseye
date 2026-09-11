@@ -18,6 +18,7 @@ pub struct CommandSpec {
     pub details: Option<&'static str>,
     pub completion: CompletionSpec,
     pub run_state: Option<RunState>,
+    pub run: RunEffect,
     pub style: CommandStyle,
     pub flow: Flow,
     pub handler: CommandHandler,
@@ -27,6 +28,20 @@ pub struct CommandSpec {
 pub enum RunState {
     Halted,
     Running,
+}
+
+/// What a command does to target execution, so dispatch contexts that must
+/// not let a command move the target (breakpoint actions, exception
+/// commands, a remote host with its own run-control) can refuse it by
+/// metadata rather than by a name list that aliases can bypass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunEffect {
+    /// Leaves execution state alone (or only pauses it).
+    None,
+    /// Executes one instruction and returns promptly.
+    Step,
+    /// Resumes until the next stop; may block indefinitely.
+    Run,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -401,6 +416,7 @@ macro_rules! repl_command {
         $(, details: $details:expr)?
         $(, completion: $completion:tt)?
         $(, run_state: $run_state:ident)?
+        $(, run: $run:ident)?
         $(, style: $style:ident)?
         , flow: $flow:ident
         $(,)?
@@ -414,6 +430,7 @@ macro_rules! repl_command {
             $(, details: $details)?
             $(, completion: $completion)?
             $(, run_state: $run_state)?
+            $(, run: $run)?
             $(, style: $style)?
             , flow: $flow,
         }
@@ -428,6 +445,7 @@ macro_rules! repl_command {
         $(, details: $details:expr)?
         $(, completion: $completion:tt)?
         $(, run_state: $run_state:ident)?
+        $(, run: $run:ident)?
         $(, style: $style:ident)?
         $(, flow: $flow:ident)?
         $(,)?
@@ -441,6 +459,7 @@ macro_rules! repl_command {
                 details: $crate::repl_command!(@details $($details)?),
                 completion: $crate::repl_command!(@completion $($completion)?),
                 run_state: $crate::repl_command!(@run_state $($run_state)?),
+                run: $crate::repl_command!(@run $($run)?),
                 style: $crate::repl_command!(@style $($style)?),
                 flow: $crate::repl_command!(@flow $($flow)?),
                 handler: $handler,
@@ -476,6 +495,10 @@ macro_rules! repl_command {
     (@run_state) => { None };
     (@run_state Halted) => { Some($crate::repl::RunState::Halted) };
     (@run_state Running) => { Some($crate::repl::RunState::Running) };
+
+    (@run) => { $crate::repl::RunEffect::None };
+    (@run Step) => { $crate::repl::RunEffect::Step };
+    (@run Run) => { $crate::repl::RunEffect::Run };
 
     (@style) => { $crate::repl::CommandStyle::StructuredArgs };
     (@style StructuredArgs) => { $crate::repl::CommandStyle::StructuredArgs };

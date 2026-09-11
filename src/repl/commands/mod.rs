@@ -38,29 +38,18 @@ impl ReplState<'_> {
             .is_some_and(|command| command.trim().eq_ignore_ascii_case("gc"));
         let command_count = commands.len().saturating_sub(usize::from(continue_after));
         self.event_command_depth += 1;
+        let outer = std::mem::replace(&mut self.context, DispatchContext::BreakpointAction);
         let result = (|| {
             for command in commands.into_iter().take(command_count) {
-                let name = command
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if matches!(
-                    name.as_str(),
-                    "g" | "continue" | "gh" | "gn" | "p" | "step" | "t" | "gu" | "finish"
-                ) {
-                    error!(
-                        "run-control command '{name}' must not appear inside a breakpoint action; use trailing 'gc' to continue"
-                    );
-                    return Ok(false);
-                }
-                if self.dispatch_one(command, 0)? == Flow::Quit {
-                    return Ok(false);
+                match self.dispatch_one(command, 0)? {
+                    Flow::Quit | Flow::Denied => return Ok(false),
+                    Flow::Continue => {}
                 }
                 self.caches.refresh_expression_context(&self.ctx.target);
             }
             Ok(continue_after)
         })();
+        self.context = outer;
         self.event_command_depth -= 1;
         result
     }
@@ -81,44 +70,54 @@ impl ReplState<'_> {
             }
         };
         self.event_command_depth += 1;
+        let outer = std::mem::replace(&mut self.context, DispatchContext::ExceptionCommand);
         let result = (|| {
             for command in commands {
-                let name = command
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if matches!(
-                    name.as_str(),
-                    "g" | "continue"
-                        | "gh"
-                        | "gn"
-                        | "break"
-                        | "si"
-                        | "t"
-                        | "p"
-                        | "ni"
-                        | "gu"
-                        | "finish"
-                        | "gc"
-                        | "quit"
-                        | "q"
-                ) {
-                    error!(
-                        "run-control command '{name}' must not appear inside an exception command; use the policy's -f break, -f gh, or -f gn"
-                    );
-                    return Ok(());
-                }
-                if self.dispatch_one(command, 0)? == Flow::Quit {
-                    error!("quit is ignored inside an exception command");
-                    return Ok(());
+                match self.dispatch_one(command, 0)? {
+                    Flow::Denied => return Ok(()),
+                    Flow::Quit => {
+                        error!("quit is ignored inside an exception command");
+                        return Ok(());
+                    }
+                    Flow::Continue => {}
                 }
                 self.caches.refresh_expression_context(&self.ctx.target);
             }
             Ok(())
         })();
+        self.context = outer;
         self.event_command_depth -= 1;
         result
+    }
+
+    /// Why the current [`DispatchContext`] refuses `spec`, if it does. Decided
+    /// on the resolved command's [`RunEffect`], after alias expansion, so an
+    /// alias cannot smuggle a resume into an event command.
+    fn run_control_denial(&self, spec: &CommandSpec) -> Option<String> {
+        let name = spec.names[0];
+        match self.context {
+            DispatchContext::Interactive => None,
+            DispatchContext::BreakpointAction if spec.run != RunEffect::None => Some(format!(
+                "run-control command '{name}' must not appear inside a breakpoint action; \
+                 use trailing 'gc' to continue"
+            )),
+            DispatchContext::ExceptionCommand
+                if spec.run != RunEffect::None || spec.run_state == Some(RunState::Running) =>
+            {
+                Some(format!(
+                    "run-control command '{name}' must not appear inside an exception command; \
+                     use the policy's -f break, -f gh, or -f gn"
+                ))
+            }
+            DispatchContext::Remote if spec.run == RunEffect::Run => Some(format!(
+                "'{name}' would block this session until the next stop; use the resume tool, \
+                 then poll wait_for_stop"
+            )),
+            DispatchContext::Remote if spec.flow == Flow::Quit => Some(format!(
+                "'{name}' ends the interactive REPL; use the close tool to release the session"
+            )),
+            _ => None,
+        }
     }
 
     fn dispatch_line_inner(&mut self, line: &str, depth: usize) -> Result<Flow> {
@@ -133,6 +132,7 @@ impl ReplState<'_> {
         for command in commands {
             match self.dispatch_one(command, depth)? {
                 Flow::Quit => return Ok(Flow::Quit),
+                Flow::Denied => return Ok(Flow::Denied),
                 Flow::Continue => {}
             }
             self.caches.refresh_expression_context(&self.ctx.target);
@@ -151,13 +151,17 @@ impl ReplState<'_> {
         };
 
         if let Some(spec) = command_registry().get(parsed.name) {
+            if let Some(reason) = self.run_control_denial(spec) {
+                error!("{reason}");
+                return Ok(Flow::Denied);
+            }
             if !check_run_state(self, spec) {
                 return Ok(Flow::Continue);
             }
             match spec.handler {
                 CommandHandler::NoArgs(handler) => {
                     if !parsed.raw_tail.trim().is_empty() {
-                        println!("{}\n", command_help(parsed.name));
+                        outln!("{}\n", command_help(parsed.name));
                         return Ok(Flow::Continue);
                     }
                     handler(self)?;

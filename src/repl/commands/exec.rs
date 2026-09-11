@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use owo_colors::OwoColorize;
 
 use crate::dbg_backend::ContinueDisposition;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::gdb::breakpoints::Breakpoint;
 use crate::session::{StepKind, StopResolution};
 use crate::types::VirtAddr;
@@ -16,6 +16,7 @@ repl_command! {
     names: ["continue", "g"],
     usage: "continue",
     summary: "Resume VM execution.",
+    run: Run,
 }
 
 repl_command! {
@@ -23,6 +24,7 @@ repl_command! {
     names: ["gh"],
     usage: "gh",
     summary: "Resume and mark the current exception handled.",
+    run: Run,
 }
 
 repl_command! {
@@ -30,6 +32,7 @@ repl_command! {
     names: ["gn"],
     usage: "gn",
     summary: "Resume and pass the current exception to Windows (KD only).",
+    run: Run,
 }
 
 repl_command! {
@@ -46,6 +49,7 @@ repl_command! {
     usage: "si",
     summary: "Single step (step into).",
     run_state: Halted,
+    run: Step,
 }
 
 repl_command! {
@@ -54,6 +58,7 @@ repl_command! {
     usage: "p or ni",
     summary: "Step over the current instruction.",
     run_state: Halted,
+    run: Run,
 }
 
 repl_command! {
@@ -62,6 +67,7 @@ repl_command! {
     usage: "gu or finish",
     summary: "Run until the current function returns.",
     run_state: Halted,
+    run: Run,
 }
 
 impl ReplState<'_> {

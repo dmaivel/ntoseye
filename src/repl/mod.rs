@@ -213,6 +213,9 @@ pub fn print_padded_table(builder: Builder) {
 pub enum Flow {
     Continue,
     Quit,
+    /// The dispatch context refused a command's run effect (already reported);
+    /// the rest of the command list is abandoned.
+    Denied,
 }
 
 pub struct ReplState<'a> {
@@ -225,6 +228,70 @@ pub struct ReplState<'a> {
     pub event_command_depth: usize,
     pub radix: NumberRadix,
     pub line: String,
+    /// Who is dispatching; decides which [`RunEffect`]s a command may have.
+    pub context: DispatchContext,
+}
+
+/// Where a command line comes from. Event-driven and remote contexts must not
+/// let a command move the target on their own; see
+/// [`ReplState::run_control_denial`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DispatchContext {
+    /// The user's prompt: anything goes.
+    Interactive,
+    /// A breakpoint's action string; only a trailing `gc` may resume.
+    BreakpointAction,
+    /// An exception policy's command; the policy's `-f` owns the disposition.
+    ExceptionCommand,
+    /// A request/response host (MCP `command`) that cannot block on a run and
+    /// has its own non-blocking resume/wait tools.
+    Remote,
+}
+
+/// Everything a [`ReplState`] owns besides its session borrow. A host that
+/// runs commands one at a time against a session it owns (the MCP `command`
+/// tool) keeps one of these between calls, so completion caches, aliases,
+/// exception policies, and the radix persist exactly as in the interactive
+/// REPL, and rebuilds the borrowing `ReplState` per call with
+/// [`ReplState::attach`].
+pub struct ReplStore {
+    caches: ReplCaches,
+    aliases: UserAliases,
+    exception_policies: ExceptionPolicyTable,
+    radix: NumberRadix,
+    context: DispatchContext,
+}
+
+impl ReplStore {
+    /// Fresh REPL state for `ctx`: caches seeded from the current symbol
+    /// context, persisted aliases loaded, default exception policies and radix.
+    pub fn new(ctx: &Session, context: DispatchContext) -> Self {
+        let caches = ReplCaches {
+            symbols: Arc::new(RwLock::new(ctx.target.current_symbol_index())),
+            types: Arc::new(RwLock::new(ctx.target.current_types_index())),
+            symbol_store: Arc::clone(&ctx.target.symbols),
+            dtb: Arc::new(RwLock::new(ctx.target.current_dtb())),
+            processes: Arc::new(RwLock::new(Vec::new())),
+            threads: Arc::new(RwLock::new(Vec::new())),
+            vcpus: Arc::new(RwLock::new(Vec::new())),
+            breakpoints: Arc::new(RwLock::new(Vec::new())),
+            drivers: Arc::new(RwLock::new(Vec::new())),
+            registers: Arc::new(ctx.register_map.names()),
+            expression_variables: Arc::new(RwLock::new(Vec::new())),
+            user_commands: Arc::new(RwLock::new(initial_user_commands())),
+            aliases: Arc::new(RwLock::new(Vec::new())),
+        };
+        caches.refresh_expression_context(&ctx.target);
+        let aliases = UserAliases::load();
+        *caches.aliases.write().unwrap() = aliases.entries();
+        Self {
+            caches,
+            aliases,
+            exception_policies: ExceptionPolicyTable::default(),
+            radix: NumberRadix::Hexadecimal,
+            context,
+        }
+    }
 }
 
 /// The user-command completion set: the registered Python commands when the
@@ -241,39 +308,40 @@ pub fn initial_user_commands() -> Vec<(String, String, Vec<CompletionStrategy>)>
 }
 
 impl<'a> ReplState<'a> {
+    /// Bind stored REPL state to a session for one dispatch; [`Self::detach`]
+    /// hands the state back afterwards.
+    pub fn attach(ctx: &'a mut Session, store: ReplStore) -> Self {
+        ReplState {
+            ctx,
+            caches: store.caches,
+            aliases: store.aliases,
+            exception_policies: store.exception_policies,
+            event_command_depth: 0,
+            radix: store.radix,
+            line: String::new(),
+            context: store.context,
+        }
+    }
+
+    /// Release the session borrow, keeping the REPL state for the next
+    /// [`Self::attach`].
+    pub fn detach(self) -> ReplStore {
+        ReplStore {
+            caches: self.caches,
+            aliases: self.aliases,
+            exception_policies: self.exception_policies,
+            radix: self.radix,
+            context: self.context,
+        }
+    }
+
     /// Build a transient REPL state around an existing context for one-off
     /// command dispatch (e.g. the Python SDK's `run_command`). Completion caches
     /// start empty (no live REPL to populate them). Output goes to stdout, as in
     /// the REPL.
     pub fn for_oneshot(ctx: &'a mut Session) -> Self {
-        let caches = ReplCaches {
-            symbols: Arc::new(RwLock::new(ctx.target.current_symbol_index())),
-            types: Arc::new(RwLock::new(ctx.target.current_types_index())),
-            symbol_store: Arc::clone(&ctx.target.symbols),
-            dtb: Arc::new(RwLock::new(ctx.target.current_dtb())),
-            processes: Arc::new(RwLock::new(Vec::new())),
-            threads: Arc::new(RwLock::new(Vec::new())),
-            vcpus: Arc::new(RwLock::new(Vec::new())),
-            breakpoints: Arc::new(RwLock::new(Vec::new())),
-            drivers: Arc::new(RwLock::new(Vec::new())),
-            registers: Arc::new(ctx.register_map.names()),
-            expression_variables: Arc::new(RwLock::new(Vec::new())),
-            user_commands: Arc::new(RwLock::new(initial_user_commands())),
-            aliases: Arc::new(RwLock::new(Vec::new())),
-        };
-
-        let state = ReplState {
-            ctx,
-            caches,
-            aliases: UserAliases::load(),
-            exception_policies: ExceptionPolicyTable::default(),
-            event_command_depth: 0,
-            radix: NumberRadix::Hexadecimal,
-            line: String::new(),
-        };
-        state.caches.refresh_expression_context(&state.ctx.target);
-        state.refresh_alias_cache();
-        state
+        let store = ReplStore::new(ctx, DispatchContext::Interactive);
+        Self::attach(ctx, store)
     }
 }
 
@@ -518,6 +586,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         event_command_depth: 0,
         radix: NumberRadix::Hexadecimal,
         line: String::new(),
+        context: DispatchContext::Interactive,
     };
     // The reload state machine lives on the Session now; seed it from the
     // startup message (an empty module list means we attached very early in
@@ -562,7 +631,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                         state.line = buffer.trim().to_string();
                         match state.dispatch_line(&buffer)? {
                             Flow::Quit => break,
-                            Flow::Continue => {}
+                            Flow::Continue | Flow::Denied => {}
                         }
                     }
                 }

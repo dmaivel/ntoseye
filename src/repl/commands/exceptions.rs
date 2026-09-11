@@ -56,28 +56,22 @@ repl_command! {
     summary: "Show the most recently observed target event.",
 }
 
+/// Early feedback when a policy is set: refuse literal run-control commands
+/// (by their registered [`RunEffect`], not a name list). Aliases resolve at
+/// dispatch, where [`DispatchContext::ExceptionCommand`] enforces the same
+/// rule after expansion.
 fn validate_exception_command(command: &str) -> std::result::Result<(), String> {
     for item in split_command_list(command).map_err(|err| format!("{err:?}"))? {
         let Some(parsed) = parse_command(item).map_err(|err| format!("{err:?}"))? else {
             continue;
         };
-        if matches!(
-            parsed.name,
-            "continue"
-                | "g"
-                | "gh"
-                | "gn"
-                | "break"
-                | "si"
-                | "t"
-                | "p"
-                | "ni"
-                | "gu"
-                | "finish"
-                | "gc"
-                | "quit"
-                | "q"
-        ) {
+        let is_run_control = parsed.name == "gc"
+            || command_registry().get(parsed.name).is_some_and(|spec| {
+                spec.run != RunEffect::None
+                    || spec.run_state == Some(RunState::Running)
+                    || spec.flow == Flow::Quit
+            });
+        if is_run_control {
             return Err(format!(
                 "event command cannot contain run control '{}'; use -f break, -f gh, or -f gn for the final action",
                 parsed.name
