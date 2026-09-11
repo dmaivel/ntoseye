@@ -1,11 +1,21 @@
 # MCP integration
 
-`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server, exposing the debugger as tools to MCP clients. It reads the top-level `--backend`/`--connect`/`--kdnet-key` flags to choose how to attach, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Only one consumer of the VM can run at a time.
+`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server for MCP clients that cannot run Python themselves (desktop chat apps, web UIs). Agents that *can* run code should prefer the [Python SDK](sdk.md): it is the same debugger, but composable, with no round trip per operation.
 
-The structured tool surface includes `inspect_trap_frame` and `set_watchpoint`; watchpoints report `stop: "watchpoint"` with access/length metadata and use the existing breakpoint lifecycle tools for list, disable, enable, and clear operations.
+The surface is deliberately thin, in the shape of LLDB's `lldb-mcp`: the debugger's REPL command language is the API.
 
-> [!IMPORTANT]
-> The server attaches on launch, so bring up the guest and its debug transport before starting the client.
+| Tool | Purpose |
+| --- | --- |
+| `command` | Run one REPL line in ntoseye's WinDbg-style syntax (`!process 0 0`, `dt nt!_EPROCESS <addr>`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, ...) and return its text, styling stripped. `help` lists every command. Commands that resume until the next stop (`g`, `gh`, `gn`, `p`, `gu`) are refused because they would block the session; use the run-control tools below. `t`/`si` (one instruction) is allowed. |
+| `status` | Where the target is now: `{running, current_thread, rip, symbol, process, coherent, kernel_base}`. |
+| `interrupt` | Pause a running VM (needed before `k`, `r`, `bp`, `t`, ...). |
+| `resume` | Resume, non-blocking; optional `disposition: handled \| not_handled` (KD only). |
+| `wait_for_stop` | Wait up to `timeout_ms` (default 10 s, max 20 s) for the next stop without resuming; returns `{stop: "breakpoint" \| "watchpoint" \| "exception" \| "bugcheck" \| "step" \| "target_reloaded" \| "running" \| "halted", ...}`. Poll by calling again while it returns `running`. |
+| `open` / `close` | Attach to a target (`backend: kd \| kdnet \| gdb \| memory \| dump`, plus `connect` and, for kdnet, `key`) or release it. One session at a time. The KD memory source is an operator setting (`--memory-source` on the command line), not a tool argument. |
+
+Run-control is split so no request blocks: a typical breakpoint flow is `interrupt` → `command("bp nt!NtCreateFile")` → `resume` → `wait_for_stop` (until `stop:"breakpoint"`) → `command("k")`.
+
+The server reads the top-level `--backend`/`--connect`/`--kdnet-key`/`--dump` flags to attach at launch, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Without those flags it starts empty and the client attaches with `open`.
 
 ## stdio (default)
 
@@ -35,7 +45,7 @@ Top-level flags go before the `mcp` subcommand, e.g. to pin the backend and sock
 }
 ```
 
-For KDNET, use `["--backend", "kdnet", "--kdnet-key", "1.2.3.4", "mcp"]`; add `["--memory-source", "kd"]` to force target-mediated memory and add `--connect` before `mcp` only when changing the default `0.0.0.0:50000` listener. The dynamic `open` tool exposes the same choice as `memory_source`.
+For KDNET, use `["--backend", "kdnet", "--kdnet-key", "1.2.3.4", "mcp"]`; add `["--memory-source", "kd"]` to force target-mediated memory and add `--connect` before `mcp` only when changing the default `0.0.0.0:50000` listener. The `open` tool takes the same backend/connect/key choices; when the server starts without a target the agent is instructed to ask the user how the VM is exposed rather than guess.
 
 Use an absolute path for `command` (e.g. `../target/release/ntoseye`) if `ntoseye` isn't within `PATH`.
 
@@ -47,4 +57,4 @@ For web MCP clients that connect over the network instead of spawning a subproce
 ntoseye mcp --http 127.0.0.1:8080
 ```
 
-The service is mounted at `http://127.0.0.1:8080/mcp`. HTTP binds are loopback-only by default, since the tool surface includes execution control and guest writes; pass `--unsafe-http` to bind a non-loopback address and expose those tools to the network (only on trusted hosts).
+The service is mounted at `http://127.0.0.1:8080/mcp`. HTTP binds are loopback-only by default, since `command` grants execution control and guest writes; pass `--unsafe-http` to bind a non-loopback address and expose those tools to the network (only on trusted hosts).

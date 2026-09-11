@@ -15,11 +15,15 @@ use crate::dbg_backend::{
     WatchpointAccess,
 };
 use crate::disasm::{DisasmRow, decode_rows, decode_rows_arm64, disasm_formatter};
+use crate::dmp::DmpBackend;
 use crate::error::{Error, Result};
 use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig};
-use crate::gdb::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, RegisterMap};
+use crate::gdb::{
+    BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
+};
 use crate::kd::{KdBackend, KdMemorySource, trace_enabled};
 use crate::memory::DTB_IDENTITY;
+use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
 use crate::target::{ReloadReport, Target, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
@@ -27,6 +31,7 @@ use crate::unwind::{
     StackTrace, ThreadStackTrace, build_parked_thread_stack, build_stacktrace, preferred_code_dtb,
     resolve_thread_trace_context,
 };
+use crate::{Backend, TargetSpec};
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
 /// `NTOSEYE_KD_TRACE` like the KD packet trace so one capture correlates both.
@@ -365,6 +370,58 @@ fn prepare_backend_after_cleanup(
 }
 
 impl Session {
+    /// Attach per `spec`: open a dump, or connect the chosen live backend.
+    /// The one construction path shared by the CLI, MCP, and Python hosts, so
+    /// backend selection, endpoint defaults, and instance locking cannot
+    /// drift between them.
+    ///
+    /// kd/kdnet/gdb take a per-target instance lock before building the
+    /// backend, so a second attach against the same resource fails fast rather
+    /// than racing on the handshake; dumps and passive memory are read-only
+    /// and coexist with anything.
+    pub fn open(spec: &TargetSpec) -> Result<Self> {
+        spec.validate().map_err(Error::DebugInfo)?;
+        match spec {
+            TargetSpec::Dump(path) => {
+                let phys = Arc::new(PhysMem::dmp(path)?);
+                let info = phys
+                    .dmp_info()
+                    .expect("dmp_info must be Some for DMP backend")
+                    .clone();
+                Self::connect(phys, None, || Ok(Box::new(DmpBackend::new(&info))))
+            }
+            TargetSpec::Live {
+                backend: backend @ (Backend::Kd | Backend::KdNet),
+                kdnet_key,
+                memory_source,
+                ..
+            } => {
+                let endpoint = spec.endpoint().expect("KD/KDNET always have an endpoint");
+                Self::connect_kd(endpoint, *memory_source, || match backend {
+                    Backend::Kd => KdBackend::connect(endpoint),
+                    Backend::KdNet => {
+                        let key = kdnet_key.as_deref().expect("validated above");
+                        KdBackend::connect_net(endpoint, key)
+                    }
+                    Backend::Gdb | Backend::Memory => unreachable!("matched KD above"),
+                })
+            }
+            TargetSpec::Live { backend, .. } => {
+                let phys = Arc::new(PhysMem::live()?);
+                let endpoint = spec.endpoint();
+                Self::connect(phys, endpoint, || {
+                    Ok(match backend {
+                        Backend::Gdb => Box::new(GdbClient::connect(
+                            endpoint.expect("gdb always has an endpoint"),
+                        )?),
+                        Backend::Memory => Box::new(MemoryBackend::new()),
+                        Backend::Kd | Backend::KdNet => unreachable!("matched above"),
+                    })
+                })
+            }
+        }
+    }
+
     /// Optionally acquire the single-instance lock for `target`, connect a
     /// backend via `make_backend`, and build the owned session; the guarded
     /// attach path every host uses.
@@ -944,13 +1001,6 @@ impl Session {
                 self.parked_stop = Some(outcome);
             }
         }
-    }
-
-    /// Take the stop `service_idle` parked while the host was idle, if any (see
-    /// [`Self::parked_stop`]). The MCP `wait_for_stop` returns this before waiting,
-    /// so a stop caught between tool calls surfaces as its proper event.
-    pub fn take_parked_stop(&mut self) -> Option<ContinueOutcome> {
-        self.parked_stop.take()
     }
 
     /// A read-only run-control snapshot for the "where am I" surface (see
@@ -1681,6 +1731,12 @@ impl Session {
         timeout: Option<Duration>,
         cancel: &AtomicBool,
     ) -> Result<ContinueOutcome> {
+        // A stop `service_idle` caught and parked while the host was idle is
+        // the proper event for this wait: surface it before waiting for a new
+        // one, so every host (not just one) sees it as its real event.
+        if let Some(parked) = self.parked_stop.take() {
+            return Ok(parked);
+        }
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
             if cancel.load(Ordering::Relaxed) {

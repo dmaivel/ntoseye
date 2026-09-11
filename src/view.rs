@@ -1100,7 +1100,7 @@ fn diagnostic_metric<T>(metric: &DiagnosticMetric<T>, encode: impl FnOnce(&T) ->
     View::Object(fields)
 }
 
-fn process(process: &ProcessInfo) -> View {
+pub fn process(process: &ProcessInfo) -> View {
     View::Object(vec![
         ("pid", View::Num(process.pid)),
         ("name", View::Str(process.name.clone())),
