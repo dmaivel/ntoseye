@@ -139,7 +139,7 @@ pub fn print_alias_load_report(report: &AliasLoadReport) {
     if !report.failed.is_empty() {
         summary.push_str(&format!(", {} failed", report.failed.len()));
     }
-    println!("{summary}");
+    outln!("{summary}");
     print_alias_load_failures(report);
 }
 
@@ -282,7 +282,7 @@ impl ReplState<'_> {
             return Ok(());
         }
         self.refresh_alias_cache();
-        println!("alias {} {}\n", name, expansion);
+        outln!("alias {} {}\n", name, expansion);
         Ok(())
     }
 
@@ -291,7 +291,7 @@ impl ReplState<'_> {
         match self.aliases.remove(name) {
             Ok(true) => {
                 self.refresh_alias_cache();
-                println!("unalias {}\n", name);
+                outln!("unalias {}\n", name);
             }
             Ok(false) => error!("no such alias: {}", name),
             Err(e) => error!("failed to save aliases: {}", e),
@@ -301,13 +301,13 @@ impl ReplState<'_> {
 
     fn cmd_aliases(&mut self) -> Result<()> {
         if self.aliases.map.is_empty() {
-            println!("no aliases defined\n");
+            outln!("no aliases defined\n");
             return Ok(());
         }
         for (name, expansion) in &self.aliases.map {
-            println!("alias {} {}", name, expansion);
+            outln!("alias {} {}", name, expansion);
         }
-        println!();
+        outln!();
         Ok(())
     }
 }

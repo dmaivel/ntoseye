@@ -49,7 +49,7 @@ macro_rules! require_arg {
         match $invocation.arg($idx) {
             Some(a) => a,
             None => {
-                println!("{}\n", command_help($cmd));
+                outln!("{}\n", command_help($cmd));
                 return Ok(());
             }
         }
@@ -114,7 +114,7 @@ pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
             }
         ));
     }
-    println!("{} {summary}", ui::muted("symbols:"));
+    outln!("{} {summary}", ui::muted("symbols:"));
     const DISPLAY_LIMIT: usize = 8;
     for diagnostic in report.diagnostics.iter().take(DISPLAY_LIMIT) {
         let location = diagnostic
@@ -138,7 +138,7 @@ pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
 pub fn print_backend_capabilities(capabilities: &[BackendCapability]) {
     const COLUMNS: usize = 4;
 
-    println!("{}", "capabilities".bold());
+    outln!("{}", "capabilities".bold());
 
     let mut builder = Builder::default();
     for chunk in capabilities.chunks(COLUMNS) {
@@ -168,9 +168,9 @@ pub fn print_backend_capabilities(capabilities: &[BackendCapability]) {
         .with(tabled::settings::Style::empty())
         .with(Padding::zero());
     for line in table.to_string().lines() {
-        println!("  {line}");
+        outln!("  {line}");
     }
-    println!();
+    outln!();
 }
 
 pub fn supports_capability(
@@ -190,7 +190,7 @@ pub fn print_backend_capability_warning(capabilities: &[BackendCapability]) {
     diagnostics::print_warning(
         "selected backend has reduced capabilities; run `capabilities` for details",
     );
-    println!();
+    outln!();
 }
 
 pub fn print_plain_table(builder: Builder) {
@@ -198,7 +198,7 @@ pub fn print_plain_table(builder: Builder) {
     table
         .with(tabled::settings::Style::empty())
         .with(Padding::zero());
-    println!("{table}\n");
+    outln!("{table}\n");
 }
 
 pub fn print_padded_table(builder: Builder) {
@@ -206,7 +206,7 @@ pub fn print_padded_table(builder: Builder) {
     table
         .with(tabled::settings::Style::empty())
         .with(Padding::new(0, 2, 0, 0));
-    println!("{table}\n");
+    outln!("{table}\n");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,7 +323,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         loaded_parts.push(part);
     }
     if !loaded_parts.is_empty() {
-        println!(
+        outln!(
             "{}",
             ui::muted(&format!("loaded: {}", loaded_parts.join(", ")))
         );
@@ -337,37 +337,37 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // fail individually.
     let reload_module_list_pending = match debugger.startup_message_data() {
         Ok(message_data) => {
-            println!("\n{}", ui::label("target"));
-            println!(
+            outln!("\n{}", ui::label("target"));
+            outln!(
                 "  {} Windows {}",
                 ui::muted("kernel"),
                 message_data.build_number.0
             );
-            println!(
+            outln!(
                 "  {} {}",
                 ui::muted("base  "),
                 ui::addr(message_data.base_address.0)
             );
-            println!(
+            outln!(
                 "  {} {}",
                 ui::muted("psmods"),
                 ui::addr_opt(message_data.loaded_module_list)
             );
-            println!();
+            outln!();
             message_data.loaded_module_list.is_zero()
         }
         Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => {
-            println!("\n{}", ui::label("target"));
+            outln!("\n{}", ui::label("target"));
             if let Some(base) = debugger.kernel_base() {
-                println!("  {} {}", ui::muted("base  "), ui::addr(base.0));
+                outln!("  {} {}", ui::muted("base  "), ui::addr(base.0));
             } else {
-                println!(
+                outln!(
                     "  {} {}",
                     ui::muted("kernel"),
                     ui::muted("unknown (ntoskrnl not found in dump)")
                 );
             }
-            println!();
+            outln!();
             false
         }
         Err(e) => return Err(e),
@@ -535,7 +535,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
             } else {
                 format!("{backend_label}:{}>", state.ctx.current_thread)
             };
-            println!("{prompt}");
+            outln!("{prompt}");
             std::io::stdout().flush()?;
 
             buffer.clear();

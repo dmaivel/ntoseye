@@ -563,10 +563,10 @@ pub fn annotate_near_symbol(debugger: &Target, addr: VirtAddr) -> Option<String>
 
 pub fn print_pool_page_listing(blocks: &[PoolHeader], target_idx: Option<usize>, target: VirtAddr) {
     if blocks.is_empty() {
-        println!("  (no plausible pool block found for this address)");
+        outln!("  (no plausible pool block found for this address)");
         return;
     }
-    println!(
+    outln!(
         "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
         "header",
         "size",
@@ -580,7 +580,7 @@ pub fn print_pool_page_listing(blocks: &[PoolHeader], target_idx: Option<usize>,
         } else {
             " ".to_string()
         };
-        println!(
+        outln!(
             "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} '{}'",
             marker,
             ui::addr(h.header.0),
@@ -594,7 +594,7 @@ pub fn print_pool_page_listing(blocks: &[PoolHeader], target_idx: Option<usize>,
     if let Some(idx) = target_idx {
         let h = &blocks[idx];
         let offset = target.0.saturating_sub(h.body.0);
-        println!(
+        outln!(
             "  target offset : 0x{:x} into body (block @ {}, body @ {})",
             offset,
             ui::addr(h.header.0),
@@ -606,30 +606,30 @@ pub fn print_pool_page_listing(blocks: &[PoolHeader], target_idx: Option<usize>,
 pub fn print_big_pool(target: VirtAddr, entry: &BigPoolEntry) {
     let offset = target.0 - entry.va.0;
     let end_addr = entry.va + entry.size;
-    println!("big pool @ {}", ui::addr(entry.va.0));
-    println!("  target        : {}", ui::addr(target.0));
-    println!(
+    outln!("big pool @ {}", ui::addr(entry.va.0));
+    outln!("  target        : {}", ui::addr(target.0));
+    outln!(
         "  range         : {} - {} ({} bytes)",
         ui::addr(entry.va.0),
         ui::addr(end_addr.0),
         entry.size
     );
-    println!("  offset        : 0x{:x} / 0x{:x}", offset, entry.size);
-    println!(
+    outln!("  offset        : 0x{:x} / 0x{:x}", offset, entry.size);
+    outln!(
         "  tag           : '{}' (0x{:08x})",
         tag_string(entry.tag),
         entry.tag
     );
-    println!(
+    outln!(
         "  table entry   : {}[{}]",
         ui::addr(entry.entry.0),
         entry.index
     );
-    println!(
+    outln!(
         "  nonpaged      : {}",
         if entry.nonpaged { "yes" } else { "no" }
     );
-    println!("  pattern       : 0x{:x}", entry.pattern);
-    println!("  pool flags    : 0x{:x}", entry.pool_flags);
-    println!("  slush size    : 0x{:x}", entry.slush_size);
+    outln!("  pattern       : 0x{:x}", entry.pattern);
+    outln!("  pool flags    : 0x{:x}", entry.pool_flags);
+    outln!("  slush size    : 0x{:x}", entry.slush_size);
 }

@@ -61,7 +61,7 @@ pub fn print_script_load_report(report: &LoadReport) {
     if !report.failed.is_empty() {
         summary.push_str(&format!(", {} failed", report.failed.len()));
     }
-    println!("{summary}");
+    outln!("{summary}");
     print_script_load_failures(report);
 }
 

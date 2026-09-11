@@ -2,6 +2,8 @@ use std::fmt::Display;
 
 use owo_colors::OwoColorize;
 
+use crate::output;
+
 pub fn print_error(message: impl Display) {
     print_labeled_stderr(
         "error:",
@@ -36,11 +38,16 @@ pub fn eprint_note(message: impl Display) {
 
 fn print_labeled_stdout(label: &str, styled_label: &str, message: &str) {
     for line in labeled_lines(label, styled_label, message) {
-        println!("{line}");
+        outln!("{line}");
     }
 }
 
 fn print_labeled_stderr(label: &str, styled_label: &str, message: &str) {
+    // A capturing host wants everything the user would have seen, errors
+    // included; stderr is only the right channel for an actual terminal.
+    if output::capturing() {
+        return print_labeled_stdout(label, styled_label, message);
+    }
     for line in labeled_lines(label, styled_label, message) {
         eprintln!("{line}");
     }

@@ -57,7 +57,7 @@ impl ReplState<'_> {
             NumberRadix::Decimal => "decimal",
             NumberRadix::Hexadecimal => "hexadecimal",
         };
-        println!("radix {} ({name})\n", self.radix.value());
+        outln!("radix {} ({name})\n", self.radix.value());
         Ok(())
     }
 
@@ -71,7 +71,7 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        println!(
+        outln!(
             "unknown command: '{}' (try pressing tab to see available commands)\n",
             invocation.name
         );

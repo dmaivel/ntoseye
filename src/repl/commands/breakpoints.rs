@@ -159,7 +159,7 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
 impl ReplState<'_> {
     fn breakpoint_id_arg(invocation: &CommandInvocation<'_>, command: &str) -> Option<u32> {
         let Some(id_str) = invocation.arg(0) else {
-            println!("{}\n", command_help(command));
+            outln!("{}\n", command_help(command));
             return None;
         };
 
@@ -292,7 +292,7 @@ impl ReplState<'_> {
         match result {
             Ok(id) => {
                 self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                println!("{label} {}\n", ui::bp_id(id));
+                outln!("{label} {}\n", ui::bp_id(id));
                 Some(id)
             }
             Err(error) => {
@@ -329,20 +329,20 @@ impl ReplState<'_> {
                             .find(|bp| bp.id == ids[0])
                             .is_some_and(|bp| bp.deferred());
                         if deferred {
-                            println!(
+                            outln!(
                                 "source breakpoint {} deferred until '{}' resolves\n",
                                 ui::bp_id(ids[0]),
                                 spec
                             );
                         } else {
-                            println!(
+                            outln!(
                                 "source breakpoint {} set for '{}'\n",
                                 ui::bp_id(ids[0]),
                                 spec
                             );
                         }
                     } else {
-                        println!("{} source breakpoints set for '{}'\n", ids.len(), spec);
+                        outln!("{} source breakpoints set for '{}'\n", ids.len(), spec);
                     }
                 }
                 Err(error) => error!("{error}"),
@@ -364,7 +364,7 @@ impl ReplState<'_> {
                 .into_iter()
                 .find(|bp| bp.id == id);
             if bp.is_some_and(|bp| bp.deferred()) {
-                println!(
+                outln!(
                     "  {} is deferred until '{}' resolves\n",
                     ui::bp_id(id),
                     spec
@@ -426,14 +426,14 @@ impl ReplState<'_> {
         }
         self.caches.refresh_breakpoints(&self.ctx.breakpoints);
         if created == 0 {
-            println!("no symbols match '{}'\n", args.spec);
+            outln!("no symbols match '{}'\n", args.spec);
         } else {
             let suffix = if names.len() >= BM_LIMIT {
                 "; results limited to 256, refine the pattern"
             } else {
                 ""
             };
-            println!("{created} symbolic breakpoint(s) set{suffix}\n");
+            outln!("{created} symbolic breakpoint(s) set{suffix}\n");
         }
         Ok(())
     }
@@ -490,7 +490,7 @@ impl ReplState<'_> {
                     .as_ref()
                     .map(|condition| format!(" if {condition}"))
                     .unwrap_or_default();
-                println!(
+                outln!(
                     "hardware breakpoint {} ({} {}b) set at {}{}{}\n",
                     ui::bp_id(id),
                     access.label(),
@@ -539,7 +539,7 @@ impl ReplState<'_> {
         ) {
             Ok(id) => {
                 self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                println!(
+                outln!(
                     "breakpoint {} set at {}{}{}\n",
                     ui::bp_id(id),
                     ui::addr(address.0),
@@ -564,7 +564,7 @@ impl ReplState<'_> {
     fn cmd_bl(&mut self) -> Result<()> {
         let bps = self.ctx.breakpoints.list();
         if bps.is_empty() {
-            println!("no breakpoints set\n");
+            outln!("no breakpoints set\n");
         } else {
             let mut builder = Builder::default();
             builder.push_record(vec![
@@ -621,7 +621,7 @@ impl ReplState<'_> {
             table
                 .with(tabled::settings::Style::empty())
                 .with(Padding::new(0, 2, 0, 0));
-            println!("{table}\n");
+            outln!("{table}\n");
         }
 
         Ok(())
@@ -639,7 +639,7 @@ impl ReplState<'_> {
         {
             Ok(()) => {
                 self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                println!("breakpoint {} cleared\n", ui::bp_id(id));
+                outln!("breakpoint {} cleared\n", ui::bp_id(id));
             }
             Err(e) => {
                 error!("{}", e);
@@ -661,7 +661,7 @@ impl ReplState<'_> {
         {
             Ok(()) => {
                 self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                println!("breakpoint {} disabled\n", ui::bp_id(id));
+                outln!("breakpoint {} disabled\n", ui::bp_id(id));
             }
             Err(e) => {
                 error!("{}", e);
@@ -683,7 +683,7 @@ impl ReplState<'_> {
         {
             Ok(()) => {
                 self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                println!("breakpoint {} enabled\n", ui::bp_id(id));
+                outln!("breakpoint {} enabled\n", ui::bp_id(id));
             }
             Err(e) => {
                 error!("{}", e);
@@ -698,7 +698,7 @@ impl ReplState<'_> {
         };
         let text = invocation.join_args(1);
         if text.is_empty() {
-            println!("{}\n", command_help("bpc"));
+            outln!("{}\n", command_help("bpc"));
             return Ok(());
         }
         let (condition, expr) = if text.eq_ignore_ascii_case("clear") {
@@ -715,7 +715,7 @@ impl ReplState<'_> {
             (Some(text), Some(expr))
         };
         match self.ctx.breakpoints.set_condition(id, condition, expr) {
-            Ok(()) => println!("breakpoint {} condition updated\n", ui::bp_id(id)),
+            Ok(()) => outln!("breakpoint {} condition updated\n", ui::bp_id(id)),
             Err(error) => error!("{error}"),
         }
         Ok(())
@@ -727,12 +727,12 @@ impl ReplState<'_> {
         };
         let text = invocation.join_args(1);
         if text.is_empty() {
-            println!("{}\n", command_help("bpa"));
+            outln!("{}\n", command_help("bpa"));
             return Ok(());
         }
         let action = (!text.eq_ignore_ascii_case("clear")).then_some(text);
         match self.ctx.breakpoints.set_action(id, action) {
-            Ok(()) => println!("breakpoint {} action updated\n", ui::bp_id(id)),
+            Ok(()) => outln!("breakpoint {} action updated\n", ui::bp_id(id)),
             Err(error) => error!("{error}"),
         }
         Ok(())
@@ -743,7 +743,7 @@ impl ReplState<'_> {
             return Ok(());
         };
         let Some(text) = invocation.arg(1) else {
-            println!("{}\n", command_help("bpp"));
+            outln!("{}\n", command_help("bpp"));
             return Ok(());
         };
         let passes = match self.parse_radix_u64(text, "pass count") {
@@ -754,7 +754,7 @@ impl ReplState<'_> {
             }
         };
         match self.ctx.breakpoints.set_pass_count(id, passes) {
-            Ok(()) => println!("breakpoint {} pass count reset\n", ui::bp_id(id)),
+            Ok(()) => outln!("breakpoint {} pass count reset\n", ui::bp_id(id)),
             Err(error) => error!("{error}"),
         }
         Ok(())

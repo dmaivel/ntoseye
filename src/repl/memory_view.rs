@@ -215,7 +215,7 @@ impl MemoryDisplayMode {
 
 pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplayMode) {
     for (i, chunk) in data.chunks(mode.bytes_per_row).enumerate() {
-        print!(
+        out!(
             "{}  ",
             ui::addr((start_address + ((i * mode.bytes_per_row) as u64)).0)
         );
@@ -226,17 +226,17 @@ pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplay
         for item in chunk.chunks(mode.item_size) {
             match mode.item_format {
                 ItemFormat::Bytes => {
-                    print!("{:02x} ", item[0]);
+                    out!("{:02x} ", item[0]);
                 }
                 ItemFormat::Dwords => {
                     if item.len() == 4 {
                         let val = u32::from_le_bytes([item[0], item[1], item[2], item[3]]);
-                        print!("{:08x} ", val);
+                        out!("{:08x} ", val);
                     } else {
                         for byte in item {
-                            print!("{:02x}", byte);
+                            out!("{:02x}", byte);
                         }
-                        print!("   ");
+                        out!("   ");
                     }
                 }
                 ItemFormat::Qwords => {
@@ -244,12 +244,12 @@ pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplay
                         let val = u64::from_le_bytes([
                             item[0], item[1], item[2], item[3], item[4], item[5], item[6], item[7],
                         ]);
-                        print!("{:016x} ", val);
+                        out!("{:016x} ", val);
                     } else {
                         for byte in item {
-                            print!("{:02x}", byte);
+                            out!("{:02x}", byte);
                         }
-                        print!("   ");
+                        out!("   ");
                     }
                 }
             }
@@ -259,27 +259,27 @@ pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplay
         // pad remaining items if needed
         for _ in printed..items_per_row {
             match mode.item_format {
-                ItemFormat::Bytes => print!("   "),
-                ItemFormat::Dwords => print!("         "),
-                ItemFormat::Qwords => print!("                 "),
+                ItemFormat::Bytes => out!("   "),
+                ItemFormat::Dwords => out!("         "),
+                ItemFormat::Qwords => out!("                 "),
             }
         }
 
         if mode.show_ascii {
-            print!(" ");
+            out!(" ");
             for byte in chunk {
                 if byte.is_ascii_graphic() || *byte == b' ' {
-                    print!("{}", *byte as char);
+                    out!("{}", *byte as char);
                 } else {
-                    print!("{}", ".".bright_black());
+                    out!("{}", ".".bright_black());
                 }
             }
         }
 
-        println!();
+        outln!();
     }
 
-    println!();
+    outln!();
 }
 
 #[cfg(test)]

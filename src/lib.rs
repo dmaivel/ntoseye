@@ -21,6 +21,9 @@ pub fn resolve_target(backend: &str, connect: Option<&str>) -> Option<String> {
     }
 }
 
+#[macro_use]
+pub mod output;
+
 pub mod backend;
 pub mod bugchecks;
 #[cfg(feature = "cli")]

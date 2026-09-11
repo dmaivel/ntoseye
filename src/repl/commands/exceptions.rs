@@ -126,13 +126,13 @@ impl ReplState<'_> {
                     index += 1;
                 }
                 _ => {
-                    println!("{}\n", command_help(invocation.name));
+                    outln!("{}\n", command_help(invocation.name));
                     return Ok(());
                 }
             }
         }
         let Some(value) = code_arg else {
-            println!("{}\n", command_help(invocation.name));
+            outln!("{}\n", command_help(invocation.name));
             return Ok(());
         };
         let code = match parse_exception_code(value) {
@@ -160,7 +160,7 @@ impl ReplState<'_> {
         let final_label = final_action
             .map(|action| format!(", final {}", action.label()))
             .unwrap_or_default();
-        println!(
+        outln!(
             "{} {code:#010x}{alias}: {}{final_label}\n",
             mode.command(),
             mode.label()
@@ -187,10 +187,10 @@ impl ReplState<'_> {
     fn cmd_sx(&mut self) -> Result<()> {
         let entries: Vec<_> = self.exception_policies.entries().collect();
         if entries.is_empty() {
-            println!("No exception policies configured (ordinary exceptions break by default).\n");
+            outln!("No exception policies configured (ordinary exceptions break by default).\n");
             return Ok(());
         }
-        println!("Exception policies:");
+        outln!("Exception policies:");
         for (code, policy) in entries {
             let alias = exception_alias(code)
                 .map(|alias| format!(" {alias:<4}"))
@@ -204,53 +204,53 @@ impl ReplState<'_> {
                 .as_deref()
                 .map(|command| format!("  -c {command:?}"))
                 .unwrap_or_default();
-            println!(
+            outln!(
                 "  {code:#010x}{alias}  {:<13} ({}){final_action}{command}",
                 policy.mode.label(),
                 policy.mode.command()
             );
         }
-        println!();
+        outln!();
         Ok(())
     }
 
     fn cmd_sxr(&mut self) -> Result<()> {
         self.exception_policies.reset();
-        println!("Exception policies reset; ordinary exceptions break by default.\n");
+        outln!("Exception policies reset; ordinary exceptions break by default.\n");
         Ok(())
     }
 
     fn cmd_lastevent(&mut self) -> Result<()> {
         let Some(last) = &self.ctx.last_event else {
-            println!("No target event has been observed.\n");
+            outln!("No target event has been observed.\n");
             return Ok(());
         };
         let stop = &last.stop;
-        println!("Last event:");
+        outln!("Last event:");
         match stop.exception_code {
             Some(code) => {
                 let alias = exception_alias(code)
                     .map(|alias| format!(" ({alias})"))
                     .unwrap_or_default();
-                println!("  code:        {code:#010x}{alias}");
+                outln!("  code:        {code:#010x}{alias}");
             }
-            None => println!("  code:        unavailable"),
+            None => outln!("  code:        unavailable"),
         }
         let chance = match stop.first_chance {
             Some(true) => "first chance",
             Some(false) => "second chance",
             None => "unavailable",
         };
-        println!("  chance:      {chance}");
+        outln!("  chance:      {chance}");
         match stop.exception_address.or(stop.program_counter) {
-            Some(address) => println!("  address:     {}", ui::addr(address)),
-            None => println!("  address:     unavailable"),
+            Some(address) => outln!("  address:     {}", ui::addr(address)),
+            None => outln!("  address:     unavailable"),
         }
         let disposition = last
             .disposition
             .map(ContinueDisposition::label)
             .unwrap_or("not yet continued");
-        println!("  disposition: {disposition}\n");
+        outln!("  disposition: {disposition}\n");
         Ok(())
     }
 }

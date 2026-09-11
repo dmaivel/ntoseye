@@ -345,8 +345,8 @@ fn skip_ws(s: &str, pos: usize) -> usize {
 pub fn report_command_parse_error(line: &str, err: CommandParseError) {
     let start = err.span.start.min(line.len());
     let end = err.span.end.min(line.len()).max(start + 1);
-    println!("{line}");
-    println!(
+    outln!("{line}");
+    outln!(
         "{}{} {}",
         " ".repeat(start),
         "^".repeat(end - start),

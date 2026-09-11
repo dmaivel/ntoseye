@@ -127,7 +127,7 @@ fn thread_matches_filter(thread: &ThreadInfo, filter: &str) -> bool {
 }
 
 fn print_thread_detail(thread: &ThreadInfo) {
-    println!(
+    outln!(
         "{} {}  TID {}  PID {}  process {}",
         ui::label("thread:"),
         ui::addr(thread.ethread.0),
@@ -143,7 +143,7 @@ fn print_thread_detail(thread: &ThreadInfo) {
             .unwrap_or_else(|| "-".to_string()),
         thread.process_name.as_deref().unwrap_or("unknown")
     );
-    println!(
+    outln!(
         "  state={} wait={} kthread={} eprocess={}",
         thread_state_label(thread),
         wait_reason_label(thread),
@@ -153,7 +153,7 @@ fn print_thread_detail(thread: &ThreadInfo) {
             .map(|addr| ui::addr(addr.0))
             .unwrap_or_else(|| "-".to_string())
     );
-    println!(
+    outln!(
         "  start={} win32={} teb={} kernel_stack={}",
         thread
             .start_address
@@ -172,7 +172,7 @@ fn print_thread_detail(thread: &ThreadInfo) {
             .map(|addr| ui::addr(addr.0))
             .unwrap_or_else(|| "-".to_string())
     );
-    println!(
+    outln!(
         "  priority={} base_priority={} wait_irql={} stack_resident={}",
         thread
             .priority
@@ -191,7 +191,7 @@ fn print_thread_detail(thread: &ThreadInfo) {
             .map(|resident| if resident { "yes" } else { "no" })
             .unwrap_or("-")
     );
-    println!(
+    outln!(
         "  stack_base={} stack_limit={} trap_frame={}",
         thread
             .stack_base
@@ -208,11 +208,11 @@ fn print_thread_detail(thread: &ThreadInfo) {
     );
     if let Some(irps) = &thread.pending_irps {
         if irps.is_empty() {
-            println!("  irp_list=empty");
+            outln!("  irp_list=empty");
         } else {
-            println!("  irp_list={} pending", irps.len());
+            outln!("  irp_list={} pending", irps.len());
             for (index, irp) in irps.iter().enumerate() {
-                println!("    [{}] {}", index, ui::addr(irp.0));
+                outln!("    [{}] {}", index, ui::addr(irp.0));
             }
         }
     }
@@ -342,7 +342,7 @@ impl ReplState<'_> {
         }
 
         if threads.is_empty() {
-            println!("{}\n", "no matching threads".bright_black());
+            outln!("{}\n", "no matching threads".bright_black());
             return Ok(());
         }
 
@@ -460,7 +460,7 @@ impl ReplState<'_> {
 
         let Some((vcpu, _)) = active.get(&thread.ethread.0) else {
             print_thread_detail(thread);
-            println!(
+            outln!(
                 "{}",
                 "thread is parked: stack inspection is available, registers are not".bright_black()
             );
@@ -481,7 +481,7 @@ impl ReplState<'_> {
                 }
                 None => {}
             }
-            println!();
+            outln!();
             return Ok(());
         };
 
@@ -497,7 +497,7 @@ impl ReplState<'_> {
             .target
             .set_current_windows_thread_context((*thread).clone());
         self.caches.refresh_symbol_context(&self.ctx.target);
-        println!(
+        outln!(
             "switched to {} running ETHREAD {}\n",
             self.ctx.current_thread,
             ui::addr(thread.ethread.0)
@@ -535,7 +535,7 @@ impl ReplState<'_> {
             Some(other) => error!("unknown thread action '{}': expected k or r", other),
             None => {}
         }
-        println!();
+        outln!();
         Ok(())
     }
 
@@ -592,9 +592,9 @@ impl ReplState<'_> {
             }
 
             if shown == 0 {
-                println!("{}\n", "no matching memory regions".bright_black());
+                outln!("{}\n", "no matching memory regions".bright_black());
             } else {
-                println!(
+                outln!(
                     "{} {} ({})",
                     ui::label("vmmap:"),
                     process.name,
@@ -647,9 +647,9 @@ impl ReplState<'_> {
         }
 
         if shown == 0 {
-            println!("no matching kernel regions\n");
+            outln!("no matching kernel regions\n");
         } else {
-            println!("{} kernel", ui::label("vmmap:"));
+            outln!("{} kernel", ui::label("vmmap:"));
             print_plain_table(builder);
         }
         Ok(())
@@ -695,7 +695,7 @@ impl ReplState<'_> {
                 }
 
                 if count == 0 {
-                    println!("{}\n", "no matching processes".bright_black());
+                    outln!("{}\n", "no matching processes".bright_black());
                 } else {
                     print_plain_table(builder);
                 }
@@ -752,7 +752,7 @@ impl ReplState<'_> {
                 }
 
                 if count == 0 {
-                    println!("{}\n", "no matching drivers".bright_black());
+                    outln!("{}\n", "no matching drivers".bright_black());
                 } else {
                     print_plain_table(builder);
                 }
@@ -824,7 +824,7 @@ impl ReplState<'_> {
                 }
 
                 if count == 0 {
-                    println!("{}\n", "no matching modules".bright_black());
+                    outln!("{}\n", "no matching modules".bright_black());
                 } else {
                     print_plain_table(builder);
                 }
@@ -846,9 +846,9 @@ impl ReplState<'_> {
                     symbol_report,
                 }) => {
                     self.caches.refresh_symbol_context(&self.ctx.target);
-                    println!("attached to {} (PID {})", name, pid);
+                    outln!("attached to {} (PID {})", name, pid);
                     print_module_symbol_report(&symbol_report);
-                    println!();
+                    outln!();
                 }
                 Err(e) => {
                     error!("failed to attach: {}", e);
@@ -868,7 +868,7 @@ impl ReplState<'_> {
         } else {
             self.ctx.target.detach();
             self.caches.refresh_symbol_context(&self.ctx.target);
-            println!("detached, now in kernel context\n");
+            outln!("detached, now in kernel context\n");
         }
 
         Ok(())
@@ -900,7 +900,7 @@ impl ReplState<'_> {
             &self.ctx.current_thread,
         );
         self.caches.refresh_symbol_context(&self.ctx.target);
-        println!("switched to vCPU {}\n", self.ctx.current_thread);
+        outln!("switched to vCPU {}\n", self.ctx.current_thread);
 
         Ok(())
     }

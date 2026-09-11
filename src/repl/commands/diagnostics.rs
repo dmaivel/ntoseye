@@ -99,36 +99,36 @@ fn diagnostic_opt_string(value: &DiagnosticValue<Option<String>>) -> String {
 }
 
 fn print_resource(detail: &ResourceDetail) {
-    println!("ERESOURCE {}", ui::addr(detail.address.0));
-    println!(
+    outln!("ERESOURCE {}", ui::addr(detail.address.0));
+    outln!(
         "  active count       : {}",
         diagnostic_cell(&detail.active_count)
     );
-    println!("  flags              : {}", diagnostic_hex(&detail.flags));
-    println!(
+    outln!("  flags              : {}", diagnostic_hex(&detail.flags));
+    outln!(
         "  contention count   : {}",
         diagnostic_cell(&detail.contention_count)
     );
-    println!(
+    outln!(
         "  shared waiters     : {}",
         diagnostic_cell(&detail.shared_waiters)
     );
-    println!(
+    outln!(
         "  exclusive waiters  : {}",
         diagnostic_cell(&detail.exclusive_waiters)
     );
     match &detail.owners {
         DiagnosticValue::Available(owners) if owners.is_empty() => {
-            println!("  owners             : none")
+            outln!("  owners             : none")
         }
         DiagnosticValue::Available(owners) => {
-            println!("  owners:");
+            outln!("  owners:");
             for owner in owners {
-                println!("    {} count {}", ui::addr(owner.thread.0), owner.count);
+                outln!("    {} count {}", ui::addr(owner.thread.0), owner.count);
             }
         }
         DiagnosticValue::Unavailable(error) => {
-            println!("  owners             : <unavailable: {error}>")
+            outln!("  owners             : <unavailable: {error}>")
         }
     }
 }
@@ -153,19 +153,19 @@ impl ReplState<'_> {
             };
             match self.ctx.target.inspect_handle(handle) {
                 Ok(detail) => {
-                    println!(
+                    outln!(
                         "handle {:#x}  entry {}",
                         detail.handle,
                         ui::addr(detail.entry.0)
                     );
-                    println!("  object      : {}", diagnostic_addr(&detail.object));
-                    println!(
+                    outln!("  object      : {}", diagnostic_addr(&detail.object));
+                    outln!(
                         "  type        : {}",
                         diagnostic_opt_string(&detail.type_name)
                     );
-                    println!("  name        : {}", diagnostic_opt_string(&detail.name));
-                    println!("  access      : {}", diagnostic_hex(&detail.granted_access));
-                    println!("  attributes  : {}", diagnostic_hex(&detail.attributes));
+                    outln!("  name        : {}", diagnostic_opt_string(&detail.name));
+                    outln!("  access      : {}", diagnostic_hex(&detail.granted_access));
+                    outln!("  attributes  : {}", diagnostic_hex(&detail.attributes));
                 }
                 Err(error) => error!("{error}"),
             }
@@ -174,7 +174,7 @@ impl ReplState<'_> {
 
         match self.ctx.target.enumerate_handles(256) {
             Ok(summary) => {
-                println!(
+                outln!(
                     "handles: {} ({})  table {} level {}  scanned {}/{} slots, {} skipped{}",
                     summary.process.name,
                     summary.process.pid,
@@ -206,59 +206,61 @@ impl ReplState<'_> {
     fn cmd_token(&mut self) -> Result<()> {
         match self.ctx.target.inspect_process_token() {
             Ok(token) => {
-                println!(
+                outln!(
                     "token: {} ({})  {}",
                     token.process.name,
                     token.process.pid,
                     ui::addr(token.token.0)
                 );
-                println!("  token id           : {}", diagnostic_hex(&token.token_id));
-                println!(
+                outln!("  token id           : {}", diagnostic_hex(&token.token_id));
+                outln!(
                     "  authentication id  : {}",
                     diagnostic_hex(&token.authentication_id)
                 );
-                println!(
+                outln!(
                     "  type               : {}",
                     diagnostic_cell(&token.token_type)
                 );
-                println!(
+                outln!(
                     "  impersonation      : {}",
                     diagnostic_cell(&token.impersonation_level)
                 );
-                println!("  flags              : {}", diagnostic_hex(&token.flags));
+                outln!("  flags              : {}", diagnostic_hex(&token.flags));
                 match &token.user {
-                    DiagnosticValue::Available(Some(user)) => println!(
+                    DiagnosticValue::Available(Some(user)) => outln!(
                         "  user               : {} attributes {:#x}",
-                        user.sid, user.attributes
+                        user.sid,
+                        user.attributes
                     ),
-                    DiagnosticValue::Available(None) => println!("  user               : none"),
+                    DiagnosticValue::Available(None) => outln!("  user               : none"),
                     DiagnosticValue::Unavailable(error) => {
-                        println!("  user               : <unavailable: {error}>")
+                        outln!("  user               : <unavailable: {error}>")
                     }
                 }
                 match &token.groups {
                     DiagnosticValue::Available(groups) => {
-                        println!("  groups ({})", groups.len());
+                        outln!("  groups ({})", groups.len());
                         for group in groups {
-                            println!("    {} attributes {:#x}", group.sid, group.attributes);
+                            outln!("    {} attributes {:#x}", group.sid, group.attributes);
                         }
                     }
                     DiagnosticValue::Unavailable(error) => {
-                        println!("  groups             : <unavailable: {error}>")
+                        outln!("  groups             : <unavailable: {error}>")
                     }
                 }
                 match &token.privileges {
                     DiagnosticValue::Available(privileges) => {
-                        println!("  privileges ({})", privileges.len());
+                        outln!("  privileges ({})", privileges.len());
                         for privilege in privileges {
-                            println!(
+                            outln!(
                                 "    LUID {:#x} attributes {:#x}",
-                                privilege.luid, privilege.attributes
+                                privilege.luid,
+                                privilege.attributes
                             );
                         }
                     }
                     DiagnosticValue::Unavailable(error) => {
-                        println!("  privileges         : <unavailable: {error}>")
+                        outln!("  privileges         : <unavailable: {error}>")
                     }
                 }
             }
@@ -278,72 +280,72 @@ impl ReplState<'_> {
         };
         match self.ctx.target.inspect_file_object(address) {
             Ok(file) => {
-                println!("FILE_OBJECT {}", ui::addr(file.address.0));
-                println!(
+                outln!("FILE_OBJECT {}", ui::addr(file.address.0));
+                outln!(
                     "  type / size        : {} / {}",
                     diagnostic_cell(&file.file_type),
                     diagnostic_cell(&file.size)
                 );
-                println!(
+                outln!(
                     "  device             : {}",
                     diagnostic_addr(&file.device_object)
                 );
-                println!(
+                outln!(
                     "  device type        : {}",
                     diagnostic_hex(&file.device_type)
                 );
-                println!(
+                outln!(
                     "  device name        : {}",
                     diagnostic_opt_string(&file.device_name)
                 );
-                println!(
+                outln!(
                     "  file name          : {}",
                     diagnostic_cell(&file.file_name)
                 );
-                println!(
+                outln!(
                     "  related file       : {}",
                     diagnostic_addr(&file.related_file_object)
                 );
-                println!("  flags              : {}", diagnostic_hex(&file.flags));
-                println!(
+                outln!("  flags              : {}", diagnostic_hex(&file.flags));
+                outln!(
                     "  current offset     : {}",
                     diagnostic_cell(&file.current_byte_offset)
                 );
-                println!(
+                outln!(
                     "  fs context         : {}",
                     diagnostic_addr(&file.fs_context)
                 );
-                println!(
+                outln!(
                     "  fs context 2       : {}",
                     diagnostic_addr(&file.fs_context2)
                 );
-                println!(
+                outln!(
                     "  section object ptr : {}",
                     diagnostic_addr(&file.section_object_pointer)
                 );
-                println!(
+                outln!(
                     "  private cache map  : {}",
                     diagnostic_addr(&file.private_cache_map)
                 );
-                println!(
+                outln!(
                     "  final status       : {}",
                     diagnostic_status(&file.final_status)
                 );
-                println!(
+                outln!(
                     "  lock operation     : {}",
                     diagnostic_cell(&file.lock_operation)
                 );
-                println!(
+                outln!(
                     "  delete pending     : {}",
                     diagnostic_cell(&file.delete_pending)
                 );
-                println!(
+                outln!(
                     "  access R/W/D       : {}/{}/{}",
                     diagnostic_cell(&file.read_access),
                     diagnostic_cell(&file.write_access),
                     diagnostic_cell(&file.delete_access)
                 );
-                println!(
+                outln!(
                     "  shared R/W/D       : {}/{}/{}",
                     diagnostic_cell(&file.shared_read),
                     diagnostic_cell(&file.shared_write),
@@ -373,7 +375,7 @@ impl ReplState<'_> {
 
         match self.ctx.target.enumerate_resources(256) {
             Ok(summary) => {
-                println!(
+                outln!(
                     "executive resources: head {} entries {} termination {}",
                     ui::addr(summary.head.0),
                     summary.resources.len(),
@@ -409,28 +411,28 @@ impl ReplState<'_> {
         };
         match self.ctx.target.memory_use_summary(limit) {
             Ok(summary) => {
-                println!("system memory (page counters are pages; nonpaged pool is bytes)");
-                println!(
+                outln!("system memory (page counters are pages; nonpaged pool is bytes)");
+                outln!(
                     "  physical pages     : {}",
                     diagnostic_metric_cell(&summary.physical_pages)
                 );
-                println!(
+                outln!(
                     "  available pages    : {}",
                     diagnostic_metric_cell(&summary.available_pages)
                 );
-                println!(
+                outln!(
                     "  committed pages    : {}",
                     diagnostic_metric_cell(&summary.committed_pages)
                 );
-                println!(
+                outln!(
                     "  commit limit pages : {}",
                     diagnostic_metric_cell(&summary.commit_limit_pages)
                 );
-                println!(
+                outln!(
                     "  paged pool pages   : {}",
                     diagnostic_metric_cell(&summary.paged_pool_pages)
                 );
-                println!(
+                outln!(
                     "  nonpaged pool bytes: {}",
                     diagnostic_metric_cell(&summary.nonpaged_pool_bytes)
                 );
@@ -455,7 +457,7 @@ impl ReplState<'_> {
                 }
                 print_padded_table(builder);
                 if summary.truncated {
-                    println!(
+                    outln!(
                         "process list bounded: displayed {} of {}",
                         limit.clamp(1, 256),
                         summary.process_count

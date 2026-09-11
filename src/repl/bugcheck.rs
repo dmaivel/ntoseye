@@ -32,7 +32,7 @@ fn print_unresolved_bugcheck_data(failure: &CurrentBugcheckFailure) {
         )
     }
 
-    println!(
+    outln!(
         "{} unable to resolve nt!KiBugCheckData at {:#x}: {}",
         ui::badge("BUGCHECK"),
         failure.address,
@@ -85,7 +85,7 @@ fn format_bugcheck_fault(fault: &BugcheckFault) -> String {
 /// as ordinary panes. No bold on the plate: its `\x1b[0m` reset would cut
 /// the background. Callers own surrounding blank lines.
 pub fn print_bugcheck_analysis(analysis: &BugcheckAnalysis) {
-    println!(
+    outln!(
         "{}{}",
         ui::badge("BUGCHECK"),
         ui::plate(&format!(" {} ({:#010x}) ", analysis.name, analysis.code))
@@ -140,7 +140,7 @@ pub fn print_bugcheck_analysis(analysis: &BugcheckAnalysis) {
     print_event_children("    ", &args);
 
     for trap_frame in &analysis.trap_frames {
-        println!();
+        outln!();
         print_bugcheck_trap_frame(trap_frame);
     }
 }
@@ -150,7 +150,7 @@ pub fn print_bugcheck_analysis(analysis: &BugcheckAnalysis) {
 pub fn print_bugcheck_trap_frame(trap_frame: &BugcheckTrapFrame) {
     match &trap_frame.frame {
         Some(frame) => print_ktrap_frame(frame, trap_frame.rip_symbol.as_deref()),
-        None => println!(
+        None => outln!(
             "{} @ {} (unable to decode: {})",
             "trap frame".bold(),
             ui::addr(trap_frame.address),
@@ -163,38 +163,38 @@ pub fn print_bugcheck_trap_frame(trap_frame: &BugcheckTrapFrame) {
 /// ([`super::disasm::print_registers`]). r12-r15 are absent by design: the
 /// kernel saves them in the exception frame, not the trap frame.
 pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
-    println!("{} @ {}", "trap frame".bold(), ui::addr(frame.address));
-    println!(
+    outln!("{} @ {}", "trap frame".bold(), ui::addr(frame.address));
+    outln!(
         "  rax {}   rbx {}   rcx {}",
         ui::addr(frame.rax),
         ui::addr(frame.rbx),
         ui::addr(frame.rcx)
     );
-    println!(
+    outln!(
         "  rdx {}   rsi {}   rdi {}",
         ui::addr(frame.rdx),
         ui::addr(frame.rsi),
         ui::addr(frame.rdi)
     );
-    println!(
+    outln!(
         "  rsp {}   rbp {}   rip {}",
         ui::addr(frame.rsp),
         ui::addr(frame.rbp),
         ui::addr(frame.rip)
     );
-    println!(
+    outln!(
         "  r8  {}   r9  {}   r10 {}",
         ui::addr(frame.r8),
         ui::addr(frame.r9),
         ui::addr(frame.r10)
     );
-    println!(
+    outln!(
         "  r11 {}   rfl {}{}",
         ui::addr(frame.r11),
         ui::addr(frame.eflags as u64),
         format_rflags(frame.eflags as u64)
     );
-    println!(
+    outln!(
         "  cs  {:04x}  ss  {:04x}  error code {:#x}  irql {}  previous mode {}",
         frame.cs,
         frame.ss,
@@ -207,7 +207,7 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
         }
     );
     if let Some(symbol) = rip_symbol {
-        println!("  rip => {}", ui::symbol(symbol));
+        outln!("  rip => {}", ui::symbol(symbol));
     }
 }
 
@@ -228,7 +228,7 @@ pub fn print_bugcheck_summary(debugger: &Target, info: Option<&BugcheckInfo>) {
 pub fn print_bugcheck_summary_from_memory(debugger: &Target) {
     match resolve_current_bugcheck(debugger) {
         CurrentBugcheckResolution::Resolved(analysis) => print_bugcheck_analysis(&analysis),
-        CurrentBugcheckResolution::SymbolUnavailable => println!(
+        CurrentBugcheckResolution::SymbolUnavailable => outln!(
             "{} guest is bugchecking (symbol nt!KiBugCheckData unavailable)",
             ui::badge("BUGCHECK")
         ),

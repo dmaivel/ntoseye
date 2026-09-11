@@ -125,7 +125,7 @@ impl ReplState<'_> {
             } => {
                 self.run_exception_policy_command(Some(&command))?;
                 if notify {
-                    println!(
+                    outln!(
                         "Exception {:#010x}; continuing",
                         event.exception_code.unwrap_or_default()
                     );
@@ -162,7 +162,7 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        println!(
+        outln!(
             "{}",
             "VM running, waiting for stop (Ctrl+C to pause)...".bright_black()
         );
@@ -172,7 +172,7 @@ impl ReplState<'_> {
         loop {
             let interrupt_requested = INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst);
             let stop_result = if interrupt_requested {
-                println!();
+                outln!();
                 match self.ctx.backend.try_wait_for_stop(REPL_STOP_POLL) {
                     Ok(Some(event)) => Ok(Some(event)),
                     Ok(None) => self.ctx.backend.interrupt().map(Some),
@@ -254,7 +254,7 @@ impl ReplState<'_> {
                         StopResolution::Bugcheck { event } => {
                             print_stop_separator();
                             print_bugcheck_summary(&self.ctx.target, event.bugcheck.as_ref());
-                            println!();
+                            outln!();
                             print_break_context_for_bugcheck(
                                 &mut *self.ctx.backend,
                                 &self.ctx.register_map,
@@ -309,7 +309,7 @@ impl ReplState<'_> {
                                             let location = address
                                                 .map(|address| format!(" at {address:#x}"))
                                                 .unwrap_or_default();
-                                            println!(
+                                            outln!(
                                                 "Exception {code:#010x} ({chance}){location}; continuing"
                                             );
                                         }

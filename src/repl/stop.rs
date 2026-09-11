@@ -31,7 +31,7 @@ pub fn refresh_kernel_module_symbols_on_stop(debugger: &Target, caches: &ReplCac
 
 pub fn print_target_reload_report(report: &ReloadReport) {
     if let Some(startup) = &report.startup {
-        println!(
+        outln!(
             "{} kernel reloaded: {} -> {}, psmods {}",
             "target:".bright_black(),
             ui::addr(report.previous_base_address.0),
@@ -39,7 +39,7 @@ pub fn print_target_reload_report(report: &ReloadReport) {
             ui::addr_opt(startup.loaded_module_list)
         );
     } else {
-        println!(
+        outln!(
             "{} kernel reloaded: previous base {}",
             "target:".bright_black(),
             ui::addr(report.previous_base_address.0)
@@ -237,7 +237,7 @@ pub fn print_async_stop_resolution(
         }
         StopResolution::Bugcheck { event } => {
             print_bugcheck_summary(&session.target, event.bugcheck.as_ref());
-            println!();
+            outln!();
             print_break_context_for_bugcheck(
                 &mut *session.backend,
                 &session.register_map,
@@ -291,7 +291,7 @@ pub fn print_target_reload_notification_context(
     let pending_status = TargetReloadStatus::PendingRediscovery {
         kernel_base_hint: event.target_kernel_base_hint,
     };
-    println!(
+    outln!(
         "{}{}",
         ui::badge("BREAK"),
         ui::plate(&format!(
@@ -306,7 +306,7 @@ pub fn print_target_reload_notification_context(
         "kernel reloaded; module list is not available yet, continue to retry full reload"
     };
     print_event_children(" ", &[ui::muted(message)]);
-    println!();
+    outln!();
 }
 
 pub fn rebase_kernel_symbol_for_pending_reload(
@@ -388,7 +388,7 @@ pub fn surface_pending_stop(
                 Some(false) => "second chance",
                 None => "unknown chance",
             };
-            println!("Exception {code:#010x} ({chance}); continuing");
+            outln!("Exception {code:#010x} ({chance}); continuing");
         }
         session
             .backend
@@ -472,7 +472,7 @@ pub fn print_break_context_at(
         Ok(r) => r,
         Err(e) => {
             debugger.registers = None;
-            println!(
+            outln!(
                 "{}{}\n",
                 ui::badge("BREAK"),
                 ui::plate(&format!(
@@ -493,7 +493,7 @@ pub fn print_break_context_at(
     let context_rip = display_rip.unwrap_or(rip);
     let symbol = format_symbol(debugger, &trace, context_rip);
 
-    println!(
+    outln!(
         "{}{}",
         ui::badge("BREAK"),
         ui::plate(&format!(
@@ -533,7 +533,7 @@ pub fn print_break_context_at(
         BREAK_STACKTRACE_DISPLAY_LIMIT,
         true,
     );
-    println!();
+    outln!();
 }
 
 #[cfg(test)]

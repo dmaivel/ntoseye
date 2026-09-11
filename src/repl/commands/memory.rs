@@ -181,7 +181,7 @@ impl ReplState<'_> {
 
         let mut data: Vec<u8> = vec![0u8; range.len()];
         if let Err(e) = self.read_for_display(range.start, &mut data) {
-            println!("{e}\n");
+            outln!("{e}\n");
             return Ok(());
         }
 
@@ -199,7 +199,7 @@ impl ReplState<'_> {
         display_value: impl FnOnce(u64) -> String,
     ) -> Result<()> {
         if invocation.argv.len() < 2 {
-            println!("{}\n", command_help(command));
+            outln!("{}\n", command_help(command));
             return Ok(());
         }
 
@@ -227,7 +227,7 @@ impl ReplState<'_> {
         if let Err(e) = mem.write_bytes(address, &bytes) {
             error!("failed to write {}: {}", noun, e);
         } else {
-            println!(
+            outln!(
                 "{} {} -> {}\n",
                 "wrote".green(),
                 formatted_value,
@@ -261,7 +261,7 @@ impl ReplState<'_> {
 
         let mut data: Vec<u8> = vec![0u8; range.len()];
         if let Err(e) = self.read_for_display(range.start, &mut data) {
-            println!("{e}\n");
+            outln!("{e}\n");
             return Ok(());
         }
 
@@ -271,16 +271,16 @@ impl ReplState<'_> {
             let value = u64::from_le_bytes(chunk.try_into().unwrap());
             let addr = (range.start + (i as u64) * 8).0;
             match try_format_symbol(&self.ctx.target, &trace, value) {
-                Some(symbol) => println!(
+                Some(symbol) => outln!(
                     "{}  {:016x}  {}",
                     ui::addr(addr),
                     value,
                     ui::symbol(&symbol)
                 ),
-                None => println!("{}  {:016x}", ui::addr(addr), value),
+                None => outln!("{}  {:016x}", ui::addr(addr), value),
             }
         }
-        println!();
+        outln!();
 
         Ok(())
     }
@@ -303,7 +303,7 @@ impl ReplState<'_> {
         char_size: usize,
     ) -> Result<()> {
         let Some(start_arg) = invocation.arg(0) else {
-            println!("{}\n", command_help(command));
+            outln!("{}\n", command_help(command));
             return Ok(());
         };
         let start = match Expr::eval_with_radix(start_arg, &self.ctx.target, self.radix) {
@@ -365,7 +365,7 @@ impl ReplState<'_> {
         } else {
             String::new()
         };
-        println!(
+        outln!(
             "{}  \"{}\"{}\n",
             ui::addr(start.0),
             text.escape_debug(),
@@ -387,7 +387,7 @@ impl ReplState<'_> {
         let start_addr = range.start;
         let mut bytes: Vec<u8> = vec![0u8; range.len()];
         if let Err(e) = self.read_for_display(start_addr, &mut bytes) {
-            println!("{e}\n");
+            outln!("{e}\n");
             return Ok(());
         }
 
@@ -405,7 +405,7 @@ impl ReplState<'_> {
             Arch::Arm64 => decode_rows_arm64(&bytes, start_addr.0, None, resolve),
         };
         render_rows(&rows, |_| None);
-        println!();
+        outln!();
 
         Ok(())
     }
@@ -440,10 +440,10 @@ impl ReplState<'_> {
         }
 
         let symbol = format_symbol(&self.ctx.target, &trace, start);
-        println!("{}  {} bytes", ui::symbol(&symbol), len);
+        outln!("{}  {} bytes", ui::symbol(&symbol), len);
         let mut bytes = vec![0u8; len];
         if let Err(e) = self.read_for_display(VirtAddr(start), &mut bytes) {
-            println!("{e}\n");
+            outln!("{e}\n");
             return Ok(());
         }
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
@@ -455,7 +455,7 @@ impl ReplState<'_> {
             Arch::Arm64 => decode_rows_arm64(&bytes, start, None, resolve),
         };
         render_rows(&rows, |_| None);
-        println!();
+        outln!();
 
         Ok(())
     }
@@ -492,7 +492,7 @@ impl ReplState<'_> {
 
     fn cmd_f(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if invocation.argv.len() < 2 {
-            println!("{}\n", command_help("f"));
+            outln!("{}\n", command_help("f"));
             return Ok(());
         }
 
@@ -533,7 +533,7 @@ impl ReplState<'_> {
         if let Err(e) = mem.write_bytes(address, &data) {
             error!("failed to fill memory: {}", e);
         } else {
-            println!(
+            outln!(
                 "{} {:#x} bytes at {} with {}\n",
                 "filled".green(),
                 length,
@@ -547,7 +547,7 @@ impl ReplState<'_> {
 
     fn cmd_s(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if invocation.argv.len() < 2 {
-            println!("{}\n", command_help("s"));
+            outln!("{}\n", command_help("s"));
             return Ok(());
         }
 
@@ -606,18 +606,18 @@ impl ReplState<'_> {
                 .closest_symbol_current_context(VirtAddr(addr))
                 .unwrap_or_default();
 
-            println!("{}  {}", ui::addr(addr), ui::symbol(&sym));
+            outln!("{}  {}", ui::addr(addr), ui::symbol(&sym));
         }
 
         if hits.is_empty() {
-            println!(
+            outln!(
                 "{} (searched {:#x} bytes at {})",
                 "no matches found".bright_black(),
                 length,
                 ui::addr(start_addr.0)
             );
         } else {
-            println!(
+            outln!(
                 "\n{} {} (in $0..${})",
                 hits.len(),
                 if hits.len() == 1 { "match" } else { "matches" },
@@ -625,7 +625,7 @@ impl ReplState<'_> {
             );
         }
         self.ctx.target.set_results(hits, self.line.clone());
-        println!();
+        outln!();
 
         Ok(())
     }
@@ -752,13 +752,13 @@ impl ReplState<'_> {
                         // Header as its own line; a one-cell header row in the
                         // table would stretch the value column. The value/name
                         // table then sizes both columns to content.
-                        println!("enum {} ({} values)", arg, variants.len());
+                        outln!("enum {} ({} values)", arg, variants.len());
                         let mut builder = Builder::default();
                         for (name, value) in &variants {
                             builder.push_record(vec![format!("  {:#x}  ", value), name.clone()]);
                         }
                         print_plain_table(builder);
-                        println!();
+                        outln!();
                     }
                     None => {
                         error!("failed to get type information: type `{}` not found\n", arg);
