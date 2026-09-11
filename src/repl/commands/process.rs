@@ -258,11 +258,11 @@ fn region_matches_filter(
     filter: Option<&str>,
     address: Option<VirtAddr>,
 ) -> bool {
-    if let Some(address) = address
-        && address >= region.start
-        && address < region.end
-    {
-        return true;
+    // A filter that resolved to an address selects by containment only; the
+    // textual match below would otherwise also pick regions whose printed
+    // bounds merely contain the digits.
+    if let Some(address) = address {
+        return (region.start..region.end).contains(&address);
     }
     let Some(filter) = filter.map(str::to_ascii_lowercase) else {
         return true;
@@ -299,6 +299,7 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
+        self.caches.refresh_vcpus(self.ctx.backend.as_mut());
 
         pb.finish_and_clear();
 
@@ -334,10 +335,11 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
+        // Completion wants every thread, not just the ones this listing shows.
+        *self.caches.threads.write().unwrap() = threads.clone();
         if let Some(filter) = filter {
             threads.retain(|thread| thread_matches_filter(thread, filter));
         }
-        *self.caches.threads.write().unwrap() = threads.clone();
 
         if threads.is_empty() {
             println!("{}\n", "no matching threads".bright_black());

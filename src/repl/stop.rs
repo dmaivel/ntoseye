@@ -248,6 +248,7 @@ pub fn print_async_stop_resolution(
             );
         }
         StopResolution::TargetReloaded { event, coherent } => {
+            caches.clear_threads();
             print_target_reload_notification_context(
                 &session.target,
                 &session.current_thread,
@@ -464,9 +465,10 @@ pub fn print_break_context_at(
     display_rip: Option<u64>,
     cause: Option<String>,
 ) {
-    let _ = client.set_current_thread(thread_id);
-
-    let regs = match client.read_registers() {
+    let regs = match client
+        .set_current_thread(thread_id)
+        .and_then(|()| client.read_registers())
+    {
         Ok(r) => r,
         Err(e) => {
             debugger.registers = None;
@@ -474,7 +476,7 @@ pub fn print_break_context_at(
                 "{}{}\n",
                 ui::badge("BREAK"),
                 ui::plate(&format!(
-                    " {} (read_registers failed: {}) ",
+                    " {} (register context unavailable: {}) ",
                     ui::thread_id(thread_id),
                     e
                 ))

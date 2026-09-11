@@ -267,6 +267,7 @@ impl ReplState<'_> {
                         }
                         StopResolution::TargetReloaded { event, coherent } => {
                             print_stop_separator();
+                            self.caches.clear_threads();
                             print_target_reload_notification_context(
                                 &self.ctx.target,
                                 &self.ctx.current_thread,
@@ -443,10 +444,19 @@ impl ReplState<'_> {
 
         let result = self.continue_vm();
 
-        let _ = self
-            .ctx
-            .breakpoints
-            .remove(&mut *self.ctx.backend, &self.ctx.target, temp_id);
+        // Temporary sites are removed when the stop is consumed (a one-shot hit
+        // clears itself); anything else left in place is a real problem.
+        if let Err(e) =
+            self.ctx
+                .breakpoints
+                .remove(&mut *self.ctx.backend, &self.ctx.target, temp_id)
+            && !matches!(e, Error::BPNotFound(_))
+        {
+            error!(
+                "failed to remove temporary breakpoint at {}: {e}",
+                ui::addr(address.0)
+            );
+        }
         self.caches.refresh_breakpoints(&self.ctx.breakpoints);
 
         result

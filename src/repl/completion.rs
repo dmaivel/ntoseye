@@ -212,14 +212,16 @@ impl TargetLoan {
         f()
     }
 
-    /// The lent target, if a loan is active.
+    /// The lent target, if a loan is active. The loan's lock is held for the
+    /// whole call, so `lend` cannot return (and drop the borrow) while `f`
+    /// still reads the target; `f` must not call back into the loan.
     pub fn with<R>(&self, f: impl FnOnce(Option<&Target>) -> R) -> R {
-        let lent = *self.slot();
-        match lent {
+        let slot = self.slot();
+        match *slot {
             // SAFETY: the pointer is set only inside `lend`, from a `&Target`
-            // whose borrow outlives that call, and is cleared before `lend`
-            // returns (also on unwind), so a present pointer means the borrow
-            // is live: the pointee is alive and not aliased mutably.
+            // whose borrow outlives that call, and is cleared (under this same
+            // lock) before `lend` returns, also on unwind; holding the lock
+            // here means the borrow stays live for the whole of `f`.
             Some(LentTarget(ptr)) => f(Some(unsafe { ptr.as_ref() })),
             None => f(None),
         }

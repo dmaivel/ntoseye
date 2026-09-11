@@ -155,12 +155,7 @@ impl ReplState<'_> {
     /// Read guest memory in the current process context for *display*, masking
     /// out our own breakpoint int3 bytes so listings never show them.
     fn read_for_display(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        let process = self.ctx.target.current_process()?;
-        process.memory().read_bytes(addr, buf)?;
-        self.ctx
-            .breakpoints
-            .mask_breakpoint_bytes(addr, buf, process.dtb());
-        Ok(())
+        self.ctx.read_masked(addr, buf)
     }
 
     fn display_memory_command(

@@ -1309,6 +1309,17 @@ impl Session {
         Ok((threads, active_vcpus))
     }
 
+    /// Read guest virtual memory in the current inspection context with our
+    /// own breakpoint patch bytes masked back to the original code, so every
+    /// host (REPL, MCP, SDK) sees the same bytes the guest would run.
+    pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        let process = self.target.current_process()?;
+        process.memory().read_bytes(addr, buf)?;
+        self.breakpoints
+            .mask_breakpoint_bytes(addr, buf, process.dtb());
+        Ok(())
+    }
+
     /// Disassemble `count` instructions starting at `addr` in the current
     /// address space. Our own breakpoint `int3` bytes are masked back to the
     /// original opcode, and branch / rip-relative targets get symbol comments.
@@ -1323,8 +1334,7 @@ impl Session {
             Arch::Arm64 => count * 4,
         };
         let mut buf = vec![0u8; overread];
-        process.memory().read_bytes(addr, &mut buf)?;
-        self.breakpoints.mask_breakpoint_bytes(addr, &mut buf, dtb);
+        self.read_masked(addr, &mut buf)?;
 
         let symbols = &self.target.symbols;
         let resolve = |target: u64| {

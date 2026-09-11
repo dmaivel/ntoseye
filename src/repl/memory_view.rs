@@ -148,14 +148,7 @@ pub fn resolve_length_or_end(start: VirtAddr, end_or_length: VirtAddr) -> Option
 }
 
 pub fn repeat_pattern(pattern: &[u8], length: usize) -> Vec<u8> {
-    let mut filled = Vec::with_capacity(length);
-
-    while filled.len() < length {
-        let remaining = length - filled.len();
-        filled.extend_from_slice(&pattern[..remaining.min(pattern.len())]);
-    }
-
-    filled
+    pattern.iter().copied().cycle().take(length).collect()
 }
 
 /// Append `char_size`-wide (1 or 2 bytes, little-endian) string units from

@@ -195,8 +195,6 @@ pub fn plausible_pool_tag(tag: u32) -> bool {
 pub fn pool_block_state(h: &PoolHeader) -> &'static str {
     if h.synthetic_free || h.tag == POOL_FREE_TAG {
         "Free"
-    } else if h.pool_type == 0 {
-        "Free?"
     } else if tag_looks_printable(h.tag) {
         "Allocated"
     } else {
@@ -340,7 +338,11 @@ pub fn scan_pool_page_lax(
         }
         if h.header == cursor
             && h.size == POOL_ALIGN
-            && pool_block_state(&h) == "Free?"
+            // A minimal block with no pool type is a free-list stub, not a
+            // real allocation (PoolType 0 is otherwise ordinary NonPagedPool).
+            && !h.synthetic_free
+            && h.tag != POOL_FREE_TAG
+            && h.pool_type == 0
             && let Some(next) = candidates.get(i + 1)
             && next.header.0 > h.header.0 + POOL_ALIGN
         {
@@ -406,25 +408,27 @@ pub fn classify_pool_region(
     debugger: &Target,
     addr: VirtAddr,
 ) -> Option<(&'static str, VirtAddr, VirtAddr)> {
+    let dtb = debugger.current_dtb();
+    let mem = debugger.current_process().ok()?.memory();
+    let bound = |symbol: &str| {
+        let address = debugger
+            .symbols
+            .find_symbol_across_modules(dtb, &format!("nt!{symbol}"))
+            .ok()
+            .flatten()?;
+        mem.read::<u64>(address).ok().map(VirtAddr)
+    };
     for (name, start, stop) in [
         ("NonPagedPool", "MmNonPagedPoolStart", "MmNonPagedPoolEnd"),
         ("PagedPool", "MmPagedPoolStart", "MmPagedPoolEnd"),
         ("SpecialPool", "MmSpecialPoolStart", "MmSpecialPoolEnd"),
     ] {
-        let s_addr = debugger
-            .symbols
-            .find_symbol_across_modules(debugger.current_dtb(), &format!("nt!{start}"))
-            .ok()
-            .flatten()?;
-        let e_addr = debugger
-            .symbols
-            .find_symbol_across_modules(debugger.current_dtb(), &format!("nt!{stop}"))
-            .ok()
-            .flatten()?;
-        let mem = debugger.current_process().ok()?.memory();
-        let s = VirtAddr(mem.read::<u64>(s_addr).ok()?);
-        let e = VirtAddr(mem.read::<u64>(e_addr).ok()?);
-        if addr >= s && addr < e {
+        // A range whose symbols this build lacks says nothing about the
+        // others; keep looking.
+        let (Some(s), Some(e)) = (bound(start), bound(stop)) else {
+            continue;
+        };
+        if (s..e).contains(&addr) {
             return Some((name, s, e));
         }
     }
@@ -564,7 +568,11 @@ pub fn print_pool_page_listing(blocks: &[PoolHeader], target_idx: Option<usize>,
     }
     println!(
         "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
-        "header", "size", "prev", "state", "type"
+        "header",
+        "size",
+        "prev",
+        "state",
+        "type"
     );
     for (i, h) in blocks.iter().enumerate() {
         let marker = if Some(i) == target_idx {

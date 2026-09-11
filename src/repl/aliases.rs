@@ -196,8 +196,10 @@ fn expand_alias_template(
         out.push_str(&rest[..start]);
         let after_start = &rest[start + 2..];
         let Some(end) = after_start.find('}') else {
-            out.push_str(&rest[start..]);
-            return Ok(out);
+            return Err(format!(
+                "unterminated alias placeholder at `{}`",
+                &rest[start..]
+            ));
         };
         let key = &after_start[..end];
         if key == "*" {

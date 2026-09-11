@@ -122,8 +122,9 @@ impl<'a> CompletionInput<'a> {
         // Find the start of the identifier being typed by scanning backward for
         // expression boundary characters (operators, parens, dereference).
         let ident_start = raw_prefix
-            .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .map(|i| i + 1)
+            .char_indices()
+            .rfind(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_')
+            .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
         let prefix = &raw_prefix[ident_start..];
         let span_start = arg_start + ident_start;
