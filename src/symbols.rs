@@ -961,7 +961,8 @@ fn download_job(job: &DownloadJob, pb: ProgressBar) -> Result<()> {
         }
     }
     pb.finish_and_clear();
-    Err(last_err.expect("DownloadJob.urls must not be empty"))
+    Err(last_err
+        .unwrap_or_else(|| Error::DebugInfo("no symbol server URL to download from".into())))
 }
 
 fn download_url_to_path(url: &str, path: &Path, filename: &str, pb: &ProgressBar) -> Result<()> {
@@ -1558,6 +1559,13 @@ const PDB_S_CALLERS: u16 = 0x115b;
 fn is_pdb2_function_list_symbol(kind: u16) -> bool {
     matches!(kind, PDB_S_CALLEES | PDB_S_CALLERS)
 }
+/// Largest `IMAGE_DEBUG_DIRECTORY` array read from a guest image; real images
+/// carry a few entries.
+const MAX_DEBUG_DIRECTORY_BYTES: usize = 0x1000;
+/// Largest CodeView record read from a guest image (a GUID, an age, and a
+/// PDB path).
+const MAX_CODEVIEW_BYTES: usize = 0x1000;
+
 impl SymbolStore {
     fn module_key(dtb: Dtb, base_address: VirtAddr) -> (Dtb, u64) {
         (dtb, base_address.0)
@@ -1864,6 +1872,13 @@ impl SymbolStore {
             )));
         }
 
+        // A handful of entries at most in any real image; the field is guest
+        // memory, so bound the allocation before trusting it.
+        if debug_size as usize > MAX_DEBUG_DIRECTORY_BYTES {
+            return Err(Error::DebugInfo(format!(
+                "debug directory size {debug_size:#x} exceeds {MAX_DEBUG_DIRECTORY_BYTES:#x}"
+            )));
+        }
         let mut bytes = vec![0u8; debug_size as usize];
         memory.read_bytes(base_address + debug_rva as u64, &mut bytes)?;
 
@@ -1887,6 +1902,12 @@ impl SymbolStore {
             return Err(Error::DebugInfo(
                 "codeview entry is missing raw data".to_string(),
             ));
+        }
+        if entry.SizeOfData as usize > MAX_CODEVIEW_BYTES {
+            return Err(Error::DebugInfo(format!(
+                "codeview entry size {:#x} exceeds {MAX_CODEVIEW_BYTES:#x}",
+                entry.SizeOfData
+            )));
         }
 
         let mut bytes = vec![0u8; entry.SizeOfData as usize];
@@ -2144,7 +2165,14 @@ impl SymbolStore {
     pub fn load_downloaded_pdb(&self, load: &ModuleSymbolLoad) -> Result<()> {
         let module_key = Self::module_key(load.dtb, load.module.base_address);
         if let Some(existing) = self.modules.get(&module_key) {
-            debug_assert_eq!(existing.guid, load.guid);
+            // A job that outlived a reload/reattach of its module describes a
+            // different image; finishing it would mark the wrong PDB loaded.
+            if existing.guid != load.guid {
+                return Err(Error::DebugInfo(format!(
+                    "stale symbol job for {}: module was replaced",
+                    load.module.name
+                )));
+            }
             self.set_module_symbol_status(
                 load.dtb,
                 load.module.base_address,
@@ -3461,14 +3489,7 @@ impl SymbolStore {
                     target_rva
                         .checked_sub(record.rva)
                         .filter(|offset| *offset <= 8192)
-                        .map(|offset| {
-                            (
-                                name.clone(),
-                                offset,
-                                record.visibility,
-                                record.compiland.clone(),
-                            )
-                        })
+                        .map(|offset| (name, offset, record.visibility, &record.compiland))
                 })
             })
             .min_by(|left, right| {
@@ -3481,10 +3502,10 @@ impl SymbolStore {
                         };
                         rank(left.2).cmp(&rank(right.2))
                     })
-                    .then_with(|| left.0.cmp(&right.0))
-                    .then_with(|| left.3.cmp(&right.3))
+                    .then_with(|| left.0.cmp(right.0))
+                    .then_with(|| left.3.cmp(right.3))
             })
-            .map(|(name, offset, _, _)| (name, offset))
+            .map(|(name, offset, _, _)| (name.clone(), offset))
     }
 
     fn type_size<'p>(
@@ -3546,7 +3567,9 @@ impl SymbolStore {
                 self.type_size(finder, data.underlying_type, ptr_size)
             }
             pdb2::TypeData::Array(data) => {
-                Ok(data.dimensions.iter().fold(0, |acc, &x| acc + x as u64))
+                // pdb2 reports cumulative byte sizes per dimension (`int[4][4]`
+                // is `[16, 64]`), so the last entry is the whole array.
+                Ok(data.dimensions.last().map_or(0, |&bytes| u64::from(bytes)))
             }
             pdb2::TypeData::Bitfield(data) => {
                 self.type_size(finder, data.underlying_type, ptr_size)
@@ -3606,13 +3629,11 @@ impl SymbolStore {
 
             TypeData::Array(data) => {
                 let inner = self.resolve_type(finder, data.element_type)?;
-                let count = data.dimensions.first().unwrap_or(&0);
-                let mut sizeof_type = self.type_size(finder, data.element_type, 8)? as u32;
-                if sizeof_type == 0 {
-                    sizeof_type = 1;
-                }
-
-                Ok(ParsedType::Array(Box::new(inner), count / sizeof_type))
+                // Total byte size (see `type_size`) over the element size gives
+                // the flattened element count.
+                let bytes = data.dimensions.last().copied().unwrap_or(0);
+                let sizeof_type = (self.type_size(finder, data.element_type, 8)? as u32).max(1);
+                Ok(ParsedType::Array(Box::new(inner), bytes / sizeof_type))
             }
 
             TypeData::Modifier(data) => self.resolve_type(finder, data.underlying_type),

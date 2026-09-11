@@ -529,7 +529,7 @@ fn build_stacktrace_arm64(
         if ra == 0 || next_fp == 0 || next_fp <= fp {
             break;
         }
-        raw.push((fp + 16, ra, FrameSource::Unwind));
+        raw.push((fp.wrapping_add(16), ra, FrameSource::Unwind));
         fp = next_fp;
     }
 

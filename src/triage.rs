@@ -338,7 +338,8 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
 /// points into the string pool (null-terminated UTF-16LE strings).
 pub fn parse_drivers(mmap: &[u8]) -> Vec<TriageDriver> {
     let mmap_len = mmap.len();
-    if mmap_len <= DUMP_HEADER64_SIZE {
+    // The four header fields below end at 0x40 into the triage header.
+    if mmap_len < DUMP_HEADER64_SIZE + TRIAGE_STRING_POOL_SIZE + 4 {
         return Vec::new();
     }
 

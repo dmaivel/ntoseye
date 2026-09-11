@@ -260,7 +260,14 @@ impl Expr {
             Expr::Deref(inner) => {
                 let addr = inner.resolve(context)?;
                 let memory = context.context_memory();
-                let val: u64 = memory.read(addr)?;
+                // `*(dword)x` / `*(dword*)x` read a dword; an uncast deref is
+                // pointer-sized.
+                let val = match Self::deref_width(inner, context) {
+                    1 => u64::from(memory.read::<u8>(addr)?),
+                    2 => u64::from(memory.read::<u16>(addr)?),
+                    4 => u64::from(memory.read::<u32>(addr)?),
+                    _ => memory.read::<u64>(addr)?,
+                };
                 Ok(VirtAddr(val))
             }
 
@@ -289,7 +296,7 @@ impl Expr {
             Expr::Index(base, index) => {
                 let base_addr = base.resolve(context)?;
                 let elem_size = Self::resolve_element_size(base, context);
-                Ok(base_addr + index * elem_size)
+                Ok(base_addr + index.wrapping_mul(elem_size))
             }
 
             Expr::Add(lhs, rhs) => {
@@ -379,14 +386,31 @@ impl Expr {
 
     /// determine the element size in bytes for array indexing
     /// uses type info from casts (e.g. `(dword*)addr[3]` -> 4 bytes per element)
-    /// falls back to 1 if no type info is available
     fn resolve_element_size(expr: &Expr, context: &Target) -> u64 {
         match expr {
+            // `((dword*)p)[i]` strides by the pointee, `((dword)p)[i]` by the
+            // cast width.
+            Expr::Cast(_, ExprType::Pointer(pointee)) => Self::expr_type_size(pointee, context),
             Expr::Cast(_, expr_type) => Self::expr_type_size(expr_type, context),
             _ => 1,
         }
     }
 
+    /// Bytes a `*expr` reads: the primitive width of a cast on `expr` (through
+    /// one pointer level), else pointer-sized.
+    fn deref_width(expr: &Expr, context: &Target) -> u64 {
+        match expr {
+            Expr::Cast(_, ExprType::Pointer(pointee)) => {
+                Self::expr_type_size(pointee, context).min(8)
+            }
+            Expr::Cast(_, ty @ (ExprType::Byte | ExprType::Word | ExprType::Dword)) => {
+                Self::expr_type_size(ty, context)
+            }
+            _ => 8,
+        }
+    }
+
+    /// falls back to 1 if no type info is available
     fn expr_type_size(expr_type: &ExprType, context: &Target) -> u64 {
         match expr_type {
             ExprType::Byte => 1,

@@ -18,10 +18,6 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
     Eq,
     derive_more::From,
     derive_more::Into,
-    derive_more::Add,
-    derive_more::Sub,
-    derive_more::AddAssign,
-    derive_more::SubAssign,
     derive_more::BitAnd,
     derive_more::BitOr,
     derive_more::FromStr,
@@ -30,6 +26,37 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 )]
 #[repr(transparent)]
 pub struct VirtAddr(pub u64);
+
+// Address arithmetic wraps, like pointer arithmetic: an expression the user
+// typed or a link a corrupt guest list handed us must produce a (bogus)
+// address that then fails to read, never a panic.
+impl Add for VirtAddr {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        VirtAddr(self.0.wrapping_add(rhs.0))
+    }
+}
+
+impl Sub for VirtAddr {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        VirtAddr(self.0.wrapping_sub(rhs.0))
+    }
+}
+
+impl AddAssign for VirtAddr {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl SubAssign for VirtAddr {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs;
+    }
+}
 
 impl From<u32> for VirtAddr {
     fn from(value: u32) -> Self {
@@ -210,9 +237,9 @@ impl PageTableEntry {
             if self.0 & (1 << 4) != 0 { 'N' } else { '-' }, // CacheDisable
             '-', // WriteThrough (always '-' in reference)
             if self.0 & (1 << 2) != 0 { 'U' } else { 'K' }, // Owner (User/Kernel)
-            if self.0 & (1 << 11) != 0 { 'W' } else { 'R' }, // Write
+            if self.is_writable() { 'W' } else { 'R' },
             if self.0 & (1 << 63) != 0 { '-' } else { 'E' }, // NoExecute (inverted)
-            if self.0 & 1 != 0 { 'V' } else { '-' }, // Valid
+            if self.0 & 1 != 0 { 'V' } else { '-' },         // Valid
         )
     }
 
@@ -223,7 +250,8 @@ impl PageTableEntry {
     // descriptors carry the hierarchical APTable, PXNTable, and UXNTable
     // restrictions. Output address bits [47:12] support a 48-bit PA space.
     pub const fn arm64_is_valid(self) -> bool {
-        self.0 & 0b11 != 0
+        // 0b01 block, 0b11 table/page; 0b00 invalid, 0b10 reserved.
+        self.0 & 0b01 != 0
     }
 
     pub const fn arm64_is_block(self) -> bool {

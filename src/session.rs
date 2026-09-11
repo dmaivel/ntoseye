@@ -669,7 +669,7 @@ impl Session {
             // `bl`/`blr` are the call forms; AArch64 instructions are 4 bytes.
             return Ok(CurrentInstruction {
                 is_call: mnem == "bl" || mnem == "blr",
-                next_ip: pc + 4,
+                next_ip: pc.wrapping_add(4),
             });
         }
 

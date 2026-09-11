@@ -822,27 +822,28 @@ impl<'a> Types<'a> {
         let list_memory = |dtb: Dtb| obj.address_space(&obj.phys, dtb);
 
         let mut current: VirtAddr = list_memory(dtb).read(head)?;
-        let mut count = 0usize;
         const MAX: usize = 1000;
+        // Bounded, and a corrupt list that loops through any number of nodes
+        // (not only back onto itself) ends at the first link seen twice.
+        let mut seen = std::collections::HashSet::with_capacity(16);
 
         Ok(std::iter::from_fn(move || {
-            if current.is_zero() || current == head || count >= MAX {
+            if current.is_zero() || current == head || seen.len() >= MAX || !seen.insert(current.0)
+            {
                 return None;
             }
-            count += 1;
 
             let record = StructRef {
                 obj,
                 dtb,
                 ti: record_ti.clone(),
-                base: current - link_offset,
+                base: VirtAddr(current.0.wrapping_sub(link_offset)),
                 image: None,
             }
             .prefetch();
 
             // Flink sits at offset 0 of the link's _LIST_ENTRY
             match record.read_field_at::<VirtAddr>(link_offset) {
-                Ok(next) if next == current => current = head, // self-loop: stop after this
                 Ok(next) => current = next,
                 Err(e) => {
                     current = head;

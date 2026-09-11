@@ -128,26 +128,23 @@ mod platform {
         Ok(region)
     }
 
-    fn gpa_to_offset(hv: HvKind, gpa: PhysAddr) -> u64 {
-        match hv {
-            HvKind::Kvm => {
-                // QEMU: 2 GiB MMIO hole (0x8000_0000 – 0xFFFF_FFFF)
-                if gpa < 0x8000_0000 {
-                    gpa
-                } else {
-                    gpa - 0x8000_0000
-                }
-            }
-            HvKind::Vmware => {
-                // VMware: 3 GiB MMIO hole (0xC000_0000 – 0xFFFF_FFFF)
-                if gpa < 0xC000_0000 {
-                    gpa // low RAM: identity
-                } else if gpa >= 0x1_0000_0000 {
-                    gpa - 0x4000_0000 // high RAM: subtract 1 GiB hole
-                } else {
-                    gpa // inside the hole — no RAM
-                }
-            }
+    /// Offset of a guest-physical address into the VM's RAM mapping, or
+    /// `None` inside the 32-bit MMIO hole, which no RAM backs (mapping it
+    /// anywhere would alias real pages).
+    fn gpa_to_offset(hv: HvKind, gpa: PhysAddr) -> Option<u64> {
+        // Low RAM is identity-mapped up to the hole; RAM above 4 GiB follows
+        // it in the mapping, so the hole's size is subtracted.
+        let hole_start = match hv {
+            HvKind::Kvm => 0x8000_0000,    // QEMU: 2 GiB hole
+            HvKind::Vmware => 0xC000_0000, // VMware: 1 GiB hole
+        };
+        const HOLE_END: u64 = 0x1_0000_0000;
+        if gpa < hole_start {
+            Some(gpa)
+        } else if gpa < HOLE_END {
+            None
+        } else {
+            Some(gpa - (HOLE_END - hole_start))
         }
     }
 
@@ -194,10 +191,8 @@ mod platform {
             self.memory.length
         }
         fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
-            let hva = self
-                .memory
-                .start
-                .checked_add(gpa_to_offset(self.hv, addr))
+            let hva = gpa_to_offset(self.hv, addr)
+                .and_then(|offset| self.memory.start.checked_add(offset))
                 .ok_or(Error::BadPhysicalAddress(addr))?;
             let end = hva
                 .checked_add(len as u64)

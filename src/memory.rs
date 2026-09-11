@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-// PageFrameNumber
-pub const PFN_MASK: u64 = (!0xFu64 << 8) & 0xFFFFFFFFFu64;
+/// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
+pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
 pub const PAGE_SHIFT: u32 = 12;
 pub const PTE_SHIFT: u8 = 12;

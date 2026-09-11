@@ -1142,19 +1142,16 @@ impl Target {
         mem.read_bytes(head, &mut buf)?;
         let mut current = u64::from_le_bytes(buf);
         let mut out = Vec::new();
-        let mut count = 0usize;
-        while current != 0 && current != head.0 && count < MAX {
-            count += 1;
-            out.push(current.saturating_sub(link_offset));
+        // A corrupt list can loop through any number of nodes, not just back
+        // onto itself; every link seen terminates the walk.
+        let mut seen = std::collections::HashSet::new();
+        while current != 0 && current != head.0 && out.len() < MAX && seen.insert(current) {
+            out.push(current.wrapping_sub(link_offset));
             // truncate on a bad link rather than failing the whole walk
             if mem.read_bytes(VirtAddr(current), &mut buf).is_err() {
                 break;
             }
-            let next = u64::from_le_bytes(buf);
-            if next == current {
-                break; // self-loop
-            }
-            current = next;
+            current = u64::from_le_bytes(buf);
         }
         Ok(out)
     }

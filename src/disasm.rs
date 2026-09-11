@@ -424,9 +424,9 @@ fn arm64_operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
         bad64::Operand::Cond(c) => t.push(&c.to_string(), AsmKind::Keyword),
         bad64::Operand::Name(_) => t.push(&op.to_string(), AsmKind::Text),
         bad64::Operand::StrImm { str, imm } => {
-            let name = unsafe { std::ffi::CStr::from_ptr(str.as_ptr() as _) }
-                .to_str()
-                .unwrap();
+            // A NUL-padded ASCII name from the C decoder.
+            let end = str.iter().position(|&b| b == 0).unwrap_or(str.len());
+            let name = std::str::from_utf8(&str[..end]).unwrap_or("?");
             t.push(name, AsmKind::Text);
             t.space();
             t.push(&format!("#{imm:#x}"), AsmKind::Number);

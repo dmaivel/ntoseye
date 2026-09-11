@@ -2,7 +2,7 @@
 
 use std::{
     io::ErrorKind,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -225,7 +225,7 @@ fn write_arguments(guest_id: &str, arguments: &[String]) -> Result<()> {
 fn plan_arguments(
     original: &[String],
     request: ConfigureRequest,
-    socket: &PathBuf,
+    socket: &Path,
 ) -> Result<Vec<String>> {
     let mut arguments = remove_managed_arguments(original);
     if request.action == Action::Configure {
@@ -304,7 +304,7 @@ fn utm_socket_path() -> Result<PathBuf> {
         .join("ntoseye-kd.sock"))
 }
 
-fn utm_instructions(request: ConfigureRequest, socket: &PathBuf) -> Instructions {
+fn utm_instructions(request: ConfigureRequest, socket: &Path) -> Instructions {
     if request.action == Action::Remove {
         return Instructions::default();
     }
