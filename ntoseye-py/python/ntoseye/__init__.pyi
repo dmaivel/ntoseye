@@ -134,8 +134,6 @@ class StopOutcome:
     @property
     def running(self) -> bool: ...
     @property
-    def timed_out(self) -> bool: ...
-    @property
     def breakpoint_stop(self) -> bool: ...
     @property
     def watchpoint(self) -> bool: ...
@@ -148,8 +146,6 @@ class StopOutcome:
     @property
     def target_reloaded(self) -> bool: ...
     @property
-    def reload(self) -> bool: ...
-    @property
     def halted(self) -> bool: ...
     @property
     def terminal(self) -> bool: ...
@@ -158,7 +154,9 @@ class StopOutcome:
     @property
     def symbol(self) -> str | None: ...
     @property
-    def process(self) -> tuple[int, str] | None: ...
+    def process(self) -> dict[str, Any] | None:
+        """The attached process at the stop as `{pid, name, dtb, eprocess}`."""
+        ...
     @property
     def breakpoints(self) -> list[Breakpoint]: ...
     @property
@@ -188,10 +186,6 @@ class StopOutcome:
     def kernel_base(self) -> int | None: ...
     @property
     def coherent(self) -> bool | None: ...
-    def to_dict(self) -> dict[str, Any]: ...
-    def get(self, key: str, default: Any = None) -> Any: ...
-    def __getitem__(self, key: str) -> Any: ...
-    def __contains__(self, key: str) -> bool: ...
     def __repr__(self) -> str: ...
 
 def attach(
@@ -258,8 +252,9 @@ class Debugger:
         ...
     def type_size(self, ty: str) -> int: ...
     def offset_of(self, ty: str, field: str) -> int: ...
-    def fields(self, ty: str) -> list[tuple[str, int, int, str]]:
-        """Field layout: `(name, offset, size, type)` tuples sorted by offset."""
+    def fields(self, ty: str) -> dict[str, Any]:
+        """Type layout `{name, size, fields: [{name, offset, size, type}]}`,
+        fields sorted by offset."""
         ...
     def enum_values(self, name: str) -> list[tuple[str, int]]:
         """Variants of a PDB enum as `(name, value)` tuples, in declaration order
@@ -287,16 +282,17 @@ class Debugger:
     def closest_symbol(self, addr: int) -> str | None:
         """Nearest symbol as `module!name+0x..`, or `None`."""
         ...
-    def disassemble(self, addr: int, count: int) -> list[tuple[int, str, str, str | None]]:
-        """Disassemble `count` instructions: `(ip, hex, asm, comment)` tuples."""
+    def disassemble(self, addr: int, count: int) -> list[dict[str, Any]]:
+        """Disassemble `count` instructions as `{ip, hex, asm, comment}` dicts."""
         ...
     def inspect_trap_frame(self, address: int | None = None) -> dict[str, Any]:
         """Decode an x64 `_KTRAP_FRAME` at `address`, or the current Windows
         thread's saved trap frame when omitted. Returns `{address, rip_symbol,
         frame}` with the decoded register fields in `frame`."""
         ...
-    def backtrace(self, limit: int = 64) -> list[tuple[int, int, str, str]]:
-        """Walk the current thread's call stack: `(ip, sp, symbol, source)` tuples.
+    def backtrace(self, limit: int = 64) -> list[dict[str, Any]]:
+        """Walk the current thread's call stack as `{ip, sp, symbol, source,
+        source_location}` dicts.
 
         `source` is `"current"`, `"unwind"`, or `"scan"`.
         """
@@ -367,8 +363,9 @@ class Debugger:
     def is_running(self) -> bool: ...
     def status(self) -> dict[str, Any]:
         """Read-only run-control snapshot (where am I): `{running, current_thread,
-        rip, symbol, process, coherent, kernel_base}`. `rip`/`symbol` are None
-        while running. `coherent` is False when the guest rebooted and rediscovery
+        rip, symbol, process: {pid, name, eprocess} | None, coherent, kernel_base}`.
+        `rip`/`symbol` are None while running. `coherent` is False when the guest
+        rebooted and rediscovery
         is still pending, so enumeration is not yet meaningful; wait for it
         instead. `kernel_base` changes across a reboot; cache it to invalidate
         stale addresses."""
@@ -408,17 +405,14 @@ class Debugger:
         ...
 
     # --- breakpoints ---
-    def set_breakpoint(self, addr: int, condition: str | None = None) -> int:
-        """Set a code breakpoint; returns its id. Requires the VM halted.
+    def breakpoint(self, target: int | str, condition: str | None = None) -> Breakpoint:
+        """Set a code breakpoint from an address or expression; returns a live
+        breakpoint handle. Requires the VM halted.
 
         `condition` uses the normal expression grammar and is re-evaluated each
         hit. Comparisons, bitwise operators, and short-circuiting `!`, `&&`, and
         `||` may be combined; a bare expression is true when non-zero.
         """
-        ...
-    def breakpoint(self, target: int | str, condition: str | None = None) -> Breakpoint:
-        """Set a code breakpoint from an address or expression; returns a live
-        breakpoint handle. Requires the VM halted."""
         ...
     def set_symbol_breakpoint(
         self, symbol: str, condition: str | None = None
@@ -466,11 +460,13 @@ class Debugger:
     def detach(self) -> None:
         """Return to the default (kernel) inspection context."""
         ...
-    def current_process(self) -> tuple[int, str, int] | None:
-        """`(pid, name, eprocess)` of the attached process, or `None`."""
+    def current_process(self) -> dict[str, Any] | None:
+        """`{pid, name, dtb, eprocess}` of the attached process, or `None`."""
         ...
-    def memory_map(self) -> list[dict[str, Any]]:
-        """VAD regions of the attached process (requires `attach_process`)."""
+    def memory_map(self, pid: int | None = None) -> list[dict[str, Any]]:
+        """VAD regions of process `pid` (default: the attached process) as
+        dicts `{start, end, size, protection, vad_type, private_memory,
+        commit_charge, details}`."""
         ...
 
     # --- enumeration ---
@@ -488,28 +484,33 @@ class Debugger:
         cursor. Raises if nothing matches or a name is ambiguous; use
         `processes(filter)` for the full matching list."""
         ...
-    def kernel_modules(self) -> list[tuple[str, int, int]]:
-        """`(name, base, size)` tuples (kernel modules, regardless of attach state)."""
+    def kernel_modules(self) -> list[dict[str, Any]]:
+        """Kernel modules (regardless of attach state) as `{name, short_name,
+        base, end, size, time_date_stamp?, checksum?, file_version?,
+        product_version?}` dicts."""
         ...
-    def modules(self) -> list[tuple[str, int, int]]:
-        """`(name, base, size)` tuples for the current scope: the attached
-        process's user-mode modules when attached, else the kernel modules."""
+    def modules(self) -> list[dict[str, Any]]:
+        """Modules for the current scope, same shape as `kernel_modules()`: the
+        attached process's user-mode modules when attached, else the kernel
+        modules."""
         ...
-    def driver_objects(self) -> list[tuple[str, int, int, int]]:
-        """`(name, object, driver_start, driver_size)` tuples."""
+    def driver_objects(self) -> list[dict[str, Any]]:
+        """Driver objects as `{name, object, driver_start, driver_size,
+        device_object, driver_unload}` dicts."""
         ...
     def threads(self) -> list[dict[str, Any]]:
         """Windows threads as dicts `{tid, pid, process_name, ethread, kthread,
-        eprocess, state, wait_reason, active}`, where `active` is the vCPU id
-        currently running the thread (e.g. `"p1.1"`) or `None`."""
+        eprocess, state, state_name, wait_reason, wait_reason_name, active}`,
+        where `active` is the vCPU id currently running the thread (e.g.
+        `"p1.1"`) or `None`."""
         ...
     def vcpus(self) -> list[dict[str, Any]]:
         """Per-vCPU state as dicts `{id, rip, context, symbol, error}`; the
         address space (`"kernel"` / process name / `"unknown"`) and nearest
         symbol each vCPU is executing. Requires the VM halted."""
         ...
-    def capabilities(self) -> list[tuple[str, bool]]:
-        """Backend capability matrix as `(label, supported)` tuples."""
+    def capabilities(self) -> list[dict[str, Any]]:
+        """Backend capability matrix as `{capability, label, supported}` dicts."""
         ...
 
     # --- structured inspectors ---

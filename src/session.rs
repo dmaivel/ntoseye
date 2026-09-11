@@ -21,6 +21,7 @@ use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig};
 use crate::gdb::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
 };
+use crate::guest::ProcessInfo;
 use crate::kd::{KdBackend, KdMemorySource, trace_enabled};
 use crate::memory::DTB_IDENTITY;
 use crate::memory_backend::MemoryBackend;
@@ -115,8 +116,8 @@ pub struct RunStatus {
     pub rip: Option<u64>,
     /// Nearest symbol to `rip` when halted.
     pub symbol: Option<String>,
-    /// Attached process inspection scope as (pid, name, eprocess), if any.
-    pub process: Option<(u64, String, u64)>,
+    /// Attached process inspection scope, if any.
+    pub process: Option<ProcessInfo>,
     pub coherent: bool,
     /// Rediscovered `nt` base. A host caches it to detect a reboot (the base
     /// changes) and invalidate stale addresses without parsing prose.
@@ -1042,17 +1043,12 @@ impl Session {
             let symbol = rip.and_then(|r| self.target.closest_symbol_current_context(VirtAddr(r)));
             (rip, symbol)
         };
-        let process = self
-            .target
-            .current_process_info
-            .as_ref()
-            .map(|p| (p.pid, p.name.clone(), p.eprocess_va.0));
         RunStatus {
             running,
             current_thread: self.current_thread.clone(),
             rip,
             symbol,
-            process,
+            process: self.target.current_process_info.clone(),
             coherent: self.kernel_coherent(),
             kernel_base: self.target.kernel_base().map(|a| a.0).unwrap_or(0),
         }

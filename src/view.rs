@@ -1,20 +1,22 @@
 use crate::bugchecks::{BugcheckAnalysis, BugcheckTrapFrame};
+use crate::dbg_backend::{BackendCapability, DebugOutputPage};
+use crate::disasm::DisasmRow;
 use crate::dmp::{DmpException, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
 use crate::gdb::breakpoints::Breakpoint;
 use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::session::RunStatus;
+use crate::session::{RunStatus, VcpuInfo};
 use crate::symbols::{
     LocalVariableLocation, ProcedureLocal, SourceLocation, SymbolCandidate, SymbolVisibility,
-    format_symbol_with_offset,
+    TypeInfo, format_symbol_with_offset,
 };
 use crate::target::{
     AddressDescription, AddressModule, DeviceObjectDetail, DiagnosticMetric, DiagnosticValue,
-    DriverObjectDetail, FileObjectDetail, HandleEntryDetail, HandleTableSummary,
+    DriverObjectDetail, DriverObjectInfo, FileObjectDetail, HandleEntryDetail, HandleTableSummary,
     IoStackLocationInfo, IrpHit, IrpInfo, ListTermination, MemoryRegionInfo, MemorySearchMatch,
-    NotifyCallback, ObjectHeaderDetail, PrivilegeInfo, ProcessMemoryUsage, PteLevel,
+    NotifyCallback, ObjectHeaderDetail, PrivilegeInfo, ProcessMemoryUsage, PteLevel, PteWalk,
     ResourceDetail, ResourceListSummary, ResourceOwner, SidAndAttributes, SsdtTable,
-    SymbolSearchMatch, SystemMemorySummary, Target, TokenDetail, irp_major_function_name,
-    kthread_state_name, wait_reason_name,
+    SymbolSearchMatch, SystemMemorySummary, Target, ThreadInfo, TokenDetail,
+    irp_major_function_name, kthread_state_name, wait_reason_name,
 };
 use crate::trapframe::KtrapFrame;
 use crate::triage::TriagePrcbInfo;
@@ -330,10 +332,11 @@ fn address_module(m: &AddressModule) -> View {
     ])
 }
 
-fn memory_region(r: &MemoryRegionInfo) -> View {
+pub fn memory_region(r: &MemoryRegionInfo) -> View {
     View::Object(vec![
         ("start", View::Hex(r.start.0)),
         ("end", View::Hex(r.end.0)),
+        ("size", View::Num(r.size())),
         ("protection", View::OptNum(r.protection)),
         ("vad_type", View::OptNum(r.vad_type)),
         ("private_memory", View::OptBool(r.private_memory)),
@@ -393,6 +396,79 @@ pub fn pte_level(pte: &PteLevel) -> View {
     ])
 }
 
+/// A full page-table walk: the walked address and DTB, then the levels that
+/// were reached (a large-page mapping short-circuits, so fewer levels).
+pub fn pte_walk(walk: &PteWalk) -> View {
+    let levels = [
+        Some(&walk.pxe),
+        Some(&walk.ppe),
+        walk.pde.as_ref(),
+        walk.pte.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(pte_level)
+    .collect();
+    View::Object(vec![
+        ("address", View::Hex(walk.address.0)),
+        ("dtb", View::Hex(walk.dtb)),
+        ("levels", View::List(levels)),
+    ])
+}
+
+/// One Windows thread from the kernel thread walk; `active` is the vCPU id
+/// currently running it (only resolved while halted).
+pub fn thread(t: &ThreadInfo, active: Option<&str>) -> View {
+    View::Object(vec![
+        ("tid", View::OptNum(t.tid)),
+        ("pid", View::OptNum(t.pid)),
+        ("process_name", View::OptStr(t.process_name.clone())),
+        ("ethread", View::Hex(t.ethread.0)),
+        ("kthread", View::Hex(t.kthread.0)),
+        ("eprocess", View::OptHex(t.eprocess.map(|a| a.0))),
+        ("state", View::OptNum(t.state.map(u64::from))),
+        (
+            "state_name",
+            View::OptStr(t.state.map(|s| kthread_state_name(s).to_string())),
+        ),
+        ("wait_reason", View::OptNum(t.wait_reason.map(u64::from))),
+        (
+            "wait_reason_name",
+            View::OptStr(t.wait_reason.map(|r| wait_reason_name(r).to_string())),
+        ),
+        ("active", View::OptStr(active.map(str::to_string))),
+    ])
+}
+
+pub fn vcpu(v: &VcpuInfo) -> View {
+    View::Object(vec![
+        ("id", View::Str(v.id.clone())),
+        ("rip", View::OptHex(v.rip)),
+        ("context", View::Str(v.context.clone())),
+        ("symbol", View::OptStr(v.symbol.clone())),
+        ("error", View::OptStr(v.error.clone())),
+    ])
+}
+
+/// A page of captured guest debug output plus the cursor for the next poll.
+pub fn debug_log(page: &DebugOutputPage) -> View {
+    let lines = page
+        .lines
+        .iter()
+        .map(|l| {
+            View::Object(vec![
+                ("seq", View::Num(l.seq)),
+                ("timestamp_ms", View::Num(l.timestamp_ms)),
+                ("text", View::Str(l.text.clone())),
+            ])
+        })
+        .collect();
+    View::Object(vec![
+        ("lines", View::List(lines)),
+        ("next_seq", View::Num(page.next_seq)),
+        ("dropped", View::Bool(page.dropped)),
+    ])
+}
 /// A decoded bugcheck (BSOD): code/name/description, its four parameters, and the
 /// faulting instruction when one was identified.
 pub fn bugcheck(a: &BugcheckAnalysis) -> View {
@@ -515,23 +591,15 @@ pub fn breakpoint(bp: &Breakpoint) -> View {
 }
 
 pub fn run_status(status: &RunStatus) -> View {
-    let process = status
-        .process
-        .as_ref()
-        .map(|(pid, name, eprocess)| {
-            View::Object(vec![
-                ("pid", View::Num(*pid)),
-                ("name", View::Str(name.clone())),
-                ("eprocess", View::Hex(*eprocess)),
-            ])
-        })
-        .unwrap_or(View::Null);
     View::Object(vec![
         ("running", View::Bool(status.running)),
         ("current_thread", View::Str(status.current_thread.clone())),
         ("rip", View::OptHex(status.rip)),
         ("symbol", View::OptStr(status.symbol.clone())),
-        ("process", process),
+        (
+            "process",
+            status.process.as_ref().map_or(View::Null, process),
+        ),
         ("coherent", View::Bool(status.coherent)),
         ("kernel_base", View::Hex(status.kernel_base)),
     ])
@@ -543,6 +611,13 @@ pub fn stack_frame(frame: &StackFrame) -> View {
         ("sp", View::Hex(frame.sp)),
         ("symbol", View::Str(frame.symbol.clone())),
         ("source", View::Str(frame.source.as_str().to_string())),
+        (
+            "source_location",
+            frame
+                .source_location
+                .as_ref()
+                .map_or(View::Null, source_location),
+        ),
     ])
 }
 
@@ -567,6 +642,66 @@ pub fn module(module: &ModuleInfo) -> View {
         fields.push(("product_version", View::Str(version.clone())));
     }
     View::Object(fields)
+}
+
+/// One decoded instruction: bytes, text, and the resolved branch/rip-relative
+/// target comment when there is one.
+pub fn disasm_row(row: &DisasmRow) -> View {
+    View::Object(vec![
+        ("ip", View::Hex(row.ip)),
+        ("hex", View::Str(row.hex.clone())),
+        ("asm", View::Str(row.asm())),
+        ("comment", View::OptStr(row.comment.clone())),
+    ])
+}
+
+/// A struct's field layout, sorted by offset.
+pub fn type_layout(name: &str, info: &TypeInfo) -> View {
+    let mut fields: Vec<_> = info.fields.iter().collect();
+    fields.sort_by_key(|(_, field)| field.offset);
+    let fields = fields
+        .into_iter()
+        .map(|(field_name, field)| {
+            View::Object(vec![
+                ("name", View::Str(field_name.clone())),
+                ("offset", View::Num(field.offset.into())),
+                ("size", View::Num(field.size)),
+                ("type", View::Str(field.type_data.to_string())),
+            ])
+        })
+        .collect();
+    View::Object(vec![
+        ("name", View::Str(name.to_string())),
+        ("size", View::Num(info.size as u64)),
+        ("fields", View::List(fields)),
+    ])
+}
+
+/// A `_DRIVER_OBJECT` as enumerated from the object directory.
+pub fn driver_object_info(driver: &DriverObjectInfo) -> View {
+    View::Object(vec![
+        ("name", View::Str(driver.name.clone())),
+        ("object", View::Hex(driver.object.0)),
+        ("driver_start", View::Hex(driver.driver_start.0)),
+        ("driver_size", View::Num(driver.driver_size)),
+        ("device_object", View::Hex(driver.device_object.0)),
+        ("driver_unload", View::Hex(driver.driver_unload.0)),
+    ])
+}
+
+/// One row of a backend's capability matrix.
+pub fn capability(capability: &BackendCapability) -> View {
+    View::Object(vec![
+        (
+            "capability",
+            View::Str(capability.capability.name().to_string()),
+        ),
+        (
+            "label",
+            View::Str(capability.capability.label().to_string()),
+        ),
+        ("supported", View::Bool(capability.supported)),
+    ])
 }
 
 pub fn dump_exception(exception: &DmpException) -> View {

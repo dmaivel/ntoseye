@@ -993,6 +993,7 @@ mod tests {
     use crate::bugchecks::{BugcheckArg, BugcheckFault};
     use crate::dmp::DmpContext;
     use crate::error::Result;
+    use crate::guest::ProcessInfo;
     use crate::kd::context::REGISTER_BUFFER_SIZE;
     use crate::session::RunStatus;
     use crate::triage::TriageDriver;
@@ -1032,7 +1033,12 @@ mod tests {
             current_thread: "p0.1".into(),
             rip,
             symbol: rip.map(|_| "sample!fault".into()),
-            process: Some((4, "System".into(), 0xffff_8000_0000_1000)),
+            process: Some(ProcessInfo {
+                pid: 4,
+                name: "System".into(),
+                dtb: 0x1a_d000,
+                eprocess_va: VirtAddr(0xffff_8000_0000_1000),
+            }),
             coherent: true,
             kernel_base: 0xffff_f800_0000_0000,
         }

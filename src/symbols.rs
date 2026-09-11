@@ -2478,7 +2478,7 @@ impl SymbolStore {
         SymbolIndex { names: all_strings }
     }
 
-    pub fn find_type_across_modules(&self, dtb: Dtb, type_name: &str) -> Option<TypeInfo> {
+    pub fn find_type_across_modules(&self, dtb: Dtb, type_name: &str) -> Option<Arc<TypeInfo>> {
         // Type layouts are address-space independent, so a kernel type must
         // resolve to the kernel's definition even while attached to a user
         // process whose modules (e.g. ntdll) define same-named-but-different
@@ -3705,7 +3705,7 @@ impl SymbolStore {
         Ok(())
     }
 
-    pub fn dump_struct_with_types<S>(&self, guid: u128, struct_name: S) -> Option<TypeInfo>
+    pub fn dump_struct_with_types<S>(&self, guid: u128, struct_name: S) -> Option<Arc<TypeInfo>>
     where
         S: Into<String> + AsRef<str>,
     {
@@ -3713,7 +3713,7 @@ impl SymbolStore {
         // layout is cheap next to that scan, so callers keep their owned return
         let cache_key = (guid, struct_name.as_ref().to_string());
         if let Some(cached) = self.type_cache.get(&cache_key) {
-            return Some((**cached).clone());
+            return Some(Arc::clone(&cached));
         }
 
         let pdb = self.pdbs.get_mut(&guid)?;
@@ -3749,8 +3749,8 @@ impl SymbolStore {
                 size: size as usize,
                 fields: fields_map,
             };
-            self.type_cache
-                .insert(cache_key, Arc::new(type_info.clone()));
+            let type_info = Arc::new(type_info);
+            self.type_cache.insert(cache_key, Arc::clone(&type_info));
             return Some(type_info);
         }
 

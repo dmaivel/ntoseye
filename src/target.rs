@@ -2496,7 +2496,7 @@ impl Target {
 
     fn handle_table_context(
         &self,
-    ) -> Result<(ProcessInfo, VirtAddr, VirtAddr, u8, usize, TypeInfo)> {
+    ) -> Result<(ProcessInfo, VirtAddr, VirtAddr, u8, usize, Arc<TypeInfo>)> {
         let process = self.selected_process_info()?;
         let types = self.guest()?.ntoskrnl.types_in(process.dtb);
         let eprocess = types.struct_at("_EPROCESS", process.eprocess_va)?;
@@ -3972,7 +3972,7 @@ impl Target {
 
             let vad = node - vad_node_offset;
             if let Some(region) =
-                self.read_vad_region(&memory, &vad_layout, flags_layout.as_ref(), vad, &modules)
+                self.read_vad_region(&memory, &vad_layout, flags_layout.as_deref(), vad, &modules)
             {
                 regions.push(region);
             }

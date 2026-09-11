@@ -1,4 +1,5 @@
 use owo_colors::OwoColorize;
+use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
@@ -42,11 +43,11 @@ pub struct BigPoolEntry {
 /// presence varies across Windows builds; the `*_uses_struct` flags say whether
 /// we can decode each entry field-by-field or have to fall back to fixed offsets
 pub struct PoolLayout {
-    pool_header: TypeInfo,
+    pool_header: Arc<TypeInfo>,
     header_size: u64,
     pool_tag_offset: u64,
     pool_header_uses_struct: bool,
-    big_pool_type: Option<TypeInfo>,
+    big_pool_type: Option<Arc<TypeInfo>>,
     big_pool_uses_struct: bool,
     big_pool_has_pool_type: bool,
     big_pool_has_slush: bool,

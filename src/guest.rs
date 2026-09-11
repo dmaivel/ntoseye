@@ -777,7 +777,7 @@ pub struct Types<'a> {
 
 impl<'a> Types<'a> {
     /// The parsed layout of struct `name` from the object's PDB (cached).
-    pub fn layout<S>(self, name: S) -> Result<TypeInfo>
+    pub fn layout<S>(self, name: S) -> Result<Arc<TypeInfo>>
     where
         S: Into<String> + AsRef<str>,
     {
@@ -836,7 +836,7 @@ impl<'a> Types<'a> {
             let record = StructRef {
                 obj,
                 dtb,
-                ti: record_ti.clone(),
+                ti: Arc::clone(&record_ti),
                 base: VirtAddr(current.0.wrapping_sub(link_offset)),
                 image: None,
             }
@@ -863,7 +863,7 @@ impl<'a> Types<'a> {
 pub struct StructRef<'a> {
     obj: &'a WinObject,
     dtb: Dtb,
-    ti: TypeInfo,
+    ti: Arc<TypeInfo>,
     base: VirtAddr,
     /// Prefetched copy of the struct's bytes from `base`; field reads inside
     /// it cost no memory request.
@@ -928,7 +928,7 @@ impl<'a> StructRef<'a> {
     }
 
     /// Wrap a freshly resolved layout at `base`, carrying this cursor's context.
-    fn with(&self, ti: TypeInfo, base: VirtAddr) -> StructRef<'a> {
+    fn with(&self, ti: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
         StructRef {
             obj: self.obj,
             dtb: self.dtb,

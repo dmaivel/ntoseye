@@ -369,6 +369,28 @@ pub enum DebugCapability {
 }
 
 impl DebugCapability {
+    /// Stable machine-readable identifier (the structured hosts' key).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MemoryIntrospection => "memory_introspection",
+            Self::ExecutionControl => "execution_control",
+            Self::InterruptTarget => "interrupt_target",
+            Self::SingleStep => "single_step",
+            Self::ReadRegisters => "read_registers",
+            Self::WriteRegisters => "write_registers",
+            Self::ThreadList => "thread_list",
+            Self::ThreadSelection => "thread_selection",
+            Self::KernelBreakpoints => "kernel_breakpoints",
+            Self::UserModeBreakpoints => "user_mode_breakpoints",
+            Self::Watchpoints => "watchpoints",
+            Self::TargetReloadDetection => "target_reload_detection",
+            Self::KernelBaseHint => "kernel_base_hint",
+            Self::BugcheckDetection => "bugcheck_detection",
+            Self::BugcheckDetails => "bugcheck_details",
+            Self::DebugOutput => "debug_output",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::MemoryIntrospection => "memory introspection",

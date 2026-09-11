@@ -208,13 +208,13 @@ fn print_triage_report(report: &TriageReport) {
             .unwrap_or_default();
         outln!("  {} {}{}", ui::muted("rip    "), ui::addr(rip), symbol);
     }
-    if let Some((pid, name, eprocess)) = &report.status.process {
+    if let Some(process) = &report.status.process {
         outln!(
             "  {} {} (pid {}, eprocess {})",
             ui::muted("scope  "),
-            name,
-            pid,
-            ui::addr(*eprocess)
+            process.name,
+            process.pid,
+            ui::addr(process.eprocess_va.0)
         );
     }
     if !report.status.coherent {

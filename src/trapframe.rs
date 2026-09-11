@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use crate::symbols::{TypeInfo, le_uint};
 use crate::target::{SavedThreadRegisters, Target};
 use crate::types::{Dtb, VirtAddr};
+use std::sync::Arc;
 
 pub const KTRAP_FRAME_TYPE: &str = "_KTRAP_FRAME";
 pub const KSWITCH_FRAME_TYPE: &str = "_KSWITCH_FRAME";
@@ -117,7 +118,7 @@ fn read_frame_bytes(
     dtb: Dtb,
     type_name: &str,
     address: VirtAddr,
-) -> Result<(TypeInfo, Vec<u8>)> {
+) -> Result<(Arc<TypeInfo>, Vec<u8>)> {
     let layout = debugger
         .symbols
         .find_type_across_modules(dtb, type_name)

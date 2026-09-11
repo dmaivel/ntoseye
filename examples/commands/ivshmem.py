@@ -15,11 +15,11 @@ REPLACEMENT = b"\x48\x83\x79\x20\x00\xeb\x0a"
     "Patch IVSHMEM driver to skip the shared-memory size check.\n(usage: ivshmem_patch)",
 )
 def ivshmem_patch(dbg: repl.Debugger):
-    mod = next((m for m in dbg.kernel_modules() if "ivshmem" in m[0].lower()), None)
+    mod = next((m for m in dbg.kernel_modules() if "ivshmem" in m["name"].lower()), None)
     if not mod:
         print("ivshmem module not loaded")
         return
-    name, base, size = mod
+    name, base, size = mod["name"], mod["base"], mod["size"]
     print(f"ivshmem: {name}  base={base:#x}  size={size:#x}")
 
     hits = dbg.search(base, PATTERN, size)

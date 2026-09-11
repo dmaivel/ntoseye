@@ -59,7 +59,7 @@ def main() -> None:
             s = dbg.step()
             ip = s.rip or 0
             sym = s.symbol or dbg.closest_symbol(ip)
-            asm = next((row[2] for row in dbg.disassemble(ip, 1)), "?")
+            asm = next((row["asm"] for row in dbg.disassemble(ip, 1)), "?")
             print(f"  step #{n}: reason={s.reason}  rip={ip:#x} ({sym})  {asm}")
 
         # --- breakpoints(): the list yields the same live handles ---

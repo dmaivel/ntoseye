@@ -62,9 +62,9 @@ def main() -> None:
                 f"bp={bp.id}  rcx={regs.get('rcx', 0):#x}"
             )
             # show the next two instructions at the hit
-            for ip, _hex, asm, comment in dbg.disassemble(rip, 2):
-                c = f"   ; {comment}" if comment else ""
-                print(f"    {ip:#x}: {asm}{c}")
+            for row in dbg.disassemble(rip, 2):
+                c = f"   ; {row['comment']}" if row["comment"] else ""
+                print(f"    {row['ip']:#x}: {row['asm']}{c}")
     finally:
         if timed_out:
             dbg.interrupt()
