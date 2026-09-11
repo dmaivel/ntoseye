@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env::VarError;
 use std::io::ErrorKind;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use owo_colors::OwoColorize;
 use super::transport::KdTransport;
 use crate::dbg_backend::DebugLog;
 use crate::error::{Error, Result};
+use crate::gdb::RegisterMap;
 use crate::kd::api;
 use crate::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
@@ -25,8 +27,8 @@ use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT,
     KD_INITIAL_PROGRESS_INTERVAL, KD_INITIAL_TIMEOUT_DEFAULT, KD_INITIAL_TIMEOUT_ENV,
     KD_REFRESH_BREAKIN_INTERVAL, KD_REFRESH_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT,
-    KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE, PUMP_POLL, StateChange,
-    handle_debug_io_with_output, handle_file_io,
+    KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE, PUMP_POLL, STATUS_BREAKPOINT,
+    StateChange, handle_debug_io_with_output, handle_file_io, should_advance_pc_before_continue,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,22 +37,15 @@ pub enum InitialHandshakeStimulus {
     Reset,
 }
 
+/// Break-in first, then alternate with RESET. A running target answers the
+/// break-in at once and drops the RESET; a stopped target answers RESET by
+/// resending its state change, while a break-in only does so if it arrives
+/// in the target's request loop rather than while it retransmits a reply.
 pub fn initial_handshake_stimulus(attempt: u32) -> InitialHandshakeStimulus {
     if attempt.is_multiple_of(2) {
         InitialHandshakeStimulus::BreakIn
     } else {
         InitialHandshakeStimulus::Reset
-    }
-}
-
-pub fn initial_handshake_stimulus_for_transport(
-    attempt: u32,
-    is_network: bool,
-) -> InitialHandshakeStimulus {
-    if is_network {
-        InitialHandshakeStimulus::BreakIn
-    } else {
-        initial_handshake_stimulus(attempt)
     }
 }
 
@@ -167,26 +162,34 @@ pub fn kd_initial_timeout() -> Result<Duration> {
     }
 }
 
-/// Initial break-in: send break-in first, then alternate RESET and break-in
+/// Initial break-in: send break-in first, then alternate RESET and break-in.
+/// KDCOM attempts last two seconds because a stopped kernel takes up to its
+/// one-second leader timeout to react to a break-in and reads one byte per
+/// clock tick while running; KDNET reacts within a datagram round trip, and
+/// its stimuli are cheap, so it retries at the target's own 500 ms cadence.
 pub fn poll_for_initial_break(
     framing: &mut KdFraming<KdTransport>,
     budget: Duration,
 ) -> Result<StateChange> {
-    const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
     let deadline = Instant::now() + budget;
 
-    framing
-        .transport_mut()
-        .set_read_timeout(Some(ATTEMPT_TIMEOUT))?;
     let is_network = framing
         .transport_mut()
         .network_datagrams_received()
         .is_some();
+    let attempt_timeout = if is_network {
+        Duration::from_millis(500)
+    } else {
+        Duration::from_secs(2)
+    };
+    framing
+        .transport_mut()
+        .set_read_timeout(Some(attempt_timeout))?;
 
     let mut attempts = 0u32;
     let mut next_progress_at = Instant::now() + KD_INITIAL_PROGRESS_INTERVAL;
     loop {
-        match initial_handshake_stimulus_for_transport(attempts, is_network) {
+        match initial_handshake_stimulus(attempts) {
             InitialHandshakeStimulus::BreakIn => framing.send_breakin()?,
             InitialHandshakeStimulus::Reset => {
                 framing.send_reset()?;
@@ -562,6 +565,141 @@ pub fn pump_assist_breakin(
     Ok(())
 }
 
+/// KD reports software-breakpoint stops with the program counter still
+/// pointing at the breakpoint instruction; step it past before resuming.
+pub fn advance_pc_past_breakpoint(
+    framing: &mut KdFraming<KdTransport>,
+    register_map: &RegisterMap,
+    arch: Arch,
+    processor: u16,
+) -> Result<()> {
+    let context_flags = match arch {
+        Arch::Amd64 => super::context::CONTEXT_ALL,
+        Arch::Arm64 => super::context_arm64::CONTEXT_ALL,
+    };
+    let mut context = with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+        api::get_context(framing, processor, context_flags)
+    })?;
+    let pc = register_map.read_u64("rip", &context)?;
+    let next_pc = pc.wrapping_add(register_map.breakpoint_step_size() as u64);
+    register_map.write_u64("rip", &mut context, next_pc)?;
+    kd_trace!(
+        "kd: advance_pc: p{} read pc={:#x}, writing {}-byte CONTEXT in chunks",
+        processor + 1,
+        pc,
+        context.len()
+    );
+    with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+        api::set_context_chunked(framing, processor, &context)
+    })?;
+    if trace_enabled()
+        && let Ok(verify_context) =
+            with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+                api::get_context(framing, processor, context_flags)
+            })
+        && let Ok(verify_pc) = register_map.read_u64("rip", &verify_context)
+    {
+        kd_trace!(
+            "kd: advance_pc: p{} wrote {:#x}, read back {:#x}",
+            processor + 1,
+            next_pc,
+            verify_pc
+        );
+    }
+    Ok(())
+}
+
+/// Stops the pump absorbs right after a continue. A break-in byte the kernel
+/// consumed while it was already stopped makes it re-break on its next clock
+/// tick, at the instruction it was resumed from or at the KD break-in
+/// instruction; those are debugger noise, resumed again without being
+/// reported. Managed breakpoints are never absorbed, nor is anything after
+/// the window closes, which it does at the first idle gap or after
+/// [`Self::WINDOW`], nor a stop once the foreground has asked for one: a
+/// user's break-in lands at the same instruction as the noise.
+pub struct ContinueDrain {
+    resumed_from_rip: u64,
+    processor: u16,
+    managed_bp_addresses: HashSet<u64>,
+    breakin_addresses: HashSet<u64>,
+    register_map: RegisterMap,
+    deadline: Instant,
+    remaining: u32,
+    interrupt_requested: Arc<AtomicBool>,
+}
+
+impl ContinueDrain {
+    /// Re-breaks land within a clock tick of the resume; the budget only
+    /// matters while boot traffic streams in without an idle gap.
+    const WINDOW: Duration = Duration::from_secs(2);
+    const MAX_ABSORBED: u32 = 64;
+
+    pub fn new(
+        resumed_from_rip: u64,
+        processor: u16,
+        managed_bp_addresses: HashSet<u64>,
+        breakin_addresses: HashSet<u64>,
+        register_map: RegisterMap,
+    ) -> Self {
+        Self {
+            resumed_from_rip,
+            processor,
+            managed_bp_addresses,
+            breakin_addresses,
+            register_map,
+            deadline: Instant::now() + Self::WINDOW,
+            remaining: Self::MAX_ABSORBED,
+            interrupt_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Set by the foreground before it sends a break-in, so the resulting
+    /// stop is reported rather than absorbed.
+    pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.interrupt_requested)
+    }
+
+    pub fn is_spurious(&self, stop: &StateChange) -> bool {
+        if self.remaining == 0
+            || Instant::now() >= self.deadline
+            || self.interrupt_requested.load(Ordering::SeqCst)
+            || stop.target_reloaded
+            || stop.is_bugcheck
+            || stop.assisted_breakin
+            || stop.new_state != DBG_KD_EXCEPTION_STATE_CHANGE
+            || stop.exception_code != STATUS_BREAKPOINT
+            || self.managed_bp_addresses.contains(&stop.program_counter)
+        {
+            return false;
+        }
+        stop.program_counter == self.resumed_from_rip
+            || self.breakin_addresses.contains(&stop.program_counter)
+    }
+
+    /// Resume past an absorbed stop, always as handled: it is debugger noise
+    /// and must never reach Windows exception dispatch.
+    fn absorb(
+        &mut self,
+        framing: &mut KdFraming<KdTransport>,
+        arch: Arch,
+        stop: &StateChange,
+    ) -> Result<()> {
+        self.remaining -= 1;
+        self.resumed_from_rip = stop.program_counter;
+        self.processor = stop.processor;
+        kd_trace!(
+            "kd: pump: absorbing re-break at {:#x} on p{} ({} left)",
+            stop.program_counter,
+            stop.processor + 1,
+            self.remaining
+        );
+        if should_advance_pc_before_continue(stop.exception_code, false) {
+            advance_pc_past_breakpoint(framing, &self.register_map, arch, stop.processor)?;
+        }
+        continue_transparent_state_change(framing, arch, stop)
+    }
+}
+
 /// Handle to the background servicing pump (see [`run_pump`])
 pub struct PumpHandle {
     pub join: JoinHandle<KdFraming<KdTransport>>,
@@ -570,6 +708,18 @@ pub struct PumpHandle {
     /// Set by the pump the instant it places a result in `stop_rx` and exits.
     /// Lets the foreground tell "running" from "stopped but not yet drained"
     /// without consuming the result (see `KdBackend::has_pending_stop`).
+    pub reported_stop: Arc<AtomicBool>,
+    /// Raised by the foreground before it writes a break-in byte, so the
+    /// pump reports the stop instead of absorbing it as post-continue noise.
+    pub breakin_requested: Arc<AtomicBool>,
+}
+
+/// The pump's side of its link to the foreground: where it reports the stop
+/// and how it learns to shut down.
+pub struct PumpLink {
+    pub stop_tx: mpsc::Sender<std::result::Result<StateChange, String>>,
+    pub shutdown: Arc<AtomicBool>,
+    /// See [`PumpHandle::reported_stop`].
     pub reported_stop: Arc<AtomicBool>,
 }
 
@@ -584,18 +734,17 @@ pub struct PumpHandle {
 pub fn run_pump(
     mut framing: KdFraming<KdTransport>,
     arch: Arch,
-    stop_tx: mpsc::Sender<std::result::Result<StateChange, String>>,
-    shutdown: Arc<AtomicBool>,
-    reported_stop: Arc<AtomicBool>,
+    link: PumpLink,
     reconnect_assist_delay: Option<Duration>,
     debug_log: DebugLog,
+    mut drain: Option<ContinueDrain>,
 ) -> KdFraming<KdTransport> {
     // Flag the result the moment it lands in the channel, before we exit, so a
     // concurrent foreground `is_running()`/status read sees "stopped, undrained"
     // rather than the stale running value.
     let report = |result| {
-        reported_stop.store(true, Ordering::SeqCst);
-        let _ = stop_tx.send(result);
+        link.reported_stop.store(true, Ordering::SeqCst);
+        let _ = link.stop_tx.send(result);
     };
     let _ = framing.transport_mut().set_read_timeout(Some(PUMP_POLL));
     // Persists across poll iterations: once the bugcheck refresh is seen, the
@@ -607,7 +756,7 @@ pub fn run_pump(
     let mut next_assist_breakin = Instant::now();
     let mut assist_breakin_count = 0u32;
     let mut assisted_breakin_pending = false;
-    while !shutdown.load(Ordering::SeqCst) {
+    while !link.shutdown.load(Ordering::SeqCst) {
         // Bound each await to a poll interval so assist-poke scheduling runs on
         // time even while boot traffic streams in continuously (otherwise the
         // WouldBlock branch below, where assists are sent, never runs).
@@ -625,12 +774,25 @@ pub fn run_pump(
         ) {
             Ok(mut stop) => {
                 stop.assisted_breakin = assisted_breakin_pending;
+                if let Some(drain) = drain.as_mut()
+                    && drain.is_spurious(&stop)
+                {
+                    if let Err(e) = drain.absorb(&mut framing, arch, &stop) {
+                        report(Err(e.to_string()));
+                        break;
+                    }
+                    let _ = framing.transport_mut().set_read_timeout(Some(PUMP_POLL));
+                    continue;
+                }
                 report(Ok(stop));
                 break;
             }
             Err(Error::Io(e))
                 if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
             {
+                // The re-break a stale break-in causes lands within a clock
+                // tick of the resume; an idle gap means there is none.
+                drain = None;
                 // Idle gap between packets. After a reboot/reset, KDCOM may be
                 // waiting for the debugger to break in before it emits the
                 // state-change we need to rediscover the new kernel.

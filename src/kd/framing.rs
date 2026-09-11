@@ -4,6 +4,8 @@
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 
@@ -92,7 +94,11 @@ pub struct KdFraming<T> {
     kdnet_packet_ids: bool,
     /// KDNET remote-ID high-water mark; targets retransmit with identical
     /// IDs, so anything not strictly greater is a duplicate to ACK and drop.
-    kdnet_remote_high_water: u32,
+    /// `None` until the first packet: the target counts from 0.
+    kdnet_remote_high_water: Option<u32>,
+    /// KDNET session generation, bumped by the transport on every rollover.
+    kdnet_generation: Option<Arc<AtomicU64>>,
+    kdnet_generation_seen: u64,
 }
 
 impl<T> KdFraming<T> {
@@ -120,7 +126,9 @@ impl<T: Read + Write> KdFraming<T> {
             peer_reset_seen: false,
             modules_changed: false,
             kdnet_packet_ids: false,
-            kdnet_remote_high_water: 0,
+            kdnet_remote_high_water: None,
+            kdnet_generation: None,
+            kdnet_generation_seen: 0,
         }
     }
 
@@ -153,9 +161,31 @@ impl<T: Read + Write> KdFraming<T> {
     /// Select KDNET's packet-ID dialect: the debugger uses high-bit,
     /// monotonically increasing even IDs while the target uses its own
     /// monotonically increasing IDs. KD ACKs still echo the target's exact ID.
-    pub fn use_kdnet_packet_ids(&mut self) {
+    pub fn use_kdnet_packet_ids(&mut self, generation: Arc<AtomicU64>) {
         self.kdnet_packet_ids = true;
         self.current_packet_id = KDNET_INITIAL_PACKET_ID;
+        self.kdnet_generation_seen = generation.load(Ordering::Relaxed);
+        self.kdnet_generation = Some(generation);
+    }
+
+    /// Adopt a rolled-over KDNET session. The peer is a target that restarted
+    /// under the listener, so its packet ids begin again: the old high-water
+    /// mark would reject everything it sends as a duplicate, and our own id
+    /// would carry a value it link-ACKs but discards.
+    fn sync_kdnet_session(&mut self) {
+        let Some(generation) = &self.kdnet_generation else {
+            return;
+        };
+        let current = generation.load(Ordering::Relaxed);
+        if current == self.kdnet_generation_seen {
+            return;
+        }
+        self.kdnet_generation_seen = current;
+        kd_trace!("kd: KDNET session rolled over; restarting the packet-id stream");
+        self.reset_outbound_packet_id();
+        self.kdnet_remote_high_water = None;
+        self.queued_data.clear();
+        self.peer_reset_seen = true;
     }
 
     fn reset_outbound_packet_id(&mut self) {
@@ -164,6 +194,17 @@ impl<T: Read + Write> KdFraming<T> {
         } else {
             INITIAL_PACKET_ID
         };
+    }
+
+    /// Whether an inbound ACK answers the packet in flight. KDCOM masks SYNC
+    /// on both sides; KDNET ids are plain counters stepping by two, so the
+    /// same masking would let an ACK from 1024 packets ago pass for this one.
+    fn ack_matches(&self, packet_id: u32) -> bool {
+        if self.kdnet_packet_ids {
+            packet_id == self.current_packet_id
+        } else {
+            (packet_id & !SYNC_PACKET_ID) == (self.current_packet_id & !SYNC_PACKET_ID)
+        }
     }
 
     fn remote_ack_id(&self, packet_id: u32) -> u32 {
@@ -181,25 +222,31 @@ impl<T: Read + Write> KdFraming<T> {
         Ok(())
     }
 
-    /// Send KD_RESET and reset local packet IDs
+    /// Send KD_RESET and reset local packet IDs. KDCOM ignores the id and
+    /// restarts both streams at `INITIAL_PACKET_ID`; kdnet.dll adopts the
+    /// RESET's id as the next one it expects from the host.
     pub fn send_reset(&mut self) -> Result<()> {
         self.reset_outbound_packet_id();
         self.remote_packet_id = INITIAL_PACKET_ID;
+        self.kdnet_remote_high_water = None;
         self.queued_data.clear();
         self.awaiting_reset_ack = true;
-        self.send_control(PACKET_TYPE_KD_RESET, 0)
+        self.send_control(PACKET_TYPE_KD_RESET, self.current_packet_id)
     }
 
     fn handle_reset(&mut self, context: &str) -> Result<()> {
         kd_trace!("kd: {context}: got RESET, resyncing ids");
         self.reset_outbound_packet_id();
         self.remote_packet_id = INITIAL_PACKET_ID;
+        // The target restarts its id counter too, so the old high-water mark
+        // would reject everything it sends next.
+        self.kdnet_remote_high_water = None;
         self.queued_data.clear();
         self.peer_reset_seen = true;
         if self.awaiting_reset_ack {
             self.awaiting_reset_ack = false;
         } else {
-            self.send_control(PACKET_TYPE_KD_RESET, 0)?;
+            self.send_control(PACKET_TYPE_KD_RESET, self.current_packet_id)?;
         }
         Ok(())
     }
@@ -247,10 +294,7 @@ impl<T: Read + Write> KdFraming<T> {
                         break;
                     }
                     Err(e) => return Err(e),
-                    Ok(Received::Ack { packet_id })
-                        if (packet_id & !SYNC_PACKET_ID)
-                            == (self.current_packet_id & !SYNC_PACKET_ID) =>
-                    {
+                    Ok(Received::Ack { packet_id }) if self.ack_matches(packet_id) => {
                         kd_trace!("kd: send_data: ACKed id={:#x}", packet_id);
                         if self.kdnet_packet_ids {
                             self.current_packet_id =
@@ -326,20 +370,20 @@ impl<T: Read + Write> KdFraming<T> {
     /// `remote_packet_id` if so. A packet with `SYNC_PACKET_ID` set means the
     /// kernel reset its send-id stream (e.g. it re-entered the debugger after
     /// thinking we were gone), so we realign to it unconditionally. A plain
-    /// id that doesn't match the expected one is a stale retransmit to skip
+    /// id that doesn't match the expected one is a stale retransmit to skip.
+    ///
+    /// KDNET has no such flag: its ids are a plain counter that steps by two,
+    /// so bit `SYNC_PACKET_ID` is simply set for half of them. There, a
+    /// restarted stream is signalled by the session rollover or by RESET.
     fn accept_remote_packet(&mut self, packet_id: u32) -> bool {
         if self.kdnet_packet_ids {
-            let base = packet_id & !SYNC_PACKET_ID;
-            if packet_id & SYNC_PACKET_ID != 0 {
-                self.peer_reset_seen = true;
-                self.reset_outbound_packet_id();
-                self.kdnet_remote_high_water = base;
-                return true;
-            }
-            if base <= self.kdnet_remote_high_water {
+            if self
+                .kdnet_remote_high_water
+                .is_some_and(|high| packet_id <= high)
+            {
                 return false;
             }
-            self.kdnet_remote_high_water = base;
+            self.kdnet_remote_high_water = Some(packet_id);
             return true;
         }
         let base = packet_id & !SYNC_PACKET_ID;
@@ -427,6 +471,10 @@ impl<T: Read + Write> KdFraming<T> {
     fn recv_any(&mut self) -> Result<Received> {
         loop {
             let leader = self.read_packet_leader()?;
+            // Reading the leader pulled in the datagram that carries this
+            // packet, so a rollover it proved is visible now, before its id
+            // is judged against the superseded stream.
+            self.sync_kdnet_session();
             let mut tail = [0u8; HEADER_SIZE - 4];
             self.transport.read_exact(&mut tail)?;
 
@@ -648,7 +696,7 @@ mod tests {
     #[test]
     fn send_data_advances_kdnet_packet_ids_by_two() {
         let mut framing = KdFraming::new(Loopback::new(ack_for(KDNET_INITIAL_PACKET_ID)));
-        framing.use_kdnet_packet_ids();
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
         framing
             .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &[])
             .unwrap();
@@ -663,6 +711,128 @@ mod tests {
             framing.current_packet_id,
             KDNET_INITIAL_PACKET_ID.wrapping_add(2)
         );
+    }
+
+    /// A KDNET rollover means the peer is a restarted target whose ids begin
+    /// again; the old high-water mark must not reject them as duplicates.
+    #[test]
+    fn kdnet_rollover_restarts_the_remote_packet_id_stream() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0xb6, b"old");
+        inbound.extend(data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x04, b"new"));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids(Arc::clone(&generation));
+
+        assert_eq!(framing.recv_data().unwrap().payload, b"old");
+        assert!(!framing.take_peer_reset_seen());
+
+        generation.fetch_add(1, Ordering::Relaxed);
+        let after_reboot = framing.recv_data().unwrap();
+        assert_eq!(after_reboot.payload, b"new");
+        assert!(
+            framing.take_peer_reset_seen(),
+            "a rolled-over session is a target reload"
+        );
+        assert_eq!(framing.current_packet_id, KDNET_INITIAL_PACKET_ID);
+    }
+
+    /// KDNET ids are a plain counter, so bit `SYNC_PACKET_ID` is set for half
+    /// of them. Reading it as KDCOM's stream-reset flag rewound the host's own
+    /// id on every second packet and reported a target reload that never
+    /// happened.
+    #[test]
+    fn kdnet_ids_carrying_the_sync_bit_are_ordinary_ids() {
+        let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x2008a, b"before");
+        // 0x25f4c has SYNC_PACKET_ID set; it is still just the next counter.
+        inbound.extend(data_packet(
+            PACKET_TYPE_KD_STATE_CHANGE64,
+            0x25f4c,
+            b"after",
+        ));
+        inbound.extend(ack_for(KDNET_INITIAL_PACKET_ID));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
+
+        assert_eq!(framing.recv_data().unwrap().payload, b"before");
+        assert_eq!(framing.recv_data().unwrap().payload, b"after");
+        assert!(
+            !framing.take_peer_reset_seen(),
+            "a set SYNC bit in a KDNET id is not a target reload"
+        );
+        assert_eq!(framing.kdnet_remote_high_water, Some(0x25f4c));
+        let second_ack = Header::decode(
+            framing.transport.outbound[HEADER_SIZE..2 * HEADER_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(second_ack.packet_type, PACKET_TYPE_KD_ACKNOWLEDGE);
+        assert_eq!(
+            second_ack.packet_id, 0x25f4c,
+            "KDNET ACKs echo the id whole"
+        );
+
+        // The outbound stream was never rewound, so the next request advances.
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &[])
+            .unwrap();
+        assert_eq!(
+            framing.current_packet_id,
+            KDNET_INITIAL_PACKET_ID.wrapping_add(2)
+        );
+    }
+
+    /// An ACK differing only in bit `SYNC_PACKET_ID` is an old ACK, not this
+    /// one: KDNET ids are counters, so masking that bit would retire a packet
+    /// on the strength of an ACK from 1024 packets earlier.
+    #[test]
+    fn kdnet_ack_ids_must_match_exactly() {
+        let mut inbound = ack_for(KDNET_INITIAL_PACKET_ID | SYNC_PACKET_ID);
+        inbound.extend(ack_for(KDNET_INITIAL_PACKET_ID));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
+
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
+            .unwrap();
+
+        // The near-miss ACK forced a retransmit before the real one landed.
+        let packet_len = HEADER_SIZE + 1 + 1;
+        assert_eq!(framing.transport.outbound.len(), 2 * packet_len);
+        assert_eq!(
+            framing.current_packet_id,
+            KDNET_INITIAL_PACKET_ID.wrapping_add(2)
+        );
+    }
+
+    /// A stale retransmit under the high-water mark stays rejected.
+    #[test]
+    fn kdnet_replayed_packet_ids_are_still_dropped() {
+        let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x25f4c, b"first");
+        inbound.extend(data_packet(
+            PACKET_TYPE_KD_STATE_CHANGE64,
+            0x25f4c,
+            b"replay",
+        ));
+        inbound.extend(data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x25f4e, b"next"));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
+
+        assert_eq!(framing.recv_data().unwrap().payload, b"first");
+        assert_eq!(framing.recv_data().unwrap().payload, b"next");
+    }
+
+    /// kdnet.dll counts its packet ids from 0, so a freshly booted target's
+    /// first packet carries id 0 and must not be mistaken for a replay.
+    #[test]
+    fn kdnet_first_packet_may_carry_id_zero() {
+        let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x0, b"boot");
+        inbound.extend(data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x0, b"replay"));
+        inbound.extend(data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0x2, b"next"));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
+
+        assert_eq!(framing.recv_data().unwrap().payload, b"boot");
+        assert_eq!(framing.recv_data().unwrap().payload, b"next");
     }
 
     #[test]
@@ -688,7 +858,7 @@ mod tests {
     fn recv_data_accepts_kdnet_monotonic_packet_ids() {
         let inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 0xb6, b"kdnet");
         let mut framing = KdFraming::new(Loopback::new(inbound));
-        framing.use_kdnet_packet_ids();
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
 
         let pkt = framing.recv_data().unwrap();
         assert_eq!(pkt.payload, b"kdnet");
@@ -702,33 +872,6 @@ mod tests {
         assert_eq!(ack.packet_id, 0xb6);
     }
 
-    #[test]
-    fn recv_data_resynchronizes_kdnet_and_echoes_sync_ack_exactly() {
-        let mut inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, SYNC_PACKET_ID, b"sync");
-        inbound.extend(data_packet(PACKET_TYPE_KD_STATE_CHANGE64, 2, b"next"));
-        let mut framing = KdFraming::new(Loopback::new(inbound));
-        framing.use_kdnet_packet_ids();
-        framing.current_packet_id = KDNET_INITIAL_PACKET_ID + 20;
-        framing.kdnet_remote_high_water = 0x100;
-
-        assert_eq!(framing.recv_data().unwrap().payload, b"sync");
-        assert!(framing.take_peer_reset_seen());
-        assert_eq!(framing.current_packet_id, KDNET_INITIAL_PACKET_ID);
-        assert_eq!(framing.recv_data().unwrap().payload, b"next");
-
-        let first_ack = Header::decode(
-            framing.transport.outbound[..HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        );
-        let second_ack = Header::decode(
-            framing.transport.outbound[HEADER_SIZE..2 * HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        );
-        assert_eq!(first_ack.packet_id, SYNC_PACKET_ID);
-        assert_eq!(second_ack.packet_id, 2);
-    }
     #[test]
     fn recv_data_skips_garbage_before_leader() {
         let payload = vec![0x01, 0x02];

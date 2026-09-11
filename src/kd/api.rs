@@ -313,8 +313,15 @@ pub fn read_virtual_memory<T: Read + Write>(
     let mut header = make_header(DBGKD_READ_VIRTUAL_MEMORY, processor);
     write_u64(&mut header, UNION_OFFSET, addr);
     write_u32(&mut header, UNION_OFFSET + 8, len);
-    let (parsed, _, data) = send_manipulate(framing, &header, &[])?;
+    let (parsed, reply_header, data) = send_manipulate(framing, &header, &[])?;
     check_status(&parsed, DBGKD_READ_VIRTUAL_MEMORY)?;
+    let actual = read_u32(&reply_header, UNION_OFFSET + 12);
+    if actual > len || data.len() != actual as usize || (len != 0 && actual == 0) {
+        return Err(Error::Kd(format!(
+            "invalid virtual-memory read at {addr:#x}: received {} bytes, target reported {actual} for request {len}",
+            data.len()
+        )));
+    }
     Ok(data)
 }
 

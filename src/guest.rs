@@ -11,6 +11,7 @@ use crate::{
     types::*,
 };
 use indicatif::{ProgressBar, ProgressStyle};
+use pelite::image::{IMAGE_DIRECTORY_ENTRY_DEBUG, IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 use pelite::pe64::{Pe, PeFile, PeView};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -161,10 +162,11 @@ impl ModuleSymbolLoadReport {
     }
 }
 
-/// A module image reconstructed from guest memory. Sections whose pages were
-/// paged out are zero-filled in `bytes`; their RVA ranges are recorded as `holes`
-/// so callers don't mistake a zeroed region for real data (which previously led
-/// to e.g. fabricated unwind frames or a wrong PDB GUID).
+/// A module image reconstructed from guest memory. Sections that were paged
+/// out, or that [`read_pe_image`] left unread, are zero-filled in `bytes`;
+/// their RVA ranges are recorded as `holes` so callers don't mistake a zeroed
+/// region for real data (which previously led to e.g. fabricated unwind frames
+/// or a wrong PDB GUID).
 #[derive(Debug)]
 pub struct PeImage {
     bytes: Vec<u8>,
@@ -182,6 +184,28 @@ impl PeImage {
 
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Mark `range` as read, carving it out of any hole it overlaps.
+    fn fill(&mut self, range: Range<usize>) {
+        self.holes = self
+            .holes
+            .iter()
+            .flat_map(|hole| {
+                if hole.end <= range.start || range.end <= hole.start {
+                    vec![hole.clone()]
+                } else {
+                    let mut rest = Vec::new();
+                    if hole.start < range.start {
+                        rest.push(hole.start..range.start);
+                    }
+                    if range.end < hole.end {
+                        rest.push(range.end..hole.end);
+                    }
+                    rest
+                }
+            })
+            .collect();
     }
 
     /// Whether the image has no paged-out holes (e.g. built from an on-disk
@@ -206,6 +230,11 @@ impl PeImage {
     }
 }
 
+/// Read a module's header and the sections that symbol discovery and
+/// unwinding consult: the exception and debug directories and `.rdata`,
+/// where MSVC keeps unwind info. Code and data sections are most of an image
+/// and are never read from the snapshot, so they are left as holes; a lookup
+/// that lands in one falls back to the on-disk image.
 pub fn read_pe_image<'a, B: MemoryOps<PhysAddr>>(
     base_address: VirtAddr,
     memory: &memory::AddressSpace<'a, B>,
@@ -217,6 +246,16 @@ pub fn read_pe_image<'a, B: MemoryOps<PhysAddr>>(
     let view = PeView::from_bytes(&header_buf)?;
     let optional_header = view.optional_header();
     let sections = view.section_headers();
+    let directories = view.data_directory();
+    let wanted_directories = [IMAGE_DIRECTORY_ENTRY_EXCEPTION, IMAGE_DIRECTORY_ENTRY_DEBUG]
+        .into_iter()
+        .filter_map(|index| directories.get(index))
+        .filter(|directory| directory.Size != 0)
+        .map(|directory| {
+            directory.VirtualAddress as usize
+                ..directory.VirtualAddress as usize + directory.Size as usize
+        })
+        .collect::<Vec<_>>();
 
     let total_size = optional_header.SizeOfImage as usize;
     let mut image_buffer = vec![0u8; total_size];
@@ -234,6 +273,16 @@ pub fn read_pe_image<'a, B: MemoryOps<PhysAddr>>(
         if copy_size == 0 || v_addr + copy_size > total_size {
             continue;
         }
+        let name = section.Name;
+        let wanted = name.starts_with(b".rdata")
+            || name.starts_with(b".xdata")
+            || wanted_directories
+                .iter()
+                .any(|range| range.start < v_addr + copy_size && v_addr < range.end);
+        if !wanted {
+            holes.push(v_addr..(v_addr + copy_size));
+            continue;
+        }
 
         let target_slice = &mut image_buffer[v_addr..v_addr + copy_size];
         match memory.read_bytes(VirtAddr(base_address.0 + v_addr as u64), target_slice) {
@@ -247,10 +296,39 @@ pub fn read_pe_image<'a, B: MemoryOps<PhysAddr>>(
         }
     }
 
-    Ok(PeImage {
+    let mut image = PeImage {
         bytes: image_buffer,
         holes,
-    })
+    };
+    // The debug directory names where its CodeView record lives; a linker
+    // may put that outside `.rdata`.
+    let records = PeView::from_bytes(&image.bytes)
+        .ok()
+        .and_then(|view| view.debug().ok())
+        .map(|debug| {
+            debug
+                .image()
+                .iter()
+                .filter(|entry| entry.SizeOfData != 0)
+                .map(|entry| {
+                    entry.AddressOfRawData as usize
+                        ..entry.AddressOfRawData as usize + entry.SizeOfData as usize
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for record in records {
+        if record.end <= total_size && !image.is_present(record.start, record.len()) {
+            let target = &mut image.bytes[record.clone()];
+            if memory
+                .read_bytes(VirtAddr(base_address.0 + record.start as u64), target)
+                .is_ok()
+            {
+                image.fill(record);
+            }
+        }
+    }
+    Ok(image)
 }
 
 /// Name of the PE section containing `address` within the image loaded at
@@ -504,7 +582,9 @@ pub struct WinObject {
     /// AArch64 TTBR1 (kernel-space root). Equal to `dtb` for the kernel object
     /// and AMD64; process siblings keep the kernel root for kernel-VA reads.
     kernel_dtb: Dtb,
-    binary_snapshot: Vec<u8>,
+    /// In-memory image read once at symbol load and shared with the unwinder,
+    /// which would otherwise read the whole image again over the transport.
+    image: Option<Arc<PeImage>>,
     pub guid: Option<u128>,
     phys: Arc<PhysMem>,
     symbols: Arc<SymbolStore>,
@@ -532,7 +612,7 @@ impl WinObject {
             dtb,
             arch,
             kernel_dtb: dtb,
-            binary_snapshot: Vec::new(),
+            image: None,
             guid: None,
             phys,
             symbols,
@@ -585,7 +665,7 @@ impl WinObject {
 
     /// Size of the cached binary snapshot (0 until [`view`](Self::view) has run).
     pub fn binary_size(&self) -> usize {
-        self.binary_snapshot.len()
+        self.image.as_ref().map_or(0, |image| image.bytes.len())
     }
 
     /// A sibling object sharing this one's physical-memory and symbol handles,
@@ -597,7 +677,7 @@ impl WinObject {
             dtb,
             arch: self.arch,
             kernel_dtb: self.kernel_dtb,
-            binary_snapshot: Vec::new(),
+            image: None,
             guid: None,
             phys: Arc::clone(&self.phys),
             symbols: Arc::clone(&self.symbols),
@@ -649,14 +729,19 @@ impl WinObject {
     // TODO binary should probably be reread to ensure correctness
     // TODO bc shared memory might/isnt used, this needs to be mutable to ensure data is fresh :/
     pub fn view(&mut self) -> Option<PeView<'_>> {
-        if self.binary_snapshot.is_empty() {
+        if self.image.is_none() {
             // Clone the Arc so the read borrow doesn't alias `&mut self`.
             let phys = Arc::clone(&self.phys);
             let memory = self.address_space(&phys, self.dtb);
-            self.binary_snapshot = read_pe_image(self.base_address, &memory).ok()?.bytes;
+            self.image = Some(Arc::new(read_pe_image(self.base_address, &memory).ok()?));
         }
 
-        PeView::from_bytes(&self.binary_snapshot).ok()
+        PeView::from_bytes(&self.image.as_ref()?.bytes).ok()
+    }
+
+    /// The image already read by [`view`](Self::view), if any.
+    pub fn cached_image(&self) -> Option<Arc<PeImage>> {
+        self.image.clone()
     }
 
     /// Resolve this object's struct/type namespace, read in its own address
@@ -1988,8 +2073,107 @@ impl Guest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModuleSymbolLoadReport, PeImage};
+    use super::{ModuleSymbolLoadReport, PeImage, read_pe_image};
+    use crate::backend::MemoryOps;
+    use crate::error::{Error, Result};
+    use crate::memory::{AddressSpace, DTB_IDENTITY};
     use crate::symbols::SymbolIndexDiagnostic;
+    use crate::types::{PhysAddr, VirtAddr};
+
+    #[test]
+    fn pe_image_fill_carves_holes() {
+        let mut image = PeImage {
+            bytes: vec![0u8; 0x100],
+            holes: vec![0x00..0x40, 0x80..0x100],
+        };
+        image.fill(0x90..0xa0);
+        assert_eq!(image.holes, vec![0x00..0x40, 0x80..0x90, 0xa0..0x100]);
+        image.fill(0x00..0x40);
+        assert_eq!(image.holes, vec![0x80..0x90, 0xa0..0x100]);
+        image.fill(0x70..0x88);
+        assert_eq!(image.holes, vec![0x88..0x90, 0xa0..0x100]);
+    }
+
+    /// Identity-mapped memory holding one image at `base`; reads outside it
+    /// fail like an unmapped page.
+    struct ImageMemory {
+        base: u64,
+        bytes: Vec<u8>,
+    }
+
+    impl MemoryOps<PhysAddr> for ImageMemory {
+        fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+            let start = addr
+                .checked_sub(self.base)
+                .filter(|start| start + buf.len() as u64 <= self.bytes.len() as u64)
+                .ok_or(Error::BadPhysicalAddress(addr))? as usize;
+            buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
+            Ok(())
+        }
+
+        fn write_bytes(&self, _addr: PhysAddr, _buf: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    /// A PE32+ image with `.text` at 0x1000 and `.rdata` at 0x2000, each one
+    /// page, filled with distinct bytes.
+    fn synthetic_image() -> Vec<u8> {
+        let mut image = vec![0u8; 0x3000];
+        image[..2].copy_from_slice(b"MZ");
+        image[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        let pe = 0x80;
+        image[pe..pe + 4].copy_from_slice(b"PE\0\0");
+        image[pe + 4..pe + 6].copy_from_slice(&0x8664u16.to_le_bytes());
+        image[pe + 6..pe + 8].copy_from_slice(&2u16.to_le_bytes());
+        image[pe + 20..pe + 22].copy_from_slice(&240u16.to_le_bytes());
+        let opt = pe + 24;
+        image[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        image[opt + 32..opt + 36].copy_from_slice(&0x1000u32.to_le_bytes());
+        image[opt + 36..opt + 40].copy_from_slice(&0x200u32.to_le_bytes());
+        image[opt + 56..opt + 60].copy_from_slice(&0x3000u32.to_le_bytes());
+        image[opt + 60..opt + 64].copy_from_slice(&0x1000u32.to_le_bytes());
+        image[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+        let sections = opt + 240;
+        for (index, (name, va, fill)) in [
+            (b".text\0\0\0", 0x1000u32, 0xccu8),
+            (b".rdata\0\0", 0x2000, 0xdd),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let header = sections + 40 * index;
+            image[header..header + 8].copy_from_slice(name);
+            image[header + 8..header + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+            image[header + 12..header + 16].copy_from_slice(&va.to_le_bytes());
+            image[header + 16..header + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+            image[header + 20..header + 24].copy_from_slice(&va.to_le_bytes());
+            image[va as usize..va as usize + 0x1000].fill(fill);
+        }
+        image
+    }
+
+    /// Only the header and `.rdata` come from the target; code is a hole, so
+    /// a lookup there is refused rather than served zeros.
+    #[test]
+    fn read_pe_image_skips_code_sections() {
+        let base = 0x10_0000u64;
+        let memory = ImageMemory {
+            base,
+            bytes: synthetic_image(),
+        };
+        let space = AddressSpace::new(&memory, DTB_IDENTITY);
+        let image = read_pe_image(VirtAddr(base), &space).unwrap();
+
+        assert_eq!(image.as_slice().len(), 0x3000);
+        assert!(image.is_present(0, 0x1000));
+        assert_eq!(
+            image.present_slice(0x2000, 0x1000).unwrap(),
+            &[0xdd; 0x1000][..]
+        );
+        assert!(!image.is_present(0x1000, 1));
+        assert_eq!(image.holes, vec![0x1000..0x2000]);
+    }
 
     #[test]
     fn pe_image_present_respects_holes_and_bounds() {

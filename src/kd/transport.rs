@@ -1,5 +1,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use super::kdnet::KdNetStream;
@@ -21,6 +23,15 @@ impl KdTransport {
         match self {
             Self::Serial(stream) => stream.set_read_timeout(timeout),
             Self::Network(stream) => stream.set_read_timeout(timeout),
+        }
+    }
+
+    /// KDNET session generation handle, bumped whenever the transport
+    /// renegotiates with a restarted target.
+    pub fn network_session_generation(&self) -> Option<Arc<AtomicU64>> {
+        match self {
+            Self::Network(stream) => Some(stream.session_generation()),
+            Self::Serial(_) => None,
         }
     }
 

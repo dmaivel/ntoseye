@@ -12,19 +12,21 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
+use crate::kd::framing::BREAKIN_BYTE;
 
 const MAGIC: &[u8; 4] = b"MDBG";
 const HEADER_SIZE: usize = 6;
 const METADATA_SIZE: usize = 8;
 const AUTH_TAG_SIZE: usize = 16;
 const CONTROL_RESPONSE_SIZE: usize = 322;
+/// Offset within a target poke of the host port its data channel is bound
+/// to, big-endian; zero until the target has accepted a host response.
+const POKE_HOST_PORT_OFFSET: usize = 86;
 const MAX_DATAGRAM_SIZE: usize = 8192;
 const MAX_KD_STREAM_SIZE: usize = 4017;
 const CHANNEL_DATA: u8 = 0;
 const CHANNEL_CONTROL: u8 = 1;
 const HOST_DIRECTION: u64 = 0x80;
-const CONTROL_PACKET_LEADER: u32 = 0x6969_6969;
-const PACKET_TYPE_KD_RESEND: u16 = 5;
 const DATA_PACKET_LEADER: u32 = 0x3030_3030;
 const PACKET_TRAILING_BYTE: u8 = 0xaa;
 
@@ -32,16 +34,28 @@ type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
 
-/// Session state is negotiated once from the first valid control poke. Later
-/// control packets are keepalives; answering them with a new host key would
-/// rotate the data key while older data datagrams are still in flight.
+/// Session state negotiated from control pokes.
+///
+/// kdnet.dll pokes every three seconds whether or not it has a data channel,
+/// and it accepts any response that echoes a recent poke: the response rekeys
+/// it and zeroes its sequence state. Answering a connected target's keepalive
+/// would therefore rotate the data key under a working session. The poke says
+/// which case this is: once the target has accepted a response, its pokes
+/// carry the host port its data channel is bound to; a rebooted target has no
+/// data channel and pokes with that field zero, so answering it is a rollover.
 struct SessionState {
     control_key: [u8; 32],
     hmac_key: [u8; 32],
     data_key: RwLock<Option<[u8; 32]>>,
     peer: RwLock<Option<SocketAddr>>,
     version: AtomicU8,
+    /// Never rewound: the target drops any datagram whose sequence does not
+    /// advance its high-water mark, and accepting a response zeroes that
+    /// mark, so a counter that only grows is right before and after rollover.
     send_sequence: AtomicU64,
+    /// Bumped on every rollover, so the KD framing layer restarts its
+    /// packet-id stream for the rebooted target.
+    generation: Arc<AtomicU64>,
 }
 
 /// A stream adapter for Microsoft's encrypted KDNET-over-UDP transport.
@@ -57,9 +71,10 @@ pub struct KdNetStream {
     datagram: Vec<u8>,
     received_datagrams: u64,
     encoded: Vec<u8>,
-    last_outbound: Vec<u8>,
-    resend_requested: bool,
     outbound: Vec<u8>,
+    /// A break-in written before the target had negotiated a session; sent
+    /// the moment it has one, so attach does not wait for the next attempt.
+    deferred_breakin: bool,
 }
 
 impl KdNetStream {
@@ -84,15 +99,15 @@ impl KdNetStream {
                 peer: RwLock::new(None),
                 version: AtomicU8::new(0),
                 send_sequence: AtomicU64::new(1),
+                generation: Arc::new(AtomicU64::new(0)),
             }),
             inbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
             inbound_offset: 0,
             datagram: vec![0u8; MAX_DATAGRAM_SIZE],
             received_datagrams: 0,
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
-            last_outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
-            resend_requested: false,
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+            deferred_breakin: false,
         })
     }
 
@@ -105,9 +120,8 @@ impl KdNetStream {
             datagram: vec![0u8; MAX_DATAGRAM_SIZE],
             received_datagrams: 0,
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
-            last_outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
-            resend_requested: false,
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
+            deferred_breakin: false,
         })
     }
 
@@ -148,41 +162,38 @@ impl KdNetStream {
             {
                 continue;
             }
-            let key = match channel {
-                CHANNEL_CONTROL => self.state.control_key,
-                CHANNEL_DATA => match *read_lock(&self.state.data_key)? {
-                    Some(key) => key,
-                    // Pre-negotiation data can only be stale-session traffic;
-                    // dropping it lets the control handshake proceed.
-                    None => {
-                        kd_trace!("kdnet: dropping data datagram before key negotiation");
+            match channel {
+                CHANNEL_CONTROL => {
+                    decrypt_payload(datagram, self.state.control_key)?;
+                    verify_authentication(datagram, &self.state.hmac_key)?;
+                    self.handle_control_packet(datagram, source, version)?;
+                    if self.deferred_breakin && read_lock(&self.state.data_key)?.is_some() {
+                        self.deferred_breakin = false;
+                        self.outbound.push(BREAKIN_BYTE);
+                        self.flush()?;
+                    }
+                    continue;
+                }
+                CHANNEL_DATA => {
+                    let Some(data_key) = *read_lock(&self.state.data_key)? else {
+                        // Pre-negotiation data is a target still talking to a
+                        // session this listener does not hold. It would poke
+                        // on its own within three seconds; poking it makes it
+                        // offer now.
+                        kd_trace!("kdnet: data datagram before key negotiation; poking {source}");
+                        self.poke(source, version)?;
+                        continue;
+                    };
+                    decrypt_payload(datagram, data_key)?;
+                    if let Err(err) = verify_authentication(datagram, &self.state.hmac_key) {
+                        kd_trace!("kdnet: dropping stale-session datagram: {err}");
                         continue;
                     }
-                },
+                }
                 other => {
                     kd_trace!("kdnet: dropping datagram on unknown channel {other:#x}");
                     continue;
                 }
-            };
-            decrypt_payload(datagram, key)?;
-            let is_control = channel == CHANNEL_CONTROL;
-            if let Err(err) = verify_authentication(datagram, &self.state.hmac_key) {
-                if is_control {
-                    return Err(err);
-                }
-                // Data datagrams from a superseded session can arrive after a
-                // debugger restart. Drop them; an established session never
-                // renegotiates its data key for periodic control pokes.
-                kd_trace!("kdnet: dropping stale-session datagram: {err}");
-                continue;
-            }
-
-            if is_control {
-                self.handle_control_packet(datagram, source, version)?;
-                self.last_outbound.clear();
-                self.encoded.clear();
-                self.resend_requested = false;
-                continue;
             }
 
             let metadata =
@@ -203,11 +214,6 @@ impl KdNetStream {
             self.inbound.clear();
             self.inbound
                 .extend_from_slice(&datagram[payload_start..payload_end]);
-            self.resend_requested = self.inbound.len() >= 6
-                && u32::from_le_bytes(self.inbound[..4].try_into().unwrap())
-                    == CONTROL_PACKET_LEADER
-                && u16::from_le_bytes(self.inbound[4..6].try_into().unwrap())
-                    == PACKET_TYPE_KD_RESEND;
             if self.inbound.len() >= 4
                 && u32::from_le_bytes(self.inbound[..4].try_into().unwrap()) == DATA_PACKET_LEADER
             {
@@ -224,25 +230,39 @@ impl KdNetStream {
         source: SocketAddr,
         version: u8,
     ) -> io::Result<()> {
-        // kdnet.sys emits control pokes periodically while the target is
-        // stopped or running. They are not fresh negotiations. A second
-        // response would contain a different host key and make both peers
-        // switch data keys while packets using the old key are in flight.
-        if read_lock(&self.state.data_key)?.is_some() {
+        // A restarted target keeps its address but picks a new source port, so
+        // a poke from a different host is a different machine - two guests
+        // sharing a KDNET key, say - and must not take over the session.
+        if let Some(peer) = *read_lock(&self.state.peer)?
+            && peer.ip() != source.ip()
+        {
+            kd_trace!("kdnet: ignoring poke from {source}; session belongs to {peer}");
             return Ok(());
         }
-
         let payload_end = datagram
             .len()
             .checked_sub(AUTH_TAG_SIZE)
             .ok_or_else(|| invalid_data("truncated KDNET control packet"))?;
         let plaintext = &datagram[HEADER_SIZE..payload_end];
-        if plaintext.len() < METADATA_SIZE + 2 + 32 {
+        if plaintext.len() < METADATA_SIZE + POKE_HOST_PORT_OFFSET + 2 {
             return Err(invalid_data("truncated KDNET control handshake"));
         }
         let metadata = u64::from_be_bytes(plaintext[..METADATA_SIZE].try_into().unwrap());
         if metadata & HOST_DIRECTION != 0 {
             return Err(invalid_data("KDNET control packet has wrong direction"));
+        }
+        let rollover = read_lock(&self.state.data_key)?.is_some();
+        if rollover {
+            // A target that accepted a response has a data channel, and its
+            // pokes name the host port it is bound to: those are keepalives
+            // (see `SessionState`). A rebooted target pokes with it zero.
+            let port_field = METADATA_SIZE + POKE_HOST_PORT_OFFSET;
+            let host_port =
+                u16::from_be_bytes(plaintext[port_field..port_field + 2].try_into().unwrap());
+            if host_port != 0 {
+                return Ok(());
+            }
+            kd_trace!("kdnet: poke from a target without a data channel; renegotiating");
         }
 
         let client_key: &[u8] = &plaintext[METADATA_SIZE + 2..METADATA_SIZE + 2 + 32];
@@ -281,8 +301,34 @@ impl KdNetStream {
         *write_lock(&self.state.peer)? = Some(source);
         *write_lock(&self.state.data_key)? = Some(data_key);
         self.state.version.store(version, Ordering::Relaxed);
-        self.state.send_sequence.store(1, Ordering::Relaxed);
+        if rollover {
+            self.state.generation.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
+    }
+
+    /// Ask the target to offer now rather than on its three-second timer:
+    /// kdnet.dll answers an empty control datagram with a poke of its own.
+    fn poke(&self, target: SocketAddr, version: u8) -> io::Result<()> {
+        let sequence = self.state.send_sequence.fetch_add(1, Ordering::Relaxed);
+        let packet = create_packet(
+            &[],
+            sequence,
+            CHANNEL_CONTROL,
+            version,
+            self.state.control_key,
+            &self.state.hmac_key,
+            true,
+        )?;
+        self.socket.send_to(&packet, target)?;
+        Ok(())
+    }
+
+    /// Handle to the session generation, bumped on every rollover. The KD
+    /// framing layer watches it to restart its packet-id stream for the
+    /// rebooted target.
+    pub fn session_generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.state.generation)
     }
 
     #[cfg(test)]
@@ -326,9 +372,11 @@ impl Write for KdNetStream {
         let peer = *read_lock(&self.state.peer)?;
         let data_key = *read_lock(&self.state.data_key)?;
         let (Some(peer), Some(data_key)) = (peer, data_key) else {
-            // The target initiates KDNET with a control poke. KDCOM's initial
-            // break-in/reset stimuli have no peer or session key yet, so they
-            // are intentionally discarded until negotiation completes.
+            // The target initiates KDNET with a control poke, so nothing can
+            // be sent yet. A break-in is kept for the moment a session exists;
+            // anything else the initial handshake writes is a KDCOM stimulus
+            // with no KDNET meaning.
+            self.deferred_breakin |= self.outbound == [BREAKIN_BYTE];
             self.outbound.clear();
             return Ok(());
         };
@@ -373,9 +421,6 @@ impl Write for KdNetStream {
             &self.state.hmac_key,
             true,
         )?;
-        self.last_outbound.clear();
-        self.last_outbound.extend_from_slice(&self.outbound);
-        self.resend_requested = false;
         let sent = self.socket.send_to(&self.encoded, peer)?;
         self.outbound.clear();
         if sent != self.encoded.len() {
@@ -539,6 +584,88 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kd::framing::KdFraming;
+    use crate::kd::transport::KdTransport;
+
+    /// Body size of the poke kdnet.dll sends.
+    const POKE_SIZE: usize = 344;
+
+    fn test_keys() -> ([u8; 32], [u8; 32]) {
+        let key = parse_key("1.2.3.4").unwrap();
+        let mut hmac_key = key;
+        hmac_key.iter_mut().for_each(|byte| *byte = !*byte);
+        (key, hmac_key)
+    }
+
+    /// A poke from a target with no data channel: the host-port field is zero.
+    fn poke_datagram(
+        client_byte: u8,
+        sequence: u64,
+        key: [u8; 32],
+        hmac_key: &[u8; 32],
+    ) -> Vec<u8> {
+        keepalive_datagram(client_byte, sequence, 0, key, hmac_key)
+    }
+
+    /// A poke from a target whose data channel is bound to `host_port`.
+    fn keepalive_datagram(
+        client_byte: u8,
+        sequence: u64,
+        host_port: u16,
+        key: [u8; 32],
+        hmac_key: &[u8; 32],
+    ) -> Vec<u8> {
+        let mut body = [0u8; POKE_SIZE];
+        body[0] = 1;
+        body[1] = 1;
+        body[2..34].fill(client_byte);
+        body[POKE_HOST_PORT_OFFSET..POKE_HOST_PORT_OFFSET + 2]
+            .copy_from_slice(&host_port.to_be_bytes());
+        create_packet(&body, sequence, CHANNEL_CONTROL, 5, key, hmac_key, false).unwrap()
+    }
+
+    fn kd_data_packet(payload: &[u8]) -> Vec<u8> {
+        kd_data_packet_with_id(0x8080_0000, payload)
+    }
+
+    fn kd_data_packet_with_id(packet_id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0u8; 16];
+        packet[..4].copy_from_slice(&DATA_PACKET_LEADER.to_le_bytes());
+        packet[4..6].copy_from_slice(&7u16.to_le_bytes());
+        packet[6..8].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+        packet[8..12].copy_from_slice(&packet_id.to_le_bytes());
+        let checksum = payload
+            .iter()
+            .fold(0u32, |sum, b| sum.wrapping_add(*b as u32));
+        packet[12..16].copy_from_slice(&checksum.to_le_bytes());
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    fn recv_datagram(socket: &UdpSocket) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+        let (len, _) = socket.recv_from(&mut buf).ok()?;
+        buf.truncate(len);
+        Some(buf)
+    }
+
+    /// Decrypt, authenticate and unpad a KDNET datagram, yielding its payload.
+    fn open_datagram(mut datagram: Vec<u8>, key: [u8; 32], hmac_key: &[u8; 32]) -> Option<Vec<u8>> {
+        decrypt_payload(&mut datagram, key).ok()?;
+        verify_authentication(&datagram, hmac_key).ok()?;
+        let metadata =
+            u64::from_be_bytes(datagram[HEADER_SIZE..HEADER_SIZE + 8].try_into().unwrap());
+        let padding = (metadata & 0x0f) as usize;
+        let end = datagram.len() - AUTH_TAG_SIZE - padding;
+        Some(datagram[HEADER_SIZE + METADATA_SIZE..end].to_vec())
+    }
+
+    fn derive_data_key(control_key: [u8; 32], host_response: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(control_key);
+        hasher.update(host_response);
+        hasher.finalize().into()
+    }
 
     #[test]
     fn parses_four_little_endian_base36_key_components() {
@@ -567,9 +694,7 @@ mod tests {
 
     #[test]
     fn packet_round_trip_authenticates_and_decrypts() {
-        let key = parse_key("1.2.3.4").unwrap();
-        let mut hmac_key = key;
-        hmac_key.iter_mut().for_each(|byte| *byte = !*byte);
+        let (key, hmac_key) = test_keys();
         let payload = b"0000kd-payload";
         let mut packet = create_packet(payload, 7, CHANNEL_DATA, 5, key, &hmac_key, true).unwrap();
         decrypt_payload(&mut packet, key).unwrap();
@@ -583,9 +708,7 @@ mod tests {
 
     #[test]
     fn negotiates_session_and_bridges_kd_stream_over_udp() {
-        let key = parse_key("1.2.3.4").unwrap();
-        let mut hmac_key = key;
-        hmac_key.iter_mut().for_each(|byte| *byte = !*byte);
+        let (key, hmac_key) = test_keys();
         let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
         host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let host_addr = host.local_addr();
@@ -604,7 +727,7 @@ mod tests {
         let target_kd_packet = kd_packet.clone();
 
         let target_thread = std::thread::spawn(move || -> io::Result<Vec<u8>> {
-            let mut poke = [0u8; CONTROL_RESPONSE_SIZE];
+            let mut poke = [0u8; POKE_SIZE];
             poke[0] = 1;
             poke[1] = 1;
             for (index, byte) in poke[2..34].iter_mut().enumerate() {
@@ -630,8 +753,11 @@ mod tests {
             hasher.update(key);
             hasher.update(body);
             let data_key: [u8; 32] = hasher.finalize().into();
+            // Once the target holds a data channel, its pokes name the host
+            // port and must be left unanswered.
             let mut periodic_poke = poke;
-            periodic_poke[2] ^= 0xff;
+            periodic_poke[POKE_HOST_PORT_OFFSET..POKE_HOST_PORT_OFFSET + 2]
+                .copy_from_slice(&host_addr.port().to_be_bytes());
             let periodic = create_packet(
                 &periodic_poke,
                 10,
@@ -677,7 +803,7 @@ mod tests {
     #[test]
     fn resend_mints_fresh_sequence_with_same_kd_payload() {
         let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
-        let key2 = parse_key("1.2.3.4").unwrap();
+        let (key2, _) = test_keys();
         let target = UdpSocket::bind("127.0.0.1:0").unwrap();
         target
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -698,7 +824,6 @@ mod tests {
         let (first_len, _) = target.recv_from(&mut first).unwrap();
         first.truncate(first_len);
 
-        host.resend_requested = true;
         host.write_all(&kd_packet).unwrap();
         host.flush().unwrap();
         let mut second = vec![0u8; MAX_DATAGRAM_SIZE];
@@ -716,6 +841,377 @@ mod tests {
                 &kd_packet[..16]
             );
         }
+    }
+
+    /// A rebooted target has no data channel, so its pokes carry no host
+    /// port. Answering the first one rolls the session over instead of
+    /// forcing the user to reattach.
+    #[test]
+    fn reboot_pokes_roll_the_session_over_and_restore_kd_traffic() {
+        let (key, hmac_key) = test_keys();
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let host_addr = host.local_addr();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        target
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let before_reboot = kd_data_packet(b"pre");
+        let after_reboot = kd_data_packet(b"post");
+        let expected_before = before_reboot.clone();
+        let expected_after = after_reboot.clone();
+
+        let target_thread = std::thread::spawn(move || {
+            target
+                .send_to(&poke_datagram(0x11, 9, key, &hmac_key), host_addr)
+                .unwrap();
+            let response = recv_datagram(&target).expect("first poke answered");
+            let first_key = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+            let data = create_packet(
+                &before_reboot,
+                1,
+                CHANNEL_DATA,
+                5,
+                first_key,
+                &hmac_key,
+                false,
+            )
+            .unwrap();
+            target.send_to(&data, host_addr).unwrap();
+            // The host request this target will never answer: it reboots here.
+            let request = recv_datagram(&target).expect("host request");
+            open_datagram(request, first_key, &hmac_key).expect("host used the session key");
+
+            target
+                .send_to(&poke_datagram(0x22, 1, key, &hmac_key), host_addr)
+                .unwrap();
+            let response = recv_datagram(&target).expect("reboot poke answered");
+            let rolled = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+            assert_ne!(rolled, first_key, "rollover must mint a new data key");
+            let data =
+                create_packet(&after_reboot, 1, CHANNEL_DATA, 5, rolled, &hmac_key, false).unwrap();
+            target.send_to(&data, host_addr).unwrap();
+        });
+
+        let mut bridged = vec![0u8; expected_before.len() + 1];
+        host.read_exact(&mut bridged).unwrap();
+        assert_eq!(&bridged[..expected_before.len()], &expected_before[..]);
+        host.write_all(&bridged).unwrap();
+        host.flush().unwrap();
+
+        let mut post_reboot = vec![0u8; expected_after.len() + 1];
+        host.read_exact(&mut post_reboot).unwrap();
+        assert_eq!(&post_reboot[..expected_after.len()], &expected_after[..]);
+        assert_eq!(
+            host.session_generation().load(Ordering::Relaxed),
+            1,
+            "a rollover tells the KD layer to restart its packet ids"
+        );
+        target_thread.join().unwrap();
+    }
+
+    /// A target that accepted a response pokes on regardless, naming the host
+    /// port its data channel is bound to. Those are keepalives: answering one
+    /// would rekey the target under a working session, and the target need not
+    /// have sent any data yet for the session to be working.
+    #[test]
+    fn keepalive_pokes_from_a_connected_target_are_not_answered() {
+        let (key, hmac_key) = test_keys();
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let host_addr = host.local_addr();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        target
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+
+        let state_change = kd_data_packet(b"boot");
+        let expected = state_change.clone();
+
+        let target_thread = std::thread::spawn(move || {
+            target
+                .send_to(&poke_datagram(0x11, 1, key, &hmac_key), host_addr)
+                .unwrap();
+            let response = recv_datagram(&target).expect("first poke answered");
+            let accepted = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+
+            let mut answered = 0usize;
+            for sequence in 2..=5 {
+                target
+                    .send_to(
+                        &keepalive_datagram(0x11, sequence, host_addr.port(), key, &hmac_key),
+                        host_addr,
+                    )
+                    .unwrap();
+                if recv_datagram(&target).is_some() {
+                    answered += 1;
+                }
+            }
+
+            // KD comes up, still using the key accepted at the start.
+            target
+                .send_to(
+                    &create_packet(
+                        &state_change,
+                        1,
+                        CHANNEL_DATA,
+                        5,
+                        accepted,
+                        &hmac_key,
+                        false,
+                    )
+                    .unwrap(),
+                    host_addr,
+                )
+                .unwrap();
+            (accepted, answered)
+        });
+
+        let mut bridged = vec![0u8; expected.len() + 1];
+        host.read_exact(&mut bridged).unwrap();
+        assert_eq!(&bridged[..expected.len()], &expected[..]);
+        let (accepted, answered) = target_thread.join().unwrap();
+        assert_eq!(answered, 0, "keepalive pokes must not be answered");
+        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(accepted));
+        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+    }
+
+    /// A restarted target keeps its address and changes only its source port.
+    /// A poke from another host is another machine, such as a second guest
+    /// sharing one KDNET key, and must not take a live session from its owner.
+    #[test]
+    fn pokes_from_another_host_cannot_take_over_the_session() {
+        let (key, hmac_key) = test_keys();
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        // Short enough that each read below returns after servicing the poke
+        // it was woken for.
+        host.set_read_timeout(Some(Duration::from_millis(80)))
+            .unwrap();
+        let host_addr = host.local_addr();
+        let owner = UdpSocket::bind("127.0.0.1:0").unwrap();
+        owner
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let stranger = UdpSocket::bind("127.0.0.2:0").unwrap();
+        stranger
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut scratch = [0u8; 8];
+
+        owner
+            .send_to(&poke_datagram(0x11, 9, key, &hmac_key), host_addr)
+            .unwrap();
+        assert!(host.read(&mut scratch).is_err(), "poke yields no KD bytes");
+        let response = recv_datagram(&owner).expect("first poke answered");
+        let owner_key = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+        let owner_packet = kd_data_packet(b"owner");
+        owner
+            .send_to(
+                &create_packet(
+                    &owner_packet,
+                    1,
+                    CHANNEL_DATA,
+                    5,
+                    owner_key,
+                    &hmac_key,
+                    false,
+                )
+                .unwrap(),
+                host_addr,
+            )
+            .unwrap();
+        let mut bridged = vec![0u8; owner_packet.len() + 1];
+        host.read_exact(&mut bridged).unwrap();
+
+        // A second machine with the same key and no data channel pokes.
+        for sequence in 1..=2 {
+            stranger
+                .send_to(&poke_datagram(0x22, sequence, key, &hmac_key), host_addr)
+                .unwrap();
+            let _ = host.read(&mut scratch);
+        }
+
+        assert!(
+            recv_datagram(&stranger).is_none(),
+            "a stranger's pokes must go unanswered"
+        );
+        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(owner_key));
+        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+
+        owner
+            .send_to(
+                &create_packet(
+                    &owner_packet,
+                    2,
+                    CHANNEL_DATA,
+                    5,
+                    owner_key,
+                    &hmac_key,
+                    false,
+                )
+                .unwrap(),
+                host_addr,
+            )
+            .unwrap();
+        host.read_exact(&mut bridged).unwrap();
+        assert_eq!(&bridged[..owner_packet.len()], &owner_packet[..]);
+    }
+
+    /// The initial handshake writes its break-in before any target has poked.
+    /// It cannot go anywhere yet, but it must go out as soon as the session
+    /// exists, not on the handshake's next attempt seconds later.
+    #[test]
+    fn break_in_written_before_negotiation_is_sent_once_the_session_exists() {
+        let (key, hmac_key) = test_keys();
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        host.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let host_addr = host.local_addr();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        target
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        host.write_all(&[BREAKIN_BYTE]).unwrap();
+        host.flush().unwrap();
+
+        target
+            .send_to(&poke_datagram(0x11, 1, key, &hmac_key), host_addr)
+            .unwrap();
+        let mut scratch = [0u8; 8];
+        assert!(host.read(&mut scratch).is_err(), "poke yields no KD bytes");
+
+        // The first datagram the target sees is the response, not the break-in.
+        let response = recv_datagram(&target).expect("poke answered");
+        let data_key = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+        let breakin = recv_datagram(&target).expect("deferred break-in sent");
+        assert_eq!(breakin[5], CHANNEL_DATA);
+        assert_eq!(
+            open_datagram(breakin, data_key, &hmac_key).unwrap(),
+            [BREAKIN_BYTE]
+        );
+    }
+
+    /// A target still sending data for a session this listener does not hold
+    /// would offer on its own timer within three seconds; an empty control
+    /// datagram from the host makes kdnet.dll offer immediately.
+    #[test]
+    fn stale_data_before_negotiation_is_answered_with_a_host_poke() {
+        let (key, hmac_key) = test_keys();
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        host.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let host_addr = host.local_addr();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        target
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let stale = create_packet(
+            &kd_data_packet(b"old"),
+            7,
+            CHANNEL_DATA,
+            5,
+            [0x42; 32],
+            &hmac_key,
+            false,
+        )
+        .unwrap();
+        target.send_to(&stale, host_addr).unwrap();
+        let mut scratch = [0u8; 8];
+        assert!(
+            host.read(&mut scratch).is_err(),
+            "stale data yields no KD bytes"
+        );
+
+        let poke = recv_datagram(&target).expect("host poked the target");
+        assert_eq!(poke[5], CHANNEL_CONTROL);
+        assert_eq!(poke[4], 5, "the poke echoes the target's version");
+        let mut poke = poke;
+        decrypt_payload(&mut poke, key).unwrap();
+        verify_authentication(&poke, &hmac_key).unwrap();
+        let metadata = u64::from_be_bytes(poke[HEADER_SIZE..HEADER_SIZE + 8].try_into().unwrap());
+        assert_ne!(metadata & HOST_DIRECTION, 0);
+        assert_eq!(
+            poke.len(),
+            HEADER_SIZE + METADATA_SIZE + 8 + AUTH_TAG_SIZE,
+            "an empty body pads to one block"
+        );
+        assert_eq!(metadata & 0x0f, 8);
+    }
+
+    /// The whole reattach path, transport and KD framing together: a target
+    /// that restarts under the listener renegotiates and then resumes KD with
+    /// a packet-id stream that begins again. The framing layer must adopt the
+    /// new session before judging the first post-reboot packet, otherwise its
+    /// low id is rejected as a duplicate of the old stream.
+    #[test]
+    fn rolled_over_session_is_adopted_by_the_kd_framing_layer() {
+        let (key, hmac_key) = test_keys();
+        let host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        let host_addr = host.local_addr();
+        let generation = host.session_generation();
+        let mut framing = KdFraming::new(KdTransport::Network(host));
+        framing.use_kdnet_packet_ids(Arc::clone(&generation));
+        framing
+            .transport_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        target
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // The old session runs its packet ids up high; the restarted target
+        // starts over from a low id.
+        let before = kd_data_packet_with_id(0x2_f000, b"before");
+        let after = kd_data_packet_with_id(0x4, b"after");
+
+        let target_thread = std::thread::spawn(move || {
+            let negotiate = |client_byte: u8| -> [u8; 32] {
+                target
+                    .send_to(&poke_datagram(client_byte, 1, key, &hmac_key), host_addr)
+                    .unwrap();
+                let response = recv_datagram(&target).expect("poke answered");
+                derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap())
+            };
+
+            let first_key = negotiate(0x11);
+            target
+                .send_to(
+                    &create_packet(&before, 1, CHANNEL_DATA, 5, first_key, &hmac_key, false)
+                        .unwrap(),
+                    host_addr,
+                )
+                .unwrap();
+            recv_datagram(&target).expect("framing ACKs the pre-reboot packet");
+
+            let rolled = negotiate(0x22);
+            target
+                .send_to(
+                    &create_packet(&after, 1, CHANNEL_DATA, 5, rolled, &hmac_key, false).unwrap(),
+                    host_addr,
+                )
+                .unwrap();
+            recv_datagram(&target).expect("framing ACKs the post-reboot packet");
+        });
+
+        assert_eq!(framing.recv_data().unwrap().payload, b"before");
+        assert!(!framing.take_peer_reset_seen());
+
+        let after_reboot = framing.recv_data().unwrap();
+        assert_eq!(
+            after_reboot.payload, b"after",
+            "the restarted target's low packet id must not look like a duplicate"
+        );
+        assert!(
+            framing.take_peer_reset_seen(),
+            "a rolled-over session is a target reload"
+        );
+        assert_eq!(generation.load(Ordering::Relaxed), 1);
+        target_thread.join().unwrap();
     }
 
     #[test]

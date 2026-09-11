@@ -5,7 +5,8 @@ use crate::dmp::{DmpInfo, DmpMem};
 use crate::error::Result;
 use crate::host::VmHandle;
 use crate::kd::KdMemory;
-use crate::types::PhysAddr;
+use crate::memory::TranslationCache;
+use crate::types::{Dtb, PhysAddr, VirtAddr};
 
 /// Guest physical memory backed by a live VM process, KD transport, or crash
 /// dump. Built once at attach and shared via `Arc`; everything above (address
@@ -69,6 +70,20 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Self::Live(h) => h.write_bytes(addr, buf),
             Self::Dmp(d) => d.write_bytes(addr, buf),
             Self::Remote(kd) => kd.write_bytes(addr, buf),
+        }
+    }
+
+    fn read_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &mut [u8]) -> Option<Result<()>> {
+        match self {
+            Self::Remote(kd) => kd.read_virtual_direct(addr, root, buf),
+            Self::Live(_) | Self::Dmp(_) => None,
+        }
+    }
+
+    fn translation_cache(&self) -> Option<&TranslationCache> {
+        match self {
+            Self::Remote(kd) => kd.translation_cache(),
+            Self::Live(_) | Self::Dmp(_) => None,
         }
     }
 }

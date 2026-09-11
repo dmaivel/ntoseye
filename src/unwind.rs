@@ -826,13 +826,30 @@ impl ThreadTraceContext {
 
 impl<'a> StackTracer<'a> {
     fn new(debugger: &'a Target, trace: &'a ThreadTraceContext) -> Self {
-        Self {
+        let mut tracer = Self {
             trace,
             phys: &debugger.phys,
             symbols: &debugger.symbols,
             memory: debugger.address_space(trace.active_dtb),
             modules: HashMap::new(),
+        };
+        // The kernel image was read at attach; over a remote transport reading
+        // it again is the single largest cost of the first stack trace.
+        if let Some(kernel) = debugger.guest.as_ref().map(|guest| &guest.ntoskrnl)
+            && let Some(image) = kernel.cached_image()
+            && let Some(module) = trace.module_for_address(kernel.base_address.0)
+        {
+            let executable_ranges = executable_ranges(&image);
+            tracer.modules.insert(
+                (module.dtb, module.info.base_address.0),
+                CachedModule {
+                    info: module.info.clone(),
+                    image,
+                    executable_ranges,
+                },
+            );
         }
+        tracer
     }
 
     fn unwind_once(&mut self, context: &mut RegisterContext) -> Unwound {
