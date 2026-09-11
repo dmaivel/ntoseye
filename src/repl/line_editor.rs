@@ -95,6 +95,9 @@ fn make_suggestions(
 
 pub struct MyCompleter {
     pub caches: ReplCaches,
+    /// Target lent by the REPL loop for the current `read_line`; absent in
+    /// tests and outside a prompt.
+    pub target: TargetLoan,
 }
 
 #[derive(Clone, Copy)]
@@ -288,7 +291,9 @@ impl MyCompleter {
             }
 
             CompletionStrategy::Process => {
-                let processes = self.caches.processes.read().unwrap();
+                let processes = self
+                    .target
+                    .with(|target| self.caches.processes_for_completion(target));
                 let prefix_lower = input.prefix.to_lowercase();
                 processes
                     .iter()
@@ -391,7 +396,9 @@ impl MyCompleter {
             }
 
             CompletionStrategy::Driver => {
-                let drivers = self.caches.drivers.read().unwrap();
+                let drivers = self
+                    .target
+                    .with(|target| self.caches.drivers_for_completion(target));
                 let prefix_lower = input.prefix.to_lowercase();
                 drivers
                     .iter()
@@ -745,6 +752,7 @@ mod tests {
 
     fn completer() -> MyCompleter {
         MyCompleter {
+            target: TargetLoan::default(),
             caches: ReplCaches {
                 symbols: Arc::new(RwLock::new(SymbolIndex::default())),
                 types: Arc::new(RwLock::new(SymbolIndex::default())),

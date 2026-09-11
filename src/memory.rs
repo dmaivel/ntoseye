@@ -2,6 +2,7 @@ use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::types::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 // PageFrameNumber
@@ -23,9 +24,16 @@ pub const DTB_IDENTITY: Dtb = u64::MAX;
 /// created per read, for as long as the target's page tables cannot change.
 /// Owned by a backend that knows when that is: a KD target clears it on
 /// every resume and write.
+///
+/// It also carries the target's halt epoch: a counter the owning backend
+/// advances on every resume, so guest-derived lists (processes, modules,
+/// drivers) memoized during one halt are dropped once the target has run.
+/// Writes clear translations but do not advance the epoch: a debugger poke
+/// (breakpoint install) cannot relink kernel lists.
 #[derive(Default)]
 pub struct TranslationCache {
     pages: Mutex<HashMap<(Dtb, u64), Translation>>,
+    halt_epoch: AtomicU64,
 }
 
 impl TranslationCache {
@@ -43,6 +51,17 @@ impl TranslationCache {
 
     pub fn clear(&self) {
         self.pages().clear();
+    }
+
+    /// Drop translations and start a new halt epoch; called when the target
+    /// resumes.
+    pub fn resume(&self) {
+        self.clear();
+        self.halt_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn halt_epoch(&self) -> u64 {
+        self.halt_epoch.load(Ordering::Relaxed)
     }
 }
 

@@ -8,6 +8,7 @@ use crate::{
         ModuleSymbolStatus, ParsedType, SymbolIndexDiagnostic, SymbolStore, TypeInfo,
         download_jobs_parallel,
     },
+    target::DriverObjectInfo,
     types::*,
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -17,8 +18,12 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use zerocopy::{FromBytes, IntoBytes};
+
+/// `EPROCESS.ImageFileName` capacity: the kernel keeps this many bytes of the
+/// image name, unterminated when the name is at least this long.
+const IMAGE_FILE_NAME_LEN: usize = 15;
 
 /// used for enumeration without loading full WinObject
 #[derive(Debug, Clone)]
@@ -792,6 +797,7 @@ impl<'a> Types<'a> {
             dtb: self.dtb,
             ti,
             base,
+            image: None,
         })
     }
 
@@ -800,6 +806,9 @@ impl<'a> Types<'a> {
     /// record. `record_type`/`link_field` give the record layout and the
     /// embedded link (`CONTAINING_RECORD`). Iteration is bounded and stops on a
     /// cycle. Shared by [`StructRef::list`], which sources `head` from a field.
+    ///
+    /// Each record is prefetched (see [`StructRef::prefetch`]) so its fields
+    /// and the link to the next record come from one read.
     pub fn list_at(
         self,
         head: VirtAddr,
@@ -827,10 +836,12 @@ impl<'a> Types<'a> {
                 dtb,
                 ti: record_ti.clone(),
                 base: current - link_offset,
-            };
+                image: None,
+            }
+            .prefetch();
 
             // Flink sits at offset 0 of the link's _LIST_ENTRY
-            match list_memory(dtb).read::<VirtAddr>(current) {
+            match record.read_field_at::<VirtAddr>(link_offset) {
                 Ok(next) if next == current => current = head, // self-loop: stop after this
                 Ok(next) => current = next,
                 Err(e) => {
@@ -853,11 +864,53 @@ pub struct StructRef<'a> {
     dtb: Dtb,
     ti: TypeInfo,
     base: VirtAddr,
+    /// Prefetched copy of the struct's bytes from `base`; field reads inside
+    /// it cost no memory request.
+    image: Option<Arc<[u8]>>,
 }
+
+/// Largest struct [`StructRef::prefetch`] copies whole. Loader entries,
+/// `_EPROCESS`, and `_ETHREAD` all fit; anything bigger keeps per-field reads.
+const STRUCT_PREFETCH_MAX: usize = 0x1000;
 
 impl<'a> StructRef<'a> {
     fn memory(&self) -> AddressSpace<'a, Arc<PhysMem>> {
         self.obj.address_space(&self.obj.phys, self.dtb)
+    }
+
+    /// Read the struct's bytes once so later field reads are served from the
+    /// copy: one request per page instead of one per field on a remote
+    /// target. Best-effort; an unreadable or oversized struct keeps per-field
+    /// reads, which fail or succeed individually as before.
+    pub fn prefetch(mut self) -> Self {
+        if self.image.is_none() && self.ti.size != 0 && self.ti.size <= STRUCT_PREFETCH_MAX {
+            let mut image = vec![0u8; self.ti.size];
+            if self.memory().read_bytes(self.base, &mut image).is_ok() {
+                self.image = Some(image.into());
+            }
+        }
+        self
+    }
+
+    fn read_bytes_at(&self, offset: u64, out: &mut [u8]) -> Result<()> {
+        if let Some(image) = &self.image
+            && let Some(bytes) = usize::try_from(offset)
+                .ok()
+                .and_then(|start| image.get(start..start.checked_add(out.len())?))
+        {
+            out.copy_from_slice(bytes);
+            return Ok(());
+        }
+        self.memory().read_bytes(self.base + offset, out)
+    }
+
+    fn read_field_at<T: Copy + zerocopy::FromZeros + FromBytes + IntoBytes>(
+        &self,
+        offset: u64,
+    ) -> Result<T> {
+        let mut value = T::new_zeroed();
+        self.read_bytes_at(offset, value.as_mut_bytes())?;
+        Ok(value)
     }
 
     /// The address this cursor sits at (e.g. to test a followed pointer for
@@ -880,6 +933,7 @@ impl<'a> StructRef<'a> {
             dtb: self.dtb,
             ti,
             base,
+            image: None,
         }
     }
 
@@ -890,7 +944,7 @@ impl<'a> StructRef<'a> {
         name: &str,
     ) -> Result<T> {
         let offset = self.field(name)?.offset as u64;
-        self.memory().read(self.base + offset)
+        self.read_field_at(offset)
     }
 
     /// Follow a pointer field to the struct it targets. The target struct type
@@ -908,7 +962,7 @@ impl<'a> StructRef<'a> {
             ));
         };
         let struct_name = struct_name.clone();
-        let target: VirtAddr = self.memory().read(self.base + field.offset as u64)?;
+        let target: VirtAddr = self.read_field_at(field.offset as u64)?;
         let ti = self.obj.types().layout(&struct_name)?;
         Ok(self.with(ti, target))
     }
@@ -930,7 +984,15 @@ impl<'a> StructRef<'a> {
         };
         let base = self.base + field.offset as u64;
         let ti = self.obj.types().layout(&type_name)?;
-        Ok(self.with(ti, base))
+        let mut embedded = self.with(ti, base);
+        // Carry the enclosing image so the sub-struct's fields stay free.
+        if let Some(image) = &self.image {
+            let start = field.offset as usize;
+            if let Some(bytes) = image.get(start..start + embedded.ti.size) {
+                embedded.image = Some(bytes.into());
+            }
+        }
+        Ok(embedded)
     }
 
     /// Decode the `_UNICODE_STRING` this cursor points at to a Rust `String`
@@ -999,6 +1061,86 @@ fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>>
 
 pub struct Guest {
     pub ntoskrnl: WinObject,
+    memo: Mutex<HaltMemo>,
+}
+
+/// The `_EPROCESS` fields process enumeration needs, fetched with one read
+/// covering their span instead of one request per field over the transport.
+struct EprocessSpan {
+    start: u64,
+    bytes: Vec<u8>,
+    unique_process_id_offset: u64,
+    dir_table_base_offset: u64,
+    active_process_links_offset: u64,
+    image_file_name_offset: u64,
+}
+
+impl EprocessSpan {
+    fn new(guest: &Guest) -> Result<Self> {
+        let eprocess = guest.ntoskrnl.types().layout("_EPROCESS")?;
+        let kprocess = guest.ntoskrnl.types().layout("_KPROCESS")?;
+        let unique_process_id_offset = eprocess.field_offset("UniqueProcessId")?;
+        let dir_table_base_offset =
+            eprocess.field_offset("Pcb")? + kprocess.field_offset("DirectoryTableBase")?;
+        let active_process_links_offset = eprocess.field_offset("ActiveProcessLinks")?;
+        let image_file_name_offset = eprocess.field_offset("ImageFileName")?;
+        let start = unique_process_id_offset
+            .min(dir_table_base_offset)
+            .min(active_process_links_offset)
+            .min(image_file_name_offset);
+        let end = (unique_process_id_offset + 8)
+            .max(dir_table_base_offset + 8)
+            .max(active_process_links_offset + 8)
+            .max(image_file_name_offset + IMAGE_FILE_NAME_LEN as u64);
+        Ok(Self {
+            start,
+            bytes: vec![0u8; (end - start) as usize],
+            unique_process_id_offset,
+            dir_table_base_offset,
+            active_process_links_offset,
+            image_file_name_offset,
+        })
+    }
+
+    fn read(&mut self, memory: &impl MemoryOps<VirtAddr>, eprocess: VirtAddr) -> Result<()> {
+        memory.read_bytes(eprocess + self.start, &mut self.bytes)
+    }
+
+    fn u64_at(&self, offset: u64) -> u64 {
+        let start = (offset - self.start) as usize;
+        u64::from_le_bytes(self.bytes[start..start + 8].try_into().unwrap())
+    }
+
+    fn pid(&self) -> u64 {
+        self.u64_at(self.unique_process_id_offset)
+    }
+
+    fn dtb(&self) -> Dtb {
+        self.u64_at(self.dir_table_base_offset) & !0xfff
+    }
+
+    fn active_process_links_flink(&self) -> VirtAddr {
+        VirtAddr(self.u64_at(self.active_process_links_offset))
+    }
+
+    fn image_file_name(&self) -> &[u8] {
+        let start = (self.image_file_name_offset - self.start) as usize;
+        &self.bytes[start..start + IMAGE_FILE_NAME_LEN]
+    }
+}
+
+/// Guest-derived lists memoized for one halt epoch (see
+/// [`PhysMem::halt_epoch`]). A halted guest cannot relink these lists, so the
+/// first walk per halt serves every later caller: the break context, the
+/// stop-time symbol refresh, completions, and listing commands would otherwise
+/// each re-walk the same kernel lists over the transport. Failed walks are not
+/// remembered.
+#[derive(Default)]
+struct HaltMemo {
+    epoch: Option<u64>,
+    processes: Option<Vec<ProcessInfo>>,
+    kernel_modules: Option<Vec<ModuleInfo>>,
+    drivers: Option<Vec<DriverObjectInfo>>,
 }
 
 fn is_valid_kernel_dtb_amd64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
@@ -1484,6 +1626,54 @@ fn find_ntoskrnl(phys: Arc<PhysMem>, symbols: Arc<SymbolStore>) -> Result<Option
 }
 
 impl Guest {
+    pub fn from_kernel(ntoskrnl: WinObject) -> Self {
+        Self {
+            ntoskrnl,
+            memo: Mutex::new(HaltMemo::default()),
+        }
+    }
+
+    fn memo(&self) -> MutexGuard<'_, HaltMemo> {
+        self.memo.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Serve `slot` from the current halt's memo, walking with `walk` on a
+    /// miss. Memory without a halt signal is never memoized.
+    fn memoized<T: Clone>(
+        &self,
+        slot: impl Fn(&mut HaltMemo) -> &mut Option<Vec<T>>,
+        walk: impl FnOnce() -> Result<Vec<T>>,
+    ) -> Result<Vec<T>> {
+        let Some(epoch) = self.ntoskrnl.phys.halt_epoch() else {
+            return walk();
+        };
+        {
+            let mut memo = self.memo();
+            if memo.epoch != Some(epoch) {
+                *memo = HaltMemo {
+                    epoch: Some(epoch),
+                    ..HaltMemo::default()
+                };
+            }
+            if let Some(list) = slot(&mut memo) {
+                return Ok(list.clone());
+            }
+        }
+        let list = walk()?;
+        let mut memo = self.memo();
+        if memo.epoch == Some(epoch) {
+            *slot(&mut memo) = Some(list.clone());
+        }
+        Ok(list)
+    }
+
+    pub(crate) fn memoized_drivers(
+        &self,
+        walk: impl FnOnce() -> Result<Vec<DriverObjectInfo>>,
+    ) -> Result<Vec<DriverObjectInfo>> {
+        self.memoized(|memo| &mut memo.drivers, walk)
+    }
+
     fn queue_module_symbol_load(
         symbols: &SymbolStore,
         downloads: &mut Vec<ModuleSymbolLoad>,
@@ -1526,7 +1716,7 @@ impl Guest {
         // symbol store which guid is the kernel's.
         ntoskrnl.register_as_kernel();
 
-        Ok(Self { ntoskrnl })
+        Ok(Self::from_kernel(ntoskrnl))
     }
 
     pub fn new(phys: Arc<PhysMem>, symbols: Arc<SymbolStore>) -> Result<Self> {
@@ -1599,21 +1789,16 @@ impl Guest {
         };
 
         ntoskrnl.register_as_kernel();
-        Ok(Self { ntoskrnl })
+        Ok(Self::from_kernel(ntoskrnl))
     }
 
     pub fn enumerate_processes(&self) -> Result<Vec<ProcessInfo>> {
+        self.memoized(|memo| &mut memo.processes, || self.walk_processes())
+    }
+
+    fn walk_processes(&self) -> Result<Vec<ProcessInfo>> {
         let memory = self.ntoskrnl.memory();
-
-        let eprocess_info = self.ntoskrnl.types().layout("_EPROCESS")?;
-        let active_process_links_offset = eprocess_info.field_offset("ActiveProcessLinks")?;
-        let pcb_offset = eprocess_info.field_offset("Pcb")?;
-
-        let kprocess_info = self.ntoskrnl.types().layout("_KPROCESS")?;
-        let dir_table_base_offset =
-            pcb_offset + kprocess_info.field_offset("DirectoryTableBase")?;
-        let unique_process_id_offset = eprocess_info.field_offset("UniqueProcessId")?;
-        let image_filename_offset = eprocess_info.field_offset("ImageFileName")?;
+        let mut span = EprocessSpan::new(self)?;
 
         let ps_initial_system_process: VirtAddr =
             self.ntoskrnl.symbol("PsInitialSystemProcess")?.read()?;
@@ -1634,43 +1819,29 @@ impl Guest {
             }
             visited.insert(current_eprocess.0);
 
-            let pid = memory.read::<u64>(current_eprocess + unique_process_id_offset)?;
-            let dtb = memory.read::<Dtb>(current_eprocess + dir_table_base_offset)? & !0xfff;
-
+            span.read(&memory, current_eprocess)?;
+            let dtb = span.dtb();
             if dtb == 0 {
                 break;
             }
 
-            let name = self
-                .full_process_name(current_eprocess, dtb)
-                .unwrap_or_else(|_| {
-                    let mut name_buf = [0u8; 15];
-                    if memory
-                        .read_bytes(current_eprocess + image_filename_offset, &mut name_buf)
-                        .is_ok()
-                    {
-                        String::from_utf8_lossy(
-                            &name_buf[..name_buf.iter().position(|&c| c == 0).unwrap_or(15)],
-                        )
-                        .to_string()
-                    } else {
-                        "<unknown>".to_string()
-                    }
-                });
-
             processes.push(ProcessInfo {
-                pid,
-                name,
+                pid: span.pid(),
+                name: self.process_name_from_image_file_name(
+                    current_eprocess,
+                    dtb,
+                    span.image_file_name(),
+                ),
                 dtb,
                 eprocess_va: current_eprocess,
             });
 
-            let flink = memory.read::<VirtAddr>(current_eprocess + active_process_links_offset)?;
+            let flink = span.active_process_links_flink();
             if flink.0 == 0 || Some(flink) == ps_active_process_head {
                 break;
             }
 
-            current_eprocess = flink - active_process_links_offset;
+            current_eprocess = flink - span.active_process_links_offset;
             if current_eprocess == ps_initial_system_process {
                 break;
             }
@@ -1679,26 +1850,62 @@ impl Guest {
         Ok(processes)
     }
 
-    /// Short (15-char) image name straight from EPROCESS.ImageFileName: a
-    /// single read, unlike enumerate_processes or the PEB walk
-    pub fn process_image_name(&self, eprocess_va: VirtAddr) -> Option<String> {
-        let memory = self.ntoskrnl.memory();
-        let offset = self
-            .ntoskrnl
-            .types()
-            .layout("_EPROCESS")
-            .ok()?
-            .field_offset("ImageFileName")
-            .ok()?;
-        let mut name_buf = [0u8; 15];
-        memory
-            .read_bytes(eprocess_va + offset, &mut name_buf)
-            .ok()?;
-        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(15);
+    /// The process at `eprocess_va` without walking the process list: one
+    /// EPROCESS span read plus the PEB walk only for a possibly truncated
+    /// name.
+    pub fn process_at(&self, eprocess_va: VirtAddr) -> Result<ProcessInfo> {
+        let mut span = EprocessSpan::new(self)?;
+        span.read(&self.ntoskrnl.memory(), eprocess_va)?;
+        let dtb = span.dtb();
+        Ok(ProcessInfo {
+            pid: span.pid(),
+            name: self.process_name_from_image_file_name(eprocess_va, dtb, span.image_file_name()),
+            dtb,
+            eprocess_va,
+        })
+    }
+
+    /// Display name for the process at `eprocess_va` given its raw
+    /// `EPROCESS.ImageFileName` bytes. The kernel keeps only the first 15
+    /// bytes of the image name, so the PEB loader list (a page-walked read of
+    /// user memory) is consulted only when the field is full and may be
+    /// truncated; every shorter name is complete as is.
+    fn process_name_from_image_file_name(
+        &self,
+        eprocess_va: VirtAddr,
+        dtb: Dtb,
+        image_file_name: &[u8],
+    ) -> String {
+        let len = image_file_name
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(image_file_name.len());
+        if len == IMAGE_FILE_NAME_LEN
+            && dtb != 0
+            && let Ok(full) = self.full_process_name(eprocess_va, dtb)
+        {
+            return full;
+        }
         if len == 0 {
+            return "<unknown>".to_string();
+        }
+        String::from_utf8_lossy(&image_file_name[..len]).to_string()
+    }
+
+    /// Display name for the process at `eprocess_va` without walking the
+    /// process list: the `ImageFileName` read plus, only for a possibly
+    /// truncated name, the process DTB and PEB walk.
+    pub fn process_name_at(&self, eprocess_va: VirtAddr) -> Option<String> {
+        let mut span = EprocessSpan::new(self).ok()?;
+        span.read(&self.ntoskrnl.memory(), eprocess_va).ok()?;
+        if span.image_file_name()[0] == 0 {
             return None;
         }
-        Some(String::from_utf8_lossy(&name_buf[..len]).to_string())
+        Some(self.process_name_from_image_file_name(
+            eprocess_va,
+            span.dtb(),
+            span.image_file_name(),
+        ))
     }
 
     fn full_process_name(&self, eprocess_va: VirtAddr, dtb: Dtb) -> Result<String> {
@@ -1778,6 +1985,13 @@ impl Guest {
     }
 
     pub fn kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
+        self.memoized(
+            |memo| &mut memo.kernel_modules,
+            || self.walk_kernel_modules(),
+        )
+    }
+
+    fn walk_kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
         let head = self.ntoskrnl.symbol("PsLoadedModuleList")?.address();
 
         // The kernel uses the _KLDR variant; fall back to _LDR if it's absent

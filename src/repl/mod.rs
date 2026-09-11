@@ -453,30 +453,26 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 
     let edit_mode = Box::new(Emacs::new(keybindings));
 
-    let initial_processes = debugger
-        .guest
-        .as_ref()
-        .and_then(|g| g.enumerate_processes().ok())
-        .map(|procs| procs.into_iter().map(|p| (p.name, p.pid)).collect())
-        .unwrap_or_default();
     let initial_vcpus = if supports_capability(&capabilities, DebugCapability::ThreadList) {
         client.thread_list().unwrap_or_default()
     } else {
         Vec::new()
     };
-    let initial_drivers = debugger.enumerate_driver_objects().unwrap_or_default();
 
+    // Process and driver lists are never walked ahead of use: completions
+    // enumerate them on demand through the target loan below, and listing
+    // commands refresh the fallback snapshots as a side effect.
     let caches = ReplCaches {
         symbols: Arc::new(RwLock::new(debugger.current_symbol_index())),
         types: Arc::new(RwLock::new(debugger.current_types_index())),
         symbol_store: Arc::clone(&debugger.symbols),
         dtb: Arc::new(RwLock::new(debugger.current_dtb())),
-        processes: Arc::new(RwLock::new(initial_processes)),
+        processes: Arc::new(RwLock::new(Vec::new())),
         // populated on demand by the threads/thread commands
         threads: Arc::new(RwLock::new(Vec::new())),
         vcpus: Arc::new(RwLock::new(initial_vcpus)),
         breakpoints: Arc::new(RwLock::new(Vec::new())),
-        drivers: Arc::new(RwLock::new(initial_drivers)),
+        drivers: Arc::new(RwLock::new(Vec::new())),
         registers: Arc::new(ctx.register_map.names()),
         expression_variables: Arc::new(RwLock::new(Vec::new())),
         user_commands: Arc::new(RwLock::new(initial_user_commands())),
@@ -484,8 +480,10 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     };
     caches.refresh_expression_context(debugger);
 
+    let target_loan = TargetLoan::default();
     let completor = Box::new(MyCompleter {
         caches: caches.clone(),
+        target: target_loan.clone(),
     });
 
     let had_content = Arc::new(AtomicBool::new(false));
@@ -557,7 +555,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     } else {
         loop {
             let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
-            let sig = line_editor.read_line(&prompt)?;
+            let sig = target_loan.lend(&state.ctx.target, || line_editor.read_line(&prompt))?;
             match sig {
                 Signal::Success(buffer) => {
                     if !buffer.trim().is_empty() {

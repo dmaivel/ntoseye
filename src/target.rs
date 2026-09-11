@@ -998,7 +998,7 @@ impl Target {
             WinObject::new_with_arch(phys.clone(), symbols.clone(), kernel_dtb, kernel_base, arch)
                 .load_symbols()?;
         ntoskrnl.register_as_kernel();
-        let guest = Guest { ntoskrnl };
+        let guest = Guest::from_kernel(ntoskrnl);
         let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
 
         Ok(Self {
@@ -1287,6 +1287,18 @@ impl Target {
     }
 
     pub fn thread_process_dtb(&self, thread: &ThreadInfo) -> Option<Dtb> {
+        // A known owning EPROCESS answers with one read; only a thread whose
+        // process pointer was unreadable needs the list walk by pid.
+        if thread.pid != Some(0)
+            && let Some(eprocess) = thread.eprocess
+            && let Some(process) = self
+                .guest
+                .as_ref()
+                .and_then(|guest| guest.process_at(eprocess).ok())
+            && process.dtb != 0
+        {
+            return Some(process.dtb);
+        }
         let processes = self
             .guest
             .as_ref()
@@ -1298,6 +1310,28 @@ impl Target {
             &processes,
             self.kernel_dtb(),
         )
+    }
+
+    /// The process whose page-table root is `cr3_masked`. The selected
+    /// Windows thread's owner is checked first: at a stop that is almost
+    /// always the answer and costs one EPROCESS read, where the fallback walks
+    /// the process list.
+    pub fn process_for_cr3(&self, cr3_masked: u64) -> Option<ProcessInfo> {
+        let guest = self.guest.as_ref()?;
+        if let Some(eprocess) = self
+            .windows_thread_selection
+            .as_ref()
+            .and_then(|thread| thread.eprocess)
+            && let Ok(process) = guest.process_at(eprocess)
+            && (process.dtb & CR3_PAGE_MASK) == cr3_masked
+        {
+            return Some(process);
+        }
+        guest
+            .enumerate_processes()
+            .ok()?
+            .into_iter()
+            .find(|process| (process.dtb & CR3_PAGE_MASK) == cr3_masked)
     }
 
     pub fn current_thread_pseudo_register(&self, name: &str) -> Option<u64> {
@@ -2024,6 +2058,10 @@ impl Target {
 
     pub fn enumerate_driver_objects(&self) -> Result<Vec<DriverObjectInfo>> {
         let guest = self.guest()?;
+        guest.memoized_drivers(|| self.walk_driver_objects(guest))
+    }
+
+    fn walk_driver_objects(&self, guest: &Guest) -> Result<Vec<DriverObjectInfo>> {
         let memory = guest.ntoskrnl.memory();
         let object_name = self.object_name_layout()?;
         let dir = self.object_directory_layout()?;
@@ -3788,22 +3826,23 @@ impl Target {
 
         // Bulk enumeration passes the owning process as a hint, so it never
         // walks the process list per thread. Single-thread lookups (break
-        // context, `thread_info_from_ethread`) have no hint, so match the
-        // thread's pid/EPROCESS against a one-shot process list for the name.
-        let owner: Option<ProcessInfo> = match process_hint {
-            Some(_) => None,
-            None => guest.enumerate_processes().ok().and_then(|processes| {
-                processes.into_iter().find(|process| {
-                    pid.is_some_and(|pid| process.pid == pid)
-                        || eprocess.is_some_and(|eprocess| process.eprocess_va == eprocess)
-                })
+        // context, `thread_info_from_ethread`) have no hint; with the owning
+        // EPROCESS in hand the name is a direct read, and only a thread whose
+        // process pointer is unreadable falls back to matching its pid against
+        // the process list.
+        let owner: Option<ProcessInfo> = match (process_hint, eprocess) {
+            (Some(_), _) | (None, Some(_)) => None,
+            (None, None) => guest.enumerate_processes().ok().and_then(|processes| {
+                processes
+                    .into_iter()
+                    .find(|process| pid.is_some_and(|pid| process.pid == pid))
             }),
         };
         let owner = process_hint.or(owner.as_ref());
 
         let process_name = owner
             .map(|process| process.name.clone())
-            .or_else(|| eprocess.and_then(|eprocess| guest.process_image_name(eprocess)))
+            .or_else(|| eprocess.and_then(|eprocess| guest.process_name_at(eprocess)))
             // PID 0 is the System Idle Process, which isn't on PsActiveProcessHead
             // and so never matches above; label its per-CPU idle threads like WinDbg
             .or_else(|| (pid == Some(0)).then(|| "Idle".to_string()));

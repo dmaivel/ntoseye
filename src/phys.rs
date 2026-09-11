@@ -54,6 +54,18 @@ impl PhysMem {
             Self::Dmp(_) | Self::Remote(_) => 0,
         }
     }
+
+    /// Identity of the current halt, for memoizing guest-derived lists: equal
+    /// values mean the guest has not run in between. `None` when this memory
+    /// has no resume signal (a live VM process), so nothing may be memoized.
+    /// A dump never changes, so it is one epoch forever.
+    pub fn halt_epoch(&self) -> Option<u64> {
+        match self {
+            Self::Remote(kd) => kd.translation_cache().map(TranslationCache::halt_epoch),
+            Self::Dmp(_) => Some(0),
+            Self::Live(_) => None,
+        }
+    }
 }
 
 impl MemoryOps<PhysAddr> for PhysMem {

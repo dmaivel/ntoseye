@@ -193,20 +193,13 @@ impl ReplState<'_> {
                         }
                     };
 
-                    let target_reloaded =
-                        matches!(&resolution, StopResolution::TargetReloaded { .. });
-                    let modules_changed = refresh_stop_caches_pre(
+                    refresh_stop_caches_pre(
                         &mut *self.ctx.backend,
                         &self.ctx.target,
                         &mut self.ctx.breakpoints,
                         &self.caches,
                     );
-                    refresh_stop_caches_post(
-                        &self.ctx.target,
-                        &self.caches,
-                        target_reloaded,
-                        modules_changed,
-                    );
+                    refresh_stop_caches_post(&self.ctx.target, &self.caches);
                     refresh_windows_thread_context_for_backend_thread(
                         &mut self.ctx.target,
                         &self.ctx.current_thread,

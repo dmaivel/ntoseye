@@ -60,15 +60,21 @@ ntoseye --backend kdnet --kdnet-key 1.2.3.4
 
 KDNET listens on `0.0.0.0:50000` by default. Use `--connect <listen-address>:<port>` to select another listener.
 
+A guest restart does not require reattaching. The target pokes the listener every three seconds in every state; once it has accepted a session key, its pokes carry the host port its data channel is bound to, and the listener leaves those alone since answering one would rekey a working session. A rebooted target has no data channel and pokes with that field zero, so the listener answers it at once: the session key is renegotiated, the KD packet stream restarts, and the stop is reported as a target reload.
+
+Attach therefore waits for the target's next poke, up to three seconds. A target still sending data for an earlier session (the debugger was killed while it was stopped) is poked back and offers immediately instead. The break-in goes out the moment the session exists, and a stopped target that swallowed it is reset half a second later, so attach completes within a few milliseconds of the poke either way.
+
 ## KD and KDNET memory sources
 
 KD and KDNET accept `--memory-source auto|host|kd`:
 
 - `auto` (default) uses direct VM-process memory only after its kernel PE header and live module-list links match the KD target; otherwise it falls back to KD.
 - `host` requires matching direct VM-process memory and fails on mismatch.
-- `kd` forces authenticated `DbgKdReadPhysicalMemory` and `DbgKdWritePhysicalMemory` requests.
+- `kd` forces target-mediated reads: kernel-space addresses go through `DbgKdReadVirtualMemory`, everything else through `DbgKdReadPhysicalMemory` behind a host page walk whose translations are cached until the target next runs. Writes use `DbgKdWritePhysicalMemory`.
 
-The `kd` source needs no hypervisor or VM-process access, so AMD64 and ARM64 Windows VMs or physical machines can be debugged across any routable network. Memory-backed commands require the target to be halted; remote latency also makes large scans slower than direct host memory.
+The `kd` source needs no hypervisor or VM-process access, so AMD64 and ARM64 Windows VMs or physical machines can be debugged across any routable network. Memory-backed commands require the target to be halted; remote latency also makes large scans slower than direct host memory. KDNET returns at most 1096 bytes per request, so attach reads only the parts of each module image that symbols and unwinding need (`.rdata`, `.pdata`, the debug directory) and leaves code and data sections to the on-disk image.
+
+Process, kernel-module, and driver-object lists are walked only when something needs them (a listing command, a tab completion, a break context in a user-mode process) and the first walk per halt serves every later use until the target runs again. The process walk reads one span per `_EPROCESS` and consults the PEB only for names the kernel's 15-byte `ImageFileName` may have truncated, so the prompt after attach and each stop no longer waits on a full process walk.
 
 ## Memory introspection
 

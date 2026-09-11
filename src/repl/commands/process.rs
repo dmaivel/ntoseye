@@ -844,9 +844,6 @@ impl ReplState<'_> {
                     symbol_report,
                 }) => {
                     self.caches.refresh_symbol_context(&self.ctx.target);
-                    if let Err(e) = self.caches.refresh_processes(&self.ctx.target) {
-                        error!("failed to refresh process cache: {}", e);
-                    }
                     println!("attached to {} (PID {})", name, pid);
                     print_module_symbol_report(&symbol_report);
                     println!();
@@ -869,9 +866,6 @@ impl ReplState<'_> {
         } else {
             self.ctx.target.detach();
             self.caches.refresh_symbol_context(&self.ctx.target);
-            if let Err(e) = self.caches.refresh_processes(&self.ctx.target) {
-                error!("failed to refresh process cache: {}", e);
-            }
             println!("detached, now in kernel context\n");
         }
 

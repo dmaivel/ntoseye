@@ -1638,6 +1638,37 @@ impl SymbolStore {
         *self.kernel_guid.lock()
     }
 
+    /// Register a module's layouts and public symbol RVAs without a PDB, for
+    /// tests that drive guest walks over synthetic memory.
+    #[cfg(test)]
+    pub(crate) fn inject_module_for_test(
+        &self,
+        guid: u128,
+        types: Vec<TypeInfo>,
+        symbols: &[(&str, u32)],
+    ) {
+        for type_info in types {
+            self.type_cache
+                .insert((guid, type_info.name.clone()), Arc::new(type_info));
+        }
+        self.symbol_rvas.insert(
+            guid,
+            symbols
+                .iter()
+                .map(|(name, rva)| {
+                    (
+                        name.to_string(),
+                        vec![IndexedSymbol {
+                            rva: *rva,
+                            visibility: SymbolVisibility::Public,
+                            compiland: None,
+                        }],
+                    )
+                })
+                .collect(),
+        );
+    }
+
     pub fn clear_modules_for_dtb(&self, dtb: Dtb) {
         let module_keys: Vec<_> = self
             .modules

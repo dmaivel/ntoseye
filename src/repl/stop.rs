@@ -178,23 +178,11 @@ pub fn refresh_stop_caches_pre(
     modules_changed
 }
 
-/// Refresh the guest-state completion caches after a stop. Both the async and
-/// synchronous stop paths call this, so the set can't drift. Drivers are a
-/// near-static but expensive cache, so they re-enumerate only when the module set
-/// actually changed (`modules_changed`) rather than on every stop.
-pub fn refresh_stop_caches_post(
-    debugger: &Target,
-    caches: &ReplCaches,
-    target_reloaded: bool,
-    modules_changed: bool,
-) {
-    // on reload the rediscovery path already refreshed processes
-    if !target_reloaded && let Err(e) = caches.refresh_processes(debugger) {
-        error!("failed to refresh process cache: {}", e);
-    }
-    if modules_changed {
-        caches.refresh_drivers(debugger);
-    }
+/// Refresh the completion caches derived from debugger state after a stop.
+/// Both the async and synchronous stop paths call this, so the set can't
+/// drift. Guest lists (processes, drivers) are deliberately not walked here:
+/// completions enumerate them on demand, memoized per halt.
+pub fn refresh_stop_caches_post(debugger: &Target, caches: &ReplCaches) {
     caches.refresh_expression_context(debugger);
 }
 
@@ -205,14 +193,13 @@ pub fn print_async_stop_resolution(
     caches: &ReplCaches,
     resolution: StopResolution,
 ) {
-    let target_reloaded = matches!(&resolution, StopResolution::TargetReloaded { .. });
-    let modules_changed = refresh_stop_caches_pre(
+    refresh_stop_caches_pre(
         &mut *session.backend,
         &session.target,
         &mut session.breakpoints,
         caches,
     );
-    refresh_stop_caches_post(&session.target, caches, target_reloaded, modules_changed);
+    refresh_stop_caches_post(&session.target, caches);
     refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);
 
     print_stop_separator();

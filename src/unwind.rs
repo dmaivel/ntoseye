@@ -34,7 +34,7 @@ use crate::{
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
-    guest::{Guest, ModuleInfo, PeImage, ProcessInfo, read_pe_image, read_pe_image_from_file},
+    guest::{Guest, ModuleInfo, PeImage, read_pe_image, read_pe_image_from_file},
     memory::{AddressSpace, DTB_IDENTITY},
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
@@ -215,7 +215,7 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
         };
     }
 
-    if let Some(proc_info) = find_process_by_cr3(debugger, cr3_masked) {
+    if let Some(proc_info) = debugger.process_for_cr3(cr3_masked) {
         let process_modules = debugger
             .guest
             .as_ref()
@@ -743,16 +743,6 @@ fn record_stack_frame(stacktrace: &mut StackTrace, limit: usize, frame: StackFra
     } else {
         stacktrace.truncated += 1;
     }
-}
-
-fn find_process_by_cr3(debugger: &Target, cr3_masked: u64) -> Option<ProcessInfo> {
-    debugger
-        .guest
-        .as_ref()?
-        .enumerate_processes()
-        .ok()?
-        .into_iter()
-        .find(|proc| (proc.dtb & CR3_PAGE_MASK) == cr3_masked)
 }
 
 impl RegisterContext {

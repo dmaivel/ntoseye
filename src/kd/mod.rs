@@ -861,7 +861,7 @@ impl KdBackend {
     fn record_running(&mut self) {
         self.link.set_inline_running(true);
         self.special_register_cache.clear();
-        self.translations.clear();
+        self.translations.resume();
     }
 
     fn context_flags(&self) -> u32 {
@@ -1977,10 +1977,13 @@ impl Drop for KdBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guest::{Guest, WinObject};
     use crate::kd::framing::{
         PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
         PACKET_TYPE_KD_RESET, PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
     };
+    use crate::phys::PhysMem;
+    use crate::symbols::{FieldInfo, ParsedType, SymbolStore, TypeInfo};
     use std::io::{Cursor, Read, Write};
     use std::time::Instant;
 
@@ -2941,6 +2944,301 @@ mod tests {
         };
         let error = memory.read_bytes(0x1000, &mut [0u8; 8]).unwrap_err();
         assert!(error.to_string().contains("requires a halted target"));
+    }
+
+    /// A halted fake kernel serving `DbgKdReadVirtualMemory` from a map of
+    /// kernel-space regions until the host hangs up; returns the request
+    /// count so tests can assert how many round trips a guest walk costs.
+    fn serve_virtual_memory(
+        mut kernel: UnixStream,
+        regions: Vec<(u64, Vec<u8>)>,
+    ) -> std::thread::JoinHandle<usize> {
+        const UNION: usize = 16;
+        std::thread::spawn(move || {
+            let mut kernel_id = WIRE_FIRST_PACKET_ID;
+            let mut served = 0usize;
+            loop {
+                let mut header = [0u8; WIRE_HEADER_SIZE];
+                if kernel.read_exact(&mut header).is_err() {
+                    return served;
+                }
+                if u32::from_le_bytes(header[0..4].try_into().unwrap()) != WIRE_DATA_LEADER {
+                    continue; // host ACK of our last reply
+                }
+                let len = u16::from_le_bytes(header[6..8].try_into().unwrap()) as usize;
+                let mut request = vec![0u8; len + 1];
+                kernel.read_exact(&mut request).unwrap();
+                let host_id = u32::from_le_bytes(header[8..12].try_into().unwrap());
+                kernel
+                    .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, host_id))
+                    .unwrap();
+
+                let api_number = u32::from_le_bytes(request[0..4].try_into().unwrap());
+                assert_eq!(api_number, api::DBGKD_READ_VIRTUAL_MEMORY);
+                let addr = u64::from_le_bytes(request[UNION..UNION + 8].try_into().unwrap());
+                let wanted =
+                    u32::from_le_bytes(request[UNION + 8..UNION + 12].try_into().unwrap()) as usize;
+                served += 1;
+
+                let mut reply = vec![0u8; api::MANIPULATE_HEADER_SIZE];
+                reply[0..4].copy_from_slice(&api_number.to_le_bytes());
+                reply[UNION..UNION + 8].copy_from_slice(&addr.to_le_bytes());
+                reply[UNION + 8..UNION + 12].copy_from_slice(&(wanted as u32).to_le_bytes());
+                match regions.iter().find_map(|(base, bytes)| {
+                    let start = addr.checked_sub(*base)? as usize;
+                    bytes.get(start..start + wanted)
+                }) {
+                    Some(data) => {
+                        reply[UNION + 12..UNION + 16]
+                            .copy_from_slice(&(data.len() as u32).to_le_bytes());
+                        reply.extend_from_slice(data);
+                    }
+                    None => reply[8..12].copy_from_slice(&0xC000_0005u32.to_le_bytes()),
+                }
+                kernel
+                    .write_all(&wire_data_packet(
+                        PACKET_TYPE_KD_STATE_MANIPULATE,
+                        kernel_id,
+                        &reply,
+                    ))
+                    .unwrap();
+                kernel_id ^= 1;
+            }
+        })
+    }
+
+    const FAKE_KERNEL_DTB: u64 = 0x1ad000;
+    const FAKE_KERNEL_BASE: u64 = 0xffff_f800_0000_0000;
+    const FAKE_GUID: u128 = 0x51;
+
+    fn field(offset: u32, size: u64, type_data: ParsedType) -> FieldInfo {
+        FieldInfo {
+            offset,
+            size,
+            type_data,
+        }
+    }
+
+    fn primitive(offset: u32, size: u64) -> FieldInfo {
+        field(offset, size, ParsedType::Primitive("u".into()))
+    }
+
+    fn layout(name: &str, size: usize, fields: &[(&str, FieldInfo)]) -> TypeInfo {
+        TypeInfo {
+            name: name.to_string(),
+            size,
+            fields: fields
+                .iter()
+                .map(|(name, info)| (name.to_string(), info.clone()))
+                .collect(),
+        }
+    }
+
+    /// Build a halted KD-backed guest over `regions` with `types` and
+    /// `symbols` standing in for the kernel PDB. The backend is returned so a
+    /// test can resume it; the join handle yields the request count.
+    fn synthetic_guest(
+        regions: Vec<(u64, Vec<u8>)>,
+        types: Vec<TypeInfo>,
+        symbols: &[(&str, u32)],
+    ) -> (Guest, Arc<Mutex<KdBackend>>, std::thread::JoinHandle<usize>) {
+        let (kernel, host) = UnixStream::pair().unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.link.set_inline_running(false);
+        backend.exit_prepared = true;
+        backend.kernel_dtb_override = FAKE_KERNEL_DTB;
+        let translations = Arc::clone(&backend.translations);
+        let inner = Arc::new(Mutex::new(backend));
+        let phys = Arc::new(PhysMem::remote(KdMemory {
+            inner: Arc::clone(&inner),
+            translations,
+        }));
+        let store = Arc::new(SymbolStore::new());
+        store.inject_module_for_test(FAKE_GUID, types, symbols);
+        let mut ntoskrnl = WinObject::new_with_arch(
+            phys,
+            store,
+            FAKE_KERNEL_DTB,
+            VirtAddr(FAKE_KERNEL_BASE),
+            Arch::Amd64,
+        );
+        ntoskrnl.guid = Some(FAKE_GUID);
+        let worker = serve_virtual_memory(kernel, regions);
+        (Guest::from_kernel(ntoskrnl), inner, worker)
+    }
+
+    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn resume_and_halt(backend: &Arc<Mutex<KdBackend>>) {
+        let mut backend = backend.lock().unwrap();
+        backend.record_running();
+        backend.link.set_inline_running(false);
+    }
+
+    /// Each `_EPROCESS` costs one request (its field span) and the list is
+    /// served from the halt memo until the target runs; short names never
+    /// touch the PEB.
+    #[test]
+    fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
+        const PID: u32 = 0x440;
+        const LINKS: u32 = 0x448;
+        const NAME: u32 = 0x5a8;
+        const DTB: u32 = 0x28;
+        let eprocess = layout(
+            "_EPROCESS",
+            0x600,
+            &[
+                (
+                    "Pcb",
+                    field(0, 0x438, ParsedType::Struct("_KPROCESS".into())),
+                ),
+                ("UniqueProcessId", primitive(PID, 8)),
+                ("ActiveProcessLinks", primitive(LINKS, 16)),
+                ("ImageFileName", primitive(NAME, 15)),
+            ],
+        );
+        let kprocess = layout(
+            "_KPROCESS",
+            0x438,
+            &[("DirectoryTableBase", primitive(DTB, 8))],
+        );
+
+        let head = FAKE_KERNEL_BASE + 0x1008;
+        let system = 0xffff_e000_0001_0000u64;
+        let smss = 0xffff_e000_0002_0000u64;
+        let mut nt = vec![0u8; 0x2000];
+        put_u64(&mut nt, 0x1000, system);
+        put_u64(&mut nt, 0x1008, system + LINKS as u64);
+        let mut process = |pid: u64, dtb: u64, name: &[u8], next: u64| {
+            let mut bytes = vec![0u8; 0x600];
+            put_u64(&mut bytes, PID as usize, pid);
+            put_u64(&mut bytes, DTB as usize, dtb);
+            put_u64(&mut bytes, LINKS as usize, next + LINKS as u64);
+            bytes[NAME as usize..NAME as usize + name.len()].copy_from_slice(name);
+            bytes
+        };
+        let regions = vec![
+            (FAKE_KERNEL_BASE, nt),
+            (system, process(4, 0x1ad000, b"System", smss)),
+            (
+                smss,
+                process(0x1d8, 0x2be000, b"smss.exe", head - LINKS as u64),
+            ),
+        ];
+        let (guest, backend, worker) = synthetic_guest(
+            regions,
+            vec![eprocess, kprocess],
+            &[
+                ("PsInitialSystemProcess", 0x1000),
+                ("PsActiveProcessHead", 0x1008),
+            ],
+        );
+
+        let first = guest.enumerate_processes().unwrap();
+        let names: Vec<_> = first.iter().map(|p| (p.name.as_str(), p.pid)).collect();
+        assert_eq!(names, [("System", 4), ("smss.exe", 0x1d8)]);
+        assert_eq!(first[1].dtb, 0x2be000);
+
+        let second = guest.enumerate_processes().unwrap();
+        assert_eq!(second.len(), 2);
+        let one = guest.process_at(VirtAddr(smss)).unwrap();
+        assert_eq!(
+            (one.name.as_str(), one.pid, one.dtb),
+            ("smss.exe", 0x1d8, 0x2be000)
+        );
+
+        resume_and_halt(&backend);
+        assert_eq!(guest.enumerate_processes().unwrap().len(), 2);
+
+        drop(guest);
+        drop(backend);
+        // PsInitialSystemProcess + two spans per walk, one span for
+        // `process_at`, and the memoized second walk costs nothing.
+        assert_eq!(worker.join().unwrap(), 3 + 1 + 3);
+    }
+
+    /// A loader record is prefetched whole, so a module costs the record
+    /// image plus its name buffer rather than one request per field.
+    #[test]
+    fn kernel_module_walk_prefetches_each_record() {
+        const DLL_BASE: u32 = 0x30;
+        const SIZE: u32 = 0x40;
+        const NAME: u32 = 0x58;
+        const TIME_DATE_STAMP: u32 = 0x9c;
+        const CHECK_SUM: u32 = 0x100;
+        let entry = layout(
+            "_KLDR_DATA_TABLE_ENTRY",
+            0x120,
+            &[
+                ("InLoadOrderLinks", primitive(0, 16)),
+                ("DllBase", primitive(DLL_BASE, 8)),
+                ("SizeOfImage", primitive(SIZE, 4)),
+                (
+                    "BaseDllName",
+                    field(NAME, 16, ParsedType::Struct("_UNICODE_STRING".into())),
+                ),
+                ("TimeDateStamp", primitive(TIME_DATE_STAMP, 4)),
+                ("CheckSum", primitive(CHECK_SUM, 4)),
+            ],
+        );
+        let unicode = layout(
+            "_UNICODE_STRING",
+            16,
+            &[("Length", primitive(0, 2)), ("Buffer", primitive(8, 8))],
+        );
+
+        let head = FAKE_KERNEL_BASE + 0x2000;
+        let names = 0xffff_e000_0009_0000u64;
+        let entries = 0xffff_e000_000a_0000u64;
+        let mut nt = vec![0u8; 0x3000];
+        put_u64(&mut nt, 0x2000, entries);
+        let name_bytes: Vec<u8> = "ntoskrnl.exe\0\0\0\0hal.dll"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut records = vec![0u8; 0x240];
+        let mut record = |at: usize, next: u64, base: u64, name_off: u64, name_len: u16| {
+            put_u64(&mut records, at, next);
+            put_u64(&mut records, at + DLL_BASE as usize, base);
+            records[at + SIZE as usize..at + SIZE as usize + 4]
+                .copy_from_slice(&0x1000u32.to_le_bytes());
+            records[at + NAME as usize..at + NAME as usize + 2]
+                .copy_from_slice(&name_len.to_le_bytes());
+            put_u64(&mut records, at + NAME as usize + 8, names + name_off);
+        };
+        record(0, entries + 0x120, FAKE_KERNEL_BASE, 0, 24);
+        record(0x120, head, 0xffff_f800_1000_0000, 32, 14);
+        let regions = vec![
+            (FAKE_KERNEL_BASE, nt),
+            (names, name_bytes),
+            (entries, records),
+        ];
+        let (guest, backend, worker) = synthetic_guest(
+            regions,
+            vec![entry, unicode],
+            &[("PsLoadedModuleList", 0x2000)],
+        );
+
+        let modules = guest.kernel_modules().unwrap();
+        let seen: Vec<_> = modules
+            .iter()
+            .map(|m| (m.name.as_str(), m.base_address.0))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("ntoskrnl.exe", FAKE_KERNEL_BASE),
+                ("hal.dll", 0xffff_f800_1000_0000)
+            ]
+        );
+        assert_eq!(guest.kernel_modules().unwrap().len(), 2);
+
+        drop(guest);
+        drop(backend);
+        // head pointer + (record image + name buffer) per module
+        assert_eq!(worker.join().unwrap(), 1 + 2 * 2);
     }
 
     fn read_special_registers_reply_payload(processor: u16) -> Vec<u8> {
