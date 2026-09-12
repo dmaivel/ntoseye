@@ -24,15 +24,25 @@ kdnet.exe <host-ip> 50000
 
 It validates the debug NIC, configures its PCI `busparams`, enables debugging, and prints the four-part encryption key. Reboot Windows.
 
-If `kdnet.exe` is not available, the same configuration by hand is:
+If `kdnet.exe` is not available, first find the debug NIC's PCI address:
+
+```powershell
+PS> Get-NetAdapterHardwareInfo
+
+Name        Segment Bus Device Function Slot NumaNode PcieLinkSpeed PcieLinkWidth Version
+----        ------- --- ------ -------- ---- -------- ------------- ------------- -------
+Ethernet 4        0   6      0        0    0                Unknown
+```
+
+`Bus`, `Device`, and `Function` are the three parts of `busparams`, in decimal: this adapter is `6.0.0`. (Device Manager shows the same on the adapter's General tab as `Location: PCI bus 6, device 0, function 0`.) Then:
 
 ```powershell
 bcdedit /debug on
 bcdedit /dbgsettings net hostip:<host-ip> port:50000
-bcdedit /set "{dbgsettings}" busparams <bus>.<device>.<function>
+bcdedit /set "{dbgsettings}" busparams 6.0.0
 ```
 
-`bcdedit /dbgsettings` prints the key it generated. `busparams` is the debug NIC's PCI address; `kdnet.exe` finds it for you, which is the main reason to prefer it.
+`bcdedit /dbgsettings` prints the key it generated.
 
 ## 3. Host
 
