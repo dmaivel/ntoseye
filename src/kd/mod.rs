@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use owo_colors::OwoColorize;
@@ -25,7 +25,7 @@ use crate::types::{Arch, Dtb, PhysAddr, VirtAddr};
 macro_rules! kd_trace {
     ($($arg:tt)*) => {
         if $crate::kd::trace_enabled() {
-            eprintln!($($arg)*);
+            eprintln!("[{:>9.3}] {}", $crate::kd::trace_elapsed().as_secs_f64(), format_args!($($arg)*));
         }
     };
 }
@@ -41,6 +41,13 @@ macro_rules! kd_trace_bytes {
 pub fn trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_KD_TRACE").is_some())
+}
+
+/// Seconds since the first trace line, so a trace shows what each request
+/// costs on the wire.
+pub fn trace_elapsed() -> Duration {
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+    START.elapsed()
 }
 
 pub fn trace_bytes_enabled() -> bool {
@@ -1225,14 +1232,16 @@ impl KdBackend {
     /// Convert a connected KD backend into synchronized debugger and physical
     /// memory handles after target hints have been collected.
     pub fn into_remote_memory(self) -> (KdBackendHandle, KdMemory) {
-        eprintln!(
-            "{}",
-            format!(
-                "{}: memory source kd; remote reads may be slow.",
-                self.backend_name
-            )
-            .bright_black()
-        );
+        // An emulated UART hands the guest one byte per hypervisor main-loop
+        // iteration, so every KD request costs milliseconds; KDNET has no
+        // such floor.
+        let notice = match self.backend_name {
+            "kdnet" => "kdnet: memory source kd; remote reads may be slow.".to_string(),
+            name => format!(
+                "{name}: memory source kd; prefer --memory-source host if the VM is local, or KDNET"
+            ),
+        };
+        eprintln!("{}", notice.bright_black());
         let register_map = self.register_map.clone();
         let backend_name = self.backend_name;
         let translations = Arc::clone(&self.translations);
@@ -1316,10 +1325,12 @@ impl KdBackend {
         Ok(())
     }
 
-    /// Kernel space under the kernel root is what the target itself maps, so
-    /// `DbgKdReadVirtualMemoryApi` resolves it in one request per chunk
-    /// where the host walk costs four page-table reads per page first.
-    /// Process roots keep the walk: the API has no address-space selector.
+    /// `DbgKdReadVirtualMemoryApi` resolves through the current processor's
+    /// page tables: kernel space under the kernel root, and user space under
+    /// the root that processor is running on. Both take one request per
+    /// chunk where the host walk costs four page-table reads per page first.
+    /// Any other process root keeps the walk: the API has no address-space
+    /// selector.
     fn read_virtual_direct(
         &mut self,
         addr: VirtAddr,
@@ -1330,10 +1341,30 @@ impl KdBackend {
             Arch::Amd64 => addr.0 >> 63 != 0,
             Arch::Arm64 => addr.0 & (1 << 55) != 0,
         };
-        if !kernel_space || self.kernel_dtb_override == 0 || root != self.kernel_dtb_override {
+        let direct = if kernel_space {
+            self.kernel_dtb_override != 0 && root == self.kernel_dtb_override
+        } else {
+            self.current_processor_runs_on(root)
+        };
+        if !direct {
             return None;
         }
         Some(self.read_virtual_bytes(addr, buf))
+    }
+
+    /// Whether `root` is the page-table root the current processor is
+    /// running on. AMD64 only: its CR3 sits in the special registers cached
+    /// per halt, while the ARM64 user root (TTBR0) would cost a request of
+    /// its own to learn.
+    fn current_processor_runs_on(&mut self, root: Dtb) -> bool {
+        if self.arch != Arch::Amd64 || self.require_remote_memory_stopped().is_err() {
+            return false;
+        }
+        let Ok(special) = self.read_special_registers() else {
+            return false;
+        };
+        let cr3 = wire::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
+        cr3 & AMD64_DTB_MASK == root & AMD64_DTB_MASK
     }
 
     fn read_virtual_bytes(&mut self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
@@ -3028,6 +3059,42 @@ mod tests {
         drop(guest);
         drop(backend);
         assert_eq!(worker.join().unwrap(), 3 + 1 + 3);
+    }
+
+    #[test]
+    fn user_space_of_the_current_process_is_read_in_one_request() {
+        const USER_VA: u64 = 0x7ff6_1234_5000;
+        const CURRENT_CR3: u64 = 0x2be000;
+        let regions = vec![(USER_VA, b"PEB!".to_vec())];
+        let (guest, backend, worker) = synthetic_guest(regions, Vec::new(), &[]);
+        {
+            let mut backend = backend.lock().unwrap();
+            let mut special = vec![0u8; KSPECIAL_REGISTERS_MIN_SIZE];
+            // PCID bits in CR3 do not distinguish roots.
+            put_u64(
+                &mut special,
+                KSPECIAL_REGISTERS_CR3_OFFSET,
+                CURRENT_CR3 | 0x1,
+            );
+            let processor = backend.current_processor;
+            backend.special_register_cache.insert(processor, special);
+
+            let mut out = [0u8; 4];
+            // Another process's user space still needs the host walk.
+            assert!(
+                backend
+                    .read_virtual_direct(VirtAddr(USER_VA), 0x3cf000, &mut out)
+                    .is_none()
+            );
+            backend
+                .read_virtual_direct(VirtAddr(USER_VA), CURRENT_CR3, &mut out)
+                .unwrap()
+                .unwrap();
+            assert_eq!(&out, b"PEB!");
+        }
+        drop(guest);
+        drop(backend);
+        assert_eq!(worker.join().unwrap(), 1);
     }
 
     #[test]
