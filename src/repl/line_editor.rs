@@ -545,9 +545,31 @@ impl MyCompleter {
     }
 
     fn complete_symbol_names(&self, input: CompletionInput<'_>, limit: usize) -> Vec<Suggestion> {
+        // A prefix naming a module offers `module!` first, so one Tab selects
+        // the namespace and the next completes inside it; symbol matches are
+        // module-qualified so the inserted text resolves unambiguously.
+        let mut suggestions = if input.prefix.is_empty() {
+            Vec::new()
+        } else {
+            let dtb = *self.caches.dtb.read().unwrap();
+            let modules = self
+                .caches
+                .symbol_store
+                .module_short_names_with_prefix(dtb, input.prefix)
+                .into_iter()
+                .map(|module| format!("{module}!"))
+                .collect();
+            make_suggestions(modules, "Module", input.span_start, input.pos)
+        };
         let symbols = self.caches.symbols.read().unwrap();
         let results = symbols.search(input.prefix, limit);
-        make_suggestions(results, "Symbol", input.span_start, input.pos)
+        suggestions.extend(make_suggestions(
+            results,
+            "Symbol",
+            input.span_start,
+            input.pos,
+        ));
+        suggestions
     }
 
     fn complete_expression_variables(&self, input: CompletionInput<'_>) -> Vec<Suggestion> {

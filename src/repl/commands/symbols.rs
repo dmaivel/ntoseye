@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::symbols::{
@@ -132,42 +134,37 @@ impl ReplState<'_> {
         // is O(1) now); a huge match set just floods the screen
         const X_LIMIT: usize = 4096;
         let dtb = self.ctx.target.current_dtb();
-        // `module!query` scopes the search to one module; a bare
-        // query fuzzy-matches across the cached merged index
-        let (module_filter, names) = match query.split_once('!') {
-            Some((module, q)) => (
-                Some(module),
-                self.ctx
-                    .target
-                    .symbols
-                    .search_symbols_in_module(dtb, module, q, X_LIMIT),
-            ),
-            None => (
-                None,
-                self.caches.symbols.read().unwrap().search(query, X_LIMIT),
-            ),
+        // `module!query` scopes the search to one module; a bare query
+        // fuzzy-matches the cached merged index, whose names are already
+        // module-qualified.
+        let names: Vec<String> = match query.split_once('!') {
+            Some((module, q)) => self
+                .ctx
+                .target
+                .symbols
+                .search_symbols_in_module(dtb, module, q, X_LIMIT)
+                .into_iter()
+                .map(|name| format!("{module}!{name}"))
+                .collect(),
+            None => self.caches.symbols.read().unwrap().search(query, X_LIMIT),
         };
         let truncated = names.len() >= X_LIMIT;
         let mut hits: Vec<u64> = Vec::new();
         for name in &names {
-            // resolve within the requested module when scoped,
-            // so a name present in several modules isn't hijacked
-            let lookup = match module_filter {
-                Some(m) => format!("{}!{}", m, name),
-                None => name.clone(),
-            };
-            if let Some((addr, module)) = self
-                .ctx
-                .target
-                .symbols
-                .find_symbol_with_module(dtb, &lookup)?
-            {
+            let bare = name
+                .rsplit_once('!')
+                .map_or(name.as_str(), |(_, bare)| bare);
+            let mut seen = HashSet::new();
+            for candidate in self.ctx.target.symbols.find_symbol_candidates(dtb, name) {
+                if !seen.insert((candidate.module.to_ascii_lowercase(), candidate.address.0)) {
+                    continue;
+                }
                 outln!(
                     "{}  {}",
-                    ui::addr(addr.0),
-                    ui::symbol(&format!("{}!{}", module, name))
+                    ui::addr(candidate.address.0),
+                    ui::symbol(&format!("{}!{}", candidate.module, bare))
                 );
-                hits.push(addr.0);
+                hits.push(candidate.address.0);
             }
         }
         if hits.is_empty() {

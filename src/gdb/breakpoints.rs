@@ -1118,12 +1118,11 @@ impl BreakpointManager {
         client: &mut dyn DebugBackend,
         debugger: &Target,
     ) -> Result<usize> {
-        let kernel_dtb = debugger.kernel_dtb();
         self.defer_symbolic_sites_if(client, |bp| {
-            let primary_dtb = Self::resolution_dtb(debugger, Some(&bp.scope));
+            let dtb = Self::resolution_dtb(debugger, Some(&bp.scope));
             debugger
                 .symbols
-                .find_module_for_address_in_context(primary_dtb, kernel_dtb, bp.address)
+                .find_module_for_address(dtb, bp.address)
                 .is_none()
         });
         self.resolve_symbolic(client, debugger)

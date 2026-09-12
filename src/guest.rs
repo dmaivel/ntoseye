@@ -697,11 +697,12 @@ impl WinObject {
         self.dtb
     }
 
-    /// Mark this object's module as the kernel in the shared symbol store, so
-    /// type/enum layout lookups prefer it across address spaces. Call after
-    /// [`load_symbols`](Self::load_symbols) so `guid` is populated.
+    /// Mark this object's module as the kernel in the shared symbol store:
+    /// type/enum layout lookups prefer it, and its address space is visible
+    /// from every process. Call after [`load_symbols`](Self::load_symbols) so
+    /// `guid` is populated.
     pub fn register_as_kernel(&self) {
-        self.symbols.set_kernel_guid(self.guid);
+        self.symbols.set_kernel(self.guid, self.dtb);
     }
 
     /// `SizeOfImage` of the module (0 until [`view`](Self::view) has run).

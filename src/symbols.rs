@@ -139,6 +139,10 @@ pub struct SymbolStore {
     /// consults this guid first regardless of the attached DTB; updated whenever
     /// the kernel module (re)loads.
     kernel_guid: Mutex<Option<u128>>,
+    /// Address space kernel modules are registered under. Kernel space is
+    /// mapped into every process, so lookups scoped to a user DTB also see
+    /// these modules (`bp nt!NtClose` from a process context).
+    kernel_dtb: Mutex<Option<Dtb>>,
 
     /// PDBs of modules identified in earlier sessions; opened on first use so
     /// building a store touches no files.
@@ -971,10 +975,10 @@ mod tests {
     }
 
     #[test]
-    fn module_lookup_prefers_active_dtb_then_falls_back() {
+    fn kernel_modules_are_visible_from_user_address_spaces() {
         let store = SymbolStore::new();
-        let active_dtb = 0x1000;
-        let fallback_dtb = 0x2000;
+        let user_dtb = 0x1000;
+        let kernel_dtb = 0x2000;
         let base = VirtAddr(0x180000000);
         let module = |name: &str, guid, dtb| LoadedModule {
             name: name.to_string(),
@@ -983,25 +987,40 @@ mod tests {
             size: 0x1000,
             dtb,
         };
-        store.modules.insert(
-            (fallback_dtb, base.0),
-            module("kernel.sys", 0x22, fallback_dtb),
-        );
-
-        let resolved = store
-            .find_module_for_address_in_context(active_dtb, fallback_dtb, base)
-            .unwrap();
-        assert_eq!(resolved.dtb, fallback_dtb);
-        assert_eq!(resolved.name, "kernel.sys");
-
         store
             .modules
-            .insert((active_dtb, base.0), module("user.dll", 0x11, active_dtb));
-        let resolved = store
-            .find_module_for_address_in_context(active_dtb, fallback_dtb, base)
-            .unwrap();
-        assert_eq!(resolved.dtb, active_dtb);
-        assert_eq!(resolved.name, "user.dll");
+            .insert((kernel_dtb, base.0), module("kernel.sys", 0x22, kernel_dtb));
+
+        assert!(store.find_module_for_address(user_dtb, base).is_none());
+        assert!(store.module_base_by_name(user_dtb, "kernel").is_none());
+
+        store.set_kernel(Some(0x22), kernel_dtb);
+        let resolved = store.find_module_for_address(user_dtb, base).unwrap();
+        assert_eq!(resolved.name, "kernel.sys");
+        assert_eq!(store.module_base_by_name(user_dtb, "kernel"), Some(base));
+    }
+
+    #[test]
+    fn qualified_index_search_matches_bare_names_unless_query_names_a_module() {
+        let index = SymbolIndex {
+            names: vec![
+                "nt!KeBugCheckEx".to_string(),
+                "nt!memcpy".to_string(),
+                "ntdll!memcpy".to_string(),
+            ],
+        };
+        assert_eq!(index.search("Ke*", 10), vec!["nt!KeBugCheckEx"]);
+        assert_eq!(
+            index.search("memcpy", 10),
+            vec!["nt!memcpy", "ntdll!memcpy"]
+        );
+        assert_eq!(index.search("ntdll!*", 10), vec!["ntdll!memcpy"]);
+        assert!(index.search("nt!*", 10).contains(&"nt!memcpy".to_string()));
+        assert!(
+            !index
+                .search("nt!*", 10)
+                .contains(&"ntdll!memcpy".to_string())
+        );
     }
 }
 
@@ -1801,6 +1820,7 @@ impl SymbolStore {
             sources: RwLock::new(Self::default_symbol_sources()),
             source_paths: RwLock::new(Vec::new()),
             kernel_guid: Mutex::new(None),
+            kernel_dtb: Mutex::new(None),
             identities: OnceLock::new(),
         }
     }
@@ -1850,12 +1870,19 @@ impl SymbolStore {
 
     /// Record the kernel module's guid so type/enum layout lookups can prefer it
     /// regardless of the attached address space. Called when `ntoskrnl` loads.
-    pub fn set_kernel_guid(&self, guid: Option<u128>) {
+    pub fn set_kernel(&self, guid: Option<u128>, dtb: Dtb) {
         *self.kernel_guid.lock() = guid;
+        *self.kernel_dtb.lock() = Some(dtb);
     }
 
     pub fn kernel_guid(&self) -> Option<u128> {
         *self.kernel_guid.lock()
+    }
+
+    /// Whether `module` is visible from address space `dtb`: its own space, or
+    /// kernel space, which every process maps.
+    fn module_in_scope(&self, module: &LoadedModule, dtb: Dtb) -> bool {
+        module.dtb == dtb || Some(module.dtb) == *self.kernel_dtb.lock()
     }
 
     /// Register a module's layouts and public symbol RVAs without a PDB, for
@@ -2611,11 +2638,14 @@ impl SymbolStore {
         self.ensure_index_built(expected.guid)
     }
 
+    /// Module-qualified (`nt!KeBugCheckEx`) names of every symbol visible from
+    /// `dtb` (all modules when `None`). Qualified so a completed or listed name
+    /// resolves unambiguously even when several modules export it.
     pub fn merged_symbol_index(&self, dtb: Option<Dtb>) -> SymbolIndex {
         let total_modules = self
             .modules
             .iter()
-            .filter(|module| dtb.is_none_or(|filter_dtb| module.dtb == filter_dtb))
+            .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
             .count();
         let progress = ProgressBar::new((total_modules + 1) as u64);
         progress.set_style(task_progress_style());
@@ -2625,13 +2655,14 @@ impl SymbolStore {
 
         for module in self.modules.iter() {
             if let Some(filter_dtb) = dtb
-                && module.dtb != filter_dtb
+                && !self.module_in_scope(&module, filter_dtb)
             {
                 continue;
             }
 
             if let Some(index) = self.index.get(&module.guid) {
-                all_strings.extend(index.names.iter().cloned());
+                let short = ModuleInfo::derive_short_name(&module.name);
+                all_strings.extend(index.names.iter().map(|name| format!("{short}!{name}")));
             }
 
             progress.inc(1);
@@ -2650,7 +2681,7 @@ impl SymbolStore {
         let total_modules = self
             .modules
             .iter()
-            .filter(|module| dtb.is_none_or(|filter_dtb| module.dtb == filter_dtb))
+            .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
             .count();
         let progress = ProgressBar::new((total_modules + 1) as u64);
         progress.set_style(task_progress_style());
@@ -2660,7 +2691,7 @@ impl SymbolStore {
 
         for module in self.modules.iter() {
             if let Some(filter_dtb) = dtb
-                && module.dtb != filter_dtb
+                && !self.module_in_scope(&module, filter_dtb)
             {
                 continue;
             }
@@ -2685,7 +2716,7 @@ impl SymbolStore {
         let total_modules = self
             .modules
             .iter()
-            .filter(|module| dtb.is_none_or(|filter_dtb| module.dtb == filter_dtb))
+            .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
             .count();
         let progress = ProgressBar::new((total_modules + 1) as u64);
         progress.set_style(task_progress_style());
@@ -2695,7 +2726,7 @@ impl SymbolStore {
 
         for module in self.modules.iter() {
             if let Some(filter_dtb) = dtb
-                && module.dtb != filter_dtb
+                && !self.module_in_scope(&module, filter_dtb)
             {
                 continue;
             }
@@ -2791,11 +2822,30 @@ impl SymbolStore {
         self.modules
             .iter()
             .find(|module| {
-                module.dtb == dtb
+                self.module_in_scope(module, dtb)
                     && ModuleInfo::derive_short_name(&module.name)
                         .eq_ignore_ascii_case(module_short)
             })
             .map(|module| module.base_address)
+    }
+
+    /// Short names of the modules visible from `dtb` whose name starts with
+    /// `prefix` (case-insensitive), sorted and deduplicated.
+    pub fn module_short_names_with_prefix(&self, dtb: Dtb, prefix: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .modules
+            .iter()
+            .filter(|module| self.module_in_scope(module, dtb))
+            .map(|module| ModuleInfo::derive_short_name(&module.name))
+            .filter(|short| {
+                short
+                    .get(..prefix.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            })
+            .collect();
+        names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+        names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        names
     }
 
     /// Return every PDB candidate for a symbol, retaining module, visibility,
@@ -2808,7 +2858,7 @@ impl SymbolStore {
         };
         let mut candidates = Vec::new();
         for module in self.modules.iter() {
-            if module.dtb != dtb {
+            if !self.module_in_scope(&module, dtb) {
                 continue;
             }
             let short = ModuleInfo::derive_short_name(&module.name);
@@ -2892,7 +2942,7 @@ impl SymbolStore {
         limit: usize,
     ) -> Vec<String> {
         for module in self.modules.iter() {
-            if module.dtb != dtb {
+            if !self.module_in_scope(&module, dtb) {
                 continue;
             }
             if !ModuleInfo::derive_short_name(&module.name).eq_ignore_ascii_case(module_short) {
@@ -2911,7 +2961,7 @@ impl SymbolStore {
         address: VirtAddr,
     ) -> Option<(String, String, u32)> {
         for module in self.modules.iter() {
-            if module.dtb != dtb {
+            if !self.module_in_scope(&module, dtb) {
                 continue;
             }
 
@@ -2934,24 +2984,8 @@ impl SymbolStore {
     pub fn find_module_for_address(&self, dtb: Dtb, address: VirtAddr) -> Option<LoadedModule> {
         self.modules
             .iter()
-            .find(|module| module.dtb == dtb && module.contains_address(address))
+            .find(|module| self.module_in_scope(module, dtb) && module.contains_address(address))
             .map(|module| module.clone())
-    }
-
-    /// Resolve the module containing `address`, preferring the active address
-    /// space and then consulting an explicit fallback such as the kernel DTB.
-    pub fn find_module_for_address_in_context(
-        &self,
-        primary_dtb: Dtb,
-        fallback_dtb: Dtb,
-        address: VirtAddr,
-    ) -> Option<LoadedModule> {
-        self.find_module_for_address(primary_dtb, address)
-            .or_else(|| {
-                (fallback_dtb != primary_dtb)
-                    .then(|| self.find_module_for_address(fallback_dtb, address))
-                    .flatten()
-            })
     }
 
     /// Resolve a virtual address to cached C13 source information.
@@ -2974,7 +3008,7 @@ impl SymbolStore {
         let mut addresses = Vec::new();
         let mappings = self.source_paths.read();
         for module in self.modules.iter() {
-            if module.dtb != dtb {
+            if !self.module_in_scope(&module, dtb) {
                 continue;
             }
             let Some(lines) = self.source_lines.get(&module.guid) else {
@@ -4110,10 +4144,20 @@ fn variant_to_i64(v: &pdb2::Variant) -> i64 {
 impl SymbolIndex {
     /// Fuzzy substring search over the names, ranked best-first. Smart-case
     /// (case-insensitive unless the query has uppercase), so `process` matches
-    /// `PsGetProcessId`. Empty query returns the first `limit` names.
+    /// `PsGetProcessId`. Empty query returns the first `limit` names. On a
+    /// module-qualified index a query without `!` matches the bare name, so
+    /// `Ke*` finds `nt!KeBugCheckEx` without the `nt!` counting as text.
     pub fn search(&self, query: &str, limit: usize) -> Vec<String> {
         if query.is_empty() || limit == 0 {
             return self.names.iter().take(limit).cloned().collect();
+        }
+        let qualified_query = query.contains('!');
+        fn haystack(qualified_query: bool, name: &str) -> &str {
+            if qualified_query {
+                name
+            } else {
+                name.rsplit_once('!').map_or(name, |(_, bare)| bare)
+            }
         }
         if query
             .as_bytes()
@@ -4123,7 +4167,7 @@ impl SymbolIndex {
             return self
                 .names
                 .iter()
-                .filter(|name| glob_matches(query, name, true))
+                .filter(|name| glob_matches(query, haystack(qualified_query, name), true))
                 .take(limit)
                 .cloned()
                 .collect();
@@ -4139,7 +4183,7 @@ impl SymbolIndex {
                 || (Matcher::new(Config::DEFAULT), Vec::new()),
                 |(matcher, buf), name| {
                     pattern
-                        .score(Utf32Str::new(name, buf), matcher)
+                        .score(Utf32Str::new(haystack(qualified_query, name), buf), matcher)
                         .map(|score| (score, name))
                 },
             )

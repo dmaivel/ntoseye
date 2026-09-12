@@ -464,13 +464,7 @@ impl ReplState<'_> {
         let mut printed_header = false;
         for (index, frame) in trace.frames.iter().enumerate() {
             let address = VirtAddr(frame.ip);
-            let symbol_dtb = self.ctx.target.symbol_dtb_for_address(address);
-            let Some(locals) = self
-                .ctx
-                .target
-                .symbols
-                .procedure_locals(symbol_dtb, address)?
-            else {
+            let Some(locals) = self.ctx.target.procedure_locals(address)? else {
                 continue;
             };
             let parameters: Vec<_> = locals

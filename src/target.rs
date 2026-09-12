@@ -1761,65 +1761,30 @@ impl Target {
         self.address_space(self.kernel_dtb())
     }
 
-    /// Kernel addresses fall back to the kernel DTB when a user process is
-    /// selected and owns no module covering the address.
-    pub fn symbol_dtb_for_address(&self, address: VirtAddr) -> Dtb {
-        let current_dtb = self.current_dtb();
-        let kernel_dtb = self.kernel_dtb();
-        if !looks_like_kernel_pointer(address.0) || current_dtb == kernel_dtb {
-            return current_dtb;
-        }
-        self.symbols
-            .find_module_for_address_in_context(current_dtb, kernel_dtb, address)
-            .map(|module| module.dtb)
-            .unwrap_or(current_dtb)
-    }
-
-    /// Return all matching symbol identities in the active address space,
-    /// adding the kernel address space when a user process is selected.
+    /// All matching symbol identities visible from the active address space.
     pub fn symbol_candidates(&self, name: &str) -> Vec<SymbolCandidate> {
-        let current_dtb = self.current_dtb();
-        let kernel_dtb = self.kernel_dtb();
-        let mut candidates = self.symbols.find_symbol_candidates(current_dtb, name);
-        if current_dtb != kernel_dtb {
-            candidates.extend(self.symbols.find_symbol_candidates(kernel_dtb, name));
-        }
-        candidates.sort_by(|left, right| {
-            left.module
-                .to_ascii_lowercase()
-                .cmp(&right.module.to_ascii_lowercase())
-                .then_with(|| left.address.0.cmp(&right.address.0))
-                .then_with(|| left.compiland.cmp(&right.compiland))
-        });
-        candidates.dedup_by(|left, right| {
-            left.module.eq_ignore_ascii_case(&right.module)
-                && left.address == right.address
-                && left.visibility == right.visibility
-                && left.compiland == right.compiland
-        });
-        candidates
+        self.symbols
+            .find_symbol_candidates(self.current_dtb(), name)
     }
 
     /// Fuzzy-search the active symbol index and resolve only unambiguous
     /// module/address identities. `module!query` restricts the search.
     pub fn search_symbols(&self, query: &str, limit: usize) -> Vec<SymbolSearchMatch> {
         let dtb = self.current_dtb();
-        let (module, names) = match query.split_once('!') {
-            Some((module, query)) => (
-                Some(module),
-                self.symbols
-                    .search_symbols_in_module(dtb, module, query, limit),
-            ),
-            None => (None, self.current_symbol_index().search(query, limit)),
+        let names: Vec<String> = match query.split_once('!') {
+            Some((module, query)) => self
+                .symbols
+                .search_symbols_in_module(dtb, module, query, limit)
+                .into_iter()
+                .map(|name| format!("{module}!{name}"))
+                .collect(),
+            None => self.current_symbol_index().search(query, limit),
         };
         names
             .into_iter()
-            .map(|name| {
-                let lookup = module
-                    .map(|module| format!("{module}!{name}"))
-                    .unwrap_or_else(|| name.clone());
+            .map(|qualified| {
                 let locations: HashSet<(String, u64)> = self
-                    .symbol_candidates(&lookup)
+                    .symbol_candidates(&qualified)
                     .into_iter()
                     .map(|candidate| (candidate.module, candidate.address.0))
                     .collect();
@@ -1829,6 +1794,10 @@ impl Target {
                 } else {
                     (None, None)
                 };
+                let name = qualified
+                    .rsplit_once('!')
+                    .map_or(qualified.as_str(), |(_, bare)| bare)
+                    .to_string();
                 SymbolSearchMatch {
                     name,
                     address,
@@ -1837,23 +1806,12 @@ impl Target {
             })
             .collect()
     }
-    /// Structured nearest-symbol lookup with kernel-address fallback.
     pub fn nearest_symbol_current_context(
         &self,
         address: VirtAddr,
     ) -> Option<(String, String, u32)> {
-        let current_dtb = self.current_dtb();
         self.symbols
-            .find_closest_symbol_for_address(current_dtb, address)
-            .or_else(|| {
-                let kernel_dtb = self.kernel_dtb();
-                (looks_like_kernel_pointer(address.0) && current_dtb != kernel_dtb)
-                    .then(|| {
-                        self.symbols
-                            .find_closest_symbol_for_address(kernel_dtb, address)
-                    })
-                    .flatten()
-            })
+            .find_closest_symbol_for_address(self.current_dtb(), address)
     }
 
     pub fn closest_symbol_current_context(&self, address: VirtAddr) -> Option<String> {
@@ -1861,29 +1819,17 @@ impl Target {
             .map(|(module, name, offset)| format_symbol_with_offset(&module, &name, offset))
     }
 
-    /// Resolve cached source information using the active address space with the
-    /// same kernel-address fallback as symbol rendering.
     pub fn source_location(&self, address: VirtAddr) -> Option<SourceLocation> {
-        let dtb = self.symbol_dtb_for_address(address);
-        self.symbols.source_location(dtb, address)
+        self.symbols.source_location(self.current_dtb(), address)
     }
 
-    /// Resolve `file:line` across the active and kernel address spaces.
     pub fn source_addresses(&self, file: &str, line: u32) -> Vec<VirtAddr> {
-        let current_dtb = self.current_dtb();
-        let kernel_dtb = self.kernel_dtb();
-        let mut addresses = self.symbols.source_addresses(current_dtb, file, line);
-        if current_dtb != kernel_dtb {
-            addresses.extend(self.symbols.source_addresses(kernel_dtb, file, line));
-        }
-        addresses.sort_by_key(|address| address.0);
-        addresses.dedup();
-        addresses
+        self.symbols
+            .source_addresses(self.current_dtb(), file, line)
     }
     /// Return private procedure locals in scope at `address`.
     pub fn procedure_locals(&self, address: VirtAddr) -> Result<Option<Vec<ProcedureLocal>>> {
-        let dtb = self.symbol_dtb_for_address(address);
-        self.symbols.procedure_locals(dtb, address)
+        self.symbols.procedure_locals(self.current_dtb(), address)
     }
 
     /// Resolve a scalar local from the current halted register/memory context.
