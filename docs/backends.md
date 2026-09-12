@@ -1,6 +1,6 @@
 # Choosing a backend
 
-`ntoseye` can talk to the guest four ways. Pick with `--backend kd` (default), `--backend kdnet`, `--backend gdb`, or `--backend memory`.
+`ntoseye` can talk to the target four ways. Pick with `--backend kd` (default), `--backend kdnet`, `--backend gdb`, or `--backend memory`.
 
 | Capability | `kd` (default) | `kdnet` | `gdb` | `memory` |
 | --- | --- | --- | --- | --- |
@@ -22,7 +22,7 @@ Host-side configuration is specific to the hypervisor:
 
 ## Supported live environments
 
-Live support depends on the host OS, hypervisor, and guest architecture. The currently supported combinations are:
+Any Windows 10/11 target reachable over the network is debuggable with `kdnet` (see the [KDNET guide](kdnet.md)); that path has nothing hypervisor-specific in it. The combinations below are where `ntoseye` additionally reads VM memory directly, sets the VM up with `ntoseye configure`, and offers the `gdb` and `memory` backends:
 
 | Host OS | Hypervisor | Guest architecture | `kd` | `kdnet` | `gdb` | `memory` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ Live support depends on the host OS, hypervisor, and guest architecture. The cur
 | Linux | VMware Workstation | AMD64 | Yes | Yes | Yes | Yes |
 | macOS | UTM (QEMU/HVF) | ARM64 | Yes | Yes | No | Yes |
 
-Combinations not listed above are untested. Crash-dump analysis is currently AMD64-only.
+Other hypervisors are untested with these integrations. Crash-dump analysis is currently AMD64-only.
 
 The initial KD handshake timeout is 8 seconds by default. For unusually slow guests, override it with `NTOSEYE_KD_TIMEOUT=<seconds>`.
 

@@ -1,18 +1,18 @@
 # KDNET
 
-KDNET runs Windows kernel debugging over the guest's virtual NIC as encrypted UDP. It needs no serial device and no VM-process access, so it works for AMD64 and ARM64 guests alike and across any routable network.
+KDNET runs Windows kernel debugging over the target's NIC as encrypted UDP. It needs no serial device and no VM-process access, so it works for AMD64 and ARM64 targets alike and across any routable network.
 
 `ntoseye configure` prompts for the host IPv4 address, applies any required hypervisor changes, and prints the guest and launch commands below with the addresses filled in. The rest of this page is the manual equivalent.
 
 ## 1. Hypervisor
 
-Pick the host address the guest can reach and apply the hypervisor's requirements:
+Pick the host address the target can reach. Hypervisors `ntoseye` integrates with have their own requirements:
 
 - [KVM/QEMU](kvm-qemu.md#kdnet): set the libvirt Hyper-V vendor ID to `KVMKVMKVM`, then completely power off and restart the VM; a Windows reboot is insufficient. `ntoseye configure` applies the vendor override automatically.
 - [VMware Workstation](vmware.md#kdnet): no additional virtual hardware configuration is needed, but the guest's bridged, NAT, or host-only NIC must be able to reach the selected host address.
 - [UTM](utm.md#kdnet): disable Secure Boot before changing the Windows BCD debug settings and ensure the guest NIC can reach the selected macOS address.
 
-Permit inbound UDP on the selected port (50000 by default) through the host firewall.
+Any other hypervisor, cloud VM, or physical machine needs nothing on the host side; a physical machine's NIC must be one `kdnet.exe` accepts (Microsoft's supported list). If a host firewall filters inbound UDP, allow the selected port (50000 by default).
 
 ## 2. Guest
 

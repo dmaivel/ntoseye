@@ -1,11 +1,11 @@
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="media/logo_light.svg">
-  <img align="right" width="24%" src="media/logo_dark.svg" alt="logo">
+  <img align="right" width="18%" src="media/logo_dark.svg" alt="logo">
 </picture>
 
 # ntoseye ![license](https://img.shields.io/badge/license-MIT-blue) [![crates.io](https://img.shields.io/crates/v/ntoseye.svg)](https://crates.io/crates/ntoseye)
 
-WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macOS (UTM).
+WinDbg-like kernel debugger for Windows, from Linux and macOS.
 
 ## Features
 
@@ -22,7 +22,13 @@ WinDbg-like kernel debugger for Windows VMs on Linux (KVM/QEMU, VMware) and macO
 
 ### Supported Windows
 
-`ntoseye` supports 64-bit AMD64 and ARM64 Windows 10 and 11 guests.
+`ntoseye` supports 64-bit AMD64 and ARM64 Windows 10 and 11 targets.
+
+### Supported hypervisors
+
+`ntoseye` supports any hypervisor, cloud VM, or physical machine reachable over [KDNET](docs/kdnet.md).
+
+KVM/QEMU, VMware Workstation, and UTM guests additionally get the [GDB and memory-only backends](docs/backends.md).
 
 ### Disclaimer
 
@@ -99,6 +105,8 @@ Run `ntoseye status` at any time to inspect configured transports, assigned gues
 ### Hypervisor setup
 
 `ntoseye configure` handles automatic setup for supported libvirt, VMware Workstation, and UTM guests. For plain QEMU or manual configuration, see the [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md) setup guides.
+
+For any other hypervisor, a cloud VM, or a physical machine, follow the [KDNET guide](docs/kdnet.md) instead; `configure` is not needed.
 
 ### Not sure which backend to use?
 
