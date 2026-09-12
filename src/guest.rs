@@ -164,6 +164,17 @@ impl ModuleSymbolLoadReport {
     pub fn failed_count(&self) -> usize {
         self.failed
     }
+
+    /// Fold in a follow-up pass over modules already counted in `total`.
+    fn absorb(&mut self, other: Self) {
+        self.loaded += other.loaded;
+        self.unloaded += other.unloaded;
+        self.no_pdb += other.no_pdb;
+        self.skipped += other.skipped;
+        self.failed += other.failed;
+        self.diagnostic_count += other.diagnostic_count;
+        self.diagnostics.extend(other.diagnostics);
+    }
 }
 
 /// A module image addressed by RVA. An on-disk image is complete; an image
@@ -2089,7 +2100,7 @@ impl Guest {
                 continue;
             }
 
-            match symbols.extract_download_job(phys, dtb, &module.name, module.base_address, arch) {
+            match symbols.extract_download_job(phys, dtb, &module, arch) {
                 Ok(ModuleSymbolDiscovery::Ready { job, guid, source }) => {
                     Self::queue_module_symbol_load(
                         symbols,
@@ -2180,9 +2191,15 @@ impl Guest {
         let download_results =
             download_jobs_parallel(jobs_with_info.iter().map(|load| load.job.clone()).collect());
 
+        // Modules whose remembered PDB no longer resolves: forget the record
+        // and rediscover them from the target below.
+        let mut stale_identities: Vec<ModuleInfo> = Vec::new();
         for (load, result) in jobs_with_info.into_iter().zip(download_results) {
             match result {
                 Ok(_) => ready_to_load.push(load),
+                Err(_) if matches!(load.source, ModuleSymbolSource::Identity) => {
+                    stale_identities.push(load.module);
+                }
                 Err(e) => {
                     Self::apply_module_symbol_status(
                         symbols,
@@ -2206,33 +2223,54 @@ impl Guest {
             let results = ready_to_load
                 .into_par_iter()
                 .map(|load| {
-                    let module = load.module.clone();
-                    let guid = load.guid;
                     let result = symbols.load_downloaded_pdb(&load);
                     pb.inc(1);
-                    (module, guid, result)
+                    (load, result)
                 })
                 .collect::<Vec<_>>();
 
             pb.finish_and_clear();
 
-            for (module, guid, result) in results {
+            for (load, result) in results {
                 match result {
                     Ok(_) => {
                         report.record_status(&ModuleSymbolStatus::Loaded);
-                        report.record_diagnostics(&module.name, symbols.index_diagnostics(guid));
+                        report.record_diagnostics(
+                            &load.module.name,
+                            symbols.index_diagnostics(load.guid),
+                        );
+                        if !matches!(load.source, ModuleSymbolSource::Identity) {
+                            symbols.remember_module_identity(&load.module, &load.job);
+                        }
+                    }
+                    Err(_) if matches!(load.source, ModuleSymbolSource::Identity) => {
+                        stale_identities.push(load.module);
                     }
                     Err(e) => {
                         Self::apply_module_symbol_status(
                             symbols,
                             &mut report,
                             dtb,
-                            &module,
+                            &load.module,
                             ModuleSymbolStatus::Failed(e.to_string()),
                         );
                     }
                 }
             }
+        }
+
+        if !stale_identities.is_empty() {
+            for module in &stale_identities {
+                symbols.forget_module_identity(module);
+            }
+            report.absorb(Self::load_module_symbols(
+                phys,
+                symbols,
+                stale_identities,
+                dtb,
+                skip_session_space,
+                arch,
+            )?);
         }
 
         Ok(report)

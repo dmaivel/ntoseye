@@ -28,11 +28,14 @@ use std::{
     path::{Path, PathBuf},
     ptr,
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
 };
-use std::{fmt, io::Cursor};
+use std::{
+    fmt,
+    io::{self, Cursor, Write},
+};
 
 // NOTE global is probably fine here?
 pub static FORCE_DOWNLOADS: OnceLock<bool> = OnceLock::new();
@@ -128,6 +131,10 @@ pub struct SymbolStore {
     /// consults this guid first regardless of the attached DTB; updated whenever
     /// the kernel module (re)loads.
     kernel_guid: Mutex<Option<u128>>,
+
+    /// PDBs of modules identified in earlier sessions; opened on first use so
+    /// building a store touches no files.
+    identities: OnceLock<ModuleIdentities>,
 }
 
 fn guid_to_u128(guid: GUID) -> u128 {
@@ -315,6 +322,140 @@ fn images_directory() -> Option<PathBuf> {
     Some(images_path)
 }
 
+/// The image identity the symbol server keys on: file name, `TimeDateStamp`,
+/// `SizeOfImage`. The loader's module record carries all three.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ModuleIdentity {
+    name: String,
+    time_date_stamp: u32,
+    size_of_image: u32,
+}
+
+impl ModuleIdentity {
+    fn of(module: &ModuleInfo) -> Option<Self> {
+        Some(Self {
+            name: SymbolStore::symbol_server_file_name(&module.name).to_ascii_lowercase(),
+            time_date_stamp: module.time_date_stamp?,
+            size_of_image: module.size,
+        })
+    }
+}
+
+/// What [`SymbolStore::build_download_job`] needs to name a PDB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdbReference {
+    server_name: String,
+    guid: u128,
+    age: u32,
+}
+
+/// Module identity to PDB map persisted across sessions, one tab-separated
+/// line per module, so a module seen before is identified without reading
+/// its headers, debug directory, and CodeView record from the target.
+struct ModuleIdentities {
+    path: Option<PathBuf>,
+    entries: std::sync::Mutex<HashMap<ModuleIdentity, PdbReference>>,
+}
+
+impl ModuleIdentities {
+    fn open(path: Option<PathBuf>) -> Self {
+        let entries = path
+            .as_deref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.lines().filter_map(Self::parse_line).collect())
+            .unwrap_or_default();
+        Self {
+            path,
+            entries: std::sync::Mutex::new(entries),
+        }
+    }
+
+    fn parse_line(line: &str) -> Option<(ModuleIdentity, PdbReference)> {
+        let mut fields = line.split('\t');
+        let name = fields.next()?.to_string();
+        let time_date_stamp = u32::from_str_radix(fields.next()?, 16).ok()?;
+        let size_of_image = u32::from_str_radix(fields.next()?, 16).ok()?;
+        let guid = u128::from_str_radix(fields.next()?, 16).ok()?;
+        let age = u32::from_str_radix(fields.next()?, 16).ok()?;
+        let server_name = fields.next()?.to_string();
+        if fields.next().is_some() || name.is_empty() || server_name.is_empty() {
+            return None;
+        }
+        Some((
+            ModuleIdentity {
+                name,
+                time_date_stamp,
+                size_of_image,
+            },
+            PdbReference {
+                server_name,
+                guid,
+                age,
+            },
+        ))
+    }
+
+    fn format_line(identity: &ModuleIdentity, reference: &PdbReference) -> String {
+        format!(
+            "{}\t{:08x}\t{:x}\t{:032X}\t{:X}\t{}\n",
+            identity.name,
+            identity.time_date_stamp,
+            identity.size_of_image,
+            reference.guid,
+            reference.age,
+            reference.server_name
+        )
+    }
+
+    fn get(&self, identity: &ModuleIdentity) -> Option<PdbReference> {
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(identity)
+            .cloned()
+    }
+
+    /// Record a module's PDB. A failure to persist only costs the next
+    /// session the reads this one already paid.
+    fn insert(&self, identity: ModuleIdentity, reference: PdbReference) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if entries.get(&identity) == Some(&reference) {
+            return;
+        }
+        let line = Self::format_line(&identity, &reference);
+        let replaced = entries.insert(identity, reference).is_some();
+        if let Some(path) = &self.path {
+            let _ = if replaced {
+                Self::write_all(path, &entries)
+            } else {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut file| file.write_all(line.as_bytes()))
+            };
+        }
+    }
+
+    /// Drop a module whose recorded PDB could not be loaded.
+    fn remove(&self, identity: &ModuleIdentity) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if entries.remove(identity).is_some()
+            && let Some(path) = &self.path
+        {
+            let _ = Self::write_all(path, &entries);
+        }
+    }
+
+    fn write_all(path: &Path, entries: &HashMap<ModuleIdentity, PdbReference>) -> io::Result<()> {
+        let text: String = entries
+            .iter()
+            .map(|(identity, reference)| Self::format_line(identity, reference))
+            .collect();
+        std::fs::write(path, text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +466,98 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("ntoseye-{name}-{nonce}"))
+    }
+
+    fn identity(name: &str) -> ModuleIdentity {
+        ModuleIdentity {
+            name: name.to_string(),
+            time_date_stamp: 0x6600_0000,
+            size_of_image: 0x7000,
+        }
+    }
+
+    fn reference(age: u32) -> PdbReference {
+        PdbReference {
+            server_name: "driver.pdb".to_string(),
+            guid: 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+            age,
+        }
+    }
+
+    /// Identities survive a reopen, a re-recorded module keeps one entry,
+    /// and a forgotten one stays forgotten; a damaged line is skipped
+    /// rather than poisoning the rest.
+    #[test]
+    fn module_identities_persist_across_reopen() {
+        let root = temp_root("identities");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("identities");
+
+        let identities = ModuleIdentities::open(Some(path.clone()));
+        identities.insert(identity("a.sys"), reference(1));
+        identities.insert(identity("b.sys"), reference(2));
+        identities.insert(identity("a.sys"), reference(3));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"garbage line\n")
+            .unwrap();
+
+        let reopened = ModuleIdentities::open(Some(path.clone()));
+        assert_eq!(reopened.get(&identity("a.sys")), Some(reference(3)));
+        assert_eq!(reopened.get(&identity("b.sys")), Some(reference(2)));
+        assert_eq!(reopened.get(&identity("c.sys")), None);
+
+        reopened.remove(&identity("a.sys"));
+        let again = ModuleIdentities::open(Some(path));
+        assert_eq!(again.get(&identity("a.sys")), None);
+        assert_eq!(again.get(&identity("b.sys")), Some(reference(2)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A module recorded in an earlier session is identified without a
+    /// single read from the target.
+    #[test]
+    fn remembered_module_is_discovered_without_reading_the_target() {
+        struct NoReads;
+        impl MemoryOps<PhysAddr> for NoReads {
+            fn read_bytes(&self, addr: PhysAddr, _: &mut [u8]) -> Result<()> {
+                panic!("read at {addr:#x} for a remembered module");
+            }
+            fn write_bytes(&self, _: PhysAddr, _: &[u8]) -> Result<()> {
+                unreachable!()
+            }
+        }
+
+        let root = temp_root("identity-discovery");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SymbolStore::new();
+        let identities = ModuleIdentities::open(Some(root.join("identities")));
+        identities.insert(identity("driver.sys"), reference(2));
+        store.identities.set(identities).ok().unwrap();
+
+        let mut module = ModuleInfo::new(
+            "\\SystemRoot\\drivers\\Driver.sys".to_string(),
+            VirtAddr(0xffff_f800_1000_0000),
+            0x7000,
+        );
+        module = module.with_time_date_stamp(0x6600_0000);
+        let discovery = store
+            .extract_download_job(&NoReads, 0x1000, &module, Arch::Amd64)
+            .unwrap();
+        let ModuleSymbolDiscovery::Ready { job, guid, source } = discovery else {
+            panic!("expected a ready job");
+        };
+        assert!(matches!(source, ModuleSymbolSource::Identity));
+        assert_eq!(guid, reference(2).guid);
+        assert_eq!(job.filename, "driver.pdb");
+        assert!(
+            job.urls[0].ends_with("/driver.pdb/0123456789ABCDEF0123456789ABCDEF2/driver.pdb"),
+            "{}",
+            job.urls[0]
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -804,6 +1037,8 @@ impl ModuleSymbolStatus {
 pub enum ModuleSymbolSource {
     Memory,
     Image,
+    /// Remembered from an earlier session (see [`ModuleIdentities`]).
+    Identity,
 }
 
 impl ModuleSymbolSource {
@@ -811,6 +1046,7 @@ impl ModuleSymbolSource {
         match self {
             Self::Memory => "memory",
             Self::Image => "image",
+            Self::Identity => "cached",
         }
     }
 }
@@ -1543,6 +1779,7 @@ impl SymbolStore {
             sources: RwLock::new(Self::default_symbol_sources()),
             source_paths: RwLock::new(Vec::new()),
             kernel_guid: Mutex::new(None),
+            identities: OnceLock::new(),
         }
     }
 
@@ -1880,7 +2117,8 @@ impl SymbolStore {
                 let path =
                     Self::read_c_string_lossy(&bytes[size_of::<IMAGE_DEBUG_CV_INFO_PDB70>()..]);
                 let summary = format!("CodeView RSDS age={} path={}", image.Age, path);
-                let job = self.build_download_job(&path, image.Signature, image.Age)?;
+                let job =
+                    self.build_download_job(&path, guid_to_u128(image.Signature), image.Age)?;
                 Ok((summary, Some(job)))
             }
             b"NB10" => {
@@ -1906,24 +2144,13 @@ impl SymbolStore {
     fn build_download_job(
         &self,
         pdb_file_name: &str,
-        guid: GUID,
+        guid: u128,
         age: u32,
     ) -> Result<(DownloadJob, u128)> {
         let server_name = Self::symbol_server_file_name(pdb_file_name);
-        let guid_str = format!(
-            "{:08X}{:04X}{:04X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-            guid.Data1,
-            guid.Data2,
-            guid.Data3,
-            guid.Data4[0],
-            guid.Data4[1],
-            guid.Data4[2],
-            guid.Data4[3],
-            guid.Data4[4],
-            guid.Data4[5],
-            guid.Data4[6],
-            guid.Data4[7],
-        );
+        // `guid_to_u128` packs the GUID fields big-endian in field order, so
+        // the hex of the u128 is the symbol server's GUID spelling.
+        let guid_str = format!("{guid:032X}");
 
         let index_path = format!("{}/{}{:X}/{}", server_name, guid_str, age, server_name);
         let urls: Vec<String> = pdb_servers()
@@ -1940,7 +2167,6 @@ impl SymbolStore {
         let storage_dir = symbols_directory().ok_or(Error::StorageNotFound)?;
         let path = storage_dir.join(&filename);
 
-        let guid = guid_to_u128(guid);
         let job = DownloadJob {
             urls,
             path,
@@ -2088,10 +2314,21 @@ impl SymbolStore {
         &self,
         backend: &B,
         dtb: Dtb,
-        module_name: &str,
-        base_address: VirtAddr,
+        module: &ModuleInfo,
         arch: Arch,
     ) -> Result<ModuleSymbolDiscovery> {
+        if let Some(reference) =
+            ModuleIdentity::of(module).and_then(|identity| self.module_identities().get(&identity))
+        {
+            let (job, guid) =
+                self.build_download_job(&reference.server_name, reference.guid, reference.age)?;
+            return Ok(ModuleSymbolDiscovery::Ready {
+                job,
+                guid,
+                source: ModuleSymbolSource::Identity,
+            });
+        }
+        let (module_name, base_address) = (module.name.as_str(), module.base_address);
         // `dtb` is the root for the module's own VA half: the kernel root for
         // kernel modules and the process root for user modules.
         let addr_space = match arch {
@@ -2112,6 +2349,34 @@ impl SymbolStore {
                 Self::plan_image_fallback(&addr_space, module_name, base_address)
             }
             Err(err) => Err(err),
+        }
+    }
+
+    fn module_identities(&self) -> &ModuleIdentities {
+        self.identities.get_or_init(|| {
+            ModuleIdentities::open(symbols_directory().map(|dir| dir.join("identities")))
+        })
+    }
+
+    /// Record which PDB `job` names for `module`. A module whose record
+    /// lacks a `TimeDateStamp` has no identity to key on.
+    pub fn remember_module_identity(&self, module: &ModuleInfo, job: &DownloadJob) {
+        if let (Some(identity), Some(request)) = (ModuleIdentity::of(module), &job.pdb) {
+            self.module_identities().insert(
+                identity,
+                PdbReference {
+                    server_name: request.server_name.clone(),
+                    guid: request.identity.guid,
+                    age: request.identity.age,
+                },
+            );
+        }
+    }
+
+    /// Forget a recorded PDB that failed to load.
+    pub fn forget_module_identity(&self, module: &ModuleInfo) {
+        if let Some(identity) = ModuleIdentity::of(module) {
+            self.module_identities().remove(&identity);
         }
     }
 
@@ -2165,8 +2430,11 @@ impl SymbolStore {
                     }) = entry.as_code_view()
                     {
                         let pdb_path = pdb_file_name.to_string();
-                        let (job, guid) =
-                            self.build_download_job(&pdb_path, image.Signature, image.Age)?;
+                        let (job, guid) = self.build_download_job(
+                            &pdb_path,
+                            guid_to_u128(image.Signature),
+                            image.Age,
+                        )?;
                         return Ok(Some((job, guid)));
                     }
                 }
