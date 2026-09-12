@@ -12,7 +12,7 @@ use crate::dbg_backend::{
 };
 use crate::error::{Error, Result};
 use crate::expr::Expr;
-use crate::guest::{ModuleInfo, ProcessInfo, read_pe_image};
+use crate::guest::{ModuleInfo, ProcessInfo, read_pe_header_page};
 use crate::target::Target;
 use crate::types::{Arch, Dtb, VirtAddr};
 
@@ -1429,8 +1429,8 @@ impl BreakpointManager {
         }
 
         if let Some(module) = module {
-            let image = read_pe_image(module.base_address, &memory)?;
-            let view = PeView::from_bytes(image.as_slice())?;
+            let headers = read_pe_header_page(module.base_address, &memory)?;
+            let view = PeView::from_bytes(&headers)?;
             let rva = address.0.saturating_sub(module.base_address.0) as u32;
             let in_executable_section = view.section_headers().iter().any(|section| {
                 let size = section.VirtualSize.max(section.SizeOfRawData);

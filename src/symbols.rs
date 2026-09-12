@@ -1,7 +1,7 @@
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    guest::{ModuleInfo, WinObject},
+    guest::{ModuleInfo, WinObject, read_pe_header_page},
     memory,
     types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
@@ -1798,8 +1798,7 @@ impl SymbolStore {
         memory: &memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
     ) -> Result<Option<(u32, u32)>> {
-        let mut header_buf = [0u8; 0x1000];
-        memory.read_bytes(base_address, &mut header_buf)?;
+        let header_buf = read_pe_header_page(base_address, memory)?;
         let view = PeView::from_bytes(&header_buf)?;
         Ok(view
             .data_directory()
@@ -2009,9 +2008,10 @@ impl SymbolStore {
                 view.file_header().Machine
             )));
         }
-        let debug = view.debug()?;
 
-        if let Some((job, guid)) = self.download_job_from_debug(&debug)? {
+        if let Some((job, guid)) =
+            self.extract_download_job_from_memory(&object.memory(), object.base_address)?
+        {
             download_job(&job, ProgressBar::new(0))?;
             self.ensure_pdb_loaded(job.expected_identity().unwrap(), &job.path)?;
 
@@ -2238,8 +2238,7 @@ impl SymbolStore {
         memory: &memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
     ) -> Result<(u32, u32)> {
-        let mut header_buf = [0u8; 0x1000];
-        memory.read_bytes(base_address, &mut header_buf)?;
+        let header_buf = read_pe_header_page(base_address, memory)?;
         let view = PeView::from_bytes(&header_buf)?;
         Ok((
             view.file_header().TimeDateStamp,

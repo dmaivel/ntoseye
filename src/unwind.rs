@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -17,7 +18,7 @@ macro_rules! unwind_trace {
     };
 }
 
-use std::cmp::Ordering;
+use std::ops::Range;
 
 use pelite::pe64::{
     Pe, PeView,
@@ -34,8 +35,8 @@ use crate::{
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
-    guest::{Guest, ModuleInfo, PeImage, read_pe_image, read_pe_image_from_file},
-    memory::{AddressSpace, DTB_IDENTITY},
+    guest::{Guest, ModuleInfo, PeImage, WinObject, read_pe_image, read_pe_image_from_file},
+    memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
     target::{SavedThreadRegisters, Target, ThreadInfo},
@@ -191,10 +192,16 @@ enum Unwound {
 
 struct StackTracer<'a> {
     trace: &'a ThreadTraceContext,
-    phys: &'a PhysMem,
+    phys: &'a Arc<PhysMem>,
     symbols: &'a SymbolStore,
     memory: AddressSpace<'a, PhysMem>,
     modules: HashMap<(Dtb, u64), CachedModule>,
+    /// Stack pages read during this trace, by page address; `None` is a
+    /// page the target refused. Without this every 8-byte slot the walk or
+    /// the scan looks at is its own request over the transport.
+    stack_pages: RefCell<HashMap<u64, Option<Box<[u8]>>>>,
+    /// The kernel object, whose image is shared across traces.
+    kernel: Option<&'a WinObject>,
 }
 
 pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceContext {
@@ -303,7 +310,7 @@ fn arm64_function_length(image: &PeImage, unwind_data: u32) -> Option<u32> {
     let instructions = match unwind_data & 0b11 {
         0 => {
             let xdata_rva = (unwind_data & !0b11) as usize;
-            let header = image_u32(image.present_slice(xdata_rva, 4)?, 0)?;
+            let header = image_u32(&image.read(xdata_rva, 4)?, 0)?;
             header & 0x3ffff
         }
         1 | 2 => (unwind_data >> 2) & 0x7ff,
@@ -312,17 +319,22 @@ fn arm64_function_length(image: &PeImage, unwind_data: u32) -> Option<u32> {
     (instructions != 0).then(|| instructions * 4)
 }
 
-/// Find the ARM64 runtime-function entry containing `rva`. ARM64 `.pdata`
-/// records are sorted 8-byte `{BeginAddress, UnwindData}` pairs; unlike AMD64,
-/// the end address must be decoded from packed unwind data or the `.xdata`
-/// header.
-fn lookup_arm64_runtime_function(image: &PeImage, pdata: &[u8], rva: u32) -> Option<(u32, u32)> {
+/// Find the ARM64 runtime-function entry containing `rva` in the exception
+/// directory at `pdata`. ARM64 `.pdata` records are sorted 8-byte
+/// `{BeginAddress, UnwindData}` pairs; unlike AMD64, the end address must be
+/// decoded from packed unwind data or the `.xdata` header.
+fn lookup_arm64_runtime_function(
+    image: &PeImage,
+    pdata: Range<usize>,
+    rva: u32,
+) -> Option<(u32, u32)> {
+    let entry = |index: usize| image.read(pdata.start + index * 8, 8);
     let count = pdata.len() / 8;
     let mut low = 0usize;
     let mut high = count;
     while low < high {
         let mid = low + (high - low) / 2;
-        let begin = image_u32(pdata, mid * 8)?;
+        let begin = image_u32(&entry(mid)?, 0)?;
         if begin <= rva {
             low = mid + 1;
         } else {
@@ -331,8 +343,9 @@ fn lookup_arm64_runtime_function(image: &PeImage, pdata: &[u8], rva: u32) -> Opt
     }
 
     let index = low.checked_sub(1)?;
-    let begin = image_u32(pdata, index * 8)?;
-    let unwind_data = image_u32(pdata, index * 8 + 4)?;
+    let found = entry(index)?;
+    let begin = image_u32(&found, 0)?;
+    let unwind_data = image_u32(&found, 4)?;
     let end = begin.checked_add(arm64_function_length(image, unwind_data)?)?;
     (rva >= begin && rva < end).then_some((begin, end))
 }
@@ -349,20 +362,20 @@ pub fn function_range(
     address: u64,
 ) -> Option<(u64, u64)> {
     fn range(image: &PeImage, base: u64, address: u64, arch: Arch) -> Option<(u64, u64)> {
-        let view = PeView::from_bytes(image.as_slice()).ok()?;
         let rva = u32::try_from(address.checked_sub(base)?).ok()?;
+        let pdata = exception_directory(image)?;
         let (begin, end) = match arch {
             Arch::Amd64 => {
-                let functions = view.exception().ok()?;
-                let function = lookup_runtime_function(functions.image(), rva)?;
+                let Lookup::Found(function) = lookup_runtime_function(
+                    pdata.len() / RUNTIME_FUNCTION_SIZE,
+                    |index| runtime_function_at(image, pdata.start, index),
+                    rva,
+                ) else {
+                    return None;
+                };
                 (function.BeginAddress, function.EndAddress)
             }
-            Arch::Arm64 => {
-                let directory = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_EXCEPTION)?;
-                let pdata = image
-                    .present_slice(directory.VirtualAddress as usize, directory.Size as usize)?;
-                lookup_arm64_runtime_function(image, pdata, rva)?
-            }
+            Arch::Arm64 => lookup_arm64_runtime_function(image, pdata, rva)?,
         };
         Some((base + u64::from(begin), base + u64::from(end)))
     }
@@ -811,30 +824,43 @@ impl ThreadTraceContext {
 
 impl<'a> StackTracer<'a> {
     fn new(debugger: &'a Target, trace: &'a ThreadTraceContext) -> Self {
-        let mut tracer = Self {
+        Self {
             trace,
             phys: &debugger.phys,
             symbols: &debugger.symbols,
             memory: debugger.address_space(trace.active_dtb),
             modules: HashMap::new(),
-        };
-        // The kernel image was read at attach; over a remote transport reading
-        // it again is the single largest cost of the first stack trace.
-        if let Some(kernel) = debugger.guest.as_ref().map(|guest| &guest.ntoskrnl)
-            && let Some(image) = kernel.cached_image()
-            && let Some(module) = trace.module_for_address(kernel.base_address.0)
-        {
-            let executable_ranges = executable_ranges(&image);
-            tracer.modules.insert(
-                (module.dtb, module.info.base_address.0),
-                CachedModule {
-                    info: module.info.clone(),
-                    image,
-                    executable_ranges,
-                },
-            );
+            stack_pages: RefCell::new(HashMap::new()),
+            kernel: debugger.guest.as_ref().map(|guest| &guest.ntoskrnl),
         }
-        tracer
+    }
+
+    /// A stack slot, from the per-trace page cache.
+    fn stack_u64(&self, address: u64) -> Result<u64> {
+        let mut bytes = [0u8; 8];
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let at = address
+                .checked_add(done as u64)
+                .ok_or(Error::BadVirtualAddress(VirtAddr(address)))?;
+            let page = at & !(PAGE_SIZE as u64 - 1);
+            let offset = (at - page) as usize;
+            let take = (bytes.len() - done).min(PAGE_SIZE - offset);
+            let mut pages = self.stack_pages.borrow_mut();
+            let cached = pages.entry(page).or_insert_with(|| {
+                let mut buf = vec![0u8; PAGE_SIZE];
+                self.memory
+                    .read_bytes(VirtAddr(page), &mut buf)
+                    .ok()
+                    .map(|()| buf.into_boxed_slice())
+            });
+            let Some(data) = cached else {
+                return Err(Error::BadVirtualAddress(VirtAddr(at)));
+            };
+            bytes[done..done + take].copy_from_slice(&data[offset..offset + take]);
+            done += take;
+        }
+        Ok(u64::from_le_bytes(bytes))
     }
 
     fn unwind_once(&mut self, context: &mut RegisterContext) -> Unwound {
@@ -925,7 +951,7 @@ impl<'a> StackTracer<'a> {
                     primary = false;
                 }
                 None => {
-                    let Ok(return_address) = self.memory.read::<u64>(VirtAddr(context.rsp)) else {
+                    let Ok(return_address) = self.stack_u64(context.rsp) else {
                         unwind_trace!(
                             "unwind: return-address read failed at rsp={:#x} -> stop",
                             context.rsp
@@ -984,7 +1010,7 @@ impl<'a> StackTracer<'a> {
     }
 
     fn unwind_leaf(&mut self, context: &mut RegisterContext) -> Unwound {
-        let Ok(return_address) = self.memory.read::<u64>(VirtAddr(context.rsp)) else {
+        let Ok(return_address) = self.stack_u64(context.rsp) else {
             return Unwound::Stop;
         };
 
@@ -1009,7 +1035,7 @@ impl<'a> StackTracer<'a> {
         let slot = unwind_info.codes[index];
         match slot.unwind_op {
             UWOP_PUSH_NONVOL => {
-                let saved = self.memory.read::<u64>(VirtAddr(context.rsp)).ok()?;
+                let saved = self.stack_u64(context.rsp).ok()?;
                 context.set(slot.op_info, saved);
                 context.rsp = context.rsp.saturating_add(8);
             }
@@ -1050,7 +1076,7 @@ impl<'a> StackTracer<'a> {
                 };
                 if slot.unwind_op == UWOP_SAVE_NONVOL {
                     let base = frame_base(original_context, unwind_info)?;
-                    let saved = self.memory.read::<u64>(VirtAddr(base + offset)).ok()?;
+                    let saved = self.stack_u64(base + offset).ok()?;
                     context.set(slot.op_info, saved);
                 }
             }
@@ -1064,7 +1090,7 @@ impl<'a> StackTracer<'a> {
                 };
                 if slot.unwind_op == UWOP_SAVE_NONVOL_FAR {
                     let base = frame_base(original_context, unwind_info)?;
-                    let saved = self.memory.read::<u64>(VirtAddr(base + scaled)).ok()?;
+                    let saved = self.stack_u64(base + scaled).ok()?;
                     context.set(slot.op_info, saved);
                 }
             }
@@ -1077,11 +1103,8 @@ impl<'a> StackTracer<'a> {
                 } else {
                     context.rsp
                 };
-                let return_rip = self.memory.read::<u64>(VirtAddr(base)).ok()?;
-                let return_rsp = self
-                    .memory
-                    .read::<u64>(VirtAddr(base.saturating_add(24)))
-                    .ok()?;
+                let return_rip = self.stack_u64(base).ok()?;
+                let return_rsp = self.stack_u64(base.saturating_add(24)).ok()?;
                 context.rip = return_rip;
                 context.rsp = return_rsp;
                 return Some(UnwindStep::MachineFrame);
@@ -1102,7 +1125,7 @@ impl<'a> StackTracer<'a> {
             }
 
             let sp = start_rsp.saturating_add((slot * 8) as u64);
-            let potential_ip = match self.memory.read::<u64>(VirtAddr(sp)) {
+            let potential_ip = match self.stack_u64(sp) {
                 Ok(addr) => {
                     failures = 0;
                     addr
@@ -1197,22 +1220,35 @@ impl<'a> StackTracer<'a> {
             return Some(());
         }
 
-        let image_memory = AddressSpace::new(self.phys, module.dtb);
-        let image = match read_pe_image(module.info.base_address, &image_memory) {
-            Ok(img) => img,
-            Err(_) => {
-                // Triage dumps don't contain PE headers; download the PE from
-                // the symbol server using the driver list's metadata.
-                let tds = module.info.time_date_stamp?;
-                unwind_trace!(
-                    "unwind: in-memory PE unreadable for {}, downloading via timestamp",
-                    module.info.short_name
-                );
-                let path = self
-                    .symbols
-                    .ensure_module_image_on_disk(&module.info.name, tds, module.info.size)
-                    .ok()?;
-                read_pe_image_from_file(&path).ok()?
+        let kernel_image = self
+            .kernel
+            .filter(|kernel| {
+                kernel.base_address == module.info.base_address && kernel.dtb() == module.dtb
+            })
+            .and_then(WinObject::image);
+        let image = match kernel_image {
+            Some(image) => image,
+            None => {
+                let (phys, dtb) = (Arc::clone(self.phys), module.dtb);
+                match read_pe_image(module.info.base_address, move |address, buf| {
+                    AddressSpace::new(&phys, dtb).read_bytes(address, buf)
+                }) {
+                    Ok(img) => Arc::new(img),
+                    Err(_) => {
+                        // Triage dumps don't contain PE headers; download the PE from
+                        // the symbol server using the driver list's metadata.
+                        let tds = module.info.time_date_stamp?;
+                        unwind_trace!(
+                            "unwind: in-memory PE unreadable for {}, downloading via timestamp",
+                            module.info.short_name
+                        );
+                        let path = self
+                            .symbols
+                            .ensure_module_image_on_disk(&module.info.name, tds, module.info.size)
+                            .ok()?;
+                        Arc::new(read_pe_image_from_file(&path).ok()?)
+                    }
+                }
             }
         };
         let executable_ranges = executable_ranges(&image);
@@ -1221,7 +1257,7 @@ impl<'a> StackTracer<'a> {
             key,
             CachedModule {
                 info: module.info.clone(),
-                image: Arc::new(image),
+                image,
                 executable_ranges,
             },
         );
@@ -1233,7 +1269,7 @@ impl<'a> StackTracer<'a> {
     /// matched by the in-memory header's TimeDateStamp + SizeOfImage. The caller
     /// re-resolves against it to decide whether it actually recovered anything.
     fn load_on_disk_image(&self, image: &PeImage, info: &ModuleInfo) -> Option<PeImage> {
-        let view = PeView::from_bytes(image.as_slice()).ok()?;
+        let view = PeView::from_bytes(image.headers()).ok()?;
         let time_date_stamp = view.file_header().TimeDateStamp;
         let size_of_image = view.optional_header().SizeOfImage;
 
@@ -1248,7 +1284,7 @@ impl<'a> StackTracer<'a> {
 /// The `[start, end)` RVA ranges of a module's executable sections (used to
 /// validate scan candidates).
 fn executable_ranges(image: &PeImage) -> Vec<(u32, u32)> {
-    let Ok(view) = PeView::from_bytes(image.as_slice()) else {
+    let Ok(view) = PeView::from_bytes(image.headers()) else {
         return Vec::new();
     };
     view.section_headers()
@@ -1284,70 +1320,102 @@ enum Resolve {
 /// Resolve `rip` against the image's unwind tables, distinguishing a true leaf
 /// from a paged-out hole so the caller knows whether an on-disk image would help.
 fn resolve_function(image: &PeImage, base_address: u64, rip: u64) -> Resolve {
-    let Ok(view) = PeView::from_bytes(image.as_slice()) else {
-        return Resolve::Leaf;
-    };
-    let Ok(exception) = view.exception() else {
+    let Some(pdata) = exception_directory(image) else {
         return Resolve::Leaf;
     };
 
     let rva = (rip - base_address) as u32;
-    match lookup_runtime_function(exception.image(), rva) {
+    match lookup_runtime_function(
+        pdata.len() / RUNTIME_FUNCTION_SIZE,
+        |index| runtime_function_at(image, pdata.start, index),
+        rva,
+    ) {
         // an entry is only usable if its unwind info (`.xdata`) is resident too
-        Some(function) if image.is_present(function.UnwindData as usize, 4) => Resolve::Function {
-            unwind_data: function.UnwindData,
-            begin: function.BeginAddress,
-        },
-        Some(_) => Resolve::Holed,
-        None => {
-            // no entry: a true leaf if the table is resident, otherwise the table
-            // itself is holed
-            let pdata_present = view
-                .data_directory()
-                .get(IMAGE_DIRECTORY_ENTRY_EXCEPTION)
-                .map(|d| {
-                    d.Size == 0 || image.is_present(d.VirtualAddress as usize, d.Size as usize)
-                })
-                .unwrap_or(true);
-            if pdata_present {
-                Resolve::Leaf
-            } else {
-                Resolve::Holed
+        Lookup::Found(function) if image.is_present(function.UnwindData as usize, 4) => {
+            Resolve::Function {
+                unwind_data: function.UnwindData,
+                begin: function.BeginAddress,
             }
         }
+        // the entry exists but its unwind info is paged out, or the table
+        // itself is: an on-disk image would answer
+        Lookup::Found(_) | Lookup::Unreadable => Resolve::Holed,
+        Lookup::Missing => Resolve::Leaf,
     }
 }
 
+/// The exception directory's RVA range, `None` when the image has none.
+fn exception_directory(image: &PeImage) -> Option<Range<usize>> {
+    let view = PeView::from_bytes(image.headers()).ok()?;
+    let directory = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_EXCEPTION)?;
+    if directory.Size == 0 {
+        return None;
+    }
+    let start = directory.VirtualAddress as usize;
+    Some(start..start.checked_add(directory.Size as usize)?)
+}
+
+const RUNTIME_FUNCTION_SIZE: usize = 12;
+
+/// Entry `index` of the AMD64 exception directory at `pdata`, `None` when it
+/// is paged out.
+fn runtime_function_at(image: &PeImage, pdata: usize, index: usize) -> Option<RUNTIME_FUNCTION> {
+    let bytes = image.read(pdata + index * RUNTIME_FUNCTION_SIZE, RUNTIME_FUNCTION_SIZE)?;
+    Some(RUNTIME_FUNCTION {
+        BeginAddress: image_u32(&bytes, 0)?,
+        EndAddress: image_u32(&bytes, 4)?,
+        UnwindData: image_u32(&bytes, 8)?,
+    })
+}
+
+enum Lookup {
+    Found(RUNTIME_FUNCTION),
+    /// No entry covers the address: a leaf function.
+    Missing,
+    /// An entry the search needed could not be read.
+    Unreadable,
+}
+
 /// Find the runtime function whose `[BeginAddress, EndAddress)` range covers
-/// `rva`, by binary search over the (sorted) `.pdata` table. Replaces pelite
-/// 0.10's `lookup_function_entry`, whose comparator is inverted and misses.
-fn lookup_runtime_function(functions: &[RUNTIME_FUNCTION], rva: u32) -> Option<&RUNTIME_FUNCTION> {
-    functions
-        .binary_search_by(|rf| {
-            if rva < rf.BeginAddress {
-                Ordering::Greater
-            } else if rva >= rf.EndAddress {
-                Ordering::Less
-            } else {
-                Ordering::Equal
-            }
-        })
-        .ok()
-        .map(|index| &functions[index])
+/// `rva`, by binary search over the sorted `.pdata` table of `count` entries
+/// served by `entry`. Replaces pelite 0.10's `lookup_function_entry`, whose
+/// comparator is inverted and misses. The search touches `log2(count)`
+/// entries, so a demand-read image fetches only the blocks holding them.
+fn lookup_runtime_function(
+    count: usize,
+    entry: impl Fn(usize) -> Option<RUNTIME_FUNCTION>,
+    rva: u32,
+) -> Lookup {
+    let mut low = 0usize;
+    let mut high = count;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let Some(function) = entry(mid) else {
+            return Lookup::Unreadable;
+        };
+        if rva < function.BeginAddress {
+            high = mid;
+        } else if rva >= function.EndAddress {
+            low = mid + 1;
+        } else {
+            return Lookup::Found(function);
+        }
+    }
+    Lookup::Missing
 }
 
 fn parse_unwind_info(image: &PeImage, unwind_rva: u32) -> Option<ParsedUnwindInfo> {
-    // every read goes through `present_slice`, so unwind data that lands in a
+    // every read goes through `PeImage::read`, so unwind data that lands in a
     // paged-out hole returns None (fall back to scan) rather than being parsed as
     // zeros and fabricating a frame
     let offset = unwind_rva as usize;
-    let header = image.present_slice(offset, 4)?;
+    let header = image.read(offset, 4)?;
     let version_flags = header[0];
     let count_of_codes = header[2] as usize;
     let frame_register_offset = header[3];
 
     let codes_offset = offset + 4;
-    let codes_bytes = image.present_slice(codes_offset, count_of_codes.checked_mul(2)?)?;
+    let codes_bytes = image.read(codes_offset, count_of_codes.checked_mul(2)?)?;
 
     let aligned_code_count = (count_of_codes + 1) & !1;
     let tail_offset = offset + 4 + aligned_code_count * 2;
@@ -1355,7 +1423,7 @@ fn parse_unwind_info(image: &PeImage, unwind_rva: u32) -> Option<ParsedUnwindInf
         // a chained entry is followed by the parent RUNTIME_FUNCTION
         // (BeginAddress, EndAddress, UnwindInfoAddress); only the parent's
         // unwind-data RVA is needed to keep walking the chain
-        let tail = image.present_slice(tail_offset, 12)?;
+        let tail = image.read(tail_offset, 12)?;
         Some(u32::from_le_bytes([tail[8], tail[9], tail[10], tail[11]]))
     } else {
         None
@@ -1414,8 +1482,8 @@ fn slot_u16(codes: &[UnwindCodeSlot], index: usize) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameSource, ParsedUnwindInfo, PeImage, RUNTIME_FUNCTION, RegisterContext, StackFrame,
-        StackTrace, frame_base, lookup_arm64_runtime_function, lookup_runtime_function,
+        FrameSource, Lookup, ParsedUnwindInfo, PeImage, RUNTIME_FUNCTION, RegisterContext,
+        StackFrame, StackTrace, frame_base, lookup_arm64_runtime_function, lookup_runtime_function,
         parse_unwind_info, record_stack_frame, unwind_slot_count,
     };
     use crate::target::SavedThreadRegisters;
@@ -1429,31 +1497,34 @@ mod tests {
                 UnwindData: i,
             })
             .collect();
+        let lookup = |rva: u32| match lookup_runtime_function(
+            funcs.len(),
+            |index| funcs.get(index).copied(),
+            rva,
+        ) {
+            Lookup::Found(function) => Some(function.BeginAddress),
+            Lookup::Missing => None,
+            Lookup::Unreadable => panic!("table is fully readable"),
+        };
 
-        assert_eq!(
-            lookup_runtime_function(&funcs, 0x0).unwrap().BeginAddress,
-            0x0
-        );
-        assert_eq!(
-            lookup_runtime_function(&funcs, 0x310).unwrap().BeginAddress,
-            0x300
-        );
-        assert_eq!(
-            lookup_runtime_function(&funcs, 0x3f00)
-                .unwrap()
-                .BeginAddress,
-            0x3f00
-        );
-        assert!(lookup_runtime_function(&funcs, 0x350).is_none());
-        assert!(lookup_runtime_function(&funcs, 0x10000).is_none());
+        assert_eq!(lookup(0x0), Some(0x0));
+        assert_eq!(lookup(0x310), Some(0x300));
+        assert_eq!(lookup(0x3f00), Some(0x3f00));
+        assert_eq!(lookup(0x350), None);
+        assert_eq!(lookup(0x10000), None);
+
+        // An entry the search cannot read is reported, not treated as a leaf.
+        assert!(matches!(
+            lookup_runtime_function(funcs.len(), |_| None, 0x310),
+            Lookup::Unreadable
+        ));
     }
 
     #[test]
     fn lookup_arm64_runtime_function_decodes_packed_and_xdata_lengths() {
-        let mut image_bytes = vec![0u8; 0x2100];
+        let mut image_bytes = vec![0u8; 0x3100];
         // Full .xdata header: low 18 bits are a 0x80-byte function in 4-byte units.
         image_bytes[0x2000..0x2004].copy_from_slice(&(0x80u32 / 4).to_le_bytes());
-        let image = PeImage::complete(image_bytes);
 
         let mut pdata = Vec::new();
         // Packed entry: flag 1 and a 0x40-byte function length.
@@ -1462,17 +1533,20 @@ mod tests {
         // Unpacked entry: flag 0 and an RVA to the .xdata header above.
         pdata.extend_from_slice(&0x1100u32.to_le_bytes());
         pdata.extend_from_slice(&0x2000u32.to_le_bytes());
+        image_bytes[0x3000..0x3000 + pdata.len()].copy_from_slice(&pdata);
+        let image = PeImage::complete(image_bytes);
+        let pdata = 0x3000..0x3000 + pdata.len();
 
         assert_eq!(
-            lookup_arm64_runtime_function(&image, &pdata, 0x103c),
+            lookup_arm64_runtime_function(&image, pdata.clone(), 0x103c),
             Some((0x1000, 0x1040))
         );
-        assert!(lookup_arm64_runtime_function(&image, &pdata, 0x1040).is_none());
+        assert!(lookup_arm64_runtime_function(&image, pdata.clone(), 0x1040).is_none());
         assert_eq!(
-            lookup_arm64_runtime_function(&image, &pdata, 0x117c),
+            lookup_arm64_runtime_function(&image, pdata.clone(), 0x117c),
             Some((0x1100, 0x1180))
         );
-        assert!(lookup_arm64_runtime_function(&image, &pdata, 0x1180).is_none());
+        assert!(lookup_arm64_runtime_function(&image, pdata, 0x1180).is_none());
     }
 
     #[test]

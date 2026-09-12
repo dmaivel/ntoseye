@@ -12,11 +12,10 @@ use crate::{
     types::*,
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use pelite::image::{IMAGE_DIRECTORY_ENTRY_DEBUG, IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 use pelite::pe64::{Pe, PeFile, PeView};
 use rayon::prelude::*;
-use std::collections::HashSet;
-use std::ops::Range;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use zerocopy::{FromBytes, IntoBytes};
@@ -167,172 +166,184 @@ impl ModuleSymbolLoadReport {
     }
 }
 
-/// A module image reconstructed from guest memory. Sections that were paged
-/// out, or that [`read_pe_image`] left unread, are zero-filled in `bytes`;
-/// their RVA ranges are recorded as `holes` so callers don't mistake a zeroed
-/// region for real data.
-#[derive(Debug)]
+/// A module image addressed by RVA. An on-disk image is complete; an image
+/// read from guest memory is demand-read in [`IMAGE_BLOCK`]-sized blocks and
+/// keeps every block it has read, so a stack walk costs the blocks its
+/// lookups touch rather than the whole `.pdata`/`.rdata` of the module,
+/// which for a kernel over a KD serial link is megabytes.
 pub struct PeImage {
-    bytes: Vec<u8>,
-    holes: Vec<Range<usize>>,
+    size: usize,
+    body: ImageBody,
+}
+
+enum ImageBody {
+    Complete(Vec<u8>),
+    Lazy(LazyImage),
+}
+
+/// One block is one KD memory request, and a block never straddles a page,
+/// so a block is either readable or not as a whole.
+const IMAGE_BLOCK: usize = 0x800;
+
+type ImageReader = Box<dyn Fn(usize, &mut [u8]) -> Result<()> + Send + Sync>;
+
+struct LazyImage {
+    /// The header page, read up front; what a `PeView` is built on.
+    headers: Box<[u8]>,
+    /// Reads `buf.len()` bytes of the image at an RVA.
+    read: ImageReader,
+    /// Blocks by index. A block the target refused (paged out) is not
+    /// recorded, so it is asked for again once the target has run.
+    blocks: Mutex<HashMap<usize, Box<[u8]>>>,
+}
+
+impl std::fmt::Debug for PeImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeImage")
+            .field("size", &self.size)
+            .field("complete", &self.is_complete())
+            .finish()
+    }
 }
 
 impl PeImage {
-    /// Wrap fully-available bytes (e.g. a complete on-disk image) with no holes.
+    /// Wrap fully-available bytes (e.g. a complete on-disk image).
     pub fn complete(bytes: Vec<u8>) -> Self {
         Self {
-            bytes,
-            holes: Vec::new(),
+            size: bytes.len(),
+            body: ImageBody::Complete(bytes),
         }
     }
 
-    pub fn as_slice(&self) -> &[u8] {
-        &self.bytes
+    /// Bytes a `PeView` may be built on: the whole image when complete,
+    /// otherwise the header page. Directories past the headers are not in
+    /// here; read them through [`read`](Self::read).
+    pub fn headers(&self) -> &[u8] {
+        match &self.body {
+            ImageBody::Complete(bytes) => bytes,
+            ImageBody::Lazy(lazy) => &lazy.headers,
+        }
     }
 
-    /// Mark `range` as read, carving it out of any hole it overlaps.
-    fn fill(&mut self, range: Range<usize>) {
-        self.holes = self
-            .holes
-            .iter()
-            .flat_map(|hole| {
-                if hole.end <= range.start || range.end <= hole.start {
-                    vec![hole.clone()]
-                } else {
-                    let mut rest = Vec::new();
-                    if hole.start < range.start {
-                        rest.push(hole.start..range.start);
-                    }
-                    if range.end < hole.end {
-                        rest.push(range.end..hole.end);
-                    }
-                    rest
-                }
-            })
-            .collect();
-    }
-
-    /// Whether the image has no paged-out holes (e.g. built from an on-disk
-    /// file). Used to avoid re-fetching an already-complete image.
+    /// Whether every byte is known up front (an on-disk image); a lazy image
+    /// can always still hit a paged-out block.
     pub fn is_complete(&self) -> bool {
-        self.holes.is_empty()
+        matches!(self.body, ImageBody::Complete(_))
     }
 
-    /// Whether `[at, at+len)` is fully backed by real guest data: in bounds and
-    /// not overlapping a paged-out hole.
+    /// Whether `[at, at+len)` is in bounds and readable from the target.
     pub fn is_present(&self, at: usize, len: usize) -> bool {
-        let Some(end) = at.checked_add(len) else {
-            return false;
-        };
-        end <= self.bytes.len() && !self.holes.iter().any(|h| at < h.end && h.start < end)
+        self.read(at, len).is_some()
     }
 
-    /// Slice of `len` bytes at offset `at`, but only if fully present (see
-    /// [`is_present`](Self::is_present)); otherwise None.
-    pub fn present_slice(&self, at: usize, len: usize) -> Option<&[u8]> {
-        self.is_present(at, len).then(|| &self.bytes[at..at + len])
-    }
-}
-
-/// Read a module's header and the sections that symbol discovery and
-/// unwinding consult: the exception and debug directories and `.rdata`,
-/// where MSVC keeps unwind info. Code and data sections are most of an image
-/// and are never read from the snapshot, so they are left as holes; a lookup
-/// that lands in one falls back to the on-disk image.
-pub fn read_pe_image<'a, B: MemoryOps<PhysAddr>>(
-    base_address: VirtAddr,
-    memory: &memory::AddressSpace<'a, B>,
-) -> Result<PeImage> {
-    let mut header_buf = [0u8; 0x1000];
-
-    memory.read_bytes(base_address, &mut header_buf)?;
-
-    let view = PeView::from_bytes(&header_buf)?;
-    let optional_header = view.optional_header();
-    let sections = view.section_headers();
-    let directories = view.data_directory();
-    let wanted_directories = [IMAGE_DIRECTORY_ENTRY_EXCEPTION, IMAGE_DIRECTORY_ENTRY_DEBUG]
-        .into_iter()
-        .filter_map(|index| directories.get(index))
-        .filter(|directory| directory.Size != 0)
-        .map(|directory| {
-            directory.VirtualAddress as usize
-                ..directory.VirtualAddress as usize + directory.Size as usize
-        })
-        .collect::<Vec<_>>();
-
-    let total_size = optional_header.SizeOfImage as usize;
-    let mut image_buffer = vec![0u8; total_size];
-    let mut holes: Vec<Range<usize>> = Vec::new();
-
-    let header_len = std::cmp::min(header_buf.len(), total_size);
-    image_buffer[..header_len].copy_from_slice(&header_buf[..header_len]);
-
-    for section in sections {
-        let v_addr = section.VirtualAddress as usize;
-        let v_size = section.VirtualSize as usize;
-        let raw_size = section.SizeOfRawData as usize;
-        let copy_size = std::cmp::max(v_size, raw_size);
-
-        if copy_size == 0 || v_addr + copy_size > total_size {
-            continue;
+    /// `len` bytes at RVA `at`, or `None` when out of bounds or any block of
+    /// the range is paged out. Blocks are fetched on first use.
+    pub fn read(&self, at: usize, len: usize) -> Option<Cow<'_, [u8]>> {
+        let end = at.checked_add(len)?;
+        if end > self.size {
+            return None;
         }
-        let name = section.Name;
-        let wanted = name.starts_with(b".rdata")
-            || name.starts_with(b".xdata")
-            || wanted_directories
-                .iter()
-                .any(|range| range.start < v_addr + copy_size && v_addr < range.end);
-        if !wanted {
-            holes.push(v_addr..(v_addr + copy_size));
-            continue;
-        }
-
-        let target_slice = &mut image_buffer[v_addr..v_addr + copy_size];
-        match memory.read_bytes(VirtAddr(base_address.0 + v_addr as u64), target_slice) {
-            Ok(()) => {}
-            // a page in the section is paged out: read_bytes fills up to the hole
-            // and leaves the rest zeroed. Record the unread tail so callers know
-            // not to trust those bytes.
-            Err(Error::PartialRead(read)) => holes.push((v_addr + read)..(v_addr + copy_size)),
-            // the section's first page is unmapped: the whole region is unread
-            Err(_) => holes.push(v_addr..(v_addr + copy_size)),
-        }
-    }
-
-    let mut image = PeImage {
-        bytes: image_buffer,
-        holes,
-    };
-    // The debug directory names where its CodeView record lives; a linker
-    // may put that outside `.rdata`.
-    let records = PeView::from_bytes(&image.bytes)
-        .ok()
-        .and_then(|view| view.debug().ok())
-        .map(|debug| {
-            debug
-                .image()
-                .iter()
-                .filter(|entry| entry.SizeOfData != 0)
-                .map(|entry| {
-                    entry.AddressOfRawData as usize
-                        ..entry.AddressOfRawData as usize + entry.SizeOfData as usize
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    for record in records {
-        if record.end <= total_size && !image.is_present(record.start, record.len()) {
-            let target = &mut image.bytes[record.clone()];
-            if memory
-                .read_bytes(VirtAddr(base_address.0 + record.start as u64), target)
-                .is_ok()
-            {
-                image.fill(record);
+        match &self.body {
+            ImageBody::Complete(bytes) => Some(Cow::Borrowed(&bytes[at..end])),
+            ImageBody::Lazy(lazy) => {
+                if len == 0 {
+                    return Some(Cow::Borrowed(&[]));
+                }
+                let mut blocks = lazy.blocks.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut out = Vec::with_capacity(len);
+                for index in at / IMAGE_BLOCK..=(end - 1) / IMAGE_BLOCK {
+                    let block = match blocks.entry(index) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => entry.insert(lazy.fetch(index, self.size)?),
+                    };
+                    let start = at.saturating_sub(index * IMAGE_BLOCK);
+                    let stop = (end - index * IMAGE_BLOCK).min(block.len());
+                    out.extend_from_slice(&block[start..stop]);
+                }
+                Some(Cow::Owned(out))
             }
         }
     }
-    Ok(image)
+}
+
+impl LazyImage {
+    fn fetch(&self, index: usize, size: usize) -> Option<Box<[u8]>> {
+        let start = index * IMAGE_BLOCK;
+        let mut block = vec![0u8; IMAGE_BLOCK.min(size - start)];
+        (self.read)(start, &mut block).ok()?;
+        Some(block.into_boxed_slice())
+    }
+}
+
+/// Bytes of a module's headers read before the section table's end is known.
+/// A normally linked image keeps its DOS stub, NT headers, and section table
+/// well inside this; only an image whose table runs past it costs a second
+/// read.
+const PE_HEADER_PROBE: usize = 0x400;
+
+/// Where the section table of the headers in `probe` ends, or `None` when
+/// the NT headers themselves extend past the probe. A buffer that is not a
+/// PE ends at the probe: reading more of it changes nothing.
+fn pe_headers_end(probe: &[u8]) -> Option<usize> {
+    if probe.len() < 0x40 || &probe[..2] != b"MZ" {
+        return Some(probe.len());
+    }
+    let e_lfanew = u32::from_le_bytes(probe[0x3c..0x40].try_into().unwrap()) as usize;
+    let nt = probe.get(e_lfanew..e_lfanew.checked_add(24)?)?;
+    if &nt[..4] != b"PE\0\0" {
+        return Some(probe.len());
+    }
+    let sections = u16::from_le_bytes([nt[6], nt[7]]) as usize;
+    let optional = u16::from_le_bytes([nt[20], nt[21]]) as usize;
+    Some(e_lfanew + 24 + optional + sections * 40)
+}
+
+/// Read a module's headers into a page-sized buffer, as `PeView` wants them,
+/// with a probe-sized first read and a second only when the section table
+/// extends past it. The page tail beyond the table stays zero; nothing in it
+/// is consulted.
+pub fn read_pe_header_page<B: MemoryOps<PhysAddr>>(
+    base_address: VirtAddr,
+    memory: &memory::AddressSpace<'_, B>,
+) -> Result<[u8; PAGE_SIZE]> {
+    read_pe_header_page_with(&|address, buf| memory.read_bytes(base_address + address, buf))
+}
+
+/// [`read_pe_header_page`] over a reader addressed by RVA.
+fn read_pe_header_page_with(
+    read: &dyn Fn(u64, &mut [u8]) -> Result<()>,
+) -> Result<[u8; PAGE_SIZE]> {
+    let mut header_buf = [0u8; PAGE_SIZE];
+    read(0, &mut header_buf[..PE_HEADER_PROBE])?;
+    let end = pe_headers_end(&header_buf[..PE_HEADER_PROBE])
+        .unwrap_or(PAGE_SIZE)
+        .min(PAGE_SIZE);
+    if end > PE_HEADER_PROBE {
+        read(
+            PE_HEADER_PROBE as u64,
+            &mut header_buf[PE_HEADER_PROBE..end],
+        )?;
+    }
+    Ok(header_buf)
+}
+
+/// Open a module image in guest memory: the headers are read now, the rest
+/// on demand through `read`, which reads `buf.len()` bytes at a virtual
+/// address of the module's address space.
+pub fn read_pe_image(
+    base_address: VirtAddr,
+    read: impl Fn(VirtAddr, &mut [u8]) -> Result<()> + Send + Sync + 'static,
+) -> Result<PeImage> {
+    let headers = read_pe_header_page_with(&|address, buf| read(base_address + address, buf))?;
+    let size = PeView::from_bytes(&headers)?.optional_header().SizeOfImage as usize;
+    Ok(PeImage {
+        size,
+        body: ImageBody::Lazy(LazyImage {
+            headers: Box::new(headers),
+            read: Box::new(move |rva, buf| read(base_address + rva as u64, buf)),
+            blocks: Mutex::new(HashMap::new()),
+        }),
+    })
 }
 
 /// Name of the PE section containing `address` within the image loaded at
@@ -345,8 +356,7 @@ pub fn section_name_at<'a, B: MemoryOps<PhysAddr>>(
     address: VirtAddr,
 ) -> Option<String> {
     let rva = u32::try_from(address.0.checked_sub(base.0)?).ok()?;
-    let mut header_buf = [0u8; 0x1000];
-    memory.read_bytes(base, &mut header_buf).ok()?;
+    let header_buf = read_pe_header_page(base, memory).ok()?;
     let view = PeView::from_bytes(&header_buf).ok()?;
     for section in view.section_headers() {
         let va = section.VirtualAddress;
@@ -370,8 +380,7 @@ pub fn read_pe_version_info<B: MemoryOps<PhysAddr>>(
 ) -> Option<(String, String)> {
     use pelite::image::IMAGE_DIRECTORY_ENTRY_RESOURCE;
 
-    let mut header_buf = [0u8; 0x1000];
-    memory.read_bytes(base, &mut header_buf).ok()?;
+    let header_buf = read_pe_header_page(base, memory).ok()?;
     let view = PeView::from_bytes(&header_buf).ok()?;
 
     let rsrc_dir = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_RESOURCE)?;
@@ -574,6 +583,20 @@ impl SymbolRef<'_> {
     }
 }
 
+/// The address space a module lives in: AArch64 kernel VAs walk `kernel_dtb`
+/// (TTBR1) while `dtb` stays the process root.
+fn object_address_space(
+    phys: &Arc<PhysMem>,
+    dtb: Dtb,
+    kernel_dtb: Dtb,
+    arch: Arch,
+) -> AddressSpace<'_, Arc<PhysMem>> {
+    match arch {
+        Arch::Amd64 => AddressSpace::new(phys, dtb),
+        Arch::Arm64 => AddressSpace::new_arm64(phys, dtb, kernel_dtb),
+    }
+}
+
 /// A structured view into a loaded module's memory: it carries its own address
 /// space (`dtb`) and the handles needed to read and resolve symbols/types
 /// (`kvm`, `symbols`), so navigation methods don't take them as arguments. The
@@ -586,9 +609,11 @@ pub struct WinObject {
     /// AArch64 TTBR1 (kernel-space root). Equal to `dtb` for the kernel object
     /// and AMD64; process siblings keep the kernel root for kernel-VA reads.
     kernel_dtb: Dtb,
-    /// In-memory image read once at symbol load and shared with the unwinder,
-    /// which would otherwise read the whole image again over the transport.
-    image: Option<Arc<PeImage>>,
+    /// Header page read at symbol load; nothing from the sections.
+    headers: Option<Box<[u8]>>,
+    /// Demand-read image shared across stack traces, so each block is
+    /// fetched once per session.
+    image: Mutex<Option<Arc<PeImage>>>,
     pub guid: Option<u128>,
     phys: Arc<PhysMem>,
     symbols: Arc<SymbolStore>,
@@ -616,7 +641,8 @@ impl WinObject {
             dtb,
             arch,
             kernel_dtb: dtb,
-            image: None,
+            headers: None,
+            image: Mutex::new(None),
             guid: None,
             phys,
             symbols,
@@ -665,9 +691,12 @@ impl WinObject {
         self.symbols.set_kernel_guid(self.guid);
     }
 
-    /// Size of the cached binary snapshot (0 until [`view`](Self::view) has run).
+    /// `SizeOfImage` of the module (0 until [`view`](Self::view) has run).
     pub fn binary_size(&self) -> usize {
-        self.image.as_ref().map_or(0, |image| image.bytes.len())
+        self.headers
+            .as_deref()
+            .and_then(|headers| PeView::from_bytes(headers).ok())
+            .map_or(0, |view| view.optional_header().SizeOfImage as usize)
     }
 
     /// A sibling object sharing this one's physical-memory and symbol handles,
@@ -679,7 +708,8 @@ impl WinObject {
             dtb,
             arch: self.arch,
             kernel_dtb: self.kernel_dtb,
-            image: None,
+            headers: None,
+            image: Mutex::new(None),
             guid: None,
             phys: Arc::clone(&self.phys),
             symbols: Arc::clone(&self.symbols),
@@ -695,10 +725,7 @@ impl WinObject {
         phys: &'a Arc<PhysMem>,
         dtb: Dtb,
     ) -> AddressSpace<'a, Arc<PhysMem>> {
-        match self.arch {
-            Arch::Amd64 => AddressSpace::new(phys, dtb),
-            Arch::Arm64 => AddressSpace::new_arm64(phys, dtb, self.kernel_dtb),
-        }
+        object_address_space(phys, dtb, self.kernel_dtb, self.arch)
     }
 
     pub fn memory(&self) -> AddressSpace<'_, Arc<PhysMem>> {
@@ -728,21 +755,32 @@ impl WinObject {
         Ok(result)
     }
 
-    // TODO binary should probably be reread to ensure correctness
-    // TODO bc shared memory might/isnt used, this needs to be mutable to ensure data is fresh :/
+    /// The module's headers, read once from guest memory. Directories past
+    /// the headers are not in the view; see [`image`](Self::image) for those.
     pub fn view(&mut self) -> Option<PeView<'_>> {
-        if self.image.is_none() {
-            let phys = Arc::clone(&self.phys);
-            let memory = self.address_space(&phys, self.dtb);
-            self.image = Some(Arc::new(read_pe_image(self.base_address, &memory).ok()?));
+        if self.headers.is_none() {
+            let headers = read_pe_header_page(self.base_address, &self.memory()).ok()?;
+            self.headers = Some(Box::new(headers));
         }
 
-        PeView::from_bytes(&self.image.as_ref()?.bytes).ok()
+        PeView::from_bytes(self.headers.as_deref()?).ok()
     }
 
-    /// The image already read by [`view`](Self::view), if any.
-    pub fn cached_image(&self) -> Option<Arc<PeImage>> {
-        self.image.clone()
+    /// The in-memory image (see [`read_pe_image`]), opened on first use and
+    /// shared afterwards. `None` when the headers are unreadable; that is
+    /// retried next time rather than cached.
+    pub fn image(&self) -> Option<Arc<PeImage>> {
+        let mut cached = self.image.lock().unwrap_or_else(PoisonError::into_inner);
+        if cached.is_none() {
+            let (phys, dtb, kernel_dtb, arch) =
+                (Arc::clone(&self.phys), self.dtb, self.kernel_dtb, self.arch);
+            let image = read_pe_image(self.base_address, move |address, buf| {
+                object_address_space(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
+            })
+            .ok()?;
+            *cached = Some(Arc::new(image));
+        }
+        cached.clone()
     }
 
     /// Resolve this object's struct/type namespace, read in its own address
@@ -2277,41 +2315,53 @@ impl Guest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModuleSymbolLoadReport, PeImage, read_pe_image};
+    use super::{
+        IMAGE_BLOCK, ModuleSymbolLoadReport, PE_HEADER_PROBE, PeImage, read_pe_header_page,
+        read_pe_image,
+    };
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
     use crate::memory::{AddressSpace, DTB_IDENTITY};
     use crate::symbols::SymbolIndexDiagnostic;
     use crate::types::{PhysAddr, VirtAddr};
-
-    #[test]
-    fn pe_image_fill_carves_holes() {
-        let mut image = PeImage {
-            bytes: vec![0u8; 0x100],
-            holes: vec![0x00..0x40, 0x80..0x100],
-        };
-        image.fill(0x90..0xa0);
-        assert_eq!(image.holes, vec![0x00..0x40, 0x80..0x90, 0xa0..0x100]);
-        image.fill(0x00..0x40);
-        assert_eq!(image.holes, vec![0x80..0x90, 0xa0..0x100]);
-        image.fill(0x70..0x88);
-        assert_eq!(image.holes, vec![0x88..0x90, 0xa0..0x100]);
-    }
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Identity-mapped memory holding one image at `base`; reads outside it
-    /// fail like an unmapped page.
+    /// fail like an unmapped page. Counts the bytes handed out.
     struct ImageMemory {
         base: u64,
         bytes: Vec<u8>,
+        read: AtomicUsize,
+        /// Bytes past this offset read as unmapped.
+        readable: AtomicUsize,
+    }
+
+    impl ImageMemory {
+        fn new(base: u64, bytes: Vec<u8>) -> Self {
+            Self {
+                base,
+                readable: AtomicUsize::new(bytes.len()),
+                bytes,
+                read: AtomicUsize::new(0),
+            }
+        }
+
+        fn bytes_read(&self) -> usize {
+            self.read.load(Ordering::Relaxed)
+        }
     }
 
     impl MemoryOps<PhysAddr> for ImageMemory {
         fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
             let start = addr
                 .checked_sub(self.base)
-                .filter(|start| start + buf.len() as u64 <= self.bytes.len() as u64)
+                .filter(|start| {
+                    start + buf.len() as u64 <= self.readable.load(Ordering::Relaxed) as u64
+                })
                 .ok_or(Error::BadPhysicalAddress(addr))? as usize;
             buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
+            self.read.fetch_add(buf.len(), Ordering::Relaxed);
             Ok(())
         }
 
@@ -2320,13 +2370,24 @@ mod tests {
         }
     }
 
+    fn open_image(memory: &Arc<ImageMemory>) -> PeImage {
+        let memory = Arc::clone(memory);
+        read_pe_image(VirtAddr(memory.base), move |address, buf| {
+            AddressSpace::new(&memory, DTB_IDENTITY).read_bytes(address, buf)
+        })
+        .unwrap()
+    }
+
     /// A PE32+ image with `.text` at 0x1000 and `.rdata` at 0x2000, each one
     /// page, filled with distinct bytes.
     fn synthetic_image() -> Vec<u8> {
+        synthetic_image_with_pe_at(0x80)
+    }
+
+    fn synthetic_image_with_pe_at(pe: usize) -> Vec<u8> {
         let mut image = vec![0u8; 0x3000];
         image[..2].copy_from_slice(b"MZ");
-        image[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-        let pe = 0x80;
+        image[0x3c..0x40].copy_from_slice(&(pe as u32).to_le_bytes());
         image[pe..pe + 4].copy_from_slice(b"PE\0\0");
         image[pe + 4..pe + 6].copy_from_slice(&0x8664u16.to_le_bytes());
         image[pe + 6..pe + 8].copy_from_slice(&2u16.to_le_bytes());
@@ -2357,47 +2418,65 @@ mod tests {
         image
     }
 
-    /// Only the header and `.rdata` come from the target; code is a hole, so
-    /// a lookup there is refused rather than served zeros.
+    /// Opening an image costs the header probe; a lookup fetches the one
+    /// block it lands in, and a second lookup in that block costs nothing.
     #[test]
-    fn read_pe_image_skips_code_sections() {
-        let base = 0x10_0000u64;
-        let memory = ImageMemory {
-            base,
-            bytes: synthetic_image(),
-        };
-        let space = AddressSpace::new(&memory, DTB_IDENTITY);
-        let image = read_pe_image(VirtAddr(base), &space).unwrap();
+    fn lazy_image_fetches_blocks_on_first_use() {
+        let memory = Arc::new(ImageMemory::new(0x10_0000, synthetic_image()));
+        let image = open_image(&memory);
+        assert!(!image.is_complete());
+        assert_eq!(memory.bytes_read(), PE_HEADER_PROBE);
 
-        assert_eq!(image.as_slice().len(), 0x3000);
-        assert!(image.is_present(0, 0x1000));
-        assert_eq!(
-            image.present_slice(0x2000, 0x1000).unwrap(),
-            &[0xdd; 0x1000][..]
-        );
-        assert!(!image.is_present(0x1000, 1));
-        assert_eq!(image.holes, vec![0x1000..0x2000]);
+        assert_eq!(&image.read(0x2200, 0x100).unwrap()[..], &[0xdd; 0x100][..]);
+        assert_eq!(memory.bytes_read(), PE_HEADER_PROBE + IMAGE_BLOCK);
+        assert_eq!(&image.read(0x2300, 0x10).unwrap()[..], &[0xdd; 0x10][..]);
+        assert_eq!(memory.bytes_read(), PE_HEADER_PROBE + IMAGE_BLOCK);
+
+        // A range spanning two blocks is stitched from both: the header
+        // page's tail and the first bytes of `.text`.
+        let across = image.read(2 * IMAGE_BLOCK - 4, 8).unwrap();
+        assert_eq!(&across[..4], &[0; 4]);
+        assert_eq!(&across[4..], &[0xcc; 4]);
+        assert!(image.read(0x2ff0, 0x11).is_none());
     }
 
+    /// A block the target refuses is a hole: the read reports it rather
+    /// than serving zeros, and it is asked for again rather than remembered,
+    /// so a page that is resident by the next lookup is served.
     #[test]
-    fn pe_image_present_respects_holes_and_bounds() {
-        let hole = 0x40..0x80;
-        let image = PeImage {
-            bytes: vec![0u8; 0x100],
-            holes: vec![hole],
-        };
+    fn lazy_image_reports_unreadable_blocks() {
+        let memory = Arc::new(ImageMemory::new(0x10_0000, synthetic_image()));
+        memory.readable.store(0x2000, Ordering::Relaxed);
+        let image = open_image(&memory);
 
-        assert!(image.is_present(0x00, 0x40));
-        assert!(image.is_present(0x80, 0x80));
-        assert!(image.present_slice(0x10, 0x10).is_some());
+        assert!(image.is_present(0x1000, 0x10));
+        assert!(!image.is_present(0x2000, 4));
+        assert!(image.read(0x1ff0, 0x20).is_none());
 
-        assert!(!image.is_present(0x40, 0x01));
-        assert!(!image.is_present(0x3f, 0x02));
-        assert!(!image.is_present(0x7f, 0x02));
-        assert!(image.present_slice(0x38, 0x10).is_none());
+        memory.readable.store(0x3000, Ordering::Relaxed);
+        assert_eq!(&image.read(0x2000, 4).unwrap()[..], &[0xdd; 4][..]);
+    }
 
-        assert!(!image.is_present(0xf0, 0x20));
-        assert!(!image.is_present(usize::MAX, 1));
+    /// The header probe alone covers a normally linked image; a section table
+    /// that runs past the probe is completed by a second read instead of
+    /// being parsed from zeros.
+    #[test]
+    fn read_pe_header_page_extends_past_probe_only_when_needed() {
+        let base = 0x10_0000u64;
+        let memory = ImageMemory::new(base, synthetic_image());
+        let space = AddressSpace::new(&memory, DTB_IDENTITY);
+        let header = read_pe_header_page(VirtAddr(base), &space).unwrap();
+        assert_eq!(memory.bytes_read(), PE_HEADER_PROBE);
+        assert_eq!(&header[..PE_HEADER_PROBE], &memory.bytes[..PE_HEADER_PROBE]);
+
+        let late_pe = PE_HEADER_PROBE - 0x40;
+        let memory = ImageMemory::new(base, synthetic_image_with_pe_at(late_pe));
+        let space = AddressSpace::new(&memory, DTB_IDENTITY);
+        let header = read_pe_header_page(VirtAddr(base), &space).unwrap();
+        let table_end = late_pe + 24 + 240 + 2 * 40;
+        assert_eq!(memory.bytes_read(), table_end);
+        assert_eq!(&header[..table_end], &memory.bytes[..table_end]);
+        assert!(header[table_end..].iter().all(|&byte| byte == 0));
     }
 
     #[test]
