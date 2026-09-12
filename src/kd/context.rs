@@ -4,8 +4,11 @@ use crate::gdb::{RegisterInfo, RegisterMap};
 
 pub const CONTEXT_SIZE: usize = 1232;
 
-/// CONTEXT plus synthetic control-register slots
-pub const REGISTER_BUFFER_SIZE: usize = CONTEXT_SIZE + 5 * 8;
+/// CONTEXT plus synthetic control/special-register slots. The descriptor
+/// limits and segment selectors occupy their own 8-byte slots so every
+/// synthetic value has a stable, naturally aligned offset in the register
+/// buffer even though KD's `KDESCRIPTOR` fields are smaller on the wire.
+pub const REGISTER_BUFFER_SIZE: usize = CONTEXT_SIZE + 12 * 8;
 
 // ContextFlags bits
 pub const CONTEXT_AMD64: u32 = 0x0010_0000;
@@ -66,6 +69,13 @@ pub const OFFSET_CR2: usize = OFFSET_CR0 + 8;
 pub const OFFSET_CR3: usize = OFFSET_CR2 + 8;
 pub const OFFSET_CR4: usize = OFFSET_CR3 + 8;
 pub const OFFSET_CR8: usize = OFFSET_CR4 + 8;
+pub const OFFSET_GDTR_BASE: usize = OFFSET_CR8 + 8;
+pub const OFFSET_GDTR_LIMIT: usize = OFFSET_GDTR_BASE + 8;
+pub const OFFSET_IDTR_BASE: usize = OFFSET_GDTR_LIMIT + 8;
+pub const OFFSET_IDTR_LIMIT: usize = OFFSET_IDTR_BASE + 8;
+pub const OFFSET_TR: usize = OFFSET_IDTR_LIMIT + 8;
+pub const OFFSET_LDTR: usize = OFFSET_TR + 8;
+pub const OFFSET_EFER: usize = OFFSET_LDTR + 8;
 
 /// Build the KD register map
 pub fn build_register_map() -> RegisterMap {
@@ -123,7 +133,31 @@ pub fn build_register_map() -> RegisterMap {
         next_reg("cr3", OFFSET_CR3, 8),
         next_reg("cr4", OFFSET_CR4, 8),
         next_reg("cr8", OFFSET_CR8, 8),
+        // KDESCRIPTOR values come from KSPECIAL_REGISTERS. Keep WinDbg names
+        // alongside the explicit names used by the register display.
+        next_reg("gdtr", OFFSET_GDTR_BASE, 8),
+        next_reg("gdtr_base", OFFSET_GDTR_BASE, 8),
+        next_reg("gdtr_limit", OFFSET_GDTR_LIMIT, 2),
+        next_reg("gdtl", OFFSET_GDTR_LIMIT, 2),
+        next_reg("idtr", OFFSET_IDTR_BASE, 8),
+        next_reg("idtr_base", OFFSET_IDTR_BASE, 8),
+        next_reg("idtr_limit", OFFSET_IDTR_LIMIT, 2),
+        next_reg("idtl", OFFSET_IDTR_LIMIT, 2),
+        next_reg("tr", OFFSET_TR, 2),
+        next_reg("ldtr", OFFSET_LDTR, 2),
+        // EFER is not part of KSPECIAL_REGISTERS; KD fills this synthetic
+        // slot with DbgKdReadMachineSpecificRegister(MSR_EFER).
+        next_reg("efer", OFFSET_EFER, 8),
+        next_reg("mxcsr", OFFSET_MX_CSR, 4),
     ];
+
+    let mut registers = registers;
+    for i in 0..16 {
+        let offset = OFFSET_XMM0 + i * 16;
+        registers.push(next_reg(&format!("xmm{i}"), offset, 16));
+        registers.push(next_reg(&format!("xmm{i}l"), offset, 8));
+        registers.push(next_reg(&format!("xmm{i}h"), offset + 8, 8));
+    }
 
     RegisterMap::from_registers(registers)
 }

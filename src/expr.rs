@@ -199,11 +199,18 @@ impl Expr {
                     return Ok(VirtAddr(value));
                 }
                 // A bare `rip`/`rsp` resolves as a register when no symbol matches.
-                if let Some(value) = context.registers.as_ref().and_then(|r| r.get(name)) {
-                    return Ok(VirtAddr(*value));
+                if let Some(value) = context.register_value(name) {
+                    return Ok(VirtAddr(value));
                 }
                 if let Some(value) = context.builtin_variable_value(name) {
                     return Ok(VirtAddr(value));
+                }
+                // WinDbg: a bare module name is its base (`? nt`, `u nt+0x1000`).
+                if let Some(base) = context
+                    .symbols
+                    .module_base_by_name(context.current_dtb(), name)
+                {
+                    return Ok(base);
                 }
                 Err(Error::SymbolNotFound(name.clone()))
             }
@@ -229,8 +236,8 @@ impl Expr {
                 }
 
                 // a register (predefined) wins over a user variable of the same name
-                if let Some(value) = context.registers.as_ref().and_then(|r| r.get(name)) {
-                    return Ok(VirtAddr(*value));
+                if let Some(value) = context.register_value(name) {
+                    return Ok(VirtAddr(value));
                 }
 
                 // a user-defined convenience variable ($name = ...); explicit

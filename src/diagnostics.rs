@@ -49,7 +49,7 @@ fn print_labeled_stderr(label: &str, styled_label: &str, message: &str) {
         return print_labeled_stdout(label, styled_label, message);
     }
     for line in labeled_lines(label, styled_label, message) {
-        eprintln!("{line}");
+        output::write_stderr_fmt(format_args!("{line}\n"));
     }
 }
 

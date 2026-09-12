@@ -193,6 +193,7 @@ pub fn print_async_stop_resolution(
     caches: &ReplCaches,
     resolution: StopResolution,
 ) {
+    session.target.selected_frame = None;
     refresh_stop_caches_pre(
         &mut *session.backend,
         &session.target,
@@ -390,6 +391,7 @@ pub fn surface_pending_stop(
             };
             outln!("Exception {code:#010x} ({chance}); continuing");
         }
+        session.target.selected_frame = None;
         session
             .backend
             .continue_execution_with_disposition(disposition)?;
@@ -464,6 +466,7 @@ pub fn print_break_context_at(
     display_rip: Option<u64>,
     cause: Option<String>,
 ) {
+    debugger.selected_frame = None;
     let regs = match client
         .set_current_thread(thread_id)
         .and_then(|()| client.read_registers())
@@ -485,7 +488,9 @@ pub fn print_break_context_at(
     };
     debugger.registers = Some(register_map.to_hashmap(&regs));
 
-    let cr3 = register_map.read_u64("cr3", &regs).unwrap_or(0);
+    let cr3 = register_map
+        .read_u64(debugger.arch().dtb_register(), &regs)
+        .unwrap_or(0);
     let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
     let windows_thread = refresh_windows_thread_context_for_backend_thread(debugger, thread_id);
     let trace = resolve_thread_trace_context(debugger, cr3);

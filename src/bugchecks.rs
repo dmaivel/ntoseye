@@ -46,7 +46,7 @@ pub struct BugcheckFault {
 pub struct BugcheckTrapFrame {
     pub address: u64,
     pub frame: Option<KtrapFrame>,
-    /// Symbol for the frame's `Rip`, when the frame decoded.
+    /// Symbol for the frame's instruction pointer, when the frame decoded.
     pub rip_symbol: Option<String>,
     /// Decode failure reason; `None` exactly when `frame` is present.
     pub error: Option<String>,
@@ -416,7 +416,7 @@ pub fn analyze_bugcheck(debugger: &Target, info: &BugcheckInfo) -> BugcheckAnaly
             };
             let rip_symbol = frame
                 .as_ref()
-                .map(|frame| format_symbol(debugger, &trace, frame.rip));
+                .map(|frame| format_symbol(debugger, &trace, frame.instruction_pointer()));
             BugcheckTrapFrame {
                 address,
                 frame,
@@ -1160,7 +1160,7 @@ pub fn bugcheck_descriptor(code: u32) -> Option<BugcheckDescriptor> {
             ),
             arguments: [
                 "memory address referenced",
-                "access type (x64: 0 = read; 1 = legacy write; 2 = modern write; 0x10 = execute)",
+                "access type (0 = read; 1 = write; 2 = execute; some builds report 0x10 for execute)",
                 "address that referenced memory, if known",
                 "page-fault subtype on newer Windows; reserved on older versions",
             ],

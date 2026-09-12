@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::unwind::frame_base_for_register_values;
 use crate::{
     backend::MemoryOps,
     bugchecks::looks_like_kernel_pointer,
@@ -37,6 +38,10 @@ pub struct Target {
     triage_modules_cache: Option<Vec<ModuleInfo>>,
     context_dtb_override: Option<Dtb>,
     pub registers: Option<HashMap<String, u64>>,
+    /// Frontend-selected stack/context frame. The REPL owns the lifetime and
+    /// mirrors it into this target so expression and local evaluation see the
+    /// same recovered register context across command calls.
+    pub selected_frame: Option<SelectedFrame>,
     /// Windows thread metadata selected for inspection. Whether it is live on
     /// the backend vCPU or parked is session state; Target only owns identity
     /// and the corresponding process/address-space view.
@@ -50,7 +55,21 @@ pub struct Target {
     pub results_origin: Option<String>,
 }
 
-const CR3_PAGE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+/// A debugger-selected non-live register context. Register values are kept as
+/// a sparse map because unwind metadata can recover only a subset of the full
+/// live register file for caller frames; `seed_registers` keeps the original
+/// context available when `.frame N` navigates repeatedly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedFrame {
+    pub index: usize,
+    pub ip: u64,
+    pub sp: u64,
+    pub frame_base: Option<u64>,
+    pub registers: HashMap<String, u64>,
+    /// Sparse register context from which this selection's stack walk started.
+    /// It remains stable as `.frame N` moves through the recovered trace.
+    pub seed_registers: HashMap<String, u64>,
+}
 
 /// A user-defined convenience variable and the expression it was defined from
 #[derive(Debug, Clone)]
@@ -266,6 +285,16 @@ pub struct SymbolSearchMatch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Arm64SavedRegisters {
+    pub x: [Option<u64>; 31],
+    pub sp: Option<u64>,
+    pub pc: Option<u64>,
+    pub cpsr: Option<u64>,
+    pub fp: Option<u64>,
+    pub lr: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SavedThreadRegisters {
     pub rip: Option<u64>,
     pub rsp: Option<u64>,
@@ -285,11 +314,20 @@ pub struct SavedThreadRegisters {
     pub r14: Option<u64>,
     pub r15: Option<u64>,
     pub rflags: Option<u64>,
+    pub arm64: Option<Arm64SavedRegisters>,
 }
 
 impl SavedThreadRegisters {
     pub fn get(&self, name: &str) -> Option<u64> {
-        match name.to_ascii_lowercase().as_str() {
+        let name = name.to_ascii_lowercase();
+        if let Some(index) = name
+            .strip_prefix('x')
+            .and_then(|index| index.parse::<usize>().ok())
+            .filter(|&index| index < 31)
+        {
+            return self.arm64.as_ref()?.x[index];
+        }
+        match name.as_str() {
             "rip" => self.rip,
             "rsp" => self.rsp,
             "rax" => self.rax,
@@ -308,6 +346,11 @@ impl SavedThreadRegisters {
             "r14" => self.r14,
             "r15" => self.r15,
             "rflags" | "eflags" => self.rflags,
+            "sp" => self.arm64.as_ref()?.sp,
+            "pc" => self.arm64.as_ref()?.pc,
+            "cpsr" => self.arm64.as_ref()?.cpsr,
+            "fp" => self.arm64.as_ref()?.fp,
+            "lr" => self.arm64.as_ref()?.lr,
             _ => None,
         }
     }
@@ -464,6 +507,16 @@ pub fn kthread_state_name(state: u8) -> &'static str {
     }
 }
 
+/// Case-insensitive lookup in a register map; exact match first.
+pub fn lookup_register(registers: &HashMap<String, u64>, name: &str) -> Option<u64> {
+    registers.get(name).copied().or_else(|| {
+        registers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| *value)
+    })
+}
+
 pub fn wait_reason_name(reason: u8) -> &'static str {
     match reason {
         0 => "Executive",
@@ -511,6 +564,8 @@ pub fn wait_reason_name(reason: u8) -> &'static str {
 
 #[derive(Debug, Clone)]
 pub struct MemoryRegionInfo {
+    pub node_address: VirtAddr,
+    pub level: usize,
     pub start: VirtAddr,
     pub end: VirtAddr,
     pub protection: Option<u64>,
@@ -977,6 +1032,7 @@ impl Target {
             triage_modules_cache,
             context_dtb_override: None,
             registers: None,
+            selected_frame: None,
             windows_thread_selection: None,
             user_vars: HashMap::new(),
             results: Vec::new(),
@@ -1012,6 +1068,7 @@ impl Target {
             triage_modules_cache: None,
             context_dtb_override: None,
             registers: None,
+            selected_frame: None,
             windows_thread_selection: None,
             user_vars: HashMap::new(),
             results: Vec::new(),
@@ -1241,6 +1298,7 @@ impl Target {
 
         self.current_process = Some(winobj);
         self.current_process_info = Some(process_info);
+        self.selected_frame = None;
         self.clear_context_dtb_override();
         self.clear_current_windows_thread_context();
         Ok(AttachReport {
@@ -1250,6 +1308,7 @@ impl Target {
     }
 
     pub fn detach(&mut self) {
+        self.selected_frame = None;
         self.clear_context_dtb_override();
         self.clear_current_windows_thread_context();
         self.current_process = None;
@@ -1265,14 +1324,16 @@ impl Target {
     }
 
     pub fn normalize_cr3(cr3: u64) -> Dtb {
-        cr3 & CR3_PAGE_MASK
+        cr3 & Arch::Amd64.dtb_page_mask()
     }
 
     pub fn set_current_windows_thread_context(&mut self, thread: ThreadInfo) {
+        self.selected_frame = None;
         self.windows_thread_selection = Some(thread);
     }
 
     pub fn set_parked_windows_thread(&mut self, thread: ThreadInfo) {
+        self.selected_frame = None;
         self.windows_thread_selection = Some(thread);
         // A parked thread has no coherent register file. In particular, do not
         // let expressions reuse registers cached from the still-selected vCPU.
@@ -1320,7 +1381,7 @@ impl Target {
             .as_ref()
             .and_then(|thread| thread.eprocess)
             && let Ok(process) = guest.process_at(eprocess)
-            && (process.dtb & CR3_PAGE_MASK) == cr3_masked
+            && (process.dtb & self.arch().dtb_page_mask()) == cr3_masked
         {
             return Some(process);
         }
@@ -1328,12 +1389,19 @@ impl Target {
             .enumerate_processes()
             .ok()?
             .into_iter()
-            .find(|process| (process.dtb & CR3_PAGE_MASK) == cr3_masked)
+            .find(|process| (process.dtb & self.arch().dtb_page_mask()) == cr3_masked)
     }
 
     pub fn current_thread_pseudo_register(&self, name: &str) -> Option<u64> {
         let thread = self.windows_thread_selection.as_ref()?;
         thread.pseudo_register_value(name)
+    }
+
+    /// Read a cached register in a case-insensitive manner. The cache is
+    /// populated from either the live backend context or a selected frame, so
+    /// expression evaluation does not need to know which one is active.
+    pub fn register_value(&self, name: &str) -> Option<u64> {
+        lookup_register(self.registers.as_ref()?, name)
     }
 
     pub fn builtin_variable_value(&self, name: &str) -> Option<u64> {
@@ -1693,7 +1761,6 @@ impl Target {
         self.address_space(self.kernel_dtb())
     }
 
-    /// Symbol address space for an address in the active inspection context.
     /// Kernel addresses fall back to the kernel DTB when a user process is
     /// selected and owns no module covering the address.
     pub fn symbol_dtb_for_address(&self, address: VirtAddr) -> Dtb {
@@ -1829,10 +1896,8 @@ impl Target {
         local: &ProcedureLocal,
     ) -> Option<u64> {
         if self
-            .registers
-            .as_ref()
-            .and_then(|registers| registers.get("rip"))
-            .is_none_or(|rip| *rip != address.0)
+            .register_value("rip")
+            .is_none_or(|rip| rip != address.0)
         {
             return None;
         }
@@ -1843,7 +1908,7 @@ impl Target {
         let registers = self.registers.as_ref()?;
         match &local.location {
             LocalVariableLocation::Register { register } => {
-                let value = *registers.get(register)?;
+                let value = lookup_register(registers, register)?;
                 Some(if size == 8 {
                     value
                 } else {
@@ -1851,7 +1916,7 @@ impl Target {
                 })
             }
             LocalVariableLocation::RegisterRelative { register, offset } => {
-                let base = *registers.get(register)?;
+                let base = lookup_register(registers, register)?;
                 let address = VirtAddr(base.wrapping_add_signed(i64::from(*offset)));
                 let mut bytes = [0u8; 8];
                 self.context_memory()
@@ -1859,8 +1924,21 @@ impl Target {
                     .ok()?;
                 Some(u64::from_le_bytes(bytes))
             }
-            LocalVariableLocation::FrameRelative { .. }
-            | LocalVariableLocation::Unavailable { .. } => None,
+            LocalVariableLocation::FrameRelative { offset } => {
+                let frame_base = self
+                    .selected_frame
+                    .as_ref()
+                    .and_then(|frame| frame.frame_base)
+                    .or_else(|| frame_base_for_register_values(self, registers))
+                    .or_else(|| lookup_register(registers, "rsp"))?;
+                let address = VirtAddr(frame_base.wrapping_add_signed(i64::from(*offset)));
+                let mut bytes = [0u8; 8];
+                self.context_memory()
+                    .read_bytes(address, &mut bytes[..size])
+                    .ok()?;
+                Some(u64::from_le_bytes(bytes))
+            }
+            LocalVariableLocation::Unavailable { .. } => None,
         }
     }
 
@@ -3728,14 +3806,22 @@ impl Target {
     }
 
     pub fn enumerate_threads(&self) -> Result<Vec<ThreadInfo>> {
+        const MAX_ENUMERATED_THREADS: usize = 65_536;
         let processes = self.guest()?.enumerate_processes()?;
         let mut threads = Vec::new();
 
         for process in &processes {
+            if threads.len() >= MAX_ENUMERATED_THREADS {
+                break;
+            }
             let Ok(process_threads) = self.enumerate_threads_for_process_info(process) else {
                 continue;
             };
-            threads.extend(process_threads);
+            threads.extend(
+                process_threads
+                    .into_iter()
+                    .take(MAX_ENUMERATED_THREADS.saturating_sub(threads.len())),
+            );
         }
 
         Ok(threads)
@@ -3941,10 +4027,10 @@ impl Target {
         let modules = guest.process_modules(process).unwrap_or_default();
 
         let mut regions = Vec::new();
-        let mut stack = vec![root];
+        let mut stack = vec![(root, 0usize)];
         let mut visited = HashSet::new();
 
-        while let Some(node) = stack.pop() {
+        while let Some((node, level)) = stack.pop() {
             if node.is_zero() || !visited.insert(node.0) || visited.len() > 65536 {
                 continue;
             }
@@ -3952,16 +4038,22 @@ impl Target {
             let left = Self::canonical_vad_link(memory.read::<VirtAddr>(node + left_offset)?);
             let right = Self::canonical_vad_link(memory.read::<VirtAddr>(node + right_offset)?);
             if !right.is_zero() {
-                stack.push(right);
+                stack.push((right, level.saturating_add(1)));
             }
             if !left.is_zero() {
-                stack.push(left);
+                stack.push((left, level.saturating_add(1)));
             }
 
             let vad = node - vad_node_offset;
-            if let Some(region) =
-                self.read_vad_region(&memory, &vad_layout, flags_layout.as_deref(), vad, &modules)
-            {
+            if let Some(region) = self.read_vad_region(
+                &memory,
+                &vad_layout,
+                flags_layout.as_deref(),
+                node,
+                level,
+                vad,
+                &modules,
+            ) {
                 regions.push(region);
             }
         }
@@ -4032,6 +4124,8 @@ impl Target {
         memory: &impl MemoryOps<VirtAddr>,
         vad_layout: &TypeInfo,
         flags_layout: Option<&TypeInfo>,
+        node_address: VirtAddr,
+        level: usize,
         vad: VirtAddr,
         modules: &[ModuleInfo],
     ) -> Option<MemoryRegionInfo> {
@@ -4070,6 +4164,8 @@ impl Target {
             .map(|module| module.name.clone());
 
         Some(MemoryRegionInfo {
+            node_address,
+            level,
             start,
             end,
             protection,

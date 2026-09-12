@@ -68,6 +68,29 @@ impl RegisterMap {
         Ok(u64::from_le_bytes(buf))
     }
 
+    /// Read a register whose wire representation is at most 128 bits.
+    /// Smaller registers are zero-extended in the same little-endian order as
+    /// [`read_u64`]. This is used for the AMD64 XMM/FltSave and ARM64 V
+    /// registers exposed by KD's CONTEXT packet.
+    pub fn read_u128<S>(&self, name: S, data: &[u8]) -> Result<u128>
+    where
+        S: Into<String> + AsRef<str>,
+    {
+        let info = self
+            .by_name
+            .get(name.as_ref())
+            .ok_or(Error::RegisterNotFound(name.into()))?;
+        if info.offset + info.size > data.len() {
+            return Err(Error::BufferNotEnough);
+        }
+        let slice = &data[info.offset..info.offset + info.size];
+
+        let mut buf = [0u8; 16];
+        let copy_len = slice.len().min(buf.len());
+        buf[..copy_len].copy_from_slice(&slice[..copy_len]);
+        Ok(u128::from_le_bytes(buf))
+    }
+
     pub fn write_u64<S>(&self, name: S, data: &mut [u8], value: u64) -> Result<()>
     where
         S: Into<String> + AsRef<str>,
@@ -288,5 +311,15 @@ mod tests {
         let error = arm64.require_amd64_target().unwrap_err();
         assert!(matches!(error, Error::UnsupportedArchitecture(_)));
         assert!(error.to_string().contains("ARM64 register description"));
+    }
+
+    #[test]
+    fn reads_128_bit_registers_without_truncation() {
+        let xml = r#"<target><feature name="core">
+            <reg name="xmm0" bitsize="128"/>
+        </feature></target>"#;
+        let map = RegisterMap::parse_target_xml(xml);
+        let value = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeffu128;
+        assert_eq!(map.read_u128("xmm0", &value.to_le_bytes()).unwrap(), value);
     }
 }

@@ -6,7 +6,7 @@ Analyse a Windows kernel crash dump (`.dmp`) offline, without a running VM:
 ntoseye --dump /path/to/MEMORY.DMP
 ```
 
-Full and kernel memory dumps are supported. BSOD dumps give you the crash registers, stack trace, and bugcheck analysis automatically; live system dumps (bugcheck 0x161) have memory but no exception context.
+Full and kernel dumps, plus kernel triage (small/minidump) dumps, are supported. BSOD dumps give you the crash registers, stack trace, and bugcheck analysis automatically; live system dumps (bugcheck 0x161) have memory but no exception context.
 
 Available commands include `ps`, `lm`, `dt`, `dq`/`db`/`dd`, `dqs`, `da`/`du`, `analyze`, `trap`, `x`, `ev`, `drivers`, and `s`. Execution control, breakpoints, and register/memory writes are not available (the dump is read-only).
 
@@ -17,7 +17,17 @@ import ntoseye
 dbg = ntoseye.attach("dmp", connect="/path/to/MEMORY.DMP")
 ```
 
-So does the MCP server: pass `--dump` at startup (`ntoseye --dump /path/to/MEMORY.DMP mcp`), or start it with `ntoseye mcp` (no flags) and let the client load a dump later via the `open_dump` tool.
+So does the MCP server: pass `--dump` at startup (`ntoseye --dump /path/to/MEMORY.DMP mcp`), or start it with `ntoseye mcp` (no flags) and let the client load a dump later via the `open` tool with `backend: dump` and the dump path as `connect`.
+
+## Writing a dump from a live target
+
+From a live halted target, use the WinDbg-compatible command:
+
+```text
+.dump [/f] [/ma] <file>
+```
+
+This streams a `PAGEDU64` full kernel dump page by page. It requires a live halted target with memory introspection and is currently supported only for AMD64; a static crash-dump session cannot write another dump. `/f` and `/ma` are accepted as full-dump switches. The resulting file can be reopened with `ntoseye --dump <file>`.
 
 ## Generating dumps
 

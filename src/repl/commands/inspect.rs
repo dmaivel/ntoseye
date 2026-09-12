@@ -9,35 +9,34 @@ use crate::expr::Expr;
 use crate::symbols::LocalVariableLocation;
 use crate::target::{irp_major_function_name, kthread_state_name, wait_reason_name};
 use crate::trapframe::read_ktrap_frame_at_or_current;
-use crate::triage_report::{
-    BlackboxState, FailureSignatureSource, TriageReport, WheaRecordState, exception_code_name,
-    filetime_to_iso,
-};
 use crate::types::VirtAddr;
 use crate::ui;
-use crate::unwind::{StackTrace, build_stacktrace, format_symbol, resolve_thread_trace_context};
+use crate::unwind::{
+    RecoveredStackTrace, StackTrace, build_stacktrace_with_context,
+    build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context,
+};
 
 use crate::repl::*;
 
 repl_command! {
     cmd_pte;
-    names: ["pte", "!pte"],
-    usage: "pte <address>",
+    names: ["!pte", "pte"],
+    usage: "!pte <address>",
     summary: "Display page table entries for an address.",
     completion: Expression,
 }
 
 repl_command! {
     cmd_pool;
-    names: ["pool", "!pool"],
-    usage: "pool <address-expression>",
+    names: ["!pool", "pool"],
+    usage: "!pool <address-expression>",
     summary: "Inspect the pool page containing an address.",
     completion: Expression,
 }
 
 repl_command! {
     cmd_registers;
-    names: ["registers", "r"],
+    names: ["r", "registers"],
     usage: "r [register[=expression]]",
     summary: "Display CPU registers or assign one register.",
     run_state: Halted,
@@ -45,8 +44,8 @@ repl_command! {
 
 repl_command! {
     cmd_k;
-    names: ["k", "kb", "kp", "kv"],
-    usage: "k|kb|kp|kv [count]",
+    names: ["kn", "k", "kb", "kp", "kv"],
+    usage: "kn|k|kb|kp|kv [count]",
     summary: "Display a stack; kp adds PDB parameter locations and kv provenance.",
     run_state: Halted,
 }
@@ -74,8 +73,8 @@ repl_command! {
 
 repl_command! {
     cmd_irp;
-    names: ["irp", "!irp"],
-    usage: "irp <address-expression>",
+    names: ["!irp", "irp"],
+    usage: "!irp <address-expression>",
     summary: "Inspect an IRP and its current IO_STACK_LOCATION.",
     completion: Expression,
 }
@@ -90,24 +89,24 @@ repl_command! {
 
 repl_command! {
     cmd_drvobj;
-    names: ["drvobj", "!drvobj"],
-    usage: "drvobj <driver-object-expression-or-name>",
+    names: ["!drvobj", "drvobj"],
+    usage: "!drvobj <driver-object-expression-or-name>",
     summary: "Inspect a DRIVER_OBJECT, its device chain and dispatch table.",
     completion: Driver,
 }
 
 repl_command! {
     cmd_devobj;
-    names: ["devobj", "!devobj"],
-    usage: "devobj <device-object-expression>",
+    names: ["!devobj", "devobj"],
+    usage: "!devobj <device-object-expression>",
     summary: "Inspect a DEVICE_OBJECT and its attached stack.",
     completion: Expression,
 }
 
 repl_command! {
     cmd_object;
-    names: ["object", "!object"],
-    usage: "object <object-expression>",
+    names: ["!object", "object"],
+    usage: "!object <object-expression>",
     summary: "Inspect an executive object header and body.",
     completion: Expression,
 }
@@ -137,422 +136,10 @@ repl_command! {
 
 repl_command! {
     cmd_trap;
-    names: ["trap", ".trap"],
-    usage: "trap [address-expression]",
+    names: [".trap", "trap"],
+    usage: ".trap [address-expression]",
     summary: "Decode and display a _KTRAP_FRAME (defaults to the current thread's saved frame).",
     completion: Expression,
-}
-
-repl_command! {
-    cmd_analyze();
-    names: ["analyze", "!analyze"],
-    usage: "analyze",
-    summary: "Display a coherent first-pass crash triage report.",
-}
-
-const ANALYZE_STACK_LIMIT: usize = 16;
-const ANALYZE_MODULE_LIMIT: usize = 16;
-const ANALYZE_UNLOADED_LIMIT: usize = 12;
-
-fn print_triage_report(report: &TriageReport) {
-    outln!("{}", ui::label("crash analysis"));
-
-    match &report.bugcheck {
-        Some(analysis) => {
-            outln!();
-            print_bugcheck_analysis(analysis);
-        }
-        None => outln!("{}", ui::muted("no recorded bugcheck")),
-    }
-
-    if let Some(exception) = &report.exception {
-        print_section("exception");
-        outln!(
-            "  {} {} ({:#010x})",
-            ui::muted("code   "),
-            exception_code_name(exception.code),
-            exception.code
-        );
-        outln!("  {} {}", ui::muted("address"), ui::addr(exception.address));
-        outln!("  {} {:#x}", ui::muted("flags  "), exception.flags);
-        for (index, parameter) in exception.parameters.iter().enumerate() {
-            outln!(
-                "  {} {}",
-                ui::muted(&format!("param {} ", index + 1)),
-                ui::addr(*parameter)
-            );
-        }
-    }
-
-    print_section("faulting context");
-    outln!(
-        "  {} {}",
-        ui::muted("state  "),
-        if report.status.running {
-            "running"
-        } else {
-            "halted"
-        }
-    );
-    outln!(
-        "  {} {}",
-        ui::muted("thread "),
-        ui::thread_id(&report.status.current_thread)
-    );
-    if let Some(rip) = report.status.rip {
-        let symbol = report
-            .status
-            .symbol
-            .as_deref()
-            .map(|symbol| format!("  {}", ui::symbol(symbol)))
-            .unwrap_or_default();
-        outln!("  {} {}{}", ui::muted("rip    "), ui::addr(rip), symbol);
-    }
-    if let Some(process) = &report.status.process {
-        outln!(
-            "  {} {} (pid {}, eprocess {})",
-            ui::muted("scope  "),
-            process.name,
-            process.pid,
-            ui::addr(process.eprocess_va.0)
-        );
-    }
-    if !report.status.coherent {
-        outln!(
-            "  {}",
-            ui::muted("target metadata is still being rebuilt after reload")
-        );
-    }
-    if let Some(context) = &report.crash_context {
-        let process = context.process_name.as_deref().unwrap_or("unknown");
-        let pid = context
-            .process_id
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".into());
-        let tid = context
-            .thread_id
-            .map(|tid| tid.to_string())
-            .unwrap_or_else(|| "unknown".into());
-        outln!(
-            "  {} {} (pid {}, tid {})",
-            ui::muted("crash  "),
-            process,
-            pid,
-            tid
-        );
-        if let Some(parent) = context.parent_process_id {
-            outln!("  {} {}", ui::muted("parent "), parent);
-        }
-        if let Some(status) = context.exit_status {
-            outln!("  {} {:#x}", ui::muted("process exit"), status as u32);
-        }
-        if let Some(status) = context.thread_exit_status {
-            outln!("  {} {:#x}", ui::muted("thread exit "), status as u32);
-        }
-        if let Some(time) = context.create_time
-            && let Some(time) = filetime_to_iso(time)
-        {
-            outln!("  {} {}", ui::muted("created"), time);
-        }
-    }
-    if let Some(prcb) = &report.prcb {
-        outln!(
-            "  {} #{} thread {}  {} MHz  {}",
-            ui::muted("processor"),
-            prcb.processor_number,
-            ui::addr(prcb.current_thread),
-            prcb.mhz,
-            prcb.vendor_string
-        );
-    }
-
-    match &report.backtrace {
-        Some(trace) => print_stacktrace_data(trace, ANALYZE_STACK_LIMIT, true),
-        None if report.status.running => {
-            print_section("stack");
-            outln!("  {}", ui::muted("unavailable while target is running"));
-        }
-        None => {
-            print_section("stack");
-            outln!("  {}", ui::muted("unavailable from captured context"));
-        }
-    }
-    if !report.warnings.is_empty() {
-        print_section("warnings");
-        for warning in &report.warnings {
-            outln!("  {}", ui::muted(warning));
-        }
-    }
-
-    print_crash_intelligence(report);
-    print_report_modules(report);
-    print_dump_metadata(report);
-}
-
-fn print_crash_intelligence(report: &TriageReport) {
-    if let Some(signature) = &report.failure_signature {
-        print_section("failure signature");
-        outln!("  {}", signature.bucket);
-        let source = match signature.source {
-            FailureSignatureSource::BugcheckFault => "bugcheck fault",
-            FailureSignatureSource::ExceptionAddress => "exception address",
-            FailureSignatureSource::CurrentInstruction => "current instruction",
-            FailureSignatureSource::TopFrame => "top frame",
-            FailureSignatureSource::CodeOnly => "code only",
-        };
-        outln!("  {}", ui::muted(&format!("source: {source}")));
-    }
-
-    if let Some(culprit) = &report.culprit {
-        print_section("culprit attribution");
-        outln!(
-            "  {}  {}",
-            ui::symbol(&culprit.module),
-            ui::muted(&format!("{:?} confidence", culprit.confidence).to_ascii_lowercase())
-        );
-        for evidence in &culprit.evidence {
-            match evidence.address {
-                Some(address) => outln!(
-                    "  {} {}  {}",
-                    ui::muted(&format!("{:?}", evidence.kind)),
-                    ui::addr(address),
-                    evidence.detail
-                ),
-                None => outln!(
-                    "  {}  {}",
-                    ui::muted(&format!("{:?}", evidence.kind)),
-                    evidence.detail
-                ),
-            }
-        }
-    }
-
-    if let Some(verifier) = &report.verifier {
-        print_section("driver verifier");
-        outln!(
-            "  {} ({:#x}) subcode {:#x}: {}",
-            verifier.bugcheck_name,
-            verifier.bugcheck_code,
-            verifier.subcode,
-            verifier.subcode_description
-        );
-        if let Some(driver) = &verifier.associated_driver {
-            outln!("  {} {}", ui::muted("driver"), ui::symbol(driver));
-        }
-        for address in &verifier.addresses {
-            outln!(
-                "  {} {}",
-                ui::muted(&address.role),
-                ui::addr(address.address)
-            );
-        }
-        for argument in &verifier.arguments {
-            outln!("  {}  {}", ui::addr(argument.value), argument.description);
-        }
-    }
-
-    if let Some(whea) = &report.whea {
-        print_section("WHEA");
-        if let Some(address) = whea.record_address {
-            outln!("  {} {}", ui::muted("record"), ui::addr(address));
-        }
-        match &whea.state {
-            WheaRecordState::Decoded(record) => {
-                outln!(
-                    "  revision {:#x}, severity {:#x}, length {:#x}, {} sections",
-                    record.revision,
-                    record.severity,
-                    record.length,
-                    record.sections.len()
-                );
-                for section in &record.sections {
-                    outln!(
-                        "  +{:#x} len {:#x} severity {:#x}  {}",
-                        section.offset,
-                        section.length,
-                        section.severity,
-                        section.section_type
-                    );
-                }
-            }
-            WheaRecordState::Unavailable { reason } => {
-                outln!("  {}", ui::muted(&format!("unavailable: {reason}")));
-            }
-        }
-    }
-
-    if !report.blackboxes.is_empty() {
-        print_section("blackbox streams");
-        for blackbox in &report.blackboxes {
-            let size = blackbox
-                .size
-                .map(|size| format!(", {size:#x} bytes"))
-                .unwrap_or_default();
-            match &blackbox.state {
-                BlackboxState::PresentUnparsed => {
-                    outln!(
-                        "  {}{}  {}",
-                        blackbox.name,
-                        size,
-                        ui::muted("present, unparsed")
-                    );
-                }
-                BlackboxState::Unavailable { reason } => {
-                    outln!("  {}{}  {}", blackbox.name, size, ui::muted(reason));
-                }
-            }
-        }
-    }
-}
-
-fn print_report_modules(report: &TriageReport) {
-    print_section("loaded modules");
-    let relevant_count = report
-        .modules
-        .iter()
-        .filter(|module| report.loaded_module_is_relevant(module))
-        .count();
-    if relevant_count == 0 {
-        outln!(
-            "  {}",
-            ui::muted(&format!(
-                "{} loaded; none contain a recorded fault or stack address",
-                report.modules.len()
-            ))
-        );
-    } else {
-        for module in report
-            .modules
-            .iter()
-            .filter(|module| report.loaded_module_is_relevant(module))
-            .take(ANALYZE_MODULE_LIMIT)
-        {
-            outln!(
-                "  {:<24} {}-{}  {:#x} bytes",
-                module.name,
-                ui::addr(module.base_address.0),
-                ui::addr(module.end_address().0),
-                module.size
-            );
-        }
-        if relevant_count > ANALYZE_MODULE_LIMIT {
-            outln!(
-                "  {}",
-                ui::muted(&format!(
-                    "... {} more address-matched modules",
-                    relevant_count - ANALYZE_MODULE_LIMIT
-                ))
-            );
-        }
-        outln!(
-            "  {}",
-            ui::muted(&format!("{} loaded modules total", report.modules.len()))
-        );
-    }
-
-    if report.unloaded_drivers.is_empty() {
-        return;
-    }
-    print_section("unloaded modules");
-    let mut shown = 0;
-    for driver in report
-        .unloaded_drivers
-        .iter()
-        .filter(|driver| report.unloaded_driver_is_relevant(driver))
-        .take(ANALYZE_UNLOADED_LIMIT)
-    {
-        outln!(
-            "  {:<24} {}-{}  {}",
-            driver.name,
-            ui::addr(driver.start_address),
-            ui::addr(driver.end_address),
-            ui::muted("recorded address/name match")
-        );
-        shown += 1;
-    }
-    for driver in report
-        .unloaded_drivers
-        .iter()
-        .filter(|driver| !report.unloaded_driver_is_relevant(driver))
-        .take(ANALYZE_UNLOADED_LIMIT - shown)
-    {
-        outln!(
-            "  {:<24} {}-{}",
-            driver.name,
-            ui::addr(driver.start_address),
-            ui::addr(driver.end_address)
-        );
-        shown += 1;
-    }
-    if report.unloaded_drivers.len() > shown {
-        outln!(
-            "  {}",
-            ui::muted(&format!(
-                "... {} more unloaded modules",
-                report.unloaded_drivers.len() - shown
-            ))
-        );
-    }
-}
-
-fn print_dump_metadata(report: &TriageReport) {
-    if report.system_info.is_none()
-        && report.broken_driver.is_none()
-        && report.triage_overflowed.is_none()
-    {
-        return;
-    }
-
-    print_section("dump metadata");
-    if let Some(info) = &report.system_info {
-        let machine = match info.machine_image_type {
-            0x014c => "I386",
-            0x8664 => "AMD64",
-            0xAA64 => "ARM64",
-            _ => "Unknown",
-        };
-        outln!(
-            "  {} Windows {}.{}  {}  service-pack build {}",
-            ui::muted("system "),
-            info.major_version,
-            info.minor_version,
-            machine,
-            info.service_pack_build
-        );
-        if info.system_up_time > 0 {
-            outln!(
-                "  {} {} seconds",
-                ui::muted("uptime "),
-                info.system_up_time / 10_000_000
-            );
-        }
-        if info.system_time > 0
-            && let Some(time) = filetime_to_iso(info.system_time as u64)
-        {
-            outln!("  {} {}", ui::muted("time   "), time);
-        }
-        outln!(
-            "  {} {}  suite {:#x}",
-            ui::muted("product"),
-            match info.product_type {
-                1 => "Workstation",
-                2 => "DomainController",
-                3 => "Server",
-                _ => "Unknown",
-            },
-            info.suite_mask
-        );
-    }
-    if let Some(driver) = &report.broken_driver {
-        outln!("  {} {}", ui::muted("recorded broken driver"), driver);
-    }
-    if let Some(overflowed) = report.triage_overflowed {
-        outln!(
-            "  {} {}",
-            ui::muted("triage overflow"),
-            if overflowed { "yes" } else { "no" }
-        );
-    }
 }
 
 impl ReplState<'_> {
@@ -614,6 +201,17 @@ impl ReplState<'_> {
             },
             None => None,
         };
+        if address.is_none()
+            && self
+                .ctx
+                .target
+                .current_thread_pseudo_register("trapframe")
+                .is_none()
+        {
+            self.clear_selected_frame();
+            outln!("selected context reset\n");
+            return Ok(());
+        }
         match read_ktrap_frame_at_or_current(&self.ctx.target, address) {
             Ok(frame) => {
                 // Trap frames are kernel structures; resolve the interrupted
@@ -621,8 +219,11 @@ impl ReplState<'_> {
                 // analysis does.
                 let trace =
                     resolve_thread_trace_context(&self.ctx.target, self.ctx.target.kernel_dtb());
-                let symbol = format_symbol(&self.ctx.target, &trace, frame.rip);
+                let symbol = format_symbol(&self.ctx.target, &trace, frame.instruction_pointer());
                 print_ktrap_frame(&frame, Some(&symbol));
+                let registers = super::frames::registers_from_trap_frame(&frame);
+                let selected = self.select_register_values(0, registers);
+                outln!("selected trap context frame 00 at {}", ui::addr(selected));
                 outln!();
             }
             Err(e) => {
@@ -630,13 +231,6 @@ impl ReplState<'_> {
             }
         }
 
-        Ok(())
-    }
-
-    fn cmd_analyze(&mut self) -> Result<()> {
-        let report = TriageReport::build(self.ctx);
-        print_triage_report(&report);
-        outln!();
         Ok(())
     }
 
@@ -711,6 +305,41 @@ impl ReplState<'_> {
     }
 
     fn cmd_registers(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if let Some(frame) = self.ctx.target.selected_frame.as_ref() {
+            let tail = invocation.raw_tail.trim();
+            if tail.contains('=') {
+                error!(
+                    "cannot assign registers while frame {} is selected; use `.cxr`/`.frame` reset first",
+                    frame.index
+                );
+                return Ok(());
+            }
+            if !tail.is_empty() && tail.split_whitespace().count() != 1 {
+                outln!("{}\n", command_help(invocation.name));
+                return Ok(());
+            }
+            outln!("registers (frame {})", frame.index);
+            if !tail.is_empty() {
+                let name = tail.trim_start_matches('@');
+                let lowered_name = name.to_ascii_lowercase();
+                let requested = match lowered_name.as_str() {
+                    "efl" | "rflags" => "eflags",
+                    name => name,
+                };
+                if let Some(value) = crate::target::lookup_register(&frame.registers, requested) {
+                    outln!("{}={}", requested, ui::addr(value));
+                } else {
+                    error!(
+                        "register not recovered in frame {}: {}",
+                        frame.index, requested
+                    );
+                }
+            } else {
+                print_selected_registers(&frame.registers);
+            }
+            outln!();
+            return Ok(());
+        }
         if self.ctx.parked_windows_thread().is_some() {
             error!(
                 "selected Windows thread is parked and has no coherent register context; use `vcpu <id>`"
@@ -831,7 +460,7 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn print_stack_parameters(&self, trace: &StackTrace) -> Result<()> {
+    fn print_stack_parameters(&self, trace: &StackTrace, frame_offset: usize) -> Result<()> {
         let mut printed_header = false;
         for (index, frame) in trace.frames.iter().enumerate() {
             let address = VirtAddr(frame.ip);
@@ -877,8 +506,8 @@ impl ReplState<'_> {
                     }
                 };
                 outln!(
-                    "  #{}  {:<24} {:<20} {}",
-                    index,
+                    "  #{:02}  {:<24} {:<20} {}",
+                    index + frame_offset,
                     parameter.name,
                     parameter.type_name,
                     location
@@ -905,7 +534,6 @@ impl ReplState<'_> {
             },
             None => 64,
         };
-
         if self.ctx.parked_windows_thread().is_some() {
             let trace = match self.ctx.backtrace(frame_limit) {
                 Ok(trace) => trace,
@@ -914,57 +542,72 @@ impl ReplState<'_> {
                     return Ok(());
                 }
             };
-            match invocation.name {
-                "kv" => print_stacktrace_data_with_provenance(&trace, frame_limit, false),
-                "kp" => {
-                    print_stacktrace_data_with_provenance(&trace, frame_limit, false);
-                    self.print_stack_parameters(&trace)?;
-                }
-                _ => print_stacktrace_data(&trace, frame_limit, false),
+            if invocation.name.eq_ignore_ascii_case("kv") {
+                print_stacktrace_data_with_provenance(&trace, frame_limit, false);
+            } else {
+                print_stacktrace_data(&trace, frame_limit, false);
+            }
+            if invocation.name.eq_ignore_ascii_case("kp") {
+                self.print_stack_parameters(&trace, 0)?;
             }
             outln!();
             return Ok(());
         }
 
-        if let Err(e) = self
-            .ctx
-            .backend
-            .set_current_thread(&self.ctx.current_thread)
-        {
-            error!("failed to select execution context: {:?}", e);
-            return Ok(());
-        }
-
-        let regs = match self.ctx.read_registers() {
-            Ok(r) => r,
-            Err(e) => {
-                error!("failed to read registers: {:?}", e);
+        let trace = if let Some(selected) = self.ctx.target.selected_frame.as_ref() {
+            build_stacktrace_with_register_values(
+                &self.ctx.target,
+                &self.ctx.register_map,
+                &selected.registers,
+                frame_limit,
+            )
+        } else {
+            if let Err(e) = self
+                .ctx
+                .backend
+                .set_current_thread(&self.ctx.current_thread)
+            {
+                error!("failed to select execution context: {:?}", e);
                 return Ok(());
             }
+            let regs = match self.ctx.read_registers() {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("failed to read registers: {:?}", e);
+                    return Ok(());
+                }
+            };
+            build_stacktrace_with_context(
+                &self.ctx.target,
+                &self.ctx.register_map,
+                &regs,
+                frame_limit,
+            )
         };
-
-        match invocation.name {
-            "kv" => print_stacktrace_verbose(
-                &self.ctx.target,
-                &self.ctx.register_map,
-                &regs,
-                frame_limit,
-                frame_limit,
-            ),
-            "kp" => {
-                let trace =
-                    build_stacktrace(&self.ctx.target, &self.ctx.register_map, &regs, frame_limit);
-                print_stacktrace_data_with_provenance(&trace, frame_limit, false);
-                self.print_stack_parameters(&trace)?;
-            }
-            _ => print_stacktrace(
-                &self.ctx.target,
-                &self.ctx.register_map,
-                &regs,
-                frame_limit,
-                frame_limit,
-                false,
-            ),
+        let offset = self
+            .ctx
+            .target
+            .selected_frame
+            .as_ref()
+            .map(|frame| frame.index)
+            .unwrap_or(0);
+        print_indexed_stacktrace(
+            &trace,
+            frame_limit,
+            offset,
+            invocation.name.eq_ignore_ascii_case("kv"),
+            self.ctx.target.selected_frame.as_ref().map(|_| offset),
+        );
+        if invocation.name.eq_ignore_ascii_case("kp") {
+            let plain = StackTrace {
+                frames: trace
+                    .frames
+                    .iter()
+                    .map(|frame| frame.frame.clone())
+                    .collect(),
+                truncated: trace.truncated,
+            };
+            self.print_stack_parameters(&plain, offset)?;
         }
         outln!();
 
@@ -1526,6 +1169,64 @@ impl ReplState<'_> {
         outln!();
 
         Ok(())
+    }
+}
+
+fn print_selected_registers(registers: &std::collections::HashMap<String, u64>) {
+    let mut names: Vec<_> = registers.keys().collect();
+    names.sort();
+    for name in names {
+        outln!("  {:<8} {}", name, ui::addr(registers[name]));
+    }
+}
+
+fn print_indexed_stacktrace(
+    trace: &RecoveredStackTrace,
+    display_limit: usize,
+    frame_offset: usize,
+    show_provenance: bool,
+    selected_index: Option<usize>,
+) {
+    for (index, recovered) in trace.frames.iter().take(display_limit).enumerate() {
+        let frame = &recovered.frame;
+        let global_index = frame_offset + index;
+        let marker = if selected_index == Some(global_index) {
+            "*"
+        } else {
+            " "
+        };
+        let symbol = if frame.symbol.starts_with("0x") {
+            frame.symbol.clone()
+        } else {
+            ui::symbol(&frame.symbol)
+        };
+        let provenance = if show_provenance {
+            format!("  [{}]", frame.source.as_str())
+        } else {
+            String::new()
+        };
+        let location = frame
+            .source_location
+            .as_ref()
+            .map(|location| format!("  [{}:{}]", location.file, location.line))
+            .unwrap_or_default();
+        outln!(
+            "{}{:02} {}  {}{}{}",
+            marker,
+            global_index,
+            ui::addr(frame.sp),
+            ui::addr(frame.ip),
+            if symbol.is_empty() {
+                "".to_string()
+            } else {
+                format!("  {symbol}")
+            },
+            format!("{provenance}{location}")
+        );
+    }
+    let hidden = trace.frames.len().saturating_sub(display_limit) + trace.truncated;
+    if hidden > 0 {
+        outln!("{}", format!("... {} more frames", hidden).bright_black());
     }
 }
 

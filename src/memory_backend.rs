@@ -49,6 +49,8 @@ impl DebugBackend for MemoryBackend {
             BackendCapability::unsupported(DebugCapability::BugcheckDetection),
             BackendCapability::unsupported(DebugCapability::BugcheckDetails),
             BackendCapability::unsupported(DebugCapability::DebugOutput),
+            BackendCapability::unsupported(DebugCapability::Msr),
+            BackendCapability::unsupported(DebugCapability::TargetControl),
         ]
     }
 

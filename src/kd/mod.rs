@@ -107,6 +107,10 @@ const DBG_KD_LOAD_SYMBOLS_STATE_CHANGE: u32 = 0x0000_3031;
 const DBG_KD_COMMAND_STRING_STATE_CHANGE: u32 = 0x0000_3032;
 
 const AMD64_DEBUG_CONTROL_SPACE_KSPECIAL: u64 = 2;
+/// ARM64 `KSPECIAL_REGISTERS` is read from control-space base zero. The field
+/// order/size is the public WoA definition; no cached ARM64 ntkrnlmp PDB is
+/// available in this source tree to replace those ABI offsets.
+const ARM64_DEBUG_CONTROL_SPACE_KSPECIAL: u64 = 0;
 
 fn detect_arch(machine_type: u16) -> Result<Arch> {
     match Arch::from_machine_type(machine_type) {
@@ -132,8 +136,20 @@ const KSPECIAL_REGISTERS_DR2_OFFSET: usize = 0x30;
 const KSPECIAL_REGISTERS_DR3_OFFSET: usize = 0x38;
 const KSPECIAL_REGISTERS_DR6_OFFSET: usize = 0x40;
 const KSPECIAL_REGISTERS_DR7_OFFSET: usize = 0x48;
+// KDESCRIPTOR has Pad[3], Limit, and Base, so its Base is eight bytes into
+// the descriptor even though the descriptor itself starts at these offsets.
+const KSPECIAL_REGISTERS_GDTR_OFFSET: usize = 0x50;
+const KSPECIAL_REGISTERS_IDTR_OFFSET: usize = 0x60;
+const KSPECIAL_REGISTERS_TR_OFFSET: usize = 0x70;
+const KSPECIAL_REGISTERS_LDTR_OFFSET: usize = 0x72;
 const KSPECIAL_REGISTERS_CR8_OFFSET: usize = 0xA0;
 const KSPECIAL_REGISTERS_MIN_SIZE: usize = KSPECIAL_REGISTERS_CR8_OFFSET + 8;
+const ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET: usize = 0x28;
+const ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET: usize = 0x68;
+const ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET: usize = 0x88;
+const ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET: usize = 0x98;
+const ARM64_KSPECIAL_REGISTERS_MIN_SIZE: usize = 0xA0;
+const MSR_EFER: u32 = 0xC000_0080;
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
 const KD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -165,17 +181,92 @@ const KD_EXIT_MAX_CONTINUES: u32 = 8;
 /// burst, so a timeout this size only ever fires in the idle gap between packets.
 const PUMP_POLL: Duration = Duration::from_millis(100);
 const KD_REMOTE_MEMORY_CHUNK: usize = 0x800;
-const AMD64_DTB_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-const ARM64_TTBR_BADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 /// Windows KD encoding of `TTBR1_EL1`: op0=3, op1=0, CRn=2, CRm=0, op2=1.
 const ARM64_WINDBG_TTBR1_EL1: u32 = 0x0003_0201;
+/// Windows KD encodings of ARM64 system registers (op0/op1/CRn/CRm/op2).
+const ARM64_WINDBG_TTBR0_EL1: u32 = 0x0003_0200;
+const ARM64_WINDBG_ESR_EL1: u32 = 0x0003_0520;
+const ARM64_WINDBG_FAR_EL1: u32 = 0x0003_0600;
+
+const ARM64_DEBUG_REGISTER_OFFSETS: &[(usize, usize, usize, usize)] = &[
+    (
+        ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET,
+        context_arm64::OFFSET_BVR0,
+        8,
+        hwbp::ARM64_MAX_BREAKPOINTS as usize,
+    ),
+    (
+        ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET,
+        context_arm64::OFFSET_BCR0,
+        4,
+        hwbp::ARM64_MAX_BREAKPOINTS as usize,
+    ),
+    (
+        ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET,
+        context_arm64::OFFSET_WVR0,
+        8,
+        hwbp::ARM64_MAX_WATCHPOINTS as usize,
+    ),
+    (
+        ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET,
+        context_arm64::OFFSET_WCR0,
+        4,
+        hwbp::ARM64_MAX_WATCHPOINTS as usize,
+    ),
+];
 
 fn normalize_kernel_dtb(arch: Arch, register_value: u64) -> Dtb {
+    register_value & arch.dtb_page_mask()
+}
+
+fn kspecial_control_space(arch: Arch) -> (u64, usize) {
     match arch {
-        Arch::Amd64 => register_value & AMD64_DTB_MASK,
-        // Strip the 16-bit ASID and the possible upper-table 0x800 offset.
-        Arch::Arm64 => register_value & ARM64_TTBR_BADDR_MASK,
+        Arch::Amd64 => (
+            AMD64_DEBUG_CONTROL_SPACE_KSPECIAL,
+            KSPECIAL_REGISTERS_MIN_SIZE,
+        ),
+        Arch::Arm64 => (
+            ARM64_DEBUG_CONTROL_SPACE_KSPECIAL,
+            ARM64_KSPECIAL_REGISTERS_MIN_SIZE,
+        ),
     }
+}
+
+fn arm64_slot_offsets(slot: u8) -> Result<(usize, usize)> {
+    if hwbp::ARM64_WATCHPOINT_SLOTS.contains(&slot) {
+        Ok((
+            ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET + slot as usize * 8,
+            ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET + slot as usize * 4,
+        ))
+    } else if hwbp::ARM64_BREAKPOINT_SLOTS.contains(&slot) {
+        let index = (slot - hwbp::ARM64_BREAKPOINT_SLOTS.start) as usize;
+        Ok((
+            ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET + index * 8,
+            ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET + index * 4,
+        ))
+    } else {
+        Err(Error::Kd(format!(
+            "invalid ARM64 hardware breakpoint slot {slot} (expected 0-{})",
+            hwbp::ARM64_BREAKPOINT_SLOTS.end - 1
+        )))
+    }
+}
+
+fn arm64_slot_offsets_for_access(slot: u8, access: HwBreakpointAccess) -> Result<(usize, usize)> {
+    let slots = hwbp::arm64_slot_range(access);
+    if slots.contains(&slot) {
+        return arm64_slot_offsets(slot);
+    }
+    let kind = if matches!(access, HwBreakpointAccess::Execute) {
+        "execute"
+    } else {
+        "watchpoint"
+    };
+    Err(Error::Kd(format!(
+        "ARM64 {kind} slot {slot} is outside slots {}-{}",
+        slots.start,
+        slots.end - 1
+    )))
 }
 
 fn thread_id_for(processor: u16) -> String {
@@ -208,6 +299,30 @@ fn parse_thread_id_for_processor_count(tid: &str, processor_count: u16) -> Resul
 
 fn should_advance_pc_before_continue(exception_code: u32, managed_breakpoint_stop: bool) -> bool {
     exception_code == STATUS_BREAKPOINT && !managed_breakpoint_stop
+}
+
+/// Whether the instruction at `pc` is the KD breakpoint instruction (`int3`
+/// on AMD64, `BRK #0xF000` on ARM64), read through the target so it reflects
+/// what will execute on resume. An unreadable PC returns `true` to preserve
+/// hard-coded breaks in unmapped-looking places.
+fn breakpoint_instruction_at(
+    framing: &mut KdFraming<KdTransport>,
+    arch: Arch,
+    processor: u16,
+    pc: u64,
+) -> bool {
+    const INT3: [u8; 1] = [0xcc];
+    const BRK_F000: [u8; 4] = 0xD43E_0000u32.to_le_bytes();
+    let expected: &[u8] = match arch {
+        Arch::Amd64 => &INT3,
+        Arch::Arm64 => &BRK_F000,
+    };
+    match with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+        api::read_virtual_memory(framing, processor, pc, expected.len() as u32)
+    }) {
+        Ok(bytes) => bytes == expected,
+        Err(_) => true,
+    }
 }
 
 /// Whether a stop seen during exit is a stray single-step: `STATUS_SINGLE_STEP`
@@ -248,6 +363,30 @@ fn append_control_registers_from_special(ctx: &mut Vec<u8>, special: &[u8]) -> R
     copy_reg(ctx, context::OFFSET_DR6, KSPECIAL_REGISTERS_DR6_OFFSET);
     copy_reg(ctx, context::OFFSET_DR7, KSPECIAL_REGISTERS_DR7_OFFSET);
     copy_reg(ctx, context::OFFSET_CR8, KSPECIAL_REGISTERS_CR8_OFFSET);
+    // KDESCRIPTOR layout is Pad[3] (6 bytes), Limit (2 bytes), Base (8
+    // bytes). The register map stores each value in a synthetic 8-byte slot;
+    // only the descriptor's meaningful bytes are copied for the limits.
+    ctx[context::OFFSET_GDTR_LIMIT..context::OFFSET_GDTR_LIMIT + 2].copy_from_slice(
+        &special[KSPECIAL_REGISTERS_GDTR_OFFSET + 6..KSPECIAL_REGISTERS_GDTR_OFFSET + 8],
+    );
+    copy_reg(
+        ctx,
+        context::OFFSET_GDTR_BASE,
+        KSPECIAL_REGISTERS_GDTR_OFFSET + 8,
+    );
+    ctx[context::OFFSET_IDTR_LIMIT..context::OFFSET_IDTR_LIMIT + 2].copy_from_slice(
+        &special[KSPECIAL_REGISTERS_IDTR_OFFSET + 6..KSPECIAL_REGISTERS_IDTR_OFFSET + 8],
+    );
+    copy_reg(
+        ctx,
+        context::OFFSET_IDTR_BASE,
+        KSPECIAL_REGISTERS_IDTR_OFFSET + 8,
+    );
+    ctx[context::OFFSET_TR..context::OFFSET_TR + 2]
+        .copy_from_slice(&special[KSPECIAL_REGISTERS_TR_OFFSET..KSPECIAL_REGISTERS_TR_OFFSET + 2]);
+    ctx[context::OFFSET_LDTR..context::OFFSET_LDTR + 2].copy_from_slice(
+        &special[KSPECIAL_REGISTERS_LDTR_OFFSET..KSPECIAL_REGISTERS_LDTR_OFFSET + 2],
+    );
     Ok(())
 }
 
@@ -273,6 +412,41 @@ fn update_special_debug_registers_from_context(special: &mut [u8], ctx: &[u8]) -
             .copy_from_slice(&ctx[ctx_offset..ctx_offset + 8]);
     }
     Ok(())
+}
+
+fn update_arm64_debug_registers_from_context(special: &mut [u8], ctx: &[u8]) -> Result<()> {
+    if special.len() < ARM64_KSPECIAL_REGISTERS_MIN_SIZE {
+        return Err(Error::Kd(format!(
+            "ARM64 KSPECIAL_REGISTERS buffer too short: {} bytes, expected at least {}",
+            special.len(),
+            ARM64_KSPECIAL_REGISTERS_MIN_SIZE
+        )));
+    }
+    if ctx.len() < context_arm64::CONTEXT_SIZE {
+        return Err(Error::Kd(format!(
+            "ARM64 CONTEXT buffer too short: {} bytes, expected {}",
+            ctx.len(),
+            context_arm64::CONTEXT_SIZE
+        )));
+    }
+    copy_arm64_debug_registers(special, ctx, false);
+    Ok(())
+}
+
+fn copy_arm64_debug_registers(dst: &mut [u8], src: &[u8], to_context: bool) {
+    for &(special_base, context_base, width, count) in ARM64_DEBUG_REGISTER_OFFSETS {
+        let (dst_base, src_base) = if to_context {
+            (context_base, special_base)
+        } else {
+            (special_base, context_base)
+        };
+        for index in 0..count {
+            let dst_offset = dst_base + index * width;
+            let src_offset = src_base + index * width;
+            dst[dst_offset..dst_offset + width]
+                .copy_from_slice(&src[src_offset..src_offset + width]);
+        }
+    }
 }
 
 fn context_payload(data: &[u8]) -> Result<&[u8]> {
@@ -306,6 +480,12 @@ fn stop_event(stop: StateChange) -> StopEvent {
 struct DebugRegisterSlotState {
     address: u64,
     dr7: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Arm64DebugRegisterSlotState {
+    address: u64,
+    control: u32,
 }
 
 /// Who holds the transport, which is the same question as what the target
@@ -391,6 +571,7 @@ pub struct KdBackend {
     breakin_addresses: HashSet<u64>,
     pending_write_breakpoint: Option<PendingWriteBreakpoint>,
     special_register_cache: HashMap<u16, Vec<u8>>,
+    efer_cache: HashMap<u16, u64>,
     /// Set after an explicit frontend cleanup. Prevents `Drop` from overriding
     /// a deliberate halted exit after breakpoint restoration failed.
     exit_prepared: bool,
@@ -564,9 +745,34 @@ impl KdBackend {
         // A second handle on the same transport lets the foreground send an
         // unframed break-in byte while the pump owns `framing` for reading.
         let breakin_clone = framing.transport_mut().try_clone()?;
+
+        // A target left waiting on a debugger that died mid-breakpoint reports
+        // its stop again to us, at the breakpoint's address. The kernel has
+        // dropped that table entry and its `int3` by the time the RESET
+        // handshake completes, so the byte at PC tells the two cases apart: a
+        // hard-coded break (`cc`, a break-in site to remember) or a stale
+        // breakpoint hit (resume in place; never treat that address as a
+        // break-in, or later real hits there would be absorbed as noise).
+        let mut stopped_on_stale_breakpoint = false;
+        if initial_stop.exception_code == STATUS_BREAKPOINT {
+            stopped_on_stale_breakpoint = !breakpoint_instruction_at(
+                &mut framing,
+                arch,
+                initial_stop.processor,
+                initial_stop.program_counter,
+            );
+            if stopped_on_stale_breakpoint {
+                kd_trace!(
+                    "kd: initial stop at {:#x} was a stale breakpoint; resuming in place",
+                    initial_stop.program_counter
+                );
+            }
+        }
+
         let mut breakin_addresses = HashSet::new();
         if initial_stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE
             && initial_stop.exception_code == STATUS_BREAKPOINT
+            && !stopped_on_stale_breakpoint
         {
             breakin_addresses.insert(initial_stop.program_counter);
         }
@@ -587,9 +793,12 @@ impl KdBackend {
             managed_bp_addresses: HashSet::new(),
             breakin_addresses,
             pending_write_breakpoint: None,
-            last_stop_was_managed_breakpoint: false,
+            // A restored stale breakpoint reads like one of ours for resume:
+            // the `int3` is gone, so the PC must not be advanced.
+            last_stop_was_managed_breakpoint: stopped_on_stale_breakpoint,
             reconnect_assist_after_continue: None,
             special_register_cache: HashMap::new(),
+            efer_cache: HashMap::new(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -868,12 +1077,14 @@ impl KdBackend {
         self.last_rip = stop.program_counter;
         self.last_stop_was_managed_breakpoint = managed_breakpoint_stop;
         self.special_register_cache.clear();
+        self.efer_cache.clear();
         self.link.set_inline_running(false);
     }
 
     fn record_running(&mut self) {
         self.link.set_inline_running(true);
         self.special_register_cache.clear();
+        self.efer_cache.clear();
         self.translations.resume();
     }
 
@@ -882,6 +1093,32 @@ impl KdBackend {
             Arch::Amd64 => context::CONTEXT_ALL,
             Arch::Arm64 => context_arm64::CONTEXT_ALL,
         }
+    }
+
+    /// Whether resuming from the last stop must skip an `int3` at its PC.
+    /// The exception code and the managed-breakpoint bookkeeping are only
+    /// hints: another processor can report a hit on one of our breakpoints
+    /// after we have already restored the original byte for a step-over, and
+    /// a stale table breakpoint from a dead session is restored on attach.
+    /// Advancing past a byte that is no longer `int3` resumes inside an
+    /// instruction (observed: `sub rsp,0x88` -> double fault), so the byte at
+    /// PC is read through the target, which reflects what will execute.
+    fn stop_pc_is_raw_int3(&mut self, processor: u16) -> Result<bool> {
+        if !should_advance_pc_before_continue(
+            self.last_exception_code,
+            self.last_stop_was_managed_breakpoint,
+        ) {
+            return Ok(false);
+        }
+        let pc = self.last_rip;
+        let arch = self.arch;
+        let raw = breakpoint_instruction_at(self.framing()?, arch, processor, pc);
+        if !raw {
+            kd_trace!(
+                "kd: stop at {pc:#x} reported a breakpoint but memory holds none; resuming in place"
+            );
+        }
+        Ok(raw)
     }
 
     fn advance_pc_past_breakpoint(&mut self, processor: u16) -> Result<()> {
@@ -906,15 +1143,33 @@ impl KdBackend {
         self.write_special_registers(special)
     }
 
-    fn rollback_dr_slot_states(
+    fn read_arm64_slot_state(&mut self, slot: u8) -> Result<Arm64DebugRegisterSlotState> {
+        let special = self.read_special_registers_uncached(self.current_processor)?;
+        let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
+        Ok(Arm64DebugRegisterSlotState {
+            address: wire::read_u64(&special, address_offset),
+            control: wire::read_u32(&special, control_offset),
+        })
+    }
+
+    fn apply_arm64_restore(&mut self, slot: u8, state: Arm64DebugRegisterSlotState) -> Result<()> {
+        let mut special = self.read_special_registers_uncached(self.current_processor)?;
+        let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
+        wire::write_u64(&mut special, address_offset, state.address);
+        wire::write_u32(&mut special, control_offset, state.control);
+        self.write_special_registers(special)
+    }
+
+    fn rollback_slot_states<S: Copy>(
         &mut self,
         slot: u8,
-        states: &[(u16, DebugRegisterSlotState)],
+        states: &[(u16, S)],
+        mut restore: impl FnMut(&mut Self, u8, S) -> Result<()>,
     ) -> Result<()> {
         let mut first_error = None;
         for &(processor, state) in states.iter().rev() {
             self.current_processor = processor;
-            if let Err(error) = self.apply_dr_restore(slot, state)
+            if let Err(error) = restore(self, slot, state)
                 && first_error.is_none()
             {
                 first_error = Some(error);
@@ -926,24 +1181,25 @@ impl KdBackend {
         }
     }
 
-    /// Apply one DR-slot update to every processor as a transaction. The slot's
-    /// prior address and DR7 are captured before each write; any read/write
-    /// failure restores every processor that may have been modified, including
-    /// the one whose reply was lost. The caller's selected processor is always
-    /// restored.
-    fn update_dr_slot_on_all_processors(
+    /// Apply one hardware-slot update to every processor as a transaction.
+    /// Each processor's prior slot state is captured before its write; a
+    /// failure restores every processor that may have been modified.
+    fn update_slot_on_all_processors<S: Copy>(
         &mut self,
         slot: u8,
+        slot_count: u8,
         operation: &str,
+        label: &str,
+        mut read: impl FnMut(&mut Self, u8) -> Result<S>,
+        mut restore: impl FnMut(&mut Self, u8, S) -> Result<()>,
         mut update: impl FnMut(&mut Self) -> Result<()>,
     ) -> Result<()> {
-        if slot >= HW_BREAKPOINT_SLOTS {
+        if slot >= slot_count {
             return Err(Error::Kd(format!(
-                "invalid hardware breakpoint slot {slot} (expected 0-{max})",
-                max = HW_BREAKPOINT_SLOTS - 1
+                "invalid hardware breakpoint slot {slot} (expected 0-{})",
+                slot_count.saturating_sub(1)
             )));
         }
-
         let saved = self.current_processor;
         let result = (|| {
             let mut applied = Vec::with_capacity(self.processor_count.max(1) as usize);
@@ -951,7 +1207,7 @@ impl KdBackend {
 
             for processor in 0..self.processor_count.max(1) {
                 self.current_processor = processor;
-                let previous = match self.read_dr_slot_state(slot) {
+                let previous = match read(self, slot) {
                     Ok(previous) => previous,
                     Err(error) => {
                         failure = Some(error);
@@ -968,15 +1224,53 @@ impl KdBackend {
             let Some(error) = failure else {
                 return Ok(());
             };
-            match self.rollback_dr_slot_states(slot, &applied) {
+            match self.rollback_slot_states(slot, &applied, &mut restore) {
                 Ok(()) => Err(error),
                 Err(rollback_error) => Err(Error::Kd(format!(
-                    "hardware breakpoint {operation} failed: {error}; rollback also failed: {rollback_error}"
+                    "{label} {operation} failed: {error}; rollback also failed: {rollback_error}"
                 ))),
             }
         })();
         self.current_processor = saved;
         result
+    }
+
+    fn apply_arm64_set(
+        &mut self,
+        slot: u8,
+        addr: u64,
+        access: HwBreakpointAccess,
+        len: u8,
+    ) -> Result<()> {
+        let (address_offset, control_offset) = arm64_slot_offsets_for_access(slot, access)?;
+        if matches!(access, HwBreakpointAccess::Execute) && (len != 1 || !addr.is_multiple_of(4)) {
+            return Err(Error::Rsp(
+                "ARM64 execute hardware breakpoints require a 4-byte-aligned address and length 1"
+                    .into(),
+            ));
+        }
+
+        let mut special = self.read_special_registers_uncached(self.current_processor)?;
+        if matches!(access, HwBreakpointAccess::Execute) {
+            wire::write_u64(&mut special, address_offset, addr);
+            wire::write_u32(&mut special, control_offset, hwbp::arm64_bcr_value(addr));
+        } else {
+            wire::write_u64(&mut special, address_offset, hwbp::arm64_wvr_address(addr));
+            wire::write_u32(
+                &mut special,
+                control_offset,
+                hwbp::arm64_wcr_value(addr, access, len),
+            );
+        }
+        self.write_special_registers(special)
+    }
+
+    fn apply_arm64_clear(&mut self, slot: u8) -> Result<()> {
+        let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
+        let mut special = self.read_special_registers_uncached(self.current_processor)?;
+        wire::write_u64(&mut special, address_offset, 0);
+        wire::write_u32(&mut special, control_offset, 0);
+        self.write_special_registers(special)
     }
 
     fn kspecial_dr_offset(slot: u8) -> usize {
@@ -1012,32 +1306,42 @@ impl KdBackend {
     }
 
     fn read_special_registers_uncached(&mut self, processor: u16) -> Result<Vec<u8>> {
+        let (base, size) = kspecial_control_space(self.arch);
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::read_control_space(
-                framing,
-                processor,
-                AMD64_DEBUG_CONTROL_SPACE_KSPECIAL,
-                KSPECIAL_REGISTERS_MIN_SIZE as u32,
-            )
+            api::read_control_space(framing, processor, base, size as u32)
         })
+    }
+
+    fn read_msr_value(&mut self, processor: u16, msr: u32) -> Result<u64> {
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::read_machine_specific_register(framing, processor, msr)
+        })
+    }
+
+    fn validate_processor(&self, processor: u16) -> Result<()> {
+        if processor >= self.processor_count.max(1) {
+            return Err(Error::Kd(format!(
+                "processor {} is out of range (target reports {} processor(s))",
+                processor + 1,
+                self.processor_count.max(1)
+            )));
+        }
+        Ok(())
     }
 
     fn write_special_registers(&mut self, special: Vec<u8>) -> Result<()> {
         let processor = self.current_processor;
+        let (base, expected_size) = kspecial_control_space(self.arch);
         let actual = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::write_control_space(
-                framing,
-                processor,
-                AMD64_DEBUG_CONTROL_SPACE_KSPECIAL,
-                &special,
-            )
+            api::write_control_space(framing, processor, base, &special)
         })?;
         if actual as usize != special.len() {
             return Err(Error::Kd(format!(
-                "short KSPECIAL_REGISTERS write on processor {}: wrote {} of {} bytes",
+                "short KSPECIAL_REGISTERS write on processor {}: wrote {} of {} bytes (requested layout size {})",
                 processor + 1,
                 actual,
-                special.len()
+                special.len(),
+                expected_size,
             )));
         }
         self.special_register_cache.insert(processor, special);
@@ -1067,11 +1371,63 @@ impl KdBackend {
                 append_control_registers_from_special(ctx, special)
             }
             Arch::Arm64 => {
-                // The ARM64 CONTEXT carries no TTBR; fill the synthetic `cr3`
-                // slot (TTBR1_EL1) from guest discovery.
+                if ctx.len() < context_arm64::CONTEXT_SIZE {
+                    return Err(Error::Kd(format!(
+                        "ARM64 CONTEXT buffer too short: {} bytes, expected {}",
+                        ctx.len(),
+                        context_arm64::CONTEXT_SIZE
+                    )));
+                }
+                let ttbr0 =
+                    match self.read_msr_value(self.current_processor, ARM64_WINDBG_TTBR0_EL1) {
+                        Ok(value) => value & Arch::Arm64.dtb_page_mask(),
+                        Err(error) => {
+                            kd_trace!("kd: ARM64 TTBR0_EL1 read unavailable: {error}");
+                            0
+                        }
+                    };
+                let (esr, far) = if self.last_exception_code == STATUS_SINGLE_STEP {
+                    let esr =
+                        match self.read_msr_value(self.current_processor, ARM64_WINDBG_ESR_EL1) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                kd_trace!("kd: ARM64 ESR_EL1 read unavailable: {error}");
+                                0
+                            }
+                        };
+                    let far =
+                        match self.read_msr_value(self.current_processor, ARM64_WINDBG_FAR_EL1) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                kd_trace!("kd: ARM64 FAR_EL1 read unavailable: {error}");
+                                0
+                            }
+                        };
+                    (esr, far)
+                } else {
+                    (0, 0)
+                };
+                let kernel_dtb = self.kernel_dtb_override;
+                let special = self.read_special_registers()?;
+                if special.len() < ARM64_KSPECIAL_REGISTERS_MIN_SIZE {
+                    return Err(Error::Kd(format!(
+                        "ARM64 KSPECIAL_REGISTERS buffer too short: {} bytes, expected at least {}",
+                        special.len(),
+                        ARM64_KSPECIAL_REGISTERS_MIN_SIZE
+                    )));
+                }
                 ctx.resize(context_arm64::REGISTER_BUFFER_SIZE, 0);
                 ctx[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
-                    .copy_from_slice(&self.kernel_dtb_override.to_le_bytes());
+                    .copy_from_slice(&kernel_dtb.to_le_bytes());
+                ctx[context_arm64::OFFSET_TTBR0..context_arm64::OFFSET_TTBR0 + 8]
+                    .copy_from_slice(&ttbr0.to_le_bytes());
+                copy_arm64_debug_registers(ctx, special, true);
+                if self.last_exception_code == STATUS_SINGLE_STEP {
+                    ctx[context_arm64::OFFSET_ESR..context_arm64::OFFSET_ESR + 8]
+                        .copy_from_slice(&esr.to_le_bytes());
+                    ctx[context_arm64::OFFSET_FAR..context_arm64::OFFSET_FAR + 8]
+                        .copy_from_slice(&far.to_le_bytes());
+                }
                 Ok(())
             }
         }
@@ -1105,10 +1461,7 @@ impl KdBackend {
 
     fn continue_stopped_for_exit(&mut self) -> Result<()> {
         let processor = self.last_stop_processor;
-        if should_advance_pc_before_continue(
-            self.last_exception_code,
-            self.last_stop_was_managed_breakpoint,
-        ) {
+        if self.stop_pc_is_raw_int3(processor)? {
             self.advance_pc_past_breakpoint(processor)?;
         }
         self.continue_preserving_dr7(processor, api::DBG_CONTINUE, false)?;
@@ -1364,7 +1717,8 @@ impl KdBackend {
             return false;
         };
         let cr3 = wire::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
-        cr3 & AMD64_DTB_MASK == root & AMD64_DTB_MASK
+        let mask = self.arch.dtb_page_mask();
+        cr3 & mask == root & mask
     }
 
     fn read_virtual_bytes(&mut self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
@@ -1432,6 +1786,23 @@ impl DebugBackend for KdBackend {
         })?;
         kd_trace!("kd: read_registers: got {} context bytes", ctx.len());
         self.append_control_registers(&mut ctx)?;
+        if self.arch == Arch::Amd64 {
+            let efer = self.efer_cache.get(&processor).copied().or_else(|| {
+                match self.read_msr_value(processor, MSR_EFER) {
+                    Ok(value) => {
+                        self.efer_cache.insert(processor, value);
+                        Some(value)
+                    }
+                    Err(error) => {
+                        kd_trace!("kd: EFER read unavailable: {error}");
+                        None
+                    }
+                }
+            });
+            if let Some(efer) = efer {
+                wire::write_u64(&mut ctx, context::OFFSET_EFER, efer);
+            }
+        }
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());
         if trace_enabled() {
             let cr3 = self.register_map.read_u64("cr3", &ctx).unwrap_or(0);
@@ -1472,7 +1843,13 @@ impl DebugBackend for KdBackend {
                         processor,
                         &data[..context_arm64::CONTEXT_SIZE],
                     )
-                })
+                })?;
+                // ARM64 hardware state is authoritative in KSPECIAL_REGISTERS,
+                // while CONTEXT exposes the same BVR/BCR and WVR/WCR fields.
+                // Keep both views coherent when a full context is written.
+                let mut special = self.read_special_registers_uncached(processor)?;
+                update_arm64_debug_registers_from_context(&mut special, data)?;
+                self.write_special_registers(special)
             }
         }
     }
@@ -1531,9 +1908,23 @@ impl DebugBackend for KdBackend {
     }
 
     fn supports_watchpoints(&self) -> bool {
-        // AArch64 has no x86-style debug registers; hardware watchpoints would
-        // need DBGWCR/DBGWVR support in the KD transport.
-        self.arch == Arch::Amd64
+        // Both architectures expose per-processor debug state through KD
+        // KSPECIAL_REGISTERS (DR0-DR7 on AMD64; BVR/BCR and WVR/WCR on ARM64).
+        matches!(self.arch, Arch::Amd64 | Arch::Arm64)
+    }
+
+    fn hardware_breakpoint_slots(&self) -> u8 {
+        match self.arch {
+            Arch::Amd64 => HW_BREAKPOINT_SLOTS,
+            Arch::Arm64 => hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS,
+        }
+    }
+
+    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<u8> {
+        match self.arch {
+            Arch::Amd64 => 0..HW_BREAKPOINT_SLOTS,
+            Arch::Arm64 => hwbp::arm64_slot_range(access),
+        }
     }
 
     fn set_hardware_breakpoint(
@@ -1546,11 +1937,34 @@ impl DebugBackend for KdBackend {
         if !self.supports_watchpoints() {
             return Err(Error::NotSupported);
         }
-        // DR state is per-processor, so program every CPU: watched code can run
-        // anywhere. The shared transaction prevents an untracked partial set.
-        self.update_dr_slot_on_all_processors(slot, "install", |backend| {
-            backend.apply_dr_set(slot, addr, access, len)
-        })
+        match self.arch {
+            Arch::Amd64 => {
+                // DR state is per-processor, so program every CPU: watched code
+                // can run anywhere. The shared transaction prevents an
+                // untracked partial set.
+                self.update_slot_on_all_processors(
+                    slot,
+                    HW_BREAKPOINT_SLOTS,
+                    "install",
+                    "hardware breakpoint",
+                    |backend, slot| backend.read_dr_slot_state(slot),
+                    |backend, slot, state| backend.apply_dr_restore(slot, state),
+                    |backend| backend.apply_dr_set(slot, addr, access, len),
+                )
+            }
+            Arch::Arm64 => {
+                arm64_slot_offsets_for_access(slot, access)?;
+                self.update_slot_on_all_processors(
+                    slot,
+                    hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS,
+                    "install",
+                    "ARM64 hardware breakpoint",
+                    |backend, slot| backend.read_arm64_slot_state(slot),
+                    |backend, slot, state| backend.apply_arm64_restore(slot, state),
+                    |backend| backend.apply_arm64_set(slot, addr, access, len),
+                )
+            }
+        }
     }
 
     fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
@@ -1559,13 +1973,82 @@ impl DebugBackend for KdBackend {
         }
         // A failed disable/remove must leave the manager's still-enabled entry
         // truthful, so clearing receives the same rollback guarantee as set.
-        self.update_dr_slot_on_all_processors(slot, "clear", |backend| backend.apply_dr_clear(slot))
+        match self.arch {
+            Arch::Amd64 => self.update_slot_on_all_processors(
+                slot,
+                HW_BREAKPOINT_SLOTS,
+                "clear",
+                "hardware breakpoint",
+                |backend, slot| backend.read_dr_slot_state(slot),
+                |backend, slot, state| backend.apply_dr_restore(slot, state),
+                |backend| backend.apply_dr_clear(slot),
+            ),
+            Arch::Arm64 => {
+                arm64_slot_offsets(slot)?;
+                self.update_slot_on_all_processors(
+                    slot,
+                    hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS,
+                    "clear",
+                    "ARM64 hardware breakpoint",
+                    |backend, slot| backend.read_arm64_slot_state(slot),
+                    |backend, slot, state| backend.apply_arm64_restore(slot, state),
+                    |backend| backend.apply_arm64_clear(slot),
+                )
+            }
+        }
     }
 
     fn supports_user_mode_breakpoints(&self) -> bool {
-        // GuestMemoryPatch user-mode breakpoints write an x86 `int3`; the
-        // AArch64 equivalent (4-byte `brk #0xF000`) is not wired up yet.
-        self.arch == Arch::Amd64
+        // GuestMemoryPatch emits `int3` on AMD64 and `brk #0xF000` on ARM64.
+        matches!(self.arch, Arch::Amd64 | Arch::Arm64)
+    }
+
+    fn supports_msr(&self) -> bool {
+        true
+    }
+
+    fn read_msr(&mut self, processor: u16, msr: u32) -> Result<u64> {
+        self.validate_processor(processor)?;
+        self.read_msr_value(processor, msr)
+    }
+
+    fn write_msr(&mut self, processor: u16, msr: u32, value: u64) -> Result<()> {
+        self.validate_processor(processor)?;
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::write_machine_specific_register(framing, processor, msr, value)
+        })?;
+        if msr == MSR_EFER {
+            self.efer_cache.insert(processor, value);
+        }
+        Ok(())
+    }
+
+    fn supports_target_control(&self) -> bool {
+        true
+    }
+
+    fn reboot_target(&mut self) -> Result<()> {
+        let processor = self.current_processor;
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::reboot(framing, processor)
+        })?;
+        // Reboot has no manipulate-state reply: after the transport ACK the
+        // kernel resets the KD stream and eventually emits a fresh state
+        // change. Keep the backend visibly running and let the pump perform
+        // the existing reconnect/reload detection dance.
+        self.record_running();
+        self.start_pump(Some(Duration::ZERO), None)
+    }
+
+    fn cause_bugcheck(&mut self) -> Result<()> {
+        let processor = self.current_processor;
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::cause_bugcheck(framing, processor)
+        })?;
+        // The target reports the resulting bugcheck state-change asynchronously
+        // through the normal KD pump, just like a guest-triggered crash.
+        self.record_running();
+        self.start_pump(None, None)
     }
 
     fn optional_capabilities(&self) -> Vec<BackendCapability> {
@@ -1583,6 +2066,14 @@ impl DebugBackend for KdBackend {
             BackendCapability::supported(DebugCapability::BugcheckDetection),
             BackendCapability::supported(DebugCapability::BugcheckDetails),
             BackendCapability::supported(DebugCapability::DebugOutput),
+            BackendCapability {
+                capability: DebugCapability::Msr,
+                supported: self.supports_msr(),
+            },
+            BackendCapability {
+                capability: DebugCapability::TargetControl,
+                supported: self.supports_target_control(),
+            },
         ]
     }
 
@@ -1635,10 +2126,7 @@ impl DebugBackend for KdBackend {
         disposition: ContinueDisposition,
     ) -> Result<()> {
         let resume_processor = self.last_stop_processor;
-        if should_advance_pc_before_continue(
-            self.last_exception_code,
-            self.last_stop_was_managed_breakpoint,
-        ) {
+        if self.stop_pc_is_raw_int3(resume_processor)? {
             kd_trace!(
                 "kd: continue: advancing p{} RIP past raw int3 (last_exception_code={:#x})",
                 resume_processor + 1,
@@ -1686,12 +2174,7 @@ impl DebugBackend for KdBackend {
         let processor = self.current_processor;
         // A raw int3 stop still points at the int3; stepping from there would
         // only execute it again and report the same stop.
-        if processor == self.last_stop_processor
-            && should_advance_pc_before_continue(
-                self.last_exception_code,
-                self.last_stop_was_managed_breakpoint,
-            )
-        {
+        if processor == self.last_stop_processor && self.stop_pc_is_raw_int3(processor)? {
             self.advance_pc_past_breakpoint(processor)?;
         }
         self.continue_preserving_dr7(processor, api::DBG_CONTINUE, true)?;
@@ -1893,6 +2376,14 @@ impl DebugBackend for KdBackendHandle {
         self.lock().supports_watchpoints()
     }
 
+    fn hardware_breakpoint_slots(&self) -> u8 {
+        self.lock().hardware_breakpoint_slots()
+    }
+
+    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<u8> {
+        self.lock().hardware_slot_range(access)
+    }
+
     fn set_hardware_breakpoint(
         &mut self,
         slot: u8,
@@ -1909,6 +2400,30 @@ impl DebugBackend for KdBackendHandle {
 
     fn supports_user_mode_breakpoints(&self) -> bool {
         self.lock().supports_user_mode_breakpoints()
+    }
+
+    fn supports_msr(&self) -> bool {
+        self.lock().supports_msr()
+    }
+
+    fn read_msr(&mut self, processor: u16, msr: u32) -> Result<u64> {
+        self.lock().read_msr(processor, msr)
+    }
+
+    fn write_msr(&mut self, processor: u16, msr: u32, value: u64) -> Result<()> {
+        self.lock().write_msr(processor, msr, value)
+    }
+
+    fn supports_target_control(&self) -> bool {
+        self.lock().supports_target_control()
+    }
+
+    fn reboot_target(&mut self) -> Result<()> {
+        self.lock().reboot_target()
+    }
+
+    fn cause_bugcheck(&mut self) -> Result<()> {
+        self.lock().cause_bugcheck()
     }
 
     fn optional_capabilities(&self) -> Vec<BackendCapability> {
@@ -2010,6 +2525,7 @@ impl Drop for KdBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET: usize = 0x10;
     use crate::guest::{Guest, WinObject};
     use crate::kd::framing::{
         PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
@@ -2164,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    fn arm64_capabilities_exclude_amd64_only_breakpoints() {
+    fn arm64_capabilities_include_debug_breakpoints() {
         let (_kernel, host) = UnixStream::pair().unwrap();
         let mut backend = kd_backend_with_framing(host);
         backend.arch = Arch::Arm64;
@@ -2177,13 +2693,9 @@ mod tests {
                 backend
                     .capabilities()
                     .iter()
-                    .any(|entry| { entry.capability == capability && !entry.supported })
+                    .any(|entry| { entry.capability == capability && entry.supported })
             );
         }
-        assert!(matches!(
-            backend.set_hardware_breakpoint(0, 0x1000, HwBreakpointAccess::Write, 4),
-            Err(Error::NotSupported)
-        ));
     }
 
     struct Loopback {
@@ -2530,6 +3042,18 @@ mod tests {
             .copy_from_slice(&0x350ef8u64.to_le_bytes());
         special[KSPECIAL_REGISTERS_CR8_OFFSET..KSPECIAL_REGISTERS_CR8_OFFSET + 8]
             .copy_from_slice(&2u64.to_le_bytes());
+        special[KSPECIAL_REGISTERS_GDTR_OFFSET + 6..KSPECIAL_REGISTERS_GDTR_OFFSET + 8]
+            .copy_from_slice(&0x1234u16.to_le_bytes());
+        special[KSPECIAL_REGISTERS_GDTR_OFFSET + 8..KSPECIAL_REGISTERS_GDTR_OFFSET + 16]
+            .copy_from_slice(&0xffff_f800_0000_1000u64.to_le_bytes());
+        special[KSPECIAL_REGISTERS_IDTR_OFFSET + 6..KSPECIAL_REGISTERS_IDTR_OFFSET + 8]
+            .copy_from_slice(&0x5678u16.to_le_bytes());
+        special[KSPECIAL_REGISTERS_IDTR_OFFSET + 8..KSPECIAL_REGISTERS_IDTR_OFFSET + 16]
+            .copy_from_slice(&0xffff_f800_0000_2000u64.to_le_bytes());
+        special[KSPECIAL_REGISTERS_TR_OFFSET..KSPECIAL_REGISTERS_TR_OFFSET + 2]
+            .copy_from_slice(&0x40u16.to_le_bytes());
+        special[KSPECIAL_REGISTERS_LDTR_OFFSET..KSPECIAL_REGISTERS_LDTR_OFFSET + 2]
+            .copy_from_slice(&0x48u16.to_le_bytes());
         special[KSPECIAL_REGISTERS_DR0_OFFSET..KSPECIAL_REGISTERS_DR0_OFFSET + 8]
             .copy_from_slice(&0xffff_f804_1234_5678u64.to_le_bytes());
         special[KSPECIAL_REGISTERS_DR6_OFFSET..KSPECIAL_REGISTERS_DR6_OFFSET + 8]
@@ -2549,6 +3073,12 @@ mod tests {
         assert_eq!(map.read_u64("dr6", &ctx).unwrap(), 5);
         assert_eq!(map.read_u64("dr7", &ctx).unwrap(), 0x402);
         assert_eq!(map.read_u64("cr8", &ctx).unwrap(), 2);
+        assert_eq!(map.read_u64("gdtr", &ctx).unwrap(), 0xffff_f800_0000_1000);
+        assert_eq!(map.read_u64("gdtr_limit", &ctx).unwrap(), 0x1234);
+        assert_eq!(map.read_u64("idtr", &ctx).unwrap(), 0xffff_f800_0000_2000);
+        assert_eq!(map.read_u64("idtr_limit", &ctx).unwrap(), 0x5678);
+        assert_eq!(map.read_u64("tr", &ctx).unwrap(), 0x40);
+        assert_eq!(map.read_u64("ldtr", &ctx).unwrap(), 0x48);
     }
 
     #[test]
@@ -2574,6 +3104,41 @@ mod tests {
         );
         assert_eq!(
             wire::read_u64(&special, KSPECIAL_REGISTERS_CR0_OFFSET),
+            0xa5a5_a5a5_a5a5_a5a5,
+            "non-debug special registers must remain untouched"
+        );
+    }
+
+    #[test]
+    fn arm64_context_debug_registers_update_special_registers() {
+        let mut ctx = vec![0u8; context_arm64::CONTEXT_SIZE];
+        let mut special = vec![0xa5; ARM64_KSPECIAL_REGISTERS_MIN_SIZE];
+        let map = context_arm64::build_register_map();
+        map.write_u64("bvr0", &mut ctx, 0x4000).unwrap();
+        map.write_u64("bcr0", &mut ctx, 0xe9e1).unwrap();
+        map.write_u64("wvr1", &mut ctx, 0x5000).unwrap();
+        map.write_u64("wcr1", &mut ctx, 0x0000_e9e1).unwrap();
+
+        update_arm64_debug_registers_from_context(&mut special, &ctx).unwrap();
+
+        assert_eq!(
+            wire::read_u64(&special, ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET),
+            0x4000
+        );
+        assert_eq!(
+            wire::read_u32(&special, ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET),
+            0xe9e1
+        );
+        assert_eq!(
+            wire::read_u64(&special, ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET + 8),
+            0x5000
+        );
+        assert_eq!(
+            wire::read_u32(&special, ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET + 4),
+            0x0000_e9e1
+        );
+        assert_eq!(
+            wire::read_u64(&special, ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET),
             0xa5a5_a5a5_a5a5_a5a5,
             "non-debug special registers must remain untouched"
         );
@@ -2718,6 +3283,7 @@ mod tests {
             breakin_addresses: HashSet::new(),
             pending_write_breakpoint: None,
             special_register_cache: HashMap::new(),
+            efer_cache: HashMap::new(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -2745,6 +3311,7 @@ mod tests {
             breakin_addresses: HashSet::new(),
             pending_write_breakpoint: None,
             special_register_cache: HashMap::new(),
+            efer_cache: HashMap::new(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),

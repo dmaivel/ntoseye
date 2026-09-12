@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::kd::{
     framing::{
         KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
-        PACKET_TYPE_KD_STATE_MANIPULATE,
+        PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
     },
     handle_debug_io, handle_file_io,
     wire::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64},
@@ -27,7 +27,12 @@ pub const DBGKD_WRITE_PHYSICAL_MEMORY: u32 = 0x0000_313E;
 pub const DBGKD_GET_VERSION: u32 = 0x0000_3146;
 pub const DBGKD_SWITCH_PROCESSOR: u32 = 0x0000_3150;
 pub const DBGKD_READ_MACHINE_SPECIFIC_REGISTER: u32 = 0x0000_3152;
+pub const DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER: u32 = 0x0000_3153;
+pub const DBGKD_REBOOT: u32 = 0x0000_313B;
+pub const DBGKD_CAUSE_BUGCHECK: u32 = 0x0000_3149;
 pub const DBGKD_SET_CONTEXT_EX: u32 = 0x0000_3160;
+
+const MANUALLY_INITIATED_CRASH: u32 = 0x0000_00e2;
 
 pub const DBGKD_VERS_FLAG_DATA: u16 = 0x0002;
 
@@ -115,6 +120,15 @@ fn recv_manipulate_reply(
             }
             PACKET_TYPE_KD_FILE_IO => {
                 handle_file_io(framing, &pkt.payload)?;
+                continue;
+            }
+            // A manipulate request is only sent to a halted target, and a
+            // halted target cannot reach a new stop: a state change here is
+            // the target re-announcing its current stop after a RESET resync
+            // (a reconnect to a target left waiting on a dead debugger). The
+            // request was ACKed after the resync, so its reply still follows.
+            PACKET_TYPE_KD_STATE_CHANGE64 => {
+                kd_trace!("kd: ignoring re-announced state change while awaiting manipulate reply");
                 continue;
             }
             other => {
@@ -213,6 +227,50 @@ pub fn read_machine_specific_register<T: Read + Write>(
     let low = read_u32(&reply_header, UNION_OFFSET + 4) as u64;
     let high = read_u32(&reply_header, UNION_OFFSET + 8) as u64;
     Ok(low | high << 32)
+}
+
+/// `DbgKdWriteMachineSpecificRegister` (`wrmsr` in WinDbg).
+///
+/// The request union is `{ Register: u32, DataLow: u32, DataHigh: u32 }`.
+/// Windows returns the same manipulate-state header with a status and no
+/// trailing payload.
+pub fn write_machine_specific_register<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    register: u32,
+    value: u64,
+) -> Result<()> {
+    let mut header = make_header(DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER, processor);
+    write_u32(&mut header, UNION_OFFSET, register);
+    write_u32(&mut header, UNION_OFFSET + 4, value as u32);
+    write_u32(&mut header, UNION_OFFSET + 8, (value >> 32) as u32);
+    let (parsed, _, _) = send_manipulate(framing, &header, &[])?;
+    check_status(&parsed, DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER)
+}
+
+/// Send a manipulate-state request whose API has no reply packet. The KD
+/// framing layer still waits for and validates the transport ACK; the target
+/// may then reset or stop independently (as reboot and bugcheck do).
+fn send_manipulate_no_reply<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    header: &[u8; MANIPULATE_HEADER_SIZE],
+) -> Result<()> {
+    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, header)
+}
+
+/// `DbgKdRebootApi`.
+pub fn reboot<T: Read + Write>(framing: &mut KdFraming<T>, processor: u16) -> Result<()> {
+    let header = make_header(DBGKD_REBOOT, processor);
+    send_manipulate_no_reply(framing, &header)
+}
+
+/// `DbgKdCauseBugCheckApi`.
+pub fn cause_bugcheck<T: Read + Write>(framing: &mut KdFraming<T>, processor: u16) -> Result<()> {
+    let mut header = make_header(DBGKD_CAUSE_BUGCHECK, processor);
+    // KdpCauseBugCheck reads the bugcheck code from the first DWORD of the
+    // manipulate-state union, rather than from the API number or payload.
+    write_u32(&mut header, UNION_OFFSET, MANUALLY_INITIATED_CRASH);
+    send_manipulate_no_reply(framing, &header)
 }
 
 pub fn get_context<T: Read + Write>(
@@ -498,8 +556,8 @@ pub fn continue_api2<T: Read + Write>(
 
 /// `DbgKdContinueApi2` for ARM64 targets. `ARM64_DBGKD_CONTROL_SET` packs
 /// { ContinueStatus u32, TraceFlag u32, CurrentSymbolStart u64,
-///   CurrentSymbolEnd u64 } — there is no Dr7 field (AArch64 has no x86-style
-/// debug registers; watchpoints use DBGWCR/DBGWVR). The kernel performs
+///   CurrentSymbolEnd u64 } — there is no Dr7 field (AArch64 uses its
+/// DBGBCR/DBGBVR and DBGWCR/DBGWVR state instead). The kernel performs
 /// single-stepping via MDSCR_EL1 when TraceFlag is set.
 pub fn continue_api2_arm64<T: Read + Write>(
     framing: &mut KdFraming<T>,
@@ -636,6 +694,16 @@ mod tests {
         stream
     }
 
+    fn ack_only(outbound_id: u32) -> Vec<u8> {
+        let mut stream = Vec::with_capacity(16);
+        stream.extend_from_slice(&0x6969_6969u32.to_le_bytes());
+        stream.extend_from_slice(&PACKET_TYPE_KD_ACKNOWLEDGE.to_le_bytes());
+        stream.extend_from_slice(&0u16.to_le_bytes());
+        stream.extend_from_slice(&outbound_id.to_le_bytes());
+        stream.extend_from_slice(&0u32.to_le_bytes());
+        stream
+    }
+
     fn build_reply(api: u32, processor: u16, union_body: &[u8], data: &[u8]) -> Vec<u8> {
         let mut payload = vec![0u8; MANIPULATE_HEADER_SIZE];
         write_u32(&mut payload, 0, api);
@@ -701,6 +769,56 @@ mod tests {
         assert_eq!(read_u32(request, 0), DBGKD_READ_MACHINE_SPECIFIC_REGISTER);
         assert_eq!(read_u16(request, 6), 3);
         assert_eq!(read_u32(request, UNION_OFFSET), 0x0003_0201);
+    }
+
+    #[test]
+    fn write_machine_specific_register_round_trip() {
+        let reply = build_reply(DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER, 2, &[], &[]);
+        let stream = ack_then_reply(
+            (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
+            INITIAL_PACKET_ID,
+            &reply,
+        );
+        let mut framing = KdFraming::new(Loopback::new(stream));
+
+        write_machine_specific_register(&mut framing, 2, 0xc000_0080, 0x1234_5678_9abc_def0)
+            .unwrap();
+
+        let request = &framing.transport_ref().outbound[16..16 + MANIPULATE_HEADER_SIZE];
+        assert_eq!(read_u32(request, 0), DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER);
+        assert_eq!(read_u16(request, 6), 2);
+        assert_eq!(read_u32(request, UNION_OFFSET), 0xc000_0080);
+        assert_eq!(read_u32(request, UNION_OFFSET + 4), 0x9abc_def0);
+        assert_eq!(read_u32(request, UNION_OFFSET + 8), 0x1234_5678);
+    }
+
+    #[test]
+    fn reboot_and_cause_bugcheck_are_acknowledged_without_reply_packets() {
+        for (api, send) in [
+            (
+                DBGKD_REBOOT,
+                reboot as fn(&mut KdFraming<Loopback>, u16) -> Result<()>,
+            ),
+            (
+                DBGKD_CAUSE_BUGCHECK,
+                cause_bugcheck as fn(&mut KdFraming<Loopback>, u16) -> Result<()>,
+            ),
+        ] {
+            let outbound_id = (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID;
+            let stream = ack_only(outbound_id);
+            let mut framing = KdFraming::new(Loopback::new(stream));
+
+            send(&mut framing, 7).unwrap();
+
+            let request = &framing.transport_ref().outbound[16..16 + MANIPULATE_HEADER_SIZE];
+            assert_eq!(read_u32(request, 0), api);
+            assert_eq!(read_u16(request, 6), 7);
+            if api == DBGKD_CAUSE_BUGCHECK {
+                assert_eq!(read_u32(request, UNION_OFFSET), MANUALLY_INITIATED_CRASH);
+            } else {
+                assert_eq!(read_u32(request, UNION_OFFSET), 0);
+            }
+        }
     }
 
     #[test]

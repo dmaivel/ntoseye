@@ -913,27 +913,8 @@ fn is_kernel_module(name: &str) -> bool {
     )
 }
 
-/// Stable exception-code label shared by report renderers.
 pub fn exception_code_name(code: u32) -> &'static str {
-    match code {
-        0xC0000005 => "STATUS_ACCESS_VIOLATION",
-        0xC000001D => "STATUS_ILLEGAL_INSTRUCTION",
-        0xC0000094 => "STATUS_INTEGER_DIVIDE_BY_ZERO",
-        0xC0000095 => "STATUS_INTEGER_OVERFLOW",
-        0xC0000096 => "STATUS_PRIVILEGED_INSTRUCTION",
-        0xC00000FD => "STATUS_STACK_OVERFLOW",
-        0xC0000006 => "STATUS_IN_PAGE_ERROR",
-        0x80000003 => "STATUS_BREAKPOINT",
-        0x80000004 => "STATUS_SINGLE_STEP",
-        0xC000008E => "STATUS_FLOAT_DIVIDE_BY_ZERO",
-        0xC0000090 => "STATUS_FLOAT_INVALID_OPERATION",
-        0xC0000091 => "STATUS_FLOAT_OVERFLOW",
-        0xC000008D => "STATUS_FLOAT_DENORMAL_OPERAND",
-        0xC0000092 => "STATUS_FLOAT_STACK_CHECK",
-        0xC0000093 => "STATUS_FLOAT_UNDERFLOW",
-        0xC000008F => "STATUS_FLOAT_INEXACT_RESULT",
-        _ => "unknown",
-    }
+    crate::ntstatus::ntstatus_name(code).unwrap_or("unknown")
 }
 
 /// Convert a Windows FILETIME value to an ISO-8601 UTC timestamp.

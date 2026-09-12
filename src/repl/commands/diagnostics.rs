@@ -5,7 +5,9 @@ use tabled::builder::Builder;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::repl::*;
-use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination, ResourceDetail};
+use crate::target::{
+    DiagnosticMetric, DiagnosticValue, ListTermination, ResourceDetail, SystemMemorySummary,
+};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -52,17 +54,76 @@ repl_command! {
     completion: Expression,
 }
 
-fn diagnostic_cell<T: Display>(value: &DiagnosticValue<T>) -> String {
+pub(crate) const DEFAULT_MEMORY_PROCESS_LIMIT: usize = 64;
+
+pub(crate) fn diagnostic_cell<T: Display>(value: &DiagnosticValue<T>) -> String {
     match value {
         DiagnosticValue::Available(value) => value.to_string(),
         DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
     }
 }
 
-fn diagnostic_metric_cell<T: Display>(metric: &DiagnosticMetric<T>) -> String {
+pub(crate) fn diagnostic_metric_cell<T: Display>(metric: &DiagnosticMetric<T>) -> String {
     match metric.source {
         Some(source) => format!("{} [{source}]", diagnostic_cell(&metric.value)),
         None => diagnostic_cell(&metric.value),
+    }
+}
+
+pub(crate) fn print_memory_use_summary(summary: &SystemMemorySummary, include_process_stats: bool) {
+    outln!("system memory (page counters are pages; nonpaged pool is bytes)");
+    outln!(
+        "  physical pages     : {}",
+        diagnostic_metric_cell(&summary.physical_pages)
+    );
+    outln!(
+        "  available pages    : {}",
+        diagnostic_metric_cell(&summary.available_pages)
+    );
+    outln!(
+        "  committed pages    : {}",
+        diagnostic_metric_cell(&summary.committed_pages)
+    );
+    outln!(
+        "  commit limit pages : {}",
+        diagnostic_metric_cell(&summary.commit_limit_pages)
+    );
+    outln!(
+        "  paged pool pages   : {}",
+        diagnostic_metric_cell(&summary.paged_pool_pages)
+    );
+    outln!(
+        "  nonpaged pool bytes: {}",
+        diagnostic_metric_cell(&summary.nonpaged_pool_bytes)
+    );
+    if include_process_stats && !summary.processes.is_empty() {
+        let mut builder = Builder::default();
+        builder.push_record([
+            "PID",
+            "Process",
+            "Virtual",
+            "Working set",
+            "Pagefile",
+            "Private",
+        ]);
+        for process in &summary.processes {
+            builder.push_record([
+                process.process.pid.to_string(),
+                process.process.name.clone(),
+                diagnostic_cell(&process.virtual_size),
+                diagnostic_cell(&process.working_set_size),
+                diagnostic_cell(&process.pagefile_usage),
+                diagnostic_cell(&process.private_usage),
+            ]);
+        }
+        print_padded_table(builder);
+    }
+    if include_process_stats && summary.truncated {
+        outln!(
+            "process list bounded: displayed {} of {}",
+            summary.processes.len(),
+            summary.process_count
+        );
     }
 }
 
@@ -407,63 +468,10 @@ impl ReplState<'_> {
                     return Ok(());
                 }
             },
-            None => 64,
+            None => DEFAULT_MEMORY_PROCESS_LIMIT,
         };
         match self.ctx.target.memory_use_summary(limit) {
-            Ok(summary) => {
-                outln!("system memory (page counters are pages; nonpaged pool is bytes)");
-                outln!(
-                    "  physical pages     : {}",
-                    diagnostic_metric_cell(&summary.physical_pages)
-                );
-                outln!(
-                    "  available pages    : {}",
-                    diagnostic_metric_cell(&summary.available_pages)
-                );
-                outln!(
-                    "  committed pages    : {}",
-                    diagnostic_metric_cell(&summary.committed_pages)
-                );
-                outln!(
-                    "  commit limit pages : {}",
-                    diagnostic_metric_cell(&summary.commit_limit_pages)
-                );
-                outln!(
-                    "  paged pool pages   : {}",
-                    diagnostic_metric_cell(&summary.paged_pool_pages)
-                );
-                outln!(
-                    "  nonpaged pool bytes: {}",
-                    diagnostic_metric_cell(&summary.nonpaged_pool_bytes)
-                );
-                let mut builder = Builder::default();
-                builder.push_record([
-                    "PID",
-                    "Process",
-                    "Virtual",
-                    "Working set",
-                    "Pagefile",
-                    "Private",
-                ]);
-                for process in summary.processes {
-                    builder.push_record([
-                        process.process.pid.to_string(),
-                        process.process.name,
-                        diagnostic_cell(&process.virtual_size),
-                        diagnostic_cell(&process.working_set_size),
-                        diagnostic_cell(&process.pagefile_usage),
-                        diagnostic_cell(&process.private_usage),
-                    ]);
-                }
-                print_padded_table(builder);
-                if summary.truncated {
-                    outln!(
-                        "process list bounded: displayed {} of {}",
-                        limit.clamp(1, 256),
-                        summary.process_count
-                    );
-                }
-            }
+            Ok(summary) => print_memory_use_summary(&summary, true),
             Err(error) => error!("{error}"),
         }
         Ok(())

@@ -1,7 +1,74 @@
 use iced_x86::{
-    Code, Decoder, DecoderOptions, Formatter, FormatterOutput, FormatterTextKind, Instruction,
-    MemorySizeOptions, NasmFormatter,
+    Code, Decoder, DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind,
+    Instruction, MemorySizeOptions, Mnemonic, NasmFormatter,
 };
+
+use crate::types::Arch;
+
+/// Control-flow class for the instruction at the start of a byte buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlFlow {
+    Call,
+    Ret,
+    Branch,
+    Other,
+}
+
+/// Classify the first instruction in `bytes` for the target architecture.
+/// Invalid or incomplete instructions are treated as [`ControlFlow::Other`].
+pub fn classify(bytes: &[u8], arch: Arch) -> ControlFlow {
+    if bytes.is_empty() {
+        return ControlFlow::Other;
+    }
+    match arch {
+        Arch::Amd64 => {
+            let mut decoder = Decoder::with_ip(64, bytes, 0, DecoderOptions::NONE);
+            let instruction = decoder.decode();
+            if instruction.code() == Code::INVALID {
+                return ControlFlow::Other;
+            }
+            if instruction.mnemonic() == Mnemonic::Call {
+                ControlFlow::Call
+            } else if instruction.mnemonic() == Mnemonic::Ret {
+                ControlFlow::Ret
+            } else if instruction.flow_control() != FlowControl::Next {
+                ControlFlow::Branch
+            } else {
+                ControlFlow::Other
+            }
+        }
+        Arch::Arm64 => {
+            if bytes.len() < 4 {
+                return ControlFlow::Other;
+            }
+            let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let Ok(instruction) = bad64::decode(word, 0) else {
+                return ControlFlow::Other;
+            };
+            let mnemonic = instruction.op().mnem();
+            // `blraa`/`blrab`/`blraaz`/`blrabz` are pointer-authenticated
+            // `blr`; Windows ARM64 kernels emit them.
+            if mnemonic == "bl" || mnemonic.starts_with("blr") {
+                ControlFlow::Call
+            } else if mnemonic.starts_with("ret") {
+                ControlFlow::Ret
+            } else if mnemonic == "b"
+                || mnemonic.starts_with("b.")
+                // `br`, `braa`, `brab`, `braaz`, `brabz`; never `brk`/SVE `brk*`.
+                || mnemonic == "br"
+                || mnemonic.starts_with("bra")
+                || mnemonic == "cbz"
+                || mnemonic == "cbnz"
+                || mnemonic == "tbz"
+                || mnemonic == "tbnz"
+            {
+                ControlFlow::Branch
+            } else {
+                ControlFlow::Other
+            }
+        }
+    }
+}
 
 /// NASM formatter configured for ntoseye's disassembly, so every call site
 /// decodes identically.
@@ -459,6 +526,34 @@ fn arm64_pcrel_comment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_control_flow_instructions() {
+        assert_eq!(
+            classify(&[0xe8, 0, 0, 0, 0], Arch::Amd64),
+            ControlFlow::Call
+        );
+        assert_eq!(classify(&[0xc3], Arch::Amd64), ControlFlow::Ret);
+        assert_eq!(classify(&[0xeb, 0], Arch::Amd64), ControlFlow::Branch);
+        assert_eq!(classify(&[0x90], Arch::Amd64), ControlFlow::Other);
+
+        assert_eq!(
+            classify(&0x94000000u32.to_le_bytes(), Arch::Arm64),
+            ControlFlow::Call
+        );
+        assert_eq!(
+            classify(&0xd65f03c0u32.to_le_bytes(), Arch::Arm64),
+            ControlFlow::Ret
+        );
+        assert_eq!(
+            classify(&0x14000000u32.to_le_bytes(), Arch::Arm64),
+            ControlFlow::Branch
+        );
+        assert_eq!(
+            classify(&0xd503201fu32.to_le_bytes(), Arch::Arm64),
+            ControlFlow::Other
+        );
+    }
 
     /// The joined token text must reproduce bad64's Display exactly — the
     /// plain form is what the Python SDK and MCP consume.

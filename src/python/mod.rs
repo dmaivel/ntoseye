@@ -1532,7 +1532,7 @@ impl Debugger {
         )
     }
 
-    /// Decode an x64 `_KTRAP_FRAME` at `address`, or the current Windows
+    /// Decode a `_KTRAP_FRAME` at `address`, or the current Windows
     /// thread's saved trap frame when omitted.
     #[pyo3(signature = (address=None))]
     fn inspect_trap_frame<'py>(
@@ -1545,7 +1545,7 @@ impl Debugger {
         let rip_symbol = self
             .inner
             .target
-            .closest_symbol_current_context(VirtAddr(frame.rip));
+            .closest_symbol_current_context(VirtAddr(frame.instruction_pointer()));
         view_dict(py, &view::trap_frame(&frame, rip_symbol))
     }
 

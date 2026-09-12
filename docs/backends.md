@@ -1,16 +1,20 @@
 # Choosing a backend
 
-`ntoseye` can talk to the target four ways. Pick with `--backend kd` (default), `--backend kdnet`, `--backend gdb`, or `--backend memory`.
+`ntoseye` can talk to a live target four ways. Pick with `--backend kd` (default), `--backend kdnet`, `--backend gdb`, or `--backend memory`. Crash-dump mode is a separate offline attach mode selected with `--dump <file>`.
 
-| Capability | `kd` (default) | `kdnet` | `gdb` | `memory` |
-| --- | --- | --- | --- | --- |
-| Transport | Windows KD over a serial pipe (KDCOM) | Windows KD over encrypted UDP | Hypervisor GDB stub | Direct VM-process memory |
-| Guest configuration | Kernel debugging enabled | Kernel network debugging enabled | None | None |
-| Host VM configuration | Serial socket | Reachable virtual NIC | Listening GDB stub | None |
-| Execution control | Yes | Yes | Yes | No |
-| Kernel breakpoints | Yes | Yes | Yes | No |
-| Usermode breakpoints | AMD64 only | AMD64 only | No | No |
-| Hardware watchpoints | AMD64 only | AMD64 only | No | No |
+| Capability | `kd` (default) | `kdnet` | `gdb` | `memory` | `--dump` |
+| --- | --- | --- | --- | --- | --- |
+| Transport | Windows KD over a serial pipe (KDCOM) | Windows KD over encrypted UDP | Hypervisor GDB stub | Direct VM-process memory | Offline crash-dump file |
+| Guest configuration | Kernel debugging enabled | Kernel network debugging enabled | None | None | None |
+| Host VM configuration | Serial socket | Reachable virtual NIC | Listening GDB stub | None | None |
+| Execution control | Yes | Yes | Yes | No | No |
+| Registers | Yes | Yes | Yes | No | Yes (crash context) |
+| Memory reads | Yes | Yes | Yes | Yes | Yes |
+| Kernel breakpoints | Yes | Yes | Yes | No | No |
+| Usermode breakpoints | Yes | Yes | No | No | No |
+| Hardware watchpoints | Yes | Yes | No | No | No |
+| Model-specific registers | Yes | Yes | No | No | No |
+| Reboot / forced crash | Yes | Yes | No | No | No |
 
 ## Hypervisor setup
 
@@ -30,7 +34,7 @@ Any Windows 10/11 target reachable over the network is debuggable with `kdnet` (
 | Linux | VMware Workstation | AMD64 | Yes | Yes | Yes | Yes |
 | macOS | UTM (QEMU/HVF) | ARM64 | Yes | Yes | No | Yes |
 
-Other hypervisors are untested with these integrations. Crash-dump analysis is currently AMD64-only.
+Other hypervisors are untested with these integrations. Crash-dump analysis supports AMD64 and ARM64 dumps.
 
 The initial KD handshake timeout is 8 seconds by default. For unusually slow guests, override it with `NTOSEYE_KD_TIMEOUT=<seconds>`.
 

@@ -14,7 +14,7 @@ WinDbg-like kernel debugger for Windows, from Linux and macOS.
 - Remote debugging over encrypted KDNET
 - Public/private PDB symbols, source lines, and scoped local-variable metadata
 - Deferred, conditional, pass-count, one-shot, and command-action breakpoints
-- AMD64 hardware watchpoints
+- Hardware watchpoints
 - Integrated bugcheck, exception, verifier, WHEA, and crash-dump analysis
 - [Four backends](docs/backends.md): Windows KDCOM and KDNET, QEMU's GDB stub, and passive memory introspection
 - [Python SDK and custom commands](docs/sdk.md)

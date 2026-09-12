@@ -158,54 +158,102 @@ pub fn print_bugcheck_trap_frame(trap_frame: &BugcheckTrapFrame) {
 }
 
 /// Render a decoded [`KtrapFrame`] in the register-grid house style
-/// ([`super::disasm::print_registers`]). r12-r15 are absent by design: the
-/// kernel saves them in the exception frame, not the trap frame.
+/// ([`super::disasm::print_registers`]).
 pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
     outln!("{} @ {}", "trap frame".bold(), ui::addr(frame.address));
-    outln!(
-        "  rax {}   rbx {}   rcx {}",
-        ui::addr(frame.rax),
-        ui::addr(frame.rbx),
-        ui::addr(frame.rcx)
-    );
-    outln!(
-        "  rdx {}   rsi {}   rdi {}",
-        ui::addr(frame.rdx),
-        ui::addr(frame.rsi),
-        ui::addr(frame.rdi)
-    );
-    outln!(
-        "  rsp {}   rbp {}   rip {}",
-        ui::addr(frame.rsp),
-        ui::addr(frame.rbp),
-        ui::addr(frame.rip)
-    );
-    outln!(
-        "  r8  {}   r9  {}   r10 {}",
-        ui::addr(frame.r8),
-        ui::addr(frame.r9),
-        ui::addr(frame.r10)
-    );
-    outln!(
-        "  r11 {}   rfl {}{}",
-        ui::addr(frame.r11),
-        ui::addr(frame.eflags as u64),
-        format_rflags(frame.eflags as u64)
-    );
-    outln!(
-        "  cs  {:04x}  ss  {:04x}  error code {:#x}  irql {}  previous mode {}",
-        frame.cs,
-        frame.ss,
-        frame.error_code,
-        frame.previous_irql,
-        if frame.previous_mode == 0 {
-            "kernel"
-        } else {
-            "user"
+    match &frame.data {
+        crate::trapframe::KtrapFrameData::Amd64(frame) => {
+            outln!(
+                "  rax {}   rbx {}   rcx {}",
+                ui::addr(frame.rax),
+                ui::addr(frame.rbx),
+                ui::addr(frame.rcx)
+            );
+            outln!(
+                "  rdx {}   rsi {}   rdi {}",
+                ui::addr(frame.rdx),
+                ui::addr(frame.rsi),
+                ui::addr(frame.rdi)
+            );
+            outln!(
+                "  rsp {}   rbp {}   rip {}",
+                ui::addr(frame.rsp),
+                ui::addr(frame.rbp),
+                ui::addr(frame.rip)
+            );
+            outln!(
+                "  r8  {}   r9  {}   r10 {}",
+                ui::addr(frame.r8),
+                ui::addr(frame.r9),
+                ui::addr(frame.r10)
+            );
+            outln!(
+                "  r11 {}   rfl {}{}",
+                ui::addr(frame.r11),
+                ui::addr(frame.eflags as u64),
+                format_rflags(frame.eflags as u64)
+            );
+            outln!(
+                "  cs  {:04x}  ss  {:04x}  error code {:#x}  irql {}  previous mode {}",
+                frame.cs,
+                frame.ss,
+                frame.error_code,
+                frame.previous_irql,
+                if frame.previous_mode == 0 {
+                    "kernel"
+                } else {
+                    "user"
+                }
+            );
+            if let Some(symbol) = rip_symbol {
+                outln!("  rip => {}", ui::symbol(symbol));
+            }
         }
-    );
-    if let Some(symbol) = rip_symbol {
-        outln!("  rip => {}", ui::symbol(symbol));
+        crate::trapframe::KtrapFrameData::Arm64(frame) => {
+            for (index, registers) in frame.x.chunks(3).enumerate() {
+                let base = index * 3;
+                let values = registers
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, value)| format!("x{:<2} {}", base + offset, ui::addr(*value)))
+                    .collect::<Vec<_>>();
+                outln!("  {}", values.join("   "));
+            }
+            outln!(
+                "  fp  {}   lr  {}   sp  {}",
+                ui::addr(frame.fp),
+                ui::addr(frame.lr),
+                ui::addr(frame.sp)
+            );
+            outln!("  pc  {}   cpsr {:#x}", ui::addr(frame.pc), frame.cpsr);
+            outln!(
+                "  esr {:#x}  fault address {}  irql {}  previous mode {}",
+                frame.esr,
+                ui::addr(frame.fault_address),
+                frame.previous_irql,
+                if frame.previous_mode == 0 {
+                    "kernel"
+                } else {
+                    "user"
+                }
+            );
+            for (name, values) in [
+                ("bcr", frame.bcr.as_slice()),
+                ("bvr", frame.bvr.as_slice()),
+                ("wcr", frame.wcr.as_slice()),
+                ("wvr", frame.wvr.as_slice()),
+            ] {
+                let values = values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| format!("{name}{index} {value:#x}"))
+                    .collect::<Vec<_>>();
+                outln!("  {}", values.join("   "));
+            }
+            if let Some(symbol) = rip_symbol {
+                outln!("  pc => {}", ui::symbol(symbol));
+            }
+        }
     }
 }
 

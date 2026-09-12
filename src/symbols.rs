@@ -105,6 +105,12 @@ pub struct SymbolStore {
     index: DashMap<u128, SymbolIndex>,
     index_types: DashMap<u128, SymbolIndex>,
     index_enums: DashMap<u128, SymbolIndex>,
+    /// GUID -> struct/union name -> (size, field list) of its largest complete
+    /// definition (a header-local `_KPCR` stub precedes the real one in
+    /// ntoskrnl.pdb). Member types are usually forward references (size 0),
+    /// so array element counts and field sizes need the size; layout dumps
+    /// need the field list without rescanning the type stream.
+    struct_defs: DashMap<u128, HashMap<String, (u64, TypeIndex)>>,
     /// GUID -> symbol name -> every address-bearing PDB record. Private/static
     /// duplicates retain their compiland identity; resolution prefers public
     /// records when present but never collapses distinct candidate addresses.
@@ -116,7 +122,9 @@ pub struct SymbolStore {
     /// otherwise rescans the entire PDB type stream on every call; keying on
     /// guid makes this self-coherent (a reloaded module gets a new guid, so a
     /// stale entry can never be returned).
-    type_cache: DashMap<(u128, String), Arc<TypeInfo>>,
+    /// `None` remembers a type the PDB does not define, so repeated misses
+    /// (`_MM_SESSION_SPACE` per process) cost a map probe, not a stream scan.
+    type_cache: DashMap<(u128, String), Option<Arc<TypeInfo>>>,
 
     modules: DashMap<(Dtb, u64), LoadedModule>,
     module_status: DashMap<(Dtb, u64), ModuleSymbolStatus>,
@@ -1401,7 +1409,20 @@ impl fmt::Display for ParsedType {
                     write!(f, "{}*", inner)
                 }
             }
-            ParsedType::Array(inner, count) => write!(f, "{}[{}]", inner, count),
+            ParsedType::Array(inner, count) => {
+                // `T[2][256]` is Array(Array(T, 256), 2): outer count first.
+                let mut dims = vec![*count];
+                let mut element = inner.as_ref();
+                while let ParsedType::Array(next, n) = element {
+                    dims.push(*n);
+                    element = next.as_ref();
+                }
+                write!(f, "{element}")?;
+                for n in dims {
+                    write!(f, "[{n}]")?;
+                }
+                Ok(())
+            }
             ParsedType::Bitfield {
                 underlying,
                 pos,
@@ -1769,6 +1790,7 @@ impl SymbolStore {
             index: DashMap::new(),
             index_types: DashMap::new(),
             index_enums: DashMap::new(),
+            struct_defs: DashMap::new(),
             symbol_rvas: DashMap::new(),
             source_lines: DashMap::new(),
             index_diagnostics: DashMap::new(),
@@ -1847,7 +1869,7 @@ impl SymbolStore {
     ) {
         for type_info in types {
             self.type_cache
-                .insert((guid, type_info.name.clone()), Arc::new(type_info));
+                .insert((guid, type_info.name.clone()), Some(Arc::new(type_info)));
         }
         self.symbol_rvas.insert(
             guid,
@@ -2763,6 +2785,19 @@ impl SymbolStore {
             .map(|resolved| resolved.map(|(address, _)| address))
     }
 
+    /// Base address of the module whose short name is `module_short` (WinDbg
+    /// lets a bare module name stand for its base: `? nt`, `u nt+0x1000`).
+    pub fn module_base_by_name(&self, dtb: Dtb, module_short: &str) -> Option<VirtAddr> {
+        self.modules
+            .iter()
+            .find(|module| {
+                module.dtb == dtb
+                    && ModuleInfo::derive_short_name(&module.name)
+                        .eq_ignore_ascii_case(module_short)
+            })
+            .map(|module| module.base_address)
+    }
+
     /// Return every PDB candidate for a symbol, retaining module, visibility,
     /// and private-compiland provenance. `module!symbol` restricts the module;
     /// a bare symbol searches the active address space.
@@ -2971,6 +3006,7 @@ impl SymbolStore {
 
     fn procedure_local(
         &self,
+        guid: u128,
         finder: &TypeFinder<'_>,
         name: String,
         type_index: TypeIndex,
@@ -2980,10 +3016,10 @@ impl SymbolStore {
         ProcedureLocal {
             name,
             type_name: self
-                .resolve_type(finder, type_index)
+                .resolve_type(guid, finder, type_index)
                 .map(|parsed| parsed.to_string())
                 .unwrap_or_else(|_| format!("type({:#x})", type_index.0)),
-            byte_size: self.type_size(finder, type_index, 8).ok(),
+            byte_size: self.type_size(guid, finder, type_index, 8).ok(),
             is_parameter,
             location,
         }
@@ -3085,6 +3121,7 @@ impl SymbolStore {
                             "not live at this address"
                         };
                         locals.push(self.procedure_local(
+                            module.guid,
                             &finder,
                             local.name.to_string().into(),
                             local.type_index,
@@ -3218,6 +3255,7 @@ impl SymbolStore {
                     }
                     pdb2::SymbolData::RegisterVariable(variable) if visible => {
                         locals.push(self.procedure_local(
+                            module.guid,
                             &finder,
                             variable.name.to_string().into(),
                             variable.type_index,
@@ -3230,6 +3268,7 @@ impl SymbolStore {
                     }
                     pdb2::SymbolData::RegisterRelative(variable) if visible => {
                         locals.push(self.procedure_local(
+                            module.guid,
                             &finder,
                             variable.name.to_string().into(),
                             variable.type_index,
@@ -3243,6 +3282,7 @@ impl SymbolStore {
                     }
                     pdb2::SymbolData::BasePointerRelative(variable) if visible => {
                         locals.push(self.procedure_local(
+                            module.guid,
                             &finder,
                             variable.name.to_string().into(),
                             variable.type_index,
@@ -3256,6 +3296,7 @@ impl SymbolStore {
                     pdb2::SymbolData::MultiRegisterVariable(variable) if visible => {
                         if let Some((_, name)) = variable.registers.first() {
                             locals.push(self.procedure_local(
+                                module.guid,
                                 &finder,
                                 name.to_string().into(),
                                 variable.type_index,
@@ -3539,6 +3580,15 @@ impl SymbolStore {
 
         let mut type_strings: Vec<String> = Vec::new();
         let mut enum_strings: Vec<String> = Vec::new();
+        let mut struct_defs: HashMap<String, (u64, TypeIndex)> = HashMap::new();
+        let mut record_struct = |name: String, size: u64, fields: Option<TypeIndex>| {
+            if let Some(fields) = fields {
+                let entry = struct_defs.entry(name).or_insert((0, fields));
+                if size >= entry.0 {
+                    *entry = (size, fields);
+                }
+            }
+        };
 
         let type_information = pdb_lock.type_information()?;
         let mut type_finder = type_information.finder();
@@ -3553,13 +3603,17 @@ impl SymbolStore {
                         if !class.properties.forward_reference()
                             && class.name.to_string() != "<anonymous-tag>" =>
                     {
-                        type_strings.push(class.name.to_string().into());
+                        let name = class.name.to_string().into_owned();
+                        record_struct(name.clone(), class.size, class.fields);
+                        type_strings.push(name);
                     }
                     TypeData::Union(union)
                         if !union.properties.forward_reference()
                             && union.name.to_string() != "<anonymous-tag>" =>
                     {
-                        type_strings.push(union.name.to_string().into());
+                        let name = union.name.to_string().into_owned();
+                        record_struct(name.clone(), union.size, Some(union.fields));
+                        type_strings.push(name);
                     }
                     TypeData::Enumeration(en)
                         if !en.properties.forward_reference()
@@ -3601,6 +3655,7 @@ impl SymbolStore {
                 names: enum_strings,
             },
         );
+        self.struct_defs.insert(guid, struct_defs);
 
         self.index_diagnostics.insert(guid, diagnostics);
         Ok(())
@@ -3711,8 +3766,16 @@ impl SymbolStore {
             .map(|(name, offset, _, _)| (name.clone(), offset))
     }
 
+    fn struct_size_by_name(&self, guid: u128, name: &str) -> u64 {
+        self.struct_defs
+            .get(&guid)
+            .and_then(|defs| defs.get(name).map(|(size, _)| *size))
+            .unwrap_or(0)
+    }
+
     fn type_size<'p>(
         &self,
+        guid: u128,
         finder: &pdb2::TypeFinder<'p>,
         index: pdb2::TypeIndex,
         ptr_size: u64,
@@ -3760,14 +3823,24 @@ impl SymbolStore {
                     _ => Ok(0),
                 }
             }
-            pdb2::TypeData::Class(data) => Ok(data.size), // NOTE this might (probably will) return 0
-            pdb2::TypeData::Union(data) => Ok(data.size), // FIXME possibly? ^^
+            // Members reference their struct through a forward declaration
+            // whose size is 0; the index knows the complete definition.
+            pdb2::TypeData::Class(data) => Ok(if data.properties.forward_reference() {
+                self.struct_size_by_name(guid, &data.name.to_string())
+            } else {
+                data.size
+            }),
+            pdb2::TypeData::Union(data) => Ok(if data.properties.forward_reference() {
+                self.struct_size_by_name(guid, &data.name.to_string())
+            } else {
+                data.size
+            }),
             pdb2::TypeData::Pointer(_) => Ok(ptr_size),
             pdb2::TypeData::Modifier(data) => {
-                self.type_size(finder, data.underlying_type, ptr_size)
+                self.type_size(guid, finder, data.underlying_type, ptr_size)
             }
             pdb2::TypeData::Enumeration(data) => {
-                self.type_size(finder, data.underlying_type, ptr_size)
+                self.type_size(guid, finder, data.underlying_type, ptr_size)
             }
             pdb2::TypeData::Array(data) => {
                 // pdb2 reports cumulative byte sizes per dimension (`int[4][4]`
@@ -3775,7 +3848,7 @@ impl SymbolStore {
                 Ok(data.dimensions.last().map_or(0, |&bytes| u64::from(bytes)))
             }
             pdb2::TypeData::Bitfield(data) => {
-                self.type_size(finder, data.underlying_type, ptr_size)
+                self.type_size(guid, finder, data.underlying_type, ptr_size)
             }
             pdb2::TypeData::Procedure(_) => Ok(ptr_size),
             _ => Ok(0),
@@ -3784,6 +3857,7 @@ impl SymbolStore {
 
     fn resolve_type<'p>(
         &self,
+        guid: u128,
         finder: &TypeFinder<'p>,
         index: TypeIndex,
     ) -> pdb2::Result<ParsedType> {
@@ -3826,22 +3900,23 @@ impl SymbolStore {
             TypeData::Enumeration(data) => Ok(ParsedType::Enum(data.name.to_string().into_owned())),
 
             TypeData::Pointer(data) => {
-                let inner = self.resolve_type(finder, data.underlying_type)?;
+                let inner = self.resolve_type(guid, finder, data.underlying_type)?;
                 Ok(ParsedType::Pointer(Box::new(inner)))
             }
 
             TypeData::Array(data) => {
-                let inner = self.resolve_type(finder, data.element_type)?;
+                let inner = self.resolve_type(guid, finder, data.element_type)?;
                 // Total byte size (see `type_size`) over the element size gives
                 // the flattened element count.
                 let bytes = data.dimensions.last().copied().unwrap_or(0);
-                let sizeof_type = (self.type_size(finder, data.element_type, 8)? as u32).max(1);
+                let sizeof_type =
+                    (self.type_size(guid, finder, data.element_type, 8)? as u32).max(1);
                 Ok(ParsedType::Array(Box::new(inner), bytes / sizeof_type))
             }
 
-            TypeData::Modifier(data) => self.resolve_type(finder, data.underlying_type),
+            TypeData::Modifier(data) => self.resolve_type(guid, finder, data.underlying_type),
             TypeData::Bitfield(data) => {
-                let inner = self.resolve_type(finder, data.underlying_type)?;
+                let inner = self.resolve_type(guid, finder, data.underlying_type)?;
 
                 Ok(ParsedType::Bitfield {
                     underlying: Box::new(inner),
@@ -3852,7 +3927,7 @@ impl SymbolStore {
 
             pdb2::TypeData::Procedure(data) => {
                 let return_type = if let Some(idx) = data.return_type {
-                    self.resolve_type(finder, idx)?
+                    self.resolve_type(guid, finder, idx)?
                 } else {
                     ParsedType::Primitive("void".to_string())
                 };
@@ -3862,7 +3937,7 @@ impl SymbolStore {
                     && let Ok(pdb2::TypeData::ArgumentList(list)) = arg_item.parse()
                 {
                     for arg_idx in list.arguments {
-                        let arg_type = self.resolve_type(finder, arg_idx)?;
+                        let arg_type = self.resolve_type(guid, finder, arg_idx)?;
                         args.push(arg_type);
                     }
                 }
@@ -3876,6 +3951,7 @@ impl SymbolStore {
 
     fn process_field_list<'p>(
         &self,
+        guid: u128,
         type_finder: &pdb2::TypeFinder<'p>,
         field_index: pdb2::TypeIndex,
         fields_map: &mut HashMap<String, FieldInfo>,
@@ -3888,13 +3964,13 @@ impl SymbolStore {
                     let name = member.name.to_string().into_owned();
                     let offset = member.offset;
 
-                    let type_info = self.resolve_type(type_finder, member.field_type)?;
+                    let type_info = self.resolve_type(guid, type_finder, member.field_type)?;
 
                     fields_map.insert(
                         name,
                         FieldInfo {
                             offset: offset as u32,
-                            size: self.type_size(type_finder, member.field_type, 8)?,
+                            size: self.type_size(guid, type_finder, member.field_type, 8)?,
                             type_data: type_info,
                         },
                     );
@@ -3902,7 +3978,7 @@ impl SymbolStore {
             }
 
             if let Some(more_fields) = list.continuation {
-                self.process_field_list(type_finder, more_fields, fields_map)?;
+                self.process_field_list(guid, type_finder, more_fields, fields_map)?;
             }
         }
         Ok(())
@@ -3912,12 +3988,19 @@ impl SymbolStore {
     where
         S: Into<String> + AsRef<str>,
     {
-        // A hit skips the full PDB type-stream scan below. Cloning the cached
-        // layout is cheap next to that scan, so callers keep their owned return
         let cache_key = (guid, struct_name.as_ref().to_string());
         if let Some(cached) = self.type_cache.get(&cache_key) {
-            return Some(Arc::clone(&cached));
+            return cached.clone();
         }
+
+        let definition = self
+            .struct_defs
+            .get(&guid)
+            .and_then(|defs| defs.get(struct_name.as_ref()).copied());
+        let Some((size, field_index)) = definition else {
+            self.type_cache.insert(cache_key, None);
+            return None;
+        };
 
         let pdb = self.pdbs.get_mut(&guid)?;
         let mut pdb_lock = pdb.lock();
@@ -3925,39 +4008,38 @@ impl SymbolStore {
         let mut type_finder = type_information.finder();
         let mut iter = type_information.iter();
 
-        while let Some(typ) = iter.next().ok()? {
+        // The finder only knows records the iterator has passed. A field list
+        // and everything it references precede the class record, so stop once
+        // the list is indexed; fall back to the full stream if a member still
+        // resolves to an unindexed record.
+        while type_finder.max_index() < field_index {
+            let Some(_) = iter.next().ok()? else { break };
             type_finder.update(&iter);
-
-            let (name, size, field_index) = match typ.parse() {
-                Ok(TypeData::Class(class)) if !class.properties.forward_reference() => {
-                    (class.name.to_string(), class.size, class.fields)
+        }
+        let mut fields = HashMap::new();
+        let parsed = match self.process_field_list(guid, &type_finder, field_index, &mut fields) {
+            Err(pdb2::Error::TypeNotIndexed(..)) => {
+                while iter.next().ok()?.is_some() {
+                    type_finder.update(&iter);
                 }
-                Ok(TypeData::Union(union)) if !union.properties.forward_reference() => {
-                    (union.name.to_string(), union.size, Some(union.fields))
-                }
-                _ => continue,
-            };
-            if name != struct_name.as_ref() {
-                continue;
+                fields.clear();
+                self.process_field_list(guid, &type_finder, field_index, &mut fields)
             }
-
-            let mut fields_map: HashMap<String, FieldInfo> = HashMap::new();
-            if let Some(field_index) = field_index {
-                self.process_field_list(&type_finder, field_index, &mut fields_map)
-                    .ok()?;
-            }
-
-            let type_info = TypeInfo {
-                name: struct_name.into(),
-                size: size as usize,
-                fields: fields_map,
-            };
-            let type_info = Arc::new(type_info);
-            self.type_cache.insert(cache_key, Arc::clone(&type_info));
-            return Some(type_info);
+            other => other,
+        };
+        if parsed.is_err() {
+            self.type_cache.insert(cache_key, None);
+            return None;
         }
 
-        None
+        let type_info = Arc::new(TypeInfo {
+            name: struct_name.into(),
+            size: size as usize,
+            fields,
+        });
+        self.type_cache
+            .insert(cache_key, Some(Arc::clone(&type_info)));
+        Some(type_info)
     }
 
     /// Variants `(name, value)` of a PDB enum, in declaration order. Enums live
@@ -4033,6 +4115,19 @@ impl SymbolIndex {
         if query.is_empty() || limit == 0 {
             return self.names.iter().take(limit).cloned().collect();
         }
+        if query
+            .as_bytes()
+            .iter()
+            .any(|byte| matches!(*byte, b'*' | b'?'))
+        {
+            return self
+                .names
+                .iter()
+                .filter(|name| glob_matches(query, name, true))
+                .take(limit)
+                .cloned()
+                .collect();
+        }
 
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
@@ -4061,4 +4156,42 @@ impl SymbolIndex {
         scored.sort_unstable_by(by_rank);
         scored.into_iter().map(|(_, name)| name.clone()).collect()
     }
+}
+
+/// Anchored glob match: `*` matches any number of bytes, `?` exactly one.
+/// `ignore_case` compares literals ASCII case-insensitively (symbol, type,
+/// process, and module names); pool tags are case-sensitive.
+pub fn glob_matches(pattern: &str, name: &str, ignore_case: bool) -> bool {
+    let pattern = pattern.as_bytes();
+    let name = name.as_bytes();
+    let mut pattern_index = 0;
+    let mut name_index = 0;
+    let mut star_index = None;
+    let mut star_name_index = 0;
+
+    while name_index < name.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?'
+                || pattern[pattern_index] == name[name_index]
+                || (ignore_case && pattern[pattern_index].eq_ignore_ascii_case(&name[name_index])))
+        {
+            pattern_index += 1;
+            name_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_name_index = name_index;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            star_name_index += 1;
+            name_index = star_name_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }

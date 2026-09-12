@@ -520,7 +520,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Run one line of ntoseye's WinDbg-style REPL and return its text output (styling stripped). This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.attach <pid>` / `.detach` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; VM must be halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!pte <addr>`, `!analyze`. Commands that resume until the next stop (g, gh, gn, p, gu) are refused here because they would block the session: use the resume tool then poll wait_for_stop. `t`/`si` (one instruction) is allowed. Addresses accept expressions (symbols, registers, hex, arithmetic, poi())."
+        description = "Run one line of ntoseye's WinDbg-style REPL and return its text output (styling stripped). This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope; `attach`/`detach` aliases), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; VM must be halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!pte <addr>`, `!analyze`. Commands that resume until the next stop (g, gh, gn, p, pa, pc, pt, ph, ta, tc, tt, th, gu, wt, .reboot, .crash) are refused here because they would block the session: use the resume tool then poll wait_for_stop. `t`/`si` (one instruction) is allowed. Addresses accept expressions (symbols, registers, hex, arithmetic, poi())."
     )]
     async fn command(
         &self,
@@ -820,8 +820,8 @@ impl rmcp::ServerHandler for NtoseyeMcp {
                  first, or be stopped at a breakpoint). Run-control is split so no \
                  request blocks: `resume` returns immediately, `wait_for_stop` polls \
                  (bounded) for the next stop, `status` reports where the target is now. \
-                 Typical breakpoint flow: interrupt → command(\"bp nt!NtCreateFile\") → \
-                 resume → wait_for_stop until stop:\"breakpoint\" → command(\"k\"). \
+                 Typical breakpoint flow: interrupt, command(\"bp nt!NtCreateFile\"), \
+                 resume, wait_for_stop until stop:\"breakpoint\", then command(\"k\"). \
                  After a reboot, status reports coherent:false until rediscovery \
                  finishes; wait for it rather than enumerating stale state. Addresses \
                  in JSON results are 0x hex strings. If no session is open and the \

@@ -230,6 +230,9 @@ pub struct ReplState<'a> {
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
     pub context: DispatchContext,
+    /// Set while a multi-step command (`pa`, `pt`, `wt`...) drives the
+    /// target: intermediate stops are not rendered, only the final one.
+    pub quiet_stops: bool,
 }
 
 /// Where a command line comes from. Event-driven and remote contexts must not
@@ -307,6 +310,39 @@ pub fn initial_user_commands() -> Vec<(String, String, Vec<CompletionStrategy>)>
     }
 }
 
+impl Session {
+    pub(crate) fn restore_live_register_cache(&mut self) {
+        if self.backend.is_running() || self.parked_windows_thread().is_some() {
+            self.target.registers = None;
+            self.target.clear_context_dtb_override();
+            return;
+        }
+
+        let registers = match self.read_registers() {
+            Ok(registers) => registers,
+            Err(_) => {
+                self.target.registers = None;
+                self.target.clear_context_dtb_override();
+                return;
+            }
+        };
+        self.target.registers = Some(self.register_map.to_hashmap(&registers));
+        match self
+            .register_map
+            .read_u64(self.target.arch().dtb_register(), &registers)
+        {
+            Ok(dtb)
+                if dtb != 0
+                    && self.target.guest.is_some()
+                    && self.target.kernel_dtb() != crate::memory::DTB_IDENTITY =>
+            {
+                self.target.set_context_dtb_override(dtb);
+            }
+            _ => self.target.clear_context_dtb_override(),
+        }
+    }
+}
+
 impl<'a> ReplState<'a> {
     /// Bind stored REPL state to a session for one dispatch; [`Self::detach`]
     /// hands the state back afterwards.
@@ -320,6 +356,7 @@ impl<'a> ReplState<'a> {
             radix: store.radix,
             line: String::new(),
             context: store.context,
+            quiet_stops: false,
         }
     }
 
@@ -340,6 +377,9 @@ impl<'a> ReplState<'a> {
     /// start empty (no live REPL to populate them). Output goes to stdout, as in
     /// the REPL.
     pub fn for_oneshot(ctx: &'a mut Session) -> Self {
+        if ctx.target.selected_frame.is_none() {
+            ctx.restore_live_register_cache();
+        }
         let store = ReplStore::new(ctx, DispatchContext::Interactive);
         Self::attach(ctx, store)
     }
@@ -562,6 +602,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         radix: NumberRadix::Hexadecimal,
         line: String::new(),
         context: DispatchContext::Interactive,
+        quiet_stops: false,
     };
     // An empty module list at startup means we attached before rediscovery completed.
     state.ctx.reload_module_list_pending = reload_module_list_pending;
@@ -589,6 +630,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 continue;
             }
 
+            crate::output::log_input_line(command);
             state.line = command.to_string();
             if state.dispatch_line(command)? == Flow::Quit {
                 break;
@@ -601,6 +643,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
             match sig {
                 Signal::Success(buffer) => {
                     if !buffer.trim().is_empty() {
+                        crate::output::log_input_line(buffer.trim());
                         state.line = buffer.trim().to_string();
                         match state.dispatch_line(&buffer)? {
                             Flow::Quit => break,

@@ -29,8 +29,8 @@ repl_command! {
 
 repl_command! {
     cmd_ev;
-    names: ["ev", "?"],
-    usage: "ev <expression>",
+    names: ["?", "ev"],
+    usage: "? <expression>",
     summary: "Evaluate an expression.",
     completion: Expression,
     style: ExpressionTail,
@@ -444,10 +444,10 @@ impl ReplState<'_> {
             let Some(rip) = self
                 .ctx
                 .target
-                .registers
+                .selected_frame
                 .as_ref()
-                .and_then(|registers| registers.get("rip"))
-                .copied()
+                .map(|frame| frame.ip)
+                .or_else(|| self.ctx.target.register_value("rip"))
             else {
                 error!("dv requires a halted register context or an explicit address");
                 return Ok(());

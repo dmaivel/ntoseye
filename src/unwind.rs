@@ -36,15 +36,15 @@ use crate::{
     error::{Error, Result},
     gdb::RegisterMap,
     guest::{Guest, ModuleInfo, PeImage, WinObject, read_pe_image, read_pe_image_from_file},
+    kd::{context, context_arm64},
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
-    target::{SavedThreadRegisters, Target, ThreadInfo},
+    target::{SavedThreadRegisters, Target, ThreadInfo, lookup_register},
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
     types::{Arch, Dtb, VirtAddr},
 };
 
-const CR3_PAGE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const STACK_SCAN_BYTES: usize = 0x1000;
 // cap on chained unwind entries followed per frame, guarding against cyclic or
 // corrupt unwind data
@@ -107,6 +107,21 @@ pub struct StackFrame {
 #[derive(Debug, Clone, Default)]
 pub struct StackTrace {
     pub frames: Vec<StackFrame>,
+    pub truncated: usize,
+}
+
+/// A stack trace paired with the sparse register values recovered for every
+/// frame.
+#[derive(Debug, Clone)]
+pub struct RecoveredFrame {
+    pub frame: StackFrame,
+    pub registers: HashMap<String, u64>,
+    pub frame_base: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecoveredStackTrace {
+    pub frames: Vec<RecoveredFrame>,
     pub truncated: usize,
 }
 
@@ -205,9 +220,10 @@ struct StackTracer<'a> {
 }
 
 pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceContext {
-    let cr3_masked = cr3 & CR3_PAGE_MASK;
+    let dtb_mask = debugger.arch().dtb_page_mask();
+    let cr3_masked = cr3 & dtb_mask;
     let kernel_dtb = debugger.kernel_dtb();
-    let kernel_dtb_masked = kernel_dtb & CR3_PAGE_MASK;
+    let kernel_dtb_masked = kernel_dtb & dtb_mask;
 
     // Triage dumps use DTB_IDENTITY — page-table walks are impossible,
     // so force the kernel context regardless of the thread's real CR3.
@@ -489,18 +505,92 @@ pub fn build_stacktrace(
     regs: &[u8],
     limit: usize,
 ) -> StackTrace {
-    if debugger.arch() == Arch::Arm64 {
-        return build_stacktrace_arm64(debugger, register_map, regs, limit);
+    let recovered = build_stacktrace_with_context(debugger, register_map, regs, limit);
+    StackTrace {
+        frames: recovered
+            .frames
+            .into_iter()
+            .map(|frame| frame.frame)
+            .collect(),
+        truncated: recovered.truncated,
     }
-    let cr3 = register_map.read_u64("cr3", regs).unwrap_or(0);
+}
+
+/// Build a stack trace while retaining the register values known at every
+/// frame. Caller frames intentionally expose only values justified by unwind
+/// metadata (plus the address-space CR3), rather than copying volatile values
+/// from the stopped frame.
+pub fn build_stacktrace_with_context(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    limit: usize,
+) -> RecoveredStackTrace {
+    if debugger.arch() == Arch::Arm64 {
+        return build_recovered_stacktrace_arm64(debugger, register_map, regs, limit);
+    }
+    let cr3 = register_map
+        .read_u64(debugger.arch().dtb_register(), regs)
+        .unwrap_or(0);
     let trace = resolve_thread_trace_context(debugger, cr3);
-    build_stacktrace_seeded(
+    build_recovered_stacktrace_seeded(
         debugger,
         &trace,
         RegisterContext::from_registers(register_map, regs),
         FrameSource::Current,
         limit,
+        register_map.to_hashmap(regs),
     )
+}
+
+/// Build a recovered trace from a sparse selected-frame register map. This is
+/// used after `.frame`, `.cxr`, or `.trap`, where there is no backend packet to
+/// provide the original register byte layout. The fixed scratch buffer covers
+/// both architecture-specific CONTEXT maps and their synthetic control slots.
+pub fn build_stacktrace_with_register_values(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    values: &HashMap<String, u64>,
+    limit: usize,
+) -> RecoveredStackTrace {
+    let register_buffer_size = match debugger.arch() {
+        Arch::Amd64 => context::REGISTER_BUFFER_SIZE,
+        Arch::Arm64 => context_arm64::REGISTER_BUFFER_SIZE,
+    };
+    let mut bytes = vec![0u8; register_buffer_size];
+    for (name, value) in values {
+        let _ = register_map.write_u64(name, &mut bytes, *value);
+    }
+    let dtb_name = debugger.arch().dtb_register();
+    if lookup_register(values, dtb_name)
+        .filter(|dtb| *dtb != 0)
+        .is_none()
+    {
+        let _ = register_map.write_u64(dtb_name, &mut bytes, debugger.current_dtb());
+    }
+    build_stacktrace_with_context(debugger, register_map, &bytes, limit)
+}
+
+/// Resolve the frame-relative local base for a sparse register context. This
+/// mirrors the first frame of a recovered trace without requiring a backend
+/// register packet, so `dv` uses unwind metadata rather than assuming RBP is a
+/// frame pointer.
+pub fn frame_base_for_register_values(
+    debugger: &Target,
+    values: &HashMap<String, u64>,
+) -> Option<u64> {
+    let lookup = |name: &str| lookup_register(values, name);
+    let context = RegisterContext {
+        rip: lookup("rip").or_else(|| lookup("pc")).unwrap_or(0),
+        rsp: lookup("rsp").or_else(|| lookup("sp")).unwrap_or(0),
+        regs: std::array::from_fn(|index| lookup(UNWIND_REG_NAMES[index])),
+    };
+    let dtb = lookup(debugger.arch().dtb_register())
+        .filter(|dtb| *dtb != 0)
+        .unwrap_or_else(|| debugger.current_dtb());
+    let trace = resolve_thread_trace_context(debugger, dtb);
+    let mut tracer = StackTracer::new(debugger, &trace);
+    tracer.frame_base_for(&context)
 }
 
 /// Strip AArch64 pointer-authentication bits (bits 63:56) from a return
@@ -513,47 +603,88 @@ fn strip_pac(addr: u64) -> u64 {
 /// previous FP at `[fp]` and the return address at `[fp+8]`. Windows ARM64
 /// kernel code keeps frame pointers enabled, so this is reliable; PAC-signed
 /// return addresses are stripped.
-fn build_stacktrace_arm64(
+fn build_recovered_stacktrace_arm64(
     debugger: &Target,
     register_map: &RegisterMap,
     regs: &[u8],
     limit: usize,
-) -> StackTrace {
-    let cr3 = register_map.read_u64("cr3", regs).unwrap_or(0);
+) -> RecoveredStackTrace {
+    let limit = limit.max(1);
+    let cr3 = register_map
+        .read_u64(debugger.arch().dtb_register(), regs)
+        .unwrap_or(0);
     let trace = resolve_thread_trace_context(debugger, cr3);
     let seed_pc = register_map.read_u64("rip", regs).unwrap_or(0);
     let seed_sp = register_map.read_u64("rsp", regs).unwrap_or(0);
-    let mut raw: Vec<(u64, u64, FrameSource)> = vec![(seed_sp, seed_pc, FrameSource::Current)];
+    let mut seed_context = RegisterContext::from_registers(register_map, regs);
+    seed_context.rip = seed_pc;
+    seed_context.rsp = seed_sp;
+    let mut fp = register_map.read_u64("fp", regs).unwrap_or(0);
+    let mut raw: Vec<(RegisterContext, FrameSource, u64)> =
+        vec![(seed_context, FrameSource::Current, fp)];
 
     let memory = debugger.address_space(trace.active_dtb);
-    let mut fp = register_map.read_u64("fp", regs).unwrap_or(0);
     for _ in 0..MAX_UNWIND_FRAMES {
+        if raw.len() >= limit {
+            break;
+        }
         let mut buf = [0u8; 16];
         if memory.read_bytes(VirtAddr(fp), &mut buf).is_err() {
             break;
         }
-        let next_fp = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-        let ra = strip_pac(u64::from_le_bytes(buf[8..16].try_into().unwrap()));
+        let mut next_fp_bytes = [0u8; 8];
+        next_fp_bytes.copy_from_slice(&buf[..8]);
+        let next_fp = u64::from_le_bytes(next_fp_bytes);
+        let mut return_address_bytes = [0u8; 8];
+        return_address_bytes.copy_from_slice(&buf[8..]);
+        let ra = strip_pac(u64::from_le_bytes(return_address_bytes));
         if ra == 0 || next_fp == 0 || next_fp <= fp {
             break;
         }
-        raw.push((fp.wrapping_add(16), ra, FrameSource::Unwind));
+        let mut context = RegisterContext::from_registers(register_map, regs);
+        context.rip = ra;
+        context.rsp = fp.wrapping_add(16);
+        context.regs = [None; 16];
+        raw.push((context, FrameSource::Unwind, next_fp));
         fp = next_fp;
     }
 
-    ensure_frame_module_symbols(debugger, &trace, raw.iter().map(|(_, ip, _)| *ip));
+    ensure_frame_module_symbols(
+        debugger,
+        &trace,
+        raw.iter().map(|(context, _, _)| context.rip),
+    );
 
-    let mut stacktrace = StackTrace::default();
-    for (sp, ip, source) in raw {
-        record_stack_frame(
+    let initial_registers = register_map.to_hashmap(regs);
+    let mut stacktrace = RecoveredStackTrace::default();
+    for (index, (context, source, fp)) in raw.into_iter().enumerate() {
+        let mut registers;
+        if index == 0 {
+            registers = initial_registers.clone();
+        } else {
+            registers = HashMap::new();
+            if let Some(dtb) = initial_registers.get(debugger.arch().dtb_register()) {
+                let name = debugger.arch().dtb_register();
+                registers.insert(name.to_string(), *dtb);
+            }
+            registers.insert("fp".to_string(), fp);
+            registers.insert("sp".to_string(), context.rsp);
+            registers.insert("pc".to_string(), context.rip);
+        }
+        let frame = StackFrame {
+            sp: context.rsp,
+            ip: context.rip,
+            symbol: format_symbol(debugger, &trace, context.rip),
+            source,
+            source_location: frame_source_location(debugger, &trace, context.rip),
+        };
+        record_recovered_frame(
             &mut stacktrace,
             limit,
-            StackFrame {
-                sp,
-                ip,
-                symbol: format_symbol(debugger, &trace, ip),
-                source,
-                source_location: frame_source_location(debugger, &trace, ip),
+            RecoveredFrame {
+                frame,
+                registers,
+                frame_base: (fp != 0).then_some(fp),
             },
         );
     }
@@ -650,18 +781,52 @@ pub fn build_parked_thread_stack(
 fn build_stacktrace_seeded(
     debugger: &Target,
     trace: &ThreadTraceContext,
-    mut context: RegisterContext,
+    context: RegisterContext,
     initial_source: FrameSource,
     limit: usize,
 ) -> StackTrace {
+    let recovered = build_recovered_stacktrace_seeded(
+        debugger,
+        trace,
+        context,
+        initial_source,
+        limit,
+        HashMap::new(),
+    );
+    StackTrace {
+        frames: recovered
+            .frames
+            .into_iter()
+            .map(|frame| frame.frame)
+            .collect(),
+        truncated: recovered.truncated,
+    }
+}
+
+fn build_recovered_stacktrace_seeded(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    mut context: RegisterContext,
+    initial_source: FrameSource,
+    limit: usize,
+    initial_registers: HashMap<String, u64>,
+) -> RecoveredStackTrace {
     let limit = limit.max(1);
-    let mut raw: Vec<(u64, u64, FrameSource)> = vec![(context.rsp, context.rip, initial_source)];
+    let mut raw: Vec<(RegisterContext, FrameSource, Option<u64>)> = Vec::new();
     let mut tracer = StackTracer::new(debugger, trace);
     let mut seen = HashSet::from([context.rip]);
+    raw.push((
+        context.clone(),
+        initial_source,
+        tracer.frame_base_for(&context),
+    ));
 
     // RSP normally advances every step. A trap/interrupt frame can switch to a
     // different stack, so the hard frame cap remains the final corruption guard.
     for _ in 0..MAX_UNWIND_FRAMES {
+        if raw.len() >= limit {
+            break;
+        }
         let previous_rip = context.rip;
         let previous_rsp = context.rsp;
 
@@ -677,27 +842,74 @@ fn build_stacktrace_seeded(
             break;
         }
 
+        // Volatile registers are not recoverable at a normal call boundary;
+        // clear them before exposing the caller frame. Nonvolatile values
+        // modified by unwind codes remain in the context.
+        for index in [0usize, 1, 2, 8, 9, 10, 11] {
+            context.regs[index] = None;
+        }
         seen.insert(context.rip);
-        raw.push((context.rsp, context.rip, FrameSource::Unwind));
+        raw.push((
+            context.clone(),
+            FrameSource::Unwind,
+            tracer.frame_base_for(&context),
+        ));
     }
 
-    for (sp, ip) in tracer.scan_stack(context.rsp, &seen) {
-        raw.push((sp, ip, FrameSource::Scan));
+    let remaining = limit.saturating_sub(raw.len());
+    for (sp, ip) in tracer.scan_stack(context.rsp, &seen, remaining) {
+        let scan_context = RegisterContext {
+            rip: ip,
+            rsp: sp,
+            regs: [None; 16],
+        };
+        raw.push((
+            scan_context.clone(),
+            FrameSource::Scan,
+            tracer.frame_base_for(&scan_context),
+        ));
     }
 
-    ensure_frame_module_symbols(debugger, trace, raw.iter().map(|(_, ip, _)| *ip));
+    ensure_frame_module_symbols(
+        debugger,
+        trace,
+        raw.iter().map(|(context, _, _)| context.rip),
+    );
 
-    let mut stacktrace = StackTrace::default();
-    for (sp, ip, source) in raw {
-        record_stack_frame(
+    let mut stacktrace = RecoveredStackTrace::default();
+    for (index, (context, source, frame_base)) in raw.into_iter().enumerate() {
+        let mut registers;
+        if index == 0 {
+            registers = initial_registers.clone();
+        } else {
+            registers = HashMap::new();
+            if let Some(dtb) = initial_registers.get(debugger.arch().dtb_register()) {
+                let name = debugger.arch().dtb_register();
+                registers.insert(name.to_string(), *dtb);
+            }
+        }
+        for (register, name) in UNWIND_REG_NAMES.iter().enumerate() {
+            if let Some(value) = context.get(register as u8) {
+                registers.insert((*name).to_string(), value);
+            }
+        }
+        registers.insert("rip".to_string(), context.rip);
+        registers.insert("rsp".to_string(), context.rsp);
+
+        let frame = StackFrame {
+            sp: context.rsp,
+            ip: context.rip,
+            symbol: format_symbol(debugger, trace, context.rip),
+            source,
+            source_location: frame_source_location(debugger, trace, context.rip),
+        };
+        record_recovered_frame(
             &mut stacktrace,
             limit,
-            StackFrame {
-                sp,
-                ip,
-                symbol: format_symbol(debugger, trace, ip),
-                source,
-                source_location: frame_source_location(debugger, trace, ip),
+            RecoveredFrame {
+                frame,
+                registers,
+                frame_base,
             },
         );
     }
@@ -745,7 +957,11 @@ fn ensure_frame_module_symbols(
     }
 }
 
-fn record_stack_frame(stacktrace: &mut StackTrace, limit: usize, frame: StackFrame) {
+fn record_recovered_frame(
+    stacktrace: &mut RecoveredStackTrace,
+    limit: usize,
+    frame: RecoveredFrame,
+) {
     if stacktrace.frames.len() < limit {
         stacktrace.frames.push(frame);
     } else {
@@ -768,6 +984,17 @@ impl RegisterContext {
     }
 
     fn from_saved(registers: &SavedThreadRegisters) -> Option<Self> {
+        if let Some(arm64) = registers.arm64.as_ref() {
+            let rip = arm64.pc?;
+            let rsp = arm64.sp?;
+            let mut values = [None; 16];
+            values[5] = arm64.fp;
+            return Some(Self {
+                rip,
+                rsp,
+                regs: values,
+            });
+        }
         let rip = registers.rip?;
         let rsp = registers.rsp?;
         let mut values = [None; 16];
@@ -1115,11 +1342,48 @@ impl<'a> StackTracer<'a> {
         Some(UnwindStep::Continue)
     }
 
-    fn scan_stack(&mut self, start_rsp: u64, seen: &HashSet<u64>) -> Vec<(u64, u64)> {
+    /// Resolve the stack base used by frame-pointer-relative PDB locations for
+    /// the function containing `context.rip`. A missing or unreadable unwind
+    /// record degrades to the recovered RSP rather than aborting the walk.
+    fn frame_base_for(&mut self, context: &RegisterContext) -> Option<u64> {
+        let fallback = (context.rsp != 0).then_some(context.rsp);
+        let Some(base_address) = self
+            .module_containing(context.rip)
+            .map(|module| module.info.base_address.0)
+        else {
+            return fallback;
+        };
+        let Some(image) = self.module_image(context.rip) else {
+            return fallback;
+        };
+        let Resolve::Function { unwind_data, .. } =
+            resolve_function(&image, base_address, context.rip)
+        else {
+            return fallback;
+        };
+        parse_unwind_info(&image, unwind_data)
+            .and_then(|info| {
+                if info.frame_register == 0 {
+                    Some(context.rsp)
+                } else {
+                    context.get(info.frame_register)
+                }
+            })
+            .or(fallback)
+    }
+
+    fn scan_stack(&mut self, start_rsp: u64, seen: &HashSet<u64>, limit: usize) -> Vec<(u64, u64)> {
         let mut frames = Vec::new();
         let mut failures = 0usize;
 
+        if limit == 0 {
+            return frames;
+        }
+
         for slot in 0..(STACK_SCAN_BYTES / 8) {
+            if frames.len() >= limit {
+                break;
+            }
             if failures >= 32 {
                 break;
             }
@@ -1482,9 +1746,9 @@ fn slot_u16(codes: &[UnwindCodeSlot], index: usize) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameSource, Lookup, ParsedUnwindInfo, PeImage, RUNTIME_FUNCTION, RegisterContext,
-        StackFrame, StackTrace, frame_base, lookup_arm64_runtime_function, lookup_runtime_function,
-        parse_unwind_info, record_stack_frame, unwind_slot_count,
+        Lookup, ParsedUnwindInfo, PeImage, RUNTIME_FUNCTION, RegisterContext, frame_base,
+        lookup_arm64_runtime_function, lookup_runtime_function, parse_unwind_info,
+        unwind_slot_count,
     };
     use crate::target::SavedThreadRegisters;
 
@@ -1602,28 +1866,6 @@ mod tests {
         };
 
         assert_eq!(frame_base(&context, &unwind), Some(0x1fe0));
-    }
-
-    #[test]
-    fn record_stack_frame_counts_truncated_frames() {
-        let mut stacktrace = StackTrace::default();
-
-        for ip in [0x1000, 0x2000, 0x3000] {
-            record_stack_frame(
-                &mut stacktrace,
-                2,
-                StackFrame {
-                    sp: 0,
-                    ip,
-                    symbol: String::new(),
-                    source: FrameSource::Current,
-                    source_location: None,
-                },
-            );
-        }
-
-        assert_eq!(stacktrace.frames.len(), 2);
-        assert_eq!(stacktrace.truncated, 1);
     }
 
     #[test]

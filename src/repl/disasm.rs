@@ -370,17 +370,6 @@ pub fn print_stacktrace(
     print_stacktrace_data(&stacktrace, display_limit, embedded);
 }
 
-pub fn print_stacktrace_verbose(
-    debugger: &Target,
-    register_map: &RegisterMap,
-    regs: &[u8],
-    build_limit: usize,
-    display_limit: usize,
-) {
-    let stacktrace = build_stacktrace(debugger, register_map, regs, build_limit);
-    print_stacktrace_data_with_provenance(&stacktrace, display_limit, false);
-}
-
 /// Render an already-collected stack trace in the same layout as [`print_stacktrace`].
 pub fn print_stacktrace_data(stacktrace: &StackTrace, display_limit: usize, embedded: bool) {
     print_stacktrace_data_impl(stacktrace, display_limit, embedded, false);

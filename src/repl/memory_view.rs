@@ -15,7 +15,7 @@ pub struct AddressRange {
 /// WinDbg range arguments use `L<count>` (case-insensitive) to distinguish an
 /// element count from an end address. Keep ordinary identifiers beginning with
 /// `l` available as expressions unless the suffix has count-like syntax.
-fn windbg_count_expression(argument: &str) -> Option<&str> {
+pub fn windbg_count_expression(argument: &str) -> Option<&str> {
     let count = argument
         .strip_prefix('L')
         .or_else(|| argument.strip_prefix('l'))?;
@@ -173,8 +173,10 @@ pub fn push_string_units(buf: &[u8], char_size: usize, max: usize, out: &mut Vec
 
 pub enum ItemFormat {
     Bytes,
+    Words,
     Dwords,
     Qwords,
+    Binary,
 }
 
 pub struct MemoryDisplayMode {
@@ -194,12 +196,39 @@ impl MemoryDisplayMode {
         }
     }
 
+    pub fn words() -> Self {
+        Self {
+            bytes_per_row: 16,
+            item_size: 2,
+            item_format: ItemFormat::Words,
+            show_ascii: false,
+        }
+    }
+
+    pub fn words_ascii() -> Self {
+        Self {
+            bytes_per_row: 16,
+            item_size: 2,
+            item_format: ItemFormat::Words,
+            show_ascii: true,
+        }
+    }
+
     pub fn dwords() -> Self {
         Self {
             bytes_per_row: 16,
             item_size: 4,
             item_format: ItemFormat::Dwords,
             show_ascii: false,
+        }
+    }
+
+    pub fn dwords_ascii() -> Self {
+        Self {
+            bytes_per_row: 16,
+            item_size: 4,
+            item_format: ItemFormat::Dwords,
+            show_ascii: true,
         }
     }
 
@@ -211,9 +240,27 @@ impl MemoryDisplayMode {
             show_ascii: false,
         }
     }
+
+    pub fn binary() -> Self {
+        Self {
+            bytes_per_row: 16,
+            item_size: 1,
+            item_format: ItemFormat::Binary,
+            show_ascii: false,
+        }
+    }
 }
 
-pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplayMode) {
+/// Render a memory listing while preserving rows that contain unreadable
+/// bytes. `validity`, when supplied, has one entry per byte in `data`; an
+/// invalid item is shown as question marks and the ASCII column uses `?` for
+/// each unavailable byte.
+pub fn display_memory_with_validity(
+    start_address: VirtAddr,
+    data: &[u8],
+    validity: Option<&[bool]>,
+    mode: &MemoryDisplayMode,
+) {
     for (i, chunk) in data.chunks(mode.bytes_per_row).enumerate() {
         out!(
             "{}  ",
@@ -224,9 +271,36 @@ pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplay
         let mut printed = 0;
 
         for item in chunk.chunks(mode.item_size) {
+            let item_start = i * mode.bytes_per_row + printed * mode.item_size;
+            let readable = validity.is_none_or(|valid| {
+                item.iter()
+                    .enumerate()
+                    .all(|(offset, _)| valid.get(item_start + offset).copied().unwrap_or(false))
+            });
+            if !readable {
+                match mode.item_format {
+                    ItemFormat::Bytes => out!("?? "),
+                    ItemFormat::Words => out!("???? "),
+                    ItemFormat::Dwords => out!("???????? "),
+                    ItemFormat::Qwords => out!("???????????????? "),
+                    ItemFormat::Binary => out!("???????? ?? "),
+                }
+                printed += 1;
+                continue;
+            }
+
             match mode.item_format {
-                ItemFormat::Bytes => {
-                    out!("{:02x} ", item[0]);
+                ItemFormat::Bytes => out!("{:02x} ", item[0]),
+                ItemFormat::Words => {
+                    if item.len() == 2 {
+                        let val = u16::from_le_bytes([item[0], item[1]]);
+                        out!("{:04x} ", val);
+                    } else {
+                        for byte in item {
+                            out!("{:02x}", byte);
+                        }
+                        out!("  ");
+                    }
                 }
                 ItemFormat::Dwords => {
                     if item.len() == 4 {
@@ -252,6 +326,11 @@ pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplay
                         out!("   ");
                     }
                 }
+                ItemFormat::Binary => {
+                    out!("{:08b}", item[0]);
+                    out!(" {:02x}", item[0]);
+                    out!(" ");
+                }
             }
             printed += 1;
         }
@@ -259,15 +338,25 @@ pub fn display_memory(start_address: VirtAddr, data: &[u8], mode: &MemoryDisplay
         for _ in printed..items_per_row {
             match mode.item_format {
                 ItemFormat::Bytes => out!("   "),
+                ItemFormat::Words => out!("     "),
                 ItemFormat::Dwords => out!("         "),
                 ItemFormat::Qwords => out!("                 "),
+                ItemFormat::Binary => out!("            "),
             }
         }
 
         if mode.show_ascii {
             out!(" ");
-            for byte in chunk {
-                if byte.is_ascii_graphic() || *byte == b' ' {
+            for (offset, byte) in chunk.iter().enumerate() {
+                let readable = validity.is_none_or(|valid| {
+                    valid
+                        .get(i * mode.bytes_per_row + offset)
+                        .copied()
+                        .unwrap_or(false)
+                });
+                if !readable {
+                    out!("?");
+                } else if byte.is_ascii_graphic() || *byte == b' ' {
                     out!("{}", *byte as char);
                 } else {
                     out!("{}", ".".bright_black());

@@ -4,20 +4,95 @@
 //! run a command and take its text with [`capture`]. With no capture active
 //! the macros are plain stdout, so the interactive REPL is unchanged.
 //!
-//! The sink is thread-local: the REPL and the MCP session actor are each one
+//! Capture is thread-local: the REPL and the MCP session actor are each one
 //! thread, and a capture installed on one never sees output from another.
+//! Transcript logging is process-wide so a `.logopen` command also records
+//! diagnostics emitted by the backend or another command context.
 
 use std::cell::RefCell;
 use std::fmt;
-use std::io::Write;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 
 thread_local! {
     static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
 }
 
+static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Open the command transcript sink. Every subsequent [`out!`], [`outln!`],
+/// and diagnostic emission is copied here with terminal escape sequences
+/// removed. Opening a new sink replaces the previous one.
+pub fn open_log(path: impl AsRef<Path>, append: bool) -> io::Result<()> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(!append)
+        .append(append)
+        .open(path)?;
+    let mut sink = LOG_SINK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *sink = Some(file);
+    Ok(())
+}
+
+/// Close the command transcript sink, flushing it first when possible.
+pub fn close_log() {
+    let mut sink = LOG_SINK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(mut file) = sink.take() {
+        let _ = file.flush();
+    }
+}
+
+fn log_text(text: &str) {
+    let mut sink = LOG_SINK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(file) = sink.as_mut() else {
+        return;
+    };
+    // A failed transcript must never interfere with debugger output. Keep the
+    // sink installed so a transient error does not silently redirect later
+    // output elsewhere, and flush each write so `.logclose` is optional.
+    let _ = file.write_all(text.as_bytes());
+    let _ = file.flush();
+}
+
+fn log_args(args: fmt::Arguments<'_>) {
+    let mut sink = LOG_SINK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(file) = sink.as_mut() else {
+        return;
+    };
+    let mut text = String::new();
+    let _ = fmt::write(&mut text, args);
+    let clean = strip_ansi(&text);
+    let _ = file.write_all(clean.as_bytes());
+    let _ = file.flush();
+}
+
+/// Record one command line in the active transcript without echoing it to the
+/// terminal or a capture buffer. The REPL owns the prompt itself, so the
+/// transcript uses a plain `> ` prompt that remains useful in redirected logs.
+pub fn log_input_line(line: &str) {
+    let mut text = String::with_capacity(line.len() + 3);
+    text.push_str("> ");
+    text.push_str(line);
+    text.push('\n');
+    let clean = strip_ansi(&text);
+    log_text(&clean);
+}
+
 /// Backing call for [`out!`]/[`outln!`]: append to the active capture, else
 /// print to stdout.
 pub fn write_fmt(args: fmt::Arguments<'_>) {
+    log_args(args);
     let captured = CAPTURE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(buf) = slot.as_mut() else {
@@ -30,6 +105,14 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
     if !captured {
         print!("{args}");
     }
+}
+
+/// Backing call for diagnostics that intentionally use stderr on a terminal.
+/// It still participates in the transcript sink, while preserving stderr as
+/// the visible channel outside a captured host.
+pub fn write_stderr_fmt(args: fmt::Arguments<'_>) {
+    log_args(args);
+    eprint!("{args}");
 }
 
 /// Whether this thread's REPL output is currently being captured.

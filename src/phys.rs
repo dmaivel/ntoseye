@@ -55,6 +55,16 @@ impl PhysMem {
         }
     }
 
+    /// Guest-physical RAM as `(base, len)` runs, for memory sources that know
+    /// the layout (a live VM process). Empty for KD and dumps, whose callers
+    /// take the runs from the guest's own `MmPhysicalMemoryBlock`.
+    pub fn ram_runs(&self) -> Vec<(u64, u64)> {
+        match self {
+            Self::Live(h) => h.ram_runs(),
+            Self::Dmp(_) | Self::Remote(_) => Vec::new(),
+        }
+    }
+
     /// Identity of the current halt, for memoizing guest-derived lists: equal
     /// values mean the guest has not run in between. `None` when this memory
     /// has no resume signal (a live VM process), so nothing may be memoized.

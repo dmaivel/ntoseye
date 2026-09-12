@@ -1,10 +1,12 @@
 use crate::diagnostics;
 use crate::dmp::{
-    DmpContext, DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver, clamp_processors,
+    DmpContext, DmpException, DmpInfo, DmpSystemInfo, IMAGE_FILE_MACHINE_ARM64, UnloadedDriver,
+    clamp_processors,
 };
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::kd::context;
+use crate::kd::context_arm64;
 use crate::kd::wire::{read_u16, read_u32, read_u64};
 use crate::types::VirtAddr;
 use kdmp_parser::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
@@ -148,6 +150,7 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
     let directory_table_base = read_u64(mmap, OFF_DIRECTORY_TABLE_BASE);
     let number_processors = read_u32(mmap, OFF_NUMBER_PROCESSORS);
     let bug_check_code = read_u32(mmap, OFF_BUG_CHECK_CODE);
+    let machine_image_type = read_u32(mmap, OFF_MACHINE_IMAGE_TYPE);
     let bug_check_parameters = [
         read_u64(mmap, OFF_BUG_CHECK_PARAMETERS),
         read_u64(mmap, OFF_BUG_CHECK_PARAMETERS + 8),
@@ -164,17 +167,30 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
     // position — in practice they point to the same data, but the triage
     // offset is authoritative for minidumps.
     let ctx_offset = read_u32(triage_hdr, TRIAGE_CONTEXT_OFFSET) as usize;
-    let ctx_offset = if ctx_offset > 0 && ctx_offset + context::OFFSET_RIP + 8 <= mmap.len() {
+    let pc_offset = if machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
+        context_arm64::OFFSET_PC
+    } else {
+        context::OFFSET_RIP
+    };
+    let ctx_offset = if ctx_offset > 0
+        && ctx_offset
+            .checked_add(pc_offset + 8)
+            .is_some_and(|end| end <= mmap.len())
+    {
         ctx_offset
     } else {
         OFF_CONTEXT_RECORD
     };
-    if mmap.len() < ctx_offset + context::OFFSET_RIP + 8 {
+    if mmap.len() < ctx_offset.saturating_add(pc_offset + 8) {
         return Err(Error::InvalidDump(
             "dump too small for context record".into(),
         ));
     }
-    let context = DmpContext::from_bytes(&mmap[ctx_offset..]);
+    let context = if machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
+        DmpContext::from_arm64_bytes(&mmap[ctx_offset..])
+    } else {
+        DmpContext::from_bytes(&mmap[ctx_offset..])
+    };
 
     let call_stack_offset = read_u32(triage_hdr, TRIAGE_CALL_STACK_OFFSET) as u64;
     let size_of_call_stack = read_u32(triage_hdr, TRIAGE_SIZE_OF_CALL_STACK);
@@ -273,7 +289,7 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
         system_up_time: read_u64(mmap, OFF_SYSTEM_UP_TIME) as i64,
         product_type: read_u32(mmap, OFF_PRODUCT_TYPE),
         suite_mask: read_u32(mmap, OFF_SUITE_MASK),
-        machine_image_type: read_u32(mmap, OFF_MACHINE_IMAGE_TYPE),
+        machine_image_type,
         service_pack_build,
     });
 
@@ -686,6 +702,7 @@ fn parse_unloaded_drivers(mmap: &[u8], triage_hdr: &[u8]) -> Vec<UnloadedDriver>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
 
     fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8])]) -> Vec<u8> {
         // DUMP_HEADER64 (0x2000) + TRIAGE_DUMP64 + data
@@ -698,6 +715,8 @@ mod tests {
         buf[OFF_BUG_CHECK_CODE..OFF_BUG_CHECK_CODE + 4].copy_from_slice(&0x50u32.to_le_bytes());
         // NumberProcessors = 1
         buf[OFF_NUMBER_PROCESSORS..OFF_NUMBER_PROCESSORS + 4].copy_from_slice(&1u32.to_le_bytes());
+        buf[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
+            .copy_from_slice(&IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
         // DTB
         buf[OFF_DIRECTORY_TABLE_BASE..OFF_DIRECTORY_TABLE_BASE + 8]
             .copy_from_slice(&0x1ad000u64.to_le_bytes());
@@ -762,6 +781,26 @@ mod tests {
         assert!(info.is_triage);
         assert_eq!(info.context.rip, 0xfffff80012345678);
         assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn parse_triage_extracts_arm64_context_layout() {
+        let mut dump = make_triage_dump(&[], &[]);
+        dump[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
+            .copy_from_slice(&IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+        let ctx_base = OFF_CONTEXT_RECORD;
+        dump[ctx_base + context_arm64::OFFSET_PC..ctx_base + context_arm64::OFFSET_PC + 8]
+            .copy_from_slice(&0xffff_0000_0000_1000u64.to_le_bytes());
+        dump[ctx_base + context_arm64::OFFSET_SP..ctx_base + context_arm64::OFFSET_SP + 8]
+            .copy_from_slice(&0xffff_0000_1234_5000u64.to_le_bytes());
+        dump[ctx_base + context_arm64::OFFSET_BCR0..ctx_base + context_arm64::OFFSET_BCR0 + 4]
+            .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
+
+        let (info, _) = parse_triage(&dump).unwrap();
+        let arm = info.context.arm64.as_ref().unwrap();
+        assert_eq!(arm.pc, 0xffff_0000_0000_1000);
+        assert_eq!(arm.sp, 0xffff_0000_1234_5000);
+        assert_eq!(arm.bcr[0], 0x0000_e9e1);
     }
 
     #[test]

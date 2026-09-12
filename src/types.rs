@@ -129,6 +129,24 @@ impl Arch {
         }
     }
 
+    /// Register holding the current address space's page-table base.
+    pub const fn dtb_register(self) -> &'static str {
+        match self {
+            Self::Amd64 => "cr3",
+            Self::Arm64 => "ttbr0",
+        }
+    }
+
+    /// Bits of the DTB register that select the page-table base frame (PCID,
+    /// ASID, and reserved/canonical bits masked out), for comparing address
+    /// spaces.
+    pub const fn dtb_page_mask(self) -> u64 {
+        match self {
+            Self::Amd64 => 0x000F_FFFF_FFFF_F000,
+            Self::Arm64 => 0x0000_FFFF_FFFF_F000,
+        }
+    }
+
     pub fn from_machine_type(machine: u16) -> Option<Self> {
         match machine {
             0x8664 => Some(Self::Amd64),
@@ -140,6 +158,14 @@ impl Arch {
 
 #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
 pub struct PageTableEntry(pub u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageTableLevel {
+    Pxe,
+    Ppe,
+    Pde,
+    Pte,
+}
 
 impl VirtAddr {
     pub const fn from_u64(value: u64) -> Self {
@@ -227,15 +253,31 @@ impl PageTableEntry {
     }
 
     pub fn flags(self) -> String {
+        // Without a level, render bit 7 as LargePage.
+        self.format_flags(true)
+    }
+
+    /// Format flags using the WinDbg !pte interpretation for a specific
+    /// level.  Bit 7 is LargePage only on PPE/PDE entries; on a leaf PTE it is
+    /// the PAT bit and is intentionally not rendered as `L`.
+    pub fn flags_for_level(self, level: PageTableLevel) -> String {
+        self.format_flags(matches!(level, PageTableLevel::Ppe | PageTableLevel::Pde))
+    }
+
+    fn format_flags(self, large_page_level: bool) -> String {
         format!(
             "{}{}{}{}{}{}{}{}{}{}{}",
             if self.0 & (1 << 9) != 0 { 'C' } else { '-' }, // CopyOnWrite
             if self.0 & (1 << 8) != 0 { 'G' } else { '-' }, // Global
-            if self.0 & (1 << 7) != 0 { 'L' } else { '-' }, // LargePage
+            if large_page_level && self.0 & (1 << 7) != 0 {
+                'L'
+            } else {
+                '-'
+            }, // LargePage (PAT on leaf PTEs)
             if self.0 & (1 << 6) != 0 { 'D' } else { '-' }, // Dirty
             if self.0 & (1 << 5) != 0 { 'A' } else { '-' }, // Accessed
             if self.0 & (1 << 4) != 0 { 'N' } else { '-' }, // CacheDisable
-            '-', // WriteThrough (always '-' in reference)
+            if self.0 & (1 << 3) != 0 { 'T' } else { '-' }, // WriteThrough
             if self.0 & (1 << 2) != 0 { 'U' } else { 'K' }, // Owner (User/Kernel)
             if self.is_writable() { 'W' } else { 'R' },
             if self.0 & (1 << 63) != 0 { '-' } else { 'E' }, // NoExecute (inverted)

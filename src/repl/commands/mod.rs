@@ -3,15 +3,25 @@ use crate::repl::*;
 const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
 
+mod analyze;
 mod breakpoints;
+mod cpu;
 mod diagnostics;
 mod exceptions;
 mod exec;
+mod frames;
 mod inspect;
 mod memory;
 mod meta;
+mod mm;
+mod physical;
 mod process;
+mod sched;
+mod security;
 mod symbols;
+mod target_control;
+mod types;
+mod usermode;
 
 impl ReplState<'_> {
     pub fn dispatch_line(&mut self, line: &str) -> Result<Flow> {
@@ -141,6 +151,20 @@ impl ReplState<'_> {
     }
 
     fn dispatch_one(&mut self, line: &str, depth: usize) -> Result<Flow> {
+        // WinDbg processor syntax (`~`, `~2s`, `~*k`) is one token with the
+        // selector glued on, so it never matches a registered name.
+        if line.trim_start().starts_with('~') {
+            if let Some(spec) = command_registry().get("~") {
+                if let Some(reason) = self.run_control_denial(spec) {
+                    error!("{reason}");
+                    return Ok(Flow::Denied);
+                }
+                if !check_run_state(self, spec) {
+                    return Ok(Flow::Continue);
+                }
+            }
+            return self.cmd_tilde(line.trim());
+        }
         let parsed = match parse_command(line) {
             Ok(Some(parsed)) => parsed,
             Ok(None) => return Ok(Flow::Continue),

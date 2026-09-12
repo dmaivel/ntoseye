@@ -9,6 +9,8 @@ use crate::symbols::{SymbolIndex, SymbolStore};
 use crate::target::{DriverObjectInfo, Target, ThreadInfo};
 use crate::types::{Dtb, VirtAddr};
 
+const PROCESS_COMPLETION_LIMIT: usize = 4096;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionStrategy {
     None,
@@ -41,7 +43,9 @@ impl CompletionStrategy {
     }
 }
 
-/// Cached process info for completion (name, PID)
+/// Cached process info for completion (image name, PID).  The process command
+/// accepts both forms, so completion deliberately keeps the image spelling
+/// instead of reducing entries to numeric IDs.
 pub type ProcessCache = Vec<(String, u64)>;
 
 /// Cached execution-context IDs for completion
@@ -90,11 +94,12 @@ impl ReplCaches {
     /// from the halt memo after the first walk) and remembered as the fallback
     /// for when the target cannot be read, e.g. while the guest runs.
     pub fn processes_for_completion(&self, target: Option<&Target>) -> ProcessCache {
-        if let Some(processes) = target
-            .and_then(|target| target.guest().ok())
-            .and_then(|guest| guest.enumerate_processes().ok())
-        {
-            let processes: ProcessCache = processes.into_iter().map(|p| (p.name, p.pid)).collect();
+        if let Some(processes) = target.and_then(|target| target.matching_processes(None).ok()) {
+            let processes: ProcessCache = processes
+                .into_iter()
+                .take(PROCESS_COMPLETION_LIMIT)
+                .map(|p| (p.name, p.pid))
+                .collect();
             *self.processes.write().unwrap() = processes.clone();
             return processes;
         }

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -361,6 +362,8 @@ pub enum DebugCapability {
     BugcheckDetection,
     BugcheckDetails,
     DebugOutput,
+    Msr,
+    TargetControl,
 }
 
 impl DebugCapability {
@@ -383,6 +386,8 @@ impl DebugCapability {
             Self::BugcheckDetection => "bugcheck_detection",
             Self::BugcheckDetails => "bugcheck_details",
             Self::DebugOutput => "debug_output",
+            Self::Msr => "msr",
+            Self::TargetControl => "target_control",
         }
     }
 
@@ -404,6 +409,8 @@ impl DebugCapability {
             Self::BugcheckDetection => "bugcheck stop detection",
             Self::BugcheckDetails => "bugcheck details",
             Self::DebugOutput => "debug output",
+            Self::Msr => "model-specific registers",
+            Self::TargetControl => "reboot / forced crash",
         }
     }
 }
@@ -461,8 +468,23 @@ pub trait DebugBackend {
         false
     }
 
-    /// Program debug-register slot `slot` (0-3) to trap on `access` at `addr`
-    /// over `len` bytes (1/2/4/8; execute forces 1), on every processor.
+    /// Number of physical hardware-breakpoint slots exposed by this backend.
+    /// AMD64 backends use the four DR0-DR3 slots; ARM64 KD exposes eight
+    /// execute slots and two data-watch slots through one global ID space.
+    fn hardware_breakpoint_slots(&self) -> u8 {
+        HW_BREAKPOINT_SLOTS
+    }
+
+    /// Physical slots available for a hardware breakpoint access mode.
+    /// Backends with separate execute/watchpoint banks override this range;
+    /// the default covers all slots used by AMD64 debug registers.
+    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> Range<u8> {
+        let _ = access;
+        0..self.hardware_breakpoint_slots()
+    }
+
+    /// Program debug-register slot `slot` to trap on `access` at `addr` over
+    /// `len` bytes (1/2/4/8; execute forces 1), on every processor.
     fn set_hardware_breakpoint(
         &mut self,
         _slot: u8,
@@ -493,6 +515,14 @@ pub trait DebugBackend {
             BackendCapability::unsupported(DebugCapability::BugcheckDetection),
             BackendCapability::unsupported(DebugCapability::BugcheckDetails),
             BackendCapability::unsupported(DebugCapability::DebugOutput),
+            BackendCapability {
+                capability: DebugCapability::Msr,
+                supported: self.supports_msr(),
+            },
+            BackendCapability {
+                capability: DebugCapability::TargetControl,
+                supported: self.supports_target_control(),
+            },
         ]
     }
 
@@ -607,6 +637,42 @@ pub trait DebugBackend {
     /// on the per-stop module-list diff.
     fn take_modules_changed(&mut self) -> bool {
         false
+    }
+
+    /// Whether the transport can read/write model-specific registers
+    /// (`rdmsr`/`wrmsr`). KD implements this with
+    /// `DbgKdReadMachineSpecificRegister`; other transports report `false`.
+    fn supports_msr(&self) -> bool {
+        false
+    }
+
+    /// Read model-specific register `msr` on `processor`. On ARM64, `msr` is
+    /// the Windows KD encoding of an AArch64 system register.
+    fn read_msr(&mut self, _processor: u16, _msr: u32) -> Result<u64> {
+        Err(Error::NotSupported)
+    }
+
+    /// Write model-specific register `msr` on `processor`.
+    fn write_msr(&mut self, _processor: u16, _msr: u32, _value: u64) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Whether the transport can reboot the target or force a bugcheck
+    /// (`.reboot` / `.crash`). KD implements these with `DbgKdRebootApi` and
+    /// `DbgKdCauseBugCheckApi`.
+    fn supports_target_control(&self) -> bool {
+        false
+    }
+
+    /// Reboot the target. The target is gone after this returns; the caller
+    /// treats the next stop as a reload.
+    fn reboot_target(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Force a `MANUALLY_INITIATED_CRASH` (0xE2) bugcheck on the target.
+    fn cause_bugcheck(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
     }
 }
 

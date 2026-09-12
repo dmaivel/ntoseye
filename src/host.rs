@@ -131,20 +131,24 @@ mod platform {
     /// Offset of a guest-physical address into the VM's RAM mapping, or
     /// `None` inside the 32-bit MMIO hole, which no RAM backs (mapping it
     /// anywhere would alias real pages).
+    fn mmio_hole(hv: HvKind) -> (u64, u64) {
+        let start = match hv {
+            HvKind::Kvm => 0x8000_0000,
+            HvKind::Vmware => 0xC000_0000,
+        };
+        (start, 0x1_0000_0000)
+    }
+
     fn gpa_to_offset(hv: HvKind, gpa: PhysAddr) -> Option<u64> {
         // Low RAM is identity-mapped up to the hole; RAM above 4 GiB follows
         // it in the mapping, so the hole's size is subtracted.
-        let hole_start = match hv {
-            HvKind::Kvm => 0x8000_0000,    // QEMU: 2 GiB hole
-            HvKind::Vmware => 0xC000_0000, // VMware: 1 GiB hole
-        };
-        const HOLE_END: u64 = 0x1_0000_0000;
+        let (hole_start, hole_end) = mmio_hole(hv);
         if gpa < hole_start {
             Some(gpa)
-        } else if gpa < HOLE_END {
+        } else if gpa < hole_end {
             None
         } else {
-            Some(gpa - (HOLE_END - hole_start))
+            Some(gpa - (hole_end - hole_start))
         }
     }
 
@@ -189,6 +193,19 @@ mod platform {
 
         pub fn ram_size(&self) -> u64 {
             self.memory.length
+        }
+
+        /// Guest-physical RAM as `(base, len)` runs: low RAM up to the
+        /// hypervisor's 32-bit MMIO hole, then the remainder from 4 GiB.
+        /// Inverse of [`gpa_to_offset`].
+        pub fn ram_runs(&self) -> Vec<(u64, u64)> {
+            let (hole_start, hole_end) = mmio_hole(self.hv);
+            let size = self.memory.length;
+            if size <= hole_start {
+                vec![(0, size)]
+            } else {
+                vec![(0, hole_start), (hole_end, size - hole_start)]
+            }
         }
         fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
             let hva = gpa_to_offset(self.hv, addr)
@@ -462,6 +479,11 @@ mod platform {
 
         pub fn ram_size(&self) -> u64 {
             self.memory.length
+        }
+
+        /// Guest-physical RAM as one contiguous run from the `virt` RAM base.
+        pub fn ram_runs(&self) -> Vec<(u64, u64)> {
+            vec![(AARCH64_RAM_BASE, self.memory.length)]
         }
 
         fn gpa_offset(&self, gpa: PhysAddr) -> Result<u64> {

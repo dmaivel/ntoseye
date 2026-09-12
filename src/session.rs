@@ -22,7 +22,7 @@ use crate::gdb::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
 };
 use crate::guest::ProcessInfo;
-use crate::kd::{KdBackend, KdMemorySource, trace_enabled};
+use crate::kd::{KdBackend, KdMemorySource, hwbp, trace_enabled};
 use crate::memory::DTB_IDENTITY;
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
@@ -240,20 +240,22 @@ fn update_target_context_from_registers(
     register_map: &RegisterMap,
     registers: Result<Vec<u8>>,
 ) {
+    target.selected_frame = None;
     let Ok(registers) = registers else {
         target.registers = None;
         target.clear_context_dtb_override();
         return;
     };
     target.registers = Some(register_map.to_hashmap(&registers));
-    match register_map.read_u64("cr3", &registers) {
+    match register_map.read_u64(target.arch().dtb_register(), &registers) {
         // For triage dumps all modules are loaded with DTB_IDENTITY and
-        // memory reads use identity mapping, so the CR3 from the CONTEXT
+        // memory reads use identity mapping, so the context DTB from the
+        // CONTEXT
         // record is meaningless.  Setting it here would cause a DTB
         // mismatch that makes symbol lookup, type resolution, and eval
         // fail.
-        Ok(cr3) if cr3 != 0 && target.guest.is_some() && target.kernel_dtb() != DTB_IDENTITY => {
-            target.set_context_dtb_override(cr3)
+        Ok(dtb) if dtb != 0 && target.guest.is_some() && target.kernel_dtb() != DTB_IDENTITY => {
+            target.set_context_dtb_override(dtb)
         }
         _ => target.clear_context_dtb_override(),
     }
@@ -280,8 +282,6 @@ pub struct VcpuInfo {
 /// The low bits of a CR3/DTB that select the page-directory base physical
 /// frame (PCID and reserved/canonical bits masked out), for comparing the
 /// address space a vCPU runs in against a process's DTB.
-const DTB_PAGE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-
 /// How often the run-control poll loop wakes to check for a stop.
 const CONTINUE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -583,6 +583,7 @@ impl Session {
     /// The full "step one instruction", shared by the REPL (`si`) and the SDK.
     pub fn step(&mut self) -> Result<()> {
         self.require_live_register_context()?;
+        self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).
         self.parked_stop = None;
@@ -617,6 +618,7 @@ impl Session {
     /// backend. Shared by the REPL's `thread`/`vcpu` commands and the SDKs.
     pub fn set_current_thread(&mut self, id: &str) -> Result<()> {
         self.backend.set_current_thread(id)?;
+        self.target.selected_frame = None;
         self.current_thread = id.to_string();
         self.parked_windows_thread = None;
         self.target.clear_current_windows_thread_context();
@@ -628,6 +630,7 @@ impl Session {
     /// without changing the backend vCPU. This deliberately does not attempt to
     /// manufacture a register context for the parked thread.
     pub fn select_parked_windows_thread(&mut self, thread: &ThreadInfo) {
+        self.target.selected_frame = None;
         self.parked_windows_thread = Some(thread.ethread);
         self.target.set_parked_windows_thread(thread.clone());
     }
@@ -700,7 +703,8 @@ impl Session {
 
     /// Align the inspection context to the currently selected thread's address
     /// space: when halted, read that thread's registers and set
-    /// `target.registers` and `context_dtb_override` from its CR3, so reads,
+    /// `target.registers` and `context_dtb_override` from its CR3 (or ARM64
+    /// TTBR0), so reads,
     /// steps, and breakpoint installs scope to the focused thread rather than
     /// an earlier stop on another thread. Called from the thread-selection entry
     /// points; `continue_until_break` establishes the same context inline. Best-
@@ -725,8 +729,11 @@ impl Session {
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
         let pc = self.register_map.read_u64("rip", &regs)?;
-        let cr3 = self.register_map.read_u64("cr3", &regs).unwrap_or(0);
-        let trace = resolve_thread_trace_context(&self.target, cr3);
+        let dtb = self
+            .register_map
+            .read_u64(self.target.arch().dtb_register(), &regs)
+            .unwrap_or(0);
+        let trace = resolve_thread_trace_context(&self.target, dtb);
         let code_dtb = preferred_code_dtb(&trace, pc);
         let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
@@ -1159,11 +1166,12 @@ impl Session {
             .as_ref()
             .and_then(|g| g.enumerate_processes().ok())
             .unwrap_or_default();
+        let dtb_mask = self.target.arch().dtb_page_mask();
         let kernel_dtb_masked = self
             .target
             .guest
             .as_ref()
-            .map(|g| g.ntoskrnl.dtb() & DTB_PAGE_MASK);
+            .map(|g| g.ntoskrnl.dtb() & dtb_mask);
 
         let mut out = Vec::with_capacity(threads.len());
         for thread in &threads {
@@ -1184,9 +1192,10 @@ impl Session {
                     continue;
                 }
             };
-            let (Ok(rip), Ok(cr3)) = (
+            let (Ok(rip), Ok(dtb)) = (
                 self.register_map.read_u64("rip", &regs),
-                self.register_map.read_u64("cr3", &regs),
+                self.register_map
+                    .read_u64(self.target.arch().dtb_register(), &regs),
             ) else {
                 out.push(VcpuInfo {
                     id: thread.clone(),
@@ -1210,8 +1219,8 @@ impl Session {
                 continue;
             }
 
-            let cr3_masked = cr3 & DTB_PAGE_MASK;
-            let (context, symbol) = if kernel_dtb_masked.is_some_and(|k| cr3_masked == k) {
+            let dtb_masked = dtb & dtb_mask;
+            let (context, symbol) = if kernel_dtb_masked.is_some_and(|k| dtb_masked == k) {
                 let sym = self
                     .target
                     .guest
@@ -1220,10 +1229,7 @@ impl Session {
                     .map(|(s, o)| format!("{s}+{o:#x}"));
                 ("kernel".to_string(), sym)
             } else {
-                match processes
-                    .iter()
-                    .find(|p| (p.dtb & DTB_PAGE_MASK) == cr3_masked)
-                {
+                match processes.iter().find(|p| (p.dtb & dtb_mask) == dtb_masked) {
                     Some(proc) => {
                         let sym = self
                             .target
@@ -1412,9 +1418,21 @@ impl Session {
         self.resume_with_disposition(ContinueDisposition::Handled)
     }
 
+    /// Clear every inspection cache that cannot survive a crash/reboot command
+    /// before the shared wait loop re-establishes the next stop.
+    pub fn clear_resume_state(&mut self) {
+        self.target.selected_frame = None;
+        self.target.registers = None;
+        self.target.clear_context_dtb_override();
+        self.target.clear_current_windows_thread_context();
+        self.parked_windows_thread = None;
+        self.parked_stop = None;
+    }
+
     /// Resume with an explicit exception acknowledgement while preserving the
     /// same breakpoint step-over and cache invalidation prologue as [`Self::resume`].
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
+        self.target.selected_frame = None;
         if self.parked_windows_thread().is_some() {
             self.parked_windows_thread = None;
             self.target.clear_current_windows_thread_context();
@@ -1538,6 +1556,7 @@ impl Session {
     /// raw events here so reload handling, DR acknowledgement, scope checks,
     /// `int3` rewind, conditions, and auto-resume behavior cannot drift.
     pub fn classify_stop_event(&mut self, mut event: StopEvent) -> Result<StopResolution> {
+        self.target.selected_frame = None;
         self.record_stop_event(&event);
         set_current_thread_from_stop(self.backend.as_mut(), &event, &mut self.current_thread);
 
@@ -1602,12 +1621,16 @@ impl Session {
                 &self.register_map,
                 &self.breakpoints,
                 &self.current_thread,
+                self.target.arch(),
             );
         }
 
         let registers = self.backend.read_registers()?;
         let rip = self.register_map.read_u64("rip", &registers).unwrap_or(0);
-        let cr3 = self.register_map.read_u64("cr3", &registers).unwrap_or(0);
+        let cr3 = self
+            .register_map
+            .read_u64(self.target.arch().dtb_register(), &registers)
+            .unwrap_or(0);
         update_target_context_from_registers(&mut self.target, &self.register_map, Ok(registers));
 
         match self.resolve_breakpoint_stop(rip, cr3)? {
@@ -2207,11 +2230,10 @@ pub fn stop_is_stray_single_step(event: &StopEvent, breakpoints: &BreakpointMana
             .is_none_or(|pc| breakpoints.breakpoint_id_at_address(pc).is_none())
 }
 
-/// If `event` is a `#DB` raised by a hardware breakpoint, return the breakpoint
-/// that fired: maps a set DR6 status bit (B0-B3) to a registered slot, clears
-/// the status bits (even with no match), and sets RF for an execute watch so
-/// the fault is not re-raised on resume. `None` for a plain trap-flag
-/// single-step or a backend without `dr6`. Must run before
+/// If `event` is a hardware-debug stop, return the breakpoint that fired.
+/// AMD64 maps DR6 status bits and clears them; ARM64 uses the stopped PC/FAR
+/// together with BCR/WCR enable and address-select fields. `None` means a
+/// plain single-step or a backend without hardware-stop state. Must run before
 /// [`stop_is_stray_single_step`].
 pub fn hardware_breakpoint_hit(
     backend: &mut dyn DebugBackend,
@@ -2227,7 +2249,9 @@ pub fn hardware_breakpoint_hit(
     }
 
     let mut regs = backend.read_registers()?;
-    let dr6 = register_map.read_u64("dr6", &regs)?;
+    let Ok(dr6) = register_map.read_u64("dr6", &regs) else {
+        return arm64_hardware_breakpoint_hit(register_map, breakpoints, event, &regs);
+    };
 
     let hit = (0..HW_BREAKPOINT_SLOTS)
         .filter(|slot| dr6 & (1u64 << slot) != 0)
@@ -2261,6 +2285,80 @@ pub fn hardware_breakpoint_hit(
     Ok(hit)
 }
 
+fn arm64_hardware_breakpoint_hit(
+    register_map: &RegisterMap,
+    breakpoints: &BreakpointManager,
+    event: &StopEvent,
+    regs: &[u8],
+) -> Result<Option<Breakpoint>> {
+    let pc = register_map
+        .read_u64("pc", regs)
+        .or_else(|_| register_map.read_u64("rip", regs))
+        .unwrap_or_else(|_| event.program_counter.unwrap_or(0));
+    let far = register_map.read_u64("far", regs).unwrap_or(0);
+    let mut hit = None;
+
+    // ARM64 WVR values are granule-aligned and WCR.BAS identifies the bytes
+    // that caused the data watchpoint. Require FAR as evidence: without it a
+    // plain single-step must not be mistaken for a data breakpoint.
+    if far != 0 {
+        for slot in hwbp::ARM64_WATCHPOINT_SLOTS {
+            let Some(bp) = breakpoints.hardware_breakpoint_for_slot(slot) else {
+                continue;
+            };
+            let Some(hw) = bp.hardware else { continue };
+            if hw.access == HwBreakpointAccess::Execute {
+                continue;
+            }
+            let control = register_map
+                .read_u64(format!("wcr{slot}"), regs)
+                .unwrap_or(0);
+            let value = register_map
+                .read_u64(format!("wvr{slot}"), regs)
+                .unwrap_or(0);
+            if control & 1 == 0 || value != far & !7 {
+                continue;
+            }
+            let bas = ((control >> 5) & 0xff) as u8;
+            let far_bit = 1u8 << (far & 7);
+            let in_requested_range = bp
+                .address
+                .0
+                .checked_add(hw.len as u64)
+                .is_some_and(|end| far >= bp.address.0 && far < end);
+            if bas & far_bit != 0 && in_requested_range {
+                hit = Some(bp);
+                break;
+            }
+        }
+    }
+
+    if hit.is_none() {
+        for slot in hwbp::ARM64_BREAKPOINT_SLOTS {
+            let Some(bp) = breakpoints.hardware_breakpoint_for_slot(slot) else {
+                continue;
+            };
+            let Some(hw) = bp.hardware else { continue };
+            if hw.access != HwBreakpointAccess::Execute {
+                continue;
+            }
+            let index = slot - hwbp::ARM64_BREAKPOINT_SLOTS.start;
+            let control = register_map
+                .read_u64(format!("bcr{index}"), regs)
+                .unwrap_or(0);
+            let value = register_map
+                .read_u64(format!("bvr{index}"), regs)
+                .unwrap_or(0);
+            if control & 1 != 0 && value == pc & !3 && bp.address.0 == pc {
+                hit = Some(bp);
+                break;
+            }
+        }
+    }
+
+    Ok(hit)
+}
+
 /// Resolve one stop against the watchpoint manager. This owns the behavior
 /// common to every host: claim and acknowledge backend status, adopt the
 /// stopped thread, refresh register/CR3 context before condition evaluation,
@@ -2281,9 +2379,11 @@ pub fn resolve_watchpoint_stop(
 
     set_current_thread_from_stop(backend, event, current_thread);
     let registers = backend.read_registers()?;
-    let cr3 = register_map.read_u64("cr3", &registers).unwrap_or(0);
+    let scope_dtb = register_map
+        .read_u64(target.arch().dtb_register(), &registers)
+        .unwrap_or(0);
     update_target_context_from_registers(target, register_map, Ok(registers));
-    if !breakpoint.scope.matches_cr3(cr3) {
+    if !breakpoint.scope.matches_cr3(scope_dtb) {
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }
@@ -2321,7 +2421,11 @@ pub fn rewind_threads_off_breakpoints(
     register_map: &RegisterMap,
     breakpoints: &BreakpointManager,
     restore_thread: &str,
+    arch: Arch,
 ) {
+    if arch == Arch::Arm64 {
+        return;
+    }
     let threads = match backend.thread_list() {
         Ok(t) => t,
         Err(_) => return,
@@ -2335,7 +2439,9 @@ pub fn rewind_threads_off_breakpoints(
             continue;
         };
         let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
-        let cr3 = register_map.read_u64("cr3", &regs).unwrap_or(0);
+        let cr3 = register_map
+            .read_u64(arch.dtb_register(), &regs)
+            .unwrap_or(0);
         let Some(prev) = rip.checked_sub(register_map.breakpoint_step_size() as u64) else {
             continue;
         };
@@ -2399,7 +2505,8 @@ pub fn step_one_and_clear_tf(
 
 /// Clear the trap flag (`TF`, RFLAGS bit 8) and DR6's B0-B3 status bits on the
 /// currently selected thread, best-effort, so an absorbed single-step leaves
-/// no residue for the next resume.
+/// no residue for the next resume. ARM64 has neither x86 field, so its
+/// single-step state is acknowledged by KD's ARM64 continue request instead.
 pub fn clear_trap_flag(backend: &mut dyn DebugBackend, register_map: &RegisterMap) -> Result<()> {
     if let Ok(mut regs) = backend.read_registers() {
         let mut dirty = false;
@@ -2437,8 +2544,10 @@ pub fn step_over_current_breakpoint(
     let regs = backend.read_registers()?;
     let rip = register_map.read_u64("rip", &regs)?;
     // Only the shared-page fallback below needs the address space; a stub
-    // without `cr3` (or a non-x86 target) still gets the plain step-over.
-    let cr3 = register_map.read_u64("cr3", &regs).ok();
+    // without its DTB register still gets the plain step-over.
+    let cr3 = register_map
+        .read_u64(debugger.arch().dtb_register(), &regs)
+        .ok();
 
     // Scope-agnostic: a wrong-process hit on a shared-page BP still needs the
     // disable/step/enable dance so the wrong process can make forward progress.

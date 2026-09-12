@@ -40,6 +40,7 @@ pub struct ModuleInfo {
     pub short_name: String,
     pub base_address: VirtAddr,
     pub size: u32,
+    pub entry_point: Option<VirtAddr>,
     pub time_date_stamp: Option<u32>,
     pub checksum: Option<u32>,
     pub file_version: Option<String>,
@@ -54,6 +55,7 @@ impl ModuleInfo {
             short_name,
             base_address,
             size,
+            entry_point: None,
             time_date_stamp: None,
             checksum: None,
             file_version: None,
@@ -1096,6 +1098,11 @@ fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>>
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "<unknown>".to_string());
     let mut info = ModuleInfo::new(name, dll_base, size_of_image);
+    if let Ok(entry_point) = record.read_field::<VirtAddr>("EntryPoint")
+        && !entry_point.is_zero()
+    {
+        info.entry_point = Some(entry_point);
+    }
     if let Ok(tds) = record.read_field::<u32>("TimeDateStamp") {
         info = info.with_time_date_stamp(tds);
     }
@@ -1852,7 +1859,10 @@ impl Guest {
 
         let mut current_eprocess = ps_initial_system_process;
 
-        loop {
+        // Cycle detection handles a corrupt list that loops; the cap handles
+        // one that wanders through unrelated memory without repeating.
+        const PROCESS_WALK_LIMIT: usize = 65_536;
+        while processes.len() < PROCESS_WALK_LIMIT {
             if current_eprocess.0 == 0 || visited.contains(&current_eprocess.0) {
                 break;
             }

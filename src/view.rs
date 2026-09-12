@@ -18,7 +18,7 @@ use crate::target::{
     SymbolSearchMatch, SystemMemorySummary, Target, ThreadInfo, TokenDetail,
     irp_major_function_name, kthread_state_name, wait_reason_name,
 };
-use crate::trapframe::KtrapFrame;
+use crate::trapframe::{KtrapFrame, KtrapFrameData};
 use crate::triage::TriagePrcbInfo;
 use crate::triage_report::{
     BlackboxFinding, BlackboxKind, BlackboxState, CulpritAttribution, CulpritConfidence,
@@ -504,27 +504,76 @@ pub fn bugcheck(a: &BugcheckAnalysis) -> View {
 }
 
 fn ktrap_frame_registers(frame: &KtrapFrame) -> View {
-    View::Object(vec![
-        ("rax", View::Hex(frame.rax)),
-        ("rbx", View::Hex(frame.rbx)),
-        ("rcx", View::Hex(frame.rcx)),
-        ("rdx", View::Hex(frame.rdx)),
-        ("rsi", View::Hex(frame.rsi)),
-        ("rdi", View::Hex(frame.rdi)),
-        ("rbp", View::Hex(frame.rbp)),
-        ("rsp", View::Hex(frame.rsp)),
-        ("r8", View::Hex(frame.r8)),
-        ("r9", View::Hex(frame.r9)),
-        ("r10", View::Hex(frame.r10)),
-        ("r11", View::Hex(frame.r11)),
-        ("rip", View::Hex(frame.rip)),
-        ("cs", View::Hex(frame.cs as u64)),
-        ("ss", View::Hex(frame.ss as u64)),
-        ("eflags", View::Hex(frame.eflags as u64)),
-        ("error_code", View::Hex(frame.error_code)),
-        ("previous_mode", View::Num(frame.previous_mode as u64)),
-        ("previous_irql", View::Num(frame.previous_irql as u64)),
-    ])
+    match &frame.data {
+        KtrapFrameData::Amd64(frame) => View::Object(vec![
+            ("rax", View::Hex(frame.rax)),
+            ("rbx", View::Hex(frame.rbx)),
+            ("rcx", View::Hex(frame.rcx)),
+            ("rdx", View::Hex(frame.rdx)),
+            ("rsi", View::Hex(frame.rsi)),
+            ("rdi", View::Hex(frame.rdi)),
+            ("rbp", View::Hex(frame.rbp)),
+            ("rsp", View::Hex(frame.rsp)),
+            ("r8", View::Hex(frame.r8)),
+            ("r9", View::Hex(frame.r9)),
+            ("r10", View::Hex(frame.r10)),
+            ("r11", View::Hex(frame.r11)),
+            ("rip", View::Hex(frame.rip)),
+            ("cs", View::Hex(frame.cs as u64)),
+            ("ss", View::Hex(frame.ss as u64)),
+            ("eflags", View::Hex(frame.eflags as u64)),
+            ("error_code", View::Hex(frame.error_code)),
+            ("previous_mode", View::Num(frame.previous_mode as u64)),
+            ("previous_irql", View::Num(frame.previous_irql as u64)),
+        ]),
+        KtrapFrameData::Arm64(frame) => {
+            const X_NAMES: [&str; 31] = [
+                "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+                "x13", "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24",
+                "x25", "x26", "x27", "x28", "x29", "x30",
+            ];
+            let mut fields = Vec::with_capacity(31 + 9);
+            for (index, name) in X_NAMES.iter().enumerate() {
+                let value = match index {
+                    0..=18 => Some(frame.x[index]),
+                    29 => Some(frame.fp),
+                    30 => Some(frame.lr),
+                    _ => None,
+                };
+                fields.push((*name, value.map_or(View::Null, View::Hex)));
+            }
+            fields.extend([
+                ("fp", View::Hex(frame.fp)),
+                ("lr", View::Hex(frame.lr)),
+                ("sp", View::Hex(frame.sp)),
+                ("pc", View::Hex(frame.pc)),
+                ("cpsr", View::Hex(frame.cpsr)),
+                ("esr", View::Hex(frame.esr)),
+                ("fault_address", View::Hex(frame.fault_address)),
+                ("previous_mode", View::Num(frame.previous_mode as u64)),
+                ("previous_irql", View::Num(frame.previous_irql as u64)),
+            ]);
+            fields.extend([
+                (
+                    "bcr",
+                    View::List(frame.bcr.iter().copied().map(View::Hex).collect()),
+                ),
+                (
+                    "bvr",
+                    View::List(frame.bvr.iter().copied().map(View::Hex).collect()),
+                ),
+                (
+                    "wcr",
+                    View::List(frame.wcr.iter().copied().map(View::Hex).collect()),
+                ),
+                (
+                    "wvr",
+                    View::List(frame.wvr.iter().copied().map(View::Hex).collect()),
+                ),
+            ]);
+            View::Object(fields)
+        }
+    }
 }
 
 /// A decoded `_KTRAP_FRAME` shared by structured host APIs.

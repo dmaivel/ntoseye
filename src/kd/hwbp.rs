@@ -1,4 +1,4 @@
-//! x86-64 debug-register (DR7/DR6) bit encoding for hardware breakpoints.
+//! x86-64 and ARM64 debug-register bit encoding for hardware breakpoints.
 //!
 //! DR0-DR3 hold up to four linear breakpoint addresses; DR7 enables each slot
 //! and selects its trigger condition (R/W) and width (LEN); DR6 reports which
@@ -6,7 +6,77 @@
 //! per-processor read-modify-write in [`crate::kd`] stays trivial and the bit
 //! math is unit-testable.
 
+use std::ops::Range;
+
 use crate::dbg_backend::HwBreakpointAccess;
+
+/// Number of architectural ARM64 hardware breakpoint and watchpoint slots.
+/// These values are part of the Windows ARM64 ABI (`ARM64_NT_CONTEXT`).
+pub const ARM64_MAX_BREAKPOINTS: u8 = 8;
+pub const ARM64_MAX_WATCHPOINTS: u8 = 2;
+pub const ARM64_WATCHPOINT_SLOTS: Range<u8> = 0..ARM64_MAX_WATCHPOINTS;
+pub const ARM64_BREAKPOINT_SLOTS: Range<u8> =
+    ARM64_MAX_WATCHPOINTS..(ARM64_MAX_WATCHPOINTS + ARM64_MAX_BREAKPOINTS);
+
+pub fn arm64_slot_range(access: HwBreakpointAccess) -> Range<u8> {
+    match access {
+        HwBreakpointAccess::Execute => ARM64_BREAKPOINT_SLOTS,
+        HwBreakpointAccess::Write | HwBreakpointAccess::ReadWrite => ARM64_WATCHPOINT_SLOTS,
+    }
+}
+
+const ARM64_DBG_CTRL_ENABLE: u32 = 1 << 0;
+const ARM64_DBG_CTRL_BOTH_EXCEPTION_LEVELS: u32 = 0b11 << 1;
+const ARM64_DBG_CTRL_BAS_SHIFT: u32 = 5;
+const ARM64_DBG_CTRL_HMC: u32 = 1 << 13;
+const ARM64_DBG_CTRL_BOTH_SECURITY_STATES: u32 = 0b11 << 14;
+
+/// Return the byte-address-select mask for an ARM64 watchpoint.
+///
+/// ARM64 watchpoint value registers are eight-byte granular; `BAS` selects
+/// the bytes within that granule. Callers validate the length/alignment before
+/// programming a watchpoint.
+pub fn arm64_bas(addr: u64, len: u8) -> u32 {
+    let width = len as u32;
+    let start = (addr & 7) as u32;
+    (((1u32 << width) - 1) << start) & 0xff
+}
+
+/// ARM64 WVR stores the containing eight-byte granule. `BAS` carries the
+/// requested byte range within that granule.
+pub const fn arm64_wvr_address(addr: u64) -> u64 {
+    addr & !7
+}
+
+/// Encode one ARM64 DBGWCR value for a global EL0+EL1 watchpoint.
+///
+/// `Write` selects stores; `ReadWrite` selects loads and stores. HMC and SSC
+/// are set so both exception levels and both security states are covered,
+/// matching a WinDbg kernel-wide `ba` watchpoint.
+pub fn arm64_wcr_value(addr: u64, access: HwBreakpointAccess, len: u8) -> u32 {
+    let lsc = if access == HwBreakpointAccess::ReadWrite {
+        0b11
+    } else {
+        0b10
+    };
+    ARM64_DBG_CTRL_ENABLE
+        | ARM64_DBG_CTRL_BOTH_EXCEPTION_LEVELS
+        | (lsc << 3)
+        | (arm64_bas(addr, len) << ARM64_DBG_CTRL_BAS_SHIFT)
+        | ARM64_DBG_CTRL_HMC
+        | ARM64_DBG_CTRL_BOTH_SECURITY_STATES
+}
+
+/// Encode one ARM64 DBGBCR value for an execute breakpoint. ARM64
+/// instructions are four bytes, so BAS selects the instruction's four bytes.
+pub fn arm64_bcr_value(addr: u64) -> u32 {
+    debug_assert!(addr.is_multiple_of(4));
+    ARM64_DBG_CTRL_ENABLE
+        | ARM64_DBG_CTRL_BOTH_EXCEPTION_LEVELS
+        | (0x0fu32 << ARM64_DBG_CTRL_BAS_SHIFT)
+        | ARM64_DBG_CTRL_HMC
+        | ARM64_DBG_CTRL_BOTH_SECURITY_STATES
+}
 
 /// DR7 R/W field for an access type (2 bits): 00 execute, 01 write, 11 r/w.
 fn rw_field(access: HwBreakpointAccess) -> u64 {
@@ -137,5 +207,42 @@ mod tests {
         assert_eq!(gn(cleared, 1), 1, "slot 1 Gn preserved");
         assert_eq!(rw(cleared, 1), 0b01, "slot 1 R/W preserved");
         assert_eq!(len(cleared, 1), 0b01, "slot 1 LEN preserved");
+    }
+
+    #[test]
+    fn arm64_bas_selects_aligned_bytes_inside_wvr_granule() {
+        assert_eq!(arm64_bas(0x1000, 1), 0x01);
+        assert_eq!(arm64_bas(0x1003, 1), 0x08);
+        assert_eq!(arm64_bas(0x1002, 2), 0x0c);
+        assert_eq!(arm64_bas(0x1000, 4), 0x0f);
+        assert_eq!(arm64_bas(0x1000, 8), 0xff);
+        assert_eq!(arm64_wvr_address(0x1007), 0x1000);
+    }
+
+    #[test]
+    fn arm64_wcr_encodes_write_and_readwrite_conditions() {
+        let write = arm64_wcr_value(0x1003, HwBreakpointAccess::Write, 1);
+        assert_eq!(write & 1, 1, "E must enable the watchpoint");
+        assert_eq!((write >> 1) & 0b11, 0b11, "PAC must cover EL0 and EL1");
+        assert_eq!((write >> 3) & 0b11, 0b10, "write uses store-only LSC");
+        assert_eq!((write >> 5) & 0xff, 0x08, "BAS selects byte 3");
+        assert_eq!((write >> 13) & 1, 1, "HMC must cover both security states");
+        assert_eq!((write >> 14) & 0b11, 0b11, "SSC must cover both states");
+
+        let readwrite = arm64_wcr_value(0x2000, HwBreakpointAccess::ReadWrite, 8);
+        assert_eq!(
+            (readwrite >> 3) & 0b11,
+            0b11,
+            "read/write uses load+store LSC"
+        );
+        assert_eq!((readwrite >> 5) & 0xff, 0xff);
+    }
+
+    #[test]
+    fn arm64_bcr_encodes_four_byte_execute_instruction() {
+        let bcr = arm64_bcr_value(0x4000);
+        assert_eq!(bcr & 1, 1, "E must enable the breakpoint");
+        assert_eq!((bcr >> 1) & 0b11, 0b11, "PMC must cover EL0 and EL1");
+        assert_eq!((bcr >> 5) & 0xff, 0x0f, "BAS selects one ARM64 instruction");
     }
 }
