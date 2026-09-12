@@ -111,6 +111,7 @@ The debugger is self-documented: run `ntoseye --help` for command-line arguments
 - [REPL usage](docs/usage.md): expressions, radix, breakpoints, watchpoints, aliases
 - [Symbols and source](docs/symbols.md): private PDBs, `.sympath`/`.srcpath`, source breakpoints
 - [Choosing a backend](docs/backends.md): kd/kdnet/gdb/memory comparison, per-hypervisor setup for [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md)
+- [KDNET](docs/kdnet.md): `kdnet.exe` guest setup, host launch, reboot behaviour
 - [Crash dumps](docs/dumps.md): offline dump analysis, generating dumps, guest tweaks
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)

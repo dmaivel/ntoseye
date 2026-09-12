@@ -28,7 +28,7 @@ Then connect: `ntoseye`.
 
 ## KDNET
 
-KDNET uses the guest's virtual NIC instead of a serial device. Choose a host IP that the guest can reach through its bridged, NAT, or host-only VMware network, then follow the common [KDNET guest and launch setup](backends.md#kdnet).
+KDNET uses the guest's virtual NIC instead of a serial device. Choose a host IP that the guest can reach through its bridged, NAT, or host-only VMware network, then follow the [KDNET guide](kdnet.md).
 
 ## GDB stub
 

@@ -60,7 +60,7 @@ QEMU/KVM guests must not report the default `Microsoft Hv` hypervisor vendor. KD
 <vendor_id state="on" value="KVMKVMKVM"/>
 ```
 
-Power the VM completely off and start it again after changing the CPU identity; a Windows reboot does not recreate the QEMU CPU. See OSR's [QEMU/KVM KDNET analysis](https://www.osr.com/blog/2021/10/05/using-windbg-over-kdnet-on-qemu-kvm/). Then follow the common [KDNET guest and launch setup](backends.md#kdnet) using the selected host address.
+Power the VM completely off and start it again after changing the CPU identity; a Windows reboot does not recreate the QEMU CPU. See OSR's [QEMU/KVM KDNET analysis](https://www.osr.com/blog/2021/10/05/using-windbg-over-kdnet-on-qemu-kvm/). Then follow the [KDNET guide](kdnet.md) using the selected host address.
 
 ## GDB stub
 

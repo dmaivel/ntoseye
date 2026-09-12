@@ -25,7 +25,7 @@ For a Windows 11 ARM64 VM under [UTM](https://mac.getutm.app) (QEMU/HVF). Run `n
 
 ## KDNET
 
-KDNET uses the guest's virtual NIC instead of a serial device. Choose a macOS host IP that the guest can reach through its UTM network, then follow the common [KDNET guest and launch setup](backends.md#kdnet). UTM must not use Secure Boot while changing the BCD debug settings. Use `ntoseye --backend kdnet --kdnet-key 1.2.3.4 --memory-source kd` for target-mediated ARM64 memory with no root or UTM-process access; `ntoseye configure` prints this command.
+KDNET uses the guest's virtual NIC instead of a serial device. Choose a macOS host IP that the guest can reach through its UTM network, then follow the [KDNET guide](kdnet.md). UTM must not use Secure Boot while changing the BCD debug settings. Use `ntoseye --backend kdnet --kdnet-key 1.2.3.4 --memory-source kd` for target-mediated ARM64 memory with no root or UTM-process access; `ntoseye configure` prints this command.
 
 ## Memory introspection
 
