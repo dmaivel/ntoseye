@@ -37,7 +37,7 @@ dt _EPROCESS poi(nt!PsInitialSystemProcess) UniqueProcessId
 - `gu or finish` - Run until the current function returns.
 - `wt [count]` - Watch and trace calls until the current function returns.
 - `.reboot` (`reboot`, `.restart`, `restart`) - Reboot the debug target and reload its kernel context.
-- `.crash` (`crash`) - Force a `MANUALLY_INITIATED_CRASH` bugcheck (`0xE2`).
+- `.crash` (`crash`) - Force a `MANUALLY_INITIATED_CRASH` bugcheck (`0xE2`); Windows writes its crash dump first (often a minute, ignoring break-ins), then reboots or breaks in.
 
 ## Frames and context
 

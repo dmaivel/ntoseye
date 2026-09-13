@@ -22,11 +22,10 @@ use crate::kd::wire::{read_u16, read_u32, read_u64};
 use crate::types::{Arch, VirtAddr};
 
 use super::{
-    AMD64_DEBUG_CONTROL_SPACE_KSPECIAL, BUGCHECK_MANUALLY_INITIATED_CRASH,
-    BUGCHECK_REFRESH_ASSIST_GRACE, BugcheckCapture, DBG_KD_COMMAND_STRING_STATE_CHANGE,
+    AMD64_DEBUG_CONTROL_SPACE_KSPECIAL, BugcheckCapture, DBG_KD_COMMAND_STRING_STATE_CHANGE,
     DBG_KD_EXCEPTION_STATE_CHANGE, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT,
     KD_INITIAL_PROGRESS_INTERVAL, KD_INITIAL_TIMEOUT_DEFAULT, KD_INITIAL_TIMEOUT_ENV,
-    KD_REFRESH_BREAKIN_INTERVAL, KD_REFRESH_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT,
+    KD_RECONNECT_BREAKIN_INTERVAL, KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT,
     KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE, PUMP_POLL, STATUS_BREAKPOINT,
     StateChange, handle_debug_io_with_output, handle_file_io, should_advance_pc_before_continue,
 };
@@ -428,11 +427,14 @@ pub struct AwaitStateOptions<'a> {
 /// Receive packets until a state-change we should surface arrives.
 ///
 /// - `surface_all`: return the first state-change of any kind (initial handshake)
-/// - `bugcheck`: when `Some`, run in bugcheck-aware mode; the refresh message
-///   sets the flag, after which the next state-change is surfaced rather than
-///   continued, so the user catches the (frozen) bugcheck instead of riding its
-///   symbol-unload teardown to reboot. The flag is the caller's so it survives
-///   poll timeouts between the refresh print and the state-change
+/// - `bugcheck`: when `Some`, run in bugcheck-aware mode; the kernel's
+///   `*** Fatal System Error` print sets the flag, after which the next
+///   state-change is surfaced with the captured bugcheck data. The flag is the
+///   caller's so it survives poll timeouts between the print and the
+///   state-change. `KDTARGET: Refreshing KD connection` alone is not a crash
+///   marker: the kernel prints it at boot and whenever it re-probes the
+///   debugger, and `.crash` (MANUALLY_INITIATED_CRASH) skips the fatal print
+///   and the first break entirely, writing its dump and rebooting.
 /// - otherwise: continue load-symbols / command-string notifications
 ///   transparently (like WinDbg) and surface only exception breaks
 ///
@@ -510,7 +512,7 @@ pub fn await_state_change(
                 continue_transparent_state_change(framing, arch, &stop)?;
             }
             PACKET_TYPE_KD_DEBUG_IO => {
-                let detect = saw_kd_refresh.is_some() || bugcheck.is_some();
+                let detect = saw_kd_refresh.is_some();
                 let saw_refresh = handle_debug_io_with_output(
                     framing,
                     &pkt.payload,
@@ -520,21 +522,20 @@ pub fn await_state_change(
                     debug_log,
                     &mut std::io::stderr(),
                 )?;
-                if saw_refresh {
-                    if let Some(flag) = bugcheck.as_deref_mut() {
-                        // Bugcheck starting: stop riding the teardown, surface
-                        // the next state-change so the crash can be inspected.
-                        // Do not break in immediately here: Windows often emits
-                        // the fatal-system-error packet before a separate
-                        // "Driver at fault" packet, and an eager break-in stops
-                        // in the middle of that print sequence.
-                        *flag = true;
-                        kd_trace!(
-                            "kd: await: bugcheck refresh seen, will surface next state-change"
-                        );
-                    } else if let Some(flag) = saw_kd_refresh.as_deref_mut() {
-                        *flag = true;
-                    }
+                if saw_refresh && let Some(flag) = saw_kd_refresh.as_deref_mut() {
+                    *flag = true;
+                }
+                if let Some(flag) = bugcheck.as_deref_mut()
+                    && !*flag
+                    && bugcheck_capture
+                        .as_deref()
+                        .is_some_and(|capture| capture.code().is_some())
+                {
+                    // The fatal print precedes the first-chance bugcheck break;
+                    // "Driver at fault" may follow as a separate packet, so wait
+                    // for the kernel's own break rather than poking it.
+                    *flag = true;
+                    kd_trace!("kd: await: fatal system error seen, will surface next state-change");
                 }
             }
             PACKET_TYPE_KD_FILE_IO => {
@@ -552,7 +553,6 @@ pub fn pump_assist_breakin(
     framing: &mut KdFraming<KdTransport>,
     next_breakin: &mut Instant,
     breakin_count: &mut u32,
-    reason: &str,
 ) -> Result<()> {
     let now = Instant::now();
     if now < *next_breakin {
@@ -560,10 +560,10 @@ pub fn pump_assist_breakin(
     }
 
     framing.send_breakin()?;
-    *next_breakin = now + KD_REFRESH_BREAKIN_INTERVAL;
+    *next_breakin = now + KD_RECONNECT_BREAKIN_INTERVAL;
     *breakin_count = breakin_count.saturating_add(1);
-    if *breakin_count == 1 || breakin_count.is_multiple_of(KD_REFRESH_BREAKIN_TRACE_EVERY) {
-        kd_trace!("kd: pump: sent {} break-in #{}", reason, *breakin_count);
+    if *breakin_count == 1 || breakin_count.is_multiple_of(KD_RECONNECT_BREAKIN_TRACE_EVERY) {
+        kd_trace!("kd: pump: sent reconnect break-in #{}", *breakin_count);
     }
     Ok(())
 }
@@ -742,11 +742,10 @@ pub fn run_pump(
         let _ = link.stop_tx.send(result);
     };
     let _ = framing.transport_mut().set_read_timeout(Some(PUMP_POLL));
-    // Persists across poll iterations: once the bugcheck refresh is seen, the
+    // Persists across poll iterations: once the fatal-error print is seen, the
     // next state-change is surfaced even if a timeout intervened first
     let mut bugcheck = false;
     let reconnect_assist_at = reconnect_assist_delay.map(|delay| Instant::now() + delay);
-    let mut bugcheck_refresh_seen_at = None;
     let mut bugcheck_capture = BugcheckCapture::default();
     let mut next_assist_breakin = Instant::now();
     let mut assist_breakin_count = 0u32;
@@ -792,31 +791,13 @@ pub fn run_pump(
                 // waiting for the debugger to break in before it emits the
                 // state-change we need to rediscover the new kernel.
                 let now = Instant::now();
-                let bugcheck_needs_assist = if bugcheck {
-                    let bugcheck_refresh_seen_at = *bugcheck_refresh_seen_at.get_or_insert(now);
-                    now.duration_since(bugcheck_refresh_seen_at) >= BUGCHECK_REFRESH_ASSIST_GRACE
-                        && !matches!(
-                            bugcheck_capture.code(),
-                            Some(code) if code != BUGCHECK_MANUALLY_INITIATED_CRASH
-                        )
-                } else {
-                    false
-                };
                 let reconnect_assist_ready =
                     reconnect_assist_at.is_some_and(|assist_at| now >= assist_at);
-                let assist_reason = if bugcheck_needs_assist {
-                    Some("refresh")
-                } else if reconnect_assist_ready || framing.peer_reset_seen() {
-                    Some("reconnect")
-                } else {
-                    None
-                };
-                if let Some(reason) = assist_reason {
+                if reconnect_assist_ready || framing.peer_reset_seen() {
                     if let Err(e) = pump_assist_breakin(
                         &mut framing,
                         &mut next_assist_breakin,
                         &mut assist_breakin_count,
-                        reason,
                     ) {
                         report(Err(e.to_string()));
                         break;

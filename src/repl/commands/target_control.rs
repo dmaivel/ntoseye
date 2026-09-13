@@ -26,7 +26,7 @@ repl_command! {
     names: [".crash", "crash"],
     usage: ".crash",
     summary: "Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).",
-    details: "KD reports the resulting bugcheck through the normal stop and crash-analysis path.",
+    details: "Windows writes its crash dump first (often a minute, during which the target ignores break-ins), then reboots or, with automatic restart disabled, breaks in. Ctrl+C stops waiting.",
     run_state: Halted,
     run: Run,
 }
@@ -79,7 +79,9 @@ impl ReplState<'_> {
         }
         self.clear_selected_frame();
         self.ctx.clear_resume_state();
-        outln!("Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH).");
+        outln!(
+            "Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash dump before rebooting or breaking in."
+        );
         self.wait_for_stop_after_resume()
     }
 

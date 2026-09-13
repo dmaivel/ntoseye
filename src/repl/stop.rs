@@ -362,6 +362,10 @@ pub fn pending_reload_register_kernel_base_hint(
     (rva < CURRENT_KERNEL_RELOAD_WINDOW).then_some(VirtAddr(base))
 }
 
+/// Drain one stop the running target has already reported. Returns whether a
+/// stop was surfaced to the user; a noise stop that was resumed (or an
+/// exception a policy continued) leaves the target running and returns
+/// `false`, so callers that want a stop keep going and break in.
 pub fn surface_pending_stop(
     session: &mut Session,
     caches: &ReplCaches,
@@ -372,7 +376,7 @@ pub fn surface_pending_stop(
     };
     let resolution = session.classify_stop_event(event)?;
     if matches!(resolution, StopResolution::Resumed) {
-        return Ok(true);
+        return Ok(false);
     }
 
     if let StopResolution::Stopped { event, .. } = &resolution
@@ -396,7 +400,7 @@ pub fn surface_pending_stop(
             .backend
             .continue_execution_with_disposition(disposition)?;
         session.record_continuation_disposition(disposition);
-        return Ok(true);
+        return Ok(false);
     }
 
     print_async_stop_resolution(session, caches, resolution);

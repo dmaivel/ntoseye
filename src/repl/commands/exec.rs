@@ -211,13 +211,13 @@ impl ReplState<'_> {
             }
             Ok(false) => {}
             Err(e) => {
-                error!("error checking running VM: {:?}", e);
+                error!("error checking running VM: {e}");
                 return Ok(());
             }
         }
 
         if let Err(e) = surface_interrupt_stop(self.ctx, &self.caches) {
-            error!("failed to interrupt: {:?}", e);
+            error!("failed to interrupt: {e}");
         }
 
         Ok(())
@@ -513,7 +513,13 @@ impl ReplState<'_> {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    error!("error waiting for stop: {:?}", e);
+                    error!("error waiting for stop: {e}");
+                    if self.ctx.backend.is_running() {
+                        outln!(
+                            "{}",
+                            ui::muted("target still running; use `break` to try again")
+                        );
+                    }
                     break;
                 }
             }

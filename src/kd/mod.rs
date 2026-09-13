@@ -168,11 +168,9 @@ const KD_REFRESH_MESSAGE: &[u8] = b"KDTARGET: Refreshing KD connection";
 const KD_INITIAL_TIMEOUT_ENV: &str = "NTOSEYE_KD_TIMEOUT";
 const KD_INITIAL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(8);
 const KD_INITIAL_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
-const KD_REFRESH_BREAKIN_INTERVAL: Duration = Duration::from_millis(250);
-const KD_REFRESH_BREAKIN_TRACE_EVERY: u32 = 8;
-const BUGCHECK_REFRESH_ASSIST_GRACE: Duration = Duration::from_secs(2);
+const KD_RECONNECT_BREAKIN_INTERVAL: Duration = Duration::from_millis(250);
+const KD_RECONNECT_BREAKIN_TRACE_EVERY: u32 = 8;
 const POST_BUGCHECK_RECONNECT_ASSIST_DELAY: Duration = Duration::from_secs(20);
-const BUGCHECK_MANUALLY_INITIATED_CRASH: u32 = 0x0000_00e2;
 const KD_EXIT_STOP_POLL: Duration = Duration::from_secs(1);
 const KD_EXIT_MAX_CONTINUES: u32 = 8;
 /// How long the background pump blocks on a socket read before looping back to
@@ -2045,10 +2043,14 @@ impl DebugBackend for KdBackend {
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::cause_bugcheck(framing, processor)
         })?;
-        // The target reports the resulting bugcheck state-change asynchronously
-        // through the normal KD pump, just like a guest-triggered crash.
+        // KeBugCheck2 skips the fatal print and the first debugger break for
+        // MANUALLY_INITIATED_CRASH: the target writes its dump (tens of seconds,
+        // interrupts off, break-ins ignored) and then reboots, or breaks in
+        // afterwards when automatic restart is disabled. Treat it like a reboot,
+        // but do not poke immediately: the kernel still polls for break-ins on
+        // its way into KeBugCheck2 and an early poke detours it into a stop.
         self.record_running();
-        self.start_pump(None, None)
+        self.start_pump(Some(POST_BUGCHECK_RECONNECT_ASSIST_DELAY), None)
     }
 
     fn optional_capabilities(&self) -> Vec<BackendCapability> {
@@ -4709,156 +4711,81 @@ mod tests {
         assert_eq!(stop.program_counter, pc);
     }
 
-    #[test]
-    fn pump_does_not_breakin_immediately_on_bugcheck_refresh_print() {
+    /// Drive `await_state_change` in bugcheck-aware mode: the fake kernel sends
+    /// `prints` then an exception state-change, ACKing whatever comes back.
+    fn await_bugcheck_aware(prints: &[&[u8]], pc: u64) -> StateChange {
         let (mut kernel, host) = UnixStream::pair().unwrap();
         kernel
-            .set_read_timeout(Some(Duration::from_millis(5)))
+            .set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
-        let framing = KdFraming::new(host.into());
-        let (tx, _rx) = mpsc::channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle = {
-            let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
-                run_pump(
-                    framing,
-                    Arch::Amd64,
-                    PumpLink {
-                        stop_tx: tx,
-                        shutdown,
-                        reported_stop: Arc::new(AtomicBool::new(false)),
-                    },
-                    None,
-                    DebugLog::new(DEBUG_LOG_CAPACITY),
-                    None,
-                )
-            })
-        };
+        let handle = std::thread::spawn(move || {
+            let mut framing = KdFraming::new(host.into());
+            let mut bugcheck = false;
+            let mut capture = BugcheckCapture::default();
+            await_state_change(
+                &mut framing,
+                AwaitStateOptions {
+                    arch: Arch::Amd64,
+                    saw_kd_refresh: None,
+                    surface_all: false,
+                    bugcheck: Some(&mut bugcheck),
+                    bugcheck_capture: Some(&mut capture),
+                    deadline: None,
+                    debug_log: None,
+                },
+            )
+            .expect("await_state_change failed")
+        });
 
-        let refresh = debug_io_print_payload(KD_REFRESH_MESSAGE);
+        let mut packet_id = WIRE_FIRST_PACKET_ID;
+        let mut buf = [0u8; 128];
+        for text in prints {
+            kernel
+                .write_all(&wire_data_packet(
+                    PACKET_TYPE_KD_DEBUG_IO,
+                    packet_id,
+                    &debug_io_print_payload(text),
+                ))
+                .unwrap();
+            kernel.flush().unwrap();
+            let _ = kernel.read(&mut buf);
+            packet_id ^= 1;
+        }
         kernel
             .write_all(&wire_data_packet(
-                PACKET_TYPE_KD_DEBUG_IO,
-                WIRE_FIRST_PACKET_ID,
-                &refresh,
+                PACKET_TYPE_KD_STATE_CHANGE64,
+                packet_id,
+                &exception_state_change_payload(pc),
             ))
             .unwrap();
         kernel.flush().unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut buf = [0u8; 64];
-        let mut outbound = Vec::new();
-        while Instant::now() < deadline && outbound.len() < WIRE_HEADER_SIZE {
-            match kernel.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => outbound.extend_from_slice(&buf[..n]),
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-                Err(e) => panic!("failed to read pump output: {e}"),
-            }
-        }
-        assert!(
-            outbound.len() >= WIRE_HEADER_SIZE,
-            "pump should ACK the refresh print"
-        );
-
-        let mut saw_breakin = false;
-        let immediate_window = Instant::now() + Duration::from_millis(30);
-        while Instant::now() < immediate_window {
-            match kernel.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    outbound.extend_from_slice(&buf[..n]);
-                    if buf[..n].contains(&BREAKIN_BYTE) {
-                        saw_breakin = true;
-                        break;
-                    }
-                }
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                    break;
-                }
-                Err(e) => panic!("failed to read pump output: {e}"),
-            }
-        }
-        assert!(
-            !saw_breakin,
-            "bugcheck refresh should not interrupt the remaining debug text immediately"
-        );
-
-        shutdown.store(true, Ordering::SeqCst);
-        let _framing = handle.join().expect("pump thread panicked");
+        handle.join().expect("await thread panicked")
     }
 
     #[test]
-    fn pump_does_not_assist_non_e2_bugcheck_after_code_is_captured() {
-        let (mut kernel, host) = UnixStream::pair().unwrap();
-        kernel
-            .set_read_timeout(Some(Duration::from_millis(5)))
-            .unwrap();
-        let framing = KdFraming::new(host.into());
-        let (tx, _rx) = mpsc::channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle = {
-            let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
-                run_pump(
-                    framing,
-                    Arch::Amd64,
-                    PumpLink {
-                        stop_tx: tx,
-                        shutdown,
-                        reported_stop: Arc::new(AtomicBool::new(false)),
-                    },
-                    None,
-                    DebugLog::new(DEBUG_LOG_CAPACITY),
-                    None,
-                )
-            })
-        };
+    fn refresh_print_alone_does_not_mark_the_next_stop_as_a_bugcheck() {
+        // The kernel prints the refresh at boot and whenever it re-probes the
+        // debugger; only the fatal-error print means a crash is in progress.
+        let stop = await_bugcheck_aware(&[KD_REFRESH_MESSAGE], 0xffff_f800_0000_1000);
+        assert!(!stop.is_bugcheck);
+        assert!(stop.bugcheck.is_none());
+    }
 
-        let refresh = debug_io_print_payload(KD_REFRESH_MESSAGE);
-        kernel
-            .write_all(&wire_data_packet(
-                PACKET_TYPE_KD_DEBUG_IO,
-                WIRE_FIRST_PACKET_ID,
-                &refresh,
-            ))
-            .unwrap();
-        let fatal = debug_io_print_payload(
-            b"\r\n*** Fatal System Error: 0x000000d1\r\n                       (0x1,0x2,0x0,0x4)\r\n",
+    #[test]
+    fn fatal_system_error_print_marks_the_next_stop_with_captured_bugcheck() {
+        let stop = await_bugcheck_aware(
+            &[
+                KD_REFRESH_MESSAGE,
+                b"\r\n*** Fatal System Error: 0x000000d1\r\n                       (0x1,0x2,0x0,0x4)\r\n",
+                b"Driver at fault: myfault.sys.\r\n",
+            ],
+            0xffff_f800_0000_1000,
         );
-        kernel
-            .write_all(&wire_data_packet(
-                PACKET_TYPE_KD_DEBUG_IO,
-                WIRE_FIRST_PACKET_ID ^ 1,
-                &fatal,
-            ))
-            .unwrap();
-        kernel.flush().unwrap();
-
-        let deadline = Instant::now() + Duration::from_millis(300);
-        let mut saw_breakin = false;
-        let mut buf = [0u8; 128];
-        while Instant::now() < deadline {
-            match kernel.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if buf[..n].contains(&BREAKIN_BYTE) {
-                        saw_breakin = true;
-                        break;
-                    }
-                }
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-                Err(e) => panic!("failed to read pump output: {e}"),
-            }
-        }
-        assert!(
-            !saw_breakin,
-            "ordinary bugchecks should rely on the kernel-driven break once the code is known"
-        );
-
-        shutdown.store(true, Ordering::SeqCst);
-        let _framing = handle.join().expect("pump thread panicked");
+        assert!(stop.is_bugcheck);
+        let info = stop.bugcheck.expect("captured bugcheck");
+        assert_eq!(info.code, 0xd1);
+        assert_eq!(info.parameters, [1, 2, 0, 4]);
+        assert_eq!(info.driver.as_deref(), Some("myfault.sys"));
     }
 
     #[test]
