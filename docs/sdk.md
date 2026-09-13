@@ -27,6 +27,9 @@ for proc in dbg.processes():  # _EPROCESS cursors
 
 fun = dbg.eval("nt!KeBugCheckEx")
 print(hex(fun), dbg.read(fun, 16).hex())
+
+# any REPL command, returned as text (styling stripped)
+print(dbg.run_command("!analyze -v"))
 ```
 
 The module is a native extension built with [maturin](https://www.maturin.rs/); see [`ntoseye-py/README.md`](../ntoseye-py/README.md) for build info and [`examples/standalone/`](../examples/standalone/) for standalone scripts.

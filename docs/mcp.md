@@ -1,6 +1,6 @@
 # MCP integration
 
-`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server for MCP clients that cannot run Python themselves (desktop chat apps, web UIs). Agents that *can* run code should prefer the [Python SDK](sdk.md): it is the same debugger, but composable, with no round trip per operation.
+`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server. Agents may use either this, for WinDbg syntax with bounded run-control, or the [Python SDK](sdk.md), for structured values and scripted loops (conditional stops, bulk enumeration); both drive the same debugger.
 
 The surface is deliberately thin: the debugger's REPL command language is the API.
 

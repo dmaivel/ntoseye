@@ -374,8 +374,8 @@ impl<'a> ReplState<'a> {
 
     /// Build a transient REPL state around an existing context for one-off
     /// command dispatch (e.g. the Python SDK's `run_command`). Completion caches
-    /// start empty (no live REPL to populate them). Output goes to stdout, as in
-    /// the REPL.
+    /// start empty (no live REPL to populate them). Output goes to stdout unless
+    /// the caller wraps dispatch in [`crate::output::capture`].
     pub fn for_oneshot(ctx: &'a mut Session) -> Self {
         if ctx.target.selected_frame.is_none() {
             ctx.restore_live_register_cache();

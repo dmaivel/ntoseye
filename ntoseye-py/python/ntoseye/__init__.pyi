@@ -571,8 +571,11 @@ class Debugger:
         ...
 
     # --- misc ---
-    def run_command(self, line: str) -> None:
-        """Run any REPL command (output goes to stdout)."""
+    def run_command(self, line: str) -> str:
+        """Run any REPL command (`"dt _EPROCESS"`, `"lm"`, `"!analyze"`) and
+        return its text output, styling stripped. The escape hatch for commands
+        without a typed method. Commands that resume the target block until
+        the next stop, like `cont()`/`run()`."""
         ...
     def debug_log(self, since_seq: int = 0) -> dict[str, Any]:
         """Captured guest debug output (DbgPrint) since sequence `since_seq`;

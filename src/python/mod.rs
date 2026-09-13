@@ -19,6 +19,7 @@ use crate::expr::Expr;
 use crate::gdb::breakpoints::Breakpoint as CoreBreakpoint;
 use crate::guest::ProcessInfo;
 use crate::kd::KdMemorySource;
+use crate::output;
 use crate::repl::ReplState;
 use crate::session::{ContinueOutcome, Session};
 use crate::symbols::{FieldValue, ParsedType, TypeInfo, le_uint};
@@ -2048,16 +2049,20 @@ impl Debugger {
             .collect()
     }
 
-    /// Run any REPL command (e.g. `"dt _EPROCESS"`, `"lm"`, `"k"`). Output is
-    /// printed to stdout, exactly as in the interactive REPL. Useful for quick
-    /// one-offs; the typed methods above are the structured API.
-    fn run_command(&mut self, line: &str) -> PyResult<()> {
+    /// Run any REPL command (e.g. `"dt _EPROCESS"`, `"lm"`, `"!analyze"`) and
+    /// return its text output with terminal styling stripped. The escape hatch
+    /// for commands without a typed method; the typed methods above are the
+    /// structured API. Commands that resume the target block until the next
+    /// stop, like `cont()`/`run()`.
+    fn run_command(&mut self, line: &str) -> PyResult<String> {
         if line.trim().is_empty() {
-            return Ok(());
+            return Ok(String::new());
         }
         let mut state = ReplState::for_oneshot(&mut self.inner);
         state.line = line.trim().to_string();
-        state.dispatch_line(line).map(|_| ()).map_err(err)
+        let (result, text) = output::capture(|| state.dispatch_line(line));
+        result.map_err(err)?;
+        Ok(text)
     }
 
     /// Remove all breakpoints and leave the VM running. If restoration fails,
