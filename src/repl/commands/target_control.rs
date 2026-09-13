@@ -8,6 +8,8 @@ use crate::phys::PhysMem;
 use crate::repl::*;
 use crate::symbols::ParsedType;
 use crate::types::{Arch, VirtAddr};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::atomic::Ordering;
 
 const WINDOWS_MAJOR_VERSION: u32 = 0xf;
 
@@ -105,16 +107,37 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let metadata = match collect_dump_metadata(self) {
-            Ok(metadata) => metadata,
+        let (metadata, total_pages) = match collect_dump_metadata(self)
+            .and_then(|metadata| metadata.total_pages().map(|pages| (metadata, pages)))
+        {
+            Ok(prepared) => prepared,
             Err(error) => {
                 error!("cannot prepare dump: {error}");
                 return Ok(());
             }
         };
         let memory = &*self.ctx.target.phys;
-        match write_kernel_dump(path, memory, &metadata) {
-            Ok(()) => outln!("Wrote full kernel dump to {}.", path),
+        let progress = ProgressBar::new(total_pages);
+        progress.set_style(
+            ProgressStyle::with_template("Writing dump [{bar:40}] {pos}/{len}")?
+                .progress_chars("#-"),
+        );
+        INTERRUPT_REQUESTED.store(false, Ordering::SeqCst);
+        let result = write_kernel_dump(
+            path,
+            memory,
+            &metadata,
+            || INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst),
+            || progress.inc(1),
+        );
+        progress.finish_and_clear();
+        match result {
+            Ok(unreadable_pages) => {
+                if unreadable_pages != 0 {
+                    outln!("{unreadable_pages} pages unreadable (zero-filled)");
+                }
+                outln!("Wrote full kernel dump to {}.", path)
+            }
             Err(error) => error!("failed to write dump: {error}"),
         }
         Ok(())
@@ -176,10 +199,8 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
         return Err(Error::DebugInfo("nt!MmPhysicalMemoryBlock is null".into()));
     }
 
-    let layout = guest
-        .ntoskrnl
-        .types()
-        .layout("_PHYSICAL_MEMORY_DESCRIPTOR")?;
+    let types = guest.ntoskrnl.types();
+    let layout = types.layout("_PHYSICAL_MEMORY_DESCRIPTOR")?;
     let number_of_runs = layout
         .fields
         .get("NumberOfRuns")
@@ -201,7 +222,7 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
             ));
         }
     };
-    let run_layout = guest.ntoskrnl.types().layout(element_name)?;
+    let run_layout = types.layout(element_name)?;
     let base_page = run_layout
         .fields
         .get("BasePage")
@@ -210,8 +231,13 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
         .fields
         .get("PageCount")
         .ok_or_else(|| Error::FieldNotFound("PageCount".into()))?;
-    let (run_stride, base_page_offset, base_page_size, page_count_offset, page_count_size) = (
-        run_layout.size,
+    let run_stride = run_layout.size;
+    if run_stride == 0 {
+        return Err(Error::DebugInfo(
+            "physical descriptor Run element has zero size".into(),
+        ));
+    }
+    let (base_page_offset, base_page_size, page_count_offset, page_count_size) = (
         usize::try_from(base_page.offset)
             .map_err(|_| Error::DebugInfo("physical run BasePage offset overflows usize".into()))?,
         usize::try_from(base_page.size)
@@ -222,11 +248,6 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
         usize::try_from(page_count.size)
             .map_err(|_| Error::DebugInfo("physical run PageCount size overflows usize".into()))?,
     );
-    if run_stride == 0 {
-        return Err(Error::DebugInfo(
-            "physical descriptor Run element has zero size".into(),
-        ));
-    }
     for (name, offset, size) in [
         ("BasePage", base_page_offset, base_page_size),
         ("PageCount", page_count_offset, page_count_size),
@@ -286,8 +307,14 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
         "NumberOfRuns",
     )?;
     let run_count = usize::try_from(run_count).unwrap_or(usize::MAX);
-    let emitted_count = run_count.min(MAX_PHYSICAL_MEMORY_RUNS);
-    let runs_len = emitted_count
+    // Rejected rather than truncated: a dump missing runs would still claim
+    // to be complete.
+    if run_count > MAX_PHYSICAL_MEMORY_RUNS {
+        return Err(Error::DebugInfo(format!(
+            "physical descriptor reports {run_count} runs, but the dump header supports at most {MAX_PHYSICAL_MEMORY_RUNS}"
+        )));
+    }
+    let runs_len = run_count
         .checked_mul(run_stride)
         .and_then(|size| run_offset.checked_add(size))
         .ok_or_else(|| Error::DebugInfo("physical descriptor run list overflows usize".into()))?;
@@ -299,8 +326,8 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
             .read_bytes(descriptor_address, &mut bytes)?;
     }
 
-    let mut runs = Vec::with_capacity(emitted_count);
-    for index in 0..emitted_count {
+    let mut runs = Vec::with_capacity(run_count);
+    for index in 0..run_count {
         let offset = run_offset + index * run_stride;
         let run_bytes = &bytes[offset..offset + run_stride];
         let base_page = read_integer(run_bytes, base_page_offset, base_page_size, "BasePage")?;
