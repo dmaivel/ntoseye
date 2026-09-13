@@ -112,6 +112,8 @@ Physical memory commands use guest-physical addresses:
 
 For `dt`, `-r` expands nested structures, `-a` expands bounded arrays, `-v` shows field sizes, `-y` uses case-insensitive prefix matching, and `-l <field>` walks a LIST_ENTRY field. Nested field paths are dotted, and field patterns support `*` and `?`.
 
+`dt -l`, `!list -t`, and `dl` all treat the address you give them as the first element, like WinDbg: the walk emits every node up to the return to that address, and `dl` follows `Blink` instead with `-b`. A list head and a record link are indistinguishable in memory, so starting at a list head (rather than `poi(ListHead)`) prints the head as one pseudo-record instead of dropping a real record; an empty list, whose link points at itself, prints nothing. The walks keep whatever they collected and report null links, cycles, unreadable links, and reaching the entry bound; `dl` reaching its requested count is not reported. Scheduler queue walks use the same termination policy.
+
 ## Symbols
 
 - `x <query>  or  x <module>!<query>` - Fuzzy-search symbols by name; `*` and `?` are globs.

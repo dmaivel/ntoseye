@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -11,7 +10,9 @@ use crate::kuser_shared;
 use crate::repl::*;
 use crate::session::processor_index_from_backend_thread_id;
 use crate::symbols::{ParsedType, TypeInfo};
-use crate::target::{Target, ThreadInfo, kthread_state_name, wait_reason_name};
+use crate::target::{
+    ListCursor, ListTermination, Target, ThreadInfo, kthread_state_name, wait_reason_name,
+};
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{StackTrace, format_symbol, resolve_thread_trace_context};
@@ -160,30 +161,15 @@ fn walk_list_nodes(
     target: &Target,
     head: VirtAddr,
     limit: usize,
-) -> (Vec<VirtAddr>, Option<String>) {
-    let mut current = match read_list_next(target, head) {
-        Ok(value) => value,
-        Err(error) => return (Vec::new(), Some(error.to_string())),
-    };
-    let mut seen = HashSet::new();
+) -> (Vec<VirtAddr>, ListTermination) {
+    let mut cursor = ListCursor::new(head, limit.min(MAX_LIST_ENTRIES));
+    cursor.advance(read_list_next(target, head).map_err(|error| error.to_string()));
     let mut nodes = Vec::new();
-    let limit = limit.min(MAX_LIST_ENTRIES);
-
-    for _ in 0..limit {
-        if current.is_zero() || current == head {
-            return (nodes, None);
-        }
-        if !seen.insert(current.0) {
-            return (nodes, None);
-        }
+    while let Some(current) = cursor.next() {
         nodes.push(current);
-        current = match read_list_next(target, current) {
-            Ok(value) => value,
-            Err(error) => return (nodes, Some(error.to_string())),
-        };
+        cursor.advance(read_list_next(target, current).map_err(|error| error.to_string()));
     }
-
-    (nodes, Some(format!("entry bound ({limit}) reached")))
+    (nodes, cursor.finish())
 }
 
 fn processor_indices(target: &Target) -> Result<Vec<u16>> {
@@ -555,7 +541,7 @@ impl ReplState<'_> {
                         break;
                     }
                 }
-                if let Some(stop) = stop {
+                if let Some(stop) = stop.diagnostic() {
                     outln!("CPU {processor} priority {priority}: list walk stopped: {stop}");
                 }
             }
@@ -724,7 +710,7 @@ impl ReplState<'_> {
                         break;
                     }
                 }
-                if let Some(stop) = stop {
+                if let Some(stop) = stop.diagnostic() {
                     outln!("CPU {processor} queue {queue}: list walk stopped: {stop}");
                 }
             }
@@ -953,7 +939,7 @@ impl ReplState<'_> {
                         break;
                     }
                 }
-                if let Some(stop) = stop {
+                if let Some(stop) = stop.diagnostic() {
                     outln!("CPU {processor} bucket {bucket}: list walk stopped: {stop}");
                 }
             }
@@ -1033,7 +1019,7 @@ impl ReplState<'_> {
                     + layout.head_list_offset;
                 let remaining = MAX_LIST_ENTRIES - total;
                 let (nodes, stop) = walk_list_nodes(&self.ctx.target, head, remaining);
-                if nodes.is_empty() && stop.is_none() {
+                if nodes.is_empty() && matches!(stop, ListTermination::Head) {
                     continue;
                 }
                 for node in nodes {
@@ -1077,7 +1063,7 @@ impl ReplState<'_> {
                         break;
                     }
                 }
-                if let Some(stop) = stop {
+                if let Some(stop) = stop.diagnostic() {
                     outln!("  {label} APC list stopped: {stop}");
                 }
             }

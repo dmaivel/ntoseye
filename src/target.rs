@@ -754,6 +754,108 @@ pub enum ListTermination {
     Corrupt(String),
 }
 
+impl ListTermination {
+    pub(crate) fn diagnostic(&self) -> Option<String> {
+        match self {
+            Self::Head => None,
+            Self::Null => Some("null link".to_string()),
+            Self::Cycle(address) => Some(format!("non-head cycle at {:#x}", address.0)),
+            Self::Bound => Some("entry bound reached".to_string()),
+            Self::Corrupt(error) => Some(format!("unreadable link: {error}")),
+        }
+    }
+}
+
+/// Termination state for walking an intrusive list: bounded, stopping at the
+/// head, a null link, or the first link seen twice. The caller supplies each
+/// link read after consuming the current entry, so a typed walk can take the
+/// next link from the record image it already prefetched.
+pub(crate) struct ListCursor {
+    head: VirtAddr,
+    limit: usize,
+    current: Option<VirtAddr>,
+    visited: HashSet<u64>,
+    yielded: usize,
+    first_entry: bool,
+    termination: Option<ListTermination>,
+}
+
+impl ListCursor {
+    pub(crate) fn new(head: VirtAddr, limit: usize) -> Self {
+        Self {
+            head,
+            limit,
+            current: None,
+            visited: HashSet::with_capacity(16),
+            yielded: 0,
+            first_entry: false,
+            termination: None,
+        }
+    }
+
+    /// Construct a cursor over a ring whose first element is `first` itself,
+    /// rather than the link stored at a head. The walk ends when it returns
+    /// to `first`; commands that treat their address argument as element one
+    /// (`dt -l`, `!list`, `dl`) use this.
+    pub(crate) fn from_first(first: VirtAddr, limit: usize) -> Self {
+        Self {
+            head: first,
+            limit,
+            current: Some(first),
+            visited: HashSet::with_capacity(16),
+            yielded: 0,
+            first_entry: true,
+            termination: None,
+        }
+    }
+
+    pub(crate) fn next(&mut self) -> Option<VirtAddr> {
+        if self.termination.is_some() {
+            return None;
+        }
+        let current = self.current.take()?;
+        if !self.first_entry && current == self.head {
+            self.termination = Some(ListTermination::Head);
+            return None;
+        }
+        if current.is_zero() {
+            self.termination = Some(ListTermination::Null);
+            return None;
+        }
+        if !self.visited.insert(current.0) {
+            self.termination = Some(ListTermination::Cycle(current));
+            return None;
+        }
+        if self.yielded >= self.limit {
+            self.termination = Some(ListTermination::Bound);
+            return None;
+        }
+        self.first_entry = false;
+        self.yielded += 1;
+        Some(current)
+    }
+
+    pub(crate) fn advance(&mut self, next: std::result::Result<VirtAddr, String>) {
+        if self.termination.is_some() {
+            return;
+        }
+        self.current = match next {
+            Ok(next) => Some(next),
+            Err(error) => {
+                self.termination = Some(ListTermination::Corrupt(error));
+                None
+            }
+        };
+    }
+
+    /// The termination reached; the walk must have been driven to `next()`
+    /// returning `None`.
+    pub(crate) fn finish(self) -> ListTermination {
+        self.termination
+            .expect("ListCursor::finish called before next() returned None")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResourceListSummary {
     pub head: VirtAddr,
@@ -795,31 +897,13 @@ where
     F: FnMut(VirtAddr) -> Result<VirtAddr>,
 {
     let mut links = Vec::new();
-    let mut visited = HashSet::new();
-    let mut current = match read_next(head) {
-        Ok(current) => current,
-        Err(error) => return (links, ListTermination::Corrupt(error.to_string())),
-    };
-
-    loop {
-        if current == head {
-            return (links, ListTermination::Head);
-        }
-        if current.is_zero() {
-            return (links, ListTermination::Null);
-        }
-        if !visited.insert(current.0) {
-            return (links, ListTermination::Cycle(current));
-        }
-        if links.len() >= limit {
-            return (links, ListTermination::Bound);
-        }
+    let mut cursor = ListCursor::new(head, limit);
+    cursor.advance(read_next(head).map_err(|error| error.to_string()));
+    while let Some(current) = cursor.next() {
         links.push(current);
-        current = match read_next(current) {
-            Ok(next) => next,
-            Err(error) => return (links, ListTermination::Corrupt(error.to_string())),
-        };
+        cursor.advance(read_next(current).map_err(|error| error.to_string()));
     }
+    (links, cursor.finish())
 }
 
 struct ObjectNameLayout {
@@ -1190,25 +1274,22 @@ impl Target {
     /// Walk an intrusive `_LIST_ENTRY` from `head` (the list-head address) in
     /// the current address space, returning each record's base
     /// (`link_addr - link_offset`). Bounded (max 1000) and cycle-stopping,
-    /// mirroring the engine's `Types::list_at`. Shared by the SDK and MCP list
-    /// walking; the typed cursor walk (`StructRef::list`) is the richer form.
+    /// mirroring the engine's `Types::list_at`; a bad link truncates the walk
+    /// rather than discarding the records already collected. Shared by the SDK
+    /// and MCP list walking; the typed cursor walk (`StructRef::list`) is the
+    /// richer form.
     pub fn walk_list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<u64>> {
         const MAX: usize = 1000;
         let mem = self.current_process()?.memory();
-        let mut buf = [0u8; 8];
-        mem.read_bytes(head, &mut buf)?;
-        let mut current = u64::from_le_bytes(buf);
+        let mut cursor = ListCursor::new(head, MAX);
+        cursor.advance(Ok(mem.read::<VirtAddr>(head)?));
         let mut out = Vec::new();
-        // A corrupt list can loop through any number of nodes, not just back
-        // onto itself; every link seen terminates the walk.
-        let mut seen = std::collections::HashSet::new();
-        while current != 0 && current != head.0 && out.len() < MAX && seen.insert(current) {
-            out.push(current.wrapping_sub(link_offset));
-            // truncate on a bad link rather than failing the whole walk
-            if mem.read_bytes(VirtAddr(current), &mut buf).is_err() {
-                break;
-            }
-            current = u64::from_le_bytes(buf);
+        while let Some(current) = cursor.next() {
+            out.push(current.0.wrapping_sub(link_offset));
+            cursor.advance(
+                mem.read::<VirtAddr>(current)
+                    .map_err(|error| error.to_string()),
+            );
         }
         Ok(out)
     }

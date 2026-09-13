@@ -124,55 +124,43 @@ fn layout(target: &Target, name: &str) -> Result<Arc<TypeInfo>> {
     kernel(target)?.types().layout(name)
 }
 
-fn lookup_field<'a>(layout: &'a TypeInfo, names: &[&str]) -> Result<&'a FieldInfo> {
+fn lookup_field<'a>(layout: &'a TypeInfo, names: &[&str]) -> Result<(&'a str, &'a FieldInfo)> {
     names
         .iter()
-        .find_map(|name| layout.fields.get(*name))
+        .find_map(|name| layout.fields.get_key_value(*name))
+        .map(|(name, field)| (name.as_str(), field))
         .ok_or_else(|| Error::FieldNotFound(names.first().copied().unwrap_or("<unknown>").into()))
 }
 
 fn field_bytes(
     target: &Target,
-    layout: &TypeInfo,
+    layout: &Arc<TypeInfo>,
     base: VirtAddr,
     names: &[&str],
 ) -> Result<Vec<u8>> {
-    let field = lookup_field(layout, names)?;
-    let size = usize::try_from(field.size)
-        .map_err(|_| Error::DebugInfo(format!("field {} size overflows", names[0])))?;
-    if size == 0 || size > MAX_FIELD_BYTES {
-        return Err(Error::DebugInfo(format!(
-            "field {} has unsupported size {size}",
-            names[0]
-        )));
-    }
-    let mut bytes = vec![0u8; size];
+    let (name, _) = lookup_field(layout, names)?;
     kernel(target)?
-        .memory()
-        .read_bytes(base + u64::from(field.offset), &mut bytes)?;
-    Ok(bytes)
+        .types()
+        .struct_with_layout(Arc::clone(layout), base)
+        .read_field_bytes(name, MAX_FIELD_BYTES)
 }
 
-fn field_u64(target: &Target, layout: &TypeInfo, base: VirtAddr, names: &[&str]) -> Result<u64> {
-    let field = lookup_field(layout, names)?;
-    let size = usize::try_from(field.size)
-        .map_err(|_| Error::DebugInfo(format!("field {} size overflows", names[0])))?;
-    if size == 0 || size > 8 {
-        return Err(Error::DebugInfo(format!(
-            "field {} is {} bytes, not a scalar",
-            names[0], size
-        )));
-    }
-    let mut bytes = [0u8; 8];
+fn field_u64(
+    target: &Target,
+    layout: &Arc<TypeInfo>,
+    base: VirtAddr,
+    names: &[&str],
+) -> Result<u64> {
+    let (name, _) = lookup_field(layout, names)?;
     kernel(target)?
-        .memory()
-        .read_bytes(base + u64::from(field.offset), &mut bytes[..size])?;
-    Ok(le_uint(&bytes[..size]))
+        .types()
+        .struct_with_layout(Arc::clone(layout), base)
+        .read_uint(name)
 }
 
 fn field_string(
     target: &Target,
-    layout: &TypeInfo,
+    layout: &Arc<TypeInfo>,
     base: VirtAddr,
     names: &[&str],
 ) -> Result<String> {
@@ -186,23 +174,26 @@ fn field_string(
 
 fn nested_field(
     target: &Target,
-    parent: &TypeInfo,
+    parent: &Arc<TypeInfo>,
     base: VirtAddr,
     names: &[&str],
     fallback_type: &str,
 ) -> Result<(Arc<TypeInfo>, VirtAddr)> {
-    let field = lookup_field(parent, names)?;
+    let (name, field) = lookup_field(parent, names)?;
     let (type_name, pointer) = match &field.type_data {
-        ParsedType::Struct(name) | ParsedType::Union(name) => (name.clone(), false),
+        ParsedType::Struct(name) | ParsedType::Union(name) => (name.as_str(), false),
         ParsedType::Pointer(inner) => match inner.as_ref() {
-            ParsedType::Struct(name) | ParsedType::Union(name) => (name.clone(), true),
-            _ => (fallback_type.to_string(), true),
+            ParsedType::Struct(name) | ParsedType::Union(name) => (name.as_str(), true),
+            _ => (fallback_type, true),
         },
-        _ => (fallback_type.to_string(), false),
+        _ => (fallback_type, false),
     };
     let address = base + u64::from(field.offset);
     let address = if pointer {
-        let pointer: VirtAddr = kernel(target)?.memory().read(address)?;
+        let pointer: VirtAddr = kernel(target)?
+            .types()
+            .struct_with_layout(Arc::clone(parent), base)
+            .read_field(name)?;
         if pointer.is_zero() {
             return Err(Error::DebugInfo(format!("field {} is null", names[0])));
         }
@@ -211,7 +202,7 @@ fn nested_field(
         address
     };
     Ok((
-        layout(target, &type_name).or_else(|_| layout(target, fallback_type))?,
+        layout(target, type_name).or_else(|_| layout(target, fallback_type))?,
         address,
     ))
 }
@@ -287,7 +278,7 @@ fn rendered_decimal(value: &Result<u64>) -> String {
 
 fn print_u64_field(
     target: &Target,
-    layout: &TypeInfo,
+    layout: &Arc<TypeInfo>,
     base: VirtAddr,
     label: &str,
     names: &[&str],
@@ -300,7 +291,7 @@ fn print_u64_field(
 
 fn print_decimal_field(
     target: &Target,
-    layout: &TypeInfo,
+    layout: &Arc<TypeInfo>,
     base: VirtAddr,
     label: &str,
     names: &[&str],

@@ -8,7 +8,7 @@ use crate::{
         ModuleSymbolStatus, ParsedType, SymbolIndexDiagnostic, SymbolStore, TypeInfo,
         download_jobs_parallel,
     },
-    target::DriverObjectInfo,
+    target::{DriverObjectInfo, ListCursor},
     types::*,
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -840,13 +840,19 @@ impl<'a> Types<'a> {
     /// against the object's PDB; reads come from this space's `dtb`.
     pub fn struct_at(self, name: &str, base: VirtAddr) -> Result<StructRef<'a>> {
         let ti = self.layout(name)?;
-        Ok(StructRef {
+        Ok(self.struct_with_layout(ti, base))
+    }
+
+    /// Open a struct cursor with an already-resolved layout in this address
+    /// space. Callers that cache layouts can avoid repeating the type lookup.
+    pub fn struct_with_layout(self, layout: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
+        StructRef {
             obj: self.obj,
             dtb: self.dtb,
-            ti,
+            ti: layout,
             base,
             image: None,
-        })
+        }
     }
 
     /// Walk an intrusive `_LIST_ENTRY` starting at a bare head address (e.g. a
@@ -869,32 +875,26 @@ impl<'a> Types<'a> {
 
         let list_memory = |dtb: Dtb| obj.address_space(&obj.phys, dtb);
 
-        let mut current: VirtAddr = list_memory(dtb).read(head)?;
         const MAX: usize = 1000;
-        // Bounded, and a corrupt list that loops through any number of nodes
-        // (not only back onto itself) ends at the first link seen twice.
-        let mut seen = std::collections::HashSet::with_capacity(16);
+        let initial = list_memory(dtb).read::<VirtAddr>(head)?;
+        let mut cursor = ListCursor::new(head, MAX);
+        cursor.advance(Ok(initial));
 
         Ok(std::iter::from_fn(move || {
-            if current.is_zero() || current == head || seen.len() >= MAX || !seen.insert(current.0)
-            {
-                return None;
-            }
+            let current = cursor.next()?;
 
-            let record = StructRef {
-                obj,
-                dtb,
-                ti: Arc::clone(&record_ti),
-                base: VirtAddr(current.0.wrapping_sub(link_offset)),
-                image: None,
-            }
-            .prefetch();
+            let record = Types { obj, dtb }
+                .struct_with_layout(
+                    Arc::clone(&record_ti),
+                    VirtAddr(current.0.wrapping_sub(link_offset)),
+                )
+                .prefetch();
 
             // Flink sits at offset 0 of the link's _LIST_ENTRY
             match record.read_field_at::<VirtAddr>(link_offset) {
-                Ok(next) => current = next,
+                Ok(next) => cursor.advance(Ok(next)),
                 Err(e) => {
-                    current = head;
+                    cursor.advance(Err(e.to_string()));
                     return Some(Err(e));
                 }
             }
@@ -953,6 +953,40 @@ impl<'a> StructRef<'a> {
         self.memory().read_bytes(self.base + offset, out)
     }
 
+    /// Read an integer field at its PDB-declared width (1..=8 bytes).
+    pub fn read_uint(&self, name: &str) -> Result<u64> {
+        let field = self.field(name)?;
+        let width = usize::try_from(field.size)
+            .map_err(|_| Error::DebugInfo(format!("field '{name}' has invalid integer width")))?;
+        if !(1..=8).contains(&width) {
+            return Err(Error::DebugInfo(format!(
+                "field '{name}' has invalid integer width {width} (expected 1..=8)"
+            )));
+        }
+        let mut bytes = [0u8; 8];
+        self.read_bytes_at(field.offset as u64, &mut bytes[..width])?;
+        Ok(crate::symbols::le_uint(&bytes[..width]))
+    }
+
+    /// Read a field's raw bytes at its PDB-declared size, rejecting a zero
+    /// size or one past the caller's bound.
+    pub fn read_field_bytes(&self, name: &str, max_len: usize) -> Result<Vec<u8>> {
+        let field = self.field(name)?;
+        let size = usize::try_from(field.size)
+            .map_err(|_| Error::DebugInfo(format!("field '{name}' has invalid byte width")))?;
+        if size == 0 {
+            return Err(Error::DebugInfo(format!("field '{name}' has no byte size")));
+        }
+        if size > max_len {
+            return Err(Error::DebugInfo(format!(
+                "field '{name}' is {size} bytes (maximum {max_len})"
+            )));
+        }
+        let mut bytes = vec![0u8; size];
+        self.read_bytes_at(field.offset as u64, &mut bytes)?;
+        Ok(bytes)
+    }
+
     fn read_field_at<T: Copy + zerocopy::FromZeros + FromBytes + IntoBytes>(
         &self,
         offset: u64,
@@ -977,13 +1011,7 @@ impl<'a> StructRef<'a> {
 
     /// Wrap a freshly resolved layout at `base`, carrying this cursor's context.
     fn with(&self, ti: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
-        StructRef {
-            obj: self.obj,
-            dtb: self.dtb,
-            ti,
-            base,
-            image: None,
-        }
+        self.obj.types_in(self.dtb).struct_with_layout(ti, base)
     }
 
     /// Read a scalar field by name. The Rust type `T` (inferred from context)

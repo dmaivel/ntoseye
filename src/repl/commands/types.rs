@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::symbols::{FieldInfo, ParsedType, TypeInfo, le_uint};
-use crate::target::UserVar;
+use crate::target::{ListCursor, ListTermination, UserVar};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -837,60 +837,39 @@ impl ReplState<'_> {
         Ok((link_offset, next_offset, pointer_size))
     }
 
+    /// Walk a typed list treating `first` as the first element, the way
+    /// WinDbg's `!list` treats its address argument: every node up to the
+    /// return to `first` is emitted. A list head and a record link are
+    /// structurally identical, so starting from a head yields the head as one
+    /// pseudo-record instead of silently dropping the real last record.
     fn collect_typed_list(
         &self,
-        head: VirtAddr,
+        first: VirtAddr,
         link_offset: u64,
         next_offset: u64,
         pointer_size: usize,
-    ) -> Vec<VirtAddr> {
-        let mut current = head;
-        if !current.is_zero()
-            && self
-                .read_display_uint(current, pointer_size)
-                .ok()
-                .is_some_and(|next| next == current.0)
+    ) -> (Vec<VirtAddr>, ListTermination) {
+        // A link pointing at itself is an empty list's head: the one sentinel
+        // that is provably not a record.
+        if self
+            .read_display_uint(first - link_offset + next_offset, pointer_size)
+            .ok()
+            .is_some_and(|next| next == first.0)
         {
-            return Vec::new();
+            return (Vec::new(), ListTermination::Head);
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut cursor = ListCursor::from_first(first, MAX_LIST_ENTRIES);
         let mut records = Vec::new();
-        while !current.is_zero() && records.len() < MAX_LIST_ENTRIES && seen.insert(current.0) {
-            let record = current - link_offset;
+        while let Some(link) = cursor.next() {
+            let record = link - link_offset;
             records.push(record);
-            let next = match self.read_display_uint(record + next_offset, pointer_size) {
-                Ok(next) => next,
-                Err(error) => {
-                    outln!("{}: <unavailable next link: {}>", ui::addr(record.0), error);
-                    break;
-                }
-            };
-            // `dt -l ... poi(ListHead)` receives the first record's link,
-            // not the LIST_ENTRY object that owns the sentinel. Recognize
-            // that sentinel when its Flink points back to our starting link,
-            // while retaining the ordinary explicit-head stop condition.
-            let sentinel = self.is_list_sentinel(next, head.0, 0, pointer_size);
-            if next == 0 || next == head.0 || sentinel {
-                break;
-            }
-            current = VirtAddr(next);
+            cursor.advance(
+                self.read_display_uint(record + next_offset, pointer_size)
+                    .map(VirtAddr)
+                    .map_err(|error| error.to_string()),
+            );
         }
-        records
-    }
-
-    fn is_list_sentinel(
-        &self,
-        candidate: u64,
-        head: u64,
-        backlink_offset: u64,
-        pointer_size: usize,
-    ) -> bool {
-        candidate != 0
-            && candidate != head
-            && self
-                .read_display_uint(VirtAddr(candidate) + backlink_offset, pointer_size)
-                .ok()
-                .is_some_and(|link| link == head)
+        (records, cursor.finish())
     }
 
     fn cmd_dt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -972,7 +951,8 @@ impl ReplState<'_> {
                     return Ok(());
                 }
             };
-            let records = self.collect_typed_list(head, link_offset, next_offset, pointer_size);
+            let (records, termination) =
+                self.collect_typed_list(head, link_offset, next_offset, pointer_size);
             for record in records {
                 outln!("{} @ {}", type_info.name, ui::addr(record.0));
                 self.print_struct_fields(
@@ -983,6 +963,9 @@ impl ReplState<'_> {
                     parsed.options.recursive_depth,
                     2,
                 );
+            }
+            if let Some(stop) = termination.diagnostic() {
+                outln!("dt -l {}: list walk stopped: {stop}", list_path.join("."));
             }
             return Ok(());
         }
@@ -1071,18 +1054,15 @@ impl ReplState<'_> {
             None => 2,
         };
         let limit = requested.min(MAX_LIST_ENTRIES);
-        let mut current = address;
-        let mut seen = std::collections::HashSet::new();
+        let mut cursor = ListCursor::from_first(address, limit);
         let mut bytes = [0u8; MAX_DL_WORDS * 8];
-        for _ in 0..limit {
-            if current.is_zero() || !seen.insert(current.0) {
-                break;
-            }
+        while let Some(current) = cursor.next() {
             let read_words = display_words.max(2);
             let width = read_words * 8;
             if let Err(error) = self.ctx.read_masked(current, &mut bytes[..width]) {
                 outln!("{}: <unavailable: {}>", ui::addr(current.0), error);
-                break;
+                cursor.advance(Err(error.to_string()));
+                continue;
             }
             let first = le_uint(&bytes[..8]);
             let second = le_uint(&bytes[8..16]);
@@ -1091,11 +1071,17 @@ impl ReplState<'_> {
                 .collect::<Vec<_>>();
             outln!("{}  {}", ui::addr(current.0), words.join(" "));
             let next = if backward { second } else { first };
-            let sentinel = self.is_list_sentinel(next, address.0, if backward { 8 } else { 0 }, 8);
-            if next == 0 || next == address.0 || sentinel {
-                break;
+            cursor.advance(Ok(VirtAddr(next)));
+        }
+        match cursor.finish() {
+            // A closed ring or the requested count is the normal stop, and an
+            // unreadable link was already reported against its address.
+            ListTermination::Head | ListTermination::Bound | ListTermination::Corrupt(_) => {}
+            stop => {
+                if let Some(stop) = stop.diagnostic() {
+                    outln!("dl: list walk stopped: {stop}");
+                }
             }
-            current = VirtAddr(next);
         }
         Ok(())
     }
@@ -1192,14 +1178,8 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let first = match self.read_display_uint(head, pointer_size) {
-            Ok(first) => VirtAddr(first),
-            Err(error) => {
-                error!("!list: failed to read list head: {}", error);
-                return Ok(());
-            }
-        };
-        let records = self.collect_typed_list(first, link_offset, next_offset, pointer_size);
+        let (records, termination) =
+            self.collect_typed_list(head, link_offset, next_offset, pointer_size);
         let command = commands.replace("@$extret", "@extret");
         for record in records {
             self.ctx.target.user_vars.insert(
@@ -1218,6 +1198,9 @@ impl ReplState<'_> {
                 }
             }
         }
+        if let Some(stop) = termination.diagnostic() {
+            outln!("!list: list walk stopped: {stop}");
+        }
         Ok(())
     }
 }
@@ -1234,6 +1217,105 @@ fn find_field<'a>(type_info: &'a TypeInfo, requested: &str) -> Option<(&'a Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn list_session(last_next: u64) -> crate::session::Session {
+        // A _LIST_ENTRY ring: head at 0x1000, records linked at 0x1020 and
+        // 0x1040, with the last Flink under test.
+        let mut memory = [0u8; 0x80];
+        for (offset, value) in [
+            (0x00, 0x1020u64),
+            (0x08, 0x1040),
+            (0x20, 0x1040),
+            (0x28, 0x1000),
+            (0x40, last_next),
+            (0x48, 0x1020),
+        ] {
+            crate::kd::wire::write_u64(&mut memory, offset, value);
+        }
+        let block = crate::triage::TriageBlock {
+            address: 0x1000,
+            offset: 0,
+            size: memory.len() as u32,
+        };
+        let dump = crate::triage::make_triage_dump(&[block], &[(0x1000, &memory)]);
+        // Unique per call: parallel tests must not mmap a file another test
+        // is still rewriting.
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ntoseye-list-boundaries-{}-{sequence}.dmp",
+            std::process::id(),
+        ));
+        std::fs::write(&path, dump).unwrap();
+        let session = crate::session::Session::open(&crate::TargetSpec::Dump(path.clone()));
+        std::fs::remove_file(path).unwrap();
+        session.unwrap()
+    }
+
+    #[test]
+    fn dl_keeps_the_last_node_and_reports_how_the_walk_ended() {
+        for (next, expected) in [
+            (0x1000u64, None),
+            (0x1020, Some("cycle")),
+            (0, Some("null")),
+        ] {
+            let mut session = list_session(next);
+            let mut state = ReplState::for_oneshot(&mut session);
+            let (result, text) = crate::output::capture(|| state.dispatch_line("dl 1000 8"));
+            result.unwrap();
+            assert!(
+                text.contains("0000000000001040"),
+                "last node omitted: {text}"
+            );
+            match expected {
+                Some(note) => assert!(text.contains(note), "missing {note} diagnostic: {text}"),
+                None => assert!(!text.contains("stopped"), "unexpected diagnostic: {text}"),
+            }
+        }
+    }
+
+    #[test]
+    fn typed_list_walks_every_node_from_either_entry_address() {
+        // Closed ring: the two records plus the head as a pseudo-record,
+        // whichever address the walk starts from. No record is dropped.
+        let mut session = list_session(0x1000);
+        let state = ReplState::for_oneshot(&mut session);
+        let (records, termination) = state.collect_typed_list(VirtAddr(0x1020), 0x10, 0x10, 8);
+        assert_eq!(
+            records,
+            vec![VirtAddr(0x1010), VirtAddr(0x1030), VirtAddr(0x0ff0)]
+        );
+        assert_eq!(termination, ListTermination::Head);
+        let (records, termination) = state.collect_typed_list(VirtAddr(0x1000), 0x10, 0x10, 8);
+        assert_eq!(
+            records,
+            vec![VirtAddr(0x0ff0), VirtAddr(0x1010), VirtAddr(0x1030)]
+        );
+        assert_eq!(termination, ListTermination::Head);
+
+        // Headless ring: both records, and the wrap is not corruption.
+        let mut session = list_session(0x1020);
+        let state = ReplState::for_oneshot(&mut session);
+        let (records, termination) = state.collect_typed_list(VirtAddr(0x1020), 0x10, 0x10, 8);
+        assert_eq!(records, vec![VirtAddr(0x1010), VirtAddr(0x1030)]);
+        assert_eq!(termination, ListTermination::Head);
+
+        // A null link and an unreadable link both keep what was collected.
+        let mut session = list_session(0);
+        let state = ReplState::for_oneshot(&mut session);
+        let (records, termination) = state.collect_typed_list(VirtAddr(0x1020), 0x10, 0x10, 8);
+        assert_eq!(records, vec![VirtAddr(0x1010), VirtAddr(0x1030)]);
+        assert_eq!(termination, ListTermination::Null);
+
+        let mut session = list_session(0x8000);
+        let state = ReplState::for_oneshot(&mut session);
+        let (records, termination) = state.collect_typed_list(VirtAddr(0x1020), 0x10, 0x10, 8);
+        assert_eq!(
+            records,
+            vec![VirtAddr(0x1010), VirtAddr(0x1030), VirtAddr(0x7ff0)]
+        );
+        assert!(matches!(termination, ListTermination::Corrupt(_)));
+    }
 
     #[test]
     fn field_path_parser_accepts_dotted_names_and_rejects_empty_segments() {

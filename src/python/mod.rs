@@ -84,8 +84,8 @@ fn decode_c_string(buf: &[u8]) -> String {
 
 /// Walk an intrusive `_LIST_ENTRY` from `head` (the list-head address),
 /// returning each record's base (`link_addr - link_offset`). Thin wrapper over
-/// the shared core walk ([`Session::walk_list`]) so the SDK and the
-/// engine can't diverge.
+/// the shared core walk ([`crate::target::Target::walk_list`]) so the SDK and
+/// the engine can't diverge.
 fn walk_list_bases(dbg: &Debugger, head: u64, link_offset: u64) -> PyResult<Vec<u64>> {
     dbg.inner
         .target

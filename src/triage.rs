@@ -699,64 +699,66 @@ fn parse_unloaded_drivers(mmap: &[u8], triage_hdr: &[u8]) -> Vec<UnloadedDriver>
     drivers
 }
 
+/// Build a minimal AMD64 triage dump image: one data block per `blocks`
+/// entry, filled from the matching `mem_regions` address.
+#[cfg(test)]
+pub(crate) fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8])]) -> Vec<u8> {
+    // DUMP_HEADER64 (0x2000) + TRIAGE_DUMP64 + data
+    let mut buf = vec![0u8; 0x10000];
+    // Signature
+    buf[..8].copy_from_slice(SIGNATURE_PAGEDU64);
+    // DumpType = 4
+    buf[OFF_DUMP_TYPE..OFF_DUMP_TYPE + 4].copy_from_slice(&DUMP_TYPE_TRIAGE.to_le_bytes());
+    // BugCheckCode
+    buf[OFF_BUG_CHECK_CODE..OFF_BUG_CHECK_CODE + 4].copy_from_slice(&0x50u32.to_le_bytes());
+    // NumberProcessors = 1
+    buf[OFF_NUMBER_PROCESSORS..OFF_NUMBER_PROCESSORS + 4].copy_from_slice(&1u32.to_le_bytes());
+    buf[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
+        .copy_from_slice(&crate::dmp::IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
+    // DTB
+    buf[OFF_DIRECTORY_TABLE_BASE..OFF_DIRECTORY_TABLE_BASE + 8]
+        .copy_from_slice(&0x1ad000u64.to_le_bytes());
+    // Context: set RIP
+    let ctx_base = OFF_CONTEXT_RECORD;
+    buf[ctx_base + context::OFFSET_RIP..ctx_base + context::OFFSET_RIP + 8]
+        .copy_from_slice(&0xfffff80012345678u64.to_le_bytes());
+
+    // TRIAGE_DUMP64 at 0x2000
+    let triage_base = DUMP_HEADER64_SIZE;
+
+    // DataBlocksOffset — absolute file offset, right after triage header
+    let db_offset: u32 = (DUMP_HEADER64_SIZE + 0x80) as u32;
+    buf[triage_base + TRIAGE_DATA_BLOCKS_OFFSET..triage_base + TRIAGE_DATA_BLOCKS_OFFSET + 4]
+        .copy_from_slice(&db_offset.to_le_bytes());
+    buf[triage_base + TRIAGE_DATA_BLOCKS_COUNT..triage_base + TRIAGE_DATA_BLOCKS_COUNT + 4]
+        .copy_from_slice(&(blocks.len() as u32).to_le_bytes());
+
+    let mut data_cursor = (DUMP_HEADER64_SIZE + 0x200) as u32;
+    for (i, block) in blocks.iter().enumerate() {
+        let entry_off = db_offset as usize + i * DATA_BLOCK_SIZE;
+        buf[entry_off..entry_off + 8].copy_from_slice(&block.address.to_le_bytes());
+        buf[entry_off + 8..entry_off + 12].copy_from_slice(&data_cursor.to_le_bytes());
+        buf[entry_off + 12..entry_off + 16].copy_from_slice(&block.size.to_le_bytes());
+
+        if let Some((_, content)) = mem_regions.iter().find(|(a, _)| *a == block.address) {
+            let file_off = data_cursor as usize;
+            let len = content.len().min(block.size as usize);
+            buf[file_off..file_off + len].copy_from_slice(&content[..len]);
+        }
+
+        data_cursor += block.size;
+    }
+
+    let total = data_cursor as usize - DUMP_HEADER64_SIZE + 0x200;
+    buf[triage_base + TRIAGE_SIZE_OF_DUMP..triage_base + TRIAGE_SIZE_OF_DUMP + 4]
+        .copy_from_slice(&(total as u32).to_le_bytes());
+
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
-
-    fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8])]) -> Vec<u8> {
-        // DUMP_HEADER64 (0x2000) + TRIAGE_DUMP64 + data
-        let mut buf = vec![0u8; 0x10000];
-        // Signature
-        buf[..8].copy_from_slice(SIGNATURE_PAGEDU64);
-        // DumpType = 4
-        buf[OFF_DUMP_TYPE..OFF_DUMP_TYPE + 4].copy_from_slice(&DUMP_TYPE_TRIAGE.to_le_bytes());
-        // BugCheckCode
-        buf[OFF_BUG_CHECK_CODE..OFF_BUG_CHECK_CODE + 4].copy_from_slice(&0x50u32.to_le_bytes());
-        // NumberProcessors = 1
-        buf[OFF_NUMBER_PROCESSORS..OFF_NUMBER_PROCESSORS + 4].copy_from_slice(&1u32.to_le_bytes());
-        buf[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
-            .copy_from_slice(&IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
-        // DTB
-        buf[OFF_DIRECTORY_TABLE_BASE..OFF_DIRECTORY_TABLE_BASE + 8]
-            .copy_from_slice(&0x1ad000u64.to_le_bytes());
-        // Context: set RIP
-        let ctx_base = OFF_CONTEXT_RECORD;
-        buf[ctx_base + context::OFFSET_RIP..ctx_base + context::OFFSET_RIP + 8]
-            .copy_from_slice(&0xfffff80012345678u64.to_le_bytes());
-
-        // TRIAGE_DUMP64 at 0x2000
-        let triage_base = DUMP_HEADER64_SIZE;
-
-        // DataBlocksOffset — absolute file offset, right after triage header
-        let db_offset: u32 = (DUMP_HEADER64_SIZE + 0x80) as u32;
-        buf[triage_base + TRIAGE_DATA_BLOCKS_OFFSET..triage_base + TRIAGE_DATA_BLOCKS_OFFSET + 4]
-            .copy_from_slice(&db_offset.to_le_bytes());
-        buf[triage_base + TRIAGE_DATA_BLOCKS_COUNT..triage_base + TRIAGE_DATA_BLOCKS_COUNT + 4]
-            .copy_from_slice(&(blocks.len() as u32).to_le_bytes());
-
-        let mut data_cursor = (DUMP_HEADER64_SIZE + 0x200) as u32;
-        for (i, block) in blocks.iter().enumerate() {
-            let entry_off = db_offset as usize + i * DATA_BLOCK_SIZE;
-            buf[entry_off..entry_off + 8].copy_from_slice(&block.address.to_le_bytes());
-            buf[entry_off + 8..entry_off + 12].copy_from_slice(&data_cursor.to_le_bytes());
-            buf[entry_off + 12..entry_off + 16].copy_from_slice(&block.size.to_le_bytes());
-
-            if let Some((_, content)) = mem_regions.iter().find(|(a, _)| *a == block.address) {
-                let file_off = data_cursor as usize;
-                let len = content.len().min(block.size as usize);
-                buf[file_off..file_off + len].copy_from_slice(&content[..len]);
-            }
-
-            data_cursor += block.size;
-        }
-
-        let total = data_cursor as usize - DUMP_HEADER64_SIZE + 0x200;
-        buf[triage_base + TRIAGE_SIZE_OF_DUMP..triage_base + TRIAGE_SIZE_OF_DUMP + 4]
-            .copy_from_slice(&(total as u32).to_le_bytes());
-
-        buf
-    }
 
     #[test]
     fn is_triage_dump_detects_signature_and_type() {
