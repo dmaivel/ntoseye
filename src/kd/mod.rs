@@ -107,10 +107,9 @@ const DBG_KD_LOAD_SYMBOLS_STATE_CHANGE: u32 = 0x0000_3031;
 const DBG_KD_COMMAND_STRING_STATE_CHANGE: u32 = 0x0000_3032;
 
 const AMD64_DEBUG_CONTROL_SPACE_KSPECIAL: u64 = 2;
-/// ARM64 `KSPECIAL_REGISTERS` is read from control-space base zero. The field
-/// order/size is the public WoA definition; no cached ARM64 ntkrnlmp PDB is
-/// available in this source tree to replace those ABI offsets.
-const ARM64_DEBUG_CONTROL_SPACE_KSPECIAL: u64 = 0;
+/// Control-space bases are selectors: 0 returns a KPCR pointer, 2 selects
+/// `KARM64_SPECIAL_REGISTERS` (160 bytes in the public WoA definition).
+const ARM64_DEBUG_CONTROL_SPACE_KSPECIAL: u64 = 2;
 
 fn detect_arch(machine_type: u16) -> Result<Arch> {
     match Arch::from_machine_type(machine_type) {
@@ -569,6 +568,8 @@ pub struct KdBackend {
     breakin_addresses: HashSet<u64>,
     pending_write_breakpoint: Option<PendingWriteBreakpoint>,
     special_register_cache: HashMap<u16, Vec<u8>>,
+    /// Avoid repeated round trips or timeouts after an ARM64 control-space read fails.
+    special_registers_unsupported: bool,
     efer_cache: HashMap<u16, u64>,
     /// Set after an explicit frontend cleanup. Prevents `Drop` from overriding
     /// a deliberate halted exit after breakpoint restoration failed.
@@ -796,6 +797,7 @@ impl KdBackend {
             last_stop_was_managed_breakpoint: stopped_on_stale_breakpoint,
             reconnect_assist_after_continue: None,
             special_register_cache: HashMap::new(),
+            special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
@@ -1362,6 +1364,22 @@ impl KdBackend {
             .ok_or_else(|| Error::Kd("special-register cache lookup failed".into()))
     }
 
+    /// Prefer the kernel debug-register copies; fall back to GetContext if unavailable.
+    fn arm64_special_registers(&mut self) -> Option<&[u8]> {
+        if self.special_registers_unsupported {
+            return None;
+        }
+        if let Err(error) = self.read_special_registers().map(|_| ()) {
+            kd_trace!("kd: ARM64 KSPECIAL_REGISTERS unavailable: {error}");
+            self.special_registers_unsupported = true;
+            return None;
+        }
+        self.special_register_cache
+            .get(&self.current_processor)
+            .map(Vec::as_slice)
+            .filter(|special| special.len() >= ARM64_KSPECIAL_REGISTERS_MIN_SIZE)
+    }
+
     fn append_control_registers(&mut self, ctx: &mut Vec<u8>) -> Result<()> {
         match self.arch {
             Arch::Amd64 => {
@@ -1406,20 +1424,14 @@ impl KdBackend {
                     (0, 0)
                 };
                 let kernel_dtb = self.kernel_dtb_override;
-                let special = self.read_special_registers()?;
-                if special.len() < ARM64_KSPECIAL_REGISTERS_MIN_SIZE {
-                    return Err(Error::Kd(format!(
-                        "ARM64 KSPECIAL_REGISTERS buffer too short: {} bytes, expected at least {}",
-                        special.len(),
-                        ARM64_KSPECIAL_REGISTERS_MIN_SIZE
-                    )));
-                }
                 ctx.resize(context_arm64::REGISTER_BUFFER_SIZE, 0);
                 ctx[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
                     .copy_from_slice(&kernel_dtb.to_le_bytes());
                 ctx[context_arm64::OFFSET_TTBR0..context_arm64::OFFSET_TTBR0 + 8]
                     .copy_from_slice(&ttbr0.to_le_bytes());
-                copy_arm64_debug_registers(ctx, special, true);
+                if let Some(special) = self.arm64_special_registers() {
+                    copy_arm64_debug_registers(ctx, special, true);
+                }
                 if self.last_exception_code == STATUS_SINGLE_STEP {
                     ctx[context_arm64::OFFSET_ESR..context_arm64::OFFSET_ESR + 8]
                         .copy_from_slice(&esr.to_le_bytes());
@@ -1844,8 +1856,20 @@ impl DebugBackend for KdBackend {
                 })?;
                 // ARM64 hardware state is authoritative in KSPECIAL_REGISTERS,
                 // while CONTEXT exposes the same BVR/BCR and WVR/WCR fields.
-                // Keep both views coherent when a full context is written.
-                let mut special = self.read_special_registers_uncached(processor)?;
+                // Keep both views coherent when a full context is written. The
+                // SetContext above already carried those fields, so a target
+                // that refuses control space must not fail an applied write.
+                if self.special_registers_unsupported {
+                    return Ok(());
+                }
+                let mut special = match self.read_special_registers_uncached(processor) {
+                    Ok(special) => special,
+                    Err(error) => {
+                        kd_trace!("kd: ARM64 KSPECIAL_REGISTERS mirror skipped: {error}");
+                        self.special_registers_unsupported = true;
+                        return Ok(());
+                    }
+                };
                 update_arm64_debug_registers_from_context(&mut special, data)?;
                 self.write_special_registers(special)
             }
@@ -3285,6 +3309,7 @@ mod tests {
             breakin_addresses: HashSet::new(),
             pending_write_breakpoint: None,
             special_register_cache: HashMap::new(),
+            special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
@@ -3313,6 +3338,7 @@ mod tests {
             breakin_addresses: HashSet::new(),
             pending_write_breakpoint: None,
             special_register_cache: HashMap::new(),
+            special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
@@ -3481,6 +3507,107 @@ mod tests {
                 kernel_id ^= 1;
             }
         })
+    }
+
+    /// A halted fake kernel answering manipulate requests from an ordered
+    /// `(api, status, data)` script, asserting each request's API number.
+    fn serve_manipulate(
+        mut kernel: UnixStream,
+        script: Vec<(u32, u32, Vec<u8>)>,
+    ) -> std::thread::JoinHandle<()> {
+        const UNION: usize = 16;
+        std::thread::spawn(move || {
+            let mut kernel_id = WIRE_FIRST_PACKET_ID;
+            let mut script = script.into_iter();
+            loop {
+                let mut header = [0u8; WIRE_HEADER_SIZE];
+                if kernel.read_exact(&mut header).is_err() {
+                    assert!(script.next().is_none(), "missing manipulate request");
+                    return;
+                }
+                if u32::from_le_bytes(header[0..4].try_into().unwrap()) != WIRE_DATA_LEADER {
+                    continue; // host ACK of our last reply
+                }
+                let len = u16::from_le_bytes(header[6..8].try_into().unwrap()) as usize;
+                let mut request = vec![0u8; len + 1];
+                kernel.read_exact(&mut request).unwrap();
+                let host_id = u32::from_le_bytes(header[8..12].try_into().unwrap());
+                kernel
+                    .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, host_id))
+                    .unwrap();
+
+                let (api_number, status, data) =
+                    script.next().expect("unexpected manipulate request");
+                assert_eq!(
+                    u32::from_le_bytes(request[0..4].try_into().unwrap()),
+                    api_number
+                );
+                let mut reply = vec![0u8; api::MANIPULATE_HEADER_SIZE];
+                reply[0..4].copy_from_slice(&api_number.to_le_bytes());
+                reply[8..12].copy_from_slice(&status.to_le_bytes());
+                reply[UNION + 12..UNION + 16].copy_from_slice(&(data.len() as u32).to_le_bytes());
+                reply.extend_from_slice(&data);
+                kernel
+                    .write_all(&wire_data_packet(
+                        PACKET_TYPE_KD_STATE_MANIPULATE,
+                        kernel_id,
+                        &reply,
+                    ))
+                    .unwrap();
+                kernel_id ^= 1;
+            }
+        })
+    }
+
+    #[test]
+    fn arm64_registers_survive_refused_control_space() {
+        let (kernel, host) = UnixStream::pair().unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.arch = Arch::Arm64;
+        backend.register_map = context_arm64::build_register_map();
+        backend.link.set_inline_running(false);
+        backend.exit_prepared = true;
+
+        let mut ctx = vec![0u8; context_arm64::CONTEXT_SIZE];
+        wire::write_u64(&mut ctx, context_arm64::OFFSET_PC, 0xffff_f800_1234_5678);
+        wire::write_u64(&mut ctx, context_arm64::OFFSET_BVR0, 0xffff_f800_dead_0000);
+        wire::write_u32(&mut ctx, context_arm64::OFFSET_BCR0, 0x1e5);
+        let expected = ctx.clone();
+
+        let worker = serve_manipulate(
+            kernel,
+            vec![
+                (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, ctx),
+                (
+                    api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+                    0xc000_0001,
+                    Vec::new(),
+                ),
+                (api::DBGKD_READ_CONTROL_SPACE, 0xc000_0001, Vec::new()),
+                (
+                    api::DBGKD_GET_CONTEXT,
+                    api::STATUS_SUCCESS,
+                    expected.clone(),
+                ),
+                (
+                    api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+                    0xc000_0001,
+                    Vec::new(),
+                ),
+            ],
+        );
+
+        let regs = backend.read_registers().unwrap();
+
+        assert_eq!(&regs[..context_arm64::CONTEXT_SIZE], &expected[..]);
+        assert_eq!(
+            backend.register_map.read_u64("bvr0", &regs).unwrap(),
+            0xffff_f800_dead_0000
+        );
+        // A second read must not retry the refused control-space request.
+        assert_eq!(backend.read_registers().unwrap(), regs);
+        drop(backend);
+        worker.join().unwrap();
     }
 
     const FAKE_KERNEL_DTB: u64 = 0x1ad000;

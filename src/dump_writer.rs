@@ -9,16 +9,17 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use kdmp_parser::structs::{ExceptionRecord64, Header64};
+use crate::dmp::structs::{ExceptionRecord64, Header64};
 
 use crate::backend::MemoryOps;
 use crate::cpu_state::MAX_PROCESSORS;
-use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
+use crate::dmp::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::error::{Error, Result};
 use crate::kd::context;
+use crate::kd::context_arm64;
 use crate::kd::wire::{write_u32, write_u64};
 use crate::memory::PAGE_SIZE;
-use crate::types::PhysAddr;
+use crate::types::{Arch, PhysAddr};
 
 const FULL_DUMP_TYPE: u32 = 1;
 /// `_DUMP_HEADER64.PhysicalMemoryBlock` has room for at most 42 sixteen-byte
@@ -26,6 +27,20 @@ const FULL_DUMP_TYPE: u32 = 1;
 pub const MAX_PHYSICAL_MEMORY_RUNS: usize = 42;
 const TEMP_CREATE_RETRIES: usize = 16;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn machine_image_type(arch: Arch) -> u32 {
+    match arch {
+        Arch::Amd64 => IMAGE_FILE_MACHINE_AMD64,
+        Arch::Arm64 => IMAGE_FILE_MACHINE_ARM64,
+    }
+}
+
+fn context_size(arch: Arch) -> usize {
+    match arch {
+        Arch::Amd64 => context::CONTEXT_SIZE,
+        Arch::Arm64 => context_arm64::CONTEXT_SIZE,
+    }
+}
 
 #[repr(C)]
 struct PhysicalMemoryDescriptor64 {
@@ -58,6 +73,9 @@ pub struct DumpException {
 /// lets the command degrade individual discovery fields to zero.
 #[derive(Debug, Clone)]
 pub struct DumpMetadata {
+    /// Guest architecture. Selects the header's `MachineImageType` and how
+    /// much of `context` is a `CONTEXT` record.
+    pub arch: Arch,
     pub major_version: u32,
     pub minor_version: u32,
     pub directory_table_base: u64,
@@ -68,8 +86,9 @@ pub struct DumpMetadata {
     pub bug_check_code: u32,
     pub bug_check_parameters: [u64; 4],
     pub kd_debugger_data_block: u64,
-    /// A KD `CONTEXT` record. The writer takes the first AMD64 CONTEXT-sized
-    /// prefix and leaves the rest of the header's reserved context bytes zero.
+    /// A KD register buffer. The writer takes the leading `CONTEXT` record for
+    /// `arch` -- the buffer's synthetic control/system-register slots sit past
+    /// it -- and leaves the rest of the header's context bytes zero.
     pub context: Vec<u8>,
     pub exception: Option<DumpException>,
     /// Physical RAM runs as `(base_page, page_count)`, in the order in which
@@ -101,11 +120,11 @@ impl DumpMetadata {
                 MAX_PHYSICAL_MEMORY_RUNS
             )));
         }
-        if self.context.len() < context::CONTEXT_SIZE {
+        let context_size = context_size(self.arch);
+        if self.context.len() < context_size {
             return Err(Error::DebugInfo(format!(
-                "KD CONTEXT is too short: {} bytes, expected at least {}",
+                "KD CONTEXT is too short: {} bytes, expected at least {context_size}",
                 self.context.len(),
-                context::CONTEXT_SIZE
             )));
         }
         let mut pages = 0u64;
@@ -227,7 +246,7 @@ fn build_header(metadata: &DumpMetadata, pages: u64) -> Result<Vec<u8>> {
     write_u32(
         &mut header,
         offset_of!(Header64, machine_image_type),
-        IMAGE_FILE_MACHINE_AMD64,
+        machine_image_type(metadata.arch),
     );
     write_u32(
         &mut header,
@@ -280,8 +299,9 @@ fn build_header(metadata: &DumpMetadata, pages: u64) -> Result<Vec<u8>> {
     }
 
     let context_offset = offset_of!(Header64, context_record_buffer);
-    header[context_offset..context_offset + context::CONTEXT_SIZE]
-        .copy_from_slice(&metadata.context[..context::CONTEXT_SIZE]);
+    let context_size = context_size(metadata.arch);
+    header[context_offset..context_offset + context_size]
+        .copy_from_slice(&metadata.context[..context_size]);
 
     if let Some(exception) = metadata.exception {
         let exception_offset = offset_of!(Header64, exception);
@@ -424,6 +444,7 @@ mod tests {
 
     fn test_metadata(runs: Vec<(u64, u64)>) -> DumpMetadata {
         DumpMetadata {
+            arch: Arch::Amd64,
             major_version: 0xf,
             minor_version: 19_041,
             directory_table_base: 0x1234_5000,
@@ -473,6 +494,7 @@ mod tests {
         let mut context = vec![0u8; context::CONTEXT_SIZE];
         write_u64(&mut context, context::OFFSET_RIP, 0xffff_f800_1234_5678);
         let metadata = DumpMetadata {
+            arch: Arch::Amd64,
             major_version: 0xf,
             minor_version: 19_041,
             directory_table_base: 0x1234_5000,
@@ -533,6 +555,92 @@ mod tests {
                 &memory.bytes[page as usize * PAGE_SIZE..(page as usize + 1) * PAGE_SIZE]
             );
         }
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn arm64_dump_round_trips_with_an_arm64_header_and_context() {
+        let runs = vec![(0u64, 2u64)];
+        let mut bytes = vec![0u8; 2 * PAGE_SIZE];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(59).wrapping_add(7);
+        }
+        let memory = SyntheticMemory { bytes };
+
+        let mut context = vec![0u8; context_arm64::REGISTER_BUFFER_SIZE];
+        write_u32(
+            &mut context,
+            context_arm64::OFFSET_CONTEXT_FLAGS,
+            context_arm64::CONTEXT_ALL,
+        );
+        write_u64(
+            &mut context,
+            context_arm64::OFFSET_PC,
+            0xffff_8000_dead_0000,
+        );
+        write_u64(
+            &mut context,
+            context_arm64::OFFSET_SP,
+            0xffff_8000_beef_1000,
+        );
+        write_u64(&mut context, context_arm64::OFFSET_X0, 0x5a5a_5a5a);
+        // Past the CONTEXT record: must not leak into the dump header.
+        write_u64(
+            &mut context,
+            context_arm64::OFFSET_CR3,
+            0xdead_dead_dead_dead,
+        );
+
+        let metadata = DumpMetadata {
+            arch: Arch::Arm64,
+            context,
+            directory_table_base: 0x4321_0000,
+            ..test_metadata(runs.clone())
+        };
+        let path = std::env::temp_dir().join(format!(
+            "ntoseye-dump-writer-{}-arm64.dmp",
+            std::process::id()
+        ));
+
+        let unreadable = write_kernel_dump(&path, &memory, &metadata, || false, || {}).unwrap();
+        assert_eq!(unreadable, 0);
+
+        let raw = fs::read(&path).unwrap();
+        let machine = offset_of!(Header64, machine_image_type);
+        assert_eq!(
+            u32::from_le_bytes(raw[machine..machine + 4].try_into().unwrap()),
+            IMAGE_FILE_MACHINE_ARM64,
+            "the header must declare ARM64, not AMD64"
+        );
+        let ctx = offset_of!(Header64, context_record_buffer);
+        let flags_at = ctx + context_arm64::OFFSET_CONTEXT_FLAGS;
+        assert_eq!(
+            u32::from_le_bytes(raw[flags_at..flags_at + 4].try_into().unwrap()),
+            context_arm64::CONTEXT_ALL,
+        );
+        assert!(
+            raw[ctx + context_arm64::CONTEXT_SIZE..ctx + context::CONTEXT_SIZE]
+                .iter()
+                .all(|&b| b == 0),
+            "only the ARM64 CONTEXT prefix belongs in the header"
+        );
+
+        let dump = DmpMem::open(&path).unwrap();
+        let info = dump.info();
+        let arm = info
+            .context
+            .arm64
+            .as_ref()
+            .expect("reopened ARM64 dump must decode an ARM64 context");
+        assert_eq!(arm.pc, 0xffff_8000_dead_0000);
+        assert_eq!(arm.sp, 0xffff_8000_beef_1000);
+        assert_eq!(arm.x[0], 0x5a5a_5a5a);
+        assert_eq!(info.directory_table_base, 0x4321_0000);
+
+        let mut actual = [0u8; PAGE_SIZE];
+        dump.read_bytes(PAGE_SIZE as u64, &mut actual).unwrap();
+        assert_eq!(&actual, &memory.bytes[PAGE_SIZE..2 * PAGE_SIZE]);
 
         fs::remove_file(path).unwrap();
     }

@@ -27,7 +27,7 @@ From a live halted target, use the WinDbg-compatible command:
 .dump [/f] [/ma] <file>
 ```
 
-This streams a `PAGEDU64` full kernel dump page by page. It requires a live halted target with memory introspection and is currently supported only for AMD64; a static crash-dump session cannot write another dump. `/f` and `/ma` are accepted as full-dump switches. The resulting file can be reopened with `ntoseye --dump <file>`.
+This streams a `PAGEDU64` full kernel dump page by page. It requires a live halted target with memory introspection; a static crash-dump session cannot write another dump. AMD64 and ARM64 targets are both supported: the header's `MachineImageType` and the embedded `CONTEXT` record follow the target's architecture. `/f` and `/ma` are accepted as full-dump switches. The resulting file can be reopened with `ntoseye --dump <file>`.
 
 The writer streams into a temporary file beside the destination (mode `0600`) and renames it over the destination only after the write completes, so the resulting dump is owner-readable regardless of umask. Ctrl+C or a write failure leaves an existing dump unchanged and removes the temporary file. Replacing a dump therefore requires space for the new file alongside the old one. Unreadable guest pages are zero-filled and counted in the command output. Targets with more than 42 physical-memory runs are rejected rather than producing an incomplete full dump.
 

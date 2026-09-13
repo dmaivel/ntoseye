@@ -9,13 +9,13 @@ WinDbg-like kernel debugger for Windows, from Linux and macOS.
 
 ## Features
 
-- WinDbg-compatible REPL commands and hexadecimal expression radix
+- WinDbg-compatible REPL commands
 - Kernel and usermode debugging
-- Remote debugging over encrypted KDNET
+- Remote debugging
 - Public/private PDB symbols, source lines, and scoped local-variable metadata
 - Deferred, conditional, pass-count, one-shot, and command-action breakpoints
 - Hardware watchpoints
-- Integrated bugcheck, exception, verifier, WHEA, and crash-dump analysis
+- Crash-dump analysis
 - [Four backends](docs/backends.md): Windows KDCOM and KDNET, QEMU's GDB stub, and passive memory introspection
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)

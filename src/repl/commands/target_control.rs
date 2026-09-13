@@ -11,7 +11,7 @@ use crate::phys::PhysMem;
 use crate::repl::*;
 use crate::symbols::{FieldInfo, ParsedType};
 use crate::target::Target;
-use crate::types::{Arch, VirtAddr};
+use crate::types::VirtAddr;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::atomic::Ordering;
 
@@ -385,11 +385,6 @@ fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
 }
 
 fn collect_dump_metadata(state: &mut ReplState<'_>) -> Result<DumpMetadata> {
-    if state.ctx.target.arch() != Arch::Amd64 {
-        return Err(Error::UnsupportedArchitecture(
-            "full dump writing is currently supported only for AMD64".into(),
-        ));
-    }
     let context = state.ctx.backend.read_registers()?;
     let processor_count = state
         .ctx
@@ -443,6 +438,7 @@ fn collect_dump_metadata(state: &mut ReplState<'_>) -> Result<DumpMetadata> {
     }
 
     Ok(DumpMetadata {
+        arch: state.ctx.target.arch(),
         major_version,
         minor_version,
         directory_table_base: state.ctx.target.kernel_dtb(),

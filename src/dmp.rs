@@ -1,12 +1,10 @@
 use std::fs::File;
+use std::mem::offset_of;
 use std::path::Path;
 use std::time::Duration;
 
-use kdmp_parser::gxa::Gva;
-use kdmp_parser::parse::KernelDumpParser;
-use kdmp_parser::structs::KdDebuggerData64;
-use kdmp_parser::virt;
 use memmap2::Mmap;
+use zerocopy::FromBytes;
 
 use crate::kd::wire::{
     read_u16, read_u32, read_u64, read_u64 as buffer_u64, write_u16, write_u32, write_u64,
@@ -29,6 +27,12 @@ use crate::triage::{
     TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,
 };
 use crate::types::{PhysAddr, VirtAddr};
+
+pub mod parse;
+pub mod structs;
+
+use parse::ParsedDump;
+use structs::{Context, KdDebuggerData64};
 
 pub const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
 pub const IMAGE_FILE_MACHINE_ARM64: u32 = 0xaa64;
@@ -464,25 +468,22 @@ impl DmpMem {
             return Self::open_triage(mmap);
         }
 
-        match KernelDumpParser::new(path) {
-            Ok(parser) => Self::open_full(mmap, parser),
-            Err(e) => Err(Error::InvalidDump(e.to_string())),
-        }
+        let parsed = parse::parse(&mmap)?;
+        Self::open_full(mmap, parsed)
     }
 
-    fn open_full(mmap: Mmap, parser: KernelDumpParser) -> Result<Self> {
-        let hdr = parser.headers();
+    fn open_full(mmap: Mmap, parsed: ParsedDump) -> Result<Self> {
+        let hdr = &parsed.headers;
         require_supported_dump(hdr.machine_image_type)?;
-        let mut pages: Vec<(u64, u64)> = parser
-            .physmem()
-            .map(|(gpa, offset)| (u64::from(gpa), offset))
-            .collect();
-        pages.sort_unstable_by_key(|&(gpa, _)| gpa);
+        // `PhysmemMap` is a `BTreeMap` keyed by GPA, so this is already sorted
+        // ascending -- which `lookup` relies on for its binary search.
+        let pages: Vec<(u64, u64)> = parsed.physmem.into_iter().collect();
 
         let context = if hdr.machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
             DmpContext::from_arm64_bytes(&hdr.context_record_buffer)
         } else {
-            let ctx = parser.context_record();
+            let (ctx, _) = Context::read_from_prefix(&hdr.context_record_buffer)
+                .map_err(|_| Error::InvalidDump("context record is truncated".to_string()))?;
             DmpContext {
                 rax: ctx.rax,
                 rbx: ctx.rbx,
@@ -525,8 +526,6 @@ impl DmpMem {
             }
         };
 
-        let offset_prcb_context = Self::read_prcb_context_offset(&parser);
-
         let exc = &hdr.exception;
         let n_params = (exc.number_parameters as usize).min(15);
         let exception = if exc.exception_code != 0 || exc.exception_address != 0 {
@@ -555,7 +554,8 @@ impl DmpMem {
             directory_table_base: hdr.directory_table_base,
             bug_check_code: hdr.bug_check_code,
             bug_check_parameters: hdr.bug_check_code_parameters,
-            offset_prcb_context,
+            // Resolved by DmpBackend once guest virtual-memory translation is available.
+            offset_prcb_context: None,
             number_processors: clamp_processors(hdr.number_processors),
             is_triage: false,
             ps_loaded_module_list: hdr.ps_loaded_module_list,
@@ -594,14 +594,6 @@ impl DmpMem {
             storage: DmpStorage::Blocks(blocks),
             info,
         })
-    }
-
-    fn read_prcb_context_offset(parser: &KernelDumpParser) -> Option<u16> {
-        let reader = virt::Reader::new(parser);
-        let kdbg_va: Gva = parser.headers().kd_debugger_data_block.into();
-        let kdbg: KdDebuggerData64 = reader.try_read_struct(kdbg_va).ok()??;
-        let off = kdbg.offset_prcb_context;
-        if off > 0 { Some(off) } else { None }
     }
 
     pub fn info(&self) -> &DmpInfo {
@@ -979,6 +971,16 @@ impl DmpBackend {
         self.triage_crash_info.as_ref()
     }
 
+    /// Full dumps need guest translation to read KDBG; triage dumps resolve
+    /// this from their embedded copy at parse time.
+    fn resolve_prcb_context_offset(&self, target: &Target) -> Option<u16> {
+        let kdbg = self.debugger_data_hint?.address;
+        let memory = target.guest().ok()?.ntoskrnl.memory();
+        let field = offset_of!(KdDebuggerData64, offset_prcb_context) as u64;
+        let offset: u16 = memory.read(kdbg + field).ok()?;
+        (offset > 0).then_some(offset)
+    }
+
     fn unsupported(operation: &str) -> Error {
         Error::DebugInfo(format!(
             "crash dump is a static snapshot; {operation} is not available"
@@ -998,11 +1000,19 @@ impl DebugBackend for DmpBackend {
                 ));
             }
             self.select_crash_processor();
-        } else if let Some(offset) = self.prcb_context_offset {
-            if let Err(e) = self.read_prcb_contexts(target, offset) {
-                diagnostics::eprint_warning(format!("could not read PRCB contexts from dump: {e}"));
+        } else {
+            let offset = self
+                .prcb_context_offset
+                .or_else(|| self.resolve_prcb_context_offset(target));
+            if let Some(offset) = offset {
+                self.prcb_context_offset = Some(offset);
+                if let Err(e) = self.read_prcb_contexts(target, offset) {
+                    diagnostics::eprint_warning(format!(
+                        "could not read PRCB contexts from dump: {e}"
+                    ));
+                }
+                self.select_crash_processor();
             }
-            self.select_crash_processor();
         }
 
         if let Some(info) = target.phys.dmp_info() {

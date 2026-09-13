@@ -1,6 +1,7 @@
 use crate::diagnostics;
 #[cfg(test)]
 use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
+use crate::dmp::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
 use crate::dmp::{
     DmpContext, DmpException, DmpInfo, DmpSystemInfo, IMAGE_FILE_MACHINE_ARM64, UnloadedDriver,
     clamp_processors,
@@ -11,7 +12,6 @@ use crate::kd::context;
 use crate::kd::context_arm64;
 use crate::kd::wire::{read_u16, read_u32, read_u64};
 use crate::types::VirtAddr;
-use kdmp_parser::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
 use std::mem::{offset_of, size_of};
 
 const DUMP_HEADER64_SIZE: usize = size_of::<Header64>();
@@ -19,7 +19,7 @@ const SIGNATURE_PAGEDU64: &[u8; 8] = b"PAGEDU64";
 const DUMP_TYPE_TRIAGE: u32 = 0x4;
 
 // DUMP_HEADER64 is a stable dump-container ABI. Derive its offsets from
-// kdmp-parser's SDK-sourced `#[repr(C)]` definition.
+// the SDK-sourced `#[repr(C)]` definition in `crate::dmp::structs`.
 const OFF_MAJOR_VERSION: usize = offset_of!(Header64, major_version);
 const OFF_MINOR_VERSION: usize = offset_of!(Header64, minor_version);
 const OFF_DIRECTORY_TABLE_BASE: usize = offset_of!(Header64, directory_table_base);

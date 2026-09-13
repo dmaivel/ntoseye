@@ -1344,12 +1344,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kdmp-parser"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d61e9fa66b82ab0198a5d1d5ab99412aa3c2b7e305ea49480372e59c9c076726"
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1527,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "ntoseye"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -1544,7 +1538,6 @@ dependencies = [
  "hmac",
  "iced-x86",
  "indicatif",
- "kdmp-parser",
  "linkme",
  "memmap2",
  "nix 0.31.3",
@@ -1578,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "ntoseye-py"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "ntoseye",
  "pyo3",
