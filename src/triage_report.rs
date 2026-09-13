@@ -334,12 +334,28 @@ fn failure_signature(report: &TriageReport) -> Option<FailureSignature> {
         return None;
     };
 
-    let bugcheck_symbol = report
+    // The recorded fault always outranks where the target happens to be
+    // stopped: on a bugcheck that is DbgBreakPointWithStatus, which would
+    // bucket every crash in a driver without symbols identically.
+    let bugcheck_fault = report
         .bugcheck
         .as_ref()
-        .and_then(|bugcheck| bugcheck.fault.as_ref())
+        .and_then(|bugcheck| bugcheck.fault.as_ref());
+    let bugcheck_symbol = bugcheck_fault
         .and_then(|fault| stable_symbol(&fault.symbol))
         .map(|symbol| (symbol, FailureSignatureSource::BugcheckFault));
+    let bugcheck_module = bugcheck_fault.and_then(|fault| {
+        fault
+            .driver
+            .as_deref()
+            .or_else(|| evidence_module_for_address(report, fault.ip))
+            .map(|module| {
+                (
+                    canonical_module_component(module),
+                    FailureSignatureSource::BugcheckFault,
+                )
+            })
+    });
     let exception_symbol = report.exception.as_ref().and_then(|exception| {
         report.backtrace.as_ref().and_then(|trace| {
             trace
@@ -365,16 +381,19 @@ fn failure_signature(report: &TriageReport) -> Option<FailureSignature> {
             stable_symbol(&frame.symbol).map(|symbol| (symbol, FailureSignatureSource::TopFrame))
         })
     });
-    let resolved_symbol = bugcheck_symbol
-        .or(exception_symbol)
-        .or(current_symbol)
-        .or(top_symbol);
-    let (symbol, module, source) = match resolved_symbol {
-        Some((symbol, source)) => {
+    let resolved_symbol = bugcheck_symbol.or_else(|| {
+        bugcheck_module
+            .is_none()
+            .then(|| exception_symbol.or(current_symbol).or(top_symbol))
+            .flatten()
+    });
+    let (symbol, module, source) = match (resolved_symbol, bugcheck_module) {
+        (Some((symbol, source)), _) => {
             let module = symbol.split_once('!').map(|(module, _)| module.to_string());
             (Some(symbol), module, source)
         }
-        None => match best_signature_module(report) {
+        (None, Some((module, source))) => (None, Some(module), source),
+        (None, None) => match best_signature_module(report) {
             Some((module, source)) => (None, Some(module), source),
             None => (None, None, FailureSignatureSource::CodeOnly),
         },
@@ -419,24 +438,6 @@ fn stable_symbol(symbol: &str) -> Option<String> {
 }
 
 fn best_signature_module(report: &TriageReport) -> Option<(String, FailureSignatureSource)> {
-    if let Some(fault) = report
-        .bugcheck
-        .as_ref()
-        .and_then(|bugcheck| bugcheck.fault.as_ref())
-    {
-        if let Some(driver) = fault.driver.as_deref() {
-            return Some((
-                canonical_module_component(driver),
-                FailureSignatureSource::BugcheckFault,
-            ));
-        }
-        if let Some(module) = evidence_module_for_address(report, fault.ip) {
-            return Some((
-                canonical_module_component(module),
-                FailureSignatureSource::BugcheckFault,
-            ));
-        }
-    }
     if let Some(exception) = &report.exception
         && let Some(module) = evidence_module_for_address(report, exception.address)
     {
@@ -1177,6 +1178,49 @@ mod tests {
         assert_eq!(first.bucket, "bugcheck:00000050|symbol:sample!dispatch");
         assert_eq!(first.bucket, second.bucket);
         assert_eq!(first.source, FailureSignatureSource::BugcheckFault);
+    }
+
+    #[test]
+    fn failure_signature_buckets_by_fault_module_when_the_driver_has_no_symbols() {
+        // A bugcheck stop sits at nt!DbgBreakPointWithStatus; a fault in a
+        // driver without a PDB (`myfault+0x1730`) must still bucket by that
+        // driver, not by the break-in instruction every crash shares.
+        let trace = StackTrace {
+            frames: vec![StackFrame {
+                sp: 0x8000,
+                ip: 0xffff_f800_0010_dfb0,
+                symbol: "nt!DbgBreakPointWithStatus".into(),
+                source: FrameSource::Current,
+                source_location: None,
+            }],
+            truncated: 0,
+        };
+        let report = TriageReport::assemble(
+            status(false, Some(0xffff_f800_0010_dfb0)),
+            Some(bugcheck(
+                0xd1,
+                [0; 4],
+                Some((0xffff_f809_d337_1730, "myfault+0x1730", Some("myfault.sys"))),
+            )),
+            Some(trace),
+            vec![
+                ModuleInfo::new(
+                    "ntoskrnl.exe".into(),
+                    VirtAddr(0xffff_f800_0000_0000),
+                    0x100_0000,
+                ),
+                ModuleInfo::new(
+                    "myfault.sys".into(),
+                    VirtAddr(0xffff_f809_d337_0000),
+                    0xb000,
+                ),
+            ],
+            None,
+            None,
+        );
+        let signature = report.failure_signature.unwrap();
+        assert_eq!(signature.bucket, "bugcheck:000000d1|module:myfault");
+        assert_eq!(signature.source, FailureSignatureSource::BugcheckFault);
     }
 
     #[test]
