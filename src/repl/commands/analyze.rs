@@ -1,12 +1,12 @@
 use crate::bugchecks::BugcheckAnalysis;
 use crate::cpu_state;
 use crate::dbg_backend::BugcheckInfo;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
-use crate::target::Target;
+use crate::target::{Target, wait_reason_name};
 use crate::triage_report::{
-    BlackboxState, FailureSignatureSource, TriageReport, WheaRecordState, exception_code_name,
-    filetime_to_iso,
+    BlackboxState, FailureSignatureSource, TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState,
+    exception_code_name, filetime_to_iso,
 };
 use crate::ui;
 
@@ -49,16 +49,14 @@ fn parse_analyze_options(
             "-v" | "/v" => options.verbose = true,
             "-hang" | "/hang" => options.hang = true,
             "-show" | "/show" => {
-                let code_text = invocation.arg(index + 1).ok_or_else(|| {
-                    crate::error::Error::Rsp("-show requires a bugcheck code".into())
-                })?;
+                let code_text = invocation
+                    .arg(index + 1)
+                    .ok_or_else(|| Error::Rsp("-show requires a bugcheck code".into()))?;
                 let code = Expr::eval_with_radix(code_text, target, radix)
                     .map(|value| value.0)
-                    .map_err(|_| {
-                        crate::error::Error::Rsp(format!("invalid bugcheck code '{code_text}'"))
-                    })?;
+                    .map_err(|_| Error::Rsp(format!("invalid bugcheck code '{code_text}'")))?;
                 let code = u32::try_from(code).map_err(|_| {
-                    crate::error::Error::Rsp(format!("bugcheck code '{code_text}' exceeds 32 bits"))
+                    Error::Rsp(format!("bugcheck code '{code_text}' exceeds 32 bits"))
                 })?;
                 let mut parameters = [0u64; 4];
                 let mut consumed = 2;
@@ -71,9 +69,7 @@ fn parse_analyze_options(
                     }
                     *parameter = Expr::eval_with_radix(text, target, radix)
                         .map(|value| value.0)
-                        .map_err(|_| {
-                            crate::error::Error::Rsp(format!("invalid bugcheck parameter '{text}'"))
-                        })?;
+                        .map_err(|_| Error::Rsp(format!("invalid bugcheck parameter '{text}'")))?;
                     consumed += 1;
                 }
                 options.show = Some(BugcheckInfo {
@@ -85,9 +81,7 @@ fn parse_analyze_options(
                 continue;
             }
             other => {
-                return Err(crate::error::Error::Rsp(format!(
-                    "unknown !analyze option '{other}'"
-                )));
+                return Err(Error::Rsp(format!("unknown !analyze option '{other}'")));
             }
         }
         index += 1;
@@ -192,7 +186,7 @@ fn print_hang_report(state: &mut ReplState<'_>) {
                 .map(|pid| pid.to_string())
                 .unwrap_or_else(|| "?".into()),
             thread.wait_reason.unwrap_or(0),
-            crate::target::wait_reason_name(thread.wait_reason.unwrap_or(0)),
+            wait_reason_name(thread.wait_reason.unwrap_or(0)),
             thread.pending_irps.as_ref().map_or(0, Vec::len)
         );
     }
@@ -319,7 +313,7 @@ fn print_triage_report(report: &TriageReport, verbose: bool) {
             Some(trace) => print_stacktrace_data(
                 trace,
                 if verbose {
-                    crate::triage_report::TRIAGE_BACKTRACE_LIMIT
+                    TRIAGE_BACKTRACE_LIMIT
                 } else {
                     ANALYZE_STACK_LIMIT
                 },

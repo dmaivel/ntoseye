@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 
 use tabled::builder::Builder;
 
-use crate::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
+use crate::cpu_state::{MAX_PROCESSORS, kpcr_for_processor, kprcb_for_processor, processor_count};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::kuser_shared;
@@ -15,7 +15,7 @@ use crate::target::{
 };
 use crate::types::VirtAddr;
 use crate::ui;
-use crate::unwind::{StackTrace, format_symbol, resolve_thread_trace_context};
+use crate::unwind::{StackTrace, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
 
 const MAX_LIST_ENTRIES: usize = 4096;
 const MAX_RUNNING_STACK_FRAMES: usize = 8;
@@ -173,8 +173,7 @@ fn walk_list_nodes(
 }
 
 fn processor_indices(target: &Target) -> Result<Vec<u16>> {
-    let count = usize::from(processor_count(target)?)
-        .clamp(1, usize::from(crate::cpu_state::MAX_PROCESSORS));
+    let count = usize::from(processor_count(target)?).clamp(1, usize::from(MAX_PROCESSORS));
     Ok((0..count).map(|index| index as u16).collect())
 }
 
@@ -262,21 +261,17 @@ fn short_stack(state: &ReplState<'_>, thread: &ThreadInfo, limit: usize) -> Stri
     }
 }
 
-fn kernel_trace(target: &Target) -> crate::unwind::ThreadTraceContext {
+fn kernel_trace(target: &Target) -> ThreadTraceContext {
     resolve_thread_trace_context(target, target.kernel_dtb())
 }
 
-fn symbol_for_address(
-    target: &Target,
-    trace: &crate::unwind::ThreadTraceContext,
-    address: VirtAddr,
-) -> String {
+fn symbol_for_address(target: &Target, trace: &ThreadTraceContext, address: VirtAddr) -> String {
     format_symbol(target, trace, address.0)
 }
 
 fn format_pointer_field(
     target: &Target,
-    trace: &crate::unwind::ThreadTraceContext,
+    trace: &ThreadTraceContext,
     type_name: &str,
     base: VirtAddr,
     field: Option<&str>,
@@ -1239,7 +1234,7 @@ fn decode_timer(
     target: &Target,
     timer: VirtAddr,
     timer_layout: &TypeInfo,
-    trace: &crate::unwind::ThreadTraceContext,
+    trace: &ThreadTraceContext,
     interrupt: Option<(u64, &'static str)>,
     dpc_keys: Option<TimerDpcKeys>,
 ) -> TimerRow {

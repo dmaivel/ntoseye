@@ -4,11 +4,12 @@ use std::sync::atomic::Ordering;
 use tabled::builder::Builder;
 
 use crate::backend::MemoryOps;
+use crate::debugger_data::MetadataValue;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::memory::{DTB_IDENTITY, PAGE_SIZE, PFN_MASK};
 use crate::repl::*;
-use crate::symbols::{ParsedType, TypeInfo, le_uint};
+use crate::symbols::{ParsedType, TypeInfo, glob_matches, le_uint};
 use crate::target::Target;
 use crate::types::{Arch, Dtb, PageTableEntry, PageTableLevel, VirtAddr};
 use crate::ui;
@@ -273,7 +274,7 @@ fn print_global_line(target: &Target, label: &str, symbol: &str, suffix: &str) {
 
 fn read_debugger_data_counter(
     target: &Target,
-    address: Option<crate::debugger_data::MetadataValue<VirtAddr>>,
+    address: Option<MetadataValue<VirtAddr>>,
 ) -> Option<u64> {
     let address = address?.value;
     target.kernel_address_space().read(address).ok()
@@ -283,7 +284,7 @@ fn print_memory_counter_fallback(
     target: &Target,
     label: &str,
     symbol: &str,
-    address: Option<crate::debugger_data::MetadataValue<VirtAddr>>,
+    address: Option<MetadataValue<VirtAddr>>,
 ) {
     if let Ok(value) = global_value(target, symbol) {
         outln!("  {label:<24}: {value}");
@@ -1347,7 +1348,7 @@ impl ReplState<'_> {
             .into_iter()
             .filter(|row| {
                 tag_filter
-                    .map(|filter| crate::symbols::glob_matches(filter, &tag_string(row.tag), false))
+                    .map(|filter| glob_matches(filter, &tag_string(row.tag), false))
                     .unwrap_or(true)
             })
             .collect::<Vec<_>>();
@@ -1457,8 +1458,7 @@ impl ReplState<'_> {
                         break;
                     };
                     for block in scan_pool_page_lax(&self.ctx.target, layout, base) {
-                        if block.synthetic_free
-                            || !crate::symbols::glob_matches(tag, &tag_string(block.tag), false)
+                        if block.synthetic_free || !glob_matches(tag, &tag_string(block.tag), false)
                         {
                             continue;
                         }
@@ -1497,7 +1497,7 @@ impl ReplState<'_> {
                 |entry| {
                     if found < MAX_POOLFIND_RESULTS
                         && pool_type.is_none_or(|kind| entry.nonpaged == (kind == 0))
-                        && crate::symbols::glob_matches(tag, &tag_string(entry.tag), false)
+                        && glob_matches(tag, &tag_string(entry.tag), false)
                     {
                         found += 1;
                         outln!(

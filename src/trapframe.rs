@@ -8,7 +8,7 @@
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::symbols::{TypeInfo, le_uint};
-use crate::target::{SavedThreadRegisters, Target};
+use crate::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use std::sync::Arc;
 
@@ -268,7 +268,7 @@ impl From<&KtrapFrame> for SavedThreadRegisters {
                 x[29] = Some(frame.fp);
                 x[30] = Some(frame.lr);
                 Self {
-                    arm64: Some(crate::target::Arm64SavedRegisters {
+                    arm64: Some(Arm64SavedRegisters {
                         x,
                         sp: Some(frame.sp),
                         pc: Some(frame.pc),

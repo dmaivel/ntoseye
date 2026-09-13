@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::io::IsTerminal;
 
 use crate::backend::MemoryOps;
+use crate::cpu_state::processor_count;
+use crate::dbg_backend::DebugBackend;
 use crate::error::Result;
 use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::{
@@ -10,6 +12,8 @@ use crate::kuser_shared::{
 };
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::output;
+#[cfg(feature = "python")]
+use crate::python::embed;
 use crate::target::Target;
 use crate::triage_report::filetime_to_iso;
 use crate::types::VirtAddr;
@@ -118,8 +122,8 @@ impl ReplState<'_> {
     fn cmd_reload_scripts(&mut self) -> Result<()> {
         #[cfg(feature = "python")]
         {
-            let py_report = crate::python::embed::load_commands_dir();
-            crate::python::embed::print_script_load_report(&py_report);
+            let py_report = embed::load_commands_dir();
+            embed::print_script_load_report(&py_report);
             *self.caches.user_commands.write().unwrap() = initial_user_commands();
         }
         let alias_report = self.reload_aliases();
@@ -333,9 +337,9 @@ impl ReplState<'_> {
 
     pub fn cmd_user(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         #[cfg(feature = "python")]
-        if crate::python::embed::has_command(invocation.name) {
+        if embed::has_command(invocation.name) {
             let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
-            if let Err(error) = crate::python::embed::dispatch(invocation.name, &args, self.ctx) {
+            if let Err(error) = embed::dispatch(invocation.name, &args, self.ctx) {
                 error!("{}: {}", invocation.name, error);
             }
             return Ok(());
@@ -573,11 +577,7 @@ fn format_uptime(ticks: u64) -> String {
     format!("{days}d {hours:02}:{minutes:02}:{seconds:02}")
 }
 
-fn print_target_version(
-    target: &Target,
-    backend: &str,
-    client: &mut dyn crate::dbg_backend::DebugBackend,
-) {
+fn print_target_version(target: &Target, backend: &str, client: &mut dyn DebugBackend) {
     let dump_info = target
         .phys
         .dmp_info()
@@ -622,7 +622,7 @@ fn print_target_version(
             .symbols
             .module_pdb_identity(target.kernel_dtb(), base)
     });
-    let processors = crate::cpu_state::processor_count(target).ok().or_else(|| {
+    let processors = processor_count(target).ok().or_else(|| {
         client
             .thread_list()
             .ok()
@@ -712,7 +712,7 @@ fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
 }
 
 fn eval_printf_value(text: &str, target: &Target, radix: NumberRadix) -> Option<u64> {
-    crate::expr::Expr::eval_with_radix(text, target, radix)
+    Expr::eval_with_radix(text, target, radix)
         .ok()
         .map(|value| value.0)
 }

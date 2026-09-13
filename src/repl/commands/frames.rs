@@ -4,11 +4,17 @@ use crate::backend::MemoryOps;
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
 use crate::error::Result;
 use crate::expr::Expr;
+use crate::gdb::RegisterMap;
+use crate::kd::{context, context_arm64};
+use crate::memory::DTB_IDENTITY;
 use crate::target::{SavedThreadRegisters, SelectedFrame, Target};
-use crate::trapframe::read_ktrap_frame_at_or_current;
+use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
-use crate::unwind::{RecoveredFrame, RecoveredStackTrace, build_stacktrace_with_context};
+use crate::unwind::{
+    RecoveredFrame, RecoveredStackTrace, build_stacktrace_with_context,
+    build_stacktrace_with_register_values,
+};
 
 use crate::repl::*;
 
@@ -64,18 +70,14 @@ impl ReplState<'_> {
         if let Some(cr3) = selected.registers.get("cr3").copied()
             && cr3 != 0
             && self.ctx.target.guest.is_some()
-            && self.ctx.target.kernel_dtb() != crate::memory::DTB_IDENTITY
+            && self.ctx.target.kernel_dtb() != DTB_IDENTITY
         {
             self.ctx.target.set_context_dtb_override(cr3);
         }
         self.ctx.target.selected_frame = Some(selected);
     }
 
-    pub(crate) fn select_register_values(
-        &mut self,
-        index: usize,
-        registers: HashMap<String, u64>,
-    ) -> u64 {
+    pub fn select_register_values(&mut self, index: usize, registers: HashMap<String, u64>) -> u64 {
         let selected = selected_from_registers(index, registers);
         let ip = selected.ip;
         self.set_selected_frame(selected);
@@ -173,7 +175,7 @@ impl ReplState<'_> {
                 &selected.seed_registers
             };
             let seed = seed.clone();
-            let trace = crate::unwind::build_stacktrace_with_register_values(
+            let trace = build_stacktrace_with_register_values(
                 &self.ctx.target,
                 &self.ctx.register_map,
                 &seed,
@@ -438,9 +440,7 @@ fn selected_from_registers(index: usize, registers: HashMap<String, u64>) -> Sel
     }
 }
 
-pub(crate) fn registers_from_trap_frame(
-    frame: &crate::trapframe::KtrapFrame,
-) -> HashMap<String, u64> {
+pub fn registers_from_trap_frame(frame: &KtrapFrame) -> HashMap<String, u64> {
     let saved = SavedThreadRegisters::from(frame);
     let mut registers = HashMap::new();
     const AMD64_NAMES: [&str; 18] = [
@@ -476,8 +476,8 @@ fn print_sparse_registers(registers: &HashMap<String, u64>) {
 
 fn read_context_at(target: &Target, address: VirtAddr) -> Option<HashMap<String, u64>> {
     let size = match target.arch() {
-        Arch::Amd64 => crate::kd::context::CONTEXT_SIZE,
-        Arch::Arm64 => crate::kd::context_arm64::CONTEXT_SIZE,
+        Arch::Amd64 => context::CONTEXT_SIZE,
+        Arch::Arm64 => context_arm64::CONTEXT_SIZE,
     };
     let mut bytes = vec![0u8; size];
     if !read_context_bytes(target, address, &mut bytes) {
@@ -486,13 +486,13 @@ fn read_context_at(target: &Target, address: VirtAddr) -> Option<HashMap<String,
     Some(target_register_map(target).to_hashmap(&bytes))
 }
 
-fn target_register_map(target: &Target) -> crate::gdb::RegisterMap {
+fn target_register_map(target: &Target) -> RegisterMap {
     // Context records use the same architecture-specific offsets as the KD
     // register map. This helper is intentionally local so no backend state is
     // mutated while a context is being inspected.
     match target.arch() {
-        Arch::Amd64 => crate::kd::context::build_register_map(),
-        Arch::Arm64 => crate::kd::context_arm64::build_register_map(),
+        Arch::Amd64 => context::build_register_map(),
+        Arch::Arm64 => context_arm64::build_register_map(),
     }
 }
 

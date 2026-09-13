@@ -3,6 +3,7 @@
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+use crate::guest::WinObject;
 use crate::target::Target;
 use crate::types::VirtAddr;
 
@@ -10,7 +11,7 @@ use crate::types::VirtAddr;
 /// `MAXIMUM_PROCESSORS`.
 pub const MAX_PROCESSORS: u16 = 2048;
 
-fn kernel(target: &Target) -> Result<&crate::guest::WinObject> {
+fn kernel(target: &Target) -> Result<&WinObject> {
     Ok(&target.guest()?.ntoskrnl)
 }
 

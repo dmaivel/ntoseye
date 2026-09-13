@@ -54,23 +54,23 @@ repl_command! {
     completion: Expression,
 }
 
-pub(crate) const DEFAULT_MEMORY_PROCESS_LIMIT: usize = 64;
+pub const DEFAULT_MEMORY_PROCESS_LIMIT: usize = 64;
 
-pub(crate) fn diagnostic_cell<T: Display>(value: &DiagnosticValue<T>) -> String {
+pub fn diagnostic_cell<T: Display>(value: &DiagnosticValue<T>) -> String {
     match value {
         DiagnosticValue::Available(value) => value.to_string(),
         DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
     }
 }
 
-pub(crate) fn diagnostic_metric_cell<T: Display>(metric: &DiagnosticMetric<T>) -> String {
+pub fn diagnostic_metric_cell<T: Display>(metric: &DiagnosticMetric<T>) -> String {
     match metric.source {
         Some(source) => format!("{} [{source}]", diagnostic_cell(&metric.value)),
         None => diagnostic_cell(&metric.value),
     }
 }
 
-pub(crate) fn print_memory_use_summary(summary: &SystemMemorySummary, include_process_stats: bool) {
+pub fn print_memory_use_summary(summary: &SystemMemorySummary, include_process_stats: bool) {
     outln!("system memory (page counters are pages; nonpaged pool is bytes)");
     outln!(
         "  physical pages     : {}",

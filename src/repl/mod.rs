@@ -29,10 +29,12 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::expr::NumberRadix;
 use crate::guest::ModuleSymbolLoadReport;
+use crate::memory::DTB_IDENTITY;
+#[cfg(feature = "cli")]
+use crate::output::log_input_line;
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::session::Session;
-#[cfg(feature = "cli")]
 #[cfg(feature = "cli")]
 use crate::symbols::ntoseye_home;
 #[cfg(feature = "cli")]
@@ -334,7 +336,7 @@ impl Session {
             Ok(dtb)
                 if dtb != 0
                     && self.target.guest.is_some()
-                    && self.target.kernel_dtb() != crate::memory::DTB_IDENTITY =>
+                    && self.target.kernel_dtb() != DTB_IDENTITY =>
             {
                 self.target.set_context_dtb_override(dtb);
             }
@@ -630,7 +632,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 continue;
             }
 
-            crate::output::log_input_line(command);
+            log_input_line(command);
             state.line = command.to_string();
             if state.dispatch_line(command)? == Flow::Quit {
                 break;
@@ -643,7 +645,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
             match sig {
                 Signal::Success(buffer) => {
                     if !buffer.trim().is_empty() {
-                        crate::output::log_input_line(buffer.trim());
+                        log_input_line(buffer.trim());
                         state.line = buffer.trim().to_string();
                         match state.dispatch_line(&buffer)? {
                             Flow::Quit => break,

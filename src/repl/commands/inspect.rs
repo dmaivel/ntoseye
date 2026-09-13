@@ -7,7 +7,9 @@ use owo_colors::OwoColorize;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::symbols::LocalVariableLocation;
-use crate::target::{irp_major_function_name, kthread_state_name, wait_reason_name};
+use crate::target::{
+    irp_major_function_name, kthread_state_name, lookup_register, wait_reason_name,
+};
 use crate::trapframe::read_ktrap_frame_at_or_current;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -326,7 +328,7 @@ impl ReplState<'_> {
                     "efl" | "rflags" => "eflags",
                     name => name,
                 };
-                if let Some(value) = crate::target::lookup_register(&frame.registers, requested) {
+                if let Some(value) = lookup_register(&frame.registers, requested) {
                     outln!("{}={}", requested, ui::addr(value));
                 } else {
                     error!(

@@ -9,6 +9,7 @@ use crate::guest::WinObject;
 use crate::session::processor_index_from_backend_thread_id;
 use crate::symbols::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::target::Target;
+use crate::triage::TriagePrcbInfo;
 use crate::types::{Arch, VirtAddr};
 use crate::ui;
 
@@ -225,7 +226,7 @@ fn processor_count(state: &mut ReplState<'_>) -> u16 {
         .map(|threads| {
             threads
                 .len()
-                .clamp(1, usize::from(crate::cpu_state::MAX_PROCESSORS)) as u16
+                .clamp(1, usize::from(cpu_state::MAX_PROCESSORS)) as u16
         })
         .unwrap_or(1)
 }
@@ -498,7 +499,7 @@ fn command_capability(state: &ReplState<'_>, capability: DebugCapability) -> boo
     }
 }
 
-fn print_triage_prcb(info: &crate::triage::TriagePrcbInfo) {
+fn print_triage_prcb(info: &TriagePrcbInfo) {
     outln!("CPU information from triage-dump PRCB metadata");
     outln!("  processor number    : {}", info.processor_number);
     outln!("  vendor              : {}", info.vendor_string);

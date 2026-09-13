@@ -5,15 +5,17 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::expr::Expr;
-use crate::guest::{ProcessInfo, StructRef};
+use crate::guest::{ModuleInfo, ProcessInfo, StructRef};
+use crate::memory::PAGE_SIZE;
 use crate::session::processor_index_from_backend_thread_id;
-use crate::symbols::ModuleSymbolStatus;
+use crate::symbols::{ModuleSymbolStatus, glob_matches};
 use crate::target::{
     AttachReport, MemoryRegionInfo, Target, ThreadInfo, kthread_state_name, process_matches,
     wait_reason_name,
 };
+use crate::triage_report::filetime_to_iso;
 use crate::types::{Value, VirtAddr};
 use crate::ui;
 
@@ -23,7 +25,7 @@ const MAX_PROCESSOR_SELECTION: usize = 256;
 const MAX_PROCESS_THREADS: usize = 512;
 const THREAD_STACK_LIMIT: usize = 32;
 const DEFAULT_THREAD_FRAME_LIMIT: usize = 16;
-const PAGE_SHIFT: u32 = crate::memory::PAGE_SIZE.trailing_zeros();
+const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
 const BYTES_PER_KIB: u64 = 1024;
 const BYTES_PER_MIB: u64 = BYTES_PER_KIB * 1024;
 
@@ -495,8 +497,7 @@ fn print_process_detail(target: &Target, process: &ProcessInfo) {
         ))
     );
     outln!("  Token         {}", display_pointer(token));
-    let create_time = process_field(target, process, &[&["CreateTime"]])
-        .and_then(crate::triage_report::filetime_to_iso);
+    let create_time = process_field(target, process, &[&["CreateTime"]]).and_then(filetime_to_iso);
     outln!(
         "  CreateTime    {}",
         create_time.unwrap_or_else(|| "-".to_string())
@@ -594,7 +595,7 @@ fn region_matches_filter(
 }
 
 impl ReplState<'_> {
-    pub(super) fn cmd_tilde(&mut self, line: &str) -> Result<Flow> {
+    pub fn cmd_tilde(&mut self, line: &str) -> Result<Flow> {
         let body = line.trim().strip_prefix('~').unwrap_or_default();
         if body.is_empty() {
             self.cmd_vcpus()?;
@@ -1360,9 +1361,8 @@ impl ReplState<'_> {
         let flags = match parsed.flags {
             Some(text) => {
                 match Expr::eval_with_radix(text, &self.ctx.target, self.radix).and_then(|value| {
-                    u32::try_from(value.0).map_err(|_| {
-                        crate::error::Error::Rsp(format!("invalid !process flags: {text}"))
-                    })
+                    u32::try_from(value.0)
+                        .map_err(|_| Error::Rsp(format!("invalid !process flags: {text}")))
                 }) {
                     Ok(flags) => flags,
                     Err(_) => {
@@ -1404,7 +1404,7 @@ impl ReplState<'_> {
         };
         if let Some(filter) = parsed.image {
             selected.retain(|process| {
-                crate::symbols::glob_matches(filter, &process.name, true)
+                glob_matches(filter, &process.name, true)
                     || process.name.eq_ignore_ascii_case(filter)
                     || process_matches(process, filter)
             });
@@ -1597,14 +1597,16 @@ impl ReplState<'_> {
         };
         match modules {
             Ok(modules) => {
-                let matches = |module: &crate::guest::ModuleInfo| {
+                let matches = |module: &ModuleInfo| {
                     pattern.is_none_or(|pattern| {
                         if glob_filter {
-                            crate::symbols::glob_matches(pattern, &module.short_name, true)
-                                || crate::symbols::glob_matches(pattern, &module.name, true)
-                                || module.name.rsplit(['\\', '/']).next().is_some_and(|name| {
-                                    crate::symbols::glob_matches(pattern, name, true)
-                                })
+                            glob_matches(pattern, &module.short_name, true)
+                                || glob_matches(pattern, &module.name, true)
+                                || module
+                                    .name
+                                    .rsplit(['\\', '/'])
+                                    .next()
+                                    .is_some_and(|name| glob_matches(pattern, name, true))
                         } else {
                             module
                                 .short_name

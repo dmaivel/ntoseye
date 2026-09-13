@@ -6,7 +6,7 @@ use iced_x86::{Code, Decoder, DecoderOptions};
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::memory::PAGE_SIZE;
 use crate::types::{Arch, VirtAddr};
@@ -18,7 +18,7 @@ use crate::unwind::{
 
 use crate::repl::*;
 
-pub(super) const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
+pub const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
 const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;
 const FILETIME_UNIX_MIN_SECONDS: i64 = -62_135_596_800;
 const FILETIME_UNIX_MAX_SECONDS: i64 = 253_402_300_799;
@@ -297,7 +297,7 @@ fn page_bounded_unit_read_len(
     }
 }
 
-pub(crate) fn for_each_page_chunk(
+pub fn for_each_page_chunk(
     start: VirtAddr,
     length: usize,
     mut visit: impl FnMut(usize, VirtAddr, usize),
@@ -311,7 +311,7 @@ pub(crate) fn for_each_page_chunk(
     }
 }
 
-pub(crate) fn read_page_chunks(
+pub fn read_page_chunks(
     start: VirtAddr,
     length: usize,
     mut read: impl FnMut(VirtAddr, &mut [u8]) -> Result<()>,
@@ -326,7 +326,7 @@ pub(crate) fn read_page_chunks(
     (data, valid)
 }
 
-pub(crate) fn parse_write_values(
+pub fn parse_write_values(
     state: &ReplState<'_>,
     invocation: &CommandInvocation<'_>,
 ) -> Result<Vec<u64>> {
@@ -938,7 +938,7 @@ impl ReplState<'_> {
             let page_end = start_addr
                 .0
                 .checked_add(PAGE_SIZE as u64 - start_addr.page_offset())
-                .ok_or(crate::error::Error::InvalidRange)?;
+                .ok_or(Error::InvalidRange)?;
             let readable = page_end.saturating_sub(start_addr.0).min(byte_len) as usize;
             bytes.truncate(readable);
             if let Err(e) = self.read_for_display(start_addr, &mut bytes) {
@@ -1294,19 +1294,17 @@ impl ReplState<'_> {
         address_index: usize,
         item_size: u64,
     ) -> Result<AddressRange> {
-        let start_arg = invocation
-            .arg(address_index)
-            .ok_or(crate::error::Error::InvalidRange)?;
+        let start_arg = invocation.arg(address_index).ok_or(Error::InvalidRange)?;
         let start = Expr::eval_with_radix(start_arg, &self.ctx.target, self.radix)?;
         let range_arg = invocation
             .arg(address_index + 1)
-            .ok_or(crate::error::Error::InvalidRange)?;
+            .ok_or(Error::InvalidRange)?;
         let length = eval_range_length(range_arg, &self.ctx.target, self.radix, start, item_size)?;
         let end = start
             .0
-            .checked_add(u64::try_from(length).map_err(|_| crate::error::Error::InvalidRange)?)
+            .checked_add(u64::try_from(length).map_err(|_| Error::InvalidRange)?)
             .map(VirtAddr)
-            .ok_or(crate::error::Error::InvalidRange)?;
+            .ok_or(Error::InvalidRange)?;
         Ok(AddressRange { start, end })
     }
 

@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::backend::MemoryOps;
+use crate::cpu_state::MAX_PROCESSORS;
 use crate::error::{Error, Result};
 use crate::memory::PAGE_SIZE;
 use crate::repl::INTERRUPT_REQUESTED;
-use crate::symbols::{ParsedType, TypeInfo, format_symbol_with_offset, le_uint};
+use crate::symbols::{FieldInfo, ParsedType, TypeInfo, format_symbol_with_offset, le_uint};
 use crate::target::Target;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -537,7 +538,7 @@ fn collect_tracker_usage(
     ) && processors > 0
     {
         source = "ExPoolTagTables";
-        for index in 0..u64::from(processors).min(u64::from(crate::cpu_state::MAX_PROCESSORS)) {
+        for index in 0..u64::from(processors).min(u64::from(MAX_PROCESSORS)) {
             let Some(pointer_address) = array.0.checked_add(index.saturating_mul(8)).map(VirtAddr)
             else {
                 break;
@@ -697,7 +698,7 @@ fn pool_raw_from_buf(ti: &TypeInfo, buf: &[u8], field: &str) -> Option<u64> {
     Some(le_uint(buf.get(offset..offset.checked_add(size)?)?))
 }
 
-fn pool_field_from_storage(f: &crate::symbols::FieldInfo, buf: &[u8]) -> Option<u64> {
+fn pool_field_from_storage(f: &FieldInfo, buf: &[u8]) -> Option<u64> {
     let raw = le_uint(buf);
     if let ParsedType::Bitfield { pos, len, .. } = &f.type_data {
         let mask = if *len >= 64 {

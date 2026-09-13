@@ -6,7 +6,7 @@ use crate::{
     symbols::{
         DownloadJob, FieldInfo, ModuleSymbolDiscovery, ModuleSymbolLoad, ModuleSymbolSource,
         ModuleSymbolStatus, ParsedType, SymbolIndexDiagnostic, SymbolStore, TypeInfo,
-        download_jobs_parallel,
+        download_jobs_parallel, le_uint,
     },
     target::{DriverObjectInfo, ListCursor},
     types::*,
@@ -965,7 +965,7 @@ impl<'a> StructRef<'a> {
         }
         let mut bytes = [0u8; 8];
         self.read_bytes_at(field.offset as u64, &mut bytes[..width])?;
-        Ok(crate::symbols::le_uint(&bytes[..width]))
+        Ok(le_uint(&bytes[..width]))
     }
 
     /// Read a field's raw bytes at its PDB-declared size, rejecting a zero

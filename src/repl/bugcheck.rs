@@ -6,6 +6,7 @@ use crate::bugchecks::{
 };
 use crate::dbg_backend::BugcheckInfo;
 use crate::target::Target;
+use crate::trapframe::KtrapFrameData;
 use crate::ui;
 
 pub use crate::bugchecks::{
@@ -162,7 +163,7 @@ pub fn print_bugcheck_trap_frame(trap_frame: &BugcheckTrapFrame) {
 pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
     outln!("{} @ {}", "trap frame".bold(), ui::addr(frame.address));
     match &frame.data {
-        crate::trapframe::KtrapFrameData::Amd64(frame) => {
+        KtrapFrameData::Amd64(frame) => {
             outln!(
                 "  rax {}   rbx {}   rcx {}",
                 ui::addr(frame.rax),
@@ -209,7 +210,7 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
                 outln!("  rip => {}", ui::symbol(symbol));
             }
         }
-        crate::trapframe::KtrapFrameData::Arm64(frame) => {
+        KtrapFrameData::Arm64(frame) => {
             for (index, registers) in frame.x.chunks(3).enumerate() {
                 let base = index * 3;
                 let values = registers

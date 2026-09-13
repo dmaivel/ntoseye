@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::gdb::breakpoints::Breakpoint;
 use crate::session::{StepKind, StopResolution};
+use crate::target::Target;
 use crate::types::{Arch, VirtAddr};
 use crate::ui;
 use crate::unwind::{format_symbol, resolve_thread_trace_context};
@@ -182,7 +183,7 @@ struct ExecutionState {
     flow: ControlFlow,
 }
 
-fn format_trace_symbol(target: &crate::target::Target, dtb: u64, ip: u64) -> String {
+fn format_trace_symbol(target: &Target, dtb: u64, ip: u64) -> String {
     let trace = resolve_thread_trace_context(target, dtb);
     format_symbol(target, &trace, ip)
 }
@@ -320,7 +321,7 @@ impl ReplState<'_> {
         self.wait_for_stop_after_resume()
     }
 
-    pub(super) fn wait_for_stop_after_resume(&mut self) -> Result<()> {
+    pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
         if !self.quiet_stops {
             outln!(
                 "{}",

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::expr::Expr;
-use crate::symbols::{FieldInfo, ParsedType, TypeInfo, le_uint};
+use crate::symbols::{FieldInfo, ParsedType, TypeInfo, glob_matches, le_uint};
 use crate::target::{ListCursor, ListTermination, UserVar};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -185,7 +185,7 @@ fn field_matches(name: &str, patterns: &[String], prefix_match: bool) -> bool {
             name.to_ascii_lowercase()
                 .starts_with(&pattern.to_ascii_lowercase())
         } else {
-            crate::symbols::glob_matches(pattern, name, true)
+            glob_matches(pattern, name, true)
         }
     })
 }
@@ -1217,8 +1217,13 @@ fn find_field<'a>(type_info: &'a TypeInfo, requested: &str) -> Option<(&'a Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TargetSpec;
+    use crate::kd::wire::write_u64;
+    use crate::output::capture;
+    use crate::session::Session;
+    use crate::triage::{TriageBlock, make_triage_dump};
 
-    fn list_session(last_next: u64) -> crate::session::Session {
+    fn list_session(last_next: u64) -> Session {
         // A _LIST_ENTRY ring: head at 0x1000, records linked at 0x1020 and
         // 0x1040, with the last Flink under test.
         let mut memory = [0u8; 0x80];
@@ -1230,14 +1235,14 @@ mod tests {
             (0x40, last_next),
             (0x48, 0x1020),
         ] {
-            crate::kd::wire::write_u64(&mut memory, offset, value);
+            write_u64(&mut memory, offset, value);
         }
-        let block = crate::triage::TriageBlock {
+        let block = TriageBlock {
             address: 0x1000,
             offset: 0,
             size: memory.len() as u32,
         };
-        let dump = crate::triage::make_triage_dump(&[block], &[(0x1000, &memory)]);
+        let dump = make_triage_dump(&[block], &[(0x1000, &memory)]);
         // Unique per call: parallel tests must not mmap a file another test
         // is still rewriting.
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1247,7 +1252,7 @@ mod tests {
             std::process::id(),
         ));
         std::fs::write(&path, dump).unwrap();
-        let session = crate::session::Session::open(&crate::TargetSpec::Dump(path.clone()));
+        let session = Session::open(&TargetSpec::Dump(path.clone()));
         std::fs::remove_file(path).unwrap();
         session.unwrap()
     }
@@ -1261,7 +1266,7 @@ mod tests {
         ] {
             let mut session = list_session(next);
             let mut state = ReplState::for_oneshot(&mut session);
-            let (result, text) = crate::output::capture(|| state.dispatch_line("dl 1000 8"));
+            let (result, text) = capture(|| state.dispatch_line("dl 1000 8"));
             result.unwrap();
             assert!(
                 text.contains("0000000000001040"),

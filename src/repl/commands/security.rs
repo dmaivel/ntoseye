@@ -542,7 +542,7 @@ fn print_security_descriptor<M: MemoryOps<VirtAddr>>(
     Ok(())
 }
 
-pub(super) fn process_session_id(target: &Target, eprocess: VirtAddr) -> Option<u32> {
+pub fn process_session_id(target: &Target, eprocess: VirtAddr) -> Option<u32> {
     let kernel_dtb = target.kernel_dtb();
     let types = target.guest().ok()?.ntoskrnl.types_in(kernel_dtb);
     let eprocess = types.struct_at("_EPROCESS", eprocess).ok()?;

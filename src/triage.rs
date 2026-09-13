@@ -1,4 +1,6 @@
 use crate::diagnostics;
+#[cfg(test)]
+use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
 use crate::dmp::{
     DmpContext, DmpException, DmpInfo, DmpSystemInfo, IMAGE_FILE_MACHINE_ARM64, UnloadedDriver,
     clamp_processors,
@@ -714,7 +716,7 @@ pub(crate) fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8
     // NumberProcessors = 1
     buf[OFF_NUMBER_PROCESSORS..OFF_NUMBER_PROCESSORS + 4].copy_from_slice(&1u32.to_le_bytes());
     buf[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
-        .copy_from_slice(&crate::dmp::IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
+        .copy_from_slice(&IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
     // DTB
     buf[OFF_DIRECTORY_TABLE_BASE..OFF_DIRECTORY_TABLE_BASE + 8]
         .copy_from_slice(&0x1ad000u64.to_le_bytes());

@@ -1,12 +1,16 @@
 use crate::backend::MemoryOps;
+use crate::bugchecks::current_bugcheck;
+use crate::cpu_state::MAX_PROCESSORS;
 use crate::dbg_backend::DebugCapability;
 use crate::dump_writer::{
     DumpException, DumpMetadata, MAX_PHYSICAL_MEMORY_RUNS, write_kernel_dump,
 };
 use crate::error::{Error, Result};
+use crate::memory::PAGE_SIZE;
 use crate::phys::PhysMem;
 use crate::repl::*;
-use crate::symbols::ParsedType;
+use crate::symbols::{FieldInfo, ParsedType};
+use crate::target::Target;
 use crate::types::{Arch, VirtAddr};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::atomic::Ordering;
@@ -164,7 +168,7 @@ fn parse_dump_arguments<'a>(invocation: &'a CommandInvocation<'a>) -> Option<&'a
     path
 }
 
-fn symbol_address(target: &crate::target::Target, name: &str) -> u64 {
+fn symbol_address(target: &Target, name: &str) -> u64 {
     target
         .guest()
         .ok()
@@ -173,7 +177,7 @@ fn symbol_address(target: &crate::target::Target, name: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn read_kernel_build_number(target: &crate::target::Target) -> u32 {
+fn read_kernel_build_number(target: &Target) -> u32 {
     target
         .guest()
         .ok()
@@ -183,7 +187,7 @@ fn read_kernel_build_number(target: &crate::target::Target) -> u32 {
         .unwrap_or(0)
 }
 
-fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Vec<(u64, u64)>>> {
+fn physical_runs_from_symbol(target: &Target) -> Result<Option<Vec<(u64, u64)>>> {
     let guest = match target.guest() {
         Ok(guest) => guest,
         Err(Error::NtoskrnlNotFound) => return Ok(None),
@@ -262,7 +266,7 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
         }
     }
 
-    let field_end = |field: &crate::symbols::FieldInfo| -> Result<usize> {
+    let field_end = |field: &FieldInfo| -> Result<usize> {
         let offset = usize::try_from(field.offset).map_err(|_| {
             Error::DebugInfo("physical descriptor field offset overflows usize".into())
         })?;
@@ -337,7 +341,7 @@ fn physical_runs_from_symbol(target: &crate::target::Target) -> Result<Option<Ve
     Ok(Some(runs))
 }
 
-fn physical_runs(target: &crate::target::Target) -> Result<Vec<(u64, u64)>> {
+fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
     if let Some(runs) = physical_runs_from_symbol(target)? {
         return Ok(runs);
     }
@@ -346,7 +350,7 @@ fn physical_runs(target: &crate::target::Target) -> Result<Vec<(u64, u64)>> {
     // hole, through this accessor. KD has no equivalent host map, so an absent
     // symbol there remains an actionable discovery error below.
     let runs = target.phys.ram_runs();
-    let page_size = crate::memory::PAGE_SIZE as u64;
+    let page_size = PAGE_SIZE as u64;
     if !runs.is_empty() {
         return runs
             .into_iter()
@@ -391,11 +395,7 @@ fn collect_dump_metadata(state: &mut ReplState<'_>) -> Result<DumpMetadata> {
         .ctx
         .backend
         .thread_list()
-        .map(|threads| {
-            threads
-                .len()
-                .clamp(1, usize::from(crate::cpu_state::MAX_PROCESSORS)) as u32
-        })
+        .map(|threads| threads.len().clamp(1, usize::from(MAX_PROCESSORS)) as u32)
         .unwrap_or(1);
     let runs = physical_runs(&state.ctx.target)?;
     let major_version = WINDOWS_MAJOR_VERSION;
@@ -425,7 +425,7 @@ fn collect_dump_metadata(state: &mut ReplState<'_>) -> Result<DumpMetadata> {
             bug_check_code = info.code;
             bug_check_parameters = info.parameters;
         } else if stop.is_bugcheck
-            && let Some(analysis) = crate::bugchecks::current_bugcheck(&state.ctx.target)
+            && let Some(analysis) = current_bugcheck(&state.ctx.target)
         {
             bug_check_code = analysis.code;
             for (index, argument) in analysis.args.iter().take(4).enumerate() {

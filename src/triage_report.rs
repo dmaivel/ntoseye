@@ -6,6 +6,7 @@ use crate::dmp::{
     DmpBlackboxStream, DmpException, DmpInfo, DmpSystemInfo, TriageCrashInfo, UnloadedDriver,
 };
 use crate::guest::ModuleInfo;
+use crate::ntstatus::ntstatus_name;
 use crate::session::{RunStatus, Session};
 use crate::triage::TriagePrcbInfo;
 use crate::types::VirtAddr;
@@ -915,7 +916,7 @@ fn is_kernel_module(name: &str) -> bool {
 }
 
 pub fn exception_code_name(code: u32) -> &'static str {
-    crate::ntstatus::ntstatus_name(code).unwrap_or("unknown")
+    ntstatus_name(code).unwrap_or("unknown")
 }
 
 /// Convert a Windows FILETIME value to an ISO-8601 UTC timestamp.
