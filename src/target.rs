@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::unwind::frame_base_for_register_values;
+use crate::unwind::{
+    RecoveredFrame, frame_base_for_register_values, return_address_for_register_values,
+};
 use crate::{
     backend::MemoryOps,
     bugchecks::looks_like_kernel_pointer,
@@ -53,6 +55,10 @@ pub struct Target {
     pub results: Vec<u64>,
     /// The command that produced the current result slots, for `vars`
     pub results_origin: Option<String>,
+    /// Exception code of the current stop's exception record, behind
+    /// WinDbg's `$exr_code`. Recorded by the session at the one stop-
+    /// ingestion boundary so every host sees the same value.
+    pub last_exception_code: Option<u32>,
 }
 
 /// A debugger-selected non-live register context. Register values are kept as
@@ -381,8 +387,13 @@ pub struct ThreadInfo {
 }
 
 impl ThreadInfo {
-    pub fn pseudo_register_value(&self, name: &str) -> Option<u64> {
-        match name.to_ascii_lowercase().as_str() {
+    /// A thread pseudo-register: `None` when this thread has no such name,
+    /// `Some(None)` when it has the name but not the state behind it (a
+    /// kernel thread has no TEB, an unwalked thread no trap frame). Telling
+    /// the two apart is what lets the evaluator say "not available here"
+    /// instead of "no such register".
+    pub fn pseudo_register(&self, name: &str) -> Option<Option<u64>> {
+        let value = match name.to_ascii_lowercase().as_str() {
             "thread" | "ethread" => Some(self.ethread.0),
             "kthread" => Some(self.kthread.0),
             "tid" => self.tid,
@@ -401,8 +412,13 @@ impl ThreadInfo {
             "stackresident" | "kernelstackresident" => {
                 self.kernel_stack_resident.map(|resident| resident as u64)
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        Some(value)
+    }
+
+    pub fn pseudo_register_value(&self, name: &str) -> Option<u64> {
+        self.pseudo_register(name).flatten()
     }
 }
 fn thread_owner_matches(thread: &ThreadInfo, process: &ProcessInfo) -> bool {
@@ -507,14 +523,79 @@ pub fn kthread_state_name(state: u8) -> &'static str {
     }
 }
 
-/// Case-insensitive lookup in a register map; exact match first.
+/// Case-insensitive lookup, including subregisters named by PDB locations.
+/// Never reconstruct a wider register from a narrower recovered value.
 pub fn lookup_register(registers: &HashMap<String, u64>, name: &str) -> Option<u64> {
-    registers.get(name).copied().or_else(|| {
-        registers
-            .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            .map(|(_, value)| *value)
-    })
+    let direct = |name: &str| {
+        registers.get(name).copied().or_else(|| {
+            registers
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, value)| *value)
+        })
+    };
+    if let Some(value) = direct(name) {
+        return Some(value);
+    }
+    const ALIASES: &[(&str, &str, u32, u32)] = &[
+        ("eax", "rax", 0, 32),
+        ("ax", "rax", 0, 16),
+        ("al", "rax", 0, 8),
+        ("ah", "rax", 8, 8),
+        ("ebx", "rbx", 0, 32),
+        ("bx", "rbx", 0, 16),
+        ("bl", "rbx", 0, 8),
+        ("bh", "rbx", 8, 8),
+        ("ecx", "rcx", 0, 32),
+        ("cx", "rcx", 0, 16),
+        ("cl", "rcx", 0, 8),
+        ("ch", "rcx", 8, 8),
+        ("edx", "rdx", 0, 32),
+        ("dx", "rdx", 0, 16),
+        ("dl", "rdx", 0, 8),
+        ("dh", "rdx", 8, 8),
+        ("esi", "rsi", 0, 32),
+        ("si", "rsi", 0, 16),
+        ("sil", "rsi", 0, 8),
+        ("edi", "rdi", 0, 32),
+        ("di", "rdi", 0, 16),
+        ("dil", "rdi", 0, 8),
+        ("esp", "rsp", 0, 32),
+        ("sp", "rsp", 0, 16),
+        ("spl", "rsp", 0, 8),
+        ("ebp", "rbp", 0, 32),
+        ("bp", "rbp", 0, 16),
+        ("bpl", "rbp", 0, 8),
+        ("eip", "rip", 0, 32),
+    ];
+    if let Some((_, parent, shift, width)) = ALIASES
+        .iter()
+        .find(|(alias, ..)| alias.eq_ignore_ascii_case(name))
+    {
+        return direct(parent).map(|value| (value >> shift) & ((1u64 << width) - 1));
+    }
+    // r8d/r8w/r8b through r15, and ARM64 w0 through w30.
+    let bytes = name.as_bytes();
+    if bytes.len() >= 3 && bytes[0].eq_ignore_ascii_case(&b'r') {
+        let suffix = bytes[bytes.len() - 1].to_ascii_lowercase();
+        let width = match suffix {
+            b'd' => 32,
+            b'w' => 16,
+            b'b' => 8,
+            _ => return None,
+        };
+        let number = name[1..name.len() - 1].parse::<u8>().ok()?;
+        if (8..=15).contains(&number) {
+            return direct(&name[..name.len() - 1]).map(|value| value & ((1u64 << width) - 1));
+        }
+    }
+    if bytes.len() >= 2 && bytes[0].eq_ignore_ascii_case(&b'w') {
+        let number = name[1..].parse::<u8>().ok()?;
+        if number <= 30 {
+            return direct(&format!("x{number}")).map(|value| value & 0xffff_ffff);
+        }
+    }
+    None
 }
 
 pub fn wait_reason_name(reason: u8) -> &'static str {
@@ -1121,6 +1202,7 @@ impl Target {
             user_vars: HashMap::new(),
             results: Vec::new(),
             results_origin: None,
+            last_exception_code: None,
         })
     }
 
@@ -1157,6 +1239,7 @@ impl Target {
             user_vars: HashMap::new(),
             results: Vec::new(),
             results_origin: None,
+            last_exception_code: None,
         })
     }
 
@@ -1474,8 +1557,12 @@ impl Target {
     }
 
     pub fn current_thread_pseudo_register(&self, name: &str) -> Option<u64> {
+        self.current_thread_pseudo_register_slot(name).flatten()
+    }
+
+    fn current_thread_pseudo_register_slot(&self, name: &str) -> Option<Option<u64>> {
         let thread = self.windows_thread_selection.as_ref()?;
-        thread.pseudo_register_value(name)
+        thread.pseudo_register(name)
     }
 
     /// Read a cached register in a case-insensitive manner. The cache is
@@ -1486,13 +1573,69 @@ impl Target {
     }
 
     pub fn builtin_variable_value(&self, name: &str) -> Option<u64> {
+        self.builtin_variable(name).flatten()
+    }
+
+    /// A pseudo-register: `None` when no such name exists, `Some(None)` when
+    /// the name exists but the state behind it does not (`$process` with no
+    /// process context, `$bug_code` outside a bugcheck). The evaluator needs
+    /// the distinction to report an unavailable pseudo-register as such rather
+    /// than as a register that does not exist.
+    pub fn builtin_variable(&self, name: &str) -> Option<Option<u64>> {
         let name = name.trim_start_matches('$').to_ascii_lowercase();
-        if let Some(value) = self.current_thread_pseudo_register(&name) {
-            return Some(value);
+        // A selected thread answers first, but only when it has the value:
+        // otherwise the attached inspection context below may still know it.
+        let thread = self.current_thread_pseudo_register_slot(&name);
+        if let Some(Some(value)) = thread {
+            return Some(Some(value));
         }
 
-        match name.as_str() {
+        let target = match name.as_str() {
             "dtb" => Some(self.current_dtb()),
+            // WinDbg's automatic pseudo-registers. Each is an alias for state
+            // this target already tracks; a name whose state is unavailable
+            // stays `None` so the expression reports an error instead of
+            // inventing a number.
+            // WinDbg's `$ip` is the whole instruction pointer, not x86's
+            // 16-bit IP: `? $ip` on a kernel address must not truncate.
+            "ip" => self.register_value(self.instruction_pointer_register()),
+            // The caller of the current scope, one unwind step away.
+            "ra" => self.scope_return_address(),
+            "csp" => self.register_value(self.stack_pointer_register()),
+            "retreg" => self.register_value(self.return_value_register()),
+            // Both supported architectures are LP64.
+            "ptrsize" => Some(8),
+            "pagesize" => Some(
+                self.debugger_data
+                    .as_ref()
+                    .and_then(|data| data.mm_page_size())
+                    .map(|page_size| page_size.value)
+                    .filter(|page_size| *page_size != 0)
+                    .unwrap_or(PAGE_SIZE as u64),
+            ),
+            "tpid" => self.current_thread_pseudo_register("pid"),
+            // Frame 0 is the innermost frame, which is also what an
+            // unselected context is looking at.
+            "frame" => Some(
+                self.selected_frame
+                    .as_ref()
+                    .map(|frame| frame.index as u64)
+                    .unwrap_or(0),
+            ),
+            "scopeip" => self
+                .selected_frame
+                .as_ref()
+                .map(|frame| frame.ip)
+                .or_else(|| self.register_value(self.instruction_pointer_register())),
+            "exp" => self.results.first().copied(),
+            "exr_code" => self.last_exception_code.map(u64::from),
+            // `nt!KiBugCheckData` holds the code and its four parameters; the
+            // REPL's `!analyze` decodes the same array in detail.
+            "bug_code" => self.bugcheck_data(0),
+            "bug_param1" => self.bugcheck_data(1),
+            "bug_param2" => self.bugcheck_data(2),
+            "bug_param3" => self.bugcheck_data(3),
+            "bug_param4" => self.bugcheck_data(4),
             "ntbase" | "kernelbase" => self.guest.as_ref().map(|g| g.ntoskrnl.base_address.0),
             "processbase" | "imagebase" => self.current_process.as_ref().map(|p| p.base_address.0),
             "processdtb" => self.current_process_info.as_ref().map(|p| p.dtb),
@@ -1501,9 +1644,99 @@ impl Target {
             }
             "attachedpid" => self.current_process_info.as_ref().map(|p| p.pid),
             "eprocess" | "process" => self.current_process_info.as_ref().map(|p| p.eprocess_va.0),
+            "peb" => self.current_process_peb(),
             "pid" => self.current_process_info.as_ref().map(|p| p.pid),
-            _ => None,
+            // `$t0`-`$t19` are WinDbg's twenty writable slots. An assigned
+            // value already wins in the evaluator's user-variable lookup, so
+            // only the documented default of zero belongs here.
+            _ => {
+                return match Self::user_pseudo_register_slot(&name) {
+                    Some(_) => Some(Some(0)),
+                    // Not a name either side knows.
+                    None => thread.map(|_| None),
+                };
+            }
+        };
+        // A named arm with no value knows the name but not the state behind it.
+        Some(target)
+    }
+
+    /// The stack-pointer register this architecture calls its own, behind
+    /// WinDbg's `$csp`.
+    pub fn stack_pointer_register(&self) -> &'static str {
+        match self.arch() {
+            Arch::Amd64 => "rsp",
+            Arch::Arm64 => "sp",
         }
+    }
+
+    /// Caller of the current scope, behind WinDbg's `$ra`. A selected frame
+    /// unwinds from its own recovered context, so `.frame 2` then `$ra`
+    /// names frame 3.
+    fn scope_return_address(&self) -> Option<u64> {
+        let registers = self
+            .selected_frame
+            .as_ref()
+            .map(|frame| &frame.registers)
+            .or(self.registers.as_ref())?;
+        return_address_for_register_values(self, registers)
+    }
+
+    /// `$peb`: the user-mode PEB of the process context, read from its
+    /// `_EPROCESS`. A System-context stop has none, which stays `None` so the
+    /// expression reports an error rather than handing back zero.
+    fn current_process_peb(&self) -> Option<u64> {
+        let eprocess_va = self.current_process_info.as_ref()?.eprocess_va;
+        let peb: VirtAddr = self
+            .guest()
+            .ok()?
+            .ntoskrnl
+            .types_in(self.kernel_dtb())
+            .struct_at("_EPROCESS", eprocess_va)
+            .ok()?
+            .read_field("Peb")
+            .ok()?;
+        (!peb.is_zero()).then_some(peb.0)
+    }
+
+    /// One entry of `nt!KiBugCheckData`: the bugcheck code at index 0 and its
+    /// four parameters after it. Zero when the target has not bugchecked,
+    /// which is what the array itself reports.
+    fn bugcheck_data(&self, index: u64) -> Option<u64> {
+        let address = self
+            .symbols
+            .find_symbol_across_modules(self.kernel_dtb(), "nt!KiBugCheckData")
+            .ok()
+            .flatten()?;
+        self.address_space(self.kernel_dtb())
+            .read::<u64>(address + index * 8)
+            .ok()
+    }
+
+    /// The instruction pointer this architecture calls its own, behind `$ip`
+    /// and `$scopeip`.
+    pub fn instruction_pointer_register(&self) -> &'static str {
+        match self.arch() {
+            Arch::Amd64 => "rip",
+            Arch::Arm64 => "pc",
+        }
+    }
+
+    /// The register a function's return value arrives in, behind `$retreg`.
+    fn return_value_register(&self) -> &'static str {
+        match self.arch() {
+            Arch::Amd64 => "rax",
+            Arch::Arm64 => "x0",
+        }
+    }
+
+    /// `t0`..`t19` and nothing else: `t20`, `t007`, and `ta` are not slots.
+    fn user_pseudo_register_slot(name: &str) -> Option<u8> {
+        let digits = name.strip_prefix('t')?;
+        if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
+            return None;
+        }
+        digits.parse::<u8>().ok().filter(|slot| *slot <= 19)
     }
 
     pub fn builtin_variables(&self) -> Vec<BuiltinVar> {
@@ -1512,6 +1745,27 @@ impl Target {
             value: self.current_dtb(),
             source: "current address space",
         }];
+
+        for (name, source) in [
+            ("ptrsize", "target pointer size"),
+            ("pagesize", "target page size"),
+            ("frame", "selected frame index"),
+            ("csp", "call stack pointer"),
+            ("retreg", "return value register"),
+            ("scopeip", "local context instruction pointer"),
+            ("ip", "instruction pointer"),
+            ("exp", "last expression result"),
+            ("exr_code", "last exception code"),
+            ("tpid", "current Windows PID"),
+        ] {
+            if let Some(value) = self.builtin_variable_value(name) {
+                vars.push(BuiltinVar {
+                    name,
+                    value,
+                    source,
+                });
+            }
+        }
 
         if let Some(ref guest) = self.guest {
             vars.push(BuiltinVar {
@@ -1928,8 +2182,34 @@ impl Target {
             .source_addresses(self.current_dtb(), file, line)
     }
     /// Return private procedure locals in scope at `address`.
-    pub fn procedure_locals(&self, address: VirtAddr) -> Result<Option<Vec<ProcedureLocal>>> {
+    pub fn procedure_locals(&self, address: VirtAddr) -> Result<Option<Arc<Vec<ProcedureLocal>>>> {
         self.symbols.procedure_locals(self.current_dtb(), address)
+    }
+
+    /// Address of a memory-resident local in the current inspection context
+    /// (the selected frame's registers when one is selected, else the live
+    /// ones). `None` for register-held locals, unavailable PDB recipes, and
+    /// frame-relative locals whose base could not be recovered.
+    pub fn procedure_local_address(&self, local: &ProcedureLocal) -> Option<u64> {
+        let registers = self.registers.as_ref()?;
+        match &local.location {
+            LocalVariableLocation::Register { .. } | LocalVariableLocation::Unavailable { .. } => {
+                None
+            }
+            LocalVariableLocation::RegisterRelative { register, offset } => {
+                let base = lookup_register(registers, register)?;
+                Some(base.wrapping_add_signed(i64::from(*offset)))
+            }
+            LocalVariableLocation::FrameRelative { offset } => {
+                let frame_base = self
+                    .selected_frame
+                    .as_ref()
+                    .and_then(|frame| frame.frame_base)
+                    .or_else(|| frame_base_for_register_values(self, registers))
+                    .or_else(|| lookup_register(registers, self.stack_pointer_register()))?;
+                Some(frame_base.wrapping_add_signed(i64::from(*offset)))
+            }
+        }
     }
 
     /// Resolve a scalar local from the current halted register/memory context.
@@ -1961,23 +2241,9 @@ impl Target {
                     value & ((1u64 << (size * 8)) - 1)
                 })
             }
-            LocalVariableLocation::RegisterRelative { register, offset } => {
-                let base = lookup_register(registers, register)?;
-                let address = VirtAddr(base.wrapping_add_signed(i64::from(*offset)));
-                let mut bytes = [0u8; 8];
-                self.context_memory()
-                    .read_bytes(address, &mut bytes[..size])
-                    .ok()?;
-                Some(u64::from_le_bytes(bytes))
-            }
-            LocalVariableLocation::FrameRelative { offset } => {
-                let frame_base = self
-                    .selected_frame
-                    .as_ref()
-                    .and_then(|frame| frame.frame_base)
-                    .or_else(|| frame_base_for_register_values(self, registers))
-                    .or_else(|| lookup_register(registers, "rsp"))?;
-                let address = VirtAddr(frame_base.wrapping_add_signed(i64::from(*offset)));
+            LocalVariableLocation::RegisterRelative { .. }
+            | LocalVariableLocation::FrameRelative { .. } => {
+                let address = VirtAddr(self.procedure_local_address(local)?);
                 let mut bytes = [0u8; 8];
                 self.context_memory()
                     .read_bytes(address, &mut bytes[..size])
@@ -4367,7 +4633,94 @@ mod tests {
     };
     use crate::error::Error;
     use crate::guest::ProcessInfo;
+    use crate::session::{Session, session_over_memory};
     use crate::types::VirtAddr;
+
+    /// A target whose only module records `records` as its line table and
+    /// `symbols` as its exports, for resolution tests that need private line
+    /// information without a PDB.
+    fn target_with_lines(symbols: &[(&str, u32)], records: &[(u32, Option<u32>, u32)]) -> Session {
+        let session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session
+            .target
+            .symbols
+            .inject_module_for_test(1, Vec::new(), symbols);
+        session.target.symbols.inject_source_lines_for_test(
+            1,
+            dtb,
+            VirtAddr(0x1000),
+            0x1000,
+            "driver.c",
+            records,
+        );
+        session
+    }
+
+    #[test]
+    fn windbg_pseudo_register_slots_and_exception_code() {
+        let mut session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let target = &session.target;
+
+        // Unassigned slots read zero, as WinDbg documents; names outside the
+        // range are not slots at all.
+        assert_eq!(target.builtin_variable_value("t0"), Some(0));
+        assert_eq!(target.builtin_variable_value("$t19"), Some(0));
+        assert_eq!(target.builtin_variable_value("t20"), None);
+        assert_eq!(target.builtin_variable_value("t007"), None);
+        assert_eq!(target.builtin_variable_value("ta"), None);
+
+        // `$exr_code` follows the recorded stop, so it is absent until one
+        // has been observed rather than reading as zero.
+        assert_eq!(target.builtin_variable_value("exr_code"), None);
+        session.target.last_exception_code = Some(0x8000_0003);
+        assert_eq!(
+            session.target.builtin_variable_value("exr_code"),
+            Some(0x8000_0003)
+        );
+    }
+
+    #[test]
+    fn post_prologue_address_lands_on_the_first_statement() {
+        // Line 123 is the opening brace, covering the prologue; line 132 is the
+        // first statement, where the arguments are finally where the PDB says.
+        let session = target_with_lines(
+            &[("DriverEntry", 0)],
+            &[(0, Some(0x0e), 123), (0x0e, Some(0x1b), 132)],
+        );
+        assert_eq!(
+            session
+                .target
+                .post_prologue_address(session.target.current_dtb(), VirtAddr(0x1000)),
+            Some(VirtAddr(0x100e))
+        );
+    }
+
+    #[test]
+    fn post_prologue_address_refuses_to_leave_the_function() {
+        // The next record belongs to the following function: skipping there
+        // would move the breakpoint out of the one that was asked for.
+        let session = target_with_lines(
+            &[("DriverEntry", 0), ("Unload", 0x10)],
+            &[(0, Some(0x10), 123), (0x10, Some(0x20), 200)],
+        );
+        assert_eq!(
+            session
+                .target
+                .post_prologue_address(session.target.current_dtb(), VirtAddr(0x1000)),
+            None
+        );
+
+        // No following record at all: nothing to skip to.
+        let single = target_with_lines(&[("DriverEntry", 0)], &[(0, None, 123)]);
+        assert_eq!(
+            single
+                .target
+                .post_prologue_address(single.target.current_dtb(), VirtAddr(0x1000)),
+            None
+        );
+    }
 
     fn sample_thread() -> ThreadInfo {
         ThreadInfo {

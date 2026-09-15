@@ -126,6 +126,14 @@ pub struct SymbolStore {
     /// (`_MM_SESSION_SPACE` per process) cost a map probe, not a stream scan.
     type_cache: DashMap<(u128, String), Option<Arc<TypeInfo>>>,
 
+    /// (guid, procedure-relative RVA) -> locals in scope there. A single
+    /// lookup walks the whole type stream and every compiland's symbols, and
+    /// expression evaluation now consults locals for every bare identifier,
+    /// so a conditional breakpoint would otherwise rescan the PDB on each hit.
+    /// Locations are static PDB recipes (registers are applied at use time),
+    /// so an entry stays valid for the lifetime of the guid.
+    locals_cache: DashMap<(u128, u32), Option<Arc<Vec<ProcedureLocal>>>>,
+
     modules: DashMap<(Dtb, u64), LoadedModule>,
     module_status: DashMap<(Dtb, u64), ModuleSymbolStatus>,
     module_source: DashMap<(Dtb, u64), ModuleSymbolSource>,
@@ -311,6 +319,10 @@ pub struct SourceLineExtent {
 pub struct ProcedureLocal {
     pub name: String,
     pub type_name: String,
+    /// Structured form of the local's type for hosts that decode it (the DAP
+    /// variables tree); `Unknown` means the PDB recipe could not be resolved.
+    /// `type_name` remains the display string.
+    pub type_data: ParsedType,
     pub byte_size: Option<u64>,
     pub is_parameter: bool,
     pub location: LocalVariableLocation,
@@ -1541,7 +1553,7 @@ pub fn download_jobs_parallel(jobs: Vec<DownloadJob>) -> Vec<Result<PathBuf>> {
         .collect::<Vec<_>>()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParsedType {
     Primitive(String),
     Struct(String),
@@ -1974,6 +1986,7 @@ const MAX_DEBUG_DIRECTORY_BYTES: usize = 0x1000;
 /// Largest CodeView record read from a guest image (a GUID, an age, and a
 /// PDB path).
 const MAX_CODEVIEW_BYTES: usize = 0x1000;
+const MAX_LOCALS_CACHE_ENTRIES: usize = 4096;
 
 impl SymbolStore {
     fn module_key(dtb: Dtb, base_address: VirtAddr) -> (Dtb, u64) {
@@ -1994,6 +2007,7 @@ impl SymbolStore {
             source_lines: DashMap::new(),
             index_diagnostics: DashMap::new(),
             type_cache: DashMap::new(),
+            locals_cache: DashMap::new(),
             modules: DashMap::new(),
             module_status: DashMap::new(),
             module_source: DashMap::new(),
@@ -2202,6 +2216,8 @@ impl SymbolStore {
             self.source_lines.remove(&guid);
             self.index_diagnostics.remove(&guid);
             self.type_cache
+                .retain(|(cached_guid, _), _| *cached_guid != guid);
+            self.locals_cache
                 .retain(|(cached_guid, _), _| *cached_guid != guid);
         }
     }
@@ -3282,12 +3298,14 @@ impl SymbolStore {
         is_parameter: bool,
         location: LocalVariableLocation,
     ) -> ProcedureLocal {
+        let (type_name, type_data) = match self.resolve_type(guid, finder, type_index) {
+            Ok(parsed) => (parsed.to_string(), parsed),
+            Err(_) => (format!("type({:#x})", type_index.0), ParsedType::Unknown),
+        };
         ProcedureLocal {
             name,
-            type_name: self
-                .resolve_type(guid, finder, type_index)
-                .map(|parsed| parsed.to_string())
-                .unwrap_or_else(|_| format!("type({:#x})", type_index.0)),
+            type_name,
+            type_data,
             byte_size: self.type_size(guid, finder, type_index, 8).ok(),
             is_parameter,
             location,
@@ -3302,7 +3320,7 @@ impl SymbolStore {
         &self,
         dtb: Dtb,
         address: VirtAddr,
-    ) -> Result<Option<Vec<ProcedureLocal>>> {
+    ) -> Result<Option<Arc<Vec<ProcedureLocal>>>> {
         let Some(module) = self.find_module_for_address(dtb, address) else {
             return Ok(None);
         };
@@ -3312,7 +3330,26 @@ impl SymbolStore {
         let Ok(target_rva) = u32::try_from(relative) else {
             return Ok(None);
         };
-        let Some(pdb) = self.pdbs.get_mut(&module.guid) else {
+        let key = (module.guid, target_rva);
+        if let Some(cached) = self.locals_cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        let locals = self
+            .scan_procedure_locals(module.guid, target_rva)?
+            .map(Arc::new);
+        if self.locals_cache.len() >= MAX_LOCALS_CACHE_ENTRIES {
+            self.locals_cache.clear();
+        }
+        self.locals_cache.insert(key, locals.clone());
+        Ok(locals)
+    }
+
+    fn scan_procedure_locals(
+        &self,
+        guid: u128,
+        target_rva: u32,
+    ) -> Result<Option<Vec<ProcedureLocal>>> {
+        let Some(pdb) = self.pdbs.get_mut(&guid) else {
             return Ok(None);
         };
         let mut pdb_lock = pdb.lock();
@@ -3390,7 +3427,7 @@ impl SymbolStore {
                             "not live at this address"
                         };
                         locals.push(self.procedure_local(
-                            module.guid,
+                            guid,
                             &finder,
                             local.name.to_string().into(),
                             local.type_index,
@@ -3524,7 +3561,7 @@ impl SymbolStore {
                     }
                     pdb2::SymbolData::RegisterVariable(variable) if visible => {
                         locals.push(self.procedure_local(
-                            module.guid,
+                            guid,
                             &finder,
                             variable.name.to_string().into(),
                             variable.type_index,
@@ -3537,7 +3574,7 @@ impl SymbolStore {
                     }
                     pdb2::SymbolData::RegisterRelative(variable) if visible => {
                         locals.push(self.procedure_local(
-                            module.guid,
+                            guid,
                             &finder,
                             variable.name.to_string().into(),
                             variable.type_index,
@@ -3551,7 +3588,7 @@ impl SymbolStore {
                     }
                     pdb2::SymbolData::BasePointerRelative(variable) if visible => {
                         locals.push(self.procedure_local(
-                            module.guid,
+                            guid,
                             &finder,
                             variable.name.to_string().into(),
                             variable.type_index,
@@ -3565,7 +3602,7 @@ impl SymbolStore {
                     pdb2::SymbolData::MultiRegisterVariable(variable) if visible => {
                         if let Some((_, name)) = variable.registers.first() {
                             locals.push(self.procedure_local(
-                                module.guid,
+                                guid,
                                 &finder,
                                 name.to_string().into(),
                                 variable.type_index,

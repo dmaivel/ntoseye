@@ -1,7 +1,89 @@
 use super::*;
+use crate::session::session_over_memory;
+use std::collections::HashMap;
+
+#[test]
+fn test_subregisters_read_their_parent_without_fabricating_storage() {
+    let mut session = session_over_memory(0x1000, &[0; 8]);
+    session.target.registers = Some(HashMap::from([
+        ("rcx".into(), 0xfeed00000000001b),
+        ("rax".into(), 0x1234),
+    ]));
+    assert_eq!(session.target.register_value("ecx"), Some(27));
+    assert_eq!(session.target.register_value("ah"), Some(0x12));
+    let value = ExprValue::Register {
+        value: VirtAddr(session.target.register_value("ecx").unwrap()),
+        type_data: ParsedType::Primitive("ULONG".into()),
+        byte_size: Some(4),
+        name: "ecx".into(),
+    };
+    assert_eq!(value.scalar(&session.target).unwrap().0, 27);
+    assert!(value.address().is_err());
+    session.target.registers = Some(HashMap::from([("ecx".into(), 27)]));
+    assert_eq!(session.target.register_value("rcx"), None);
+}
+
+#[test]
+fn test_typed_reads_preserve_width_and_address_of_does_not_read_memory() {
+    let bytes = [0x78, 0x56, 0x34, 0x12, 0xaa, 0xbb, 0xcc, 0xdd];
+    let session = session_over_memory(0x1000, &bytes);
+    let target = &session.target;
+    assert_eq!(
+        Expr::eval("*((dword*)0x1000)", target).unwrap().0,
+        0x12345678
+    );
+    assert_eq!(
+        Expr::eval("poi((dword*)0x1000)", target).unwrap().0,
+        0xddccbbaa12345678
+    );
+    assert_eq!(
+        Expr::eval("*(&((dword*)0x1000)[0])", target).unwrap().0,
+        0x12345678
+    );
+    assert_eq!(
+        Expr::eval("&((dword*)0x2000)[3]", target).unwrap().0,
+        0x200c
+    );
+    assert!(Expr::eval("((dword*)0x2000)[3]", target).is_err());
+}
+
+#[test]
+fn test_typed_pointer_indirection_loads_each_pointer_slot() {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&0x1008u64.to_le_bytes());
+    bytes[8..12].copy_from_slice(&0xdeadbeefu32.to_le_bytes());
+    bytes[12..].copy_from_slice(&0xffffffffu32.to_le_bytes());
+    let session = session_over_memory(0x1000, &bytes);
+    assert_eq!(
+        Expr::eval("**((dword**)0x1000)", &session.target)
+            .unwrap()
+            .0,
+        0xdeadbeef
+    );
+}
+
+#[test]
+fn test_bitfields_read_only_the_declared_storage_and_have_no_address() {
+    let session = session_over_memory(0x1000, &[0b10110100]);
+    let field = ExprValue::Memory {
+        address: VirtAddr(0x1000),
+        type_data: ParsedType::Bitfield {
+            underlying: Box::new(ParsedType::Primitive("UCHAR".into())),
+            pos: 2,
+            len: 3,
+        },
+        byte_size: Some(1),
+    };
+    assert_eq!(field.scalar(&session.target).unwrap().0, 5);
+    assert!(field.address().is_err());
+}
 
 fn lit(value: u64) -> Box<Expr> {
     Box::new(Expr::Literal(VirtAddr(value)))
+}
+
+fn add(lhs: Box<Expr>, rhs: Box<Expr>) -> Expr {
+    Expr::Binary(lhs, ExprBinaryOp::Add, rhs)
 }
 
 #[test]
@@ -19,13 +101,13 @@ fn test_parse_literal() {
 #[test]
 fn test_parse_hex_literal_with_addition() {
     let expr = Expr::parse("0xffffa304cb692040 + 584").unwrap();
-    assert_eq!(expr, Expr::Add(lit(0xffffa304cb692040), lit(584)));
+    assert_eq!(expr, add(lit(0xffffa304cb692040), lit(584)));
 }
 
 #[test]
 fn test_parse_decimal_literal_with_addition() {
     let expr = Expr::parse("1000 + 24").unwrap();
-    assert_eq!(expr, Expr::Add(lit(1000), lit(24)));
+    assert_eq!(expr, add(lit(1000), lit(24)));
 }
 
 #[test]
@@ -44,7 +126,7 @@ fn test_parse_bare_decimal_stays_decimal_literal() {
 fn test_parse_with_hexadecimal_default_radix() {
     assert_eq!(
         Expr::parse_with_radix("1000 + 10", NumberRadix::Hexadecimal).unwrap(),
-        Expr::Add(lit(0x1000), lit(0x10))
+        add(lit(0x1000), lit(0x10))
     );
     assert_eq!(
         Expr::parse_with_radix("123abc", NumberRadix::Hexadecimal).unwrap(),
@@ -56,7 +138,7 @@ fn test_parse_with_hexadecimal_default_radix() {
 fn test_explicit_decimal_overrides_default_radix() {
     assert_eq!(
         Expr::parse_with_radix("0n1000 + 0n10", NumberRadix::Hexadecimal).unwrap(),
-        Expr::Add(lit(1000), lit(10))
+        add(lit(1000), lit(10))
     );
 }
 
@@ -85,7 +167,7 @@ fn test_parse_addition() {
     let expr = Expr::parse("PsInitialSystemProcess + 0x20").unwrap();
     assert_eq!(
         expr,
-        Expr::Add(
+        add(
             Box::new(Expr::Symbol("PsInitialSystemProcess".to_string())),
             lit(0x20)
         )
@@ -97,7 +179,7 @@ fn test_parse_parentheses() {
     let expr = Expr::parse("(PsInitialSystemProcess + 0x20)").unwrap();
     assert_eq!(
         expr,
-        Expr::Add(
+        add(
             Box::new(Expr::Symbol("PsInitialSystemProcess".to_string())),
             lit(0x20)
         )
@@ -105,11 +187,11 @@ fn test_parse_parentheses() {
 }
 
 #[test]
-fn test_parse_complex() {
+fn test_parse_deref_binds_before_addition() {
     let expr = Expr::parse("*PsInitialSystemProcess + 8").unwrap();
     assert_eq!(
         expr,
-        Expr::Add(
+        add(
             Box::new(Expr::Deref(Box::new(Expr::Symbol(
                 "PsInitialSystemProcess".to_string()
             )))),
@@ -167,41 +249,6 @@ fn test_parse_cast_pointer() {
 }
 
 #[test]
-fn test_parse_cast_with_field_access() {
-    let expr = Expr::parse("(EPROCESS)PsInitialSystemProcess->Token").unwrap();
-    assert_eq!(
-        expr,
-        Expr::FieldAccess(
-            Box::new(Expr::Cast(
-                Box::new(Expr::Symbol("PsInitialSystemProcess".to_string())),
-                ExprType::Struct("EPROCESS".to_string())
-            )),
-            "Token".to_string()
-        )
-    );
-}
-
-#[test]
-fn test_parse_nested_field_access() {
-    let expr = Expr::parse("(EPROCESS)PsInitialSystemProcess->Token->Value").unwrap();
-    if let Expr::FieldAccess(inner, field2) = &expr {
-        assert_eq!(field2, "Value");
-        if let Expr::FieldAccess(inner2, field1) = inner.as_ref() {
-            assert_eq!(field1, "Token");
-            if let Expr::Cast(_, expr_type) = inner2.as_ref() {
-                assert!(matches!(expr_type, ExprType::Struct(name) if name == "EPROCESS"));
-            } else {
-                panic!("Expected Cast");
-            }
-        } else {
-            panic!("Expected FieldAccess");
-        }
-    } else {
-        panic!("Expected FieldAccess");
-    }
-}
-
-#[test]
 fn test_parse_deref_with_cast() {
     let expr = Expr::parse("*(dword)addr").unwrap();
     assert_eq!(
@@ -219,65 +266,10 @@ fn test_parse_cast_with_arithmetic() {
     assert_eq!(
         expr,
         Expr::Cast(
-            Box::new(Expr::Add(
-                Box::new(Expr::Symbol("addr".to_string())),
-                lit(0x10)
-            )),
+            Box::new(add(Box::new(Expr::Symbol("addr".to_string())), lit(0x10))),
             ExprType::Qword
         )
     );
-}
-
-#[test]
-fn test_parse_cast_pointer_with_literal_and_field() {
-    let expr = Expr::parse("(EPROCESS*)(0xffffe70c61240080)->Token").unwrap();
-    if let Expr::FieldAccess(inner, field) = &expr {
-        assert_eq!(field, "Token");
-        if let Expr::Cast(inner2, expr_type) = inner.as_ref() {
-            if let ExprType::Pointer(inner_type) = expr_type {
-                if let ExprType::Struct(name) = inner_type.as_ref() {
-                    assert_eq!(name, "EPROCESS");
-                } else {
-                    panic!("Expected Struct");
-                }
-            } else {
-                panic!("Expected Pointer");
-            }
-            if let Expr::Literal(addr) = inner2.as_ref() {
-                assert_eq!(addr.0, 0xffffe70c61240080);
-            } else {
-                panic!("Expected Literal, got {:?}", inner2);
-            }
-        } else {
-            panic!("Expected Cast, got {:?}", inner);
-        }
-    } else {
-        panic!("Expected FieldAccess, got {:?}", expr);
-    }
-}
-
-#[test]
-fn test_parse_cast_struct_with_literal_and_field() {
-    let expr = Expr::parse("(EPROCESS)(0xffffe70c61240080)->Token").unwrap();
-    if let Expr::FieldAccess(inner, field) = &expr {
-        assert_eq!(field, "Token");
-        if let Expr::Cast(inner2, expr_type) = inner.as_ref() {
-            if let ExprType::Struct(name) = expr_type {
-                assert_eq!(name, "EPROCESS");
-            } else {
-                panic!("Expected Struct");
-            }
-            if let Expr::Literal(addr) = inner2.as_ref() {
-                assert_eq!(addr.0, 0xffffe70c61240080);
-            } else {
-                panic!("Expected Literal, got {:?}", inner2);
-            }
-        } else {
-            panic!("Expected Cast, got {:?}", inner);
-        }
-    } else {
-        panic!("Expected FieldAccess, got {:?}", expr);
-    }
 }
 
 #[test]
@@ -285,7 +277,7 @@ fn test_parse_grouped_deref() {
     let expr = Expr::parse("*(PsInitialSystemProcess + 0x10)").unwrap();
     assert_eq!(
         expr,
-        Expr::Deref(Box::new(Expr::Add(
+        Expr::Deref(Box::new(add(
             Box::new(Expr::Symbol("PsInitialSystemProcess".to_string())),
             lit(0x10)
         )))
@@ -293,53 +285,26 @@ fn test_parse_grouped_deref() {
 }
 
 #[test]
-fn test_parse_grouped_deref_with_field() {
-    let expr = Expr::parse("(_EPROCESS)(*PsInitialSystemProcess)->Token").unwrap();
-    if let Expr::FieldAccess(inner, field) = &expr {
-        assert_eq!(field, "Token");
-        if let Expr::Cast(inner2, _) = inner.as_ref() {
-            assert!(matches!(inner2.as_ref(), Expr::Deref(_)));
-        } else {
-            panic!("Expected Cast, got {:?}", inner);
-        }
-    } else {
-        panic!("Expected FieldAccess, got {:?}", expr);
-    }
-}
-
-#[test]
 fn test_parse_index() {
-    let expr = Expr::parse("addr[3]").unwrap();
     assert_eq!(
-        expr,
+        Expr::parse("addr[3]").unwrap(),
         Expr::Index(Box::new(Expr::Symbol("addr".to_string())), 3)
     );
-}
-
-#[test]
-fn test_parse_index_hex() {
-    let expr = Expr::parse("addr[0x10]").unwrap();
     assert_eq!(
-        expr,
+        Expr::parse("addr[0x10]").unwrap(),
         Expr::Index(Box::new(Expr::Symbol("addr".to_string())), 0x10)
     );
 }
 
 #[test]
-fn test_parse_field_then_index() {
-    let expr = Expr::parse("(EPROCESS)addr->field[2]").unwrap();
-    if let Expr::Index(inner, index) = &expr {
-        assert_eq!(*index, 2);
-        assert!(matches!(inner.as_ref(), Expr::FieldAccess(_, _)));
-    } else {
-        panic!("Expected Index, got {:?}", expr);
+fn test_parse_register_sigils_are_interchangeable() {
+    for text in ["$rax", "@rax", "@$rax"] {
+        assert_eq!(
+            Expr::parse(text).unwrap(),
+            Expr::Register("rax".to_string()),
+            "{text}"
+        );
     }
-}
-
-#[test]
-fn test_parse_register() {
-    let expr = Expr::parse("$rax").unwrap();
-    assert_eq!(expr, Expr::Register("rax".to_string()));
 }
 
 #[test]
@@ -347,7 +312,7 @@ fn test_parse_register_with_arithmetic() {
     let expr = Expr::parse("$rsp+0x10").unwrap();
     assert_eq!(
         expr,
-        Expr::Add(Box::new(Expr::Register("rsp".to_string())), lit(0x10))
+        add(Box::new(Expr::Register("rsp".to_string())), lit(0x10))
     );
 }
 
@@ -361,33 +326,60 @@ fn test_parse_deref_register() {
 }
 
 #[test]
-fn test_parse_adds_subexpressions() {
-    let expr = Expr::parse("rax + rbx").unwrap();
-    assert_eq!(
-        expr,
-        Expr::Add(
-            Box::new(Expr::Symbol("rax".to_string())),
-            Box::new(Expr::Symbol("rbx".to_string()))
-        )
-    );
-}
-
-#[test]
 fn test_parse_poi_with_symbol_offset() {
     let expr = Expr::parse("poi(x) + offset").unwrap();
     assert_eq!(
         expr,
-        Expr::Add(
-            Box::new(Expr::Deref(Box::new(Expr::Symbol("x".to_string())))),
+        add(
+            Box::new(Expr::Read(8, Box::new(Expr::Symbol("x".to_string())))),
             Box::new(Expr::Symbol("offset".to_string()))
         )
     );
 }
 
 #[test]
-fn test_parse_at_register() {
-    let expr = Expr::parse("@rip").unwrap();
-    assert_eq!(expr, Expr::Register("rip".to_string()));
+fn test_parse_template_symbol_names_and_comparisons() {
+    assert_eq!(
+        Expr::parse("nt!ST_STORE<SM_TRAITS>::StStart").unwrap(),
+        Expr::Symbol("nt!ST_STORE<SM_TRAITS>::StStart".to_string())
+    );
+    assert_eq!(
+        Expr::parse("ST_STORE<SM_TRAITS>::StStart").unwrap(),
+        Expr::Symbol("ST_STORE<SM_TRAITS>::StStart".to_string())
+    );
+    assert_eq!(
+        Expr::parse("index < 0n10").unwrap(),
+        Expr::Binary(
+            Box::new(Expr::Symbol("index".to_string())),
+            ExprBinaryOp::Less,
+            Box::new(Expr::Literal(VirtAddr(10)))
+        )
+    );
+    // No `::` after the closing bracket, so this is two comparisons rather
+    // than a name, and chaining them is rejected.
+    assert!(Expr::parse("index<0n10>0n2").is_err());
+}
+
+#[test]
+fn test_parse_masm_width_reads() {
+    for (text, width) in [
+        ("by(x)", 1u8),
+        ("wo(x)", 2),
+        ("dwo(x)", 4),
+        ("qwo(x)", 8),
+        ("poi(x)", 8),
+    ] {
+        assert_eq!(
+            Expr::parse(text).unwrap(),
+            Expr::Read(width, Box::new(Expr::Symbol("x".to_string()))),
+            "{text}"
+        );
+    }
+    // A symbol that merely starts with an operator name is still a symbol.
+    assert_eq!(
+        Expr::parse("bytes_written").unwrap(),
+        Expr::Symbol("bytes_written".to_string())
+    );
 }
 
 #[test]
@@ -434,7 +426,28 @@ fn test_parse_not_equal_without_spaces_after_module_symbol() {
 #[test]
 fn test_parse_grouped_boolean_and_bitwise_expression() {
     let expr = Expr::parse("($rax & 0xff) == 0x42 && ($rdx >> 4) != 0").unwrap();
-    assert!(matches!(expr, Expr::Binary(_, ExprBinaryOp::LogicalAnd, _)));
+    let mask = Expr::Binary(
+        Box::new(Expr::Register("rax".to_string())),
+        ExprBinaryOp::BitwiseAnd,
+        lit(0xff),
+    );
+    let shift = Expr::Binary(
+        Box::new(Expr::Register("rdx".to_string())),
+        ExprBinaryOp::ShiftRight,
+        lit(4),
+    );
+    assert_eq!(
+        expr,
+        Expr::Binary(
+            Box::new(Expr::Binary(Box::new(mask), ExprBinaryOp::Equal, lit(0x42))),
+            ExprBinaryOp::LogicalAnd,
+            Box::new(Expr::Binary(
+                Box::new(shift),
+                ExprBinaryOp::NotEqual,
+                lit(0)
+            )),
+        )
+    );
 }
 
 #[test]
@@ -470,10 +483,52 @@ fn test_parse_error_labels_missing_poi_operand() {
 }
 
 #[test]
-fn test_parse_error_render_includes_caret_and_label() {
-    let err = Expr::parse_detailed("rax + @").unwrap_err();
-    let rendered = err.render("rax + @");
-    assert!(rendered.contains("rax + @"));
-    assert!(rendered.contains("^"));
-    assert!(rendered.contains("expected register name after '@'"));
+fn test_parse_explicit_source_local_escape() {
+    assert_eq!(
+        Expr::parse("$!request").unwrap(),
+        Expr::Local("request".to_string())
+    );
+}
+
+#[test]
+fn test_parse_dot_members_and_qualified_module_extension() {
+    assert_eq!(
+        Expr::parse("request.IoStatus.Status").unwrap(),
+        Expr::MemberAccess(
+            Box::new(Expr::MemberAccess(
+                Box::new(Expr::Symbol("request".to_string())),
+                "IoStatus".to_string(),
+            )),
+            "Status".to_string(),
+        )
+    );
+    assert_eq!(
+        Expr::parse("driver.sys!Worker").unwrap(),
+        Expr::Symbol("driver.sys!Worker".to_string())
+    );
+}
+
+#[test]
+fn test_parse_postfix_binds_before_prefix_deref() {
+    assert_eq!(
+        Expr::parse("*ptr->field").unwrap(),
+        Expr::Deref(Box::new(Expr::FieldAccess(
+            Box::new(Expr::Symbol("ptr".to_string())),
+            "field".to_string(),
+        )))
+    );
+}
+
+#[test]
+fn test_parse_address_of_grouped_pointer_member() {
+    assert_eq!(
+        Expr::parse("&((TYPE*)addr)->field").unwrap(),
+        Expr::Address(Box::new(Expr::FieldAccess(
+            Box::new(Expr::Cast(
+                Box::new(Expr::Symbol("addr".to_string())),
+                ExprType::Pointer(Box::new(ExprType::Struct("TYPE".to_string()))),
+            )),
+            "field".to_string(),
+        )))
+    );
 }

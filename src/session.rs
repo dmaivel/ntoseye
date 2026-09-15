@@ -689,7 +689,20 @@ impl Session {
         self.last_event = Some(LastEvent::new(event.clone()));
     }
 
-    /// Attach the acknowledgement chosen for the current stop. A successful
+    fn record_visible_stop(&mut self, resolution: &StopResolution) {
+        let event = match resolution {
+            StopResolution::Breakpoint { event, .. }
+            | StopResolution::Bugcheck { event }
+            | StopResolution::TargetReloaded { event, .. }
+            | StopResolution::Stopped { event, .. } => event,
+            StopResolution::Resumed | StopResolution::ModulesChanged => return,
+        };
+        // `$exr_code` follows the same boundary as host-visible stop events;
+        // absorbed transport noise must not overwrite it.
+        self.target.last_exception_code = event.exception_code;
+    }
+
+    /// Attach the acknowledgment chosen for the current stop. A successful
     /// continuation calls this after the backend accepts the request.
     pub fn record_continuation_disposition(&mut self, disposition: ContinueDisposition) {
         if let Some(last_event) = &mut self.last_event {
@@ -1616,6 +1629,7 @@ impl Session {
         self.target.registers = None;
         self.target.clear_context_dtb_override();
         self.target.clear_current_windows_thread_context();
+        self.target.last_exception_code = None;
         self.parked_windows_thread = None;
         self.parked_stop = None;
         self.module_refresh_report = None;
@@ -1792,7 +1806,9 @@ impl Session {
 
         if event.is_bugcheck && !event.target_reloaded {
             self.target.registers = None;
-            return Ok(StopResolution::Bugcheck { event });
+            let resolution = StopResolution::Bugcheck { event };
+            self.record_visible_stop(&resolution);
+            return Ok(resolution);
         }
 
         match self.classify_reload_stop(&mut event)? {
@@ -1801,7 +1817,9 @@ impl Session {
                 let coherent =
                     !matches!(disposition, ReloadDisposition::Reloaded { coherent: false });
                 self.refresh_context_for_current_thread();
-                return Ok(StopResolution::TargetReloaded { event, coherent });
+                let resolution = StopResolution::TargetReloaded { event, coherent };
+                self.record_visible_stop(&resolution);
+                return Ok(resolution);
             }
             ReloadDisposition::PendingRediscovery | ReloadDisposition::ResumePastAssist => {
                 self.backend.continue_execution()?;
@@ -1834,12 +1852,14 @@ impl Session {
                     .as_ref()
                     .and_then(|registers| registers.get("rip").copied())
                     .unwrap_or(0);
-                return Ok(StopResolution::Breakpoint {
+                let resolution = StopResolution::Breakpoint {
                     breakpoint,
                     event,
                     rip,
                     condition_error,
-                });
+                };
+                self.record_visible_stop(&resolution);
+                return Ok(resolution);
             }
             WatchpointStopAction::Resumed => return Ok(StopResolution::Resumed),
             WatchpointStopAction::NotBreakpoint => {}
@@ -1869,19 +1889,21 @@ impl Session {
             .unwrap_or(0);
         update_target_context_from_registers(&mut self.target, &self.register_map, Ok(registers));
 
-        match self.resolve_breakpoint_stop(rip, cr3)? {
+        let resolution = match self.resolve_breakpoint_stop(rip, cr3)? {
             BreakpointStopAction::Hit {
                 breakpoint,
                 condition_error,
-            } => Ok(StopResolution::Breakpoint {
+            } => StopResolution::Breakpoint {
                 breakpoint,
                 event,
                 rip,
                 condition_error,
-            }),
-            BreakpointStopAction::Resumed => Ok(StopResolution::Resumed),
-            BreakpointStopAction::NotBreakpoint => Ok(StopResolution::Stopped { event, rip }),
-        }
+            },
+            BreakpointStopAction::Resumed => StopResolution::Resumed,
+            BreakpointStopAction::NotBreakpoint => StopResolution::Stopped { event, rip },
+        };
+        self.record_visible_stop(&resolution);
+        Ok(resolution)
     }
 
     /// Resume the VM (unless already running) and wait up to `timeout` for a
@@ -2011,6 +2033,7 @@ impl Session {
     /// Rebuild guest state using an optional kernel-base hint through the shared
     /// [`perform_target_reload`] action.
     pub fn reload_with_hint(&mut self, hint: Option<VirtAddr>) -> Result<()> {
+        self.target.last_exception_code = None;
         self.module_refresh_report = None;
         let outcome = perform_target_reload(
             self.backend.as_mut(),

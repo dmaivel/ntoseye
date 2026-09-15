@@ -713,6 +713,10 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::dbg_backend::BugcheckInfo;
+    use crate::output::capture;
+    use crate::repl::ReplState;
+    use crate::session::session_over_memory;
+    use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
     use crate::types::VirtAddr;
 
     use super::{
@@ -796,5 +800,108 @@ mod tests {
             repeat_pattern(&[0x48, 0x83, 0x79], 8),
             vec![0x48, 0x83, 0x79, 0x48, 0x83, 0x79, 0x48, 0x83]
         );
+    }
+
+    #[test]
+    fn windbg_forms_produce_windbg_shaped_output() {
+        let mut memory = [0u8; 0x40];
+        memory[..4].copy_from_slice(&0x12345678u32.to_le_bytes());
+        memory[0x10..0x14].copy_from_slice(b"abc\0");
+        let mut session = session_over_memory(0x1000, &memory);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![
+                TypeInfo {
+                    name: "_NODE".to_string(),
+                    size: 0x10,
+                    fields: [(
+                        "Value".to_string(),
+                        FieldInfo {
+                            offset: 0,
+                            size: 4,
+                            type_data: ParsedType::Primitive("ULONG".to_string()),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+                // A layout whose fields sit past 0xfff, where WinDbg's three-digit
+                // offset pad gives way to the natural width.
+                TypeInfo {
+                    name: "_WIDE".to_string(),
+                    size: 0x1160,
+                    fields: [(
+                        "Far".to_string(),
+                        FieldInfo {
+                            offset: 0x1150,
+                            size: 4,
+                            type_data: ParsedType::Primitive("ULONG".to_string()),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            ],
+            &[],
+        );
+        let mut state = ReplState::for_oneshot(&mut session);
+
+        for (line, expected) in [
+            // Hexadecimal default radix, `0n` decimal override.
+            ("? 0n42", "000000000000002a"),
+            ("? 1000 + 0n16", "0000000000001010"),
+            // WinDbg prints every 64-bit address with a `\`` between its halves
+            // and takes that spelling back, so a copied address must evaluate.
+            ("? 00000000`00001000", "0000000000001000"),
+            ("? fffff803`1a2b3c4d", "fffff8031a2b3c4d"),
+            ("db 00000000`00001000 L4", "78 56 34 12"),
+            // Memory dumps are address-prefixed rows of fixed-width units.
+            ("db 1000 L4", "78 56 34 12"),
+            ("dd 1000 L1", "12345678"),
+            ("da 1010 4", "abc"),
+            // `dt` rows: WinDbg's three-digit minimum offset, name, type, value.
+            ("dt _NODE 1000", "+0x000 Value : ULONG = 0x12345678"),
+            ("dt _WIDE 0", "+0x1150 Far : ULONG"),
+            // `.formats` shows one value in every radix WinDbg lists.
+            (".formats 0n42", "2a"),
+        ] {
+            let (result, text) = capture(|| state.dispatch_line(line));
+            result.unwrap_or_else(|error| panic!("{line} failed: {error}"));
+            if line.starts_with("dt ") {
+                let expected_line = format!("  {expected}");
+                assert!(
+                    text.lines().any(|line| line == expected_line),
+                    "{line} printed {text:?}"
+                );
+            } else {
+                assert!(text.contains(expected), "{line} printed {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn session_radix_switch_applies_to_later_expressions() {
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        let (result, _) = capture(|| state.dispatch_line("n 10"));
+        result.unwrap();
+        let (result, text) = capture(|| state.dispatch_line("? 42"));
+        result.unwrap();
+        assert!(text.contains("000000000000002a"), "decimal radix: {text:?}");
+        // A separated address is the debugger's own address spelling, so it stays
+        // hexadecimal even while the session default is decimal.
+        let (result, text) = capture(|| state.dispatch_line("? 00000000`00001000"));
+        result.unwrap();
+        assert!(
+            text.contains("0000000000001000"),
+            "separated address under decimal radix: {text:?}"
+        );
+        let (result, _) = capture(|| state.dispatch_line("n 16"));
+        result.unwrap();
+        let (result, text) = capture(|| state.dispatch_line("? 42"));
+        result.unwrap();
+        assert!(text.contains("0000000000000042"), "hex radix: {text:?}");
     }
 }

@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 
 use crate::error::Result;
-use crate::expr::Expr;
+use crate::expr::{Expr, ExprValue};
 use crate::symbols::{
-    LocalVariableLocation, ModuleSymbolStatus, SourcePathMapping, SymbolSource,
-    format_symbol_with_offset,
+    FieldInfo, ModuleSymbolStatus, format_symbol_with_offset, parse_source_paths,
+    parse_symbol_sources,
 };
 use crate::target::UserVar;
 use crate::types::VirtAddr;
+use crate::typeview::{TypeView, nested_layout_name};
 use crate::ui;
 
 use crate::repl::*;
@@ -34,6 +35,7 @@ repl_command! {
     names: ["?", "ev"],
     usage: "? <expression>",
     summary: "Evaluate an expression.",
+    details: "memory reads: by() 1  wo() 2  dwo() 4  qwo()/poi() 8;  &expr is storage, ->/. are values",
     completion: Expression,
     style: ExpressionTail,
 }
@@ -229,14 +231,79 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        match Expr::eval_with_radix(expr_str, &self.ctx.target, self.radix) {
-            Ok(addr) => {
-                self.ctx.target.set_results(vec![addr.0], self.line.clone());
-                outln!("{}", ui::addr(addr.0));
+        let value = match Expr::parse_with_radix(expr_str, self.radix)
+            .and_then(|expr| expr.evaluate(&self.ctx.target))
+        {
+            Ok(value) => value,
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
             }
-            Err(e) => error!("{}", e),
+        };
+        if let Err(e) = self.print_expr_value(&value) {
+            error!("{}", e);
         }
 
+        Ok(())
+    }
+
+    /// Render an evaluated expression. A raw expression is a u64 and prints as
+    /// an address, the way every earlier release did. A typed expression
+    /// prints its type and the same value text `dt` and the editor show, so
+    /// `? index` on an `int` is not mistaken for an address.
+    fn print_expr_value(&mut self, value: &ExprValue) -> Result<()> {
+        let Some(type_data) = value.type_data() else {
+            let raw = value.scalar(&self.ctx.target)?;
+            self.ctx.target.set_results(vec![raw.0], self.line.clone());
+            outln!("{}", ui::addr(raw.0));
+            return Ok(());
+        };
+
+        let byte_size = value.byte_size();
+        let type_name = type_data.to_string();
+        let scalar = value.scalar(&self.ctx.target);
+        let view = TypeView::new(self.ctx);
+        if let Ok(scalar) = scalar {
+            let text = view.scalar_text(scalar.0, type_data, byte_size);
+            outln!("{} {}", ui::muted(&type_name), text);
+            self.ctx
+                .target
+                .set_results(vec![scalar.0], self.line.clone());
+            return Ok(());
+        }
+
+        // An aggregate has no scalar value. Where it lives in memory, render
+        // what `dt` would render for it and name the command that expands it;
+        // the result slot holds its address so `$0` stays useful.
+        let address = match value.address() {
+            Ok(address) => address,
+            // Report why the value has no number, not why it has no address:
+            // an unavailable local must say it was optimized out.
+            Err(_) => return Err(scalar.unwrap_err()),
+        };
+        let field = FieldInfo {
+            offset: 0,
+            size: byte_size.unwrap_or_default(),
+            type_data: type_data.clone(),
+        };
+        let text = view.value_text(address, &field);
+        if text.is_empty() {
+            let expand = match nested_layout_name(type_data) {
+                Some(layout) => format!("dt {layout} {:#x}", address.0),
+                None => format!("db {:#x} L{:#x}", address.0, byte_size.unwrap_or(8)),
+            };
+            outln!(
+                "{} at {}   {}",
+                ui::muted(&type_name),
+                ui::addr(address.0),
+                ui::muted(&expand)
+            );
+        } else {
+            outln!("{} {}", ui::muted(&type_name), text);
+        }
+        self.ctx
+            .target
+            .set_results(vec![address.0], self.line.clone());
         Ok(())
     }
 
@@ -461,13 +528,13 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        for local in locals {
+        for local in locals.iter() {
             let kind = if local.is_parameter { "param" } else { "local" };
-            let location = format_local_location(&local.location);
+            let location = local.location.describe();
             match self
                 .ctx
                 .target
-                .resolve_procedure_local_value(address, &local)
+                .resolve_procedure_local_value(address, local)
             {
                 Some(value) => outln!(
                     "{:<20} {:<24} {:<7} {:<24} {:#x}",
@@ -599,74 +666,12 @@ impl ReplState<'_> {
     }
 }
 
-fn format_signed_hex(offset: i32) -> String {
-    if offset < 0 {
-        format!("-0x{:x}", offset.unsigned_abs())
-    } else {
-        format!("+0x{:x}", offset)
-    }
-}
-
-fn format_local_location(location: &LocalVariableLocation) -> String {
-    match location {
-        LocalVariableLocation::Register { register } => register.clone(),
-        LocalVariableLocation::RegisterRelative { register, offset } => {
-            format!("[{}{}]", register, format_signed_hex(*offset))
-        }
-        LocalVariableLocation::FrameRelative { offset } => {
-            format!("[frame{}]", format_signed_hex(*offset))
-        }
-        LocalVariableLocation::Unavailable { reason } => format!("<{}>", reason),
-    }
-}
-
-fn parse_symbol_sources<S: AsRef<str>>(args: &[S]) -> Vec<SymbolSource> {
-    args.iter()
-        .flat_map(|arg| arg.as_ref().split(';'))
-        .filter(|entry| !entry.is_empty())
-        .flat_map(|entry| {
-            if entry.eq_ignore_ascii_case("cache") || entry.starts_with("cache*") {
-                vec![SymbolSource::Cache]
-            } else if let Some(rest) = entry.strip_prefix("srv*") {
-                let parts = rest.split('*').filter(|part| !part.is_empty());
-                parts
-                    .map(|part| {
-                        if part.starts_with("http://") || part.starts_with("https://") {
-                            SymbolSource::Http(part.trim_end_matches('/').to_string())
-                        } else {
-                            SymbolSource::LocalDirectory(part.into())
-                        }
-                    })
-                    .collect()
-            } else if entry.starts_with("http://") || entry.starts_with("https://") {
-                vec![SymbolSource::Http(entry.trim_end_matches('/').to_string())]
-            } else {
-                vec![SymbolSource::LocalDirectory(entry.into())]
-            }
-        })
-        .collect()
-}
-
-fn parse_source_paths<S: AsRef<str>>(args: &[S]) -> Vec<SourcePathMapping> {
-    args.iter()
-        .flat_map(|arg| arg.as_ref().split(';'))
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| match entry.split_once('=') {
-            Some((recorded, local)) => SourcePathMapping {
-                recorded_prefix: Some(recorded.to_string()),
-                local_root: local.into(),
-            },
-            None => SourcePathMapping {
-                recorded_prefix: None,
-                local_root: entry.into(),
-            },
-        })
-        .collect()
-}
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::repl::{CommandStyle, parse_command};
+    use crate::output::capture;
+    use crate::repl::{CommandStyle, ReplState, parse_command};
+    use crate::session::session_over_memory;
+    use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
 
     #[test]
     fn ev_keeps_expression_tail() {
@@ -677,54 +682,64 @@ mod tests {
     }
 
     #[test]
-    fn symbol_path_parser_supports_local_http_and_srv_syntax() {
-        let sources = parse_symbol_sources(&[
-            "/private",
-            "https://symbols.example.test/",
-            "srv*/cache*https://backup.example.test",
-        ]);
-        assert_eq!(
-            sources,
-            vec![
-                SymbolSource::LocalDirectory("/private".into()),
-                SymbolSource::Http("https://symbols.example.test".to_string()),
-                SymbolSource::LocalDirectory("/cache".into()),
-                SymbolSource::Http("https://backup.example.test".to_string()),
-            ]
-        );
+    fn ev_reads_each_masm_width() {
+        let memory = [0x78, 0x56, 0x34, 0x12, 0xaa, 0xbb, 0xcc, 0xdd];
+        let mut session = session_over_memory(0x1000, &memory);
+        let mut state = ReplState::for_oneshot(&mut session);
+        for (line, expected) in [
+            ("? by(1000)", "0000000000000078"),
+            ("? wo(1000)", "0000000000005678"),
+            ("? dwo(1000)", "0000000012345678"),
+            ("? qwo(1000)", "ddccbbaa12345678"),
+            ("? poi(1000)", "ddccbbaa12345678"),
+        ] {
+            let (result, text) = capture(|| state.dispatch_line(line));
+            result.unwrap();
+            assert!(text.contains(expected), "{line} printed {text:?}");
+        }
     }
 
     #[test]
-    fn source_path_parser_supports_roots_and_prefix_mappings() {
-        assert_eq!(
-            parse_source_paths(&["/source", r"C:\build\src=/checkout"]),
-            vec![
-                SourcePathMapping {
-                    recorded_prefix: None,
-                    local_root: "/source".into(),
-                },
-                SourcePathMapping {
-                    recorded_prefix: Some(r"C:\build\src".to_string()),
-                    local_root: "/checkout".into(),
-                },
-            ]
+    fn ev_renders_typed_values_with_their_type() {
+        let mut memory = [0u8; 0x20];
+        memory[..4].copy_from_slice(&0x12345678u32.to_le_bytes());
+        memory[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
+        let mut session = session_over_memory(0x1000, &memory);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![TypeInfo {
+                name: "_NODE".to_string(),
+                size: 0x10,
+                fields: [(
+                    "Value".to_string(),
+                    FieldInfo {
+                        offset: 0,
+                        size: 4,
+                        type_data: ParsedType::Primitive("ULONG".to_string()),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }],
+            &[],
         );
-    }
+        let mut state = ReplState::for_oneshot(&mut session);
 
-    #[test]
-    fn local_location_presentation_preserves_provenance() {
-        assert_eq!(
-            format_local_location(&LocalVariableLocation::RegisterRelative {
-                register: "rsp".to_string(),
-                offset: -0x20,
-            }),
-            "[rsp-0x20]"
-        );
-        assert_eq!(
-            format_local_location(&LocalVariableLocation::Unavailable {
-                reason: "optimized out".to_string(),
-            }),
-            "<optimized out>"
+        let (result, text) = capture(|| state.dispatch_line("? ((_NODE*)1000)->Value"));
+        result.unwrap();
+        assert!(text.contains("ULONG 0x12345678"), "field value: {text:?}");
+
+        let (result, text) = capture(|| state.dispatch_line("? &((_NODE*)1000)->Value"));
+        result.unwrap();
+        assert!(text.contains("ULONG* 0x1000"), "field address: {text:?}");
+
+        let (result, text) = capture(|| state.dispatch_line("? *((_NODE*)1000)"));
+        result.unwrap();
+        assert!(
+            text.contains("_NODE at 0000000000001000") && text.contains("dt _NODE 0x1000"),
+            "aggregate: {text:?}"
         );
     }
 }

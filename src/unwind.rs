@@ -602,6 +602,31 @@ pub fn frame_base_for_register_values(
     tracer.frame_base_for(&context)
 }
 
+/// The caller's instruction pointer for a sparse register context: WinDbg's
+/// `$ra`. One unwind step, so a scope nothing has walked for display still
+/// answers `g @$ra`. `None` means the unwind step could not produce a valid
+/// executable return address.
+pub fn return_address_for_register_values(
+    debugger: &Target,
+    values: &HashMap<String, u64>,
+) -> Option<u64> {
+    let lookup = |name: &str| lookup_register(values, name);
+    let mut context = RegisterContext {
+        rip: lookup("rip").or_else(|| lookup("pc"))?,
+        rsp: lookup("rsp").or_else(|| lookup("sp")).unwrap_or(0),
+        regs: from_fn(|index| lookup(UNWIND_REG_NAMES[index])),
+    };
+    let dtb = lookup(debugger.arch().dtb_register())
+        .filter(|dtb| *dtb != 0)
+        .unwrap_or_else(|| debugger.current_dtb());
+    let trace = resolve_thread_trace_context(debugger, dtb);
+    let mut tracer = StackTracer::new(debugger, &trace);
+    match tracer.unwind_once(&mut context) {
+        Unwound::Frame { .. } => (context.rip != 0).then_some(context.rip),
+        Unwound::Stop => None,
+    }
+}
+
 /// Strip AArch64 pointer-authentication bits (bits 63:56) from a return
 /// address: sign-extend the 56-bit canonical address back to 64 bits.
 fn strip_pac(addr: u64) -> u64 {
