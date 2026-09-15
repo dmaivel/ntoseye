@@ -362,8 +362,10 @@ pub fn probe_initial_request(
 }
 
 /// Whether a wait-state-change is a transparent notification (symbol load/unload
-/// or command string) the debugger acknowledges and continues past, rather than
-/// surfacing as a user break. Unknown kinds are treated as breaks to be safe
+/// or command string) for transport handling. Load/unload notifications are
+/// surfaced to the foreground for internal breakpoint reconciliation, while
+/// command strings are acknowledged and continued here. Unknown kinds are
+/// treated as breaks to be safe.
 pub fn is_transparent_state_change(new_state: u32) -> bool {
     matches!(
         new_state,
@@ -371,8 +373,10 @@ pub fn is_transparent_state_change(new_state: u32) -> bool {
     )
 }
 
-/// Acknowledge a non-exception wait-state-change (load-symbols / command-string)
-/// by sending a continue, so the kernel resumes past it.
+/// Acknowledge a non-exception wait-state-change by sending a continue, so the
+/// kernel resumes past it. The await loop uses this for command strings and
+/// post-continue drain traffic; load/unload notifications first reach the
+/// foreground so deferred breakpoints can be armed.
 pub fn continue_transparent_state_change(
     framing: &mut KdFraming<KdTransport>,
     arch: Arch,
@@ -435,8 +439,9 @@ pub struct AwaitStateOptions<'a> {
 ///   marker: the kernel prints it at boot and whenever it re-probes the
 ///   debugger, and `.crash` (MANUALLY_INITIATED_CRASH) skips the fatal print
 ///   and the first break entirely, writing its dump and rebooting.
-/// - otherwise: continue load-symbols / command-string notifications
-///   transparently (like WinDbg) and surface only exception breaks
+/// - otherwise: continue command-string notifications transparently (like
+///   WinDbg), surface load/unload notifications for internal reconciliation,
+///   and surface exception breaks
 ///
 /// `deadline` bounds the *total* time servicing transparent traffic: when it is
 /// reached between packets, the call returns a [`ErrorKind::TimedOut`] error so
@@ -484,7 +489,8 @@ pub fn await_state_change(
                 let in_bugcheck = bugcheck.as_deref().copied().unwrap_or(false);
                 // Surface exception breaks (and anything unrecognised); during a
                 // bugcheck, surface even the notification kinds. Otherwise the
-                // load-symbols / command-string notifications are continued
+                // load-symbols notification is surfaced for reconciliation while
+                // command-string notifications remain transparent.
                 if surface_all
                     || target_reloaded
                     || in_bugcheck
@@ -498,11 +504,11 @@ pub fn await_state_change(
                     }
                     return Ok(stop);
                 }
-                // a load-symbols notification means a kernel image (driver)
-                // loaded or unloaded, record it so the foreground can refresh
-                // module-dependent caches (driver completions) on the next stop
+                // Load/unload notifications are surfaced to the foreground as
+                // an internal stop. Command-string notifications remain fully
+                // transparent and are acknowledged here as before.
                 if stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE {
-                    framing.note_modules_changed();
+                    return Ok(stop);
                 }
                 kd_trace!(
                     "kd: await: transparent state-change new_state={:#x} at {:#x}, continuing",

@@ -4,6 +4,8 @@ use std::env::temp_dir;
 #[cfg(test)]
 use std::fs::{remove_file, write};
 #[cfg(test)]
+use std::mem::take;
+#[cfg(test)]
 use std::process::id;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -27,7 +29,7 @@ use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig};
 use crate::gdb::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
 };
-use crate::guest::ProcessInfo;
+use crate::guest::{ModuleSymbolLoadReport, ProcessInfo};
 use crate::kd::{KdBackend, KdMemorySource, hwbp, trace_enabled};
 use crate::memory::DTB_IDENTITY;
 use crate::memory_backend::MemoryBackend;
@@ -240,6 +242,8 @@ pub enum WatchpointStopAction {
 pub enum StopResolution {
     /// Debugger noise or a filtered breakpoint was handled and execution resumed.
     Resumed,
+    /// A kernel module load/unload notification was reconciled and resumed.
+    ModulesChanged,
     /// A software or hardware breakpoint worth surfacing.
     Breakpoint {
         breakpoint: Breakpoint,
@@ -365,6 +369,10 @@ pub struct Session {
     /// `wait_for_stop` returns this as the proper event instead of a bare
     /// "halted", and `resume` clears it. `None` whenever the host is up to date.
     parked_stop: Option<ContinueOutcome>,
+    /// The most recent per-stop module refresh report, retained so the REPL can
+    /// render its existing module-symbol summary after the core reconciles
+    /// breakpoints. Other hosts simply leave it unconsumed.
+    module_refresh_report: Option<ModuleSymbolLoadReport>,
     /// Most recently observed backend stop and the disposition used when it was
     /// subsequently continued.
     pub last_event: Option<LastEvent>,
@@ -583,6 +591,7 @@ impl Session {
             reload_module_list_pending: false,
             reload_surface_pending: false,
             parked_stop: None,
+            module_refresh_report: None,
             last_event: None,
             _instance_guard: None,
         };
@@ -687,6 +696,69 @@ impl Session {
         }
     }
 
+    fn continue_outcome_from_resolution(&self, resolution: StopResolution) -> ContinueOutcome {
+        match resolution {
+            StopResolution::Breakpoint {
+                breakpoint,
+                rip,
+                condition_error,
+                ..
+            } => ContinueOutcome::Breakpoint {
+                id: breakpoint.id,
+                address: breakpoint.address.0,
+                symbol: breakpoint.symbol,
+                temporary: breakpoint.temporary,
+                action: breakpoint.action,
+                rip,
+                condition_error,
+            },
+            StopResolution::Bugcheck { event } => ContinueOutcome::Bugcheck {
+                rip: event.program_counter,
+                info: event.bugcheck,
+            },
+            StopResolution::TargetReloaded { coherent, .. } => ContinueOutcome::TargetReloaded {
+                kernel_base: self.target.kernel_base().map(|address| address.0),
+                coherent,
+            },
+            StopResolution::Stopped { event, rip } => ContinueOutcome::Stopped {
+                rip,
+                exception_code: event.exception_code,
+                first_chance: event.first_chance,
+                exception_address: event.exception_address,
+            },
+            StopResolution::Resumed | StopResolution::ModulesChanged => {
+                unreachable!("absorbed stop cannot be parked")
+            }
+        }
+    }
+
+    fn interrupt_classified(&mut self) -> Result<(StopResolution, bool)> {
+        let mut resumed = 0;
+        loop {
+            let stop_was_pending = self.backend.has_pending_stop();
+            let event = self.backend.interrupt()?;
+            let resolution = self.classify_stop_event(event)?;
+            match resolution {
+                StopResolution::Resumed => {
+                    resumed += 1;
+                    if resumed < INTERRUPT_MAX_RESUMES {
+                        continue;
+                    }
+                    // Surface a generic stop after the bounded noise budget.
+                    let stop_was_pending = self.backend.has_pending_stop();
+                    let event = self.backend.interrupt()?;
+                    let resolution = StopResolution::Stopped {
+                        rip: event.program_counter.unwrap_or(0),
+                        event,
+                    };
+                    return Ok((resolution, !stop_was_pending));
+                }
+                StopResolution::ModulesChanged => continue,
+                resolution => return Ok((resolution, !stop_was_pending)),
+            }
+        }
+    }
+
     /// Pause the VM and return the first meaningful stop. Every raw event routes
     /// through [`Self::classify_stop_event`], so an interrupt that races with a
     /// filtered breakpoint or reconnect-assist stop cannot bypass core state.
@@ -697,24 +769,77 @@ impl Session {
     /// surfaced as-is rather than spinning forever (the ^D exit path lives on
     /// this).
     pub fn interrupt(&mut self) -> Result<StopEvent> {
-        for _ in 0..INTERRUPT_MAX_RESUMES {
-            let event = self.backend.interrupt()?;
-            match self.classify_stop_event(event)? {
-                StopResolution::Resumed => continue,
+        self.interrupt_classified()
+            .map(|(resolution, _)| match resolution {
                 StopResolution::Breakpoint { event, .. }
                 | StopResolution::Bugcheck { event }
                 | StopResolution::TargetReloaded { event, .. }
-                | StopResolution::Stopped { event, .. } => return Ok(event),
-            }
-        }
-        self.backend.interrupt()
+                | StopResolution::Stopped { event, .. } => event,
+                StopResolution::Resumed | StopResolution::ModulesChanged => {
+                    unreachable!("absorbed stop cannot be returned")
+                }
+            })
     }
 
+    /// Run `edit` with the target halted, restoring the previous run state.
+    /// If the target is already halted, `edit` runs directly and neither
+    /// interrupts nor resumes the backend. If it is running, this method breaks
+    /// in, runs `edit`, and resumes afterward unless the interrupt exposed a
+    /// genuine pending stop. Such a stop is left halted and parked for the next
+    /// [`Self::wait_for_stop_bounded`], while an edit error still resumes an
+    /// otherwise ordinary break-in before returning the error. This primitive is
+    /// shared by hosts that edit breakpoint state; it emits no notifications.
+    pub fn with_target_halted<T>(
+        &mut self,
+        edit: impl FnOnce(&mut Session) -> Result<T>,
+    ) -> Result<T> {
+        let interrupt_supported = self.backend.capabilities().iter().any(|capability| {
+            capability.capability == DebugCapability::InterruptTarget && capability.supported
+        });
+        if !self.backend.is_running() || !interrupt_supported {
+            return edit(self);
+        }
+
+        let (resolution, own_breakin_candidate) = self.interrupt_classified()?;
+        let (exception_code, program_counter) = match &resolution {
+            StopResolution::Stopped { event, .. } => (event.exception_code, event.program_counter),
+            _ => (None, None),
+        };
+        // The KD break-in rule is the same status/non-managed-address split
+        // used by `stop_is_assisted_refresh_breakin`: a STATUS_BREAKPOINT that
+        // classified as an ordinary stop and is not on one of our sites is the
+        // break-in we requested. A backend-reported pending stop wins even if
+        // it carries the same status; any other resolution is parked conservatively.
+        let own_breakin = own_breakin_candidate
+            && exception_code == Some(STATUS_BREAKPOINT)
+            && matches!(&resolution, StopResolution::Stopped { .. })
+            && program_counter
+                .is_none_or(|pc| self.breakpoints.breakpoint_id_at_address(pc).is_none());
+
+        if !own_breakin {
+            self.parked_stop = Some(self.continue_outcome_from_resolution(resolution));
+            return edit(self);
+        }
+
+        let result = edit(self);
+        let resume = self.resume();
+        match (result, resume) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(edit_error), Err(resume_error)) => Err(Error::DebugInfo(format!(
+                "{edit_error}; failed to resume target: {resume_error}"
+            ))),
+        }
+    }
     /// Bring the target to a real halt before teardown: consume a stop that is
     /// already pending if it is meaningful, else break in. The REPL's ^D path.
     pub fn halt_for_exit(&mut self) -> Result<()> {
         if let Some(event) = self.backend.try_wait_for_stop(EXIT_STOP_POLL)?
-            && !matches!(self.classify_stop_event(event)?, StopResolution::Resumed)
+            && !matches!(
+                self.classify_stop_event(event)?,
+                StopResolution::Resumed | StopResolution::ModulesChanged
+            )
         {
             return Ok(());
         }
@@ -1467,12 +1592,14 @@ impl Session {
         self.target.clear_current_windows_thread_context();
         self.parked_windows_thread = None;
         self.parked_stop = None;
+        self.module_refresh_report = None;
     }
 
     /// Resume with an explicit exception acknowledgement while preserving the
     /// same breakpoint step-over and cache invalidation prologue as [`Self::resume`].
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
         self.target.selected_frame = None;
+        self.module_refresh_report = None;
         if self.parked_windows_thread().is_some() {
             self.parked_windows_thread = None;
             self.target.clear_current_windows_thread_context();
@@ -1589,11 +1716,48 @@ impl Session {
         }
     }
 
+    /// Consult and clear the module-change signals, reconciling symbolic
+    /// breakpoints when the module set moved. Returns whether it moved. The KD
+    /// event signal and the per-stop module-list refresh are joined here so all
+    /// hosts share the same deferred-breakpoint behavior; refresh and
+    /// reconciliation failures are logged and do not discard the stop.
+    pub fn refresh_modules_on_stop(&mut self) -> bool {
+        let event_changed = self.backend.take_modules_changed();
+        let symbols_changed = match self.target.refresh_kernel_module_symbols() {
+            Ok(report) => {
+                let changed = report.loaded != 0 || report.unloaded != 0;
+                if changed {
+                    self.module_refresh_report = Some(report);
+                }
+                changed
+            }
+            Err(error) => {
+                eprintln!("failed to refresh module symbols after module change: {error}");
+                false
+            }
+        };
+        let modules_changed = event_changed || symbols_changed;
+        if modules_changed
+            && let Err(error) = self
+                .breakpoints
+                .reconcile_symbolic_after_module_refresh(self.backend.as_mut(), &self.target)
+        {
+            eprintln!("failed to reconcile breakpoints after module refresh: {error}");
+        }
+        modules_changed
+    }
+
+    /// Take the latest module-symbol report for the REPL's existing summary.
+    /// The report is private to the REPL's summary path.
+    pub fn take_module_refresh_report(&mut self) -> Option<ModuleSymbolLoadReport> {
+        self.module_refresh_report.take()
+    }
+
     /// Classify one raw backend stop and perform every core-owned transition.
     ///
     /// This is the only stop-ingestion state machine. REPL, MCP, Python, and
     /// idle servicing may differ in polling and presentation, but must route
-    /// raw events here so reload handling, DR acknowledgement, scope checks,
+    /// raw events here so reload handling, DR acknowledgment, scope checks,
     /// `int3` rewind, conditions, and auto-resume behavior cannot drift.
     pub fn classify_stop_event(&mut self, mut event: StopEvent) -> Result<StopResolution> {
         self.target.selected_frame = None;
@@ -1618,6 +1782,12 @@ impl Session {
                 return Ok(StopResolution::Resumed);
             }
             ReloadDisposition::Ordinary => {}
+        }
+
+        if event.modules_changed {
+            self.refresh_modules_on_stop();
+            self.backend.continue_execution()?;
+            return Ok(StopResolution::ModulesChanged);
         }
 
         match resolve_watchpoint_stop(
@@ -1779,30 +1949,8 @@ impl Session {
                 }
             };
             match self.classify_stop_event(event)? {
-                StopResolution::Resumed => continue,
-                StopResolution::Breakpoint {
-                    breakpoint,
-                    rip,
-                    condition_error,
-                    ..
-                } => {
-                    return Ok(ContinueOutcome::Breakpoint {
-                        id: breakpoint.id,
-                        address: breakpoint.address.0,
-                        symbol: breakpoint.symbol,
-                        temporary: breakpoint.temporary,
-                        action: breakpoint.action,
-                        rip,
-                        condition_error,
-                    });
-                }
-                StopResolution::Bugcheck { event } => {
-                    return Ok(ContinueOutcome::Bugcheck {
-                        rip: event.program_counter,
-                        info: event.bugcheck,
-                    });
-                }
-                StopResolution::TargetReloaded { coherent, .. } => {
+                StopResolution::Resumed | StopResolution::ModulesChanged => continue,
+                resolution @ StopResolution::TargetReloaded { coherent, .. } => {
                     reload_trace!(
                         "continue: SURFACE target_reloaded base={} coherent={}",
                         self.target.kernel_base().map_or_else(
@@ -1811,19 +1959,9 @@ impl Session {
                         ),
                         coherent,
                     );
-                    return Ok(ContinueOutcome::TargetReloaded {
-                        kernel_base: self.target.kernel_base().map(|address| address.0),
-                        coherent,
-                    });
+                    return Ok(self.continue_outcome_from_resolution(resolution));
                 }
-                StopResolution::Stopped { event, rip } => {
-                    return Ok(ContinueOutcome::Stopped {
-                        rip,
-                        exception_code: event.exception_code,
-                        first_chance: event.first_chance,
-                        exception_address: event.exception_address,
-                    });
-                }
+                resolution => return Ok(self.continue_outcome_from_resolution(resolution)),
             }
         }
     }
@@ -1835,7 +1973,7 @@ impl Session {
         loop {
             let event = self.backend.wait_for_stop()?;
             match self.classify_stop_event(event)? {
-                StopResolution::Resumed => continue,
+                StopResolution::Resumed | StopResolution::ModulesChanged => continue,
                 StopResolution::Breakpoint { event, .. }
                 | StopResolution::Bugcheck { event }
                 | StopResolution::TargetReloaded { event, .. }
@@ -1847,6 +1985,7 @@ impl Session {
     /// Rebuild guest state using an optional kernel-base hint through the shared
     /// [`perform_target_reload`] action.
     pub fn reload_with_hint(&mut self, hint: Option<VirtAddr>) -> Result<()> {
+        self.module_refresh_report = None;
         let outcome = perform_target_reload(
             self.backend.as_mut(),
             &mut self.target,
@@ -2668,6 +2807,8 @@ mod tests {
     use super::*;
     use crate::gdb::breakpoints::HardwareBreakpoint;
     use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
 
     /// DR6.BS (bit 14): a status bit outside B0-B3 that the functions under
     /// test must leave untouched.
@@ -2688,8 +2829,14 @@ mod tests {
         regs: Vec<u8>,
         writes: usize,
         fail_writes: bool,
+        allow_breakpoints: bool,
         exit_requests: Vec<bool>,
         fail_exit: bool,
+        running: bool,
+        interrupts: Arc<AtomicUsize>,
+        continues: Arc<AtomicUsize>,
+        interrupt_events: VecDeque<StopEvent>,
+        modules_changed: bool,
     }
 
     impl MockBackend {
@@ -2699,9 +2846,25 @@ mod tests {
                 regs: vec![0u8; REGISTER_BUFFER_SIZE],
                 writes: 0,
                 fail_writes: false,
+                allow_breakpoints: false,
                 exit_requests: Vec::new(),
                 fail_exit: false,
+                running: false,
+                interrupts: Arc::new(AtomicUsize::new(0)),
+                continues: Arc::new(AtomicUsize::new(0)),
+                interrupt_events: VecDeque::new(),
+                modules_changed: false,
             }
+        }
+
+        fn running(mut self) -> Self {
+            self.running = true;
+            self
+        }
+
+
+        fn queue_interrupt(&mut self, event: StopEvent) {
+            self.interrupt_events.push_back(event);
         }
 
         fn set(&mut self, name: &str, value: u64) {
@@ -2731,25 +2894,50 @@ mod tests {
             Ok(())
         }
         fn set_breakpoint(&mut self, _addr: u64) -> Result<()> {
-            Err(Error::NotSupported)
+            if self.allow_breakpoints {
+                Ok(())
+            } else {
+                Err(Error::NotSupported)
+            }
         }
         fn remove_breakpoint(&mut self, _addr: u64) -> Result<()> {
-            Err(Error::NotSupported)
+            if self.allow_breakpoints {
+                Ok(())
+            } else {
+                Err(Error::NotSupported)
+            }
         }
         fn continue_execution(&mut self) -> Result<()> {
-            Err(Error::NotSupported)
+            self.continues.fetch_add(1, Ordering::Relaxed);
+            self.running = true;
+            Ok(())
         }
         fn step(&mut self) -> Result<()> {
             Err(Error::NotSupported)
         }
         fn interrupt(&mut self) -> Result<StopEvent> {
-            Err(Error::NotSupported)
+            self.interrupts.fetch_add(1, Ordering::Relaxed);
+            let event = self
+                .interrupt_events
+                .pop_front()
+                .ok_or(Error::NotSupported)?;
+            self.running = false;
+            Ok(event)
         }
         fn wait_for_stop(&mut self) -> Result<StopEvent> {
-            Err(Error::NotSupported)
+            let event = self
+                .interrupt_events
+                .pop_front()
+                .ok_or(Error::NotSupported)?;
+            self.running = false;
+            Ok(event)
         }
         fn try_wait_for_stop(&mut self, _timeout: Duration) -> Result<Option<StopEvent>> {
-            Ok(None)
+            let event = self.interrupt_events.pop_front();
+            if event.is_some() {
+                self.running = false;
+            }
+            Ok(event)
         }
         fn thread_list(&mut self) -> Result<Vec<String>> {
             Err(Error::NotSupported)
@@ -2761,7 +2949,11 @@ mod tests {
             Err(Error::NotSupported)
         }
         fn is_running(&self) -> bool {
-            false
+            self.running
+        }
+
+        fn take_modules_changed(&mut self) -> bool {
+            take(&mut self.modules_changed)
         }
         fn prepare_for_exit(&mut self, leave_running: bool) -> Result<()> {
             self.exit_requests.push(leave_running);
@@ -2787,6 +2979,158 @@ mod tests {
             modules_changed: false,
             assisted_breakin: false,
         }
+    }
+
+    fn breakpoint_event(pc: u64) -> StopEvent {
+        StopEvent {
+            thread_id: None,
+            exception_code: Some(STATUS_BREAKPOINT),
+            first_chance: Some(true),
+            exception_address: Some(pc),
+            program_counter: Some(pc),
+            is_bugcheck: false,
+            bugcheck: None,
+            target_reloaded: false,
+            target_kernel_base_hint: None,
+            modules_changed: false,
+            assisted_breakin: false,
+        }
+    }
+
+    fn module_change_event() -> StopEvent {
+        StopEvent {
+            thread_id: None,
+            exception_code: None,
+            first_chance: None,
+            exception_address: None,
+            program_counter: None,
+            is_bugcheck: false,
+            bugcheck: None,
+            target_reloaded: false,
+            target_kernel_base_hint: None,
+            modules_changed: true,
+            assisted_breakin: false,
+        }
+    }
+
+    fn session_with_mock(backend: MockBackend) -> Session {
+        let mut session = session_over_memory(0x1000, &[0; 0x100]);
+        session.backend = Box::new(backend);
+        session.register_map = build_register_map();
+        session
+    }
+
+    #[test]
+    fn with_target_halted_runs_directly_when_already_halted() {
+        let backend = MockBackend::new();
+        let interrupts = Arc::clone(&backend.interrupts);
+        let continues = Arc::clone(&backend.continues);
+        let mut session = session_with_mock(backend);
+        let value = session.with_target_halted(|_| Ok(7u32)).unwrap();
+
+        assert_eq!(value, 7);
+        assert_eq!(interrupts.load(Ordering::Relaxed), 0);
+        assert_eq!(continues.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn with_target_halted_interrupts_edits_and_resumes_running_target() {
+        let mut backend = MockBackend::new().running();
+        let interrupts = Arc::clone(&backend.interrupts);
+        let continues = Arc::clone(&backend.continues);
+        backend.queue_interrupt(breakpoint_event(0x2000));
+        let mut session = session_with_mock(backend);
+
+        session.with_target_halted(|_| Ok(())).unwrap();
+
+        assert_eq!(interrupts.load(Ordering::Relaxed), 1);
+        assert_eq!(continues.load(Ordering::Relaxed), 1);
+        assert!(session.backend.is_running());
+    }
+
+    #[test]
+    fn with_target_halted_resumes_after_edit_error() {
+        let mut backend = MockBackend::new().running();
+        let continues = Arc::clone(&backend.continues);
+        backend.queue_interrupt(breakpoint_event(0x2000));
+        let mut session = session_with_mock(backend);
+
+        let error = session
+            .with_target_halted(|_| Err::<(), _>(Error::DebugInfo("edit failed".into())))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("edit failed"));
+        assert_eq!(continues.load(Ordering::Relaxed), 1);
+        assert!(session.backend.is_running());
+    }
+
+    #[test]
+    fn with_target_halted_parks_a_genuine_pending_breakpoint() {
+        let mut backend = MockBackend::new().running();
+        backend.set("rip", 0x1000);
+        let continues = Arc::clone(&backend.continues);
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        session
+            .breakpoints
+            .insert_for_test(1, VirtAddr(0x1000), true, None);
+
+        session.with_target_halted(|_| Ok(())).unwrap();
+
+        assert_eq!(continues.load(Ordering::Relaxed), 0);
+        assert!(!session.backend.is_running());
+        let cancel = AtomicBool::new(false);
+        assert!(matches!(
+            session.wait_for_stop_bounded(Some(Duration::ZERO), &cancel),
+            Ok(ContinueOutcome::Breakpoint { id: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn load_symbols_stop_reconciles_and_resumes_as_modules_changed() {
+        let mut backend = MockBackend::new().running();
+        backend.modules_changed = true;
+        backend.allow_breakpoints = true;
+        let continues = Arc::clone(&backend.continues);
+        let mut session = session_with_mock(backend);
+        let id = session
+            .add_symbol_breakpoint("driver!DeferredFn".into(), None)
+            .unwrap();
+        assert!(
+            session
+                .breakpoints
+                .list()
+                .into_iter()
+                .find(|breakpoint| breakpoint.id == id)
+                .is_some_and(|breakpoint| !breakpoint.resolved)
+        );
+
+        let dtb = session.target.current_dtb();
+        session.target.symbols.inject_source_lines_for_test(
+            1,
+            dtb,
+            VirtAddr(0x1000),
+            0x100,
+            "driver.c",
+            &[],
+        );
+        session
+            .target
+            .symbols
+            .inject_module_for_test(1, Vec::new(), &[("DeferredFn", 0x10)]);
+
+        let resolution = session.classify_stop_event(module_change_event()).unwrap();
+
+        assert!(matches!(resolution, StopResolution::ModulesChanged));
+        assert_eq!(continues.load(Ordering::Relaxed), 1);
+        let breakpoint = session
+            .breakpoints
+            .list()
+            .into_iter()
+            .find(|breakpoint| breakpoint.id == id)
+            .unwrap();
+        assert!(breakpoint.resolved);
+        assert_eq!(breakpoint.address, VirtAddr(0x1010));
     }
 
     fn manager_with_hw(slot: u8, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {

@@ -90,7 +90,6 @@ pub struct KdFraming<T> {
     queued_data: VecDeque<DataPacket>,
     awaiting_reset_ack: bool,
     peer_reset_seen: bool,
-    modules_changed: bool,
     kdnet_packet_ids: bool,
     /// KDNET remote-ID high-water mark; targets retransmit with identical
     /// IDs, so anything not strictly greater is a duplicate to ACK and drop.
@@ -124,7 +123,6 @@ impl<T: Read + Write> KdFraming<T> {
             queued_data: VecDeque::new(),
             awaiting_reset_ack: false,
             peer_reset_seen: false,
-            modules_changed: false,
             kdnet_packet_ids: false,
             kdnet_remote_high_water: None,
             kdnet_generation: None,
@@ -138,22 +136,9 @@ impl<T: Read + Write> KdFraming<T> {
         std::mem::take(&mut self.peer_reset_seen)
     }
 
-    /// Mark that a kernel image (driver/module) loaded or unloaded, set when a
-    /// load-symbols state-change is seen, so the foreground can invalidate caches
-    /// that depend on the module set (e.g. driver completions).
-    pub fn note_modules_changed(&mut self) {
-        self.modules_changed = true;
-    }
-
-    /// Returns (and clears) whether a module load/unload was seen since the last
-    /// call. The flag rides the framing back from the pump on stop.
-    pub fn take_modules_changed(&mut self) -> bool {
-        std::mem::take(&mut self.modules_changed)
-    }
-
     /// Returns whether the target reset its packet stream without clearing the
-    /// flag. Used by the running pump to assist reboot reconnects while still
-    /// preserving the reload marker for the eventual state-change.
+    /// flag. Used by the running pump to assist reboot reconnects while waiting
+    /// for the target's next state-change.
     pub fn peer_reset_seen(&self) -> bool {
         self.peer_reset_seen
     }

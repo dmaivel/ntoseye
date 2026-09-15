@@ -13,22 +13,6 @@ use crate::unwind::{format_symbol, resolve_thread_trace_context};
 
 use crate::repl::*;
 
-/// Returns whether the kernel module set changed. New modules are loaded and
-/// removed symbol registrations are pruned before breakpoint reconciliation.
-pub fn refresh_kernel_module_symbols_on_stop(debugger: &Target, caches: &ReplCaches) -> bool {
-    let Ok(report) = debugger.refresh_kernel_module_symbols() else {
-        return false;
-    };
-    let changed = report.loaded != 0 || report.unloaded != 0;
-    if report.loaded != 0 {
-        print_module_symbol_report(&report);
-    }
-    if changed {
-        caches.refresh_symbol_context(debugger);
-    }
-    changed
-}
-
 pub fn print_target_reload_report(report: &ReloadReport) {
     if let Some(startup) = &report.startup {
         outln!(
@@ -143,21 +127,16 @@ pub fn stop_exception_cause(
 /// unloaded), so the caller can refresh module-dependent caches. Both signals are
 /// consulted/cleared: the backend load event (KD) and the per-stop module-list
 /// diff (any backend).
-pub fn refresh_stop_caches_pre(
-    client: &mut dyn DebugBackend,
-    debugger: &Target,
-    breakpoints: &mut BreakpointManager,
-    caches: &ReplCaches,
-) -> bool {
-    caches.refresh_vcpus(client);
-    let symbols_changed = refresh_kernel_module_symbols_on_stop(debugger, caches);
-    let event_changed = client.take_modules_changed();
-    let modules_changed = symbols_changed || event_changed;
+pub fn refresh_stop_caches_pre(session: &mut Session, caches: &ReplCaches) -> bool {
+    caches.refresh_vcpus(&mut *session.backend);
+    let modules_changed = session.refresh_modules_on_stop();
+    let report = session.take_module_refresh_report();
+    if let Some(report) = report.as_ref().filter(|report| report.loaded != 0) {
+        print_module_symbol_report(report);
+    }
     if modules_changed {
-        if let Err(error) = breakpoints.reconcile_symbolic_after_module_refresh(client, debugger) {
-            error!("failed to reconcile breakpoints after module refresh: {error}");
-        }
-        caches.refresh_breakpoints(breakpoints);
+        caches.refresh_symbol_context(&session.target);
+        caches.refresh_breakpoints(&session.breakpoints);
     }
     modules_changed
 }
@@ -178,18 +157,13 @@ pub fn print_async_stop_resolution(
     resolution: StopResolution,
 ) {
     session.target.selected_frame = None;
-    refresh_stop_caches_pre(
-        &mut *session.backend,
-        &session.target,
-        &mut session.breakpoints,
-        caches,
-    );
+    refresh_stop_caches_pre(session, caches);
     refresh_stop_caches_post(&session.target, caches);
     refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);
 
     print_stop_separator();
     match resolution {
-        StopResolution::Resumed => {}
+        StopResolution::Resumed | StopResolution::ModulesChanged => {}
         StopResolution::Breakpoint {
             breakpoint,
             condition_error,
@@ -359,7 +333,10 @@ pub fn surface_pending_stop(
         return Ok(false);
     };
     let resolution = session.classify_stop_event(event)?;
-    if matches!(resolution, StopResolution::Resumed) {
+    if matches!(
+        resolution,
+        StopResolution::Resumed | StopResolution::ModulesChanged
+    ) {
         return Ok(false);
     }
 
@@ -395,7 +372,10 @@ pub fn surface_interrupt_stop(session: &mut Session, caches: &ReplCaches) -> Res
     loop {
         let event = session.backend.interrupt()?;
         let resolution = session.classify_stop_event(event)?;
-        if matches!(resolution, StopResolution::Resumed) {
+        if matches!(
+            resolution,
+            StopResolution::Resumed | StopResolution::ModulesChanged
+        ) {
             continue;
         }
         print_async_stop_resolution(session, caches, resolution);

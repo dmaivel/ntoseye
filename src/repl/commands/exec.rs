@@ -348,6 +348,10 @@ impl ReplState<'_> {
                 Ok(Some(event)) => {
                     let resolution = match self.ctx.classify_stop_event(event) {
                         Ok(StopResolution::Resumed) => continue,
+                        Ok(StopResolution::ModulesChanged) => {
+                            INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
+                            continue;
+                        }
                         Ok(resolution) => resolution,
                         Err(error) => {
                             error!("failed to classify stop: {error}");
@@ -355,12 +359,7 @@ impl ReplState<'_> {
                         }
                     };
 
-                    refresh_stop_caches_pre(
-                        &mut *self.ctx.backend,
-                        &self.ctx.target,
-                        &mut self.ctx.breakpoints,
-                        &self.caches,
-                    );
+                    refresh_stop_caches_pre(self.ctx, &self.caches);
                     refresh_stop_caches_post(&self.ctx.target, &self.caches);
                     refresh_windows_thread_context_for_backend_thread(
                         &mut self.ctx.target,
@@ -368,7 +367,9 @@ impl ReplState<'_> {
                     );
 
                     match resolution {
-                        StopResolution::Resumed => unreachable!("handled above"),
+                        StopResolution::Resumed | StopResolution::ModulesChanged => {
+                            unreachable!("handled above")
+                        }
                         StopResolution::Breakpoint {
                             breakpoint,
                             condition_error,

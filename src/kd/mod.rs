@@ -2363,14 +2363,6 @@ impl DebugBackend for KdBackend {
         }
         result
     }
-
-    fn take_modules_changed(&mut self) -> bool {
-        // the flag rides back on the framing when the pump reclaims it at a stop
-        self.link
-            .framing()
-            .map(KdFraming::take_modules_changed)
-            .unwrap_or(false)
-    }
 }
 
 impl DebugBackend for KdBackendHandle {
@@ -2537,10 +2529,6 @@ impl DebugBackend for KdBackendHandle {
 
     fn prepare_for_exit(&mut self, leave_running: bool) -> Result<()> {
         self.lock().prepare_for_exit(leave_running)
-    }
-
-    fn take_modules_changed(&mut self) -> bool {
-        self.lock().take_modules_changed()
     }
 }
 /// Best-effort resume during normal teardown
@@ -4645,6 +4633,52 @@ mod tests {
         assert_eq!(stop.new_state, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE);
         assert_eq!(stop.program_counter, pc);
         assert!(stop.target_reloaded);
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _framing = handle.join().expect("pump thread panicked");
+    }
+
+    #[test]
+    fn pump_surfaces_load_symbols_as_a_module_change_stop() {
+        let (mut kernel, host) = UnixStream::pair().unwrap();
+        let framing = KdFraming::new(host.into());
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let shutdown = Arc::clone(&shutdown);
+            spawn(move || {
+                run_pump(
+                    framing,
+                    Arch::Amd64,
+                    PumpLink {
+                        stop_tx: tx,
+                        shutdown,
+                        reported_stop: Arc::new(AtomicBool::new(false)),
+                    },
+                    None,
+                    DebugLog::new(DEBUG_LOG_CAPACITY),
+                    None,
+                )
+            })
+        };
+
+        let pc = 0xfffff800_cafebabe;
+        kernel
+            .write_all(&wire_data_packet(
+                PACKET_TYPE_KD_STATE_CHANGE64,
+                WIRE_FIRST_PACKET_ID,
+                &state_change_payload(DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, pc),
+            ))
+            .unwrap();
+        kernel.flush().unwrap();
+
+        let stop = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("pump reported no load-symbols notification")
+            .expect("pump reported an error");
+        assert_eq!(stop.new_state, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE);
+        assert_eq!(stop.program_counter, pc);
+        assert!(stop_event(stop).modules_changed);
 
         shutdown.store(true, Ordering::SeqCst);
         let _framing = handle.join().expect("pump thread panicked");
