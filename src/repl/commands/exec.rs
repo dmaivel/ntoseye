@@ -690,8 +690,19 @@ impl ReplState<'_> {
     }
 
     fn cmd_p(&mut self) -> Result<()> {
-        if let Err(e) = self.step_over_once() {
-            error!("failed to decode current instruction: {}", e);
+        if let Err(error) = self.step_over_once() {
+            // Stepping *over* needs the instruction decoded to know whether it
+            // is a call, and the instruction cannot be read while its page is
+            // out. `t` executes the fetch instead of reading it, which is what
+            // brings the page in.
+            match (&error, self.current_ip()) {
+                (Error::BadVirtualAddress(_) | Error::AddressNotInDump(_), Some(ip)) => error!(
+                    "the page holding {} is not resident, so the instruction cannot be \
+                     decoded to step over it; `t` single-steps through the fetch",
+                    ui::addr(ip)
+                ),
+                _ => error!("failed to decode current instruction: {}", error),
+            }
         }
         Ok(())
     }

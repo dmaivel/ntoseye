@@ -1,6 +1,7 @@
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
+use crate::error::Error;
 use crate::gdb::{BreakpointManager, RegisterMap};
 use crate::symbols::SourceLocation;
 use crate::target::Target;
@@ -302,6 +303,29 @@ pub fn render_rows(rows: &[DisasmRow], marker_for: impl Fn(u64) -> Option<bool>)
 const DISASM_CONTEXT_BYTES: usize = 64;
 const DISASM_CONTEXT_INSTRUCTIONS: usize = 7;
 
+/// Why the instruction at `pc` could not be read, in the terms the user can
+/// act on.
+///
+/// A page that is not resident is the normal outcome of an execute breakpoint
+/// on code nothing has run yet: a code breakpoint fault outranks the code page
+/// fault of the instruction fetch (Intel SDM, "Priority Among Concurrent
+/// Events": code breakpoint fault is priority 7, faults from fetching the next
+/// instruction priority 8), so the trap is delivered before the page is
+/// faulted in. The bytes appear once the instruction is actually fetched, so a
+/// single step reveals them.
+pub fn non_resident_note(pc: u64, error: &Error) -> String {
+    match error {
+        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0) => {
+            format!(
+                "  (the page holding {pc:#x} is not resident, so there is nothing to decode yet; \
+                 an execute breakpoint traps before the fetch that pages it in, and `t` \
+                 single-steps through the fetch)"
+            )
+        }
+        error => format!("  (could not read memory at {pc:#x}: {error})"),
+    }
+}
+
 fn decode_disasm_context(
     bytes_at_rip: &[u8],
     rip: u64,
@@ -339,11 +363,13 @@ pub fn print_disasm_context(
     let code_memory = debugger.address_space(code_dtb);
     let mut bytes = [0u8; DISASM_CONTEXT_BYTES];
 
-    if active_memory.read_bytes(VirtAddr(rip), &mut bytes).is_err()
-        && (code_dtb == trace.active_dtb
-            || code_memory.read_bytes(VirtAddr(rip), &mut bytes).is_err())
-    {
-        outln!("{}", "  (could not read memory at RIP)".bright_black());
+    let read = match active_memory.read_bytes(VirtAddr(rip), &mut bytes) {
+        Ok(()) => Ok(()),
+        Err(active_error) if code_dtb == trace.active_dtb => Err(active_error),
+        Err(_) => code_memory.read_bytes(VirtAddr(rip), &mut bytes),
+    };
+    if let Err(error) = read {
+        outln!("{}", ui::muted(&non_resident_note(rip, &error)));
         return;
     }
 
