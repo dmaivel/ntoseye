@@ -633,9 +633,12 @@ impl Session {
 
         // Re-arm breakpoints the stub may have lost when the VM stopped, then
         // adopt whatever thread we ended up on.
-        let _ = self
+        if let Err(error) = self
             .breakpoints
-            .refresh_enabled(self.backend.as_mut(), &self.target);
+            .refresh_enabled(self.backend.as_mut(), &self.target)
+        {
+            eprintln!("failed to re-arm breakpoints after the step: {error}");
+        }
         if let Ok(tid) = self.backend.stopped_thread_id() {
             self.current_thread = tid;
         }
@@ -1778,9 +1781,12 @@ impl Session {
 
                 // The stub can drop non-hit breakpoints when the VM stops; re-arm
                 // so they survive the next resume.
-                let _ = self
+                if let Err(error) = self
                     .breakpoints
-                    .refresh_enabled(self.backend.as_mut(), &self.target);
+                    .refresh_enabled(self.backend.as_mut(), &self.target)
+                {
+                    eprintln!("failed to re-arm breakpoints at this stop: {error}");
+                }
 
                 self.breakpoints.mark_one_shot_hit(bp.id)?;
                 Ok(BreakpointStopAction::Hit {

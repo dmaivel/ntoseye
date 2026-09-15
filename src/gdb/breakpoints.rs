@@ -1078,17 +1078,53 @@ impl BreakpointManager {
         }
     }
 
-    pub fn refresh_enabled(&self, client: &mut dyn DebugBackend, debugger: &Target) -> Result<()> {
+    pub fn refresh_enabled(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+    ) -> Result<()> {
         let mut enabled: Vec<_> = self
             .breakpoints
             .values()
             .filter(|bp| bp.enabled && bp.resolved && bp.hardware.is_none())
+            .cloned()
             .collect();
         enabled.sort_by_key(|bp| bp.id);
 
         for bp in enabled {
-            let _ = Self::uninstall_breakpoint(client, debugger, bp);
-            Self::install_existing_breakpoint(client, debugger, bp)?;
+            // A target that owns its sites re-arms them itself on every
+            // resume. Lifting and rewriting the entry here would churn the
+            // target's breakpoint table and, in the window between the two
+            // requests, leave a site the target may already have re-armed
+            // with nothing claiming it. A site whose displaced byte we never
+            // saw still goes through the reinstall below, to pick that byte
+            // up now the page is resident.
+            if client.target_manages_breakpoint_sites()
+                && matches!(&bp.backend, BreakpointBackend::Kernel { original: Some(_) })
+            {
+                continue;
+            }
+            // A restore that fails for any reason other than an absent page
+            // leaves an `int3` at a site we can no longer account for, and
+            // re-patching over it strands that byte: the saved original is
+            // written back to whatever the address resolves to next, while the
+            // old frame keeps the breakpoint. Surface the failure instead.
+            let uninstalled = match Self::uninstall_breakpoint(client, debugger, &bp) {
+                Ok(()) => true,
+                // Nothing to restore: the page is gone, and the reinstall
+                // below fails the same way and reports it.
+                Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => false,
+                Err(error) => return Err(error),
+            };
+            if uninstalled && matches!(&bp.backend, BreakpointBackend::Kernel { original: None }) {
+                let backend = Self::install_breakpoint(client, debugger, bp.address, &bp.scope)?;
+                self.breakpoints
+                    .get_mut(&bp.id)
+                    .ok_or(Error::BPNotFound(bp.id))?
+                    .backend = backend;
+            } else {
+                Self::install_existing_breakpoint(client, debugger, &bp)?;
+            }
         }
 
         Ok(())

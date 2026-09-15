@@ -2128,6 +2128,21 @@ impl DebugBackend for KdBackend {
             Err(Error::KdStatus { ntstatus, api })
                 if ntstatus == STATUS_UNSUCCESSFUL && api == api::DBGKD_RESTORE_BREAKPOINT =>
             {
+                // The target refuses a handle whose table entry it has
+                // already reclaimed, which is what a stop does to every
+                // entry it suspends. That is only the harmless answer if the
+                // site is clean: forgetting an address that still holds the
+                // breakpoint instruction leaves an `int3` no one claims, and
+                // the next resume steps the program counter past it and into
+                // the middle of the instruction it displaced. Keep the
+                // handle so a retry (and exit) can still release the entry.
+                let arch = self.arch;
+                if breakpoint_instruction_at(self.link.framing()?, arch, processor, addr) {
+                    return Err(Error::Kd(format!(
+                        "target refused to release the breakpoint at {addr:#x} (handle {handle}) \
+                         and the site still holds a breakpoint instruction"
+                    )));
+                }
                 kd_trace!(
                     "kd: restore breakpoint handle {handle} at {addr:#x} was already consumed"
                 );
@@ -3880,6 +3895,40 @@ mod tests {
             "reclaim released a handle this session still owns: {released:?}"
         );
         assert_eq!(released.len(), KD_BREAKPOINT_TABLE_SIZE as usize - 1);
+    }
+
+    #[test]
+    fn a_refused_restore_keeps_a_site_that_still_holds_a_breakpoint() {
+        const ADDR: u64 = 0xffff_f800_0001_2000;
+
+        let mut refused = api::test_wire::build_reply(api::DBGKD_RESTORE_BREAKPOINT, 0, &[], &[]);
+        refused[8..12].copy_from_slice(&STATUS_UNSUCCESSFUL.to_le_bytes());
+        let mut probe = vec![0u8; api::MANIPULATE_HEADER_SIZE];
+        wire::write_u32(&mut probe, 0, api::DBGKD_READ_VIRTUAL_MEMORY);
+        wire::write_u64(&mut probe, 16, ADDR);
+        wire::write_u32(&mut probe, 16 + 8, 1);
+        wire::write_u32(&mut probe, 16 + 12, 1);
+        probe.push(0xcc);
+
+        let (host, target) = UnixStream::pair().unwrap();
+        (&target)
+            .write_all(&scripted_target(&[refused, probe]))
+            .unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.bp_handles.insert(ADDR, 1);
+        backend.managed_bp_addresses.insert(ADDR);
+
+        let error = backend.remove_breakpoint(ADDR).unwrap_err();
+
+        assert!(
+            error.to_string().contains("still holds a breakpoint"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(backend.bp_handles.get(&ADDR), Some(&1));
+        assert!(
+            backend.managed_bp_addresses.contains(&ADDR),
+            "an armed site was disowned, so a resume would step its program counter"
+        );
     }
 
     #[test]
