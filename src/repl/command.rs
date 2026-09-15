@@ -328,6 +328,14 @@ fn parse_args(
         while let Some(ch) = line[pos..].chars().next() {
             pos += ch.len_utf8();
             if escaped {
+                // A backslash only escapes a quote or another backslash.
+                // Every other sequence is passed through intact, because the
+                // command that receives it owns its own escapes: `.printf`
+                // needs to see `\n`, and a Windows path keeps its
+                // separators.
+                if ch != quote && ch != '\\' {
+                    text.push('\\');
+                }
                 text.push(ch);
                 escaped = false;
             } else if ch == '\\' {

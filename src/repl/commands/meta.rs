@@ -193,8 +193,19 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         };
-        let text = format_printf(&format, &args, &self.ctx.target, self.radix);
-        outln!("{text}");
+        // An unreadable argument is reported, not propagated: `.printf` is
+        // the body of a log point, and a single bad read must not tear down
+        // the session that is running it.
+        let text = match format_printf(&format, &args, &self.ctx.target, self.radix) {
+            Ok(text) => text,
+            Err(error) => {
+                error!("{}", error);
+                return Ok(());
+            }
+        };
+        // WinDbg's `.printf` emits exactly the format's characters, which is
+        // why its examples end in `\n`; appending one here would double it.
+        out!("{text}");
         Ok(())
     }
 
@@ -711,12 +722,6 @@ fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
     Some((format, args))
 }
 
-fn eval_printf_value(text: &str, target: &Target, radix: NumberRadix) -> Option<u64> {
-    Expr::eval_with_radix(text, target, radix)
-        .ok()
-        .map(|value| value.0)
-}
-
 fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Option<String> {
     let count = max_chars.checked_mul(2)?;
     let mut bytes = vec![0u8; count];
@@ -737,23 +742,36 @@ fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Opt
     Some(text)
 }
 
-fn format_printf(format: &str, args: &[String], target: &Target, radix: NumberRadix) -> String {
+fn format_printf(
+    format: &str,
+    args: &[String],
+    target: &Target,
+    radix: NumberRadix,
+) -> Result<String> {
     let chars: Vec<char> = format.chars().collect();
     let mut output = String::new();
     let mut index = 0;
     let mut arg_index = 0;
-    let emit = |output: &mut String,
-                arg_index: &mut usize,
-                rendered: Option<String>,
-                fallback: &[char]| {
-        if let Some(rendered) = rendered {
-            output.push_str(&rendered);
-            *arg_index += 1;
-        } else {
-            output.extend(fallback);
-        }
-    };
     while index < chars.len() {
+        // WinDbg's `.printf` takes the standard C control characters, so a
+        // format ending in `\n` must break the line rather than print an `n`.
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            let (escaped, width) = match chars[index + 1] {
+                'n' => ('\n', 2),
+                't' => ('\t', 2),
+                'r' => ('\r', 2),
+                'b' => ('\u{8}', 2),
+                '0' => ('\0', 2),
+                '\\' => ('\\', 2),
+                '"' => ('"', 2),
+                // An unknown escape keeps both characters, so a Windows path
+                // in a format string survives.
+                _ => ('\\', 1),
+            };
+            output.push(escaped);
+            index += width;
+            continue;
+        }
         if chars[index] != '%' || index + 1 >= chars.len() {
             output.push(chars[index]);
             index += 1;
@@ -775,80 +793,47 @@ fn format_printf(format: &str, args: &[String], target: &Target, radix: NumberRa
         }
         let Some(argument) = args.get(arg_index) else {
             output.extend(chars[start..index + 1].iter());
+            index += 1;
             continue;
         };
-        let value = || eval_printf_value(argument, target, radix);
-        let fallback = &chars[start..=index];
-        match (spec, extended.then_some(chars[index])) {
-            ('d', None) => emit(
-                &mut output,
-                &mut arg_index,
-                value().map(|value| (value as i64).to_string()),
-                fallback,
-            ),
-            ('u', None) => emit(
-                &mut output,
-                &mut arg_index,
-                value().map(|value| value.to_string()),
-                fallback,
-            ),
-            ('x', None) => emit(
-                &mut output,
-                &mut arg_index,
-                value().map(|value| format!("{value:x}")),
-                fallback,
-            ),
-            ('p', None) => emit(&mut output, &mut arg_index, value().map(ui::addr), fallback),
-            ('c', None) => emit(
-                &mut output,
-                &mut arg_index,
-                value().map(|value| {
-                    char::from_u32(value as u32)
-                        .unwrap_or('\u{fffd}')
-                        .to_string()
-                }),
-                fallback,
-            ),
-            ('s', None) => emit(
-                &mut output,
-                &mut arg_index,
-                Some(argument.to_string()),
-                fallback,
-            ),
-            ('m', Some('a')) => emit(
-                &mut output,
-                &mut arg_index,
-                value().map(|value| {
-                    target
-                        .read_c_string(VirtAddr(value), PRINTF_C_STRING_LIMIT)
-                        .unwrap_or_else(|_| format!("<unreadable {value:#x}>"))
-                }),
-                fallback,
-            ),
-            ('m', Some('u')) => emit(
-                &mut output,
-                &mut arg_index,
-                value().map(|value| {
-                    read_wide_string(target, VirtAddr(value), PRINTF_WIDE_STRING_LIMIT)
-                        .unwrap_or_else(|| format!("<unreadable {value:#x}>"))
-                }),
-                fallback,
-            ),
-            ('y', None) => emit(
-                &mut output,
-                &mut arg_index,
-                value().map(|value| {
-                    target
-                        .closest_symbol_current_context(VirtAddr(value))
-                        .unwrap_or_else(|| format!("{value:#x}"))
-                }),
-                fallback,
-            ),
-            _ => output.extend(chars[start..=index].iter()),
-        }
+        let value = || Expr::eval_with_radix(argument, target, radix).map(|value| value.0);
+        let rendered = match (spec, extended.then_some(chars[index])) {
+            ('d', None) => (value()? as i64).to_string(),
+            ('u', None) => value()?.to_string(),
+            ('x', None) => format!("{:x}", value()?),
+            ('p', None) => ui::addr(value()?),
+            ('c', None) => char::from_u32(value()? as u32)
+                .unwrap_or('\u{fffd}')
+                .to_string(),
+            ('s', None) => argument.to_string(),
+            ('m', Some('a')) => {
+                let address = value()?;
+                target
+                    .read_c_string(VirtAddr(address), PRINTF_C_STRING_LIMIT)
+                    .unwrap_or_else(|_| format!("<unreadable {address:#x}>"))
+            }
+            ('m', Some('u')) => {
+                let address = value()?;
+                read_wide_string(target, VirtAddr(address), PRINTF_WIDE_STRING_LIMIT)
+                    .unwrap_or_else(|| format!("<unreadable {address:#x}>"))
+            }
+            ('y', None) => {
+                let address = value()?;
+                target
+                    .closest_symbol_current_context(VirtAddr(address))
+                    .unwrap_or_else(|| format!("{address:#x}"))
+            }
+            _ => {
+                output.extend(chars[start..=index].iter());
+                index += 1;
+                continue;
+            }
+        };
+        output.push_str(&rendered);
+        arg_index += 1;
         index += 1;
     }
-    output
+    Ok(output)
 }
 
 fn print_error_code(code: u32, force_ntstatus: bool) {
@@ -894,4 +879,57 @@ fn print_error_code(code: u32, force_ntstatus: bool) {
 
     let name = win32_error_name(code).unwrap_or("ERROR_UNKNOWN");
     outln!("Win32 error {code} ({code:#x}): {name}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::output::capture;
+    use crate::repl::ReplState;
+    use crate::session::session_over_memory;
+
+    #[test]
+    fn printf_reports_expression_errors_instead_of_printing_placeholders() {
+        let session = session_over_memory(0x1000, &[0; 8]);
+        let result = format_printf(
+            "major[%p] wired",
+            &["missing_local".into()],
+            &session.target,
+            NumberRadix::Hexadecimal,
+        );
+        assert!(matches!(result, Err(Error::SymbolNotFound(name)) if name == "missing_local"));
+    }
+
+    #[test]
+    fn printf_interprets_control_characters_and_adds_nothing() {
+        // Driven through `dispatch_line`, because the command parser also
+        // handles backslashes: a test that called `format_printf` directly
+        // passed while the REPL still printed a literal `n`.
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        let (result, text) =
+            capture(|| state.dispatch_line("\u{2e}printf \"a\\tb\\nc=%u\\n\" 0n42"));
+        result.unwrap();
+        assert_eq!(text, "a\tb\nc=42\n");
+
+        // An unrecognized escape keeps both characters, so a Windows path in
+        // a format string survives.
+        let (result, text) = capture(|| state.dispatch_line("\u{2e}printf \"C:\\dir\\x\""));
+        result.unwrap();
+        assert_eq!(text, "C:\\dir\\x");
+    }
+
+    #[test]
+    fn printf_keeps_literal_strings_separate_from_numeric_expressions() {
+        let session = session_over_memory(0x1000, &[0; 8]);
+        let result = format_printf(
+            "%s=%u %%",
+            &["index".into(), "0n27+1".into()],
+            &session.target,
+            NumberRadix::Hexadecimal,
+        )
+        .unwrap();
+        assert_eq!(result, "index=28 %");
+    }
 }
