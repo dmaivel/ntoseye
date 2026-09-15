@@ -2327,6 +2327,14 @@ impl DebugBackend for KdBackend {
         self.managed_bp_addresses.remove(&addr);
     }
 
+    /// The target's `KdpBreakpointTable` owns every site written through
+    /// `DbgKdWriteBreakPointApi`: the kernel lifts those breakpoints out of
+    /// guest code when it takes control and writes them back on the continue,
+    /// stepping the reporting thread over its own site.
+    fn target_manages_breakpoint_sites(&self) -> bool {
+        true
+    }
+
     fn note_target_rediscovery_pending(&mut self) {
         self.reconnect_assist_after_continue = Some(Duration::ZERO);
     }
@@ -2664,6 +2672,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn note_target_rediscovery_complete(&mut self) {
         self.lock().note_target_rediscovery_complete();
+    }
+
+    fn target_manages_breakpoint_sites(&self) -> bool {
+        self.lock().target_manages_breakpoint_sites()
     }
 
     fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {

@@ -6,6 +6,7 @@ use std::{
 use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use crate::backend::MemoryOps;
+use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::{
     DebugBackend, DebugCapability, HwBreakpointAccess, WatchpointAccess, validate_hw_breakpoint,
 };
@@ -185,6 +186,18 @@ impl Breakpoint {
         self.spec.is_some() && !self.resolved
     }
 
+    /// The target accepted this breakpoint but its site was not resident, so
+    /// the target's own breakpoint table owes the opcode until the page is
+    /// paged in (`nt!KdSetOwedBreakpoints` writes it then). Only a
+    /// target-owned site can be owed; a site this debugger patches itself is
+    /// refused while its page is out, since nothing tells the debugger when
+    /// the page arrives. Distinct from [`Self::deferred`], which is a
+    /// breakpoint whose *address* is not known yet: this one has an address
+    /// the target has agreed to.
+    pub fn awaiting_page_in(&self) -> bool {
+        matches!(self.backend, BreakpointBackend::Kernel { original: None })
+    }
+
     pub fn specification(&self) -> Option<&str> {
         self.spec.as_ref().map(BreakpointSpec::label)
     }
@@ -267,18 +280,18 @@ impl BreakpointScope {
 /// * `Kernel`: written through the target's debugger API
 ///   (`DbgKdWriteBreakPointApi` / gdb `Z0`). The target tracks the original
 ///   instruction and handles step-over.
-/// * `GuestMemoryPatch`: the user-process path writes the architecture's
+/// * `GuestMemoryPatch`: a user-space site writes the architecture's
 ///   breakpoint instruction (`int3` on AMD64 or `brk #0xF000` on AArch64)
 ///   through the live VM memory handle against a specific process page table.
 ///   KD has no per-process breakpoint primitive: its API uses the current
 ///   address-space root. Writing the physical frame bypasses copy-on-write, so
 ///   every process mapping that frame sees the trap; the address-space filter
 ///   discards wrong-process hits, though those processes still pay for the
-///   exception.
-/// * `Hardware`: an architecture debug-register watch (`ba`). No memory is
-///   modified —
-///   the CPU traps on the linear address — so there is no displaced byte and no
-///   step-over dance. The DR slot and watch parameters live on
+///   exception. Kernel code is never patched this way, whatever the scope: see
+///   [`BreakpointManager::install_is_target_owned`].
+/// * `Hardware`: an architecture debug-register watch (`ba`). The CPU traps
+///   on the linear address without modifying memory or displacing an instruction.
+///   The DR slot and watch parameters live on
 ///   [`Breakpoint::hardware`]; hits are identified by DR6, not by RIP, so
 ///   hardware breakpoints stay out of the int3-hit predicates.
 #[derive(Debug, Clone, Copy)]
@@ -315,8 +328,15 @@ impl BreakpointPatch {
 
 #[derive(Debug, Clone)]
 enum BreakpointBackend {
-    Kernel { original: BreakpointPatch },
-    GuestMemoryPatch { original: BreakpointPatch },
+    /// Installed through the target's own breakpoint API. `original` is the
+    /// displaced instruction, or `None` when the site's page was not resident
+    /// and the target owes the write until it is paged in.
+    Kernel {
+        original: Option<BreakpointPatch>,
+    },
+    GuestMemoryPatch {
+        original: BreakpointPatch,
+    },
     Hardware,
     Deferred,
 }
@@ -339,8 +359,14 @@ impl BreakpointBackend {
     /// displace nothing (they never reach the masking path).
     fn original_bytes(&self) -> &[u8] {
         match self {
-            Self::Kernel { original } | Self::GuestMemoryPatch { original } => original.as_slice(),
-            Self::Hardware | Self::Deferred => &[],
+            Self::Kernel {
+                original: Some(original),
+            }
+            | Self::GuestMemoryPatch { original } => original.as_slice(),
+            // A site whose page was not resident at install time displaced
+            // nothing we have seen: there is no byte to overlay, and a read of
+            // that page cannot succeed while it stays paged out.
+            Self::Kernel { original: None } | Self::Hardware | Self::Deferred => &[],
         }
     }
 }
@@ -393,7 +419,7 @@ impl BreakpointManager {
         let backend = match hardware {
             Some(_) => BreakpointBackend::Hardware,
             None => BreakpointBackend::Kernel {
-                original: BreakpointPatch::single(0x90),
+                original: Some(BreakpointPatch::single(0x90)),
             },
         };
         self.breakpoints.insert(
@@ -585,7 +611,7 @@ impl BreakpointManager {
         } else {
             fallback_scope
         };
-        Self::validate_scope_capability(client, &scope)?;
+        Self::validate_scope_capability(client, debugger.arch(), address, &scope)?;
 
         let (address, resolved, backend) = match address {
             Some(address) => {
@@ -625,10 +651,35 @@ impl BreakpointManager {
         Ok(id)
     }
 
-    fn validate_scope_capability(client: &dyn DebugBackend, scope: &BreakpointScope) -> Result<()> {
-        let capability = match scope {
-            BreakpointScope::Kernel => DebugCapability::KernelBreakpoints,
-            BreakpointScope::Process { .. } => DebugCapability::UserModeBreakpoints,
+    /// Whether the target installs this site into its own breakpoint table,
+    /// rather than this debugger patching guest memory.
+    ///
+    /// Kernel code is shared by every process, so a process scope over a
+    /// kernel address is a filter on which hits are surfaced, not a license to
+    /// write a shared kernel page through host memory: patching the frame
+    /// ourselves would trap every process that executes it, leave the target's
+    /// own breakpoint bookkeeping unaware of the `int3`, and put this debugger
+    /// in charge of restoring a byte in code it does not own. The scope only
+    /// picks the page tables a user-space site is resolved through.
+    fn install_is_target_owned(
+        arch: Arch,
+        address: Option<VirtAddr>,
+        scope: &BreakpointScope,
+    ) -> bool {
+        matches!(scope, BreakpointScope::Kernel)
+            || address.is_some_and(|address| Self::is_kernel_space(arch, address))
+    }
+
+    fn validate_scope_capability(
+        client: &dyn DebugBackend,
+        arch: Arch,
+        address: Option<VirtAddr>,
+        scope: &BreakpointScope,
+    ) -> Result<()> {
+        let capability = if Self::install_is_target_owned(arch, address, scope) {
+            DebugCapability::KernelBreakpoints
+        } else {
+            DebugCapability::UserModeBreakpoints
         };
         if client
             .capabilities()
@@ -898,7 +949,10 @@ impl BreakpointManager {
         }
         if snapshot.resolved {
             self.ensure_site_available(snapshot.address, snapshot.hardware.is_some(), Some(id))?;
-            let backend = if matches!(snapshot.backend, BreakpointBackend::Deferred) {
+            let backend = if matches!(
+                &snapshot.backend,
+                BreakpointBackend::Deferred | BreakpointBackend::Kernel { original: None }
+            ) {
                 Some(Self::install_breakpoint(
                     client,
                     debugger,
@@ -1235,16 +1289,20 @@ impl BreakpointManager {
         ids.sort_unstable();
 
         let mut resolved_count = 0;
+        // One unarmable site must not stop the others: a driver's `INIT`
+        // section is gone once `DriverEntry` returns, and the target refuses
+        // a breakpoint there. Failures are collected and reported after every
+        // other specification has had its chance.
+        let mut failures: Vec<String> = Vec::new();
         for id in ids {
             let snapshot = self
                 .breakpoints
                 .get(&id)
                 .cloned()
                 .ok_or(Error::BPNotFound(id))?;
-            let spec = snapshot
-                .spec
-                .as_ref()
-                .ok_or_else(|| Error::Rsp(format!("breakpoint {id} lost its specification")))?;
+            let spec = snapshot.spec.as_ref().ok_or_else(|| {
+                Error::Breakpoint(format!("breakpoint {id} lost its specification"))
+            })?;
             let dtb = Self::resolution_dtb(debugger, Some(&snapshot.scope));
             let resolved = spec.resolve(debugger, dtb)?;
             let scope = resolved
@@ -1257,14 +1315,22 @@ impl BreakpointManager {
                 continue;
             }
 
-            if let Some(address) = resolved {
-                Self::validate_scope_capability(client, &scope)?;
-                Self::validate_breakpoint_target(debugger, address, &scope)?;
-                self.ensure_site_available(address, false, Some(id))?;
+            if let Some(address) = resolved
+                && let Err(error) =
+                    Self::validate_scope_capability(client, debugger.arch(), resolved, &scope)
+                        .and_then(|()| Self::validate_breakpoint_target(debugger, address, &scope))
+                        .and_then(|()| self.ensure_site_available(address, false, Some(id)))
+            {
+                failures.push(format!("breakpoint {id}: {error}"));
+                continue;
             }
 
-            if snapshot.resolved && snapshot.enabled {
-                Self::uninstall_breakpoint(client, debugger, &snapshot)?;
+            if snapshot.resolved
+                && snapshot.enabled
+                && let Err(error) = Self::uninstall_breakpoint(client, debugger, &snapshot)
+            {
+                failures.push(format!("breakpoint {id}: {error}"));
+                continue;
             }
 
             let backend = match resolved {
@@ -1276,11 +1342,13 @@ impl BreakpointManager {
                                 && let Err(rollback_error) =
                                     Self::install_existing_breakpoint(client, debugger, &snapshot)
                             {
-                                return Err(Error::Rsp(format!(
+                                failures.push(format!(
                                     "failed to move breakpoint {id}: {install_error}; restoring its previous installation also failed: {rollback_error}"
-                                )));
+                                ));
+                                continue;
                             }
-                            return Err(install_error);
+                            failures.push(format!("breakpoint {id}: {install_error}"));
+                            continue;
                         }
                     }
                 }
@@ -1302,6 +1370,9 @@ impl BreakpointManager {
                     bp.backend = BreakpointBackend::Deferred;
                 }
             }
+        }
+        if !failures.is_empty() {
+            return Err(Error::Breakpoint(failures.join("; ")));
         }
         Ok(resolved_count)
     }
@@ -1389,6 +1460,15 @@ impl BreakpointManager {
             .map(|bp| bp.id)
     }
 
+    /// Whether the target, not this debugger, wrote the breakpoint instruction
+    /// at `id` - so removing, stepping and rewriting it is the target's job.
+    /// An unknown id answers `false`: nothing to defer to.
+    pub fn target_owns_site(&self, id: u32) -> bool {
+        self.breakpoints
+            .get(&id)
+            .is_some_and(|bp| matches!(bp.backend, BreakpointBackend::Kernel { .. }))
+    }
+
     fn ensure_site_available(
         &self,
         address: VirtAddr,
@@ -1442,31 +1522,49 @@ impl BreakpointManager {
         address: VirtAddr,
         scope: &BreakpointScope,
     ) -> Result<BreakpointBackend> {
-        match scope {
-            BreakpointScope::Kernel => {
-                // Capture the displaced instruction before the kernel writes
-                // the breakpoint, so display paths can mask it back out. x86
-                // `int3` displaces one byte; AArch64 `brk #0xF000` displaces
-                // four. Kernel code is read through the kernel's own tables: an
-                // attached process's (KVA-shadow) CR3 need not map it.
-                let memory = debugger.address_space(debugger.kernel_dtb());
-                let mut original = BreakpointPatch::new(breakpoint_opcode(debugger.arch()).len());
-                memory.read_bytes(address, original.as_mut_slice())?;
-                client.set_breakpoint(address.0)?;
-                Ok(BreakpointBackend::Kernel { original })
-            }
-            BreakpointScope::Process { dtb, .. } => {
-                let memory = debugger.address_space(*dtb);
-                let opcode = breakpoint_opcode(debugger.arch());
-                let mut original = BreakpointPatch::new(opcode.len());
-                memory.read_bytes(address, original.as_mut_slice())?;
-                memory.write_bytes(address, opcode)?;
-                // The kernel does not know about a breakpoint patched through
-                // host memory, so update the backend's stop bookkeeping.
-                client.note_breakpoint_installed(address.0);
-                Ok(BreakpointBackend::GuestMemoryPatch { original })
-            }
+        if Self::install_is_target_owned(debugger.arch(), Some(address), scope) {
+            // Capture the displaced instruction before the kernel writes
+            // the breakpoint, so display paths can mask it back out. x86
+            // `int3` displaces one byte; AArch64 `brk #0xF000` displaces
+            // four. Kernel code is read through the kernel's own tables: an
+            // attached process's (KVA-shadow) CR3 need not map it.
+            let memory = debugger.address_space(debugger.kernel_dtb());
+            let mut original = BreakpointPatch::new(breakpoint_opcode(debugger.arch()).len());
+            // A page that is not resident has no bytes to displace yet.
+            // The target's own breakpoint table records the site and writes
+            // the opcode when the page arrives (`nt!KdpSetOwedBreakpoints`),
+            // so refusing here would reject a breakpoint the target accepts.
+            let original = match memory.read_bytes(address, original.as_mut_slice()) {
+                Ok(()) => Some(original),
+                Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => None,
+                Err(error) => return Err(error),
+            };
+            client.set_breakpoint(address.0)?;
+            return Ok(BreakpointBackend::Kernel { original });
         }
+        let dtb = match scope {
+            BreakpointScope::Process { dtb, .. } => *dtb,
+            BreakpointScope::Kernel => debugger.kernel_dtb(),
+        };
+        let memory = debugger.address_space(dtb);
+        let opcode = breakpoint_opcode(debugger.arch());
+        let mut original = BreakpointPatch::new(opcode.len());
+        // This debugger owns the byte at a user-space site, and it cannot
+        // write one into a page that is not there. Nothing reports the page
+        // arriving either, so say so now instead of accepting a site that
+        // would never arm.
+        match memory.read_bytes(address, original.as_mut_slice()) {
+            Ok(()) => {}
+            Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => {
+                return Err(Self::non_resident_site_error(debugger, dtb, address, scope));
+            }
+            Err(error) => return Err(error),
+        }
+        memory.write_bytes(address, opcode)?;
+        // The kernel does not know about a breakpoint patched through
+        // host memory, so update the backend's stop bookkeeping.
+        client.note_breakpoint_installed(address.0);
+        Ok(BreakpointBackend::GuestMemoryPatch { original })
     }
 
     fn install_existing_breakpoint(
@@ -1475,9 +1573,8 @@ impl BreakpointManager {
         bp: &Breakpoint,
     ) -> Result<()> {
         match (&bp.scope, &bp.backend) {
-            (BreakpointScope::Kernel, BreakpointBackend::Kernel { .. }) => {
-                client.set_breakpoint(bp.address.0)
-            }
+            // The target owns the byte whatever the scope filters hits on.
+            (_, BreakpointBackend::Kernel { .. }) => client.set_breakpoint(bp.address.0),
             (BreakpointScope::Process { dtb, .. }, BreakpointBackend::GuestMemoryPatch { .. }) => {
                 let memory = debugger.address_space(*dtb);
                 memory.write_bytes(bp.address, breakpoint_opcode(debugger.arch()))?;
@@ -1504,9 +1601,7 @@ impl BreakpointManager {
         bp: &Breakpoint,
     ) -> Result<()> {
         match (&bp.scope, &bp.backend) {
-            (BreakpointScope::Kernel, BreakpointBackend::Kernel { .. }) => {
-                client.remove_breakpoint(bp.address.0)
-            }
+            (_, BreakpointBackend::Kernel { .. }) => client.remove_breakpoint(bp.address.0),
             (
                 BreakpointScope::Process { dtb, .. },
                 BreakpointBackend::GuestMemoryPatch { original },
@@ -1522,7 +1617,22 @@ impl BreakpointManager {
                     "hardware breakpoint missing parameters".into(),
                 )),
             },
-            _ => Err(Error::Rsp("breakpoint backend/scope mismatch".into())),
+            _ => Err(Error::Breakpoint(
+                "breakpoint backend/scope mismatch".into(),
+            )),
+        }
+    }
+
+    /// Whether `address` is a kernel-space virtual address on this architecture.
+    ///
+    /// AMD64 kernel space is the canonical upper half; AArch64 selects TTBR1 by
+    /// bit 55, the same test the executable-permission check above relies on.
+    /// Windows places its kernel in the upper half on both, so the AMD64 bound
+    /// also holds there, but the bit is what the hardware actually uses.
+    fn is_kernel_space(arch: Arch, address: VirtAddr) -> bool {
+        match arch {
+            Arch::Amd64 => looks_like_kernel_pointer(address.0),
+            Arch::Arm64 => address.0 & (1 << 55) != 0,
         }
     }
 
@@ -1537,19 +1647,33 @@ impl BreakpointManager {
             BreakpointScope::Process { dtb, .. } => *dtb,
         };
         let memory = debugger.address_space(dtb);
-        let translation = memory
-            .virt_to_phys(address)?
-            .ok_or(Error::BadVirtualAddress(address))?;
+        let translation = match memory.virt_to_phys(address) {
+            Ok(Some(translation)) => Some(translation),
+            // The page is not resident. Kernel code is demand-paged and a
+            // driver's `INIT` section is discarded outright, so a debugger that
+            // insists on a translation cannot break on either, while the
+            // target itself accepts the site and owes the write until the page
+            // arrives (`nt!KdSetOwedBreakpoints`). Hand that decision to the
+            // target rather than pre-empting it.
+            Ok(None) if Self::is_kernel_space(debugger.arch(), address) => None,
+            // A user-space site is this debugger's own `int3` in that page,
+            // and there is no page to put it in.
+            Ok(None) => return Err(Self::non_resident_site_error(debugger, dtb, address, scope)),
+            Err(error) => return Err(error),
+        };
 
         // AArch64 table-level execute restrictions depend on TCR_EL1
         // hierarchical-permission controls, which passive memory inspection
         // does not capture. Do not reject a TTBR1 address solely from descriptor
         // bits; known kernel modules are still checked against PE executable
         // sections below. TTBR0 user pages can be classified by effective UXN.
-        let nx = match (debugger.arch(), address.0 & (1 << 55) != 0) {
-            (Arch::Arm64, true) => false,
-            (Arch::Arm64, false) => translation.uxn,
-            _ => translation.nx,
+        let nx = match (debugger.arch(), address.0 & (1 << 55) != 0, &translation) {
+            (Arch::Arm64, true, _) => false,
+            (Arch::Arm64, false, Some(translation)) => translation.uxn,
+            (_, _, Some(translation)) => translation.nx,
+            // No translation to judge: the executable-section check below is
+            // the only evidence available, and it does not need the page.
+            (_, _, None) => false,
         };
 
         if nx {
@@ -1586,6 +1710,37 @@ impl BreakpointManager {
         Ok(())
     }
 
+    /// A user-space breakpoint site whose page is not resident.
+    ///
+    /// Unlike a kernel site, which the target records and writes when the
+    /// page arrives, a user-space site is an `int3` this debugger patches
+    /// into the page itself: there is nothing to patch while the page is out,
+    /// and no event tells the debugger it arrived. Name the module when one
+    /// covers the address, since that distinguishes code that simply has not
+    /// been touched yet from an address that is merely wrong.
+    fn non_resident_site_error(
+        debugger: &Target,
+        dtb: Dtb,
+        address: VirtAddr,
+        scope: &BreakpointScope,
+    ) -> Error {
+        match debugger.symbols.find_module_for_address(dtb, address) {
+            Some(module) => Error::Breakpoint(format!(
+                "{:#x} is in {}+{:#x} but that page is not paged in; consider using \
+                 `ba e1 {:#x}` instead",
+                address.0,
+                ModuleInfo::derive_short_name(&module.name),
+                address.0.saturating_sub(module.base_address.0),
+                address.0,
+            )),
+            None => Error::Breakpoint(format!(
+                "{:#x} is not mapped in {} and no loaded image covers it",
+                address.0,
+                scope.label(),
+            )),
+        }
+    }
+
     fn find_kernel_module_containing_address(
         debugger: &Target,
         address: VirtAddr,
@@ -1610,13 +1765,17 @@ pub enum BreakpointHitResult {
 mod tests {
     use std::time::Duration;
 
+    use crate::types::Arch;
+
     use super::{
-        Breakpoint, BreakpointBackend, BreakpointHitDisposition, BreakpointHitResult,
-        BreakpointManager, BreakpointPatch, BreakpointScope, BreakpointSpec, HardwareBreakpoint,
+        Breakpoint, BreakpointBackend, BreakpointConfig, BreakpointHitDisposition,
+        BreakpointHitResult, BreakpointManager, BreakpointPatch, BreakpointScope, BreakpointSpec,
+        HardwareBreakpoint,
     };
     use crate::dbg_backend::{DebugBackend, HwBreakpointAccess, StopEvent};
     use crate::error::{Error, Result};
     use crate::gdb::RegisterMap;
+    use crate::session::session_over_memory;
     use crate::types::VirtAddr;
 
     #[test]
@@ -1722,7 +1881,7 @@ mod tests {
                 temporary: false,
                 hardware: None,
                 backend: BreakpointBackend::Kernel {
-                    original: BreakpointPatch::single(0x90),
+                    original: Some(BreakpointPatch::single(0x90)),
                 },
             },
         );
@@ -1938,6 +2097,227 @@ mod tests {
     }
 
     #[test]
+    fn one_unarmable_site_does_not_block_the_others() {
+        let session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session.target.symbols.inject_module_for_test(
+            1,
+            Vec::new(),
+            &[("Refused", 0x10), ("Allowed", 0x20)],
+        );
+        session.target.symbols.inject_source_lines_for_test(
+            1,
+            dtb,
+            VirtAddr(0x1000),
+            0x1000,
+            "driver.c",
+            &[],
+        );
+
+        let mut manager = BreakpointManager::new();
+        for (id, name) in [(0u32, "driver!Refused"), (1, "driver!Allowed")] {
+            manager.insert_for_test(id, VirtAddr(0), true, None);
+            let bp = manager.breakpoints.get_mut(&id).unwrap();
+            bp.spec = Some(BreakpointSpec::Symbol {
+                name: name.to_string(),
+                skip_prologue: false,
+            });
+            bp.resolved = false;
+            bp.backend = BreakpointBackend::Deferred;
+        }
+
+        let mut client = SlotRecorder::refusing(0x1010);
+        let error = manager
+            .resolve_symbolic(&mut client, &session.target)
+            .expect_err("the refused site is reported");
+        assert!(
+            error.to_string().contains("breakpoint 0"),
+            "failure names the breakpoint: {error}"
+        );
+        assert!(!manager.breakpoints[&0].resolved);
+        let allowed = &manager.breakpoints[&1];
+        assert!(
+            allowed.resolved && allowed.address == VirtAddr(0x1020),
+            "the armable site still resolved: {allowed:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_kernel_site_installs_and_reports_the_owed_write() {
+        let session = session_over_memory(0x1000, &[0u8; 0x40]);
+        let address = VirtAddr(0xfffff80000001000);
+        let mut manager = BreakpointManager::new();
+        let mut client = SlotRecorder::accepting();
+
+        let id = manager
+            .add_configured(
+                &mut client,
+                &session.target,
+                address,
+                None,
+                BreakpointConfig::default(),
+            )
+            .expect("a non-resident kernel site is the target's decision");
+
+        assert_eq!(client.installed, vec![address.0]);
+        let breakpoint = &manager.breakpoints[&id];
+        assert!(
+            breakpoint.awaiting_page_in(),
+            "an unread site must report that the write is owed"
+        );
+        // Nothing was displaced while the page remained unreadable, so there
+        // is no byte to mask into a view yet.
+        let mut buffer = [0xccu8; 4];
+        manager.mask_breakpoint_bytes(address, &mut buffer, session.target.current_dtb());
+        assert_eq!(buffer, [0xcc; 4], "masked bytes it never read");
+    }
+
+    #[test]
+    fn a_non_resident_user_site_is_refused_and_names_the_page() {
+        let session = session_over_memory(0x1000, &[0u8; 0x40]);
+        let dtb = session.target.current_dtb();
+        let mapped = VirtAddr(0x00007ff000001000);
+        session
+            .target
+            .symbols
+            .inject_source_lines_for_test(1, dtb, mapped, 0x1000, "user.c", &[]);
+        let scope = BreakpointScope::Process {
+            dtb,
+            pid: 4,
+            name: "mspaint.exe".to_string(),
+        };
+        let config = |scope: &BreakpointScope| BreakpointConfig {
+            scope: Some(scope.clone()),
+            ..BreakpointConfig::default()
+        };
+
+        let mut manager = BreakpointManager::new();
+        let mut client = SlotRecorder::accepting();
+        let error = manager
+            .add_configured(&mut client, &session.target, mapped, None, config(&scope))
+            .expect_err("a page this debugger cannot write is not a site it can arm");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("not paged in") && message.contains("ba e1"),
+            "the refusal must name the missing page and the mechanism that works: {message}"
+        );
+        assert!(
+            manager.list().is_empty(),
+            "a refused site must not be left registered"
+        );
+        assert!(
+            client.installed.is_empty(),
+            "a host-patched site must not enter the target's breakpoint table"
+        );
+    }
+
+    #[test]
+    fn kernel_space_is_classified_per_architecture() {
+        for (arch, kernel, user) in [
+            (
+                Arch::Amd64,
+                VirtAddr(0xfffff80000001000),
+                VirtAddr(0x00007ff000001000),
+            ),
+            (
+                Arch::Arm64,
+                VirtAddr(0xffff800000001000),
+                VirtAddr(0x00007ff000001000),
+            ),
+        ] {
+            assert!(
+                BreakpointManager::is_kernel_space(arch, kernel),
+                "{arch:?} rejected its own kernel address {:#x}",
+                kernel.0
+            );
+            assert!(
+                !BreakpointManager::is_kernel_space(arch, user),
+                "{arch:?} accepted a user address {:#x} as kernel space",
+                user.0
+            );
+        }
+        // An AArch64 kernel address is below the AMD64 canonical bound, so the
+        // bit-55 rule is doing real work rather than agreeing by accident.
+        assert!(!BreakpointManager::is_kernel_space(
+            Arch::Amd64,
+            VirtAddr(0x0080000000001000)
+        ));
+        assert!(BreakpointManager::is_kernel_space(
+            Arch::Arm64,
+            VirtAddr(0x0080000000001000)
+        ));
+    }
+
+    #[test]
+    fn conditions_supplied_as_text_are_enforced() {
+        let session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let mut client = SlotRecorder::accepting();
+
+        for (condition, holds) in [("0", false), ("1", true)] {
+            let mut manager = BreakpointManager::new();
+            let id = manager
+                .add_configured(
+                    &mut client,
+                    &session.target,
+                    VirtAddr(0x1000),
+                    None,
+                    BreakpointConfig {
+                        condition: Some(condition.to_string()),
+                        ..BreakpointConfig::default()
+                    },
+                )
+                .expect("configured breakpoint installs");
+            let bp = &manager.breakpoints[&id];
+            assert_eq!(
+                bp.evaluate_condition(&session.target).unwrap(),
+                holds,
+                "condition {condition:?} was stored but not evaluated"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_symbol_specs_apply_their_offset() {
+        let session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session
+            .target
+            .symbols
+            .inject_module_for_test(1, Vec::new(), &[("DriverEntry", 0)]);
+        session.target.symbols.inject_source_lines_for_test(
+            1,
+            dtb,
+            VirtAddr(0x1000),
+            0x1000,
+            "driver.c",
+            &[],
+        );
+
+        let resolve = |name: &str| {
+            BreakpointSpec::Symbol {
+                name: name.to_string(),
+                skip_prologue: false,
+            }
+            .resolve(&session.target, dtb)
+            .unwrap()
+        };
+
+        assert_eq!(resolve("driver!DriverEntry"), Some(VirtAddr(0x1000)));
+        assert_eq!(resolve("driver!DriverEntry+0x29"), Some(VirtAddr(0x1029)));
+        // Deferred offsets are hexadecimal even without an explicit prefix.
+        assert_eq!(resolve("driver!DriverEntry+29"), Some(VirtAddr(0x1029)));
+        assert_eq!(resolve("driver!DriverEntry+0n16"), Some(VirtAddr(0x1010)));
+        assert_eq!(resolve("driver!DriverEntry-8"), Some(VirtAddr(0xff8)));
+        // An absent symbol stays deferred rather than resolving to the bare
+        // offset.
+        assert_eq!(resolve("driver!Missing+0x10"), None);
+        assert_eq!(resolve("absent!DriverEntry+0x10"), None);
+    }
+
+    #[test]
     fn target_reload_keeps_symbolic_identity_deferred_and_drops_numeric_points() {
         let mut manager = BreakpointManager::new();
         manager.insert_for_test(1, VirtAddr(0x1000), true, None);
@@ -2006,6 +2386,10 @@ mod tests {
     struct SlotRecorder {
         register_map: RegisterMap,
         cleared: Vec<u8>,
+        /// Address the target refuses a breakpoint at, like a driver's
+        /// discarded `INIT` section.
+        refused: Option<u64>,
+        installed: Vec<u64>,
     }
 
     impl SlotRecorder {
@@ -2013,6 +2397,19 @@ mod tests {
             Self {
                 register_map: RegisterMap::default(),
                 cleared: Vec::new(),
+                refused: None,
+                installed: Vec::new(),
+            }
+        }
+
+        fn accepting() -> Self {
+            Self::refusing(u64::MAX)
+        }
+
+        fn refusing(address: u64) -> Self {
+            Self {
+                refused: Some(address),
+                ..Self::new()
             }
         }
     }
@@ -2021,14 +2418,27 @@ mod tests {
         fn register_map(&self) -> &RegisterMap {
             &self.register_map
         }
+        /// Host-patched (user-space) sites are refused outright without this,
+        /// so the recorder has to look like a live backend that can patch
+        /// guest memory.
+        fn supports_user_mode_breakpoints(&self) -> bool {
+            true
+        }
         fn read_registers(&mut self) -> Result<Vec<u8>> {
             Err(Error::NotSupported)
         }
         fn write_registers(&mut self, _data: &[u8]) -> Result<()> {
             Err(Error::NotSupported)
         }
-        fn set_breakpoint(&mut self, _addr: u64) -> Result<()> {
-            Err(Error::NotSupported)
+        fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
+            if self.refused == Some(addr) {
+                return Err(Error::Kd("kernel returned NTSTATUS 0xc0000001".into()));
+            }
+            if self.refused.is_none() {
+                return Err(Error::NotSupported);
+            }
+            self.installed.push(addr);
+            Ok(())
         }
         fn remove_breakpoint(&mut self, _addr: u64) -> Result<()> {
             Err(Error::NotSupported)

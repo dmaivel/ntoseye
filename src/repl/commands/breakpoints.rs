@@ -48,7 +48,7 @@ repl_command! {
     cmd_ba;
     names: ["ba"],
     usage: "ba [/1] [/p <pid>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
-    summary: "Set a hardware (debug-register) breakpoint (KD backend only).",
+    summary: "Set a hardware (debug-register) breakpoint (KD and KDNET only).",
     details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). e.g. ba w4 nt!MyGlobal",
     completion: [None, Expression],
     run_state: Halted,
@@ -739,6 +739,12 @@ impl ReplState<'_> {
         ) {
             Ok(id) => {
                 self.caches.refresh_breakpoints(&self.ctx.breakpoints);
+                let breakpoint = self
+                    .ctx
+                    .breakpoints
+                    .list()
+                    .into_iter()
+                    .find(|bp| bp.id == id);
                 outln!(
                     "breakpoint {} set at {}{}{}\n",
                     ui::bp_id(id),
@@ -746,15 +752,25 @@ impl ReplState<'_> {
                     symbol
                         .map(|symbol| format!(" ({})", ui::symbol(&symbol)))
                         .unwrap_or_default(),
-                    self.ctx
-                        .breakpoints
-                        .list()
-                        .into_iter()
-                        .find(|bp| bp.id == id)
+                    breakpoint
+                        .as_ref()
                         .map(|bp| format!(" ({})", bp.scope.label()))
                         .unwrap_or_default()
                         .bright_black(),
                 );
+                // The target accepted the site into its own table but its page
+                // is out, so the opcode is owed. Say so rather than letting the
+                // confirmation imply an armed site.
+                if breakpoint.is_some_and(|bp| bp.awaiting_page_in()) {
+                    outln!(
+                        "{}\n",
+                        ui::muted(
+                            "  site is not resident; the target writes the breakpoint when the \
+                             page is paged in (`ba e1` traps a site that never pages in on its \
+                             own)"
+                        )
+                    );
+                }
             }
             Err(error) => error!("{error}"),
         }
@@ -833,7 +849,14 @@ impl ReplState<'_> {
             };
             builder.push_record(vec![
                 ui::bp_id(bp.id),
-                if bp.enabled { "e" } else { "d" }.to_string(),
+                match (bp.enabled, bp.awaiting_page_in()) {
+                    // `o`: enabled and accepted by the target, but the opcode
+                    // is owed until its page is resident.
+                    (true, true) => "o",
+                    (true, false) => "e",
+                    (false, _) => "d",
+                }
+                .to_string(),
                 bp.resolved_address()
                     .map(|address| ui::addr(address.0))
                     .unwrap_or_else(|| "-".to_string()),

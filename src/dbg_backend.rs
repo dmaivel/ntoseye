@@ -548,6 +548,15 @@ pub trait DebugBackend {
     fn note_breakpoint_installed(&mut self, _addr: u64) {}
     fn note_breakpoint_uninstalled(&mut self, _addr: u64) {}
 
+    /// Whether the target removes, steps over, and reinstalls its breakpoint sites.
+    ///
+    /// KD owns this lifecycle. Host-side re-arming can leave an installed `int3`
+    /// untracked, causing resume to mistake it for a hard-coded breakpoint.
+    /// GDB stubs leave patched bytes in place, so the host manages them.
+    fn target_manages_breakpoint_sites(&self) -> bool {
+        false
+    }
+
     /// Called once after the [`Target`] is constructed, giving the backend a
     /// chance to read guest state that requires symbol resolution. DmpBackend
     /// uses this to extract per-CPU registers from the PRCB ContextFrame.

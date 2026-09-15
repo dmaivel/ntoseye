@@ -2855,6 +2855,12 @@ pub fn step_over_current_breakpoint(
         return Ok(false);
     };
 
+    // KD removes and reinstalls its own breakpoint sites around stops.
+    // Host-side step-over would temporarily leave the site untracked.
+    if backend.target_manages_breakpoint_sites() && breakpoints.target_owns_site(bp_id) {
+        return Ok(false);
+    }
+
     match (breakpoints.disable(backend, debugger, bp_id), cr3) {
         (Ok(()), _) => {}
         (Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)), Some(cr3)) => {
@@ -2933,6 +2939,7 @@ mod tests {
         continues: Arc<AtomicUsize>,
         interrupt_events: VecDeque<StopEvent>,
         modules_changed: bool,
+        target_manages_sites: bool,
     }
 
     impl MockBackend {
@@ -2950,6 +2957,7 @@ mod tests {
                 continues: Arc::new(AtomicUsize::new(0)),
                 interrupt_events: VecDeque::new(),
                 modules_changed: false,
+                target_manages_sites: false,
             }
         }
 
@@ -2958,6 +2966,12 @@ mod tests {
             self
         }
 
+        /// Model a target that owns its breakpoint table (KD), not a stub
+        /// that leaves our patched byte in place across a stop.
+        fn target_managed_sites(mut self) -> Self {
+            self.target_manages_sites = true;
+            self
+        }
 
         fn queue_interrupt(&mut self, event: StopEvent) {
             self.interrupt_events.push_back(event);
@@ -3002,6 +3016,9 @@ mod tests {
             } else {
                 Err(Error::NotSupported)
             }
+        }
+        fn target_manages_breakpoint_sites(&self) -> bool {
+            self.target_manages_sites
         }
         fn continue_execution(&mut self) -> Result<()> {
             self.continues.fetch_add(1, Ordering::Relaxed);
@@ -3255,6 +3272,33 @@ mod tests {
 
         assert_eq!(backend.get("rip"), 0x2001);
         assert_eq!(backend.writes, 0);
+    }
+
+    #[test]
+    fn a_target_owned_breakpoint_is_left_for_the_target_to_step_over() {
+        let session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let mut backend = MockBackend::new().target_managed_sites();
+        // A dance would succeed here, so only the ownership check can stop it.
+        backend.allow_breakpoints = true;
+        backend.set("rip", 0x1000);
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+        let register_map = backend.register_map().clone();
+
+        let stepped = step_over_current_breakpoint(
+            &mut backend,
+            &register_map,
+            &session.target,
+            &mut manager,
+        )
+        .unwrap();
+
+        assert!(!stepped, "host stepped a site the target owns");
+        assert!(
+            manager.list()[0].enabled,
+            "the site was disowned across the resume"
+        );
+        assert_eq!(backend.writes, 0, "the guest context was rewritten");
     }
 
     fn manager_with_hw(slot: u8, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {

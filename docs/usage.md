@@ -255,8 +255,8 @@ ba w8 nt!KiBalanceSetManagerLastCheckTick
 - `bp [/1] [/p <pid>] [/t <ethread>] [/w "<expr>"] <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a breakpoint.
 - `bu [/1] [/p <pid>] [/t <ethread>] [/w "<expr>"] <symbol> [<passes>] [if <expr>] [do "<commands>"]` - Set a deferred symbolic breakpoint.
 - `bm [/1] [/p <pid>] [/t <ethread>] [/w "<expr>"] <symbol-pattern> [<passes>] [if <expr>] [do "<commands>"]` - Set deferred symbolic breakpoints for matching symbols.
-- `ba [/1] [/p <pid>] [/t <ethread>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (KD backend only); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
-- `bl` - List all breakpoints.
+- `ba [/1] [/p <pid>] [/t <ethread>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (KD and KDNET only); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
+- `bl` - List all breakpoints. The status column reads `e` enabled, `d` disabled, `o` owed.
 - `bc <id|id-id|*>` - Clear one or more breakpoints by ID.
 - `bd <id|id-id|*>` - Disable one or more breakpoints by ID.
 - `be <id|id-id|*>` - Enable one or more breakpoints by ID.
@@ -264,6 +264,14 @@ ba w8 nt!KiBalanceSetManagerLastCheckTick
 - `bs <id> <commands|clear>` (`bpa`) - Set or clear a breakpoint command action.
 - `br <id> <newid>` - Renumber a breakpoint.
 - `bpp <id> <passes>` - Reset a breakpoint pass count.
+
+A kernel code breakpoint can target a non-resident page. KD records the site and writes the breakpoint when the page arrives. Until then, `bl` shows `o` (owed).
+
+User-space code breakpoints require resident memory. If the page is absent, set the breakpoint after the code has run, or use `ba e1 <address>`, which requires no memory write.
+
+A `ba e1` stop can precede the instruction page fault, leaving no bytes to disassemble. Registers and the stack remain available. Use `t` to execute the fetch and bring the page in; `p` needs to decode the instruction first.
+
+`/p` filters reported hits; it does not change how a breakpoint is installed. Kernel sites are always target-managed. User-space sites are patched through the selected process’s page tables. Shared physical pages can therefore trap other processes too; those hits are discarded but still incur debugger round trips.
 
 KD has a fixed 32-entry software-breakpoint table. A session killed with `SIGKILL` leaves its entries installed and can prevent later breakpoints at those addresses.
 
