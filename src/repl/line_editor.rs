@@ -11,6 +11,8 @@ use owo_colors::OwoColorize;
 use std::borrow::Cow;
 
 use crate::expr::Expr;
+use crate::symbols::ParsedType;
+use crate::types::VirtAddr;
 use crate::ui;
 
 use crate::repl::*;
@@ -249,7 +251,8 @@ impl Completer for MyCompleter {
                     .copied()
                     .unwrap_or(CompletionStrategy::None);
 
-                return self.apply_strategy(strat, CompletionInput::new(text_before_cursor, pos));
+                let input = CompletionInput::new(text_before_cursor, pos);
+                return self.apply_strategy(strat, input);
             }
         }
 
@@ -266,7 +269,8 @@ impl Completer for MyCompleter {
                 let user_cmds = self.caches.user_commands.read().unwrap();
                 infer_alias_completion_strategy(&expansion, arg_index, &user_cmds)
             };
-            return self.apply_strategy(strategy, CompletionInput::new(text_before_cursor, pos));
+            let input = CompletionInput::new(text_before_cursor, pos);
+            return self.apply_strategy(strategy, input);
         }
 
         vec![]
@@ -456,11 +460,14 @@ impl MyCompleter {
         if preceding.ends_with('@') {
             return self.complete_registers(input);
         }
+        if preceding.ends_with("$!") {
+            return self.complete_locals(input);
+        }
 
         if preceding.ends_with('[') {
             return vec![];
         }
-        if preceding.ends_with("->") || preceding.ends_with('!') {
+        if preceding.ends_with("->") || preceding.ends_with('.') || preceding.ends_with('!') {
             return self.complete_symbol(input, false);
         }
 
@@ -471,8 +478,32 @@ impl MyCompleter {
         if is_cast_completion_context(preceding) {
             append_unique(&mut suggestions, self.complete_cast_types(input));
         }
+        append_unique(&mut suggestions, self.complete_locals(input));
         append_unique(&mut suggestions, self.complete_symbol_names(input, 1024));
         suggestions
+    }
+
+    fn complete_locals(&self, input: CompletionInput<'_>) -> Vec<Suggestion> {
+        let names = self.target.with(|target| {
+            let Some(target) = target else {
+                return Vec::new();
+            };
+            let Some(ip) = target.register_value(target.instruction_pointer_register()) else {
+                return Vec::new();
+            };
+            let Ok(Some(locals)) = target.procedure_locals(VirtAddr(ip)) else {
+                return Vec::new();
+            };
+            let mut names: Vec<_> = locals
+                .iter()
+                .filter(|local| local.name.starts_with(input.prefix))
+                .map(|local| local.name.clone())
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        });
+        make_suggestions(names, "Local", input.span_start, input.pos)
     }
 
     fn complete_symbol(
@@ -491,10 +522,51 @@ impl MyCompleter {
                 return vec![];
             }
 
-            if let Some(expr_text) = preceding.strip_suffix("->") {
+            if let Some(expr_text) = preceding
+                .strip_suffix("->")
+                .or_else(|| preceding.strip_suffix('.'))
+            {
                 if let Ok(expr) = Expr::parse(expr_text) {
                     let dtb = *self.caches.dtb.read().unwrap();
-                    let fields = expr.complete_fields(&self.caches.symbol_store, dtb, input.prefix);
+                    let static_fields =
+                        expr.complete_fields(&self.caches.symbol_store, dtb, input.prefix);
+                    if !static_fields.is_empty() {
+                        return make_suggestions(
+                            static_fields,
+                            "Field",
+                            input.span_start,
+                            input.pos,
+                        );
+                    }
+                    let fields = self
+                        .target
+                        .with(|target| {
+                            let target = target?;
+                            let value = expr.evaluate(target).ok()?;
+                            let mut type_data = value.type_data()?;
+                            if preceding.ends_with("->") {
+                                let ParsedType::Pointer(inner) = type_data else {
+                                    return None;
+                                };
+                                type_data = inner;
+                            }
+                            let (ParsedType::Struct(name) | ParsedType::Union(name)) = type_data
+                            else {
+                                return None;
+                            };
+                            let layout = target
+                                .symbols
+                                .find_type_across_modules(target.current_dtb(), name)?;
+                            let mut fields: Vec<_> = layout
+                                .fields
+                                .keys()
+                                .filter(|name| name.starts_with(input.prefix))
+                                .cloned()
+                                .collect();
+                            fields.sort();
+                            Some(fields)
+                        })
+                        .unwrap_or_default();
                     if !fields.is_empty() {
                         return make_suggestions(fields, "Field", input.span_start, input.pos);
                     }
