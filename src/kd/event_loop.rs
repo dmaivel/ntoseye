@@ -27,7 +27,8 @@ use super::{
     KD_INITIAL_PROGRESS_INTERVAL, KD_INITIAL_TIMEOUT_DEFAULT, KD_INITIAL_TIMEOUT_ENV,
     KD_RECONNECT_BREAKIN_INTERVAL, KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT,
     KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE, PUMP_POLL, STATUS_BREAKPOINT,
-    StateChange, handle_debug_io_with_output, handle_file_io, should_advance_pc_before_continue,
+    StateChange, breakpoint_instruction_at, context, context_arm64, handle_debug_io_with_output,
+    handle_file_io,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -574,22 +575,53 @@ pub fn pump_assist_breakin(
     Ok(())
 }
 
+/// The program counter `processor` will resume from, read from the target
+/// rather than from a recorded stop: hosts rewind and rewrite the PC between a
+/// stop and the resume, so only the target knows what is about to execute.
+pub fn read_program_counter(
+    framing: &mut KdFraming<KdTransport>,
+    register_map: &RegisterMap,
+    arch: Arch,
+    processor: u16,
+) -> Result<u64> {
+    let context = with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+        api::get_context(framing, processor, context_flags_for(arch))
+    })?;
+    register_map.read_u64("rip", &context)
+}
+
+fn context_flags_for(arch: Arch) -> u32 {
+    match arch {
+        Arch::Amd64 => context::CONTEXT_ALL,
+        Arch::Arm64 => context_arm64::CONTEXT_ALL,
+    }
+}
+
 /// KD reports software-breakpoint stops with the program counter still
 /// pointing at the breakpoint instruction; step it past before resuming.
+///
+/// `expected_pc` is the PC the caller decided about. Advancing a PC that has
+/// moved since would step past a byte nobody inspected, so a mismatch is an
+/// error rather than a best guess.
 pub fn advance_pc_past_breakpoint(
     framing: &mut KdFraming<KdTransport>,
     register_map: &RegisterMap,
     arch: Arch,
     processor: u16,
+    expected_pc: u64,
 ) -> Result<()> {
-    let context_flags = match arch {
-        Arch::Amd64 => super::context::CONTEXT_ALL,
-        Arch::Arm64 => super::context_arm64::CONTEXT_ALL,
-    };
+    let context_flags = context_flags_for(arch);
     let mut context = with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
         api::get_context(framing, processor, context_flags)
     })?;
     let pc = register_map.read_u64("rip", &context)?;
+    if pc != expected_pc {
+        return Err(Error::Kd(format!(
+            "refusing to step p{} past a breakpoint: the PC moved from {expected_pc:#x} to \
+             {pc:#x} after the decision was made",
+            processor + 1
+        )));
+    }
     let next_pc = pc.wrapping_add(register_map.breakpoint_step_size() as u64);
     register_map.write_u64("rip", &mut context, next_pc)?;
     kd_trace!(
@@ -694,8 +726,20 @@ impl ContinueDrain {
             stop.processor + 1,
             self.remaining
         );
-        if should_advance_pc_before_continue(stop.exception_code, false) {
-            advance_pc_past_breakpoint(framing, &self.register_map, arch, stop.processor)?;
+        // Absorbed stops sit on a break-in instruction or the site we resumed
+        // from. Only step the PC when the byte there really is a breakpoint
+        // instruction: a displaced one belongs to whoever installed it, and
+        // stepping past it would resume inside the instruction it replaced.
+        if stop.exception_code == STATUS_BREAKPOINT
+            && breakpoint_instruction_at(framing, arch, stop.processor, stop.program_counter)
+        {
+            advance_pc_past_breakpoint(
+                framing,
+                &self.register_map,
+                arch,
+                stop.processor,
+                stop.program_counter,
+            )?;
         }
         continue_transparent_state_change(framing, arch, stop)
     }
@@ -821,4 +865,48 @@ pub fn run_pump(
         }
     }
     framing
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+
+    use super::*;
+    use crate::kd::api::test_wire::{
+        INITIAL_PACKET_ID, ack_then_reply, build_reply, first_outbound_id,
+    };
+    use crate::kd::context;
+
+    #[test]
+    fn advance_pc_refuses_a_program_counter_that_moved_since_the_decision() {
+        let register_map = context::build_register_map();
+        let mut guest_context = vec![0u8; context::CONTEXT_SIZE];
+        register_map
+            .write_u64("rip", &mut guest_context, 0xffff_f800_0011_2233)
+            .unwrap();
+        let reply = build_reply(api::DBGKD_GET_CONTEXT, 0, &[], &guest_context);
+        let stream = ack_then_reply(first_outbound_id(), INITIAL_PACKET_ID, &reply);
+
+        let (local, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(&stream).unwrap();
+        let mut framing = KdFraming::new(KdTransport::Serial(local));
+
+        let error = advance_pc_past_breakpoint(
+            &mut framing,
+            &register_map,
+            Arch::Amd64,
+            0,
+            0xffff_f800_0011_0000,
+        )
+        .unwrap_err();
+
+        match error {
+            Error::Kd(message) => assert!(
+                message.contains("the PC moved"),
+                "unexpected message: {message}"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

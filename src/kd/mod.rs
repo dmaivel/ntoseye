@@ -302,15 +302,15 @@ fn parse_thread_id_for_processor_count(tid: &str, processor_count: u16) -> Resul
     Ok(processor)
 }
 
-fn should_advance_pc_before_continue(exception_code: u32, managed_breakpoint_stop: bool) -> bool {
-    exception_code == STATUS_BREAKPOINT && !managed_breakpoint_stop
-}
-
 /// Whether the instruction at `pc` is the KD breakpoint instruction (`int3`
 /// on AMD64, `BRK #0xF000` on ARM64), read through the target so it reflects
-/// what will execute on resume. An unreadable PC returns `true` to preserve
-/// hard-coded breaks in unmapped-looking places.
-fn breakpoint_instruction_at(
+/// what will execute on resume.
+///
+/// An unreadable PC answers `false`. The only thing this answer is used for is
+/// deciding whether to step the PC past a byte, and guessing wrong in that
+/// direction costs a repeated stop, where guessing wrong in the other resumes
+/// the guest inside an instruction.
+pub fn breakpoint_instruction_at(
     framing: &mut KdFraming<KdTransport>,
     arch: Arch,
     processor: u16,
@@ -326,7 +326,7 @@ fn breakpoint_instruction_at(
         api::read_virtual_memory(framing, processor, pc, expected.len() as u32)
     }) {
         Ok(bytes) => bytes == expected,
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -618,7 +618,6 @@ pub struct KdBackend {
     last_stop_processor: u16,
     last_exception_code: u32,
     last_rip: u64,
-    last_stop_was_managed_breakpoint: bool,
     reconnect_assist_after_continue: Option<Duration>,
     bp_handles: HashMap<u64, u32>,
     managed_bp_addresses: HashSet<u64>,
@@ -863,9 +862,6 @@ impl KdBackend {
             managed_bp_addresses: HashSet::new(),
             breakin_addresses,
             pending_write_breakpoint: None,
-            // A restored stale breakpoint reads like one of ours for resume:
-            // the `int3` is gone, so the PC must not be advanced.
-            last_stop_was_managed_breakpoint: stopped_on_stale_breakpoint,
             reconnect_assist_after_continue: None,
             special_register_cache: HashMap::new(),
             context_cache: HashMap::new(),
@@ -1147,7 +1143,6 @@ impl KdBackend {
         self.last_stop_processor = stop.processor;
         self.last_exception_code = stop.exception_code;
         self.last_rip = stop.program_counter;
-        self.last_stop_was_managed_breakpoint = managed_breakpoint_stop;
         self.special_register_cache.clear();
         self.context_cache.clear();
         self.efer_cache.clear();
@@ -1169,37 +1164,64 @@ impl KdBackend {
         }
     }
 
-    /// Whether resuming from the last stop must skip an `int3` at its PC.
-    /// The exception code and the managed-breakpoint bookkeeping are only
-    /// hints: another processor can report a hit on one of our breakpoints
-    /// after we have already restored the original byte for a step-over, and
-    /// a stale table breakpoint from a dead session is restored on attach.
-    /// Advancing past a byte that is no longer `int3` resumes inside an
-    /// instruction (observed: `sub rsp,0x88` -> double fault), so the byte at
-    /// PC is read through the target, which reflects what will execute.
-    fn stop_pc_is_raw_int3(&mut self, processor: u16) -> Result<bool> {
-        if !should_advance_pc_before_continue(
-            self.last_exception_code,
-            self.last_stop_was_managed_breakpoint,
-        ) {
-            return Ok(false);
+    /// Step the resume PC past a hard-coded `int3`, when that is genuinely what
+    /// is at the PC.
+    ///
+    /// An `int3` that is really part of the guest's code has already executed
+    /// by the time the kernel reports the stop with the PC back on it, so
+    /// resuming in place would trap on it forever and the PC has to move past
+    /// it. Every other `int3` at a stop PC is a *displaced* byte standing in
+    /// for a real instruction, and moving the PC past one of those resumes
+    /// inside that instruction: `48 8b c4` (`mov rax,rsp`) entered at its
+    /// second byte is `8b c4` (`mov eax,esp`), which truncates the register the
+    /// next instruction dereferences, and the guest faults three bytes into the
+    /// function it was entering. So a displaced byte is never stepped over:
+    ///
+    /// * One of ours is left alone; the host's step-over owns removing and
+    ///   restoring it.
+    /// * A table entry a dead session stranded is released, which makes the
+    ///   target restore the byte it displaced. Attach clears the table, but a
+    ///   target reload drops our handles while the entries survive.
+    /// * A PC that cannot be read resumes in place. Failing that way costs a
+    ///   repeated stop; failing the other way corrupts the guest.
+    ///
+    /// The PC is read from the target rather than from the recorded stop: hosts
+    /// rewind and rewrite it between a stop and the resume, so only the target
+    /// knows what is about to execute.
+    fn skip_hardcoded_breakpoint(&mut self, processor: u16) -> Result<()> {
+        if self.last_exception_code != STATUS_BREAKPOINT {
+            return Ok(());
         }
-        let pc = self.last_rip;
+        self.require_no_pending_write_breakpoint()?;
         let arch = self.arch;
-        let raw = breakpoint_instruction_at(self.framing()?, arch, processor, pc);
-        if !raw {
+        let register_map = self.register_map.clone();
+        let pc = read_program_counter(self.link.framing()?, &register_map, arch, processor)?;
+        if self.managed_bp_addresses.contains(&pc) {
+            return Ok(());
+        }
+        if !breakpoint_instruction_at(self.link.framing()?, arch, processor, pc) {
             kd_trace!(
                 "kd: stop at {pc:#x} reported a breakpoint but memory holds none; resuming in place"
             );
+            return Ok(());
         }
-        Ok(raw)
-    }
 
-    fn advance_pc_past_breakpoint(&mut self, processor: u16) -> Result<()> {
-        self.require_no_pending_write_breakpoint()?;
-        let arch = self.arch;
-        let framing = self.link.framing()?;
-        advance_pc_past_breakpoint(framing, &self.register_map, arch, processor)
+        let owned: HashSet<u32> = self.bp_handles.values().copied().collect();
+        let reclaimed = restore_unowned_breakpoint_handles(self.link.framing()?, processor, &owned);
+        report_reclaimed_breakpoints(reclaimed);
+        if reclaimed != 0 && !breakpoint_instruction_at(self.link.framing()?, arch, processor, pc) {
+            kd_trace!("kd: released a stranded breakpoint at {pc:#x}; resuming in place");
+            return Ok(());
+        }
+
+        kd_trace!(
+            "kd: advancing p{} past a hard-coded int3 at {pc:#x}",
+            processor + 1
+        );
+        // The PC goes straight through the context API, behind
+        // `write_registers` and its cache invalidation.
+        self.context_cache.remove(&processor);
+        advance_pc_past_breakpoint(self.link.framing()?, &register_map, arch, processor, pc)
     }
 
     fn read_dr_slot_state(&mut self, slot: u8) -> Result<DebugRegisterSlotState> {
@@ -1545,9 +1567,7 @@ impl KdBackend {
 
     fn continue_stopped_for_exit(&mut self) -> Result<()> {
         let processor = self.last_stop_processor;
-        if self.stop_pc_is_raw_int3(processor)? {
-            self.advance_pc_past_breakpoint(processor)?;
-        }
+        self.skip_hardcoded_breakpoint(processor)?;
         self.continue_preserving_dr7(processor, api::DBG_CONTINUE, false)?;
         self.record_running();
         Ok(())
@@ -2344,21 +2364,7 @@ impl DebugBackend for KdBackend {
         disposition: ContinueDisposition,
     ) -> Result<()> {
         let resume_processor = self.last_stop_processor;
-        if self.stop_pc_is_raw_int3(resume_processor)? {
-            kd_trace!(
-                "kd: continue: advancing p{} RIP past raw int3 (last_exception_code={:#x})",
-                resume_processor + 1,
-                self.last_exception_code,
-            );
-            self.advance_pc_past_breakpoint(resume_processor)?;
-        } else {
-            kd_trace!(
-                "kd: continue: not advancing p{} (last_exception_code={:#x}, managed_bp={})",
-                resume_processor + 1,
-                self.last_exception_code,
-                self.last_stop_was_managed_breakpoint
-            );
-        }
+        self.skip_hardcoded_breakpoint(resume_processor)?;
         // The pump absorbs the re-break a stale break-in byte causes right
         // after resume; it needs to know where we resumed from and which
         // breakpoints are real. Nothing can change either while the VM runs.
@@ -2392,8 +2398,8 @@ impl DebugBackend for KdBackend {
         let processor = self.current_processor;
         // A raw int3 stop still points at the int3; stepping from there would
         // only execute it again and report the same stop.
-        if processor == self.last_stop_processor && self.stop_pc_is_raw_int3(processor)? {
-            self.advance_pc_past_breakpoint(processor)?;
+        if processor == self.last_stop_processor {
+            self.skip_hardcoded_breakpoint(processor)?;
         }
         self.continue_preserving_dr7(processor, api::DBG_CONTINUE, true)?;
         self.record_running();
@@ -3188,13 +3194,6 @@ mod tests {
     }
 
     #[test]
-    fn continue_advance_policy_skips_only_unmanaged_software_breakpoints() {
-        assert!(should_advance_pc_before_continue(STATUS_BREAKPOINT, false));
-        assert!(!should_advance_pc_before_continue(STATUS_BREAKPOINT, true));
-        assert!(!should_advance_pc_before_continue(0x8000_0004, false)); // STATUS_SINGLE_STEP
-    }
-
-    #[test]
     fn initial_handshake_breaks_in_immediately_then_resets() {
         assert_eq!(
             initial_handshake_stimulus(0),
@@ -3482,7 +3481,6 @@ mod tests {
             last_stop_processor: 0,
             last_exception_code: 0,
             last_rip: 0,
-            last_stop_was_managed_breakpoint: false,
             reconnect_assist_after_continue: None,
             bp_handles: HashMap::new(),
             managed_bp_addresses: HashSet::new(),
@@ -3495,6 +3493,92 @@ mod tests {
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
+        }
+    }
+
+    /// Replies a scripted target hands back, in request order.
+    fn scripted_target(replies: &[Vec<u8>]) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for (index, reply) in replies.iter().enumerate() {
+            let id = api::test_wire::INITIAL_PACKET_ID ^ (index as u32 & 1);
+            stream.extend_from_slice(&api::test_wire::ack_then_reply(id, id, reply));
+        }
+        stream
+    }
+
+    fn refused_reply(api_number: u32) -> Vec<u8> {
+        let mut reply = api::test_wire::build_reply(api_number, 0, &[], &[]);
+        reply[8..12].copy_from_slice(&0xc000_0005u32.to_le_bytes());
+        reply
+    }
+
+    #[test]
+    fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
+        const PC: u64 = 0xffff_f800_0011_2233;
+
+        for owned_by_us in [true, false] {
+            let register_map = context::build_register_map();
+            let mut guest_context = vec![0u8; context::CONTEXT_SIZE];
+            register_map
+                .write_u64("rip", &mut guest_context, PC)
+                .unwrap();
+            let mut replies = vec![api::test_wire::build_reply(
+                api::DBGKD_GET_CONTEXT,
+                0,
+                &[],
+                &guest_context,
+            )];
+            if !owned_by_us {
+                replies.push(refused_reply(api::DBGKD_READ_VIRTUAL_MEMORY));
+            }
+            // Enough of an advance to complete if the resume wrongly attempts
+            // one, so a regression trips the assertion below instead of
+            // timing out on an unanswered request.
+            replies.push(api::test_wire::build_reply(
+                api::DBGKD_GET_CONTEXT,
+                0,
+                &[],
+                &guest_context,
+            ));
+            for chunk in guest_context.chunks(512) {
+                let mut union = [0u8; 12];
+                wire::write_u32(&mut union, 8, chunk.len() as u32);
+                replies.push(api::test_wire::build_reply(
+                    api::DBGKD_SET_CONTEXT_EX,
+                    0,
+                    &union,
+                    &[],
+                ));
+            }
+
+            let (host, target) = UnixStream::pair().unwrap();
+            (&target).write_all(&scripted_target(&replies)).unwrap();
+            let mut backend = kd_backend_with_framing(host);
+            backend.last_exception_code = STATUS_BREAKPOINT;
+            backend.last_stop_processor = 0;
+            backend.last_rip = PC;
+            if owned_by_us {
+                backend.managed_bp_addresses.insert(PC);
+            }
+            // Hold every table handle, so the resume has no stranded entry to
+            // reclaim and the only requests on the wire are its own decision.
+            for handle in 1..=KD_BREAKPOINT_TABLE_SIZE {
+                backend
+                    .bp_handles
+                    .insert(0xdead_0000 + handle as u64, handle);
+            }
+
+            let outcome = backend.skip_hardcoded_breakpoint(0);
+            target.set_nonblocking(true).unwrap();
+            let mut sent = Vec::new();
+            let _ = (&target).read_to_end(&mut sent);
+            assert!(
+                !sent
+                    .windows(4)
+                    .any(|word| wire::read_u32(word, 0) == api::DBGKD_SET_CONTEXT_EX),
+                "resume stepped the PC past an int3 it does not own (owned_by_us={owned_by_us})"
+            );
+            outcome.unwrap();
         }
     }
 
@@ -3512,7 +3596,6 @@ mod tests {
             last_stop_processor: 0,
             last_exception_code: 0,
             last_rip: 0,
-            last_stop_was_managed_breakpoint: false,
             reconnect_assist_after_continue: None,
             bp_handles: HashMap::new(),
             managed_bp_addresses: HashSet::new(),
@@ -4735,6 +4818,15 @@ mod tests {
                     let mut union = [0u8; 12];
                     union[8..12].copy_from_slice(&(chunk.len() as u32).to_le_bytes());
                     manipulate_reply_payload(api_number, 0, &union)
+                }
+                api::DBGKD_READ_VIRTUAL_MEMORY => {
+                    // The absorbed re-break sits on a break-in `int3`, which
+                    // the pump confirms before stepping the PC past it.
+                    let mut union = [0u8; 16];
+                    union[12..16].copy_from_slice(&1u32.to_le_bytes());
+                    let mut reply = manipulate_reply_payload(api_number, 0, &union);
+                    reply.push(0xcc);
+                    reply
                 }
                 api::DBGKD_READ_CONTROL_SPACE => read_special_registers_reply_payload(0),
                 api::DBGKD_CONTINUE_API2 => break,
