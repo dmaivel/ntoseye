@@ -15,7 +15,7 @@ installers = ["shell"]
 # and omit embedded Python from prebuilt archives so they remain portable.
 precise-builds = true
 default-features = false
-features = ["cli", "mcp"]
+features = ["cli", "mcp", "dap"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = [
     "x86_64-unknown-linux-gnu",

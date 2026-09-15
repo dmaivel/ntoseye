@@ -59,6 +59,7 @@ dialoguer = { version = "0.12.0", default-features = false, optional = true }
 nu-ansi-term = { version = "0.50.3", optional = true }
 reedline = { version = "0.49.0", optional = true }
 
+base64 = { version = "0.22", optional = true }
 rmcp = { version = "2.2", features = ["server", "transport-io", "transport-streamable-http-server", "macros"], optional = true }
 schemars = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -76,9 +77,10 @@ nix = { version = "0.31.3", features = [ "process", "uio" ] }
 libc = "0.2"
 
 [features]
-default = ["cli", "mcp", "python-embed"]
+default = ["cli", "mcp", "dap", "python-embed"]
 cli = ["dep:ctrlc", "dep:argh", "dep:dialoguer", "dep:nu-ansi-term", "dep:reedline"]
 mcp = ["dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:tower-http", "dep:anyhow"]
+dap = ["dep:serde_json", "dep:base64"]
 python = ["dep:pyo3"]
 python-embed = ["python", "pyo3/auto-initialize"]
 python-extension = ["python", "pyo3/extension-module"]

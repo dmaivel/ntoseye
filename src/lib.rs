@@ -132,6 +132,8 @@ pub mod cli;
 #[cfg(feature = "cli")]
 pub mod configure;
 pub mod cpu_state;
+#[cfg(feature = "dap")]
+pub mod dap;
 pub mod dbg_backend;
 pub mod debugger_data;
 pub mod diagnostics;

@@ -1538,6 +1538,7 @@ dependencies = [
  "hmac",
  "iced-x86",
  "indicatif",
+ "libc",
  "linkme",
  "memmap2",
  "nix 0.31.3",

@@ -1,7 +1,11 @@
+use argh::from_env;
 use argh::{FromArgValue, FromArgs};
+use std::mem::take;
 
 use std::path::PathBuf;
 
+#[cfg(feature = "dap")]
+use crate::dap;
 #[cfg(feature = "mcp")]
 use crate::mcp;
 use crate::{
@@ -88,6 +92,8 @@ enum Command {
     Status(StatusCommand),
     #[cfg(feature = "mcp")]
     Mcp(McpCommand),
+    #[cfg(feature = "dap")]
+    Dap(DapCommand),
 }
 
 #[cfg(feature = "mcp")]
@@ -121,6 +127,25 @@ struct McpCommand {
 #[argh(subcommand, name = "configure")]
 /// interactively configure a supported hypervisor for ntoseye
 struct ConfigureCommand {}
+
+#[cfg(feature = "dap")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "dap")]
+/// run as a Debug Adapter Protocol server for editor integration. Reads the
+/// top-level --backend/--connect/--dump to choose how to attach. Defaults to
+/// stdio; pass --port to serve one client over loopback TCP instead.
+struct DapCommand {
+    /// serve one DAP client on 127.0.0.1:<port> instead of stdio, for clients
+    /// configured with a debugServer port
+    #[argh(option, long = "port")]
+    port: Option<u16>,
+
+    /// additional PDB symbol server URL (repeatable; tried before the
+    /// Microsoft default). Same as the top-level --pdb-server; can be placed
+    /// before or after the 'dap' subcommand.
+    #[argh(option, long = "pdb-server")]
+    pdb_server: Vec<String>,
+}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "status")]
@@ -234,7 +259,7 @@ pub fn main() {
 }
 
 fn run() -> Result<()> {
-    let args: Args = argh::from_env();
+    let mut args: Args = from_env();
     if args.version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -260,10 +285,15 @@ fn run() -> Result<()> {
             "--memory-source is only valid with --backend kd or --backend kdnet".to_string(),
         ));
     }
-    #[cfg(feature = "mcp")]
-    let may_defer_kdnet_key = matches!(&args.command, Some(Command::Mcp(_)));
-    #[cfg(not(feature = "mcp"))]
-    let may_defer_kdnet_key = false;
+    // A protocol server may start without a target and be pointed at one by
+    // its client, which is where the KDNET key arrives instead.
+    let may_defer_kdnet_key = match &args.command {
+        #[cfg(feature = "mcp")]
+        Some(Command::Mcp(_)) => true,
+        #[cfg(feature = "dap")]
+        Some(Command::Dap(_)) => true,
+        _ => false,
+    };
     if backend == Backend::KdNet && args.kdnet_key.is_none() && !may_defer_kdnet_key {
         return Err(Error::DebugInfo(
             "--backend kdnet requires --kdnet-key <w.x.y.z>".to_string(),
@@ -280,13 +310,14 @@ fn run() -> Result<()> {
 
     // Merge top-level and subcommand --pdb-server lists (the subcommand may
     // carry its own, e.g. `ntoseye mcp --pdb-server URL`).
-    #[cfg(feature = "mcp")]
-    let mut pdb_servers = args.pdb_server;
-    #[cfg(not(feature = "mcp"))]
-    let pdb_servers = args.pdb_server;
+    let mut pdb_servers = take(&mut args.pdb_server);
     #[cfg(feature = "mcp")]
     if let Some(Command::Mcp(ref mcp_args)) = args.command {
         pdb_servers.extend(mcp_args.pdb_server.clone());
+    }
+    #[cfg(feature = "dap")]
+    if let Some(Command::Dap(ref dap_args)) = args.command {
+        pdb_servers.extend(dap_args.pdb_server.clone());
     }
     if !pdb_servers.is_empty() {
         symbols::PDB_SERVERS.set(pdb_servers).map_err(|_| {
@@ -305,53 +336,37 @@ fn run() -> Result<()> {
         ));
     }
 
-    let live = |connect: Option<String>| TargetSpec::Live {
-        backend,
-        connect,
-        kdnet_key: args.kdnet_key.clone(),
-        memory_source: args.memory_source.unwrap_or(KdMemorySource::Auto),
-    };
-
-    if let Some(command) = args.command {
+    if let Some(command) = args.command.take() {
         return match command {
             Command::Configure(_) => configure::run_interactive(),
             Command::Status(_) => configure::print_status(),
             #[cfg(feature = "mcp")]
             Command::Mcp(mcp_args) => {
-                // Attach at startup only when the flags pin a target; otherwise
-                // start empty and let the client `open` one.
-                let spec = if let Some(dump) = args.dump {
-                    Some(TargetSpec::Dump(dump))
-                } else if args.connect.is_some()
-                    || backend == Backend::Memory
-                    || (backend == Backend::KdNet && args.kdnet_key.is_some())
-                {
-                    Some(live(args.connect))
-                } else {
-                    if backend == Backend::Kd {
-                        eprintln!(
-                            "ntoseye-mcp: note: pass --connect {} to auto-attach at startup, \
-                             or use the 'open' tool after launch",
-                            DEFAULT_KD_SOCKET
-                        );
-                    } else {
-                        eprintln!(
-                            "ntoseye-mcp: note: --backend {backend} has no effect without \
-                             --connect; use the 'open' tool to attach, or pass --connect to \
-                             auto-attach at startup"
-                        );
-                    }
-                    None
-                };
+                let spec = server_startup_spec(
+                    "ntoseye-mcp",
+                    "use the 'open' tool after launch",
+                    &args,
+                    backend,
+                );
                 mcp::run(spec, mcp_args.http, mcp_args.unsafe_http)
                     .map_err(|e| Error::DebugInfo(e.to_string()))
+            }
+            #[cfg(feature = "dap")]
+            Command::Dap(dap_args) => {
+                let spec = server_startup_spec(
+                    "ntoseye-dap",
+                    "name the target in the client's launch/attach arguments",
+                    &args,
+                    backend,
+                );
+                dap::run(spec, dap_args.port)
             }
         };
     }
 
-    let spec = match args.dump {
-        Some(dump) => TargetSpec::Dump(dump),
-        None => live(args.connect),
+    let spec = match args.dump.as_ref() {
+        Some(dump) => TargetSpec::Dump(dump.clone()),
+        None => live_spec(&args, backend),
     };
     let mut ctx = Session::open(&spec)?;
     if args.plain_repl {
@@ -359,6 +374,48 @@ fn run() -> Result<()> {
     } else {
         start_repl(&mut ctx)
     }
+}
+
+fn live_spec(args: &Args, backend: Backend) -> TargetSpec {
+    TargetSpec::Live {
+        backend,
+        connect: args.connect.clone(),
+        kdnet_key: args.kdnet_key.clone(),
+        memory_source: args.memory_source.unwrap_or(KdMemorySource::Auto),
+    }
+}
+
+/// The target a protocol server (MCP, DAP) attaches at startup: one pinned by
+/// the command line, or `None` when the client is expected to name it in its
+/// own attach request.
+#[cfg(any(feature = "mcp", feature = "dap"))]
+fn server_startup_spec(
+    tool: &str,
+    client_attach_hint: &str,
+    args: &Args,
+    backend: Backend,
+) -> Option<TargetSpec> {
+    if let Some(dump) = args.dump.clone() {
+        return Some(TargetSpec::Dump(dump));
+    }
+    if args.connect.is_some()
+        || backend == Backend::Memory
+        || (backend == Backend::KdNet && args.kdnet_key.is_some())
+    {
+        return Some(live_spec(args, backend));
+    }
+    if backend == Backend::Kd {
+        eprintln!(
+            "{tool}: note: pass --connect {DEFAULT_KD_SOCKET} to auto-attach at startup, \
+             or {client_attach_hint}"
+        );
+    } else {
+        eprintln!(
+            "{tool}: note: --backend {backend} has no effect without --connect; \
+             {client_attach_hint}, or pass --connect to auto-attach at startup"
+        );
+    }
+    None
 }
 
 fn print_home_migration() {

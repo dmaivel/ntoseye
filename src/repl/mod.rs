@@ -317,6 +317,13 @@ impl ReplStore {
             context,
         }
     }
+
+    /// The session's current default radix. A host that evaluates expressions
+    /// outside `dispatch_line` (DAP watch/hover requests) shares it so `n 10`
+    /// typed in the console applies there too.
+    pub fn radix(&self) -> NumberRadix {
+        self.radix
+    }
 }
 
 /// The user-command completion set: the registered Python commands when the
@@ -333,7 +340,7 @@ pub fn initial_user_commands() -> Vec<(String, String, Vec<CompletionStrategy>)>
 }
 
 impl Session {
-    pub(crate) fn restore_live_register_cache(&mut self) {
+    pub fn restore_live_register_cache(&mut self) {
         if self.backend.is_running() || self.parked_windows_thread().is_some() {
             self.target.registers = None;
             self.target.clear_context_dtb_override();

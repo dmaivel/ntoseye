@@ -16,6 +16,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
     Debug,
     PartialEq,
     Eq,
+    Hash,
     derive_more::From,
     derive_more::Into,
     derive_more::BitAnd,
