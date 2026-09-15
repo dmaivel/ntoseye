@@ -161,6 +161,7 @@ pub mod trapframe;
 pub mod triage;
 pub mod triage_report;
 pub mod types;
+pub mod typeview;
 pub mod ui;
 pub mod unwind;
 #[cfg(any(feature = "mcp", feature = "python"))]

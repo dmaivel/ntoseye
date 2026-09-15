@@ -6,14 +6,16 @@ use crate::expr::Expr;
 use crate::symbols::{FieldInfo, ParsedType, TypeInfo, glob_matches, le_uint};
 use crate::target::{ListCursor, ListTermination, UserVar};
 use crate::types::VirtAddr;
+use crate::typeview::{
+    MAX_ARRAY_ELEMENTS, TypeView, field_sort_key, find_field, named_type, nested_layout_name,
+    unqualified_type_name,
+};
 use crate::ui;
 
 use crate::repl::*;
 
 const MAX_LIST_ENTRIES: usize = 4096;
-const MAX_ARRAY_ELEMENTS: usize = 16;
 const MAX_RECURSION_DEPTH: usize = 64;
-const MAX_UNICODE_BYTES: usize = 4096;
 const MAX_DL_WORDS: usize = 64;
 
 repl_command! {
@@ -190,53 +192,6 @@ fn field_matches(name: &str, patterns: &[String], prefix_match: bool) -> bool {
     })
 }
 
-fn unqualified_type_name(type_name: &str) -> &str {
-    type_name
-        .rsplit_once('!')
-        .map(|(_, name)| name)
-        .unwrap_or(type_name)
-}
-
-fn nested_layout_name(type_data: &ParsedType) -> Option<String> {
-    match type_data {
-        ParsedType::Struct(name) | ParsedType::Union(name) => Some(name.clone()),
-        ParsedType::Primitive(name)
-            if name
-                .trim_start_matches('_')
-                .eq_ignore_ascii_case("LIST_ENTRY") =>
-        {
-            Some("_LIST_ENTRY".to_string())
-        }
-        ParsedType::Primitive(name)
-            if name
-                .trim_start_matches('_')
-                .eq_ignore_ascii_case("UNICODE_STRING") =>
-        {
-            Some("_UNICODE_STRING".to_string())
-        }
-        ParsedType::Pointer(inner) | ParsedType::Array(inner, _) => nested_layout_name(inner),
-        ParsedType::Bitfield { underlying, .. } => nested_layout_name(underlying),
-        _ => None,
-    }
-}
-
-fn named_type(type_data: &ParsedType, wanted: &str) -> bool {
-    match type_data {
-        ParsedType::Primitive(name) | ParsedType::Struct(name) | ParsedType::Union(name) => name
-            .trim_start_matches('_')
-            .eq_ignore_ascii_case(wanted.trim_start_matches('_')),
-        _ => false,
-    }
-}
-
-fn field_sort_key(info: &FieldInfo) -> (u32, u8) {
-    let bitfield_position = match &info.type_data {
-        ParsedType::Bitfield { pos, .. } => *pos,
-        _ => 0,
-    };
-    (info.offset, bitfield_position)
-}
-
 fn standard_layout_field(type_name: &str, requested: &str) -> Option<(String, FieldInfo)> {
     let normalized = type_name.trim_start_matches('_');
     let requested = requested.to_ascii_lowercase();
@@ -285,235 +240,16 @@ fn standard_layout_field(type_name: &str, requested: &str) -> Option<(String, Fi
 }
 
 impl ReplState<'_> {
+    fn type_view(&self) -> TypeView<'_> {
+        TypeView::new(self.ctx)
+    }
+
     fn lookup_type(&self, type_name: &str) -> Option<Arc<TypeInfo>> {
-        self.ctx.target.symbols.find_type_across_modules(
-            self.ctx.target.current_dtb(),
-            unqualified_type_name(type_name),
-        )
+        self.type_view().lookup_type(type_name)
     }
 
     fn lookup_enum(&self, type_name: &str) -> Option<Vec<(String, i64)>> {
-        self.ctx.target.symbols.find_enum_across_modules(
-            self.ctx.target.current_dtb(),
-            unqualified_type_name(type_name),
-        )
-    }
-
-    fn parsed_type_size(&self, type_data: &ParsedType) -> usize {
-        match type_data {
-            ParsedType::Primitive(name) => match name.to_ascii_lowercase().as_str() {
-                "char" | "uchar" | "int8" | "uint8" | "int8_t" | "uint8_t" | "boolean" | "bool" => {
-                    1
-                }
-                "wchar" | "ushort" | "short" | "uint16" | "int16" | "int16_t" | "uint16_t" => 2,
-                "ulong" | "long" | "uint" | "int" | "uint32" | "int32" | "int32_t" | "uint32_t"
-                | "float" => 4,
-                "__int64" | "unsigned __int64" | "longlong" | "ulonglong" | "uint64" | "int64"
-                | "int64_t" | "uint64_t" | "double" => 8,
-                _ => 0,
-            },
-            ParsedType::Pointer(_) | ParsedType::Function(_, _) => 8,
-            ParsedType::Array(inner, count) => {
-                self.parsed_type_size(inner).saturating_mul(*count as usize)
-            }
-            ParsedType::Bitfield { underlying, .. } => self.parsed_type_size(underlying),
-            ParsedType::Struct(name) | ParsedType::Union(name) => self
-                .lookup_type(name)
-                .map(|type_info| type_info.size)
-                .unwrap_or(0),
-            ParsedType::Enum(_) => 4,
-            ParsedType::Unknown => 0,
-        }
-    }
-
-    fn field_size(&self, field: &FieldInfo) -> usize {
-        usize::try_from(field.size)
-            .ok()
-            .filter(|size| *size != 0)
-            .unwrap_or_else(|| self.parsed_type_size(&field.type_data))
-    }
-
-    fn read_display_bytes(
-        &self,
-        address: VirtAddr,
-        size: usize,
-    ) -> std::result::Result<Vec<u8>, String> {
-        if size == 0 {
-            return Err("field has no size".to_string());
-        }
-        let mut bytes = vec![0u8; size];
-        self.ctx
-            .read_masked(address, &mut bytes)
-            .map_err(|error| error.to_string())?;
-        Ok(bytes)
-    }
-
-    fn read_display_uint(
-        &self,
-        address: VirtAddr,
-        size: usize,
-    ) -> std::result::Result<u64, String> {
-        if size == 0 {
-            return Err("field has no size".to_string());
-        }
-        if size > 8 {
-            return Err(format!("scalar field is {} bytes", size));
-        }
-        let mut bytes = [0u8; 8];
-        self.ctx
-            .read_masked(address, &mut bytes[..size])
-            .map_err(|error| error.to_string())?;
-        Ok(le_uint(&bytes[..size]))
-    }
-
-    fn format_enum_value(&self, type_name: &str, raw: u64, size: usize) -> String {
-        let signed = match size {
-            1 => raw as i8 as i64,
-            2 => raw as i16 as i64,
-            4 => raw as i32 as i64,
-            _ => raw as i64,
-        };
-        let variant = self
-            .lookup_enum(type_name)
-            .and_then(|variants| {
-                variants
-                    .into_iter()
-                    .find(|(_, value)| *value == signed)
-                    .map(|(name, _)| name)
-            })
-            .unwrap_or_else(|| "?".to_string());
-        format!(" = 0n{signed} ( {variant} )")
-    }
-
-    fn format_scalar_value(&self, address: VirtAddr, field: &FieldInfo) -> String {
-        let size = self.field_size(field);
-        let raw = match self.read_display_uint(address, size) {
-            Ok(raw) => raw,
-            Err(error) => return format!(" = <unavailable: {error}>"),
-        };
-        match &field.type_data {
-            ParsedType::Pointer(_) => format!(" = {:#x}", raw),
-            ParsedType::Enum(type_name) => self.format_enum_value(type_name, raw, size),
-            ParsedType::Bitfield {
-                underlying,
-                pos,
-                len,
-            } => {
-                let mask = if *len == 0 {
-                    0
-                } else if *len >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << len) - 1
-                };
-                let value = if *pos >= 64 { 0 } else { (raw >> pos) & mask };
-                if *len == 1 {
-                    if value == 1 {
-                        " = Y".to_string()
-                    } else {
-                        " = N".to_string()
-                    }
-                } else if let ParsedType::Enum(type_name) = underlying.as_ref() {
-                    self.format_enum_value(type_name, value, size)
-                } else {
-                    format!(" = {:#x}", value)
-                }
-            }
-            _ => format!(" = {:#x}", raw),
-        }
-    }
-
-    fn format_c_string(&self, address: VirtAddr, count: u32) -> String {
-        let size = (count as usize).min(MAX_UNICODE_BYTES);
-        let bytes = match self.read_display_bytes(address, size) {
-            Ok(bytes) => bytes,
-            Err(error) => return format!(" = <unavailable: {error}>"),
-        };
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        let text: String = String::from_utf8_lossy(&bytes[..end])
-            .chars()
-            .flat_map(char::escape_default)
-            .collect();
-        format!(" = \"{text}\"")
-    }
-
-    fn format_unicode_string(&self, address: VirtAddr) -> String {
-        let type_info = self.lookup_type("_UNICODE_STRING");
-        let (length_offset, length_size, buffer_offset, buffer_size) =
-            if let Some(type_info) = type_info {
-                let Some((_, length_field)) = find_field(type_info.as_ref(), "Length") else {
-                    return " = <unavailable: Length field not found>".to_string();
-                };
-                let Some((_, buffer_field)) = find_field(type_info.as_ref(), "Buffer") else {
-                    return " = <unavailable: Buffer field not found>".to_string();
-                };
-                (
-                    length_field.offset as u64,
-                    self.field_size(length_field),
-                    buffer_field.offset as u64,
-                    self.field_size(buffer_field),
-                )
-            } else {
-                // These offsets are stable for the Windows ABI and let a PDB
-                // represent a string field as a primitive aggregate.
-                (0, 2, 8, 8)
-            };
-        let length = match self.read_display_uint(address + length_offset, length_size) {
-            Ok(length) => (length as usize).min(MAX_UNICODE_BYTES) & !1,
-            Err(error) => return format!(" = <unavailable: {error}>"),
-        };
-        let buffer = match self.read_display_uint(address + buffer_offset, buffer_size) {
-            Ok(buffer) => VirtAddr(buffer),
-            Err(error) => return format!(" = <unavailable: {error}>"),
-        };
-        if length == 0 || buffer.is_zero() {
-            return " = \"\"".to_string();
-        }
-        let bytes = match self.read_display_bytes(buffer, length) {
-            Ok(bytes) => bytes,
-            Err(error) => return format!(" = <unavailable: {error}>"),
-        };
-        let utf16: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
-        let text: String = String::from_utf16_lossy(&utf16)
-            .chars()
-            .flat_map(char::escape_default)
-            .collect();
-        format!(" = \"{text}\"")
-    }
-
-    fn format_list_entry(&self, address: VirtAddr) -> String {
-        let (flink_offset, flink_size, blink_offset, blink_size) =
-            if let Some(type_info) = self.lookup_type("_LIST_ENTRY") {
-                let Some((_, flink)) = find_field(type_info.as_ref(), "Flink") else {
-                    return " = <unavailable: Flink field not found>".to_string();
-                };
-                let Some((_, blink)) = find_field(type_info.as_ref(), "Blink") else {
-                    return " = <unavailable: Blink field not found>".to_string();
-                };
-                (
-                    flink.offset as u64,
-                    self.field_size(flink),
-                    blink.offset as u64,
-                    self.field_size(blink),
-                )
-            } else {
-                (0, 8, 8, 8)
-            };
-        let flink = match self.read_display_uint(address + flink_offset, flink_size) {
-            Ok(value) => value,
-            Err(error) => return format!(" = <unavailable: {error}>"),
-        };
-        let blink = match self.read_display_uint(address + blink_offset, blink_size) {
-            Ok(value) => value,
-            Err(error) => return format!(" = <unavailable: {error}>"),
-        };
-        format!(" = [ {:#x} - {:#x} ]", flink, blink)
+        self.type_view().lookup_enum(type_name)
     }
 
     fn field_descriptor(
@@ -525,14 +261,18 @@ impl ReplState<'_> {
     ) -> String {
         let prefix = " ".repeat(indent);
         let type_name = field.type_data.to_string();
+        // WinDbg pads a field offset to three hex digits and lets wider
+        // offsets grow naturally (`+0x000`, `+0x2e0`, `+0x1150`), so a layout
+        // dump lines up with the reference output people compare against and
+        // with anything grepping for `+0x000 `.
         if options.verbose {
             format!(
-                "{prefix}+0x{:04x} {name} : {type_name} [size {}]",
+                "{prefix}+0x{:03x} {name} : {type_name} [size {}]",
                 field.offset,
-                self.field_size(field)
+                self.type_view().field_size(field)
             )
         } else {
-            format!("{prefix}+0x{:04x} {name} : {type_name}", field.offset)
+            format!("{prefix}+0x{:03x} {name} : {type_name}", field.offset)
         }
     }
 
@@ -547,25 +287,12 @@ impl ReplState<'_> {
         recurse_struct: bool,
     ) {
         match &field.type_data {
-            ParsedType::Primitive(_) | ParsedType::Struct(_) | ParsedType::Union(_)
-                if named_type(&field.type_data, "_UNICODE_STRING") =>
+            // A nested layout prints its own fields rather than a value, but
+            // the two Windows aggregates `TypeView` renders as text do not.
+            ParsedType::Struct(type_name) | ParsedType::Union(type_name)
+                if !named_type(&field.type_data, "_UNICODE_STRING")
+                    && !named_type(&field.type_data, "_LIST_ENTRY") =>
             {
-                if options.show_values {
-                    outln!("{}{}", label, self.format_unicode_string(address));
-                } else {
-                    outln!("{}", label);
-                }
-            }
-            ParsedType::Primitive(_) | ParsedType::Struct(_) | ParsedType::Union(_)
-                if named_type(&field.type_data, "_LIST_ENTRY") =>
-            {
-                if options.show_values {
-                    outln!("{}{}", label, self.format_list_entry(address));
-                } else {
-                    outln!("{}", label);
-                }
-            }
-            ParsedType::Struct(type_name) | ParsedType::Union(type_name) => {
                 outln!("{}", label);
                 if recurse_struct {
                     if let Some(type_info) = self.lookup_type(type_name) {
@@ -586,29 +313,28 @@ impl ReplState<'_> {
                     }
                 }
             }
-            ParsedType::Array(inner, count) => {
-                if let Some(string_len) = field.type_data.c_string_len() {
-                    if options.show_values {
-                        outln!("{}{}", label, self.format_c_string(address, string_len));
-                    } else {
-                        outln!("{}", label);
-                    }
-                } else {
-                    outln!("{}", label);
-                    self.print_array_elements(
-                        address,
-                        field,
-                        inner,
-                        *count,
-                        options,
-                        indent + 2,
-                        depth.saturating_sub(1),
-                    );
-                }
+            // An array prints its elements, unless it is an inline C string.
+            ParsedType::Array(inner, count) if field.type_data.c_string_len().is_none() => {
+                outln!("{}", label);
+                self.print_array_elements(
+                    address,
+                    field,
+                    inner,
+                    *count,
+                    options,
+                    indent + 2,
+                    depth.saturating_sub(1),
+                );
             }
+            // Everything else has a text value: scalars, enums, bitfields,
+            // `_UNICODE_STRING`, `_LIST_ENTRY` and C-string arrays.
             _ => {
                 if options.show_values {
-                    outln!("{}{}", label, self.format_scalar_value(address, field));
+                    outln!(
+                        "{} = {}",
+                        label,
+                        self.type_view().value_text(address, field)
+                    );
                 } else {
                     outln!("{}", label);
                 }
@@ -635,19 +361,14 @@ impl ReplState<'_> {
         if shown == 0 {
             return;
         }
-        let total_size = self.field_size(field);
-        let element_size = if count_usize != 0 && total_size != 0 {
-            total_size / count_usize
-        } else {
-            self.parsed_type_size(inner)
-        };
-        if element_size == 0 {
+        let total_size = self.type_view().field_size(field);
+        let Some(element_size) = self.type_view().element_stride(total_size, inner, count) else {
             outln!(
                 "{}[array elements unavailable: element size is unknown]",
                 " ".repeat(indent)
             );
             return;
-        }
+        };
 
         for index in 0..shown {
             let element_address = address + (index.saturating_mul(element_size)) as u64;
@@ -768,8 +489,10 @@ impl ReplState<'_> {
                 return Ok((field_address, component.info.clone()));
             }
             if matches!(component.info.type_data, ParsedType::Pointer(_)) {
-                let pointer =
-                    self.read_display_uint(field_address, self.field_size(&component.info))?;
+                let pointer = self.type_view().read_display_uint(
+                    field_address,
+                    self.type_view().field_size(&component.info),
+                )?;
                 if pointer == 0 {
                     return Err(format!("field `{}` points to null", component.name));
                 }
@@ -833,7 +556,7 @@ impl ReplState<'_> {
             link_offset = link_offset.saturating_add(component.info.offset as u64);
         }
         let next_offset = link_offset.saturating_add(last.info.offset as u64);
-        let pointer_size = self.field_size(&last.info).clamp(1, 8);
+        let pointer_size = self.type_view().field_size(&last.info).clamp(1, 8);
         Ok((link_offset, next_offset, pointer_size))
     }
 
@@ -852,6 +575,7 @@ impl ReplState<'_> {
         // A link pointing at itself is an empty list's head: the one sentinel
         // that is provably not a record.
         if self
+            .type_view()
             .read_display_uint(first - link_offset + next_offset, pointer_size)
             .ok()
             .is_some_and(|next| next == first.0)
@@ -864,7 +588,8 @@ impl ReplState<'_> {
             let record = link - link_offset;
             records.push(record);
             cursor.advance(
-                self.read_display_uint(record + next_offset, pointer_size)
+                self.type_view()
+                    .read_display_uint(record + next_offset, pointer_size)
                     .map(VirtAddr)
                     .map_err(|error| error.to_string()),
             );
@@ -1205,23 +930,12 @@ impl ReplState<'_> {
     }
 }
 
-fn find_field<'a>(type_info: &'a TypeInfo, requested: &str) -> Option<(&'a String, &'a FieldInfo)> {
-    type_info.fields.get_key_value(requested).or_else(|| {
-        type_info
-            .fields
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(requested))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TargetSpec;
     use crate::kd::wire::write_u64;
     use crate::output::capture;
-    use crate::session::Session;
-    use crate::triage::{TriageBlock, make_triage_dump};
+    use crate::session::{Session, session_over_memory};
 
     fn list_session(last_next: u64) -> Session {
         // A _LIST_ENTRY ring: head at 0x1000, records linked at 0x1020 and
@@ -1237,24 +951,95 @@ mod tests {
         ] {
             write_u64(&mut memory, offset, value);
         }
-        let block = TriageBlock {
-            address: 0x1000,
-            offset: 0,
-            size: memory.len() as u32,
-        };
-        let dump = make_triage_dump(&[block], &[(0x1000, &memory)]);
-        // Unique per call: parallel tests must not mmap a file another test
-        // is still rewriting.
-        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "ntoseye-list-boundaries-{}-{sequence}.dmp",
-            std::process::id(),
-        ));
-        std::fs::write(&path, dump).unwrap();
-        let session = Session::open(&TargetSpec::Dump(path.clone()));
-        std::fs::remove_file(path).unwrap();
-        session.unwrap()
+        session_over_memory(0x1000, &memory)
+    }
+
+    #[test]
+    fn dt_renders_each_value_kind_in_windbg_form() {
+        let mut memory = [0u8; 0x80];
+        memory[0] = 0x2a;
+        memory[1] = 0b1000_0001;
+        write_u64(&mut memory, 0x08, 0x1000);
+        memory[0x10..0x13].copy_from_slice(b"abc");
+        write_u64(&mut memory, 0x20, 0x1040);
+        write_u64(&mut memory, 0x28, 0x1000);
+        let mut session = session_over_memory(0x1000, &memory);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        let fields = [
+            (
+                "Value".to_string(),
+                FieldInfo {
+                    offset: 0,
+                    size: 1,
+                    type_data: ParsedType::Primitive("UCHAR".to_string()),
+                },
+            ),
+            (
+                "Busy".to_string(),
+                FieldInfo {
+                    offset: 1,
+                    size: 1,
+                    type_data: ParsedType::Bitfield {
+                        underlying: Box::new(ParsedType::Primitive("UCHAR".to_string())),
+                        pos: 0,
+                        len: 1,
+                    },
+                },
+            ),
+            (
+                "Next".to_string(),
+                FieldInfo {
+                    offset: 8,
+                    size: 8,
+                    type_data: ParsedType::Pointer(Box::new(ParsedType::Struct(
+                        "_NODE".to_string(),
+                    ))),
+                },
+            ),
+            (
+                "Name".to_string(),
+                FieldInfo {
+                    offset: 0x10,
+                    size: 3,
+                    type_data: ParsedType::Array(
+                        Box::new(ParsedType::Primitive("UCHAR".to_string())),
+                        3,
+                    ),
+                },
+            ),
+            (
+                "Links".to_string(),
+                FieldInfo {
+                    offset: 0x20,
+                    size: 0x10,
+                    type_data: ParsedType::Struct("_LIST_ENTRY".to_string()),
+                },
+            ),
+        ];
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![TypeInfo {
+                name: "_NODE".to_string(),
+                size: 0x30,
+                fields: fields.into_iter().collect(),
+            }],
+            &[],
+        );
+
+        let mut state = ReplState::for_oneshot(&mut session);
+        let (result, text) = capture(|| state.dispatch_line("dt _NODE 1000"));
+        result.unwrap();
+
+        for expected in [
+            "+0x000 Value : UCHAR = 0x2a",
+            "+0x001 Busy : UCHAR : 1 @ bit 0 = Y",
+            "+0x008 Next : _NODE* = 0x1000",
+            "+0x010 Name : UCHAR[3] = \"abc\"",
+            "+0x020 Links : _LIST_ENTRY = [ 0x1040 - 0x1000 ]",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
     }
 
     #[test]
