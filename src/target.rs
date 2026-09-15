@@ -19,8 +19,8 @@ use crate::{
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{
-        LocalVariableLocation, ParsedType, ProcedureLocal, SourceLocation, SymbolCandidate,
-        SymbolIndex, SymbolStore, TypeInfo, format_symbol_with_offset,
+        LocalVariableLocation, ParsedType, ProcedureLocal, SourceLineExtent, SourceLocation,
+        SymbolCandidate, SymbolIndex, SymbolStore, TypeInfo, format_symbol_with_offset,
     },
     types::{Arch, Dtb, PageTableEntry, Value, VirtAddr},
 };
@@ -1902,6 +1902,25 @@ impl Target {
 
     pub fn source_location(&self, address: VirtAddr) -> Option<SourceLocation> {
         self.symbols.source_location(self.current_dtb(), address)
+    }
+
+    /// Resolve the source line and exclusive address extent in the current
+    /// inspection context for consumers that step complete source lines.
+    pub fn source_line_extent(&self, address: VirtAddr) -> Option<SourceLineExtent> {
+        self.symbols.source_line_extent(self.current_dtb(), address)
+    }
+
+    /// End of the function's opening source-line range, after the prologue.
+    /// Return `None` without private line records or if the next record leaves
+    /// the function.
+    pub fn post_prologue_address(&self, dtb: Dtb, address: VirtAddr) -> Option<VirtAddr> {
+        let end = self.symbols.source_line_extent(dtb, address)?.end?;
+        let function = self.symbols.find_closest_symbol_for_address(dtb, address)?;
+        let at_end = self.symbols.find_closest_symbol_for_address(dtb, end)?;
+        (function.0 == at_end.0
+            && function.1 == at_end.1
+            && self.symbols.source_line_extent(dtb, end).is_some())
+        .then_some(end)
     }
 
     pub fn source_addresses(&self, file: &str, line: u32) -> Vec<VirtAddr> {

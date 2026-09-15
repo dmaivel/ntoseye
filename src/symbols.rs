@@ -295,6 +295,18 @@ pub struct SourceLocation {
     pub local_exists: bool,
 }
 
+/// The source-line address range containing an instruction. `end` is
+/// exclusive; it is `None` when the PDB records neither a length nor a
+/// following entry. A debugger uses this extent to step a whole source line
+/// at once instead of single-stepping each instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLineExtent {
+    /// Source file and line metadata, including any configured path remapping.
+    pub location: SourceLocation,
+    /// Exclusive line end, when the PDB provides one.
+    pub end: Option<VirtAddr>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcedureLocal {
     pub name: String,
@@ -944,10 +956,40 @@ mod tests {
             },
         ];
 
-        assert_eq!(lookup_source_line(&lines, 0x102).unwrap().line, 10);
+        assert_eq!(
+            lookup_source_line(&lines, 0x102).unwrap().0.location.line,
+            10
+        );
         assert!(lookup_source_line(&lines, 0x104).is_none());
-        assert_eq!(lookup_source_line(&lines, 0x11f).unwrap().line, 11);
+        assert_eq!(
+            lookup_source_line(&lines, 0x11f).unwrap().0.location.line,
+            11
+        );
         assert!(lookup_source_line(&lines, 0x122).is_none());
+    }
+
+    #[test]
+    fn source_line_extent_reports_explicit_next_and_missing_ends() {
+        let store = SymbolStore::new();
+        let dtb = 0x1000_u64;
+        let base = VirtAddr(0x0000_0001_8000_0000);
+        store.inject_source_lines_for_test(
+            1,
+            dtb,
+            base,
+            0x1000,
+            "private.c",
+            &[(0x100, Some(4), 10), (0x110, None, 11), (0x120, None, 12)],
+        );
+
+        let explicit = store.source_line_extent(dtb, base + 0x101_u64).unwrap();
+        assert_eq!(explicit.end, Some(base + 0x104_u64));
+
+        let next_entry = store.source_line_extent(dtb, base + 0x111_u64).unwrap();
+        assert_eq!(next_entry.end, Some(base + 0x120_u64));
+
+        let final_entry = store.source_line_extent(dtb, base + 0x120_u64).unwrap();
+        assert_eq!(final_entry.end, None);
     }
 
     #[test]
@@ -1753,16 +1795,27 @@ fn record_index_diagnostic(
     }
 }
 
-fn lookup_source_line(lines: &[SourceLineEntry], rva: u32) -> Option<SourceLocation> {
+fn lookup_source_line(
+    lines: &[SourceLineEntry],
+    rva: u32,
+) -> Option<(&SourceLineEntry, Option<u32>)> {
     let index = lines
         .partition_point(|line| line.rva <= rva)
         .checked_sub(1)?;
     let line = &lines[index];
+    let next_rva = lines.get(index + 1).map(|next| next.rva);
     let covered = match line.length {
         Some(length) => rva < line.rva.saturating_add(length),
-        None => lines.get(index + 1).is_some_and(|next| rva < next.rva) || rva == line.rva,
+        None => next_rva.is_some_and(|next| rva < next) || rva == line.rva,
     };
-    covered.then(|| line.location.clone())
+    if !covered {
+        return None;
+    }
+    let end_rva = line
+        .length
+        .map(|length| line.rva.saturating_add(length))
+        .or(next_rva);
+    Some((line, end_rva))
 }
 
 fn source_file_matches(recorded: &str, query: &str) -> bool {
@@ -3160,15 +3213,27 @@ impl SymbolStore {
 
     /// Resolve a virtual address to cached C13 source information.
     pub fn source_location(&self, dtb: Dtb, address: VirtAddr) -> Option<SourceLocation> {
+        self.source_line_extent(dtb, address)
+            .map(|extent| extent.location)
+    }
+
+    /// Resolve a virtual address to its cached C13 source line and exclusive
+    /// address extent, which the debugger uses to step a whole source line at
+    /// once.
+    pub fn source_line_extent(&self, dtb: Dtb, address: VirtAddr) -> Option<SourceLineExtent> {
         let module = self.find_module_for_address(dtb, address)?;
         let rva = u32::try_from(address.0.checked_sub(module.base_address.0)?).ok()?;
         let lines = self.source_lines.get(&module.guid)?;
-        let mut location = lookup_source_line(&lines, rva)?;
+        let (line, end_rva) = lookup_source_line(&lines, rva)?;
+        let mut location = line.location.clone();
         let (local_path, local_exists) =
             remap_source_file(&location.file, &self.source_paths.read());
         location.local_path = local_path;
         location.local_exists = local_exists;
-        Some(location)
+        Some(SourceLineExtent {
+            location,
+            end: end_rva.map(|rva| module.base_address + u64::from(rva)),
+        })
     }
 
     /// Resolve a PDB source file and line to every loaded address in the
