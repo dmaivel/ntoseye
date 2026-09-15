@@ -2,7 +2,6 @@ use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Write};
 
-use iced_x86::{Code, Decoder, DecoderOptions};
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
@@ -997,11 +996,7 @@ impl ReplState<'_> {
             None => 8,
         };
 
-        let max_instruction_bytes = match self.ctx.target.arch() {
-            Arch::Amd64 => 15usize,
-            Arch::Arm64 => 4usize,
-        };
-        let max_bytes = count.saturating_mul(max_instruction_bytes);
+        let max_bytes = count.saturating_mul(max_instruction_bytes(self.ctx.target.arch()));
         let initial_start = VirtAddr(address.0.saturating_sub(max_bytes as u64));
         let range = AddressRange {
             start: initial_start,
@@ -1014,7 +1009,7 @@ impl ReplState<'_> {
         }
         let suffix_offset = data.len().saturating_sub(suffix_len);
         let read_start = initial_start + suffix_offset as u64;
-        let bytes = data[suffix_offset..].to_vec();
+        let bytes = &data[suffix_offset..];
         if bytes.is_empty() {
             error!("could not read memory before {}", ui::addr(address.0));
             return Ok(());
@@ -1023,113 +1018,20 @@ impl ReplState<'_> {
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
-        let rows = match self.ctx.target.arch() {
-            Arch::Amd64 => {
-                let mut first_candidate = None;
-                let mut candidate_offset = None;
-                for offset in 0..bytes.len() {
-                    let start = read_start.0 + offset as u64;
-                    let mut decoder =
-                        Decoder::with_ip(64, &bytes[offset..], start, DecoderOptions::NONE);
-                    let mut valid = true;
-                    while decoder.can_decode() {
-                        let instruction = decoder.decode();
-                        valid &= instruction.code() != Code::INVALID;
-                        let end = decoder.ip();
-                        if end >= address.0 {
-                            if end == address.0 {
-                                first_candidate.get_or_insert(offset);
-                                if valid {
-                                    candidate_offset = Some(offset);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    if candidate_offset.is_some() {
-                        break;
-                    }
-                }
-                let Some(offset) = candidate_offset.or(first_candidate) else {
-                    error!(
-                        "could not decode instructions ending at {}",
-                        ui::addr(address.0)
-                    );
-                    return Ok(());
-                };
-                let start = read_start.0 + offset as u64;
-                let mut decoder =
-                    Decoder::with_ip(64, &bytes[offset..], start, DecoderOptions::NONE);
-                let mut instruction_starts = Vec::new();
-                while decoder.can_decode() {
-                    instruction_starts.push(decoder.ip());
-                    let _ = decoder.decode();
-                    if decoder.ip() >= address.0 {
-                        break;
-                    }
-                }
-                let Some(&tail_start) =
-                    instruction_starts.get(instruction_starts.len().saturating_sub(count))
-                else {
-                    error!(
-                        "could not decode instructions ending at {}",
-                        ui::addr(address.0)
-                    );
-                    return Ok(());
-                };
-                let tail_offset = usize::try_from(tail_start - read_start.0).unwrap_or(offset);
-                let mut formatter = disasm_formatter();
-                decode_rows(
-                    &bytes[tail_offset..],
-                    tail_start,
-                    Some(count),
-                    &mut formatter,
-                    resolve,
-                )
-            }
-            Arch::Arm64 => {
-                let tail_len = count.saturating_mul(4) as usize;
-                let tail_offset = bytes.len().saturating_sub(tail_len);
-                decode_rows_arm64(
-                    &bytes[tail_offset..],
-                    read_start.0 + tail_offset as u64,
-                    Some(count),
-                    resolve,
-                )
-            }
+        let Some(rows) = decode_preceding(
+            self.ctx.target.arch(),
+            bytes,
+            read_start.0,
+            address.0,
+            count,
+            resolve,
+        ) else {
+            error!(
+                "could not decode instructions ending at {}",
+                ui::addr(address.0)
+            );
+            return Ok(());
         };
-
-        if rows.is_empty() {
-            error!(
-                "could not decode instructions ending at {}",
-                ui::addr(address.0)
-            );
-            return Ok(());
-        }
-        let ends_at_address = rows.last().is_some_and(|row| match self.ctx.target.arch() {
-            Arch::Amd64 => {
-                let Ok(offset) = usize::try_from(row.ip.saturating_sub(read_start.0)) else {
-                    return false;
-                };
-                let Some(bytes) = bytes.get(offset..) else {
-                    return false;
-                };
-                let mut decoder = Decoder::with_ip(64, bytes, row.ip, DecoderOptions::NONE);
-                if !decoder.can_decode() {
-                    return false;
-                }
-                let instruction = decoder.decode();
-                instruction.code() != Code::INVALID && decoder.ip() == address.0
-            }
-            Arch::Arm64 => row.ip.saturating_add(4) == address.0,
-        });
-        if !ends_at_address {
-            error!(
-                "could not decode instructions ending at {}",
-                ui::addr(address.0)
-            );
-            return Ok(());
-        }
         render_rows(&rows, |_| None);
         outln!();
         Ok(())

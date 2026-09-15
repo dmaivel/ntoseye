@@ -1,3 +1,4 @@
+use bad64::decode;
 use iced_x86::{
     Code, Decoder, DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind,
     Instruction, MemorySizeOptions, Mnemonic, NasmFormatter,
@@ -14,20 +15,18 @@ pub enum ControlFlow {
     Other,
 }
 
-/// Classify the first instruction in `bytes` for the target architecture.
-/// Invalid or incomplete instructions are treated as [`ControlFlow::Other`].
-pub fn classify(bytes: &[u8], arch: Arch) -> ControlFlow {
-    if bytes.is_empty() {
-        return ControlFlow::Other;
-    }
+fn decode_first(bytes: &[u8], arch: Arch) -> Option<(usize, ControlFlow)> {
     match arch {
         Arch::Amd64 => {
             let mut decoder = Decoder::with_ip(64, bytes, 0, DecoderOptions::NONE);
+            if !decoder.can_decode() {
+                return None;
+            }
             let instruction = decoder.decode();
             if instruction.code() == Code::INVALID {
-                return ControlFlow::Other;
+                return None;
             }
-            if instruction.mnemonic() == Mnemonic::Call {
+            let flow = if instruction.mnemonic() == Mnemonic::Call {
                 ControlFlow::Call
             } else if instruction.mnemonic() == Mnemonic::Ret {
                 ControlFlow::Ret
@@ -35,20 +34,19 @@ pub fn classify(bytes: &[u8], arch: Arch) -> ControlFlow {
                 ControlFlow::Branch
             } else {
                 ControlFlow::Other
-            }
+            };
+            Some((instruction.len(), flow))
         }
         Arch::Arm64 => {
             if bytes.len() < 4 {
-                return ControlFlow::Other;
+                return None;
             }
             let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            let Ok(instruction) = bad64::decode(word, 0) else {
-                return ControlFlow::Other;
-            };
+            let instruction = decode(word, 0).ok()?;
             let mnemonic = instruction.op().mnem();
             // `blraa`/`blrab`/`blraaz`/`blrabz` are pointer-authenticated
             // `blr`; Windows ARM64 kernels emit them.
-            if mnemonic == "bl" || mnemonic.starts_with("blr") {
+            let flow = if mnemonic == "bl" || mnemonic.starts_with("blr") {
                 ControlFlow::Call
             } else if mnemonic.starts_with("ret") {
                 ControlFlow::Ret
@@ -65,9 +63,54 @@ pub fn classify(bytes: &[u8], arch: Arch) -> ControlFlow {
                 ControlFlow::Branch
             } else {
                 ControlFlow::Other
-            }
+            };
+            Some((4, flow))
         }
     }
+}
+
+/// Encoded length of the first instruction, or `None` for invalid or incomplete bytes.
+pub fn instruction_length(bytes: &[u8], arch: Arch) -> Option<usize> {
+    decode_first(bytes, arch).map(|(length, _)| length)
+}
+
+/// End of a branch-free instruction range starting at `start`.
+/// Input bytes must have debugger breakpoint opcodes masked out.
+pub fn fallthrough_run_end(bytes: &[u8], start: u64, end: u64, arch: Arch) -> Option<u64> {
+    if end <= start {
+        return None;
+    }
+    let Ok(window_len) = usize::try_from(end - start) else {
+        return None;
+    };
+    if bytes.len() < window_len {
+        return None;
+    }
+
+    let mut offset = 0;
+    while offset < window_len {
+        let boundary = start + offset as u64;
+        let Some((length, flow)) = decode_first(&bytes[offset..], arch) else {
+            return (offset != 0).then_some(boundary);
+        };
+        if length == 0 || length > window_len - offset {
+            return (offset != 0).then_some(boundary);
+        }
+        if flow != ControlFlow::Other {
+            return (offset != 0).then_some(boundary);
+        }
+        offset += length;
+    }
+    Some(end)
+}
+
+/// Classify the first instruction in `bytes` for the target architecture.
+/// Invalid or incomplete instructions are treated as [`ControlFlow::Other`].
+pub fn classify(bytes: &[u8], arch: Arch) -> ControlFlow {
+    if bytes.is_empty() {
+        return ControlFlow::Other;
+    }
+    decode_first(bytes, arch).map_or(ControlFlow::Other, |(_, flow)| flow)
 }
 
 /// NASM formatter configured for ntoseye's disassembly, so every call site
@@ -523,6 +566,115 @@ fn arm64_pcrel_comment(
     Some(resolve(target as u64))
 }
 
+/// Maximum encoded instruction length per architecture, used to size the
+/// lookbehind window for [`decode_preceding`].
+pub fn max_instruction_bytes(arch: Arch) -> usize {
+    match arch {
+        Arch::Amd64 => 15,
+        Arch::Arm64 => 4,
+    }
+}
+
+/// Decode `count` instructions ending exactly at `end_addr`.
+///
+/// `bytes` spans `read_start..end_addr`. Try each starting offset because x86
+/// cannot decode backwards, preferring streams without invalid instructions.
+/// Return `None` if no alignment reaches the end.
+pub fn decode_preceding(
+    arch: Arch,
+    bytes: &[u8],
+    read_start: u64,
+    end_addr: u64,
+    count: usize,
+    resolve: impl Fn(u64) -> String,
+) -> Option<Vec<DisasmRow>> {
+    if bytes.is_empty() || count == 0 {
+        return None;
+    }
+    let rows = match arch {
+        Arch::Amd64 => {
+            let offset = preceding_start_offset(bytes, read_start, end_addr)?;
+            let start = read_start + offset as u64;
+            let mut decoder = Decoder::with_ip(64, &bytes[offset..], start, DecoderOptions::NONE);
+            let mut instruction_starts = Vec::new();
+            while decoder.can_decode() {
+                instruction_starts.push(decoder.ip());
+                let _ = decoder.decode();
+                if decoder.ip() >= end_addr {
+                    break;
+                }
+            }
+            let &tail_start =
+                instruction_starts.get(instruction_starts.len().saturating_sub(count))?;
+            let tail_offset = usize::try_from(tail_start - read_start).unwrap_or(offset);
+            let mut formatter = disasm_formatter();
+            decode_rows(
+                &bytes[tail_offset..],
+                tail_start,
+                Some(count),
+                &mut formatter,
+                resolve,
+            )
+        }
+        Arch::Arm64 => {
+            let tail_len = count.saturating_mul(4);
+            let tail_offset = bytes.len().saturating_sub(tail_len);
+            decode_rows_arm64(
+                &bytes[tail_offset..],
+                read_start + tail_offset as u64,
+                Some(count),
+                resolve,
+            )
+        }
+    };
+
+    let ends_at_address = rows.last().is_some_and(|row| match arch {
+        Arch::Amd64 => {
+            let Ok(offset) = usize::try_from(row.ip.saturating_sub(read_start)) else {
+                return false;
+            };
+            let Some(bytes) = bytes.get(offset..) else {
+                return false;
+            };
+            let mut decoder = Decoder::with_ip(64, bytes, row.ip, DecoderOptions::NONE);
+            if !decoder.can_decode() {
+                return false;
+            }
+            let instruction = decoder.decode();
+            instruction.code() != Code::INVALID && decoder.ip() == end_addr
+        }
+        Arch::Arm64 => row.ip.saturating_add(4) == end_addr,
+    });
+    ends_at_address.then_some(rows)
+}
+
+/// Find the byte offset in the lookbehind window whose instruction stream ends
+/// exactly at `end_addr`, preferring one that decodes with no invalid
+/// instruction along the way.
+fn preceding_start_offset(bytes: &[u8], read_start: u64, end_addr: u64) -> Option<usize> {
+    let mut first_candidate = None;
+    for offset in 0..bytes.len() {
+        let start = read_start + offset as u64;
+        let mut decoder = Decoder::with_ip(64, &bytes[offset..], start, DecoderOptions::NONE);
+        let mut valid = true;
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            valid &= instruction.code() != Code::INVALID;
+            let end = decoder.ip();
+            if end >= end_addr {
+                if end == end_addr {
+                    first_candidate.get_or_insert(offset);
+                    if valid {
+                        return Some(offset);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    first_candidate
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,8 +707,73 @@ mod tests {
         );
     }
 
-    /// The joined token text must reproduce bad64's Display exactly — the
-    /// plain form is what the Python SDK and MCP consume.
+    #[test]
+    fn amd64_fallthrough_run_end_reaches_exact_window_end() {
+        let straight_line = [0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01];
+        assert_eq!(
+            fallthrough_run_end(
+                &straight_line,
+                0x1000,
+                0x1000 + straight_line.len() as u64,
+                Arch::Amd64
+            ),
+            Some(0x1000 + straight_line.len() as u64)
+        );
+    }
+
+    #[test]
+    fn amd64_fallthrough_run_end_stops_before_control_flow() {
+        let prefix = [0x48, 0x89, 0xc8];
+        for control_flow in [vec![0xeb, 0x00], vec![0xe8, 0, 0, 0, 0], vec![0xc3]] {
+            let mut window = prefix.to_vec();
+            window.extend_from_slice(&control_flow);
+            window.extend_from_slice(&[0x90]);
+            assert_eq!(
+                fallthrough_run_end(&window, 0x1000, 0x1000 + window.len() as u64, Arch::Amd64),
+                Some(0x1003)
+            );
+        }
+    }
+
+    #[test]
+    fn amd64_fallthrough_run_end_returns_none_for_leading_control_flow() {
+        assert_eq!(
+            fallthrough_run_end(&[0xc3, 0x90], 0x1000, 0x1002, Arch::Amd64),
+            None
+        );
+    }
+
+    #[test]
+    fn fallthrough_run_end_stops_at_last_boundary_before_end() {
+        let bytes = [0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01];
+        assert_eq!(fallthrough_run_end(&bytes, 0, 6, Arch::Amd64), Some(3));
+        assert_eq!(fallthrough_run_end(&bytes, 0, 2, Arch::Amd64), None);
+    }
+
+    #[test]
+    fn arm64_fallthrough_run_end_handles_nops_and_leading_branch() {
+        let nop = 0xd503201fu32.to_le_bytes();
+        let mut nops = Vec::new();
+        nops.extend_from_slice(&nop);
+        nops.extend_from_slice(&nop);
+        assert_eq!(
+            fallthrough_run_end(&nops, 0x2000, 0x2008, Arch::Arm64),
+            Some(0x2008)
+        );
+
+        let branch = 0x14000000u32.to_le_bytes();
+        assert_eq!(
+            fallthrough_run_end(&branch, 0x2000, 0x2004, Arch::Arm64),
+            None
+        );
+    }
+
+    #[test]
+    fn instruction_length_rejects_truncated_encodings() {
+        assert_eq!(instruction_length(&[0xe8, 0, 0, 0], Arch::Amd64), None);
+        assert_eq!(instruction_length(&[0, 0, 0], Arch::Arm64), None);
+    }
+
     #[test]
     fn arm64_rows_reproduce_bad64_display() {
         let mut checked = 0;
@@ -572,7 +789,7 @@ mod tests {
             0x91000420,    // add x0, x1, #0x10
         ];
         for (i, word) in real.iter().enumerate() {
-            let ins = bad64::decode(*word, 0x1000 + 4 * i as u64).expect("real instruction");
+            let ins = decode(*word, 0x1000 + 4 * i as u64).expect("real instruction");
             let joined: String = arm64_row_tokens(&ins)
                 .iter()
                 .map(|t| t.text.as_str())
@@ -587,7 +804,7 @@ mod tests {
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             let word = (state >> 32) as u32;
-            let Ok(ins) = bad64::decode(word, 0x2000 + 4 * i) else {
+            let Ok(ins) = decode(word, 0x2000 + 4 * i) else {
                 continue;
             };
             let joined: String = arm64_row_tokens(&ins)
@@ -607,30 +824,26 @@ mod tests {
         );
     }
 
-    /// PC-relative comments resolve to the absolute destination (bad64 folds
-    /// the offset into the Label operand), for every form: branches, register
-    /// conditional branches, and address loads. Non-PC-relative instructions
-    /// get none.
     #[test]
     fn arm64_pcrel_comments_resolve_targets() {
         // b -0x2d8
-        let ins = bad64::decode(0x17fffd28, 0xfffff8009bb34ff8).unwrap();
+        let ins = decode(0x17fffd28, 0xfffff8009bb34ff8).unwrap();
         let comment = arm64_pcrel_comment(&ins, |t| format!("SYM:{t:#x}"));
         assert_eq!(comment.as_deref(), Some("SYM:0xfffff8009bb34498"));
 
         // cbnz w10, label
-        let ins = bad64::decode(0x35ffffca, 0xfffff8009b40c998).unwrap();
+        let ins = decode(0x35ffffca, 0xfffff8009b40c998).unwrap();
         let comment = arm64_pcrel_comment(&ins, |t| format!("SYM:{t:#x}"));
         assert_eq!(comment.as_deref(), Some("SYM:0xfffff8009b40c990"));
 
-        let ins = bad64::decode(0x90000000, 0x1000).unwrap(); // adrp x0, #0
+        let ins = decode(0x90000000, 0x1000).unwrap(); // adrp x0, #0
         let comment = arm64_pcrel_comment(&ins, |t| format!("{t:#x}"));
         assert_eq!(comment.as_deref(), Some("0x1000"));
 
-        let ins = bad64::decode(0xd65f03c0, 0x1000).unwrap();
+        let ins = decode(0xd65f03c0, 0x1000).unwrap();
         assert!(arm64_pcrel_comment(&ins, |_| String::new()).is_none());
 
-        let ins = bad64::decode(0x94000005, 0x2000).unwrap();
+        let ins = decode(0x94000005, 0x2000).unwrap();
         let comment = arm64_pcrel_comment(&ins, |t| format!("{t:#x}"));
         assert_eq!(comment.as_deref(), Some("0x2014"));
     }

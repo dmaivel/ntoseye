@@ -241,7 +241,10 @@ pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) 
 
 // Decoding lives in core; the REPL owns the *rendering*
 // (`format_disasm_line`/`render_rows` below).
-pub use crate::disasm::{AsmToken, DisasmRow, decode_rows, decode_rows_arm64, disasm_formatter};
+pub use crate::disasm::{
+    AsmToken, DisasmRow, decode_preceding, decode_rows, decode_rows_arm64, disasm_formatter,
+    max_instruction_bytes,
+};
 
 /// Width of the byte column for a listing: the longest hex string among the
 /// rows about to be printed, so the asm column always aligns and never gets
