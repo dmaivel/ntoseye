@@ -7,6 +7,7 @@ use crate::debugger_data::DebuggerDataCandidate;
 use crate::dmp::TriageCrashInfo;
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
+use crate::phys::PhysMem;
 use crate::target::Target;
 use crate::types::VirtAddr;
 
@@ -648,6 +649,13 @@ pub trait DebugBackend {
     /// on the per-stop module-list diff.
     fn take_modules_changed(&mut self) -> bool {
         false
+    }
+
+    /// Revalidate host memory after rebuilding the target. A reboot or hypervisor
+    /// remap can invalidate the attach-time identity check. Backends without host
+    /// memory mappings return `Ok(())`.
+    fn revalidate_host_memory(&mut self, _phys: &PhysMem) -> Result<()> {
+        Ok(())
     }
 
     /// Whether the transport can read/write model-specific registers

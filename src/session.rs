@@ -2447,6 +2447,17 @@ pub fn perform_target_reload(
     breakpoints.prepare_target_reload(backend);
     let hint = event_hint.or_else(|| backend.target_kernel_base_hint().ok().flatten());
     let report = target.reload_guest_with_kernel_base_hint(hint);
+    // The attach-time identity check only proved the host mapping matched the
+    // kernel that was running then. Re-check it against the rebuilt target
+    // before anything reads through it again.
+    if report.is_ok()
+        && let Err(error) = backend.revalidate_host_memory(&target.phys)
+    {
+        eprintln!(
+            "host memory no longer matches the target after the reload ({error}); every read \
+             through it is now suspect - reattach with --memory-source kd"
+        );
+    }
     let breakpoint_error = if report.is_ok() {
         let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
         target.refresh_debugger_data(debugger_data_hint);

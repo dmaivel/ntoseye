@@ -52,6 +52,7 @@ KD and KDNET accept `--memory-source auto|host|kd`:
 
 The source controls reads. Where the target can service virtual writes, all sources use `DbgKdWriteVirtualMemory`; other addresses use a page walk and `DbgKdWritePhysicalMemory`. Virtual writes preserve guest write protection, copy-on-write, and residency handling. Physical or host-memory writes bypass those protections, and edits follow the physical frame if the guest remaps it.
 
+The host mapping's identity is re-checked after a guest reboot rebuilds debugger state, not just at attach.
 
 The `kd` source needs no hypervisor or VM-process access, so AMD64 and ARM64 Windows VMs or physical machines can be debugged across any routable network. Memory-backed commands require the target to be halted; remote latency also makes large scans slower than direct host memory. Every read is a request/reply round trip. Over KDCOM on an emulated UART the request alone costs about 3 ms before the target sees it: QEMU's 16550 hands the guest one byte per main-loop iteration at the FIFO trigger level KDCOM programs, and a KD request plus its ACK is ~90 bytes host-to-guest. The reply direction is cheap (~5 µs/byte), and KDNET has no such floor. So over KDCOM what matters is how many reads a step needs, not how many bytes; prefer `--memory-source host` (the `auto` default) whenever the VM is local:
 

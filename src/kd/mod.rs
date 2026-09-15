@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::framing::{BREAKIN_BYTE, KdFraming};
 use crate::memory::{AddressSpace, PAGE_SIZE, TranslationCache};
+use crate::phys::PhysMem;
 use crate::session::clear_trap_flag;
 use crate::types::{Arch, Dtb, PhysAddr, VirtAddr};
 
@@ -2662,6 +2663,12 @@ impl DebugBackend for KdBackend {
 impl DebugBackend for KdBackendHandle {
     fn register_map(&self) -> &RegisterMap {
         &self.register_map
+    }
+
+    fn revalidate_host_memory(&mut self, phys: &PhysMem) -> Result<()> {
+        let mut backend = self.lock();
+        let hints = backend.target_hints()?;
+        backend.validate_host_memory(phys, hints)
     }
 
     fn name(&self) -> &'static str {
