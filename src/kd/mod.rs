@@ -5,6 +5,9 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
+#[cfg(test)]
+use std::thread::JoinHandle;
+use std::thread::spawn;
 use std::time::{Duration, Instant};
 
 use owo_colors::OwoColorize;
@@ -848,7 +851,7 @@ impl KdBackend {
             .as_ref()
             .map(ContinueDrain::interrupt_flag)
             .unwrap_or_default();
-        let join = std::thread::spawn(move || {
+        let join = spawn(move || {
             run_pump(
                 framing,
                 arch,
@@ -2599,7 +2602,7 @@ mod tests {
         let kernel_base = 0xffff_f802_4e80_0000u64;
         let module_list = 0xffff_f802_4f4d_aed0u64;
 
-        let worker = std::thread::spawn(move || {
+        let worker = spawn(move || {
             let version_request = read_wire_packet(&mut kernel);
             let version_id = u32::from_le_bytes(version_request[8..12].try_into().unwrap());
             assert_eq!(
@@ -2679,7 +2682,7 @@ mod tests {
             target_reloaded: false,
             assisted_breakin: false,
         };
-        let handle = std::thread::spawn(move || {
+        let handle = spawn(move || {
             let mut framing = KdFraming::new(host.into());
             continue_transparent_state_change(&mut framing, Arch::Arm64, &stop)
         });
@@ -3400,7 +3403,7 @@ mod tests {
         };
         let expected = [0xde, 0xad, 0xbe, 0xef];
 
-        let worker = std::thread::spawn(move || {
+        let worker = spawn(move || {
             let request = read_wire_packet(&mut kernel);
             let packet_id = u32::from_le_bytes(request[8..12].try_into().unwrap());
             assert_eq!(
@@ -3454,9 +3457,9 @@ mod tests {
     fn serve_virtual_memory(
         mut kernel: UnixStream,
         regions: Vec<(u64, Vec<u8>)>,
-    ) -> std::thread::JoinHandle<usize> {
+    ) -> JoinHandle<usize> {
         const UNION: usize = 16;
-        std::thread::spawn(move || {
+        spawn(move || {
             let mut kernel_id = WIRE_FIRST_PACKET_ID;
             let mut served = 0usize;
             loop {
@@ -3644,7 +3647,7 @@ mod tests {
         regions: Vec<(u64, Vec<u8>)>,
         types: Vec<TypeInfo>,
         symbols: &[(&str, u32)],
-    ) -> (Guest, Arc<Mutex<KdBackend>>, std::thread::JoinHandle<usize>) {
+    ) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
         let (kernel, host) = UnixStream::pair().unwrap();
         let mut backend = kd_backend_with_framing(host);
         backend.link.set_inline_running(false);
@@ -3893,7 +3896,7 @@ mod tests {
         let breakin_clone = host.try_clone().unwrap();
         let pump_host = host.try_clone().unwrap();
         let pump = PumpHandle {
-            join: std::thread::spawn(move || KdFraming::new(pump_host.into())),
+            join: spawn(move || KdFraming::new(pump_host.into())),
             stop_rx: mpsc::channel().1,
             shutdown: Arc::new(AtomicBool::new(false)),
             reported_stop: Arc::new(AtomicBool::new(false)),
@@ -4053,7 +4056,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4098,7 +4101,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let join = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4124,7 +4127,7 @@ mod tests {
         let (continue_tx, continue_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
 
-        let kernel_thread = std::thread::spawn(move || {
+        let kernel_thread = spawn(move || {
             let pc = 0xfffff800_deadbeef;
             let mut payload = exception_state_change_payload(pc);
             payload[32..36].copy_from_slice(&0xc000_0005u32.to_le_bytes());
@@ -4300,7 +4303,7 @@ mod tests {
         let join = {
             let shutdown = Arc::clone(&shutdown);
             let reported_stop = Arc::clone(&reported_stop);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4382,7 +4385,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4483,7 +4486,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4538,7 +4541,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4604,7 +4607,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4656,7 +4659,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4709,7 +4712,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
@@ -4756,7 +4759,7 @@ mod tests {
         kernel
             .set_read_timeout(Some(Duration::from_millis(5)))
             .unwrap();
-        let handle = std::thread::spawn(move || {
+        let handle = spawn(move || {
             let mut framing = KdFraming::new(host.into());
             let mut saw_refresh = false;
             let stop = await_state_change(
@@ -4845,7 +4848,7 @@ mod tests {
         kernel
             .set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
-        let handle = std::thread::spawn(move || {
+        let handle = spawn(move || {
             let mut framing = KdFraming::new(host.into());
             let mut bugcheck = false;
             let mut capture = BugcheckCapture::default();
@@ -4935,7 +4938,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || {
+            spawn(move || {
                 run_pump(
                     framing,
                     Arch::Amd64,
