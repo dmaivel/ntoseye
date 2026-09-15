@@ -265,6 +265,10 @@ ba w8 nt!KiBalanceSetManagerLastCheckTick
 - `br <id> <newid>` - Renumber a breakpoint.
 - `bpp <id> <passes>` - Reset a breakpoint pass count.
 
+KD has a fixed 32-entry software-breakpoint table. A session killed with `SIGKILL` leaves its entries installed and can prevent later breakpoints at those addresses.
+
+Attach reclaims entries that no live session owns, restores displaced instructions, and reports the count. A colliding install also reclaims stale entries and retries. `bc *` only clears the current session’s handles. Normal exit, `SIGTERM`, and `SIGHUP` release them.
+
 ## Processes and threads
 
 - `!process [eprocess|pid|0] [flags] [image-name]` - List or inspect Windows processes; `!process 0 0` lists all, bit 1 adds process detail, bit 2 adds threads, and bit 4 adds each thread's stack.

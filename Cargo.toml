@@ -72,6 +72,9 @@ anyhow = { version = "1", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31.3", features = [ "process", "uio" ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["cli", "mcp", "python-embed"]
 cli = ["dep:ctrlc", "dep:argh", "dep:dialoguer", "dep:nu-ansi-term", "dep:reedline"]

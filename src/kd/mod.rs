@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Write};
+use std::mem::take;
 use std::os::unix::net::UnixStream;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -166,6 +167,10 @@ const DBGKD_READ_FILE_API: u32 = 0x0000_3431;
 const DBGKD_WRITE_FILE_API: u32 = 0x0000_3432;
 const DBGKD_CLOSE_FILE_API: u32 = 0x0000_3433;
 const STATUS_UNSUCCESSFUL: u32 = 0xc000_0001;
+/// Entries in the target's `KdpBreakpointTable`. A fixed global in every
+/// Windows kernel (`BREAKPOINT_TABLE_SIZE`), and the ceiling on how many
+/// software breakpoints any debugger can have installed at once.
+const KD_BREAKPOINT_TABLE_SIZE: u32 = 32;
 const KD_REFRESH_MESSAGE: &[u8] = b"KDTARGET: Refreshing KD connection";
 const KD_INITIAL_TIMEOUT_ENV: &str = "NTOSEYE_KD_TIMEOUT";
 const KD_INITIAL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(8);
@@ -323,6 +328,54 @@ fn breakpoint_instruction_at(
         Ok(bytes) => bytes == expected,
         Err(_) => true,
     }
+}
+
+/// Release every entry in the target's breakpoint table whose handle is not in
+/// `owned`, reporting how many the target accepted.
+///
+/// Handles are table indices plus one and only one debugger may be attached at
+/// a time, so every handle we do not hold belongs to a session that is gone and
+/// is ours to release. Releasing one restores the byte the entry displaced,
+/// which is the only correct way to get a guest past an `int3` we cannot
+/// account for. An empty slot refuses the handle, so the count is the number of
+/// entries actually recovered.
+fn restore_unowned_breakpoint_handles(
+    framing: &mut KdFraming<KdTransport>,
+    processor: u16,
+    owned: &HashSet<u32>,
+) -> usize {
+    let mut reclaimed = 0;
+    for handle in 1..=KD_BREAKPOINT_TABLE_SIZE {
+        if owned.contains(&handle) {
+            continue;
+        }
+        match with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+            api::restore_breakpoint(framing, processor, handle)
+        }) {
+            Ok(()) => reclaimed += 1,
+            // An empty slot refuses the handle; that is the common answer.
+            Err(Error::KdStatus { .. }) => {}
+            // Transport trouble will resurface on whatever the caller does
+            // next, with a better error than a reclaim failure could give.
+            Err(error) => {
+                kd_trace!("kd: reclaim: handle {handle} failed: {error}");
+                break;
+            }
+        }
+    }
+    reclaimed
+}
+
+/// Announce reclaimed table entries. A stranded entry is invisible to the
+/// operator but costs a breakpoint slot for the rest of the boot, so say so.
+fn report_reclaimed_breakpoints(reclaimed: usize) {
+    if reclaimed == 0 {
+        return;
+    }
+    eprintln!(
+        "ntoseye: released {reclaimed} breakpoint table entr{} stranded by an earlier session",
+        if reclaimed == 1 { "y" } else { "ies" }
+    );
 }
 
 /// Whether a stop seen during exit is a stray single-step: `STATUS_SINGLE_STEP`
@@ -750,6 +803,18 @@ impl KdBackend {
         // A second handle on the same transport lets the foreground send an
         // unframed break-in byte while the pump owns `framing` for reading.
         let breakin_clone = framing.transport_mut().try_clone()?;
+
+        // Only one debugger is attached at a time, so every entry already in
+        // the target's breakpoint table was left by a session that is gone:
+        // its `int3` is still displacing a byte of guest code and its slot is
+        // held until the guest reboots. Release them before anything reads
+        // guest memory or resumes, so no later decision has to reason about an
+        // `int3` nobody can account for.
+        report_reclaimed_breakpoints(restore_unowned_breakpoint_handles(
+            &mut framing,
+            initial_stop.processor,
+            &HashSet::new(),
+        ));
 
         // A target left waiting on a debugger that died mid-breakpoint reports
         // its stop again to us, at the breakpoint's address. The kernel has
@@ -1488,6 +1553,103 @@ impl KdBackend {
         Ok(())
     }
 
+    /// Hand every breakpoint site the host did not clear back to the target.
+    ///
+    /// A host that exits through its own teardown removes breakpoints through
+    /// the manager and leaves nothing here. Abnormal exits (a termination
+    /// signal, an I/O error unwinding past the REPL's cleanup) skip that path,
+    /// and what is left behind is not just an `int3` in guest code: each site
+    /// also holds one of the 32 entries in the target's `KdpBreakpointTable`
+    /// for the rest of the boot, because only the debugger that owns a handle
+    /// can release it. Best effort by construction: this runs while the
+    /// process is already going away.
+    fn restore_tracked_breakpoints(&mut self) {
+        // Requests are only answered while the target is halted, and a pending
+        // install owns the next reply on the wire.
+        if self.bp_handles.is_empty()
+            || self.link.is_running()
+            || self.pending_write_breakpoint.is_some()
+        {
+            return;
+        }
+        let processor = self.current_processor;
+        for (addr, handle) in take(&mut self.bp_handles) {
+            let Ok(framing) = self.framing() else { return };
+            match with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+                api::restore_breakpoint(framing, processor, handle)
+            }) {
+                Ok(()) => {
+                    self.managed_bp_addresses.remove(&addr);
+                }
+                // The transport is going away with the process; a stranded
+                // entry is better than blocking teardown on a retry.
+                Err(error) => kd_trace!(
+                    "kd: exit: restoring breakpoint handle {handle} at {addr:#x} failed: {error}"
+                ),
+            }
+        }
+    }
+
+    /// Reclaim breakpoint slots stranded by an earlier debugger session, then
+    /// retry the install once.
+    ///
+    /// `KdpAddBreakpoint` answers `STATUS_UNSUCCESSFUL` in exactly two cases a
+    /// debugger can hit: the address already has an entry in the target's
+    /// 32-slot `KdpBreakpointTable`, or every slot is taken. Both mean the same
+    /// thing in practice, because only the debugger holding a handle can
+    /// release one and a session killed mid-flight takes its handles with it -
+    /// so a fresh session can be locked out of an address it never touched,
+    /// until the guest reboots.
+    ///
+    /// Handles are table indices plus one and only one debugger may be attached
+    /// at a time, so every handle we do not own belongs to a dead session and is
+    /// ours to release. Releasing one cannot corrupt the guest: before writing
+    /// an entry's saved byte back, `KdpLowWriteContent` checks the site still
+    /// holds the breakpoint instruction. When that write-back cannot happen,
+    /// as for a breakpoint in a driver's discarded `INIT` section, the target
+    /// reports success but keeps the entry, marked suspended: the address is
+    /// installable again, though the slot itself only frees on reboot.
+    fn write_breakpoint_after_reclaim(&mut self, addr: u64, processor: u16) -> Result<u32> {
+        let reclaimed = self.reclaim_stranded_breakpoints(processor);
+        if reclaimed == 0 {
+            return Err(Self::breakpoint_table_error(addr));
+        }
+        report_reclaimed_breakpoints(reclaimed);
+        match with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::write_breakpoint(framing, processor, addr)
+        }) {
+            Ok(handle) => Ok(handle),
+            Err(Error::KdStatus { ntstatus, api })
+                if ntstatus == STATUS_UNSUCCESSFUL && api == api::DBGKD_WRITE_BREAKPOINT =>
+            {
+                Err(Self::breakpoint_table_error(addr))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Release every table handle this session does not own, reporting how many
+    /// the target accepted. A handle for a free slot is refused, so the count is
+    /// the number of entries actually recovered.
+    fn reclaim_stranded_breakpoints(&mut self, processor: u16) -> usize {
+        let owned: HashSet<u32> = self.bp_handles.values().copied().collect();
+        let Ok(framing) = self.framing() else {
+            return 0;
+        };
+        restore_unowned_breakpoint_handles(framing, processor, &owned)
+    }
+
+    /// Name the cause the raw NTSTATUS hides. WinDbg reports this as
+    /// `Win32 error 0n998`, "invalid access to memory location", which sends
+    /// people hunting a memory-access problem that does not exist.
+    fn breakpoint_table_error(addr: u64) -> Error {
+        Error::Kd(format!(
+            "target refused a breakpoint at {addr:#x}: all {KD_BREAKPOINT_TABLE_SIZE} entries in \
+             its breakpoint table are taken; entries an earlier session stranded in a page the \
+             target can no longer write back only clear when the guest reboots"
+        ))
+    }
+
     /// Exit absorbs stray single-steps the same way run-control does: clear TF
     /// on the stopped vCPU, then continue. Otherwise a leaked TF can retrigger
     /// until exit gives up.
@@ -1504,6 +1666,7 @@ impl KdBackend {
         if let Some(stop) = self.shutdown_pump_with_stop()? {
             self.record_stop(&stop);
         }
+        self.restore_tracked_breakpoints();
         if !leave_running {
             return Ok(());
         }
@@ -1918,6 +2081,11 @@ impl DebugBackend for KdBackend {
                     "KD request timed out after {}s; breakpoint install is pending, retry the same bp command to complete it",
                     KD_REQUEST_TIMEOUT.as_secs()
                 )));
+            }
+            Err(Error::KdStatus { ntstatus, api })
+                if ntstatus == STATUS_UNSUCCESSFUL && api == api::DBGKD_WRITE_BREAKPOINT =>
+            {
+                self.write_breakpoint_after_reclaim(addr, processor)?
             }
             Err(err) => return Err(err),
         };
@@ -3523,14 +3691,134 @@ mod tests {
         })
     }
 
+    /// A halted fake kernel answering breakpoint APIs from an ordered
+    /// `(api, status, handle)` script. The handle rides in the manipulate
+    /// header union, where `DbgKdWriteBreakPointApi` returns it, rather than in
+    /// trailing data. Yields the `(api, union)` pairs the host actually sent -
+    /// a breakpoint address for a write, a table handle for a restore.
+    fn serve_breakpoints(
+        mut kernel: UnixStream,
+        script: Vec<(u32, u32, u32)>,
+    ) -> JoinHandle<Vec<(u32, u64)>> {
+        const UNION: usize = 16;
+        spawn(move || {
+            let mut kernel_id = WIRE_FIRST_PACKET_ID;
+            let mut script = script.into_iter();
+            let mut seen = Vec::new();
+            loop {
+                let mut header = [0u8; WIRE_HEADER_SIZE];
+                if kernel.read_exact(&mut header).is_err() {
+                    assert!(script.next().is_none(), "missing breakpoint request");
+                    return seen;
+                }
+                if u32::from_le_bytes(header[0..4].try_into().unwrap()) != WIRE_DATA_LEADER {
+                    continue; // host ACK of our last reply
+                }
+                let len = u16::from_le_bytes(header[6..8].try_into().unwrap()) as usize;
+                let mut request = vec![0u8; len + 1];
+                kernel.read_exact(&mut request).unwrap();
+                let host_id = u32::from_le_bytes(header[8..12].try_into().unwrap());
+                kernel
+                    .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, host_id))
+                    .unwrap();
+
+                let api_number = u32::from_le_bytes(request[0..4].try_into().unwrap());
+                seen.push((api_number, wire::read_u64(&request, UNION)));
+
+                let (expected_api, status, handle) =
+                    script.next().expect("unexpected breakpoint request");
+                assert_eq!(api_number, expected_api);
+                let mut reply = vec![0u8; api::MANIPULATE_HEADER_SIZE];
+                reply[0..4].copy_from_slice(&api_number.to_le_bytes());
+                reply[8..12].copy_from_slice(&status.to_le_bytes());
+                reply[UNION + 8..UNION + 12].copy_from_slice(&handle.to_le_bytes());
+                kernel
+                    .write_all(&wire_data_packet(
+                        PACKET_TYPE_KD_STATE_MANIPULATE,
+                        kernel_id,
+                        &reply,
+                    ))
+                    .unwrap();
+                kernel_id ^= 1;
+            }
+        })
+    }
+
+    #[test]
+    fn breakpoint_install_reclaims_slots_stranded_by_a_dead_session() {
+        let (kernel, host) = UnixStream::pair().unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.link.set_inline_running(false);
+        backend.exit_prepared = true;
+        backend.bp_handles.insert(0xfffff80000001000, 3);
+
+        let mut script = vec![(api::DBGKD_WRITE_BREAKPOINT, STATUS_UNSUCCESSFUL, 0)];
+        for handle in 1..=KD_BREAKPOINT_TABLE_SIZE {
+            if handle == 3 {
+                continue;
+            }
+            // Only slot 7 still holds a stranded entry; a free slot refuses
+            // the handle, which is the answer for every other one.
+            let status = if handle == 7 {
+                api::STATUS_SUCCESS
+            } else {
+                STATUS_UNSUCCESSFUL
+            };
+            script.push((api::DBGKD_RESTORE_BREAKPOINT, status, 0));
+        }
+        script.push((api::DBGKD_WRITE_BREAKPOINT, api::STATUS_SUCCESS, 9));
+        let worker = serve_breakpoints(kernel, script);
+
+        backend.set_breakpoint(0xfffff80000002000).unwrap();
+
+        assert_eq!(backend.bp_handles.get(&0xfffff80000002000), Some(&9));
+        assert_eq!(backend.bp_handles.get(&0xfffff80000001000), Some(&3));
+        drop(backend);
+        let requests = worker.join().unwrap();
+        let released: Vec<u64> = requests
+            .iter()
+            .filter(|(api_number, _)| *api_number == api::DBGKD_RESTORE_BREAKPOINT)
+            .map(|(_, handle)| *handle)
+            .collect();
+        assert!(
+            !released.contains(&3),
+            "reclaim released a handle this session still owns: {released:?}"
+        );
+        assert_eq!(released.len(), KD_BREAKPOINT_TABLE_SIZE as usize - 1);
+    }
+
+    #[test]
+    fn exit_restores_breakpoints_the_host_left_installed() {
+        let (kernel, host) = UnixStream::pair().unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.link.set_inline_running(false);
+        backend.bp_handles.insert(0xfffff80000003000, 4);
+        backend.managed_bp_addresses.insert(0xfffff80000003000);
+
+        let worker = serve_breakpoints(
+            kernel,
+            vec![(api::DBGKD_RESTORE_BREAKPOINT, api::STATUS_SUCCESS, 0)],
+        );
+
+        backend.prepare_for_exit(false).unwrap();
+
+        assert!(backend.bp_handles.is_empty());
+        assert!(backend.managed_bp_addresses.is_empty());
+        drop(backend);
+        assert_eq!(
+            worker.join().unwrap(),
+            vec![(api::DBGKD_RESTORE_BREAKPOINT, 4)]
+        );
+    }
+
     /// A halted fake kernel answering manipulate requests from an ordered
     /// `(api, status, data)` script, asserting each request's API number.
     fn serve_manipulate(
         mut kernel: UnixStream,
         script: Vec<(u32, u32, Vec<u8>)>,
-    ) -> std::thread::JoinHandle<()> {
+    ) -> JoinHandle<()> {
         const UNION: usize = 16;
-        std::thread::spawn(move || {
+        spawn(move || {
             let mut kernel_id = WIRE_FIRST_PACKET_ID;
             let mut script = script.into_iter();
             loop {

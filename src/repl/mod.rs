@@ -1,3 +1,5 @@
+#[cfg(all(feature = "cli", unix))]
+use libc::{SIGHUP, SIGTERM, c_int, sigaction, sigemptyset, sighandler_t};
 #[cfg(feature = "cli")]
 use nu_ansi_term::{Color, Style};
 #[cfg(feature = "cli")]
@@ -8,7 +10,13 @@ use reedline::{
 #[cfg(feature = "cli")]
 use reedline::{Reedline, Signal};
 #[cfg(feature = "cli")]
+use std::io;
+#[cfg(feature = "cli")]
 use std::io::{BufRead, Write};
+#[cfg(all(feature = "cli", unix))]
+use std::mem::zeroed;
+#[cfg(all(feature = "cli", unix))]
+use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
@@ -42,6 +50,9 @@ use crate::target::Target;
 use crate::ui;
 
 pub static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set by [`note_termination`]; polled by the prompt loops so a termination
+/// signal leaves through the same teardown as `q`.
+static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub const BREAK_STACKTRACE_DISPLAY_LIMIT: usize = 6;
 pub const BREAK_STACKTRACE_PROBE_LIMIT: usize = 64;
 #[cfg(feature = "cli")]
@@ -392,6 +403,83 @@ pub fn start_repl(ctx: &mut Session) -> Result<()> {
     start_repl_with_mode(ctx, false)
 }
 
+/// Signal-handler safe: one atomic store through an already-initialized static.
+#[cfg(all(unix, feature = "cli"))]
+extern "C" fn note_termination(_signal: c_int) {
+    TERMINATION_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Turn a termination signal into an ordinary exit so the teardown below runs.
+///
+/// The default disposition kills the process outright, which leaves an `int3`
+/// in guest code and holds one of the target's 32 breakpoint-table entries for
+/// the rest of the boot, since only the debugger owning a handle can release
+/// it.
+/// `SIGINT` is left to the Ctrl+C handler, which means "interrupt the guest".
+/// `SA_RESTART` is deliberately unset: the interrupted `read` is how a loop
+/// blocked on input learns to stop waiting.
+#[cfg(all(unix, feature = "cli"))]
+fn install_termination_handler() {
+    for signal in [SIGTERM, SIGHUP] {
+        // SAFETY: the handler only performs one atomic store.
+        unsafe {
+            let mut action: sigaction = zeroed();
+            action.sa_sigaction = note_termination as *const () as sighandler_t;
+            sigemptyset(&mut action.sa_mask);
+            sigaction(signal, &action, null_mut());
+        }
+    }
+}
+
+#[cfg(all(not(unix), feature = "cli"))]
+fn install_termination_handler() {}
+
+#[cfg(feature = "cli")]
+fn termination_requested() -> bool {
+    TERMINATION_REQUESTED.load(Ordering::SeqCst)
+}
+
+/// Read one line, noticing a termination signal that arrived mid-read.
+///
+/// `BufRead::read_line` retries `EINTR` internally, so a signal delivered while
+/// the prompt waits for input stays invisible until the next keypress, leaving
+/// the process alive with breakpoints still installed in the guest. Returns
+/// `None` when termination was requested instead of a line.
+#[cfg(feature = "cli")]
+fn read_line_interruptible<R: BufRead>(
+    input: &mut R,
+    buffer: &mut String,
+) -> io::Result<Option<usize>> {
+    let mut line = Vec::new();
+    loop {
+        if termination_requested() {
+            return Ok(None);
+        }
+        let available = match input.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            break;
+        }
+        let (chunk, complete) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (&available[..=index], true),
+            None => (available, false),
+        };
+        // Decoded once at the end: a multi-byte character can straddle two
+        // fills, and lossy-decoding each chunk would mangle it.
+        line.extend_from_slice(chunk);
+        let consumed = chunk.len();
+        input.consume(consumed);
+        if complete {
+            break;
+        }
+    }
+    buffer.push_str(&String::from_utf8_lossy(&line));
+    Ok(Some(line.len()))
+}
+
 #[cfg(feature = "cli")]
 pub fn start_plain_repl(ctx: &mut Session) -> Result<()> {
     start_repl_with_mode(ctx, true)
@@ -405,6 +493,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     ctrlc::set_handler(move || {
         INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
     })?;
+    install_termination_handler();
 
     let backend_label = client.name();
 
@@ -610,22 +699,28 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     state.ctx.reload_module_list_pending = reload_module_list_pending;
 
     if plain {
-        let stdin = std::io::stdin();
+        let stdin = io::stdin();
         let mut input = stdin.lock();
         let mut buffer = String::new();
 
         loop {
+            if termination_requested() {
+                break;
+            }
             let prompt = if state.ctx.current_thread.is_empty() {
                 "ntoseye>".to_string()
             } else {
                 format!("{backend_label}:{}>", state.ctx.current_thread)
             };
             outln!("{prompt}");
-            std::io::stdout().flush()?;
+            io::stdout().flush()?;
 
             buffer.clear();
-            if input.read_line(&mut buffer)? == 0 {
-                break;
+            match read_line_interruptible(&mut input, &mut buffer) {
+                // A termination signal, or end of input.
+                Ok(None) | Ok(Some(0)) => break,
+                Ok(Some(_)) => {}
+                Err(error) => return Err(error.into()),
             }
             let command = buffer.trim();
             if command.is_empty() {
@@ -640,8 +735,18 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         }
     } else {
         loop {
+            if termination_requested() {
+                break;
+            }
             let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
-            let sig = target_loan.lend(&state.ctx.target, || line_editor.read_line(&prompt))?;
+            let sig = match target_loan.lend(&state.ctx.target, || line_editor.read_line(&prompt)) {
+                Ok(sig) => sig,
+                Err(_) if termination_requested() => break,
+                Err(error) => return Err(error.into()),
+            };
+            if termination_requested() {
+                break;
+            }
             match sig {
                 Signal::Success(buffer) => {
                     if !buffer.trim().is_empty() {
