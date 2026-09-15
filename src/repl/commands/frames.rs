@@ -6,14 +6,12 @@ use crate::error::Result;
 use crate::expr::Expr;
 use crate::gdb::RegisterMap;
 use crate::kd::{context, context_arm64};
-use crate::memory::DTB_IDENTITY;
 use crate::target::{SavedThreadRegisters, SelectedFrame, Target};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
-    RecoveredFrame, RecoveredStackTrace, build_stacktrace_with_context,
-    build_stacktrace_with_register_values,
+    RecoveredStackTrace, build_stacktrace_with_context, build_stacktrace_with_register_values,
 };
 
 use crate::repl::*;
@@ -66,19 +64,11 @@ impl ReplState<'_> {
     }
 
     fn set_selected_frame(&mut self, selected: SelectedFrame) {
-        self.ctx.target.registers = Some(selected.registers.clone());
-        if let Some(cr3) = selected.registers.get("cr3").copied()
-            && cr3 != 0
-            && self.ctx.target.guest.is_some()
-            && self.ctx.target.kernel_dtb() != DTB_IDENTITY
-        {
-            self.ctx.target.set_context_dtb_override(cr3);
-        }
-        self.ctx.target.selected_frame = Some(selected);
+        self.ctx.select_frame(selected);
     }
 
     pub fn select_register_values(&mut self, index: usize, registers: HashMap<String, u64>) -> u64 {
-        let selected = selected_from_registers(index, registers);
+        let selected = SelectedFrame::from_registers(index, registers);
         let ip = selected.ip;
         self.set_selected_frame(selected);
         ip
@@ -141,7 +131,7 @@ impl ReplState<'_> {
                 error!("current frame is unavailable");
                 return Ok(());
             };
-            let selected = selected_from_recovered(frame, 0, Some(&seed));
+            let selected = SelectedFrame::from_recovered(frame, 0, Some(&seed));
             self.print_selected_frame(&selected, show_registers);
             return Ok(());
         };
@@ -158,7 +148,7 @@ impl ReplState<'_> {
             error!("frame {} is unavailable", index);
             return Ok(());
         };
-        let selected = selected_from_recovered(frame, index, Some(&seed));
+        let selected = SelectedFrame::from_recovered(frame, index, Some(&seed));
         self.set_selected_frame(selected.clone());
         self.print_selected_frame(&selected, show_registers);
         Ok(())
@@ -225,7 +215,7 @@ impl ReplState<'_> {
             error!("could not read a CONTEXT at {}", ui::addr(address.0));
             return Ok(());
         };
-        let selected = selected_from_registers(0, registers);
+        let selected = SelectedFrame::from_registers(0, registers);
         self.set_selected_frame(selected.clone());
         outln!("selected context {}", ui::addr(address.0));
         self.print_selected_frame(&selected, false);
@@ -247,7 +237,7 @@ impl ReplState<'_> {
             match read_ktrap_frame_at_or_current(&self.ctx.target, Some(VirtAddr(address))) {
                 Ok(frame) => {
                     let registers = registers_from_trap_frame(&frame);
-                    let selected = selected_from_registers(0, registers);
+                    let selected = SelectedFrame::from_registers(0, registers);
                     self.set_selected_frame(selected.clone());
                     outln!("exception trap frame {}", ui::addr(address));
                     self.print_selected_frame(&selected, false);
@@ -265,7 +255,7 @@ impl ReplState<'_> {
 
         if let Some(address) = self.exception_context_pointer() {
             if let Some(registers) = read_context_at(&self.ctx.target, VirtAddr(address)) {
-                let selected = selected_from_registers(0, registers);
+                let selected = SelectedFrame::from_registers(0, registers);
                 self.set_selected_frame(selected.clone());
                 outln!("exception context {}", ui::addr(address));
                 self.print_selected_frame(&selected, false);
@@ -288,7 +278,7 @@ impl ReplState<'_> {
                 error!("exception context is unavailable");
                 return Ok(());
             };
-            let selected = selected_from_registers(0, registers);
+            let selected = SelectedFrame::from_registers(0, registers);
             self.set_selected_frame(selected.clone());
             outln!("exception context from current stop");
             self.print_selected_frame(&selected, false);
@@ -397,46 +387,6 @@ impl ReplState<'_> {
                 parameters: Vec::new(),
             },
         );
-    }
-}
-
-fn selected_from_recovered(
-    frame: &RecoveredFrame,
-    index: usize,
-    seed_registers: Option<&HashMap<String, u64>>,
-) -> SelectedFrame {
-    SelectedFrame {
-        index,
-        ip: frame.frame.ip,
-        sp: frame.frame.sp,
-        frame_base: frame.frame_base,
-        registers: frame.registers.clone(),
-        seed_registers: seed_registers
-            .filter(|registers| !registers.is_empty())
-            .cloned()
-            .unwrap_or_else(|| frame.registers.clone()),
-    }
-}
-
-fn selected_from_registers(index: usize, registers: HashMap<String, u64>) -> SelectedFrame {
-    let ip = registers
-        .get("rip")
-        .copied()
-        .or_else(|| registers.get("pc").copied())
-        .unwrap_or(0);
-    let sp = registers
-        .get("rsp")
-        .copied()
-        .or_else(|| registers.get("sp").copied())
-        .unwrap_or(0);
-    let seed_registers = registers.clone();
-    SelectedFrame {
-        index,
-        ip,
-        sp,
-        frame_base: None,
-        registers,
-        seed_registers,
     }
 }
 

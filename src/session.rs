@@ -34,7 +34,7 @@ use crate::kd::{KdBackend, KdMemorySource, hwbp, trace_enabled};
 use crate::memory::DTB_IDENTITY;
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
-use crate::target::{ReloadReport, Target, ThreadInfo};
+use crate::target::{ReloadReport, SelectedFrame, Target, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::{Arch, VirtAddr};
@@ -663,6 +663,24 @@ impl Session {
         self.target.selected_frame = None;
         self.parked_windows_thread = Some(thread.ethread);
         self.target.set_parked_windows_thread(thread.clone());
+    }
+
+    /// Install a debugger-selected frame/context as the inspection context:
+    /// its recovered registers shadow the live ones and its address space
+    /// becomes the expression/memory scope. Shared by the REPL's `.frame` /
+    /// `.cxr` / `.trap` and the DAP frame selection so the two can't drift.
+    pub fn select_frame(&mut self, selected: SelectedFrame) {
+        self.target.registers = Some(selected.registers.clone());
+        if let Some(cr3) = selected.registers.get("cr3").copied()
+            && cr3 != 0
+            && self.target.guest.is_some()
+            && self.target.kernel_dtb() != DTB_IDENTITY
+        {
+            self.target.set_context_dtb_override(cr3);
+        } else {
+            self.target.clear_context_dtb_override();
+        }
+        self.target.selected_frame = Some(selected);
     }
 
     pub fn parked_windows_thread(&self) -> Option<&ThreadInfo> {

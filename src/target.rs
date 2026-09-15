@@ -77,6 +77,52 @@ pub struct SelectedFrame {
     pub seed_registers: HashMap<String, u64>,
 }
 
+impl SelectedFrame {
+    /// Select frame `index` of a recovered trace, keeping the walk's seed
+    /// context so repeated selections stay anchored to the same register file.
+    pub fn from_recovered(
+        frame: &RecoveredFrame,
+        index: usize,
+        seed_registers: Option<&HashMap<String, u64>>,
+    ) -> Self {
+        Self {
+            index,
+            ip: frame.frame.ip,
+            sp: frame.frame.sp,
+            frame_base: frame.frame_base,
+            registers: frame.registers.clone(),
+            seed_registers: seed_registers
+                .filter(|registers| !registers.is_empty())
+                .cloned()
+                .unwrap_or_else(|| frame.registers.clone()),
+        }
+    }
+
+    /// Select a context given only register values (`.cxr`, `.ecxr`, `.trap`),
+    /// which carry no unwind metadata and therefore no frame base.
+    pub fn from_registers(index: usize, registers: HashMap<String, u64>) -> Self {
+        let ip = registers
+            .get("rip")
+            .copied()
+            .or_else(|| registers.get("pc").copied())
+            .unwrap_or(0);
+        let sp = registers
+            .get("rsp")
+            .copied()
+            .or_else(|| registers.get("sp").copied())
+            .unwrap_or(0);
+        let seed_registers = registers.clone();
+        Self {
+            index,
+            ip,
+            sp,
+            frame_base: None,
+            registers,
+            seed_registers,
+        }
+    }
+}
+
 /// A user-defined convenience variable and the expression it was defined from
 #[derive(Debug, Clone)]
 pub struct UserVar {
