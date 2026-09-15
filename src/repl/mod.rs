@@ -259,9 +259,18 @@ pub enum DispatchContext {
     BreakpointAction,
     /// An exception policy's command; the policy's `-f` owns the disposition.
     ExceptionCommand,
-    /// A request/response host (MCP `command`) that cannot block on a run and
-    /// has its own non-blocking resume/wait tools.
-    Remote,
+    /// A request/response host that cannot block on a run, because its client
+    /// owns run control; the variant names which controls to point at.
+    Remote(RemoteClient),
+}
+
+/// The protocol server behind a [`DispatchContext::Remote`] session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteClient {
+    /// The MCP `command` tool, alongside the `resume`/`wait_for_stop` tools.
+    Mcp,
+    /// The DAP Debug Console, alongside the client's own run-control buttons.
+    Dap,
 }
 
 /// Everything a [`ReplState`] owns besides its session borrow. A host that

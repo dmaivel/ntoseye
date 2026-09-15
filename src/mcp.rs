@@ -32,7 +32,7 @@ use crate::diagnostics;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::output;
-use crate::repl::{DispatchContext, Flow, ReplState, ReplStore};
+use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore};
 use crate::session::{ContinueOutcome, Session};
 use crate::types::VirtAddr;
 use crate::view;
@@ -544,10 +544,9 @@ impl NtoseyeMcp {
         Parameters(CommandArgs { line }): Parameters<CommandArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.run(move |actor| {
-            let store = actor
-                .repl
-                .take()
-                .unwrap_or_else(|| ReplStore::new(&actor.ctx, DispatchContext::Remote));
+            let store = actor.repl.take().unwrap_or_else(|| {
+                ReplStore::new(&actor.ctx, DispatchContext::Remote(RemoteClient::Mcp))
+            });
             let mut state = ReplState::attach(&mut actor.ctx, store);
             state.line = line.trim().to_string();
             let (result, mut text) = output::capture(|| state.dispatch_line(&line));

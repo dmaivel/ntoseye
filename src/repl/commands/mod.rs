@@ -137,12 +137,24 @@ impl ReplState<'_> {
                      use the policy's -f break, -f gh, or -f gn"
                 ))
             }
-            DispatchContext::Remote if spec.run == RunEffect::Run => Some(format!(
-                "'{name}' would block this session until the next stop; use the resume tool, \
+            DispatchContext::Remote(RemoteClient::Mcp) if spec.run == RunEffect::Run => {
+                Some(format!(
+                    "'{name}' would block this session until the next stop; use the resume tool, \
                  then poll wait_for_stop"
-            )),
-            DispatchContext::Remote if spec.flow == Flow::Quit => Some(format!(
+                ))
+            }
+            DispatchContext::Remote(RemoteClient::Dap) if spec.run == RunEffect::Run => {
+                Some(format!(
+                    "'{name}' would block this session until the next stop; use the client's \
+                 continue or step controls instead"
+                ))
+            }
+            DispatchContext::Remote(RemoteClient::Mcp) if spec.flow == Flow::Quit => Some(format!(
                 "'{name}' ends the interactive REPL; use the close tool to release the session"
+            )),
+            DispatchContext::Remote(RemoteClient::Dap) if spec.flow == Flow::Quit => Some(format!(
+                "'{name}' ends the interactive REPL; disconnect from the client to end the \
+                 debug session"
             )),
             _ => None,
         }
