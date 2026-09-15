@@ -180,6 +180,14 @@ fn validate_alias_name(name: &str) -> std::result::Result<(), String> {
     if name.is_empty() || name.chars().any(|ch| ch.is_whitespace() || ch == ';') {
         return Err("invalid alias name".to_string());
     }
+    // WinDbg's `as` takes options (`/e`, `/ma`, `/f`) that select where the
+    // value comes from. None are implemented, and an unrecognized option must
+    // not quietly become an alias literally named `/e`.
+    if name.starts_with('/') {
+        return Err(format!(
+            "alias options are not supported (got `{name}`); use `as <name> <expansion>`"
+        ));
+    }
     if command_registry().get(name).is_some() {
         return Err(format!("alias `{name}` would shadow a built-in command"));
     }
@@ -236,23 +244,23 @@ fn quote_alias_arg(arg: &str) -> String {
 
 repl_command! {
     cmd_aliases();
-    names: ["aliases"],
-    usage: "aliases",
+    names: ["al", "aliases"],
+    usage: "al",
     summary: "List command aliases.",
 }
 
 repl_command! {
     cmd_alias;
-    names: ["alias"],
-    usage: "alias <name> <expansion>",
+    names: ["as", "alias"],
+    usage: "as <name> <expansion>",
     summary: "Define a command alias.",
     style: RawTail,
 }
 
 repl_command! {
     cmd_unalias;
-    names: ["unalias"],
-    usage: "unalias <name>",
+    names: ["ad", "unalias"],
+    usage: "ad <name>",
     summary: "Remove a command alias.",
     completion: Alias,
 }
