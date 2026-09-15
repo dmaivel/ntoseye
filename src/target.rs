@@ -553,6 +553,15 @@ pub fn process_matches(process: &ProcessInfo, filter: &str) -> bool {
     }
 }
 
+/// Parse bare decimal digits as a PID, matching display and completion output.
+/// Other selectors fall back to radix-sensitive expression evaluation.
+pub fn decimal_pid_literal(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 pub fn kthread_state_name(state: u8) -> &'static str {
     match state {
         0 => "Initialized",

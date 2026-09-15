@@ -12,8 +12,8 @@ use crate::memory::PAGE_SIZE;
 use crate::session::processor_index_from_backend_thread_id;
 use crate::symbols::{ModuleSymbolStatus, glob_matches};
 use crate::target::{
-    AttachReport, MemoryRegionInfo, Target, ThreadInfo, kthread_state_name, process_matches,
-    wait_reason_name,
+    AttachReport, MemoryRegionInfo, Target, ThreadInfo, decimal_pid_literal, kthread_state_name,
+    process_matches, wait_reason_name,
 };
 use crate::triage_report::filetime_to_iso;
 use crate::types::{Value, VirtAddr};
@@ -1293,6 +1293,14 @@ impl ReplState<'_> {
         selector: &str,
         processes: &[ProcessInfo],
     ) -> Option<ProcessInfo> {
+        // A bare decimal PID first: that is the spelling every listing prints
+        // and tab completion inserts, and reading it in the session radix
+        // would silently select a different process (or none).
+        if let Some(pid) = decimal_pid_literal(selector)
+            && let Some(process) = processes.iter().find(|process| process.pid == pid)
+        {
+            return Some(process.clone());
+        }
         let address = Expr::eval_with_radix(selector, &self.ctx.target, self.radix).ok();
         if let Some(address) = address
             && let Some(process) = processes
@@ -1755,25 +1763,31 @@ impl ReplState<'_> {
 
     fn cmd_attach(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let pid_str = require_arg!(invocation, 0, "attach");
-        match Expr::eval_with_radix(pid_str, &self.ctx.target, self.radix) {
-            Ok(value) => match self.ctx.target.attach(value.0) {
-                Ok(AttachReport {
-                    name,
-                    symbol_report,
-                }) => {
-                    self.caches.refresh_symbol_context(&self.ctx.target);
-                    self.clear_selected_frame();
-                    outln!("attached to {} (PID {})", name, value.0);
-                    print_module_symbol_report(&symbol_report);
-                    outln!();
-                }
-                Err(e) => {
-                    error!("failed to attach: {}", e);
-                }
-            },
+        // Same selector grammar as `.process`, so a PID copied from `ps` (or
+        // inserted by completion) means the same thing in both.
+        let processes = match self.ctx.target.matching_processes(None) {
+            Ok(processes) => processes,
             Err(error) => {
-                error!("invalid PID {}: {}", pid_str, error);
+                error!("failed to enumerate processes: {}", error);
+                return Ok(());
             }
+        };
+        let Some(process) = self.process_for_selector(pid_str, &processes) else {
+            error!("no process matches '{}'", pid_str);
+            return Ok(());
+        };
+        match self.ctx.target.attach(process.pid) {
+            Ok(AttachReport {
+                name,
+                symbol_report,
+            }) => {
+                self.caches.refresh_symbol_context(&self.ctx.target);
+                self.clear_selected_frame();
+                outln!("attached to {} (PID {})", name, process.pid);
+                print_module_symbol_report(&symbol_report);
+                outln!();
+            }
+            Err(e) => error!("failed to attach: {}", e),
         }
 
         Ok(())

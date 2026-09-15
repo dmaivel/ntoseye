@@ -9,10 +9,11 @@ use owo_colors::OwoColorize;
 
 use crate::dbg_backend::HwBreakpointAccess;
 use crate::error::{Error, Result};
-use crate::expr::{Expr, NumberRadix};
+use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
 use crate::gdb::breakpoints::{
     BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec,
 };
+use crate::target::decimal_pid_literal;
 use crate::ui;
 
 use crate::repl::*;
@@ -144,13 +145,23 @@ enum BreakpointIdSelection {
     Ids(Vec<u32>),
 }
 
+/// An option argument that is a bare number, in the session radix. It takes
+/// the same literal grammar as an expression, so `0n7952` is decimal and
+/// `0x1f10` is hexadecimal whatever `n` is set to.
 fn parse_radix_u64_text(value: &str, radix: NumberRadix, what: &str) -> Result<u64> {
-    let value = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value);
-    u64::from_str_radix(value, radix.value())
-        .map_err(|_| Error::Rsp(format!("invalid {what}: {value}")))
+    parse_number_literal_text(value, radix)
+        .map_err(|_| Error::InvalidArgument(format!("invalid {what}: {value}")))
+}
+
+/// `/p` names a process, never an address, so a bare run of digits is the
+/// decimal PID every listing prints and completion inserts. A radix prefix
+/// still says what it means, so `0x1f10` and `0n7952` keep working for a PID
+/// carried over from an expression.
+fn parse_pid_text(value: &str, radix: NumberRadix) -> Result<u64> {
+    match decimal_pid_literal(value) {
+        Some(pid) => Ok(pid),
+        None => parse_radix_u64_text(value, radix, "PID"),
+    }
 }
 
 fn parse_breakpoint_arguments(
@@ -171,21 +182,21 @@ fn parse_breakpoint_arguments(
                 index += 1;
             }
             "/p" => {
-                let pid_text = argv
-                    .get(index + 1)
-                    .ok_or_else(|| Error::Rsp(format!("{command}: /p requires a PID")))?;
-                pid = Some(parse_radix_u64_text(pid_text.as_ref(), radix, "PID")?);
+                let pid_text = argv.get(index + 1).ok_or_else(|| {
+                    Error::InvalidArgument(format!("{command}: /p requires a PID"))
+                })?;
+                pid = Some(parse_pid_text(pid_text.as_ref(), radix)?);
                 index += 2;
             }
             "/t" => {
-                return Err(Error::Rsp(
+                return Err(Error::InvalidArgument(
                     "thread-scoped breakpoints are not supported by the current backends".into(),
                 ));
             }
             "/w" => {
-                let condition = argv
-                    .get(index + 1)
-                    .ok_or_else(|| Error::Rsp(format!("{command}: /w requires an expression")))?;
+                let condition = argv.get(index + 1).ok_or_else(|| {
+                    Error::InvalidArgument(format!("{command}: /w requires an expression"))
+                })?;
                 shorthand_condition = Some(condition.as_ref().to_string());
                 index += 2;
             }
@@ -438,7 +449,7 @@ impl ReplState<'_> {
             .enumerate_processes()?
             .into_iter()
             .find(|process| process.pid == pid)
-            .ok_or_else(|| Error::Rsp(format!("process {pid:#x} not found")))?;
+            .ok_or_else(|| Error::InvalidArgument(format!("process {pid} not found")))?;
         Ok(Some(BreakpointScope::process(&process)))
     }
 
@@ -984,6 +995,29 @@ impl ReplState<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn breakpoint_option_numbers_honor_radix_prefixes() {
+        let pid = |text: &str, radix| {
+            parse_breakpoint_arguments(
+                &[
+                    Cow::from("/p"),
+                    Cow::from(text),
+                    Cow::from("nt!NtCreateFile"),
+                ],
+                radix,
+                "bp",
+                false,
+            )
+            .map(|parsed| parsed.pid)
+        };
+
+        assert_eq!(pid("7772", NumberRadix::Hexadecimal).unwrap(), Some(7772));
+        assert_eq!(pid("0n7952", NumberRadix::Hexadecimal).unwrap(), Some(7952));
+        assert_eq!(pid("0x1f10", NumberRadix::Decimal).unwrap(), Some(0x1f10));
+        assert_eq!(pid("7952", NumberRadix::Decimal).unwrap(), Some(7952));
+        assert!(pid("notanumber", NumberRadix::Hexadecimal).is_err());
+    }
 
     #[test]
     fn breakpoint_id_selectors_accept_lists_and_ranges() {

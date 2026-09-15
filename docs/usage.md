@@ -31,6 +31,8 @@ The REPL follows WinDbg's hexadecimal default radix, so a bare `1000` is `0x1000
 
 A prefix with no digits reads as zero, so `0x` is `0`. A token beginning with `a`-`f` is a name first and falls back to hexadecimal only when no symbol matches it, while a token beginning with a digit is always a number in the current radix. Use `0x...` when an address must be unambiguously numeric. WinDbg's separated addresses (``fffff803`1a2b3c4d``) are accepted and always read as hexadecimal, whatever the session radix.
 
+Process selectors (`attach`, `.process`, `!process`, `!vad`, and `bp /p`) interpret bare digits as decimal PIDs, matching process listings and completion. `attach 3888` selects PID 3888. If no PID matches, the selector is evaluated as an expression. Explicit radix prefixes always take precedence.
+
 ### Operators
 
 Operators follow MASM, in both spellings where WinDbg has two. The levels below run from tightest binding to loosest.
