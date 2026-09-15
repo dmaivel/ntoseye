@@ -257,7 +257,7 @@ fn print_triage_report(report: &TriageReport, verbose: bool) {
                 .unwrap_or_default();
             outln!("  {} {}{}", ui::muted("rip    "), ui::addr(rip), symbol);
         }
-        if let Some(process) = &report.status.process {
+        if let Some(process) = &report.status.attached_process {
             outln!(
                 "  {} {} (pid {}, eprocess {})",
                 ui::muted("scope  "),

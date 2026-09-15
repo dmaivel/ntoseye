@@ -154,8 +154,21 @@ class StopOutcome:
     @property
     def symbol(self) -> str | None: ...
     @property
-    def process(self) -> dict[str, Any] | None:
-        """The attached process at the stop as `{pid, name, dtb, eprocess}`."""
+    def attached_process(self) -> dict[str, Any] | None:
+        """The inspection scope at the stop as `{pid, name, dtb, eprocess}`. This
+        is the operator's selection (`.process`) and persists across resumes, so
+        it is not necessarily what the guest was executing."""
+        ...
+    @property
+    def stopped_process(self) -> dict[str, Any] | None:
+        """The process whose page tables the stopped vCPU had loaded, resolved
+        from CR3 at the stop."""
+        ...
+    @property
+    def stopped_thread(self) -> dict[str, Any] | None:
+        """The Windows thread the stopped vCPU was running, walked from its
+        KPRCB. Its owner can differ from `stopped_process` when the thread is
+        attached to another address space."""
         ...
     @property
     def breakpoints(self) -> list[Breakpoint]: ...
@@ -363,7 +376,12 @@ class Debugger:
     def is_running(self) -> bool: ...
     def status(self) -> dict[str, Any]:
         """Read-only run-control snapshot (where am I): `{running, current_thread,
-        rip, symbol, process: {pid, name, eprocess} | None, coherent, kernel_base}`.
+        rip, symbol, attached_process: {pid, name, eprocess} | None,
+        stopped_process: {pid, name, eprocess} | None, stopped_thread | None,
+        coherent, kernel_base}`. `attached_process` is the inspection scope
+        (`.process`), which persists across resumes; `stopped_process` owns the
+        page tables the stopped vCPU has loaded and `stopped_thread` is the
+        Windows thread it is running.
         `rip`/`symbol` are None while running. `coherent` is False when the guest
         rebooted and rediscovery
         is still pending, so enumeration is not yet meaningful; wait for it

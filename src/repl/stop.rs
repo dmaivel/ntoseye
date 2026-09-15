@@ -95,23 +95,7 @@ pub const REPL_STOP_POLL: Duration = Duration::from_millis(100);
 pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 
 pub use crate::session::processor_index_from_backend_thread_id;
-
-pub fn refresh_windows_thread_context_for_backend_thread(
-    debugger: &mut Target,
-    thread_id: &str,
-) -> Option<ThreadInfo> {
-    let thread = processor_index_from_backend_thread_id(thread_id).and_then(|processor| {
-        debugger
-            .current_windows_thread_for_processor(processor)
-            .ok()
-    });
-    if let Some(thread) = thread.clone() {
-        debugger.set_current_windows_thread_context(thread);
-    } else {
-        debugger.clear_current_windows_thread_context();
-    }
-    thread
-}
+pub use crate::session::refresh_windows_thread_context_for_backend_thread;
 
 /// One-line summary: `thread Idle  state Running  ethread <addr>  pid 0  tid 0`.
 /// The leading `thread` label distinguishes it from the break line above,

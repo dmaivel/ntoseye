@@ -644,8 +644,19 @@ pub fn run_status(status: &RunStatus) -> View {
         ("rip", View::OptHex(status.rip)),
         ("symbol", View::OptStr(status.symbol.clone())),
         (
-            "process",
-            status.process.as_ref().map_or(View::Null, process),
+            "attached_process",
+            status.attached_process.as_ref().map_or(View::Null, process),
+        ),
+        (
+            "stopped_process",
+            status.stopped_process.as_ref().map_or(View::Null, process),
+        ),
+        (
+            "stopped_thread",
+            status
+                .stopped_thread
+                .as_ref()
+                .map_or(View::Null, |t| thread(t, None)),
         ),
         ("coherent", View::Bool(status.coherent)),
         ("kernel_base", View::Hex(status.kernel_base)),

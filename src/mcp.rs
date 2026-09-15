@@ -372,9 +372,18 @@ fn hex(v: u64) -> String {
 }
 
 /// Render a [`ContinueOutcome`] as JSON, enriching breakpoint/exception stops
-/// with the current process and resolved symbol from `ctx`.
-fn continue_outcome_json(ctx: &Session, outcome: ContinueOutcome) -> Value {
-    let process = ctx
+/// with the resolved symbol and the stop's context from `ctx`.
+///
+/// The context is three separate answers, because collapsing them is how a
+/// client ends up trusting an attached scope many stops old as the process
+/// that is executing: `attached_process` is the operator's inspection scope,
+/// `stopped_process` owns the page tables the stopped vCPU has loaded, and
+/// `stopped_thread` is the Windows thread it is running.
+fn continue_outcome_json(ctx: &mut Session, outcome: ContinueOutcome) -> Value {
+    let (stopped_process, stopped_thread) = ctx.stopped_context();
+    let stopped_process = stopped_process.map(|p| view::to_json(&view::process(&p)));
+    let stopped_thread = stopped_thread.map(|t| view::to_json(&view::thread(&t, None)));
+    let attached_process = ctx
         .target
         .current_process_info
         .as_ref()
@@ -399,7 +408,9 @@ fn continue_outcome_json(ctx: &Session, outcome: ContinueOutcome) -> Value {
                 "symbol": symbol.or_else(|| symbol_at(rip)),
                 "temporary": temporary,
                 "rip": hex(rip),
-                "process": process,
+                "attached_process": attached_process,
+                "stopped_process": stopped_process,
+                "stopped_thread": stopped_thread,
                 "watch_access": watch_access,
                 "watch_length": bp.and_then(|bp| bp.watch_length()),
                 "condition_error": condition_error,
@@ -428,13 +439,17 @@ fn continue_outcome_json(ctx: &Session, outcome: ContinueOutcome) -> Value {
             "first_chance": first_chance,
             "exception_address": exception_address.map(hex),
             "symbol": symbol_at(rip),
-            "process": process,
+            "attached_process": attached_process,
+            "stopped_process": stopped_process,
+            "stopped_thread": stopped_thread,
         }),
         ContinueOutcome::Step { rip } => serde_json::json!({
             "stop": "step",
             "rip": hex(rip),
             "symbol": symbol_at(rip),
-            "process": process,
+            "attached_process": attached_process,
+            "stopped_process": stopped_process,
+            "stopped_thread": stopped_thread,
         }),
         ContinueOutcome::TargetReloaded {
             kernel_base,
@@ -468,7 +483,9 @@ fn continue_outcome_json(ctx: &Session, outcome: ContinueOutcome) -> Value {
             "event": false,
             "rip": hex(rip),
             "symbol": symbol_at(rip),
-            "process": process,
+            "attached_process": attached_process,
+            "stopped_process": stopped_process,
+            "stopped_thread": stopped_thread,
             "coherent": ctx.kernel_coherent(),
         }),
     }
@@ -554,7 +571,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Read-only run-control state (where am I): {running, current_thread, rip, symbol, process:{pid,name,eprocess}|null, coherent, kernel_base}. rip/symbol are null while running. coherent=false means the guest rebooted and rediscovery is still in progress, so enumeration is not yet meaningful; resume + wait_for_stop rather than reading stale state."
+        description = "Read-only run-control state (where am I): {running, current_thread, rip, symbol, attached_process:{pid,name,eprocess}|null, stopped_process:{pid,name,eprocess}|null, stopped_thread|null, coherent, kernel_base}. The context fields are three different answers: attached_process is the inspection scope memory commands read through (set with `.process`, persists across resumes), stopped_process owns the page tables the stopped vCPU has loaded, and stopped_thread is the Windows thread it is running - a thread attached to another address space runs on borrowed page tables, so the last two can legitimately differ. rip/symbol are null while running. coherent=false means the guest rebooted and rediscovery is still in progress, so enumeration is not yet meaningful; resume + wait_for_stop rather than reading stale state."
     )]
     async fn status(&self) -> Result<CallToolResult, McpError> {
         self.run(|actor| json(view::to_json(&view::run_status(&actor.ctx.run_status()))))

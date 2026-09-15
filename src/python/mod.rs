@@ -23,6 +23,7 @@ use crate::output;
 use crate::repl::ReplState;
 use crate::session::{ContinueOutcome, Session};
 use crate::symbols::{FieldValue, ParsedType, TypeInfo, le_uint};
+use crate::target::ThreadInfo;
 use crate::target::{
     AddressModule as CoreAddressModule, MemoryRegionInfo,
     MemorySearchMatch as CoreMemorySearchMatch,
@@ -553,7 +554,9 @@ struct StopOutcomeData {
     kind: StopKind,
     rip: Option<u64>,
     symbol: Option<String>,
-    process: Option<ProcessInfo>,
+    attached_process: Option<ProcessInfo>,
+    stopped_process: Option<ProcessInfo>,
+    stopped_thread: Option<ThreadInfo>,
     breakpoints: Vec<BreakpointSnapshot>,
     address: Option<u64>,
     temporary: Option<bool>,
@@ -891,14 +894,39 @@ impl StopOutcome {
         self.data.symbol.clone()
     }
 
-    /// The attached process at the stop as `{pid, name, dtb, eprocess}`, or
-    /// `None` in the kernel context.
+    /// The inspection scope at the stop as `{pid, name, dtb, eprocess}`, or
+    /// `None` in the kernel context. This is the operator's selection
+    /// (`.process`) and persists across resumes, so it is not necessarily what
+    /// the guest was executing: for that, see `stopped_process`.
     #[getter]
-    fn process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn attached_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
         self.data
-            .process
+            .attached_process
             .as_ref()
             .map(|p| view_dict(py, &view::process(p)))
+            .transpose()
+    }
+
+    /// The process whose page tables the stopped vCPU had loaded, as
+    /// `{pid, name, dtb, eprocess}`. Resolved from CR3 at the stop.
+    #[getter]
+    fn stopped_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.data
+            .stopped_process
+            .as_ref()
+            .map(|p| view_dict(py, &view::process(p)))
+            .transpose()
+    }
+
+    /// The Windows thread the stopped vCPU was running, walked from its KPRCB.
+    /// Its owner can differ from `stopped_process` when the thread is attached
+    /// to another address space.
+    #[getter]
+    fn stopped_thread<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.data
+            .stopped_thread
+            .as_ref()
+            .map(|t| view_dict(py, &view::thread(t, None)))
             .transpose()
     }
 
@@ -1245,7 +1273,11 @@ impl Debugger {
     }
 
     /// Read-only run-control snapshot (where am I): dict `{running, current_thread,
-    /// rip, symbol, process: {pid, name, eprocess}|None, coherent, kernel_base}`.
+    /// rip, symbol, attached_process: {pid, name, eprocess}|None, stopped_process:
+    /// {pid, name, eprocess}|None, stopped_thread|None, coherent, kernel_base}`.
+    /// `attached_process` is the inspection scope (`.process`), which persists
+    /// across resumes; `stopped_process` owns the page tables the stopped vCPU has
+    /// loaded and `stopped_thread` is the Windows thread it is running.
     /// `rip`/`symbol` are None while running. `coherent` is False when the guest
     /// rebooted and rediscovery is still pending, so process/module enumeration
     /// is not yet meaningful; wait for it rather than reading stale state.
@@ -2157,16 +2189,17 @@ impl Debugger {
     /// enriching breakpoint/exception stops with resolved symbols and process
     /// context.
     fn continue_outcome_data(
-        &self,
+        &mut self,
         py: Python<'_>,
         outcome: ContinueOutcome,
     ) -> PyResult<StopOutcomeData> {
+        let (stopped_process, stopped_thread) = self.inner.stopped_context();
+        let attached_process = self.inner.target.current_process_info.clone();
         let symbol_at = |rip: u64| {
             self.inner
                 .target
                 .closest_symbol_current_context(VirtAddr(rip))
         };
-        let process = self.inner.target.current_process_info.clone();
 
         let data = match outcome {
             ContinueOutcome::Breakpoint {
@@ -2197,7 +2230,9 @@ impl Debugger {
                         .symbol
                         .clone()
                         .or_else(|| symbol.or_else(|| symbol_at(rip))),
-                    process,
+                    attached_process: attached_process.clone(),
+                    stopped_process: stopped_process.clone(),
+                    stopped_thread: stopped_thread.clone(),
                     breakpoints: vec![snapshot],
                     address: Some(address),
                     temporary: Some(temporary),
@@ -2230,7 +2265,9 @@ impl Debugger {
                 kind: StopKind::Exception,
                 rip: Some(rip),
                 symbol: symbol_at(rip),
-                process,
+                attached_process: attached_process.clone(),
+                stopped_process: stopped_process.clone(),
+                stopped_thread: stopped_thread.clone(),
                 exception_code,
                 first_chance,
                 exception_address,
@@ -2240,7 +2277,9 @@ impl Debugger {
                 kind: StopKind::Step,
                 rip: Some(rip),
                 symbol: symbol_at(rip),
-                process,
+                attached_process: attached_process.clone(),
+                stopped_process: stopped_process.clone(),
+                stopped_thread: stopped_thread.clone(),
                 ..Default::default()
             },
             ContinueOutcome::TargetReloaded {

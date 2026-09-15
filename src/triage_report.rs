@@ -1016,12 +1016,14 @@ mod tests {
             current_thread: "p0.1".into(),
             rip,
             symbol: rip.map(|_| "sample!fault".into()),
-            process: Some(ProcessInfo {
+            attached_process: Some(ProcessInfo {
                 pid: 4,
                 name: "System".into(),
                 dtb: 0x1a_d000,
                 eprocess_va: VirtAddr(0xffff_8000_0000_1000),
             }),
+            stopped_process: None,
+            stopped_thread: None,
             coherent: true,
             kernel_base: 0xffff_f800_0000_0000,
         }

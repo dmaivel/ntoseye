@@ -126,8 +126,18 @@ pub struct RunStatus {
     pub rip: Option<u64>,
     /// Nearest symbol to `rip` when halted.
     pub symbol: Option<String>,
-    /// Attached process inspection scope, if any.
-    pub process: Option<ProcessInfo>,
+    /// Attached process inspection scope, if any. This is where `dt`, `dq` and
+    /// friends read from; it is chosen with `.process` and survives resumes,
+    /// so it is not necessarily what the guest is executing.
+    pub attached_process: Option<ProcessInfo>,
+    /// The process whose page tables the stopped vCPU has loaded (from CR3).
+    /// Refreshed at every stop.
+    pub stopped_process: Option<ProcessInfo>,
+    /// The Windows thread the stopped vCPU is running, walked from its KPRCB
+    /// at this stop. Its owner can differ from `stopped_process`: a thread
+    /// attached to another address space with `KeStackAttachProcess` runs on
+    /// borrowed page tables.
+    pub stopped_thread: Option<ThreadInfo>,
     pub coherent: bool,
     /// Rediscovered `nt` base. A host caches it to detect a reboot (the base
     /// changes) and invalidate stale addresses without parsing prose.
@@ -981,6 +991,24 @@ impl Session {
         }
     }
 
+    /// Resolve the stopped vCPU's process and Windows thread from the target.
+    /// Select that thread for inspection. The attached process scope is separate
+    /// and persists across resumes.
+    pub fn stopped_context(&mut self) -> (Option<ProcessInfo>, Option<ThreadInfo>) {
+        let mask = self.target.arch().dtb_page_mask();
+        let dtb_register = self.target.arch().dtb_register();
+        let stopped_process = self
+            .backend
+            .read_registers()
+            .ok()
+            .and_then(|regs| self.register_map.read_u64(dtb_register, &regs).ok())
+            .and_then(|cr3| self.target.process_for_cr3(cr3 & mask));
+        let current_thread = self.current_thread.clone();
+        let stopped_thread =
+            refresh_windows_thread_context_for_backend_thread(&mut self.target, &current_thread);
+        (stopped_process, stopped_thread)
+    }
+
     /// A read-only run-control snapshot for the "where am I" surface (see
     /// [`RunStatus`]). When halted, selects the current thread and resolves
     /// rip+symbol (best-effort); while running, leaves those None. Reports
@@ -996,24 +1024,26 @@ impl Session {
         self.clear_deferred_reload_surface();
         let pending_stop = self.backend.has_pending_stop();
         let running = self.backend.is_running() && !pending_stop;
-        let (rip, symbol) = if running || pending_stop {
-            (None, None)
+        let (rip, symbol, stopped_process, stopped_thread) = if running || pending_stop {
+            (None, None, None, None)
         } else {
             let _ = self.backend.set_current_thread(&self.current_thread);
-            let rip = self
-                .backend
-                .read_registers()
-                .ok()
-                .and_then(|regs| self.register_map.read_u64("rip", &regs).ok());
+            let registers = self.backend.read_registers().ok();
+            let rip = registers
+                .as_ref()
+                .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
             let symbol = rip.and_then(|r| self.target.closest_symbol_current_context(VirtAddr(r)));
-            (rip, symbol)
+            let (stopped_process, stopped_thread) = self.stopped_context();
+            (rip, symbol, stopped_process, stopped_thread)
         };
         RunStatus {
             running,
             current_thread: self.current_thread.clone(),
             rip,
             symbol,
-            process: self.target.current_process_info.clone(),
+            attached_process: self.target.current_process_info.clone(),
+            stopped_process,
+            stopped_thread,
             coherent: self.kernel_coherent(),
             kernel_base: self.target.kernel_base().map(|a| a.0).unwrap_or(0),
         }
@@ -2090,6 +2120,31 @@ pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
     let stripped = thread_id.strip_prefix("p1.")?;
     let one_based = u16::from_str_radix(stripped, 16).ok()?;
     one_based.checked_sub(1)
+}
+
+/// Adopt the Windows thread a backend vCPU is running as the inspection
+/// context, walked from that processor's KPRCB. Returns it, or `None` when the
+/// id is not a processor context or the walk fails, clearing the stale
+/// selection either way.
+///
+/// Every host has to do this at every stop: the selection is what `!thread`
+/// reports and what the `$thread`/`$proc` pseudo-registers read, and a resume
+/// clears it. Shared by the REPL (re-exported from `repl::stop`) and
+/// [`Session::run_status`] so the two cannot report different threads.
+pub fn refresh_windows_thread_context_for_backend_thread(
+    debugger: &mut Target,
+    thread_id: &str,
+) -> Option<ThreadInfo> {
+    let thread = processor_index_from_backend_thread_id(thread_id).and_then(|processor| {
+        debugger
+            .current_windows_thread_for_processor(processor)
+            .ok()
+    });
+    match thread.clone() {
+        Some(thread) => debugger.set_current_windows_thread_context(thread),
+        None => debugger.clear_current_windows_thread_context(),
+    }
+    thread
 }
 
 /// Whether a guest-reload report found the loaded-module list (i.e. kernel
