@@ -39,7 +39,8 @@ use crate::target::{ReloadReport, Target, ThreadInfo};
 use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
-    StackTrace, ThreadStackTrace, build_parked_thread_stack, build_stacktrace, preferred_code_dtb,
+    RecoveredStackTrace, StackTrace, ThreadStackTrace, build_parked_thread_recovered_stack,
+    build_parked_thread_stack, build_stacktrace, build_stacktrace_with_context, preferred_code_dtb,
     resolve_thread_trace_context,
 };
 use crate::{Backend, TargetSpec};
@@ -1522,22 +1523,47 @@ impl Session {
         }
     }
 
-    /// Walk the currently selected inspection context's call stack, returning
-    /// up to `limit` frames. A parked Windows thread uses stack-only recovery
-    /// without touching the backend vCPU; otherwise this reads live registers.
-    pub fn backtrace(&mut self, limit: usize) -> Result<StackTrace> {
+    /// The current backend context's call stack with the sparse registers
+    /// recovered for every frame, plus the seed register file the walk started
+    /// from. A parked Windows thread is walked from its saved context without
+    /// touching the backend vCPU.
+    pub fn recovered_backtrace(
+        &mut self,
+        limit: usize,
+    ) -> Result<(RecoveredStackTrace, HashMap<String, u64>)> {
         if let Some(thread) = self.parked_windows_thread() {
-            return Ok(build_parked_thread_stack(&self.target, thread, limit)?.stacktrace);
+            let recovered = build_parked_thread_recovered_stack(&self.target, thread, limit)?;
+            // The walk's own first frame is the only register context a parked
+            // thread has; there is no live file to seed from.
+            let seed = recovered
+                .stacktrace
+                .frames
+                .first()
+                .map(|frame| frame.registers.clone())
+                .unwrap_or_default();
+            return Ok((recovered.stacktrace, seed));
         }
 
-        self.backend.set_current_thread(&self.current_thread)?;
-        let regs = self.backend.read_registers()?;
-        Ok(build_stacktrace(
-            &self.target,
-            &self.register_map,
-            &regs,
-            limit,
-        ))
+        let registers = self.read_registers()?;
+        let seed = self.register_map.to_hashmap(&registers);
+        let recovered =
+            build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit);
+        Ok((recovered, seed))
+    }
+
+    /// Walk the currently selected backend context's call stack, returning up to
+    /// `limit` frames. A parked Windows thread uses stack-only recovery without
+    /// touching the backend vCPU.
+    pub fn backtrace(&mut self, limit: usize) -> Result<StackTrace> {
+        let (recovered, _) = self.recovered_backtrace(limit)?;
+        Ok(StackTrace {
+            frames: recovered
+                .frames
+                .into_iter()
+                .map(|frame| frame.frame)
+                .collect(),
+            truncated: recovered.truncated,
+        })
     }
 
     /// Unwind a specified non-running Windows thread in its owning process

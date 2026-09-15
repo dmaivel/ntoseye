@@ -1,3 +1,4 @@
+use std::array::from_fn;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -144,6 +145,14 @@ impl ThreadStackSource {
 pub struct ThreadStackTrace {
     pub source: ThreadStackSource,
     pub stacktrace: StackTrace,
+}
+
+/// A parked thread's stack paired with the sparse registers recovered for each
+/// frame. See [`build_parked_thread_recovered_stack`].
+#[derive(Clone, Debug)]
+pub struct ThreadRecoveredStack {
+    pub source: ThreadStackSource,
+    pub stacktrace: RecoveredStackTrace,
 }
 
 #[derive(Clone, Debug)]
@@ -583,7 +592,7 @@ pub fn frame_base_for_register_values(
     let context = RegisterContext {
         rip: lookup("rip").or_else(|| lookup("pc")).unwrap_or(0),
         rsp: lookup("rsp").or_else(|| lookup("sp")).unwrap_or(0),
-        regs: std::array::from_fn(|index| lookup(UNWIND_REG_NAMES[index])),
+        regs: from_fn(|index| lookup(UNWIND_REG_NAMES[index])),
     };
     let dtb = lookup(debugger.arch().dtb_register())
         .filter(|dtb| *dtb != 0)
@@ -705,14 +714,19 @@ fn switch_seed_is_plausible(thread: &ThreadInfo, seed: &RegisterContext) -> bool
         && seed.rsp <= stack_base.0
 }
 
-/// Build a non-running Windows thread's kernel stack without manufacturing a
-/// persistent register context. A real KTRAP_FRAME is preferred; otherwise the
+/// Build a non-running Windows thread's kernel stack, keeping the sparse
+/// registers recovered for each frame, without manufacturing a persistent
+/// register context. A real KTRAP_FRAME is preferred; otherwise the
 /// context-switch bootstrap remains private to this stack walk.
-pub fn build_parked_thread_stack(
+///
+/// A host that only renders frames wants [`build_parked_thread_stack`]; a host
+/// that also selects frames and resolves their locals (the DAP call stack)
+/// needs the per-frame registers this returns.
+pub fn build_parked_thread_recovered_stack(
     debugger: &Target,
     thread: &ThreadInfo,
     limit: usize,
-) -> Result<ThreadStackTrace> {
+) -> Result<ThreadRecoveredStack> {
     let process_dtb = debugger.thread_process_dtb(thread).ok_or_else(|| {
         Error::DebugInfo("parked thread owning process DTB is unavailable".into())
     })?;
@@ -725,14 +739,15 @@ pub fn build_parked_thread_stack(
             .and_then(|registers| RegisterContext::from_saved(&registers))
         {
             Some(seed) if seed.rip != 0 && seed.rsp != 0 => {
-                return Ok(ThreadStackTrace {
+                return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::TrapFrame { address },
-                    stacktrace: build_stacktrace_seeded(
+                    stacktrace: build_recovered_stacktrace_seeded(
                         debugger,
                         &trace,
                         seed,
                         FrameSource::Seed,
                         limit,
+                        HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                     ),
                 });
             }
@@ -752,14 +767,15 @@ pub fn build_parked_thread_stack(
         };
         match seed {
             Ok(seed) if switch_seed_is_plausible(thread, &seed) => {
-                return Ok(ThreadStackTrace {
+                return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::ContextSwitch { kernel_stack },
-                    stacktrace: build_stacktrace_seeded(
+                    stacktrace: build_recovered_stacktrace_seeded(
                         debugger,
                         &trace,
                         seed,
                         FrameSource::Seed,
                         limit,
+                        HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                     ),
                 });
             }
@@ -778,29 +794,26 @@ pub fn build_parked_thread_stack(
     )))
 }
 
-fn build_stacktrace_seeded(
+/// The frames of a parked thread's stack without the recovered registers, for
+/// hosts that only render the walk (`k`, `!thread`, `!stacks`).
+pub fn build_parked_thread_stack(
     debugger: &Target,
-    trace: &ThreadTraceContext,
-    context: RegisterContext,
-    initial_source: FrameSource,
+    thread: &ThreadInfo,
     limit: usize,
-) -> StackTrace {
-    let recovered = build_recovered_stacktrace_seeded(
-        debugger,
-        trace,
-        context,
-        initial_source,
-        limit,
-        HashMap::new(),
-    );
-    StackTrace {
-        frames: recovered
-            .frames
-            .into_iter()
-            .map(|frame| frame.frame)
-            .collect(),
-        truncated: recovered.truncated,
-    }
+) -> Result<ThreadStackTrace> {
+    let recovered = build_parked_thread_recovered_stack(debugger, thread, limit)?;
+    Ok(ThreadStackTrace {
+        source: recovered.source,
+        stacktrace: StackTrace {
+            frames: recovered
+                .stacktrace
+                .frames
+                .into_iter()
+                .map(|frame| frame.frame)
+                .collect(),
+            truncated: recovered.stacktrace.truncated,
+        },
+    })
 }
 
 fn build_recovered_stacktrace_seeded(
