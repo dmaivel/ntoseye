@@ -601,8 +601,8 @@ impl ReplState<'_> {
             self.cmd_vcpus()?;
             return Ok(Flow::Continue);
         }
-        let (selector, action) = if let Some(rest) = body.strip_prefix('*') {
-            (None, rest.chars().next())
+        let (selector, suffix) = if let Some(rest) = body.strip_prefix('*') {
+            (None, rest)
         } else {
             let digits = body.chars().take_while(|ch| ch.is_ascii_digit()).count();
             if digits == 0 {
@@ -620,11 +620,24 @@ impl ReplState<'_> {
                         return Ok(Flow::Continue);
                     }
                 };
-            (selector, body[digits..].chars().next())
+            (selector, &body[digits..])
         };
-        let action = action.unwrap_or('s');
+        let mut actions = suffix.chars();
+        let action = actions.next().unwrap_or('s');
         if !matches!(action, 's' | 'k' | 'r') {
             error!("invalid processor action '{}'; expected s, k, or r", action);
+            return Ok(Flow::Continue);
+        }
+        // WinDbg accepts a whole command after the selector (`~*kb`, `~0kv`).
+        // Only the three single-letter actions are implemented, so anything
+        // trailing must be reported: silently running `~*k` for a pasted
+        // `~*kb` answers a question the user did not ask.
+        let trailing = actions.as_str();
+        if !trailing.is_empty() {
+            error!(
+                "unsupported processor command '{}{}'; expected ~, ~N[s|k|r], or ~*k",
+                action, trailing
+            );
             return Ok(Flow::Continue);
         }
         let ids = match self.ctx.backend.thread_list() {
