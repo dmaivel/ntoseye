@@ -363,7 +363,7 @@ fn prepare_backend_after_cleanup(
         Ok(()) => backend.prepare_for_exit(true),
         Err(cleanup_error) => match backend.prepare_for_exit(false) {
             Ok(()) => Err(cleanup_error),
-            Err(teardown_error) => Err(Error::Rsp(format!(
+            Err(teardown_error) => Err(Error::DebugInfo(format!(
                 "{cleanup_error}; backend teardown also failed: {teardown_error}"
             ))),
         },

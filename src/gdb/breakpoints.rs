@@ -414,21 +414,24 @@ impl BreakpointManager {
         config: BreakpointConfig,
     ) -> Result<Vec<u32>> {
         let Some(first_spec) = BreakpointSpec::source(&source, 0) else {
-            return Err(Error::Rsp(format!("invalid source breakpoint: {source}")));
+            return Err(Error::InvalidArgument(format!(
+                "invalid source breakpoint: {source}"
+            )));
         };
         let dtb = Self::resolution_dtb(debugger, config.scope.as_ref());
         let address_count = match &first_spec {
             BreakpointSpec::Source { file, line, .. } => {
                 debugger.symbols.source_addresses(dtb, file, *line).len()
             }
-            BreakpointSpec::Symbol(_) => unreachable!(),
+            BreakpointSpec::Symbol { .. } => unreachable!(),
         };
         let count = address_count.max(1);
         let mut ids = Vec::with_capacity(count);
         for index in 0..count {
             let result = (|| {
-                let spec = BreakpointSpec::source(&source, index)
-                    .ok_or_else(|| Error::Rsp(format!("invalid source breakpoint: {source}")))?;
+                let spec = BreakpointSpec::source(&source, index).ok_or_else(|| {
+                    Error::InvalidArgument(format!("invalid source breakpoint: {source}"))
+                })?;
                 let address = spec.resolve(debugger, dtb)?;
                 self.add_code_configured(
                     client,
@@ -447,7 +450,7 @@ impl BreakpointManager {
                     if let Err(rollback_error) =
                         self.remove_ids(client, debugger, ids.iter().rev().copied())
                     {
-                        return Err(Error::Rsp(format!(
+                        return Err(Error::Breakpoint(format!(
                             "failed to add source breakpoint '{source}': {error}; rollback incomplete: {rollback_error}"
                         )));
                     }
@@ -673,7 +676,9 @@ impl BreakpointManager {
                     .values()
                     .any(|bp| bp.hardware.is_some_and(|hw| hw.slot == *slot))
             })
-            .ok_or_else(|| Error::Rsp(format!("all {kind} hardware breakpoint slots are in use")))
+            .ok_or_else(|| {
+                Error::Breakpoint(format!("all {kind} hardware breakpoint slots are in use"))
+            })
     }
 
     pub fn remove(
@@ -738,7 +743,7 @@ impl BreakpointManager {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(Error::Rsp(format!(
+            Err(Error::Breakpoint(format!(
                 "failed to uninstall breakpoints: {}",
                 failures.join("; ")
             )))
@@ -769,7 +774,7 @@ impl BreakpointManager {
             return Err(Error::BPNotFound(id));
         }
         if self.breakpoints.contains_key(&new_id) {
-            return Err(Error::Rsp(format!(
+            return Err(Error::Breakpoint(format!(
                 "breakpoint ID {new_id} is already in use"
             )));
         }
@@ -871,12 +876,13 @@ impl BreakpointManager {
                 bp.enabled = false;
                 Ok(())
             }
-            BreakpointBackend::Kernel { .. } => Err(Error::Rsp(
+            BreakpointBackend::Kernel { .. } => Err(Error::Breakpoint(
                 "cannot address-space-disable a kernel breakpoint".into(),
             )),
-            BreakpointBackend::Hardware => Err(Error::Rsp(
+            BreakpointBackend::Hardware => Err(Error::Breakpoint(
                 "cannot address-space-disable a hardware breakpoint".into(),
             )),
+            // Nothing was ever patched in any address space.
             BreakpointBackend::Deferred => {
                 bp.enabled = false;
                 Ok(())
@@ -1310,7 +1316,7 @@ impl BreakpointManager {
                 && bp.hardware.is_some() == hardware
         }) {
             let kind = if hardware { "hardware" } else { "software" };
-            return Err(Error::Rsp(format!(
+            return Err(Error::Breakpoint(format!(
                 "{kind} breakpoint {} already owns address {:#x}",
                 existing.id, address.0
             )));
@@ -1396,9 +1402,13 @@ impl BreakpointManager {
                 Some(hw) => {
                     client.set_hardware_breakpoint(hw.slot, bp.address.0, hw.access, hw.len)
                 }
-                None => Err(Error::Rsp("hardware breakpoint missing parameters".into())),
+                None => Err(Error::Breakpoint(
+                    "hardware breakpoint missing parameters".into(),
+                )),
             },
-            _ => Err(Error::Rsp("breakpoint backend/scope mismatch".into())),
+            _ => Err(Error::Breakpoint(
+                "breakpoint backend/scope mismatch".into(),
+            )),
         }
     }
 
@@ -1422,7 +1432,9 @@ impl BreakpointManager {
             }
             (_, BreakpointBackend::Hardware) => match bp.hardware {
                 Some(hw) => client.clear_hardware_breakpoint(hw.slot),
-                None => Err(Error::Rsp("hardware breakpoint missing parameters".into())),
+                None => Err(Error::Breakpoint(
+                    "hardware breakpoint missing parameters".into(),
+                )),
             },
             _ => Err(Error::Rsp("breakpoint backend/scope mismatch".into())),
         }

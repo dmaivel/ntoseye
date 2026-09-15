@@ -1244,7 +1244,7 @@ impl KdBackend {
     ) -> Result<()> {
         let (address_offset, control_offset) = arm64_slot_offsets_for_access(slot, access)?;
         if matches!(access, HwBreakpointAccess::Execute) && (len != 1 || !addr.is_multiple_of(4)) {
-            return Err(Error::Rsp(
+            return Err(Error::InvalidArgument(
                 "ARM64 execute hardware breakpoints require a 4-byte-aligned address and length 1"
                     .into(),
             ));

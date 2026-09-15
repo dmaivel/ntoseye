@@ -196,7 +196,7 @@ fn parse_breakpoint_arguments(
     let access_spec = if wants_access_spec {
         let access = argv
             .get(index)
-            .ok_or_else(|| Error::Rsp(format!("{command}: missing access/size")))?;
+            .ok_or_else(|| Error::InvalidArgument(format!("{command}: missing access/size")))?;
         index += 1;
         Some(access.as_ref().to_string())
     } else {
@@ -204,7 +204,7 @@ fn parse_breakpoint_arguments(
     };
     let target = argv
         .get(index)
-        .ok_or_else(|| Error::Rsp(format!("{command}: missing breakpoint target")))?;
+        .ok_or_else(|| Error::InvalidArgument(format!("{command}: missing breakpoint target")))?;
     let target = target.as_ref().to_string();
     index += 1;
 
@@ -241,32 +241,42 @@ fn parse_breakpoint_arguments(
     let mut action = None;
     if explicit_if || bare_condition {
         if condition.is_some() {
-            return Err(Error::Rsp(
+            return Err(Error::InvalidArgument(
                 "breakpoint condition specified more than once".into(),
             ));
         }
         if condition_tail.is_empty() {
-            return Err(Error::Rsp("missing breakpoint condition after 'if'".into()));
+            return Err(Error::InvalidArgument(
+                "missing breakpoint condition after 'if'".into(),
+            ));
         }
         condition = Some(join_breakpoint_args(condition_tail));
     } else if action_tail.is_none() && condition_tail.len() == 1 {
         if let Cow::Owned(action_text) = &condition_tail[0] {
             if action_text.is_empty() {
-                return Err(Error::Rsp("missing breakpoint commands after 'do'".into()));
+                return Err(Error::InvalidArgument(
+                    "missing breakpoint commands after 'do'".into(),
+                ));
             }
             action = Some(action_text.clone());
         }
     } else if !condition_tail.is_empty() {
-        return Err(Error::Rsp("invalid breakpoint condition or action".into()));
+        return Err(Error::InvalidArgument(
+            "invalid breakpoint condition or action".into(),
+        ));
     }
 
     if let Some(action_tail) = action_tail {
         if action_tail.is_empty() {
-            return Err(Error::Rsp("missing breakpoint commands after 'do'".into()));
+            return Err(Error::InvalidArgument(
+                "missing breakpoint commands after 'do'".into(),
+            ));
         }
         let action_text = join_breakpoint_args(action_tail);
         if action_text.is_empty() {
-            return Err(Error::Rsp("missing breakpoint commands after 'do'".into()));
+            return Err(Error::InvalidArgument(
+                "missing breakpoint commands after 'do'".into(),
+            ));
         }
         action = Some(action_text);
     }
@@ -291,13 +301,13 @@ fn join_breakpoint_args(args: &[Cow<'_, str>]) -> String {
 
 fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection> {
     if args.is_empty() {
-        return Err(Error::Rsp("missing breakpoint ID".into()));
+        return Err(Error::InvalidArgument("missing breakpoint ID".into()));
     }
     if args.len() == 1 && args[0] == "*" {
         return Ok(BreakpointIdSelection::All);
     }
     if args.contains(&"*") {
-        return Err(Error::Rsp(
+        return Err(Error::InvalidArgument(
             "'*' cannot be combined with breakpoint IDs".into(),
         ));
     }
@@ -306,14 +316,14 @@ fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection>
     let mut seen = HashSet::new();
     for selector in args {
         if let Some((first, last)) = selector.split_once('-') {
-            let first = first
-                .parse::<u32>()
-                .map_err(|_| Error::Rsp(format!("invalid breakpoint ID range: {selector}")))?;
-            let last = last
-                .parse::<u32>()
-                .map_err(|_| Error::Rsp(format!("invalid breakpoint ID range: {selector}")))?;
+            let first = first.parse::<u32>().map_err(|_| {
+                Error::InvalidArgument(format!("invalid breakpoint ID range: {selector}"))
+            })?;
+            let last = last.parse::<u32>().map_err(|_| {
+                Error::InvalidArgument(format!("invalid breakpoint ID range: {selector}"))
+            })?;
             if first > last {
-                return Err(Error::Rsp(format!(
+                return Err(Error::InvalidArgument(format!(
                     "breakpoint ID range must be ascending: {selector}"
                 )));
             }
@@ -323,9 +333,9 @@ fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection>
                 }
             }
         } else {
-            let id = selector
-                .parse::<u32>()
-                .map_err(|_| Error::Rsp(format!("invalid breakpoint ID: {selector}")))?;
+            let id = selector.parse::<u32>().map_err(|_| {
+                Error::InvalidArgument(format!("invalid breakpoint ID: {selector}"))
+            })?;
             if seen.insert(id) {
                 ids.push(id);
             }
@@ -351,7 +361,7 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
         Some('w') => HwBreakpointAccess::Write,
         Some('r') => HwBreakpointAccess::ReadWrite,
         _ => {
-            return Err(Error::Rsp(format!(
+            return Err(Error::InvalidArgument(format!(
                 "invalid access in '{spec}' (use e=execute, r=read/write, w=write)"
             )));
         }
@@ -361,13 +371,13 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
         // Execute watches are always a single byte; allow the bare `e`.
         "" if matches!(access, HwBreakpointAccess::Execute) => 1,
         "" => {
-            return Err(Error::Rsp(format!(
+            return Err(Error::InvalidArgument(format!(
                 "missing size in '{spec}' (e.g. ba w4 <address>)"
             )));
         }
-        other => other
-            .parse()
-            .map_err(|_| Error::Rsp(format!("invalid size '{other}' (use 1, 2, 4, or 8)")))?,
+        other => other.parse().map_err(|_| {
+            Error::InvalidArgument(format!("invalid size '{other}' (use 1, 2, 4, or 8)"))
+        })?,
     };
     Ok((access, len))
 }

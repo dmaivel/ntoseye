@@ -49,14 +49,16 @@ fn parse_analyze_options(
             "-v" | "/v" => options.verbose = true,
             "-hang" | "/hang" => options.hang = true,
             "-show" | "/show" => {
-                let code_text = invocation
-                    .arg(index + 1)
-                    .ok_or_else(|| Error::Rsp("-show requires a bugcheck code".into()))?;
+                let code_text = invocation.arg(index + 1).ok_or_else(|| {
+                    Error::InvalidArgument("-show requires a bugcheck code".into())
+                })?;
                 let code = Expr::eval_with_radix(code_text, target, radix)
                     .map(|value| value.0)
-                    .map_err(|_| Error::Rsp(format!("invalid bugcheck code '{code_text}'")))?;
+                    .map_err(|_| {
+                        Error::InvalidArgument(format!("invalid bugcheck code '{code_text}'"))
+                    })?;
                 let code = u32::try_from(code).map_err(|_| {
-                    Error::Rsp(format!("bugcheck code '{code_text}' exceeds 32 bits"))
+                    Error::InvalidArgument(format!("bugcheck code '{code_text}' exceeds 32 bits"))
                 })?;
                 let mut parameters = [0u64; 4];
                 let mut consumed = 2;
@@ -69,7 +71,9 @@ fn parse_analyze_options(
                     }
                     *parameter = Expr::eval_with_radix(text, target, radix)
                         .map(|value| value.0)
-                        .map_err(|_| Error::Rsp(format!("invalid bugcheck parameter '{text}'")))?;
+                        .map_err(|_| {
+                            Error::InvalidArgument(format!("invalid bugcheck parameter '{text}'"))
+                        })?;
                     consumed += 1;
                 }
                 options.show = Some(BugcheckInfo {
@@ -81,7 +85,9 @@ fn parse_analyze_options(
                 continue;
             }
             other => {
-                return Err(Error::Rsp(format!("unknown !analyze option '{other}'")));
+                return Err(Error::InvalidArgument(format!(
+                    "unknown !analyze option '{other}'"
+                )));
             }
         }
         index += 1;

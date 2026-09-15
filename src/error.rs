@@ -41,6 +41,10 @@ pub enum Error {
     #[error("GDB protocol failure: {0}")]
     Rsp(String),
 
+    /// Invalid command input, independent of the backend.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("KD protocol failure: {0}")]
     Kd(String),
     #[error("KD protocol failure: send exceeded retry budget: {0}")]

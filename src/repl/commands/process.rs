@@ -1361,8 +1361,9 @@ impl ReplState<'_> {
         let flags = match parsed.flags {
             Some(text) => {
                 match Expr::eval_with_radix(text, &self.ctx.target, self.radix).and_then(|value| {
-                    u32::try_from(value.0)
-                        .map_err(|_| Error::Rsp(format!("invalid !process flags: {text}")))
+                    u32::try_from(value.0).map_err(|_| {
+                        Error::InvalidArgument(format!("invalid !process flags: {text}"))
+                    })
                 }) {
                     Ok(flags) => flags,
                     Err(_) => {
