@@ -1889,12 +1889,13 @@ impl Session {
             return Ok(StopResolution::Resumed);
         }
 
-        if self.breakpoints.has_enabled_breakpoints() {
-            rewind_threads_off_breakpoints(
+        if event.exception_code == Some(STATUS_BREAKPOINT)
+            && self.breakpoints.has_enabled_breakpoints()
+        {
+            rewind_thread_off_breakpoint(
                 self.backend.as_mut(),
                 &self.register_map,
                 &self.breakpoints,
-                &self.current_thread,
                 self.target.arch(),
             );
         }
@@ -2681,55 +2682,49 @@ pub fn resolve_watchpoint_stop(
     })
 }
 
-/// Rewind every thread that is parked one byte past one of our breakpoints back
-/// onto the breakpoint address. An `int3` advances RIP by one when it executes,
-/// so a thread that hit a BP reports `addr + 1`; the breakpoint-hit check matches
-/// on the exact address, so this realignment must happen first. Best-effort per
-/// thread; restores `restore_thread` as the selected thread afterward. Shared by
-/// the REPL and [`Session::continue_until_break`].
-pub fn rewind_threads_off_breakpoints(
+/// Rewind the reporting thread back onto the breakpoint address when it is
+/// parked one byte past one of ours.
+///
+/// An `int3` advances RIP by one when it executes, so a thread that hit a
+/// breakpoint the target does not own reports `addr + 1`; the breakpoint-hit
+/// check matches on the exact address, so this realignment must happen first.
+///
+/// Only the thread that reported the stop is touched, and only for a
+/// breakpoint exception. Every other vCPU is frozen wherever it happened to
+/// be, which may legitimately be one byte past a breakpoint, and moving a PC
+/// back there would re-execute a byte that already ran. A thread that did hit
+/// the same `int3` reports it as its own stop later, and is realigned then.
+/// Best-effort: a backend that cannot read or write the context is left alone.
+pub fn rewind_thread_off_breakpoint(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     breakpoints: &BreakpointManager,
-    restore_thread: &str,
     arch: Arch,
 ) {
     if arch == Arch::Arm64 {
         return;
     }
-    let threads = match backend.thread_list() {
-        Ok(t) => t,
-        Err(_) => return,
+    let Ok(regs) = backend.read_registers() else {
+        return;
     };
-
-    for tid in &threads {
-        if backend.set_current_thread(tid).is_err() {
-            continue;
-        }
-        let Ok(regs) = backend.read_registers() else {
-            continue;
-        };
-        let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
-        let cr3 = register_map
-            .read_u64(arch.dtb_register(), &regs)
-            .unwrap_or(0);
-        let Some(prev) = rip.checked_sub(register_map.breakpoint_step_size() as u64) else {
-            continue;
-        };
-        if !matches!(
-            breakpoints.check_breakpoint_hit(prev, cr3),
-            BreakpointHitResult::Hit(_)
-        ) {
-            continue;
-        }
-        let mut adjusted = regs.clone();
-        if register_map.write_u64("rip", &mut adjusted, prev).is_err() {
-            continue;
-        }
-        let _ = backend.write_registers(&adjusted);
+    let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
+    let cr3 = register_map
+        .read_u64(arch.dtb_register(), &regs)
+        .unwrap_or(0);
+    let Some(prev) = rip.checked_sub(register_map.breakpoint_step_size() as u64) else {
+        return;
+    };
+    if !matches!(
+        breakpoints.check_breakpoint_hit(prev, cr3),
+        BreakpointHitResult::Hit(_)
+    ) {
+        return;
     }
-
-    let _ = backend.set_current_thread(restore_thread);
+    let mut adjusted = regs.clone();
+    if register_map.write_u64("rip", &mut adjusted, prev).is_err() {
+        return;
+    }
+    let _ = backend.write_registers(&adjusted);
 }
 
 /// Adopt the thread reported by a stop event (falling back to the backend's
@@ -3198,6 +3193,34 @@ mod tests {
             .unwrap();
         assert!(breakpoint.resolved);
         assert_eq!(breakpoint.address, VirtAddr(0x1010));
+    }
+
+    #[test]
+    fn breakpoint_rewind_realigns_the_reporting_thread_without_thread_enumeration() {
+        let mut backend = MockBackend::new();
+        assert!(backend.thread_list().is_err(), "precondition");
+        backend.set("rip", 0x1001);
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+        let register_map = backend.register_map().clone();
+
+        rewind_thread_off_breakpoint(&mut backend, &register_map, &manager, Arch::Amd64);
+
+        assert_eq!(backend.get("rip"), 0x1000);
+    }
+
+    #[test]
+    fn breakpoint_rewind_leaves_an_unrelated_program_counter_alone() {
+        let mut backend = MockBackend::new();
+        backend.set("rip", 0x2001);
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+        let register_map = backend.register_map().clone();
+
+        rewind_thread_off_breakpoint(&mut backend, &register_map, &manager, Arch::Amd64);
+
+        assert_eq!(backend.get("rip"), 0x2001);
+        assert_eq!(backend.writes, 0);
     }
 
     fn manager_with_hw(slot: u8, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {
