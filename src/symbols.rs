@@ -19,10 +19,15 @@ use pelite::{
     },
     pe64::{Pe, PeFile, PeView, debug::CodeView},
 };
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 use spin::{Mutex, RwLock};
+use std::mem::swap;
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap, HashSet},
     fs::File,
     mem::size_of,
     path::{Path, PathBuf},
@@ -66,6 +71,12 @@ fn pdb_servers() -> &'static [String] {
 pub struct SymbolIndex {
     /// Symbol/type names, sorted and deduped. Matched fuzzily by `search`
     names: Vec<String>,
+    /// Byte offsets of each name's bare symbol, avoiding a reverse scan during
+    /// every completion search.
+    bare_offsets: Vec<u32>,
+    /// First four bare-name bytes, ASCII-lowercased, packed most significant byte
+    /// first, and zero-padded. Prefix searches scan these keys before reading names.
+    prefix_keys: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1182,14 +1193,82 @@ mod tests {
     }
 
     #[test]
-    fn qualified_index_search_matches_bare_names_unless_query_names_a_module() {
-        let index = SymbolIndex {
-            names: vec![
-                "nt!KeBugCheckEx".to_string(),
-                "nt!memcpy".to_string(),
-                "ntdll!memcpy".to_string(),
-            ],
+    fn merged_indexes_cover_the_selected_address_space_only() {
+        let store = SymbolStore::new();
+        let kernel_dtb = 0x2000;
+        let selected_dtb = 0x1000;
+        let other_dtb = 0x3000;
+        let register = |name: &str, guid: u128, dtb, base: u64, symbol: &str, type_name: &str| {
+            store.modules.insert(
+                (dtb, base),
+                LoadedModule {
+                    name: name.to_string(),
+                    guid,
+                    base_address: VirtAddr(base),
+                    size: 0x1000,
+                    dtb,
+                },
+            );
+            store
+                .index
+                .insert(guid, SymbolIndex::from_names(vec![symbol.to_string()]));
+            store
+                .index_types
+                .insert(guid, SymbolIndex::from_names(vec![type_name.to_string()]));
         };
+        register(
+            "ntoskrnl.exe",
+            0x22,
+            kernel_dtb,
+            0xffff_f800_0000_0000,
+            "KeBugCheckEx",
+            "_EPROCESS",
+        );
+        register(
+            "user32.dll",
+            0x33,
+            selected_dtb,
+            0x7ff0_0000_0000,
+            "PostQuitMessage",
+            "_WND",
+        );
+        register(
+            "notepad.exe",
+            0x44,
+            other_dtb,
+            0x7ff1_0000_0000,
+            "WinMain",
+            "_NOTEPAD",
+        );
+        store.set_kernel(Some(0x22), kernel_dtb);
+
+        let symbols = store.merged_symbol_index(Some(selected_dtb));
+        assert_eq!(
+            symbols.names,
+            vec![
+                "nt!KeBugCheckEx".to_string(),
+                "user32!PostQuitMessage".to_string()
+            ]
+        );
+        assert_eq!(
+            symbols.search("PostQuit", 10),
+            vec!["user32!PostQuitMessage".to_string()]
+        );
+
+        let types = store.merged_types_index(Some(selected_dtb));
+        assert_eq!(
+            types.names,
+            vec!["_EPROCESS".to_string(), "_WND".to_string()]
+        );
+    }
+
+    #[test]
+    fn qualified_index_search_matches_bare_names_unless_query_names_a_module() {
+        let index = SymbolIndex::from_names(vec![
+            "nt!KeBugCheckEx".to_string(),
+            "nt!memcpy".to_string(),
+            "ntdll!memcpy".to_string(),
+        ]);
         assert_eq!(index.search("Ke*", 10), vec!["nt!KeBugCheckEx"]);
         assert_eq!(
             index.search("memcpy", 10),
@@ -1201,6 +1280,42 @@ mod tests {
             !index
                 .search("nt!*", 10)
                 .contains(&"ntdll!memcpy".to_string())
+        );
+    }
+
+    #[test]
+    fn prefix_search_ranks_and_substring_search_falls_back() {
+        let index = SymbolIndex::from_names(vec![
+            "nt!PostQuitMessage".to_string(),
+            "nt!PostThreadMessage".to_string(),
+            "nt!XPostQuitMessage".to_string(),
+        ]);
+
+        assert_eq!(
+            index.search("Post", 1),
+            vec!["nt!PostQuitMessage".to_string()]
+        );
+        assert_eq!(
+            index.search("Quit", 10),
+            vec![
+                "nt!PostQuitMessage".to_string(),
+                "nt!XPostQuitMessage".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_module_qualifier_lists_that_module() {
+        let index = SymbolIndex::from_names(vec![
+            "nt!KeBugCheckEx".to_string(),
+            "nt!memcpy".to_string(),
+            "ntdll!memcpy".to_string(),
+        ]);
+
+        let hits = index.search("nt!", 10);
+        assert_eq!(
+            hits[..2],
+            ["nt!KeBugCheckEx".to_string(), "nt!memcpy".to_string()]
         );
     }
 }
@@ -2881,109 +2996,75 @@ impl SymbolStore {
     /// `dtb` (all modules when `None`). Qualified so a completed or listed name
     /// resolves unambiguously even when several modules export it.
     pub fn merged_symbol_index(&self, dtb: Option<Dtb>) -> SymbolIndex {
-        let total_modules = self
-            .modules
-            .iter()
-            .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
-            .count();
-        let progress = ProgressBar::new((total_modules + 1) as u64);
-        progress.set_style(task_progress_style());
-        progress.set_message("Building symbol completions");
-
-        let mut all_strings: Vec<String> = Vec::new();
-
-        for module in self.modules.iter() {
-            if let Some(filter_dtb) = dtb
-                && !self.module_in_scope(&module, filter_dtb)
-            {
-                continue;
-            }
-
-            if let Some(index) = self.index.get(&module.guid) {
-                let short = ModuleInfo::derive_short_name(&module.name);
-                all_strings.extend(index.names.iter().map(|name| format!("{short}!{name}")));
-            }
-
-            progress.inc(1);
-        }
-
-        all_strings.sort();
-        all_strings.dedup();
-
-        progress.inc(1);
-        progress.finish_and_clear();
-
-        SymbolIndex { names: all_strings }
+        self.merged_index(&self.index, dtb, true, "Building symbol completions")
     }
 
     pub fn merged_types_index(&self, dtb: Option<Dtb>) -> SymbolIndex {
-        let total_modules = self
-            .modules
-            .iter()
-            .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
-            .count();
-        let progress = ProgressBar::new((total_modules + 1) as u64);
-        progress.set_style(task_progress_style());
-        progress.set_message("Building type completions");
-
-        let mut all_strings: Vec<String> = Vec::new();
-
-        for module in self.modules.iter() {
-            if let Some(filter_dtb) = dtb
-                && !self.module_in_scope(&module, filter_dtb)
-            {
-                continue;
-            }
-
-            if let Some(index) = self.index_types.get(&module.guid) {
-                all_strings.extend(index.names.iter().cloned());
-            }
-
-            progress.inc(1);
-        }
-
-        all_strings.sort();
-        all_strings.dedup();
-
-        progress.inc(1);
-        progress.finish_and_clear();
-
-        SymbolIndex { names: all_strings }
+        self.merged_index(&self.index_types, dtb, false, "Building type completions")
     }
 
     pub fn merged_enum_index(&self, dtb: Option<Dtb>) -> SymbolIndex {
-        let total_modules = self
+        self.merged_index(&self.index_enums, dtb, false, "Building enum completions")
+    }
+
+    /// Merge the per-module indexes in `source` that are visible from `dtb`
+    /// (all modules when `None`) into one searchable index. `qualify` prefixes
+    /// each name with its module's short name, which symbol completion needs
+    /// so an inserted name resolves unambiguously; type and enum names merge
+    /// unqualified.
+    ///
+    /// Every step here is per-name work over millions of names on a live
+    /// kernel, run whenever the active address space changes (attach, reload),
+    /// so the qualification and the sort are both parallel.
+    fn merged_index(
+        &self,
+        source: &DashMap<u128, SymbolIndex>,
+        dtb: Option<Dtb>,
+        qualify: bool,
+        message: &'static str,
+    ) -> SymbolIndex {
+        let modules: Vec<(u128, String)> = self
             .modules
             .iter()
             .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
-            .count();
-        let progress = ProgressBar::new((total_modules + 1) as u64);
+            .map(|module| (module.guid, module.name.clone()))
+            .collect();
+        let progress = ProgressBar::new((modules.len() + 1) as u64);
         progress.set_style(task_progress_style());
-        progress.set_message("Building enum completions");
+        progress.set_message(message);
 
-        let mut all_strings: Vec<String> = Vec::new();
+        let per_module: Vec<Vec<String>> = modules
+            .into_par_iter()
+            .map(|(guid, name)| {
+                let names = match source.get(&guid) {
+                    Some(index) if qualify => {
+                        let short = ModuleInfo::derive_short_name(&name);
+                        index
+                            .names
+                            .iter()
+                            .map(|name| format!("{short}!{name}"))
+                            .collect()
+                    }
+                    Some(index) => index.names.clone(),
+                    None => Vec::new(),
+                };
+                progress.inc(1);
+                names
+            })
+            .collect();
 
-        for module in self.modules.iter() {
-            if let Some(filter_dtb) = dtb
-                && !self.module_in_scope(&module, filter_dtb)
-            {
-                continue;
-            }
-
-            if let Some(index) = self.index_enums.get(&module.guid) {
-                all_strings.extend(index.names.iter().cloned());
-            }
-
-            progress.inc(1);
+        let mut all_strings: Vec<String> =
+            Vec::with_capacity(per_module.iter().map(Vec::len).sum());
+        for names in per_module {
+            all_strings.extend(names);
         }
-
-        all_strings.sort();
+        all_strings.par_sort_unstable();
         all_strings.dedup();
 
         progress.inc(1);
         progress.finish_and_clear();
 
-        SymbolIndex { names: all_strings }
+        SymbolIndex::from_names(all_strings)
     }
 
     pub fn find_type_across_modules(&self, dtb: Dtb, type_name: &str) -> Option<Arc<TypeInfo>> {
@@ -3946,21 +4027,13 @@ impl SymbolStore {
         // Publish every derived index together only after all mandatory PDB
         // streams have been parsed. A fatal type/public stream error must not
         // leave a partially indexed PDB that later lookups mistake for success.
-        self.index.insert(guid, SymbolIndex { names: strings });
+        self.index.insert(guid, SymbolIndex::from_names(strings));
         self.symbol_rvas.insert(guid, rvas);
         self.source_lines.insert(guid, source_lines);
-        self.index_types.insert(
-            guid,
-            SymbolIndex {
-                names: type_strings,
-            },
-        );
-        self.index_enums.insert(
-            guid,
-            SymbolIndex {
-                names: enum_strings,
-            },
-        );
+        self.index_types
+            .insert(guid, SymbolIndex::from_names(type_strings));
+        self.index_enums
+            .insert(guid, SymbolIndex::from_names(enum_strings));
         self.struct_defs.insert(guid, struct_defs);
 
         self.index_diagnostics.insert(guid, diagnostics);
@@ -4414,23 +4487,38 @@ fn variant_to_i64(v: &pdb2::Variant) -> i64 {
 }
 
 impl SymbolIndex {
-    /// Fuzzy substring search over the names, ranked best-first. Smart-case
-    /// (case-insensitive unless the query has uppercase), so `process` matches
-    /// `PsGetProcessId`. Empty query returns the first `limit` names. On a
-    /// module-qualified index a query without `!` matches the bare name, so
-    /// `Ke*` finds `nt!KeBugCheckEx` without the `nt!` counting as text.
+    fn from_names(names: Vec<String>) -> Self {
+        let (bare_offsets, prefix_keys): (Vec<u32>, Vec<u32>) = names
+            .par_iter()
+            .map(|name| {
+                let bare_offset = name
+                    .rfind('!')
+                    .map_or(0, |separator| separator.saturating_add(1))
+                    as u32;
+                (bare_offset, prefix_key(bare_name(name, bare_offset)))
+            })
+            .unzip();
+        Self {
+            names,
+            bare_offsets,
+            prefix_keys,
+        }
+    }
+
+    /// Search names best-first with smart-case ranking (case-insensitive unless
+    /// the query has uppercase). A plain ASCII query is first reduced to a
+    /// bounded candidate set by one cheap pass that keeps the names whose bare
+    /// symbol contains the query, and only those are scored. This deliberately
+    /// drops gap-only fuzzy matches such as `PsGtPrcId`, which would otherwise
+    /// cost a full dynamic-programming scan of every name on each keystroke.
+    /// Empty query returns the first `limit` names. On a module-qualified index
+    /// a query without `!` matches the bare name, so `Ke*` finds
+    /// `nt!KeBugCheckEx` without the `nt!` counting as text.
     pub fn search(&self, query: &str, limit: usize) -> Vec<String> {
         if query.is_empty() || limit == 0 {
             return self.names.iter().take(limit).cloned().collect();
         }
         let qualified_query = query.contains('!');
-        fn haystack(qualified_query: bool, name: &str) -> &str {
-            if qualified_query {
-                name
-            } else {
-                name.rsplit_once('!').map_or(name, |(_, bare)| bare)
-            }
-        }
         if query
             .as_bytes()
             .iter()
@@ -4439,39 +4527,358 @@ impl SymbolIndex {
             return self
                 .names
                 .iter()
-                .filter(|name| glob_matches(query, haystack(qualified_query, name), true))
+                .zip(&self.bare_offsets)
+                .filter(|(name, bare_offset)| {
+                    glob_matches(query, haystack(qualified_query, name, **bare_offset), true)
+                })
                 .take(limit)
-                .cloned()
+                .map(|(name, _)| name.clone())
                 .collect();
         }
 
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let (range_start, range_end) = qualified_search_range(&self.names, query);
+        let names = &self.names[range_start..range_end];
+        let top = if plain_ascii_query(query) {
+            let fragment = query
+                .rsplit_once('!')
+                .map_or(query, |(_, fragment)| fragment);
+            let candidates = self.candidates(fragment, range_start, range_end);
+            let chunk_size = candidates
+                .len()
+                .div_ceil(rayon::current_num_threads())
+                .max(1);
+            candidates
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    score_index_chunk(
+                        chunk,
+                        &self.names,
+                        &self.bare_offsets,
+                        qualified_query,
+                        &pattern,
+                        limit,
+                    )
+                })
+                .reduce(
+                    || BinaryHeap::with_capacity(limit),
+                    |left, right| merge_top(left, right, limit),
+                )
+        } else {
+            let chunk_size = names.len().div_ceil(rayon::current_num_threads()).max(1);
+            names
+                .par_chunks(chunk_size)
+                .enumerate()
+                .map(|(chunk_number, chunk)| {
+                    score_name_chunk(
+                        chunk,
+                        &self.bare_offsets,
+                        qualified_query,
+                        &pattern,
+                        limit,
+                        range_start + chunk_number * chunk_size,
+                    )
+                })
+                .reduce(
+                    || BinaryHeap::with_capacity(limit),
+                    |left, right| merge_top(left, right, limit),
+                )
+        };
 
-        // Per-keystroke hot path over up to hundreds of thousands of names.
-        let mut scored: Vec<(u32, &String)> = self
-            .names
-            .par_iter()
-            .map_init(
-                || (Matcher::new(Config::DEFAULT), Vec::new()),
-                |(matcher, buf), name| {
-                    pattern
-                        .score(Utf32Str::new(haystack(qualified_query, name), buf), matcher)
-                        .map(|score| (score, name))
-                },
-            )
-            .filter_map(|scored| scored)
+        let mut scored: Vec<(u32, &String)> = top
+            .into_iter()
+            .map(|(Reverse(score), name)| (score, name))
             .collect();
 
-        // Partial-select the top `limit`; ties break alphabetically.
+        // The bounded heaps contain only the top `limit`; ties break alphabetically.
         let by_rank =
             |a: &(u32, &String), b: &(u32, &String)| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1));
-        if scored.len() > limit {
-            scored.select_nth_unstable_by(limit - 1, by_rank);
-            scored.truncate(limit);
-        }
         scored.sort_unstable_by(by_rank);
         scored.into_iter().map(|(_, name)| name.clone()).collect()
     }
+
+    /// The names worth fuzzy-scoring for `needle`, as indices into `names`,
+    /// restricted to `range_start..range_end` and capped at [`CANDIDATE_CAP`].
+    ///
+    /// Bare-name prefix matches come first and, when any exist, come alone:
+    /// that is what typing a prefix means, and they are found by scanning the
+    /// packed key column rather than the names. Only when no name starts with
+    /// `needle` is the far more expensive contiguous-substring scan of the
+    /// names themselves worth running.
+    fn candidates(&self, needle: &str, range_start: usize, range_end: usize) -> Vec<u32> {
+        if range_start >= range_end {
+            return Vec::new();
+        }
+        // `module!` with nothing typed after it: every name in range is a
+        // candidate, and the scorer ranks the module's own names first.
+        if needle.is_empty() {
+            let end = range_end.min(range_start.saturating_add(CANDIDATE_CAP));
+            return (range_start..end).map(|index| index as u32).collect();
+        }
+        let prefixed = self.prefix_candidates(needle, range_start, range_end);
+        if !prefixed.is_empty() {
+            return prefixed;
+        }
+        self.substring_candidates(needle, range_start, range_end)
+    }
+
+    /// Indices whose bare name starts with `needle`, case-insensitively.
+    ///
+    /// The packed key holds four bytes, so a longer `needle` still filters on
+    /// its first four and only the survivors are compared against the name
+    /// itself.
+    fn prefix_candidates(&self, needle: &str, range_start: usize, range_end: usize) -> Vec<u32> {
+        let compared = needle.len().min(4) as u32;
+        let shift = 32 - 8 * compared;
+        let needle_key = prefix_key(needle) >> shift;
+        let (chunk_size, per_chunk_cap) = candidate_chunking(range_end - range_start);
+        let chunks: Vec<Vec<u32>> = self.prefix_keys[range_start..range_end]
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_number, chunk)| {
+                let base = range_start + chunk_number * chunk_size;
+                let mut candidates = Vec::new();
+                for (offset, key) in chunk.iter().enumerate() {
+                    if candidates.len() >= per_chunk_cap {
+                        break;
+                    }
+                    if key >> shift != needle_key {
+                        continue;
+                    }
+                    let index = base + offset;
+                    if needle.len() > 4
+                        && !ascii_prefix_case_insensitive(
+                            bare_name(&self.names[index], self.bare_offsets[index]),
+                            needle,
+                        )
+                    {
+                        continue;
+                    }
+                    candidates.push(index as u32);
+                }
+                candidates
+            })
+            .collect();
+        collect_candidates(chunks)
+    }
+
+    /// Indices whose bare name contains `needle` anywhere, case-insensitively.
+    /// This reads every name in the range, so it is the fallback tier.
+    fn substring_candidates(&self, needle: &str, range_start: usize, range_end: usize) -> Vec<u32> {
+        let (chunk_size, per_chunk_cap) = candidate_chunking(range_end - range_start);
+        let chunks: Vec<Vec<u32>> = self.names[range_start..range_end]
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_number, chunk)| {
+                let base = range_start + chunk_number * chunk_size;
+                let mut candidates = Vec::new();
+                for (offset, name) in chunk.iter().enumerate() {
+                    if candidates.len() >= per_chunk_cap {
+                        break;
+                    }
+                    let index = base + offset;
+                    if ascii_contains_case_insensitive(
+                        bare_name(name, self.bare_offsets[index]),
+                        needle,
+                    ) {
+                        candidates.push(index as u32);
+                    }
+                }
+                candidates
+            })
+            .collect();
+        collect_candidates(chunks)
+    }
+}
+
+fn push_top<'a>(
+    top: &mut BinaryHeap<(Reverse<u32>, &'a String)>,
+    score: u32,
+    name: &'a String,
+    limit: usize,
+) {
+    let candidate = (Reverse(score), name);
+    if top.len() < limit || top.peek().is_some_and(|worst| candidate < *worst) {
+        top.push(candidate);
+        if top.len() > limit {
+            top.pop();
+        }
+    }
+}
+
+fn merge_top<'a>(
+    mut left: BinaryHeap<(Reverse<u32>, &'a String)>,
+    mut right: BinaryHeap<(Reverse<u32>, &'a String)>,
+    limit: usize,
+) -> BinaryHeap<(Reverse<u32>, &'a String)> {
+    if left.len() < right.len() {
+        swap(&mut left, &mut right);
+    }
+    for candidate in right {
+        left.push(candidate);
+        if left.len() > limit {
+            left.pop();
+        }
+    }
+    left
+}
+
+/// Restrict a case-sensitive qualified query to one module's contiguous name
+/// range. Smart-case lowercase queries cannot use this range because matching
+/// module names with different casing would no longer be possible on the
+/// case-sensitive index ordering.
+fn qualified_search_range(names: &[String], query: &str) -> (usize, usize) {
+    let Some((module, _)) = query.split_once('!') else {
+        return (0, names.len());
+    };
+    if module.is_empty()
+        || query.chars().any(char::is_whitespace)
+        || !query.chars().any(char::is_uppercase)
+        || module
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| matches!(*byte, b'!' | b'^' | b'\'' | b'\\'))
+    {
+        return (0, names.len());
+    }
+
+    // `!` is the last byte of the lower bound. Replacing it with the next
+    // ASCII byte gives an exclusive upper bound for every string beginning
+    // with `<module>!`, without scanning that module to find its end.
+    let lower = format!("{module}!");
+    let upper = format!("{module}\"");
+    let start = names.partition_point(|name| name < &lower);
+    let end = names.partition_point(|name| name < &upper);
+    (start, end)
+}
+
+/// Maximum candidates scored per query, bounding work on large symbol indexes.
+const CANDIDATE_CAP: usize = 50_000;
+
+fn bare_name(name: &str, bare_offset: u32) -> &str {
+    &name[bare_offset as usize..]
+}
+
+fn haystack(qualified_query: bool, name: &str, bare_offset: u32) -> &str {
+    if qualified_query {
+        name
+    } else {
+        bare_name(name, bare_offset)
+    }
+}
+
+fn score_index_chunk<'a>(
+    indices: &[u32],
+    names: &'a [String],
+    bare_offsets: &[u32],
+    qualified_query: bool,
+    pattern: &Pattern,
+    limit: usize,
+) -> BinaryHeap<(Reverse<u32>, &'a String)> {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut top = BinaryHeap::with_capacity(limit);
+    for &index in indices {
+        let index = index as usize;
+        let name = &names[index];
+        let text = haystack(qualified_query, name, bare_offsets[index]);
+        if let Some(score) = pattern.score(Utf32Str::new(text, &mut buf), &mut matcher) {
+            push_top(&mut top, score, name, limit);
+        }
+    }
+    top
+}
+
+fn score_name_chunk<'a>(
+    names: &'a [String],
+    bare_offsets: &[u32],
+    qualified_query: bool,
+    pattern: &Pattern,
+    limit: usize,
+    base: usize,
+) -> BinaryHeap<(Reverse<u32>, &'a String)> {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut top = BinaryHeap::with_capacity(limit);
+    for (offset, name) in names.iter().enumerate() {
+        let index = base + offset;
+        let text = haystack(qualified_query, name, bare_offsets[index]);
+        if let Some(score) = pattern.score(Utf32Str::new(text, &mut buf), &mut matcher) {
+            push_top(&mut top, score, name, limit);
+        }
+    }
+    top
+}
+
+fn plain_ascii_query(query: &str) -> bool {
+    if !query.is_ascii() || query.is_empty() || query.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return false;
+    }
+    let bytes = query.as_bytes();
+    !bytes.iter().any(|byte| matches!(*byte, b'*' | b'?'))
+        && !bytes
+            .first()
+            .is_some_and(|byte| matches!(*byte, b'!' | b'^' | b'\'' | b'\\'))
+        && bytes.last() != Some(&b'$')
+        && !bytes.ends_with(b"\\$")
+}
+
+/// Whether `needle` is a case-insensitive ASCII prefix of `haystack`. Byte
+/// comparison, so a non-ASCII name simply fails to match an ASCII needle.
+fn ascii_prefix_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.len() >= needle.len()
+        && haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+/// Whether `haystack` contains `needle` case-insensitively. A non-ASCII name
+/// cannot be folded this way and is kept, leaving the decision to the scorer.
+/// This reads every name in the range it is called over, so it is bounded by
+/// memory bandwidth rather than by the comparison.
+fn ascii_contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || !haystack.is_ascii() {
+        return true;
+    }
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// The first four bytes of `bare`, ASCII-lowercased and packed most
+/// significant byte first, so comparing the top `n` bytes of two keys
+/// compares their first `n` characters. Shorter names pad with zero, which no
+/// query byte can equal.
+fn prefix_key(bare: &str) -> u32 {
+    let bytes = bare.as_bytes();
+    let mut key = 0u32;
+    for index in 0..4 {
+        let byte = bytes.get(index).copied().unwrap_or(0);
+        key = (key << 8) | u32::from(byte.to_ascii_lowercase());
+    }
+    key
+}
+
+/// Concatenate capped per-chunk candidate lists into one capped list.
+fn collect_candidates(chunks: Vec<Vec<u32>>) -> Vec<u32> {
+    let mut candidates = Vec::with_capacity(chunks.iter().map(Vec::len).sum());
+    for chunk in chunks {
+        let remaining = CANDIDATE_CAP.saturating_sub(candidates.len());
+        if remaining == 0 {
+            break;
+        }
+        candidates.extend(chunk.into_iter().take(remaining));
+    }
+    candidates
+}
+
+/// One chunk per thread over `len` entries, and the share of the candidate cap
+/// each chunk may fill.
+fn candidate_chunking(len: usize) -> (usize, usize) {
+    let chunk_size = len.div_ceil(rayon::current_num_threads()).max(1);
+    let chunk_count = len.div_ceil(chunk_size).max(1);
+    (chunk_size, CANDIDATE_CAP.div_ceil(chunk_count).max(1))
 }
 
 /// Anchored glob match: `*` matches any number of bytes, `?` exactly one.
