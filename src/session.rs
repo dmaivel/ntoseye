@@ -1,4 +1,10 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::env::temp_dir;
+#[cfg(test)]
+use std::fs::{remove_file, write};
+#[cfg(test)]
+use std::process::id;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -27,12 +33,16 @@ use crate::memory::DTB_IDENTITY;
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
 use crate::target::{ReloadReport, Target, ThreadInfo};
+#[cfg(test)]
+use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     StackTrace, ThreadStackTrace, build_parked_thread_stack, build_stacktrace, preferred_code_dtb,
     resolve_thread_trace_context,
 };
 use crate::{Backend, TargetSpec};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
 /// `NTOSEYE_KD_TRACE` like the KD packet trace so one capture correlates both.
@@ -1998,7 +2008,7 @@ fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
     let key = format!("ntoseye-{:016x}", fnv1a_64(canonical.as_bytes()));
     // macOS backs the lock with a flock file at this path; keep it out of cwd.
     #[cfg(target_os = "macos")]
-    let key = std::env::temp_dir().join(&key).display().to_string();
+    let key = temp_dir().join(&key).display().to_string();
     let instance = SingleInstance::new(&key).map_err(|err| {
         Error::DebugInfo(format!("failed to create single-instance guard: {err:?}"))
     })?;
@@ -2577,6 +2587,25 @@ pub fn step_over_current_breakpoint(
         Err(err) => return stepped.and(Err(err)),
     }
     stepped.map(|()| true)
+}
+
+/// Open a session over a synthetic triage dump whose only memory region is
+/// `memory`, mapped at `base`.
+#[cfg(test)]
+pub fn session_over_memory(base: u64, memory: &[u8]) -> Session {
+    let block = TriageBlock {
+        address: base,
+        offset: 0,
+        size: memory.len() as u32,
+    };
+    let dump = make_triage_dump(&[block], &[(base, memory)]);
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = temp_dir().join(format!("ntoseye-session-{sequence}-{}.dmp", id(),));
+    write(&path, dump).unwrap();
+    let session = Session::open(&TargetSpec::Dump(path.clone())).unwrap();
+    remove_file(path).unwrap();
+    session
 }
 
 #[cfg(test)]

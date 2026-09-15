@@ -1916,6 +1916,49 @@ impl SymbolStore {
         );
     }
 
+    /// Register a loaded module and its C13 source-line records without a PDB,
+    /// for tests that drive line-granular stepping over synthetic memory. Each
+    /// record is `(rva, length, line)`; a `None` length means the next record
+    /// bounds it, exactly as a PDB without lengths does.
+    #[cfg(test)]
+    pub fn inject_source_lines_for_test(
+        &self,
+        guid: u128,
+        dtb: Dtb,
+        base: VirtAddr,
+        size: u32,
+        file: &str,
+        records: &[(u32, Option<u32>, u32)],
+    ) {
+        self.modules.insert(
+            Self::module_key(dtb, base),
+            LoadedModule {
+                name: "driver.sys".to_string(),
+                guid,
+                base_address: base,
+                size,
+                dtb,
+            },
+        );
+        self.source_lines.insert(
+            guid,
+            records
+                .iter()
+                .map(|(rva, length, line)| SourceLineEntry {
+                    rva: *rva,
+                    length: *length,
+                    location: SourceLocation {
+                        file: file.to_string(),
+                        line: *line,
+                        column: None,
+                        local_path: None,
+                        local_exists: false,
+                    },
+                })
+                .collect(),
+        );
+    }
+
     pub fn clear_modules_for_dtb(&self, dtb: Dtb) {
         let module_keys: Vec<_> = self
             .modules
