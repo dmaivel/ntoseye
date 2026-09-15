@@ -120,14 +120,14 @@ pub fn capturing() -> bool {
     CAPTURE.with(|slot| slot.borrow().is_some())
 }
 
-/// `print!` that honours an active [`capture`].
+/// `print!` that honors an active [`capture`].
 macro_rules! out {
     ($($arg:tt)*) => {
         $crate::output::write_fmt(format_args!($($arg)*))
     };
 }
 
-/// `println!` that honours an active [`capture`].
+/// `println!` that honors an active [`capture`].
 macro_rules! outln {
     () => {
         $crate::output::write_fmt(format_args!("\n"))

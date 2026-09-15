@@ -238,7 +238,7 @@ pub enum WatchpointStopAction {
 
 /// Complete core classification of one raw backend stop. Frontends render
 /// surfaced stops and execute frontend-owned breakpoint/exception commands;
-/// they never repeat backend acknowledgement, reload, scope, or trap handling.
+/// they never repeat backend acknowledgment, reload, scope, or trap handling.
 #[derive(Debug, Clone)]
 pub enum StopResolution {
     /// Debugger noise or a filtered breakpoint was handled and execution resumed.
@@ -1690,7 +1690,7 @@ impl Session {
         self.module_refresh_report = None;
     }
 
-    /// Resume with an explicit exception acknowledgement while preserving the
+    /// Resume with an explicit exception acknowledgment while preserving the
     /// same breakpoint step-over and cache invalidation prologue as [`Self::resume`].
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
         self.target.selected_frame = None;
@@ -1979,8 +1979,8 @@ impl Session {
         self.continue_until_break_with_disposition(timeout, cancel, ContinueDisposition::Handled)
     }
 
-    /// Resume with an explicit exception acknowledgement, then wait for a
-    /// meaningful stop. When already running, no acknowledgement is sent.
+    /// Resume with an explicit exception acknowledgment, then wait for a
+    /// meaningful stop. When already running, no acknowledgment is sent.
     pub fn continue_until_break_with_disposition(
         &mut self,
         timeout: Option<Duration>,
@@ -2334,7 +2334,7 @@ fn normalize_host_port(target: &str) -> Option<String> {
     if host.contains('/') {
         return None;
     }
-    // Reject bare (unbracketed) IPv6 — the host part would contain extra
+    // Reject bare (unbracketed) IPv6 because the host part would contain extra
     // colons (e.g. "fe80:" from "fe80::5678").
     if host.contains(':') && !host.starts_with('[') {
         return None;

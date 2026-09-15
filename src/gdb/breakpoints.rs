@@ -1051,16 +1051,14 @@ impl BreakpointManager {
             .any(|bp| bp.enabled && bp.resolved)
     }
 
-    /// Whether any enabled hardware (DR) breakpoint exists — the cheap gate the
-    /// stop path checks before reading DR6 on a single-step.
+    /// Whether a single-step stop needs a DR6 check for hardware breakpoints.
     pub fn has_enabled_hardware_breakpoints(&self) -> bool {
         self.breakpoints
             .values()
             .any(|bp| bp.enabled && bp.hardware.is_some())
     }
 
-    /// The enabled hardware breakpoint occupying DR slot `slot`, if any — used
-    /// to map a DR6 status bit back to the breakpoint that fired.
+    /// Map a DR6 status bit to the enabled breakpoint in DR slot `slot`.
     pub fn hardware_breakpoint_for_slot(&self, slot: u8) -> Option<Breakpoint> {
         self.breakpoints
             .values()

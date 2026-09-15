@@ -67,7 +67,7 @@ Power the VM completely off and start it again after changing the CPU identity; 
 Fallback backend for guests that are not configured for Windows KD. Expose QEMU's gdbstub on `127.0.0.1:1234`, then run with `--backend gdb`.
 
 > [!NOTE]
-> Do not enable kernel debug mode (`bcdedit /debug on`) in the guest when using the `gdb` backend. That setting is only for the `kd` backend, and the `gdb` backend's whole advantage is that the guest is unaware it is being debugged. With debug mode on, the kernel changes behaviour (anti-debug code, PatchGuard) and expects a KD debugger to service breaks, while nothing on the GDB side answers the KD transport, so the guest can hang on `DbgBreakPoint` or exceptions. Leave debug mode off.
+> Do not enable kernel debug mode (`bcdedit /debug on`) in the guest when using the `gdb` backend. That setting is only for the `kd` backend, and the `gdb` backend's whole advantage is that the guest is unaware it is being debugged. With debug mode on, the kernel changes behavior (anti-debug code, PatchGuard) and expects a KD debugger to service breaks, while nothing on the GDB side answers the KD transport, so the guest can hang on `DbgBreakPoint` or exceptions. Leave debug mode off.
 
 Plain QEMU: append `-s -S` to the qemu command.
 

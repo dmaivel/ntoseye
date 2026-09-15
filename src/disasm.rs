@@ -184,9 +184,8 @@ pub struct DisasmRow {
 }
 
 impl DisasmRow {
-    /// The instruction as plain, unstyled text — the form MCP, the Python
-    /// binding, and JSON output consume. Colored rendering goes through
-    /// `ui::disasm_asm` instead.
+    /// Plain instruction text for MCP, Python, and JSON output.
+    /// Use `ui::disasm_asm` for colored rendering.
     pub fn asm(&self) -> String {
         self.tokens.iter().map(|t| t.text.as_str()).collect()
     }
@@ -390,7 +389,7 @@ fn arm64_shift_tokens(shift: &bad64::Shift, t: &mut Arm64Tokens) {
     }
 }
 
-/// Classify one bad64 [`Operand`] into semantic tokens — the AArch64 analogue
+/// Classify one bad64 [`Operand`] into semantic tokens, the AArch64 analog
 /// of the x64 `TokenSink`. Each branch mirrors bad64's `Display` formatting
 /// for that variant, so the joined tokens are byte-identical to its output.
 fn arm64_operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
@@ -545,12 +544,8 @@ fn arm64_operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
     t.into_vec()
 }
 
-/// Symbol comment for an AArch64 PC-relative target. bad64 models every
-/// PC-relative destination — branches (`b`/`bl`/`b.cond`), register
-/// conditional branches (`cbz`/`cbnz`/`tbz`/`tbnz`), and address loads
-/// (`adr`/`adrp`) — as a `Label` operand holding the absolute target, so the
-/// operand variant itself identifies the form (the analogue of iced's
-/// `near_branch_target`); no mnemonic matching.
+/// Symbol comment for an AArch64 PC-relative target. bad64 represents branch
+/// and address-load destinations as `Label` operands with absolute addresses.
 fn arm64_pcrel_comment(
     instruction: &bad64::Instruction,
     resolve: impl Fn(u64) -> String,

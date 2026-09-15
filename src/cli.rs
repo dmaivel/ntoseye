@@ -29,7 +29,7 @@ impl FromArgValue for BackendArg {
 
 #[derive(FromArgs)]
 /// Windows kernel debugger for Linux (KVM/QEMU, VMware) and macOS (UTM) hosts
-/// running Windows — WinDbg for Linux and macOS
+/// running Windows. WinDbg for Linux and macOS.
 struct Args {
     /// print version information
     #[argh(switch, short = 'v', long = "version")]
@@ -154,7 +154,7 @@ struct StatusCommand {}
 
 static GDBSTUB_INSTRUCTIONS: &str = "The gdb backend talks to QEMU's gdbstub instead of Windows KD.
 It does not require Windows debug mode, but it loses Windows-native
-KD behavior such as bugcheck debug text and KD reboot signalling.
+KD behavior such as bugcheck debug text and KD reboot signaling.
 
 To enable it, pass the following arguments to QEMU:
 

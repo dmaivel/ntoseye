@@ -490,6 +490,7 @@ fn print_stacktrace_data_impl(
 mod tests {
     use super::*;
 
+
     #[test]
     fn stop_disassembly_starts_at_rip_and_only_looks_forward() {
         let rip = 0xffff_f807_c0e1_3ae0;
@@ -499,9 +500,6 @@ mod tests {
         assert_eq!(ips, (rip..rip + 7).collect::<Vec<_>>());
     }
 
-    /// Flag letters sit under the hex digits containing their bits:
-    /// 0x60000044 → Z,C (bits 30,29) under the '6' (cols 8-9), F (bit 6)
-    /// under the '4' (col 14).
     #[test]
     fn cpsr_flags_align_under_hex_digits() {
         assert_eq!(format_cpsr(0x6000_0044), "        ZC    F ");

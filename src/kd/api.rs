@@ -614,7 +614,7 @@ pub fn continue_api2<T: Read + Write>(
 
 /// `DbgKdContinueApi2` for ARM64 targets. `ARM64_DBGKD_CONTROL_SET` packs
 /// { ContinueStatus u32, TraceFlag u32, CurrentSymbolStart u64,
-///   CurrentSymbolEnd u64 } — there is no Dr7 field (AArch64 uses its
+///   CurrentSymbolEnd u64 }. There is no Dr7 field (AArch64 uses its
 /// DBGBCR/DBGBVR and DBGWCR/DBGWVR state instead). The kernel performs
 /// single-stepping via MDSCR_EL1 when TraceFlag is set.
 pub fn continue_api2_arm64<T: Read + Write>(

@@ -54,7 +54,7 @@ ntoseye --backend kdnet --kdnet-key 1.2.3.4
 
 KDNET listens on `0.0.0.0:50000` by default. Use `--connect <listen-address>:<port>` to select another listener. Memory comes from the VM process when it is local and matches the target (`--memory-source auto`); add `--memory-source kd` for a fully remote session, which is also the mode for ARM64 guests under UTM. See [memory sources](backends.md#kd-and-kdnet-memory-sources).
 
-## Attach and reboot behaviour
+## Attach and reboot behavior
 
 A guest restart does not require reattaching. The target pokes the listener every three seconds in every state; once it has accepted a session key, its pokes carry the host port its data channel is bound to, and the listener leaves those alone since answering one would rekey a working session. A rebooted target has no data channel and pokes with that field zero, so the listener answers it at once: the session key is renegotiated, the KD packet stream restarts, and the stop is reported as a target reload.
 

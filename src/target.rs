@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::Arc;
+use std::{fmt, result};
 
 use crate::unwind::{
     RecoveredFrame, frame_base_for_register_values, return_address_for_register_values,
@@ -891,7 +891,7 @@ pub enum ListTermination {
 }
 
 impl ListTermination {
-    pub(crate) fn diagnostic(&self) -> Option<String> {
+    pub fn diagnostic(&self) -> Option<String> {
         match self {
             Self::Head => None,
             Self::Null => Some("null link".to_string()),
@@ -906,7 +906,7 @@ impl ListTermination {
 /// head, a null link, or the first link seen twice. The caller supplies each
 /// link read after consuming the current entry, so a typed walk can take the
 /// next link from the record image it already prefetched.
-pub(crate) struct ListCursor {
+pub struct ListCursor {
     head: VirtAddr,
     limit: usize,
     current: Option<VirtAddr>,
@@ -917,7 +917,7 @@ pub(crate) struct ListCursor {
 }
 
 impl ListCursor {
-    pub(crate) fn new(head: VirtAddr, limit: usize) -> Self {
+    pub fn new(head: VirtAddr, limit: usize) -> Self {
         Self {
             head,
             limit,
@@ -933,7 +933,7 @@ impl ListCursor {
     /// rather than the link stored at a head. The walk ends when it returns
     /// to `first`; commands that treat their address argument as element one
     /// (`dt -l`, `!list`, `dl`) use this.
-    pub(crate) fn from_first(first: VirtAddr, limit: usize) -> Self {
+    pub fn from_first(first: VirtAddr, limit: usize) -> Self {
         Self {
             head: first,
             limit,
@@ -945,7 +945,7 @@ impl ListCursor {
         }
     }
 
-    pub(crate) fn next(&mut self) -> Option<VirtAddr> {
+    pub fn next(&mut self) -> Option<VirtAddr> {
         if self.termination.is_some() {
             return None;
         }
@@ -971,7 +971,7 @@ impl ListCursor {
         Some(current)
     }
 
-    pub(crate) fn advance(&mut self, next: std::result::Result<VirtAddr, String>) {
+    pub fn advance(&mut self, next: result::Result<VirtAddr, String>) {
         if self.termination.is_some() {
             return;
         }
@@ -986,7 +986,7 @@ impl ListCursor {
 
     /// The termination reached; the walk must have been driven to `next()`
     /// returning `None`.
-    pub(crate) fn finish(self) -> ListTermination {
+    pub fn finish(self) -> ListTermination {
         self.termination
             .expect("ListCursor::finish called before next() returned None")
     }

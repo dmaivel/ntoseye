@@ -42,7 +42,6 @@ use std::{
     io::{self, Cursor, Write},
 };
 
-// NOTE global is probably fine here?
 pub static FORCE_DOWNLOADS: OnceLock<bool> = OnceLock::new();
 
 pub static PDB_SERVERS: OnceLock<Vec<String>> = OnceLock::new();
@@ -658,9 +657,6 @@ mod tests {
         }
     }
 
-    /// Identities survive a reopen, a re-recorded module keeps one entry,
-    /// and a forgotten one stays forgotten; a damaged line is skipped
-    /// rather than poisoning the rest.
     #[test]
     fn module_identities_persist_across_reopen() {
         let root = temp_root("identities");
@@ -690,8 +686,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// A module recorded in an earlier session is identified without a
-    /// single read from the target.
     #[test]
     fn remembered_module_is_discovered_without_reading_the_target() {
         struct NoReads;
@@ -2665,8 +2659,8 @@ impl SymbolStore {
     }
 
     /// Load symbols for a module using its image metadata (TimeDateStamp +
-    /// SizeOfImage) when the PE header can't be read from memory — the common
-    /// case for ntoskrnl in triage dumps.  Downloads the PE from Microsoft's
+    /// SizeOfImage) when the PE header cannot be read from memory, as is common
+    /// for ntoskrnl in triage dumps. Downloads the PE from Microsoft's
     /// symbol server, extracts the PDB GUID, downloads the PDB, and registers
     /// the module.
     pub fn load_from_module_info(

@@ -1145,7 +1145,7 @@ impl Debugger {
         self.inner.write_register(name, value).map_err(err)
     }
 
-    /// Resume the VM with an explicit exception acknowledgement. `not_handled`
+    /// Resume the VM with an explicit exception acknowledgment. `not_handled`
     /// requires native transport support (currently KD). Steps past a
     /// breakpoint at RIP first and re-arms breakpoints.
     #[pyo3(signature = (disposition = "handled"))]
@@ -2506,7 +2506,7 @@ impl Struct {
                     .map_err(|_| raise(format!("field '{name}' is a bitfield; expected int")))?;
                 let (pos, len) = (*pos as u32, *len as u32);
                 // Touch only the bytes the bitfield actually spans, so we never
-                // clobber neighbouring fields that share the storage unit.
+                // clobber neighboring fields that share the storage unit.
                 let sz = ((pos + len).div_ceil(8).clamp(1, 8)) as usize;
                 let mut buf = vec![0u8; sz];
                 mem.read_bytes(VirtAddr(addr), &mut buf).map_err(err)?;

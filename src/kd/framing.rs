@@ -363,7 +363,7 @@ impl<T: Read + Write> KdFraming<T> {
     ///
     /// KDNET has no such flag: its ids are a plain counter that steps by two,
     /// so bit `SYNC_PACKET_ID` is simply set for half of them. There, a
-    /// restarted stream is signalled by the session rollover or by RESET.
+    /// restarted stream is signaled by the session rollover or by RESET.
     fn accept_remote_packet(&mut self, packet_id: u32) -> bool {
         if self.kdnet_packet_ids {
             // Serial-number order: ids are a u32 counter that wraps, so a
@@ -529,7 +529,7 @@ impl<T: Read + Write> KdFraming<T> {
         }
     }
 
-    /// Synchronise to a packet leader: read bytes until we see four identical
+    /// Synchronize to a packet leader: read bytes until we see four identical
     /// leader bytes in a row. Mirrors `KdpReceivePacketLeader` in ReactOS
     fn read_packet_leader(&mut self) -> Result<u32> {
         // Per-byte trace is its own env var; the packet-level NTOSEYE_KD_TRACE

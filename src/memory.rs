@@ -267,7 +267,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         // AArch64: bit 55 selects TTBR1 (kernel) vs TTBR0 (user).
         let root = self.root_for(va);
 
-        // Level 0 (index bits 47:39 — same 9-bit index math as x64 PML4).
+        // Level 0 uses bits 47:39, like x64 PML4.
         let Some(l0) = self.read_pt_entry(root, va.pml4_index())? else {
             return Ok(None);
         };
@@ -569,9 +569,6 @@ mod tests {
         }
     }
 
-    /// With a cache, a second read in an already translated page costs one
-    /// backend read, not five, across separate address-space instances; the
-    /// cached mapping is relocated to the new offset within the page.
     #[test]
     fn translation_cache_skips_repeat_walks_across_instances() {
         let mut data = vec![0u8; 0x6000];

@@ -387,7 +387,7 @@ where
     for &(base_page, page_count) in &metadata.runs {
         for page_index in 0..page_count {
             if should_cancel() {
-                return Err(Error::DebugInfo("dump cancelled".into()));
+                return Err(Error::DebugInfo("dump canceled".into()));
             }
             let page_number = base_page
                 .checked_add(page_index)
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn cancellation_preserves_destination_and_cleans_temporary_file() {
         let path = std::env::temp_dir().join(format!(
-            "ntoseye-dump-writer-{}-cancelled.dmp",
+            "ntoseye-dump-writer-{}-canceled.dmp",
             std::process::id()
         ));
         let original = b"previous dump";
@@ -687,7 +687,7 @@ mod tests {
             || written_pages.get() >= 1,
             || written_pages.set(written_pages.get() + 1),
         );
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(result.unwrap_err().to_string().contains("canceled"));
         assert_eq!(written_pages.get(), 1);
         assert_eq!(fs::read(&path).unwrap(), original);
         assert!(temporary_paths(&path).is_empty());

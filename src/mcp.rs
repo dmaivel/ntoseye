@@ -154,7 +154,7 @@ fn spawn_session(
 /// The one shared session slot all transports funnel into. `Opening(gen)`
 /// reserves the slot while `open` builds a session off-thread, so a concurrent
 /// open can't race the vacancy check and leak a second actor. The generation
-/// lets [`OpeningGuard`] detect that its reservation was cancelled by a
+/// lets [`OpeningGuard`] detect that its reservation was canceled by a
 /// concurrent `close`.
 enum SessionSlot {
     Vacant,
@@ -167,7 +167,7 @@ static OPENING_GENERATION: AtomicU64 = AtomicU64::new(0);
 type SharedSession = Arc<std::sync::Mutex<SessionSlot>>;
 
 /// RAII guard that rolls `SessionSlot` back to `Vacant` if the opening future
-/// is cancelled (e.g. MCP client timeout). [`OpeningGuard::promote`] installs
+/// is canceled (e.g. MCP client timeout). [`OpeningGuard::promote`] installs
 /// the active sender and defuses the rollback.
 struct OpeningGuard {
     session: SharedSession,
@@ -200,7 +200,7 @@ impl OpeningGuard {
                 *guard = SessionSlot::Active(tx);
                 Ok(())
             }
-            _ => Err(McpError::internal_error("session open was cancelled", None)),
+            _ => Err(McpError::internal_error("session open was canceled", None)),
         }
     }
 }
@@ -285,7 +285,7 @@ impl From<ContinueDispositionArg> for ContinueDisposition {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ResumeArgs {
     #[schemars(
-        description = "Exception acknowledgement: handled (default) or not_handled. not_handled requires native transport support (currently KD) and otherwise returns an error."
+        description = "Exception acknowledgment: handled (default) or not_handled. not_handled requires native transport support (currently KD) and otherwise returns an error."
     )]
     disposition: Option<ContinueDispositionArg>,
 }
@@ -578,7 +578,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Resume the VM with an optional exception acknowledgement (handled by default, or not_handled; KD only). Non-blocking: returns {running:true, already_running, disposition}. To wait for the next stop, call wait_for_stop."
+        description = "Resume the VM with an optional exception acknowledgment (handled by default, or not_handled; KD only). Non-blocking: returns {running:true, already_running, disposition}. To wait for the next stop, call wait_for_stop."
     )]
     async fn resume(
         &self,
@@ -774,7 +774,7 @@ impl NtoseyeMcp {
                     *guard = SessionSlot::Vacant;
                     return Ok(CallToolResult::structured(serde_json::json!({
                         "status": "closed",
-                        "note": "cancelled a pending open; the old connection may take a moment to release — retry if the next open reports AlreadyRunning",
+                        "note": "canceled a pending open; the old connection may take a moment to release, so retry if the next open reports AlreadyRunning",
                     })));
                 }
                 SessionSlot::Vacant => {
@@ -811,7 +811,7 @@ impl NtoseyeMcp {
             // open() past `claim` only to fail on the lock.
             serde_json::json!({
                 "status": "pending",
-                "warning": "shutdown timed out; the session is still closing — retry close shortly",
+                "warning": "shutdown timed out; the session is still closing. Retry close shortly",
             })
         }))
     }

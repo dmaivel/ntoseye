@@ -134,7 +134,7 @@ pub enum Error {
     NoVmMemoryRegion,
 
     #[error(
-        "VM process not found\n  KVM (QEMU/Linux): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open — is the VM powered on?\n  macOS (UTM): no qemu-aarch64-softmmu process found — is the VM powered on?"
+        "VM process not found\n  KVM (QEMU/Linux): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open. Is the VM powered on?\n  macOS (UTM): no qemu-aarch64-softmmu process found. Is the VM powered on?"
     )]
     VmNotFound,
 

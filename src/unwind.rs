@@ -234,7 +234,7 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
     let kernel_dtb = debugger.kernel_dtb();
     let kernel_dtb_masked = kernel_dtb & dtb_mask;
 
-    // Triage dumps use DTB_IDENTITY — page-table walks are impossible,
+    // Triage dumps use DTB_IDENTITY because page-table walks are impossible,
     // so force the kernel context regardless of the thread's real CR3.
     if kernel_dtb == DTB_IDENTITY || cr3_masked == kernel_dtb_masked {
         return ThreadTraceContext {

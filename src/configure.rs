@@ -233,7 +233,7 @@ pub fn run_interactive() -> Result<()> {
         .collect::<Vec<_>>();
 
     let Some(hypervisor_idx) = prompt_select("Hypervisor", &hypervisor_items)? else {
-        return cancelled();
+        return canceled();
     };
     let configurator = &configurators[hypervisor_idx];
     match &probes[hypervisor_idx] {
@@ -264,7 +264,7 @@ pub fn run_interactive() -> Result<()> {
         .map(|guest| format!("{} ({})", guest.name, guest.state))
         .collect::<Vec<_>>();
     let Some(guest_idx) = prompt_select("Virtual machine", &guest_items)? else {
-        return cancelled();
+        return canceled();
     };
     let guest = &guests[guest_idx];
     if !guest.stopped {
@@ -281,7 +281,7 @@ pub fn run_interactive() -> Result<()> {
     let action = match prompt_select("Action", &action_items)? {
         Some(0) => Action::Configure,
         Some(1) => Action::Remove,
-        _ => return cancelled(),
+        _ => return canceled(),
     };
 
     let backend = if action == Action::Configure {
@@ -291,7 +291,7 @@ pub fn run_interactive() -> Result<()> {
             .map(|backend| backend_label(*backend))
             .collect::<Vec<_>>();
         let Some(selected) = prompt_select("Backend", &items)? else {
-            return cancelled();
+            return canceled();
         };
         let backend = supported[selected];
         if backend == BackendSelection::Memory {
@@ -348,7 +348,7 @@ pub fn run_interactive() -> Result<()> {
     }
     println!();
     if !prompt_confirm("Apply changes?")? {
-        return cancelled();
+        return canceled();
     }
 
     let applied = plan.apply()?;
@@ -533,8 +533,8 @@ fn prompt_error(error: dialoguer::Error) -> Error {
     Error::DebugInfo(format!("interactive prompt failed: {error}"))
 }
 
-fn cancelled() -> Result<()> {
-    println!("cancelled");
+fn canceled() -> Result<()> {
+    println!("canceled");
     Ok(())
 }
 

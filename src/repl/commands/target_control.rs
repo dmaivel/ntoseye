@@ -42,7 +42,7 @@ repl_command! {
     names: [".dump", "dump"],
     usage: ".dump [/f] [/ma] <file>",
     summary: "Write a full PAGEDU64 kernel dump from the halted target.",
-    details: "Both /f and /ma are accepted as WinDbg-compatible full-dump switches. The dump is streamed page by page and can be cancelled with Ctrl+C.",
+    details: "Both /f and /ma are accepted as WinDbg-compatible full-dump switches. The dump is streamed page by page and can be canceled with Ctrl+C.",
     completion: None,
     run_state: Halted,
 }
