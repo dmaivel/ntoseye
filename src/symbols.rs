@@ -203,6 +203,59 @@ impl fmt::Display for SourcePathMapping {
     }
 }
 
+/// Parse `.sympath` syntax into ordered symbol sources: `;`-separated entries,
+/// `cache`/`cache*<dir>` for the managed cache, `srv*<a>*<b>` for a server
+/// chain, `http(s)://` for a symbol server, anything else a local directory.
+/// Shared by the REPL's `.sympath`/`.sympath+` and the DAP `symbolPath`
+/// attach argument.
+pub fn parse_symbol_sources<S: AsRef<str>>(args: &[S]) -> Vec<SymbolSource> {
+    args.iter()
+        .flat_map(|arg| arg.as_ref().split(';'))
+        .filter(|entry| !entry.is_empty())
+        .flat_map(|entry| {
+            if entry.eq_ignore_ascii_case("cache") || entry.starts_with("cache*") {
+                vec![SymbolSource::Cache]
+            } else if let Some(rest) = entry.strip_prefix("srv*") {
+                let parts = rest.split('*').filter(|part| !part.is_empty());
+                parts
+                    .map(|part| {
+                        if part.starts_with("http://") || part.starts_with("https://") {
+                            SymbolSource::Http(part.trim_end_matches('/').to_string())
+                        } else {
+                            SymbolSource::LocalDirectory(part.into())
+                        }
+                    })
+                    .collect()
+            } else if entry.starts_with("http://") || entry.starts_with("https://") {
+                vec![SymbolSource::Http(entry.trim_end_matches('/').to_string())]
+            } else {
+                vec![SymbolSource::LocalDirectory(entry.into())]
+            }
+        })
+        .collect()
+}
+
+/// Parse `.srcpath` syntax into source-path mappings: `;`-separated entries,
+/// each either `<recorded-prefix>=<local-root>` or a bare local root. Shared
+/// by the REPL's `.srcpath`/`.srcpath+` and the DAP `sourcePath` attach
+/// argument.
+pub fn parse_source_paths<S: AsRef<str>>(args: &[S]) -> Vec<SourcePathMapping> {
+    args.iter()
+        .flat_map(|arg| arg.as_ref().split(';'))
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.split_once('=') {
+            Some((recorded, local)) => SourcePathMapping {
+                recorded_prefix: Some(recorded.to_string()),
+                local_root: local.into(),
+            },
+            None => SourcePathMapping {
+                recorded_prefix: None,
+                local_root: entry.into(),
+            },
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PdbIdentity {
     pub guid: u128,
@@ -261,6 +314,33 @@ pub enum LocalVariableLocation {
     FrameRelative { offset: i32 },
     /// The PDB explicitly says the value is absent or uses an unsupported recipe.
     Unavailable { reason: String },
+}
+
+impl LocalVariableLocation {
+    /// Where the variable lives, in WinDbg's notation (`rcx`, `[rbp-0x18]`,
+    /// `[frame+0x10]`). Shared by `dv` and the DAP variables view so the two
+    /// describe a location identically.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Register { register } => register.clone(),
+            Self::RegisterRelative { register, offset } => {
+                format!("[{register}{}]", signed_hex(*offset))
+            }
+            Self::FrameRelative { offset } => format!("[frame{}]", signed_hex(*offset)),
+            Self::Unavailable { reason } => format!("<{reason}>"),
+        }
+    }
+}
+
+/// Format a signed byte offset as `+0x..`/`-0x..`. Rust's `{:+#x}` renders a
+/// negative value as its two's-complement bit pattern, which reads as a huge
+/// positive offset.
+fn signed_hex(offset: i32) -> String {
+    if offset < 0 {
+        format!("-0x{:x}", offset.unsigned_abs())
+    } else {
+        format!("+0x{offset:x}")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -471,6 +551,53 @@ impl ModuleIdentities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbol_path_parser_supports_local_http_and_srv_syntax() {
+        let sources = parse_symbol_sources(&[
+            "/private",
+            "https://symbols.example.test/",
+            "srv*/cache*https://backup.example.test",
+        ]);
+        assert_eq!(
+            sources,
+            vec![
+                SymbolSource::LocalDirectory("/private".into()),
+                SymbolSource::Http("https://symbols.example.test".to_string()),
+                SymbolSource::LocalDirectory("/cache".into()),
+                SymbolSource::Http("https://backup.example.test".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_path_parser_supports_roots_and_prefix_mappings() {
+        assert_eq!(
+            parse_source_paths(&[";a;;b=c=d;"]),
+            vec![
+                SourcePathMapping {
+                    recorded_prefix: None,
+                    local_root: "a".into(),
+                },
+                SourcePathMapping {
+                    recorded_prefix: Some("b".to_string()),
+                    local_root: "c=d".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn local_locations_describe_negative_offsets_as_subtraction() {
+        assert_eq!(
+            LocalVariableLocation::RegisterRelative {
+                register: "rsp".to_string(),
+                offset: -0x20,
+            }
+            .describe(),
+            "[rsp-0x20]"
+        );
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()

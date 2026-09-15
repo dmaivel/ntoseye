@@ -6,7 +6,6 @@ use owo_colors::OwoColorize;
 
 use crate::error::{Error, Result};
 use crate::expr::Expr;
-use crate::symbols::LocalVariableLocation;
 use crate::target::{
     irp_major_function_name, kthread_state_name, lookup_register, wait_reason_name,
 };
@@ -469,10 +468,7 @@ impl ReplState<'_> {
             let Some(locals) = self.ctx.target.procedure_locals(address)? else {
                 continue;
             };
-            let parameters: Vec<_> = locals
-                .into_iter()
-                .filter(|local| local.is_parameter)
-                .collect();
+            let parameters: Vec<_> = locals.iter().filter(|local| local.is_parameter).collect();
             if parameters.is_empty() {
                 continue;
             }
@@ -481,26 +477,7 @@ impl ReplState<'_> {
                 printed_header = true;
             }
             for parameter in parameters {
-                let location = match parameter.location {
-                    LocalVariableLocation::Register { register } => register,
-                    LocalVariableLocation::RegisterRelative { register, offset } => {
-                        if offset >= 0 {
-                            format!("[{register}+{offset:#x}]")
-                        } else {
-                            format!("[{register}-{:#x}]", offset.unsigned_abs())
-                        }
-                    }
-                    LocalVariableLocation::FrameRelative { offset } => {
-                        if offset >= 0 {
-                            format!("[frame+{offset:#x}]")
-                        } else {
-                            format!("[frame-{:#x}]", offset.unsigned_abs())
-                        }
-                    }
-                    LocalVariableLocation::Unavailable { reason } => {
-                        format!("unavailable: {reason}")
-                    }
-                };
+                let location = parameter.location.describe();
                 outln!(
                     "  #{:02}  {:<24} {:<20} {}",
                     index + frame_offset,
