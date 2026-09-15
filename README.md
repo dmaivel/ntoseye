@@ -1,24 +1,29 @@
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="media/logo_light.svg">
-  <img align="right" width="18%" src="media/logo_dark.svg" alt="logo">
-</picture>
+# ntoseye
 
-# ntoseye ![license](https://img.shields.io/badge/license-MIT-blue) [![crates.io](https://img.shields.io/crates/v/ntoseye.svg)](https://crates.io/crates/ntoseye)
+<img align="right" width="22%" src="media/ntoseye.svg" alt="logo">
 
-WinDbg-like kernel debugger for Windows, from Linux and macOS.
+[![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square&labelColor=1c1c1c)](LICENSE)
+[![release](https://img.shields.io/github/v/release/dmaivel/ntoseye?style=flat-square&labelColor=1c1c1c&logo=github&logoColor=white)](https://github.com/dmaivel/ntoseye/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/ntoseye?style=flat-square&labelColor=1c1c1c&logo=rust&logoColor=white)](https://crates.io/crates/ntoseye)
+[![docs.rs](https://img.shields.io/docsrs/ntoseye?style=flat-square&labelColor=1c1c1c&logo=docsdotrs&logoColor=white)](https://docs.rs/ntoseye)
+
+A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode and user-mode debugging in virtual machines and offline crash-dump analysis.
+
+## Showcase
+
+| Debugging via REPL | Debugging via VSCode + DAP |
+| - | - |
+| ![repl](media/repl.webp) | ![vscode](media/vscode.webp) |
 
 ## Features
 
-- WinDbg-compatible REPL commands
-- Kernel and usermode debugging
-- Remote debugging
-- Public/private PDB symbols, source lines, and scoped local-variable metadata
-- Deferred, conditional, pass-count, one-shot, and command-action breakpoints
-- Hardware watchpoints
-- Crash-dump analysis
-- [Four backends](docs/backends.md): Windows KDCOM and KDNET, QEMU's GDB stub, and passive memory introspection
+- WinDbg-style commands and expressions
+- Public and private PDB symbols, source lines, and local variables
+- Conditional and deferred breakpoints, hardware watchpoints, and breakpoint commands
+- [KD/KDNET, QEMU GDB, and passive memory backends](docs/backends.md)
 - [Python SDK and custom commands](docs/sdk.md)
-- [MCP integration](docs/mcp.md)
+- [Editor integration over DAP](docs/dap.md)
+- [Agent integration over MCP](docs/mcp.md)
 
 ### Supported Windows
 
@@ -26,9 +31,7 @@ WinDbg-like kernel debugger for Windows, from Linux and macOS.
 
 ### Supported hypervisors
 
-`ntoseye` supports any hypervisor, cloud VM, or physical machine reachable over [KDNET](docs/kdnet.md).
-
-KVM/QEMU, VMware Workstation, and UTM guests additionally get the [GDB and memory-only backends](docs/backends.md).
+`ntoseye` supports any hypervisor, cloud VM, or physical machine reachable over [KDNET](docs/kdnet.md). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](docs/backends.md).
 
 ### Disclaimer
 
@@ -40,11 +43,7 @@ KVM/QEMU, VMware Workstation, and UTM guests additionally get the [GDB and memor
 - `~/.ntoseye/aliases` for command aliases
 - `~/.ntoseye/history` for persistent REPL history
 
-### Preview
-
-![ntos](media/preview.png)
-
-# Installation
+# Getting started
 
 ## Install via shell script
 
@@ -90,6 +89,8 @@ cargo build --release --no-default-features --features cli,mcp
 
 ## Quickstart
 
+If you are using QEMU/KVM, VMware, or UTM, you can use `ntoseye configure` for easy setup. Otherwise, look at [KDNET](docs/kdnet.md) instructions.
+
 1. Power off the Windows VM.
 2. Run `ntoseye configure` and select the hypervisor, virtual machine, and debugger backend. Note the `Run` command it prints.
 3. Start the VM, run the printed guest setup commands in Administrator PowerShell, and reboot.
@@ -119,10 +120,11 @@ The debugger is self-documented: run `ntoseye --help` for command-line arguments
 - [REPL usage](docs/usage.md): expressions, radix, breakpoints, watchpoints, aliases
 - [Symbols and source](docs/symbols.md): private PDBs, `.sympath`/`.srcpath`, source breakpoints
 - [Choosing a backend](docs/backends.md): kd/kdnet/gdb/memory comparison, per-hypervisor setup for [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md)
-- [KDNET](docs/kdnet.md): `kdnet.exe` guest setup, host launch, reboot behaviour
+- [KDNET](docs/kdnet.md): `kdnet.exe` guest setup, host launch, reboot behavior
 - [Crash dumps](docs/dumps.md): offline dump analysis, generating dumps, guest tweaks
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)
+- [Editor integration (DAP)](docs/dap.md): source-level debugging from VS Code, Emacs (dape), or nvim-dap
 
 # Credits
 
