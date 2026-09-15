@@ -2729,6 +2729,7 @@ mod tests {
             bugcheck: None,
             target_reloaded: false,
             target_kernel_base_hint: None,
+            modules_changed: false,
             assisted_breakin: false,
         }
     }

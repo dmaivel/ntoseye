@@ -692,6 +692,7 @@ impl DebugBackend for GdbClient {
             bugcheck: None,
             target_reloaded: false,
             target_kernel_base_hint: None,
+            modules_changed: false,
             assisted_breakin: false,
         })
     }
@@ -708,6 +709,7 @@ impl DebugBackend for GdbClient {
             bugcheck: None,
             target_reloaded: false,
             target_kernel_base_hint: None,
+            modules_changed: false,
             assisted_breakin: false,
         })
     }
@@ -726,6 +728,7 @@ impl DebugBackend for GdbClient {
             bugcheck: None,
             target_reloaded: false,
             target_kernel_base_hint: None,
+            modules_changed: false,
             assisted_breakin: false,
         }))
     }

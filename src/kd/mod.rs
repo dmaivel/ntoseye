@@ -472,6 +472,7 @@ fn stop_event(stop: StateChange) -> StopEvent {
         bugcheck: stop.bugcheck,
         target_reloaded: stop.target_reloaded,
         target_kernel_base_hint: stop.kernel_base_hint,
+        modules_changed: stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE,
         assisted_breakin: stop.assisted_breakin,
     }
 }
@@ -4264,6 +4265,7 @@ mod tests {
             bugcheck: None,
             target_reloaded: false,
             target_kernel_base_hint: None,
+            modules_changed: false,
             assisted_breakin: false,
         };
 

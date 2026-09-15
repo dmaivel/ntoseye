@@ -231,6 +231,8 @@ pub struct StopEvent {
     pub target_reloaded: bool,
     /// Kernel/module base reported by the stop packet, when available.
     pub target_kernel_base_hint: Option<VirtAddr>,
+    /// Set when the transport surfaced a kernel module load/unload notification.
+    pub modules_changed: bool,
     /// Set when this stop was caused by a debugger-generated assist break-in
     /// during a target refresh/reconnect sequence, rather than by a user break
     /// or target exception.
