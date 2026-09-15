@@ -51,7 +51,18 @@ impl ReplState<'_> {
         let outer = std::mem::replace(&mut self.context, DispatchContext::BreakpointAction);
         let result = (|| {
             for command in commands.into_iter().take(command_count) {
-                match self.dispatch_one(command, 0)? {
+                // A failing action command is reported and abandons the rest
+                // of the list. Propagating would end the session, and a log
+                // point whose argument is briefly unreadable must not take
+                // the debugger down with it.
+                let flow = match self.dispatch_one(command, 0) {
+                    Ok(flow) => flow,
+                    Err(error) => {
+                        error!("breakpoint action failed: {}", error);
+                        return Ok(false);
+                    }
+                };
+                match flow {
                     Flow::Quit | Flow::Denied => return Ok(false),
                     Flow::Continue => {}
                 }
@@ -83,7 +94,14 @@ impl ReplState<'_> {
         let outer = std::mem::replace(&mut self.context, DispatchContext::ExceptionCommand);
         let result = (|| {
             for command in commands {
-                match self.dispatch_one(command, 0)? {
+                let flow = match self.dispatch_one(command, 0) {
+                    Ok(flow) => flow,
+                    Err(error) => {
+                        error!("exception command failed: {}", error);
+                        return Ok(());
+                    }
+                };
+                match flow {
                     Flow::Denied => return Ok(()),
                     Flow::Quit => {
                         error!("quit is ignored inside an exception command");
