@@ -67,8 +67,8 @@ repl_command! {
 
 repl_command! {
     cmd_dbgprint;
-    names: ["dbgprint"],
-    usage: "dbgprint [count]",
+    names: ["!dbgprint", "dbgprint"],
+    usage: "!dbgprint [count]",
     summary: "Show captured guest debug output (DbgPrint).",
 }
 
@@ -129,8 +129,8 @@ repl_command! {
 
 repl_command! {
     cmd_address;
-    names: ["address"],
-    usage: "address <address-expression>",
+    names: ["!address", "address"],
+    usage: "!address <address-expression>",
     summary: "Describe what an address belongs to (module+section, or VAD region).",
     completion: Expression,
 }
