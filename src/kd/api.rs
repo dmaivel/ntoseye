@@ -32,6 +32,64 @@ pub const DBGKD_REBOOT: u32 = 0x0000_313B;
 pub const DBGKD_CAUSE_BUGCHECK: u32 = 0x0000_3149;
 pub const DBGKD_SET_CONTEXT_EX: u32 = 0x0000_3160;
 
+/// Scripted KD replies for tests that need a target on the other end of a
+/// framing. Shared with the KD event-loop tests, which drive the same wire.
+#[cfg(test)]
+pub mod test_wire {
+    use super::{MANIPULATE_HEADER_SIZE, UNION_OFFSET};
+    use crate::kd::framing::{PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE};
+    use crate::kd::wire::{write_u16, write_u32};
+
+    pub const INITIAL_PACKET_ID: u32 = 0x8080_0000;
+    pub const SYNC_PACKET_ID: u32 = 0x0000_0800;
+
+    /// The packet id the target sees on our first request of a session.
+    pub fn first_outbound_id() -> u32 {
+        (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID
+    }
+
+    /// A manipulate reply payload: header, union body, then trailing data.
+    pub fn build_reply(api: u32, processor: u16, union_body: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0u8; MANIPULATE_HEADER_SIZE];
+        write_u32(&mut payload, 0, api);
+        write_u16(&mut payload, 6, processor);
+        // ReturnStatus = 0 (success)
+        let end = (UNION_OFFSET + union_body.len()).min(payload.len());
+        payload[UNION_OFFSET..end].copy_from_slice(&union_body[..end - UNION_OFFSET]);
+        payload.extend_from_slice(data);
+        payload
+    }
+
+    /// An ACK followed by a data packet: what comes back after a manipulate
+    /// request that expects a reply.
+    pub fn ack_then_reply(outbound_id: u32, reply_id: u32, reply_payload: &[u8]) -> Vec<u8> {
+        let mut stream = ack_only(outbound_id);
+        let checksum: u32 = reply_payload
+            .iter()
+            .fold(0u32, |acc, &byte| acc.wrapping_add(byte as u32));
+        let mut data_hdr = [0u8; 16];
+        data_hdr[0..4].copy_from_slice(&0x3030_3030u32.to_le_bytes());
+        data_hdr[4..6].copy_from_slice(&PACKET_TYPE_KD_STATE_MANIPULATE.to_le_bytes());
+        data_hdr[6..8].copy_from_slice(&(reply_payload.len() as u16).to_le_bytes());
+        data_hdr[8..12].copy_from_slice(&reply_id.to_le_bytes());
+        data_hdr[12..16].copy_from_slice(&checksum.to_le_bytes());
+        stream.extend_from_slice(&data_hdr);
+        stream.extend_from_slice(reply_payload);
+        stream.push(0xAA);
+        stream
+    }
+
+    pub fn ack_only(outbound_id: u32) -> Vec<u8> {
+        let mut stream = Vec::with_capacity(16);
+        stream.extend_from_slice(&0x6969_6969u32.to_le_bytes());
+        stream.extend_from_slice(&PACKET_TYPE_KD_ACKNOWLEDGE.to_le_bytes());
+        stream.extend_from_slice(&0u16.to_le_bytes());
+        stream.extend_from_slice(&outbound_id.to_le_bytes());
+        stream.extend_from_slice(&0u32.to_le_bytes());
+        stream
+    }
+}
+
 const MANUALLY_INITIATED_CRASH: u32 = 0x0000_00e2;
 
 pub const DBGKD_VERS_FLAG_DATA: u16 = 0x0002;
@@ -582,9 +640,7 @@ mod tests {
     use std::io::{Cursor, Read, Write};
 
     use crate::kd::context;
-    use crate::kd::framing::{
-        KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE,
-    };
+    use crate::kd::framing::{KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE};
 
     #[test]
     fn continuation_disposition_selects_distinct_kd_wire_status() {
@@ -645,78 +701,9 @@ mod tests {
         }
     }
 
-    /// Compose a packet stream consisting of an ACK followed by a data
-    /// packet; what we get back after sending a manipulate request that
-    /// expects a reply
-    fn ack_then_reply(outbound_id: u32, reply_id: u32, reply_payload: &[u8]) -> Vec<u8> {
-        let mut stream = Vec::new();
-
-        // ACK control packet
-        let ack_hdr = [
-            // control leader
-            0x69,
-            0x69,
-            0x69,
-            0x69,
-            // packet type
-            PACKET_TYPE_KD_ACKNOWLEDGE.to_le_bytes()[0],
-            PACKET_TYPE_KD_ACKNOWLEDGE.to_le_bytes()[1],
-            // byte count
-            0,
-            0,
-            // packet id
-            outbound_id.to_le_bytes()[0],
-            outbound_id.to_le_bytes()[1],
-            outbound_id.to_le_bytes()[2],
-            outbound_id.to_le_bytes()[3],
-            // checksum
-            0,
-            0,
-            0,
-            0,
-        ];
-        stream.extend_from_slice(&ack_hdr);
-
-        // Data packet (reply)
-        let checksum: u32 = reply_payload
-            .iter()
-            .fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
-        let mut data_hdr = [0u8; 16];
-        data_hdr[0..4].copy_from_slice(&0x30303030u32.to_le_bytes());
-        data_hdr[4..6].copy_from_slice(&PACKET_TYPE_KD_STATE_MANIPULATE.to_le_bytes());
-        data_hdr[6..8].copy_from_slice(&(reply_payload.len() as u16).to_le_bytes());
-        data_hdr[8..12].copy_from_slice(&reply_id.to_le_bytes());
-        data_hdr[12..16].copy_from_slice(&checksum.to_le_bytes());
-        stream.extend_from_slice(&data_hdr);
-        stream.extend_from_slice(reply_payload);
-        stream.push(0xAA);
-
-        stream
-    }
-
-    fn ack_only(outbound_id: u32) -> Vec<u8> {
-        let mut stream = Vec::with_capacity(16);
-        stream.extend_from_slice(&0x6969_6969u32.to_le_bytes());
-        stream.extend_from_slice(&PACKET_TYPE_KD_ACKNOWLEDGE.to_le_bytes());
-        stream.extend_from_slice(&0u16.to_le_bytes());
-        stream.extend_from_slice(&outbound_id.to_le_bytes());
-        stream.extend_from_slice(&0u32.to_le_bytes());
-        stream
-    }
-
-    fn build_reply(api: u32, processor: u16, union_body: &[u8], data: &[u8]) -> Vec<u8> {
-        let mut payload = vec![0u8; MANIPULATE_HEADER_SIZE];
-        write_u32(&mut payload, 0, api);
-        write_u16(&mut payload, 6, processor);
-        // ReturnStatus = 0 (success)
-        let end = (UNION_OFFSET + union_body.len()).min(payload.len());
-        payload[UNION_OFFSET..end].copy_from_slice(&union_body[..end - UNION_OFFSET]);
-        payload.extend_from_slice(data);
-        payload
-    }
-
-    const INITIAL_PACKET_ID: u32 = 0x80800000;
-    const SYNC_PACKET_ID: u32 = 0x00000800;
+    use super::test_wire::{
+        INITIAL_PACKET_ID, SYNC_PACKET_ID, ack_only, ack_then_reply, build_reply,
+    };
 
     #[test]
     fn get_version_round_trip() {
