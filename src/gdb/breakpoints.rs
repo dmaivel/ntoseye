@@ -10,7 +10,7 @@ use crate::dbg_backend::{
     DebugBackend, DebugCapability, HwBreakpointAccess, WatchpointAccess, validate_hw_breakpoint,
 };
 use crate::error::{Error, Result};
-use crate::expr::Expr;
+use crate::expr::{Expr, NumberRadix};
 use crate::guest::{ModuleInfo, ProcessInfo, read_pe_header_page};
 use crate::target::Target;
 use crate::types::{Arch, Dtb, VirtAddr};
@@ -26,7 +26,15 @@ pub struct HardwareBreakpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BreakpointSpec {
-    Symbol(String),
+    Symbol {
+        name: String,
+        /// Resolve past the function's prologue, so the incoming arguments are
+        /// already stored where the PDB says they live. Set by hosts whose
+        /// clients expect a function breakpoint to expose arguments (DAP);
+        /// WinDbg's `bu <symbol>` breaks at the symbol itself and leaves this
+        /// clear.
+        skip_prologue: bool,
+    },
     Source {
         raw: String,
         file: String,
@@ -49,14 +57,32 @@ impl BreakpointSpec {
 
     pub fn label(&self) -> &str {
         match self {
-            Self::Symbol(symbol) => symbol,
+            Self::Symbol { name, .. } => name,
             Self::Source { raw, .. } => raw,
         }
     }
 
     fn resolve(&self, debugger: &Target, dtb: Dtb) -> Result<Option<VirtAddr>> {
         match self {
-            Self::Symbol(symbol) => debugger.symbols.find_symbol_across_modules(dtb, symbol),
+            Self::Symbol {
+                name,
+                skip_prologue,
+            } => {
+                let Some((address, offset)) = Self::resolve_symbol_offset(debugger, dtb, name)?
+                else {
+                    return Ok(None);
+                };
+                // An explicit offset names the exact instruction, so the
+                // prologue skip a host asked for does not apply to it.
+                if !skip_prologue || offset != 0 {
+                    return Ok(Some(address));
+                }
+                Ok(Some(
+                    debugger
+                        .post_prologue_address(dtb, address)
+                        .unwrap_or(address),
+                ))
+            }
             Self::Source {
                 file,
                 line,
@@ -68,6 +94,53 @@ impl BreakpointSpec {
                 .get(*address_index)
                 .copied()),
         }
+    }
+
+    /// Resolve a deferred name, which WinDbg allows to carry an offset
+    /// (`bu mod!sym+0x29`). The symbol half is what a module load makes
+    /// available, so it is looked up in the breakpoint's own address space
+    /// and the offset applied afterwards. Returns the resolved address and
+    /// the offset that was applied.
+    fn resolve_symbol_offset(
+        debugger: &Target,
+        dtb: Dtb,
+        name: &str,
+    ) -> Result<Option<(VirtAddr, i64)>> {
+        if let Some(address) = debugger.symbols.find_symbol_across_modules(dtb, name)? {
+            return Ok(Some((address, 0)));
+        }
+        let Some((symbol, offset)) = Self::split_symbol_offset(name) else {
+            return Ok(None);
+        };
+        let Some(base) = debugger
+            .symbols
+            .find_symbol_across_modules(dtb, symbol.trim())?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((VirtAddr(base.0.wrapping_add(offset as u64)), offset)))
+    }
+
+    /// Split `symbol+0x29` or `symbol-8` into its symbol and signed offset.
+    /// The offset is a hexadecimal numeric literal.
+    fn split_symbol_offset(name: &str) -> Option<(&str, i64)> {
+        let (separator, position) = ['+', '-']
+            .into_iter()
+            .filter_map(|separator| name.rfind(separator).map(|at| (separator, at)))
+            .max_by_key(|(_, at)| *at)?;
+        if position == 0 {
+            return None;
+        }
+        let (symbol, tail) = name.split_at(position);
+        let literal = &tail[separator.len_utf8()..];
+        // Only a literal offset: a deferred breakpoint has to mean the same
+        // address every time its module loads, so registers and memory reads
+        // have no business here.
+        let offset = match Expr::parse_with_radix(literal, NumberRadix::Hexadecimal).ok()? {
+            Expr::Literal(value) => i64::try_from(value.0).ok()?,
+            _ => return None,
+        };
+        Some((symbol, if separator == '-' { -offset } else { offset }))
     }
 }
 
@@ -285,6 +358,9 @@ pub struct BreakpointConfig {
     pub one_shot: bool,
     pub action: Option<String>,
     pub scope: Option<BreakpointScope>,
+    /// Resolve a symbol breakpoint past the function's prologue. See
+    /// [`BreakpointSpec::Symbol`].
+    pub skip_prologue: bool,
 }
 
 #[derive(Default)]
@@ -353,7 +429,6 @@ impl BreakpointManager {
         symbol: Option<String>,
         condition: Option<String>,
     ) -> Result<u32> {
-        let condition_expr = Self::compile_condition(condition.as_deref())?;
         self.add_code_configured(
             client,
             debugger,
@@ -363,7 +438,6 @@ impl BreakpointManager {
             false,
             BreakpointConfig {
                 condition,
-                condition_expr,
                 ..BreakpointConfig::default()
             },
         )
@@ -387,7 +461,10 @@ impl BreakpointManager {
         symbol: String,
         config: BreakpointConfig,
     ) -> Result<u32> {
-        let spec = BreakpointSpec::Symbol(symbol.clone());
+        let spec = BreakpointSpec::Symbol {
+            name: symbol.clone(),
+            skip_prologue: config.skip_prologue,
+        };
         let dtb = Self::resolution_dtb(debugger, config.scope.as_ref());
         let address = spec.resolve(debugger, dtb)?;
         self.add_code_configured(
@@ -496,6 +573,7 @@ impl BreakpointManager {
         temporary: bool,
         config: BreakpointConfig,
     ) -> Result<u32> {
+        let condition_expr = Self::configured_condition(&config)?;
         let automatic_scope = config.scope.is_none();
         let fallback_scope = config
             .scope
@@ -533,7 +611,7 @@ impl BreakpointManager {
                 scope,
                 automatic_scope,
                 condition: config.condition,
-                condition_expr: config.condition_expr,
+                condition_expr,
                 pass_count,
                 hit_count: 0,
                 remaining_pass_count: pass_count.saturating_sub(1),
@@ -575,7 +653,6 @@ impl BreakpointManager {
         symbol: Option<String>,
         condition: Option<String>,
     ) -> Result<u32> {
-        let condition_expr = Self::compile_condition(condition.as_deref())?;
         self.add_hardware_configured(
             client,
             debugger,
@@ -585,7 +662,6 @@ impl BreakpointManager {
             symbol,
             BreakpointConfig {
                 condition,
-                condition_expr,
                 ..BreakpointConfig::default()
             },
         )
@@ -604,6 +680,7 @@ impl BreakpointManager {
         if !client.supports_watchpoints() {
             return Err(Error::NotSupported);
         }
+        let condition_expr = Self::configured_condition(&config)?;
         validate_hw_breakpoint(access, len, address.0)?;
         self.ensure_site_available(address, true, None)?;
         let slot = self.free_hardware_slot(client, access)?;
@@ -633,7 +710,7 @@ impl BreakpointManager {
                 scope,
                 automatic_scope,
                 condition: config.condition,
-                condition_expr: config.condition_expr,
+                condition_expr,
                 pass_count,
                 hit_count: 0,
                 remaining_pass_count: pass_count.saturating_sub(1),
@@ -647,8 +724,17 @@ impl BreakpointManager {
         Ok(id)
     }
 
-    fn compile_condition(condition: Option<&str>) -> Result<Option<Arc<Expr>>> {
-        condition
+    /// The compiled condition for a configuration. A host may hand over the
+    /// condition already parsed or as text; leaving text uncompiled would
+    /// store a condition that is displayed but never evaluated, so the
+    /// breakpoint would stop on every hit.
+    fn configured_condition(config: &BreakpointConfig) -> Result<Option<Arc<Expr>>> {
+        if let Some(expr) = &config.condition_expr {
+            return Ok(Some(Arc::clone(expr)));
+        }
+        config
+            .condition
+            .as_deref()
             .map(Expr::parse)
             .transpose()
             .map(|expr| expr.map(Arc::new))
@@ -1859,7 +1945,10 @@ mod tests {
         {
             let symbolic = manager.breakpoints.get_mut(&7).unwrap();
             symbolic.symbol = Some("driver!Entry".into());
-            symbolic.spec = Some(BreakpointSpec::Symbol("driver!Entry".into()));
+            symbolic.spec = Some(BreakpointSpec::Symbol {
+                name: "driver!Entry".into(),
+                skip_prologue: false,
+            });
         }
         let mut backend = SlotRecorder::new();
         assert_eq!(manager.prepare_target_reload(&mut backend), 1);

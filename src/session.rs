@@ -1208,7 +1208,7 @@ impl Session {
 
     /// Set a code breakpoint at `addr`. Returns the breakpoint id.
     pub fn add_breakpoint(&mut self, addr: VirtAddr) -> Result<u32> {
-        self.add_breakpoint_with_condition(addr, None)
+        self.add_breakpoint_with(addr, None, BreakpointConfig::default())
     }
 
     /// Set a code breakpoint at `addr` with an optional break condition
@@ -1220,20 +1220,26 @@ impl Session {
         addr: VirtAddr,
         condition: Option<String>,
     ) -> Result<u32> {
-        self.add_breakpoint_with_symbol_condition(addr, None, condition)
+        self.add_breakpoint_with(
+            addr,
+            None,
+            BreakpointConfig {
+                condition,
+                ..BreakpointConfig::default()
+            },
+        )
     }
 
-    /// Set a code breakpoint at `addr`, carrying an optional display `symbol`
-    /// for hosts that created it from a user expression rather than a raw
-    /// address.
-    pub fn add_breakpoint_with_symbol_condition(
+    /// Set a code breakpoint at `addr` with an optional display `symbol` and
+    /// explicit configuration (pass count, one-shot, and command action).
+    pub fn add_breakpoint_with(
         &mut self,
         addr: VirtAddr,
         symbol: Option<String>,
-        condition: Option<String>,
+        config: BreakpointConfig,
     ) -> Result<u32> {
         self.breakpoints
-            .add(self.backend.as_mut(), &self.target, addr, symbol, condition)
+            .add_configured(self.backend.as_mut(), &self.target, addr, symbol, config)
     }
 
     /// Set a symbol-identity breakpoint that survives module unload/reload and
@@ -1243,15 +1249,25 @@ impl Session {
         symbol: String,
         condition: Option<String>,
     ) -> Result<u32> {
-        self.breakpoints.add_symbolic(
-            self.backend.as_mut(),
-            &self.target,
+        self.add_symbol_breakpoint_with(
             symbol,
             BreakpointConfig {
                 condition,
                 ..BreakpointConfig::default()
             },
         )
+    }
+
+    /// Set a symbol-identity breakpoint with an explicit configuration (pass
+    /// count, one-shot, command action). Hosts that expose the full breakpoint
+    /// grammar (the REPL, DAP) use this instead of the condition-only form.
+    pub fn add_symbol_breakpoint_with(
+        &mut self,
+        symbol: String,
+        config: BreakpointConfig,
+    ) -> Result<u32> {
+        self.breakpoints
+            .add_symbolic(self.backend.as_mut(), &self.target, symbol, config)
     }
 
     /// Set one source identity for every address matching `file:line`, or one
@@ -1261,15 +1277,24 @@ impl Session {
         source: String,
         condition: Option<String>,
     ) -> Result<Vec<u32>> {
-        self.breakpoints.add_source(
-            self.backend.as_mut(),
-            &self.target,
+        self.add_source_breakpoint_with(
             source,
             BreakpointConfig {
                 condition,
                 ..BreakpointConfig::default()
             },
         )
+    }
+
+    /// Set source-line breakpoints with an explicit configuration. Returns one
+    /// id per matching address (or a single deferred id).
+    pub fn add_source_breakpoint_with(
+        &mut self,
+        source: String,
+        config: BreakpointConfig,
+    ) -> Result<Vec<u32>> {
+        self.breakpoints
+            .add_source(self.backend.as_mut(), &self.target, source, config)
     }
 
     /// Watch data accesses at `addr`. Watches are global across guest address
@@ -1280,7 +1305,7 @@ impl Session {
         access: WatchpointAccess,
         len: u8,
     ) -> Result<u32> {
-        self.add_watchpoint_with_condition(addr, access, len, None)
+        self.add_watchpoint_with(addr, access, len, None, BreakpointConfig::default())
     }
 
     /// Watch data accesses with an optional condition evaluated on each hit.
@@ -1291,28 +1316,37 @@ impl Session {
         len: u8,
         condition: Option<String>,
     ) -> Result<u32> {
-        self.add_watchpoint_with_symbol_condition(addr, access, len, None, condition)
+        self.add_watchpoint_with(
+            addr,
+            access,
+            len,
+            None,
+            BreakpointConfig {
+                condition,
+                ..BreakpointConfig::default()
+            },
+        )
     }
 
-    /// Watch data accesses while retaining a host-resolved display symbol. This
-    /// is a semantic watchpoint API: hosts choose write or read/write behavior
-    /// while the backend implementation remains private.
-    pub fn add_watchpoint_with_symbol_condition(
+    /// Watch data accesses while retaining an optional host-resolved display
+    /// symbol and explicit configuration. Hosts choose write or read/write
+    /// behavior while the backend implementation remains private.
+    pub fn add_watchpoint_with(
         &mut self,
         addr: VirtAddr,
         access: WatchpointAccess,
         len: u8,
         symbol: Option<String>,
-        condition: Option<String>,
+        config: BreakpointConfig,
     ) -> Result<u32> {
-        self.breakpoints.add_hardware(
+        self.breakpoints.add_hardware_configured(
             self.backend.as_mut(),
             &self.target,
             addr,
             access.into(),
             len,
             symbol,
-            condition,
+            config,
         )
     }
 

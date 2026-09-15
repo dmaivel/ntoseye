@@ -16,7 +16,7 @@ use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugche
 use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
 use crate::error::Error;
 use crate::expr::Expr;
-use crate::gdb::breakpoints::Breakpoint as CoreBreakpoint;
+use crate::gdb::breakpoints::{Breakpoint as CoreBreakpoint, BreakpointConfig};
 use crate::guest::ProcessInfo;
 use crate::kd::KdMemorySource;
 use crate::output;
@@ -1964,7 +1964,14 @@ impl Debugger {
             dbg.require_halted("breakpoint")?;
             let (addr, symbol) = breakpoint_target_arg(&dbg, target)?;
             dbg.inner
-                .add_breakpoint_with_symbol_condition(VirtAddr(addr), symbol, condition)
+                .add_breakpoint_with(
+                    VirtAddr(addr),
+                    symbol,
+                    BreakpointConfig {
+                        condition,
+                        ..BreakpointConfig::default()
+                    },
+                )
                 .map_err(err)?
         };
         Self::breakpoint_handle(&slf, id)
@@ -2028,12 +2035,15 @@ impl Debugger {
             let access = access.parse::<WatchpointAccess>().map_err(err)?;
             let (addr, symbol) = breakpoint_target_arg(&dbg, target)?;
             dbg.inner
-                .add_watchpoint_with_symbol_condition(
+                .add_watchpoint_with(
                     VirtAddr(addr),
                     access,
                     length,
                     symbol,
-                    condition,
+                    BreakpointConfig {
+                        condition,
+                        ..BreakpointConfig::default()
+                    },
                 )
                 .map_err(err)?
         };

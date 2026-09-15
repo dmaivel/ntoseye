@@ -463,6 +463,9 @@ impl ReplState<'_> {
             one_shot: parsed.one_shot,
             action: parsed.action,
             scope,
+            // `bu <symbol>` breaks at the symbol, as WinDbg does. Only a host
+            // whose client expects arguments to be live (DAP) skips ahead.
+            skip_prologue: false,
         })
     }
 
