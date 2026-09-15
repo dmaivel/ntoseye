@@ -481,29 +481,26 @@ impl Session {
         let mut backend = make_backend()?;
         let hints = backend.target_hints()?;
 
-        let host_phys = match memory_source {
+        let host_phys: Option<PhysMem> = match memory_source {
             KdMemorySource::Kd => None,
             KdMemorySource::Host => {
-                let phys = Arc::new(PhysMem::live().map_err(|error| {
+                let phys = PhysMem::live().map_err(|error| {
                     Error::Kd(format!("host memory source unavailable: {error}"))
-                })?);
-                backend.validate_host_memory(&*phys, hints)?;
+                })?;
+                backend.validate_host_memory(&phys, hints)?;
                 Some(phys)
             }
             KdMemorySource::Auto => match PhysMem::live() {
-                Ok(phys) => {
-                    let phys = Arc::new(phys);
-                    match backend.validate_host_memory(&*phys, hints) {
-                        Ok(()) => Some(phys),
-                        Err(error) => {
-                            eprintln!(
-                                "{}: host memory rejected ({error}); falling back to KD memory",
-                                backend.name()
-                            );
-                            None
-                        }
+                Ok(phys) => match backend.validate_host_memory(&phys, hints) {
+                    Ok(()) => Some(phys),
+                    Err(error) => {
+                        eprintln!(
+                            "{}: host memory rejected ({error}); falling back to KD memory",
+                            backend.name()
+                        );
+                        None
                     }
-                }
+                },
                 Err(error) => {
                     eprintln!(
                         "{}: host memory unavailable ({error}); falling back to KD memory",
@@ -514,12 +511,14 @@ impl Session {
             },
         };
 
+        let backend_name = backend.name();
         let (target, backend): (Target, Box<dyn DebugBackend>) = match host_phys {
-            Some(phys) => {
-                eprintln!(
-                    "{}: memory source host (validated VM-process memory)",
-                    backend.name()
-                );
+            Some(host) => {
+                eprintln!("{backend_name}: memory source host (validated VM-process memory)");
+                // Host reads can bypass KD, but writes must preserve guest protection,
+                // copy-on-write, and residency handling.
+                let (backend, memory) = backend.into_remote_memory();
+                let phys = Arc::new(host.with_mediated_writes(memory));
                 (
                     Target::with_remote_phys(
                         phys,
@@ -532,6 +531,7 @@ impl Session {
             }
             None => {
                 let (backend, memory) = backend.into_remote_memory();
+                eprintln!("{}", kd_memory_source_notice(backend_name));
                 let phys = Arc::new(PhysMem::remote(memory));
                 (
                     Target::with_remote_phys(
@@ -2358,6 +2358,18 @@ fn fnv1a_64(data: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+/// What to tell the operator when every memory access goes over KD. An
+/// emulated UART hands the guest one byte per hypervisor main-loop iteration,
+/// so every request costs milliseconds; KDNET has no such floor.
+fn kd_memory_source_notice(backend_name: &str) -> String {
+    match backend_name {
+        "kdnet" => "kdnet: memory source kd; remote reads may be slow.".to_string(),
+        name => format!(
+            "{name}: memory source kd; prefer --memory-source host if the VM is local, or KDNET"
+        ),
+    }
 }
 
 /// Parse a backend vCPU/thread id (`p1.<one-based-hex>`) into a zero-based

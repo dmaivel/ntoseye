@@ -24,6 +24,18 @@ pub trait MemoryOps<A> {
         None
     }
 
+    /// Write through the target in `root`, preserving guest write protection,
+    /// copy-on-write, and residency handling. `None` requests a physical-write fallback.
+    fn write_virtual_direct(&self, _addr: VirtAddr, _root: Dtb, _buf: &[u8]) -> Option<Result<()>> {
+        None
+    }
+
+    /// Whether the target can service writes now. Request/reply transports
+    /// require a halted target; a running target may need host-memory writes.
+    fn can_mediate_writes(&self) -> bool {
+        false
+    }
+
     /// Translations the page walk may reuse across address-space instances.
     /// `None` when the backend cannot tell when the target's page tables
     /// change, which is every backend but a halted KD target.
@@ -60,6 +72,14 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn read_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &mut [u8]) -> Option<Result<()>> {
         (**self).read_virtual_direct(addr, root, buf)
+    }
+
+    fn write_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &[u8]) -> Option<Result<()>> {
+        (**self).write_virtual_direct(addr, root, buf)
+    }
+
+    fn can_mediate_writes(&self) -> bool {
+        (**self).can_mediate_writes()
     }
 
     fn translation_cache(&self) -> Option<&TranslationCache> {

@@ -715,6 +715,14 @@ impl MemoryOps<PhysAddr> for KdMemory {
         self.lock().read_virtual_direct(addr, root, buf)
     }
 
+    fn write_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &[u8]) -> Option<Result<()>> {
+        self.lock().write_virtual_direct(addr, root, buf)
+    }
+
+    fn can_mediate_writes(&self) -> bool {
+        !self.lock().link.is_running()
+    }
+
     fn translation_cache(&self) -> Option<&TranslationCache> {
         Some(&self.translations)
     }
@@ -1784,19 +1792,11 @@ impl KdBackend {
         Ok(())
     }
 
-    /// Convert a connected KD backend into synchronized debugger and physical
-    /// memory handles after target hints have been collected.
+    /// Convert a connected KD backend into synchronized debugger and memory
+    /// handles after target hints have been collected. The memory handle
+    /// serves every source: it is the whole memory source for `kd`, and the
+    /// write path for `host`.
     pub fn into_remote_memory(self) -> (KdBackendHandle, KdMemory) {
-        // An emulated UART hands the guest one byte per hypervisor main-loop
-        // iteration, so every KD request costs milliseconds; KDNET has no
-        // such floor.
-        let notice = match self.backend_name {
-            "kdnet" => "kdnet: memory source kd; remote reads may be slow.".to_string(),
-            name => format!(
-                "{name}: memory source kd; prefer --memory-source host if the VM is local, or KDNET"
-            ),
-        };
-        eprintln!("{}", notice.bright_black());
         let register_map = self.register_map.clone();
         let backend_name = self.backend_name;
         let translations = Arc::clone(&self.translations);
@@ -1892,19 +1892,26 @@ impl KdBackend {
         root: Dtb,
         buf: &mut [u8],
     ) -> Option<Result<()>> {
+        if !self.virtual_api_serves(addr, root) {
+            return None;
+        }
+        Some(self.read_virtual_bytes(addr, buf))
+    }
+
+    /// Whether `DbgKd{Read,Write}VirtualMemoryApi` resolves `addr` in the
+    /// `root` address space. The API has no address-space selector, so it only
+    /// serves kernel space under the kernel root and user space under the root
+    /// the current processor is running on.
+    fn virtual_api_serves(&mut self, addr: VirtAddr, root: Dtb) -> bool {
         let kernel_space = match self.arch {
             Arch::Amd64 => addr.0 >> 63 != 0,
             Arch::Arm64 => addr.0 & (1 << 55) != 0,
         };
-        let direct = if kernel_space {
+        if kernel_space {
             self.kernel_dtb_override != 0 && root == self.kernel_dtb_override
         } else {
             self.current_processor_runs_on(root)
-        };
-        if !direct {
-            return None;
         }
-        Some(self.read_virtual_bytes(addr, buf))
     }
 
     /// Whether `root` is the page-table root the current processor is
@@ -1921,6 +1928,76 @@ impl KdBackend {
         let cr3 = wire::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
         let mask = self.arch.dtb_page_mask();
         cr3 & mask == root & mask
+    }
+
+    /// The write twin of [`Self::read_virtual_direct`], eligible in exactly
+    /// the same address spaces.
+    ///
+    /// `DbgKdWriteVirtualMemoryApi` is serviced by the guest's own
+    /// debug-memory path, which honors the page's write protection,
+    /// copy-on-write state and residency. Writing the frame instead, through
+    /// a host mapping or `DbgKdWritePhysicalMemory`, honors none of those: it
+    /// can modify a page the guest believes is read-only or shared, and a
+    /// frame the guest reclaims afterwards carries the edit to whatever lands
+    /// there next.
+    fn write_virtual_direct(
+        &mut self,
+        addr: VirtAddr,
+        root: Dtb,
+        buf: &[u8],
+    ) -> Option<Result<()>> {
+        if !self.virtual_api_serves(addr, root) {
+            return None;
+        }
+        Some(self.write_virtual_bytes(addr, buf))
+    }
+
+    fn write_virtual_bytes(&mut self, addr: VirtAddr, buf: &[u8]) -> Result<()> {
+        self.require_remote_memory_stopped()?;
+        // The write may land in a page table.
+        self.translations.clear();
+        let processor = self.current_processor;
+        let mut completed = 0usize;
+        while completed < buf.len() {
+            let chunk_addr = addr
+                .0
+                .checked_add(completed as u64)
+                .ok_or_else(|| Error::Kd("virtual-memory write address overflow".into()))?;
+            let to_page_end = PAGE_SIZE - (chunk_addr as usize & (PAGE_SIZE - 1));
+            let requested = (buf.len() - completed)
+                .min(KD_REMOTE_MEMORY_CHUNK)
+                .min(to_page_end);
+            let written =
+                match with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+                    api::write_virtual_memory(
+                        framing,
+                        processor,
+                        chunk_addr,
+                        &buf[completed..completed + requested],
+                    )
+                }) {
+                    Ok(written) => written as usize,
+                    // The target refuses a page it will not write: unmapped,
+                    // or protected in a way a physical poke would have
+                    // silently defeated.
+                    Err(Error::KdStatus { .. }) if completed > 0 => {
+                        return Err(Error::PartialWrite(completed));
+                    }
+                    Err(Error::KdStatus { .. }) => {
+                        return Err(Error::BadVirtualAddress(VirtAddr(chunk_addr)));
+                    }
+                    Err(error) => return Err(error),
+                };
+            if written == 0 {
+                return Err(Error::PartialWrite(completed));
+            }
+            kd_trace!(
+                "kd: remote virtual write {chunk_addr:#x}+{written:#x} {:02x?}",
+                &buf[completed..completed + written.min(8)]
+            );
+            completed += written;
+        }
+        Ok(())
     }
 
     fn read_virtual_bytes(&mut self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
