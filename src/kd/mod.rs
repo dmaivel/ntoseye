@@ -572,6 +572,8 @@ pub struct KdBackend {
     breakin_addresses: HashSet<u64>,
     pending_write_breakpoint: Option<PendingWriteBreakpoint>,
     special_register_cache: HashMap<u16, Vec<u8>>,
+    /// Per-processor `CONTEXT` for the current halt. See [`Self::read_registers`].
+    context_cache: HashMap<u16, Vec<u8>>,
     /// Avoid repeated round trips or timeouts after an ARM64 control-space read fails.
     special_registers_unsupported: bool,
     efer_cache: HashMap<u16, u64>,
@@ -801,6 +803,7 @@ impl KdBackend {
             last_stop_was_managed_breakpoint: stopped_on_stale_breakpoint,
             reconnect_assist_after_continue: None,
             special_register_cache: HashMap::new(),
+            context_cache: HashMap::new(),
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             exit_prepared: false,
@@ -1081,6 +1084,7 @@ impl KdBackend {
         self.last_rip = stop.program_counter;
         self.last_stop_was_managed_breakpoint = managed_breakpoint_stop;
         self.special_register_cache.clear();
+        self.context_cache.clear();
         self.efer_cache.clear();
         self.link.set_inline_running(false);
     }
@@ -1088,6 +1092,7 @@ impl KdBackend {
     fn record_running(&mut self) {
         self.link.set_inline_running(true);
         self.special_register_cache.clear();
+        self.context_cache.clear();
         self.efer_cache.clear();
         self.translations.resume();
     }
@@ -1788,7 +1793,19 @@ impl DebugBackend for KdBackend {
         kd_trace!("kd: kernel page-table root = {dtb:#x}");
     }
 
+    /// The selected processor's register context, memoized for the halt.
+    ///
+    /// A full `CONTEXT` is a request/reply exchange plus the control-register
+    /// and EFER reads layered on top, and one stop asks for it repeatedly: the
+    /// `int3` rewind, the stop classification, the step-over and the trap-flag
+    /// cleanup all want the same bytes. Nothing but this debugger can change
+    /// them while the target is halted, so the fetch happens once and is
+    /// invalidated on resume and after a write, the same contract as
+    /// `special_register_cache`.
     fn read_registers(&mut self) -> Result<Vec<u8>> {
+        if let Some(cached) = self.context_cache.get(&self.current_processor) {
+            return Ok(cached.clone());
+        }
         kd_trace!(
             "kd: read_registers: GetContext on p{}",
             self.current_processor + 1
@@ -1824,11 +1841,14 @@ impl DebugBackend for KdBackend {
             let sp = self.register_map.read_u64("sp", &ctx).unwrap_or(0);
             kd_trace!("kd: read_registers: cr3={cr3:#x} pc={pc:#x} sp={sp:#x}");
         }
+        self.context_cache.insert(processor, ctx.clone());
         Ok(ctx)
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
         let processor = self.current_processor;
+        // The written values become the truth only once the target has them.
+        self.context_cache.remove(&processor);
         match self.arch {
             Arch::Amd64 => {
                 let context = context_payload(data)?;
@@ -3301,6 +3321,7 @@ mod tests {
             breakin_addresses: HashSet::new(),
             pending_write_breakpoint: None,
             special_register_cache: HashMap::new(),
+            context_cache: HashMap::new(),
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             exit_prepared: false,
@@ -3330,6 +3351,7 @@ mod tests {
             breakin_addresses: HashSet::new(),
             pending_write_breakpoint: None,
             special_register_cache: HashMap::new(),
+            context_cache: HashMap::new(),
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             exit_prepared: false,
@@ -3576,16 +3598,6 @@ mod tests {
                     Vec::new(),
                 ),
                 (api::DBGKD_READ_CONTROL_SPACE, 0xc000_0001, Vec::new()),
-                (
-                    api::DBGKD_GET_CONTEXT,
-                    api::STATUS_SUCCESS,
-                    expected.clone(),
-                ),
-                (
-                    api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
-                    0xc000_0001,
-                    Vec::new(),
-                ),
             ],
         );
 
@@ -3596,7 +3608,9 @@ mod tests {
             backend.register_map.read_u64("bvr0", &regs).unwrap(),
             0xffff_f800_dead_0000
         );
-        // A second read must not retry the refused control-space request.
+        // A second read must not retry the refused control-space request, and
+        // the halt's context is memoized, so it must not reach the wire at all:
+        // the target above is scripted for exactly one fetch.
         assert_eq!(backend.read_registers().unwrap(), regs);
         drop(backend);
         worker.join().unwrap();
