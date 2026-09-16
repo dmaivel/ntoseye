@@ -1521,13 +1521,14 @@ dependencies = [
 
 [[package]]
 name = "ntoseye"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "aes",
  "anyhow",
  "argh",
  "axum",
  "bad64",
+ "base64",
  "cbc",
  "ctrlc",
  "dashmap",
@@ -1572,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "ntoseye-py"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "ntoseye",
  "pyo3",
