@@ -711,6 +711,7 @@ mod tests {
             1,
             vec![TypeInfo {
                 name: "_NODE".to_string(),
+                pointer_size: 8,
                 size: 0x10,
                 fields: [(
                     "Value".to_string(),

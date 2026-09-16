@@ -949,6 +949,7 @@ impl ReplState<'_> {
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
+        let bitness = self.ctx.target.code_bitness(start_addr);
 
         let rows = match self.ctx.target.arch() {
             Arch::Amd64 => {
@@ -957,6 +958,7 @@ impl ReplState<'_> {
                     &bytes,
                     start_addr.0,
                     instruction_limit,
+                    bitness,
                     &mut formatter,
                     resolve,
                 )
@@ -1018,12 +1020,14 @@ impl ReplState<'_> {
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
+        let bitness = self.ctx.target.code_bitness(address);
         let Some(rows) = decode_preceding(
             self.ctx.target.arch(),
             bytes,
             read_start.0,
             address.0,
             count,
+            bitness,
             resolve,
         ) else {
             error!(
@@ -1074,10 +1078,11 @@ impl ReplState<'_> {
             return Ok(());
         }
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
+        let bitness = self.ctx.target.code_bitness(VirtAddr(start));
         let rows = match self.ctx.target.arch() {
             Arch::Amd64 => {
                 let mut formatter = disasm_formatter();
-                decode_rows(&bytes, start, None, &mut formatter, resolve)
+                decode_rows(&bytes, start, None, bitness, &mut formatter, resolve)
             }
             Arch::Arm64 => decode_rows_arm64(&bytes, start, None, resolve),
         };

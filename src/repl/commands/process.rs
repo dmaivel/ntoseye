@@ -461,6 +461,7 @@ fn process_brief_row(target: &Target, process: &ProcessInfo) -> Vec<String> {
         display_decimal(session_id),
         format!("{} ({:#x})", process.pid, process.pid),
         display_pointer(process_field(target, process, &[&["Peb"]])),
+        display_pointer(process.wow64_peb.map(|address| address.0)),
         display_decimal(parent),
         display_pointer(dirbase),
         display_pointer(object_table),
@@ -497,6 +498,10 @@ fn print_process_detail(target: &Target, process: &ProcessInfo) {
         ))
     );
     outln!("  Token         {}", display_pointer(token));
+    outln!(
+        "  Wow64Peb      {}",
+        display_pointer(process.wow64_peb.map(|address| address.0))
+    );
     let create_time = process_field(target, process, &[&["CreateTime"]]).and_then(filetime_to_iso);
     outln!(
         "  CreateTime    {}",
@@ -1442,6 +1447,7 @@ impl ReplState<'_> {
             "SessionId".to_string(),
             "Cid".to_string(),
             "Peb".to_string(),
+            "Wow64".to_string(),
             "ParentCid".to_string(),
             "DirBase".to_string(),
             "ObjectTable".to_string(),
@@ -1490,6 +1496,7 @@ impl ReplState<'_> {
             "PID".to_string(),
             "EPROCESS".to_string(),
             "DTB".to_string(),
+            "Wow64".to_string(),
         ]);
         let mut count = 0;
         for process in processes {
@@ -1502,6 +1509,7 @@ impl ReplState<'_> {
                 format!("{}", Value(process.pid)),
                 format!("{}", ui::addr(process.eprocess_va.0)),
                 ui::addr(process.dtb),
+                if process.is_wow64() { "x86" } else { "-" }.to_string(),
             ]);
         }
         if count == 0 {
@@ -1833,11 +1841,12 @@ impl ReplState<'_> {
         let Some(selector) = selector else {
             if let Some(process) = self.current_process_context(&processes) {
                 outln!(
-                    "process context: {} {} (PID {}, DTB {})\n",
+                    "process context: {} {} (PID {}, DTB {}{})\n",
                     ui::addr(process.eprocess_va.0),
                     process.name,
                     process.pid,
-                    ui::addr(process.dtb)
+                    ui::addr(process.dtb),
+                    if process.is_wow64() { ", WOW64" } else { "" },
                 );
             } else {
                 outln!(
@@ -1859,10 +1868,11 @@ impl ReplState<'_> {
                 self.caches.refresh_symbol_context(&self.ctx.target);
                 self.clear_selected_frame();
                 outln!(
-                    "process context: {} (PID {}, EPROCESS {})",
+                    "process context: {} (PID {}, EPROCESS {}{})",
                     name,
                     process.pid,
-                    ui::addr(process.eprocess_va.0)
+                    ui::addr(process.eprocess_va.0),
+                    if process.is_wow64() { ", WOW64" } else { "" },
                 );
                 print_module_symbol_report(&symbol_report);
             }

@@ -4165,6 +4165,7 @@ mod tests {
     fn layout(name: &str, size: usize, fields: &[(&str, FieldInfo)]) -> TypeInfo {
         TypeInfo {
             name: name.to_string(),
+            pointer_size: 8,
             size,
             fields: fields
                 .iter()

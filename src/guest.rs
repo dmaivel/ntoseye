@@ -12,7 +12,7 @@ use crate::{
     types::*,
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use pelite::pe64::{Pe, PeFile, PeView};
+use pelite::{PeFile, PeView, Wrap};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
@@ -31,6 +31,15 @@ pub struct ProcessInfo {
     pub name: String,
     pub dtb: Dtb,
     pub eprocess_va: VirtAddr,
+    /// The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
+    /// for a native process.
+    pub wow64_peb: Option<VirtAddr>,
+}
+
+impl ProcessInfo {
+    pub fn is_wow64(&self) -> bool {
+        self.wow64_peb.is_some()
+    }
 }
 
 /// module metadata from PEB LDR list
@@ -40,6 +49,8 @@ pub struct ModuleInfo {
     pub short_name: String,
     pub base_address: VirtAddr,
     pub size: u32,
+    /// From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
+    pub is_32bit: bool,
     pub entry_point: Option<VirtAddr>,
     pub time_date_stamp: Option<u32>,
     pub checksum: Option<u32>,
@@ -55,6 +66,7 @@ impl ModuleInfo {
             short_name,
             base_address,
             size,
+            is_32bit: false,
             entry_point: None,
             time_date_stamp: None,
             checksum: None,
@@ -340,6 +352,22 @@ fn read_pe_header_page_with(
     Ok(header_buf)
 }
 
+/// `SizeOfImage` of either PE format.
+pub fn size_of_image(view: &PeView<'_>) -> u32 {
+    match view.optional_header() {
+        Wrap::T32(header) => header.SizeOfImage,
+        Wrap::T64(header) => header.SizeOfImage,
+    }
+}
+
+/// Preferred `ImageBase` of either PE format.
+pub fn image_base(view: &PeView<'_>) -> u64 {
+    match view.optional_header() {
+        Wrap::T32(header) => u64::from(header.ImageBase),
+        Wrap::T64(header) => header.ImageBase,
+    }
+}
+
 /// Open a module image in guest memory: the headers are read now, the rest
 /// on demand through `read`, which reads `buf.len()` bytes at a virtual
 /// address of the module's address space.
@@ -348,7 +376,7 @@ pub fn read_pe_image(
     read: impl Fn(VirtAddr, &mut [u8]) -> Result<()> + Send + Sync + 'static,
 ) -> Result<PeImage> {
     let headers = read_pe_header_page_with(&|address, buf| read(base_address + address, buf))?;
-    let size = PeView::from_bytes(&headers)?.optional_header().SizeOfImage as usize;
+    let size = size_of_image(&PeView::from_bytes(&headers)?) as usize;
     Ok(PeImage {
         size,
         body: ImageBody::Lazy(LazyImage {
@@ -555,14 +583,13 @@ fn populate_module_versions<B: MemoryOps<PhysAddr>>(
 pub fn read_pe_image_from_file(path: &Path) -> Result<PeImage> {
     let data = std::fs::read(path)?;
     let file = PeFile::from_bytes(&data)?;
-    let optional_header = file.optional_header();
-
-    let total_size = optional_header.SizeOfImage as usize;
+    let (total_size, size_of_headers) = match file.optional_header() {
+        Wrap::T32(header) => (header.SizeOfImage as usize, header.SizeOfHeaders as usize),
+        Wrap::T64(header) => (header.SizeOfImage as usize, header.SizeOfHeaders as usize),
+    };
     let mut image_buffer = vec![0u8; total_size];
 
-    let headers_size = (optional_header.SizeOfHeaders as usize)
-        .min(total_size)
-        .min(data.len());
+    let headers_size = size_of_headers.min(total_size).min(data.len());
     image_buffer[..headers_size].copy_from_slice(&data[..headers_size]);
 
     for section in file.section_headers() {
@@ -710,7 +737,7 @@ impl WinObject {
         self.headers
             .as_deref()
             .and_then(|headers| PeView::from_bytes(headers).ok())
-            .map_or(0, |view| view.optional_header().SizeOfImage as usize)
+            .map_or(0, |view| size_of_image(&view) as usize)
     }
 
     /// A sibling object sharing this one's physical-memory and symbol handles,
@@ -824,11 +851,21 @@ pub struct Types<'a> {
 }
 
 impl<'a> Types<'a> {
-    /// The parsed layout of struct `name` from the object's PDB (cached).
+    /// The parsed layout of struct `name` from the object's PDB (cached). A
+    /// `module!`-qualified name resolves in this space's modules instead,
+    /// which is how a 32-bit layout (`ntdll32!_PEB`) and the nested types it
+    /// names are reached.
     pub fn layout<S>(self, name: S) -> Result<Arc<TypeInfo>>
     where
         S: Into<String> + AsRef<str>,
     {
+        if name.as_ref().contains('!') {
+            return self
+                .obj
+                .symbols
+                .find_type_across_modules(self.dtb, name.as_ref())
+                .ok_or_else(|| Error::StructNotFound(name.into()));
+        }
         let guid = self.obj.guid.ok_or(Error::ExpectedSymbols)?;
         self.obj
             .symbols
@@ -876,7 +913,13 @@ impl<'a> Types<'a> {
         let list_memory = |dtb: Dtb| obj.address_space(&obj.phys, dtb);
 
         const MAX: usize = 1000;
-        let initial = list_memory(dtb).read::<VirtAddr>(head)?;
+        let pointer_size = usize::from(record_ti.pointer_size);
+        let read_link = move |memory: &dyn Fn(&mut [u8]) -> Result<()>| -> Result<VirtAddr> {
+            let mut bytes = [0u8; 8];
+            memory(&mut bytes[..pointer_size])?;
+            Ok(VirtAddr(le_uint(&bytes[..pointer_size])))
+        };
+        let initial = read_link(&|buf| list_memory(dtb).read_bytes(head, buf))?;
         let mut cursor = ListCursor::new(head, MAX);
         cursor.advance(Ok(initial));
 
@@ -891,7 +934,7 @@ impl<'a> Types<'a> {
                 .prefetch();
 
             // Flink sits at offset 0 of the link's _LIST_ENTRY
-            match record.read_field_at::<VirtAddr>(link_offset) {
+            match read_link(&|buf| record.read_bytes_at(link_offset, buf)) {
                 Ok(next) => cursor.advance(Ok(next)),
                 Err(e) => {
                     cursor.advance(Err(e.to_string()));
@@ -956,7 +999,11 @@ impl<'a> StructRef<'a> {
     /// Read an integer field at its PDB-declared width (1..=8 bytes).
     pub fn read_uint(&self, name: &str) -> Result<u64> {
         let field = self.field(name)?;
-        let width = usize::try_from(field.size)
+        self.read_uint_at(name, field.offset as u64, field.size)
+    }
+
+    fn read_uint_at(&self, name: &str, offset: u64, size: u64) -> Result<u64> {
+        let width = usize::try_from(size)
             .map_err(|_| Error::DebugInfo(format!("field '{name}' has invalid integer width")))?;
         if !(1..=8).contains(&width) {
             return Err(Error::DebugInfo(format!(
@@ -964,8 +1011,14 @@ impl<'a> StructRef<'a> {
             )));
         }
         let mut bytes = [0u8; 8];
-        self.read_bytes_at(field.offset as u64, &mut bytes[..width])?;
+        self.read_bytes_at(offset, &mut bytes[..width])?;
         Ok(le_uint(&bytes[..width]))
+    }
+
+    /// Read an address-valued field at its PDB-declared width: 4 bytes in a
+    /// 32-bit module's layout, 8 otherwise.
+    pub fn read_pointer(&self, name: &str) -> Result<VirtAddr> {
+        self.read_uint(name).map(VirtAddr)
     }
 
     /// Read a field's raw bytes at its PDB-declared size, rejecting a zero
@@ -1039,8 +1092,8 @@ impl<'a> StructRef<'a> {
             ));
         };
         let struct_name = struct_name.clone();
-        let target: VirtAddr = self.read_field_at(field.offset as u64)?;
-        let ti = self.obj.types().layout(&struct_name)?;
+        let target = VirtAddr(self.read_uint_at(name, field.offset as u64, field.size)?);
+        let ti = self.obj.types_in(self.dtb).layout(&struct_name)?;
         Ok(self.with(ti, target))
     }
 
@@ -1060,7 +1113,7 @@ impl<'a> StructRef<'a> {
             }
         };
         let base = self.base + field.offset as u64;
-        let ti = self.obj.types().layout(&type_name)?;
+        let ti = self.obj.types_in(self.dtb).layout(&type_name)?;
         let mut embedded = self.with(ti, base);
         // Carry the enclosing image so the sub-struct's fields stay free.
         if let Some(image) = &self.image {
@@ -1077,7 +1130,7 @@ impl<'a> StructRef<'a> {
     /// rather than hardcoding them.
     pub fn read_unicode_string(&self) -> Result<String> {
         let length: u16 = self.read_field("Length")?;
-        let buffer: VirtAddr = self.read_field("Buffer")?;
+        let buffer = self.read_pointer("Buffer")?;
         if length == 0 || buffer.is_zero() {
             return Ok(String::new());
         }
@@ -1116,7 +1169,7 @@ impl<'a> StructRef<'a> {
 /// into a `ModuleInfo`, or `None` when it has no base address (skip it). Shared
 /// by the process- and kernel-module walks, which differ only in their list.
 fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>> {
-    let dll_base: VirtAddr = record.read_field("DllBase")?;
+    let dll_base = record.read_pointer("DllBase")?;
     if dll_base.is_zero() {
         return Ok(None);
     }
@@ -1127,7 +1180,7 @@ fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>>
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "<unknown>".to_string());
     let mut info = ModuleInfo::new(name, dll_base, size_of_image);
-    if let Ok(entry_point) = record.read_field::<VirtAddr>("EntryPoint")
+    if let Ok(entry_point) = record.read_pointer("EntryPoint")
         && !entry_point.is_zero()
     {
         info.entry_point = Some(entry_point);
@@ -1155,6 +1208,8 @@ struct EprocessSpan {
     dir_table_base_offset: u64,
     active_process_links_offset: u64,
     image_file_name_offset: u64,
+    /// `WoW64Process`, absent from an x86 kernel's `_EPROCESS`.
+    wow64_process_offset: Option<u64>,
 }
 
 impl EprocessSpan {
@@ -1166,14 +1221,20 @@ impl EprocessSpan {
             eprocess.field_offset("Pcb")? + kprocess.field_offset("DirectoryTableBase")?;
         let active_process_links_offset = eprocess.field_offset("ActiveProcessLinks")?;
         let image_file_name_offset = eprocess.field_offset("ImageFileName")?;
+        let wow64_process_offset = eprocess
+            .field_offset("WoW64Process")
+            .or_else(|_| eprocess.field_offset("Wow64Process"))
+            .ok();
         let start = unique_process_id_offset
             .min(dir_table_base_offset)
             .min(active_process_links_offset)
-            .min(image_file_name_offset);
+            .min(image_file_name_offset)
+            .min(wow64_process_offset.unwrap_or(u64::MAX));
         let end = (unique_process_id_offset + 8)
             .max(dir_table_base_offset + 8)
             .max(active_process_links_offset + 8)
-            .max(image_file_name_offset + IMAGE_FILE_NAME_LEN as u64);
+            .max(image_file_name_offset + IMAGE_FILE_NAME_LEN as u64)
+            .max(wow64_process_offset.map_or(0, |offset| offset + 8));
         Ok(Self {
             start,
             bytes: vec![0u8; (end - start) as usize],
@@ -1181,6 +1242,7 @@ impl EprocessSpan {
             dir_table_base_offset,
             active_process_links_offset,
             image_file_name_offset,
+            wow64_process_offset,
         })
     }
 
@@ -1208,6 +1270,13 @@ impl EprocessSpan {
     fn image_file_name(&self) -> &[u8] {
         let start = (self.image_file_name_offset - self.start) as usize;
         &self.bytes[start..start + IMAGE_FILE_NAME_LEN]
+    }
+
+    /// `_EPROCESS.WoW64Process`: null for a native process.
+    fn wow64_process(&self) -> Option<VirtAddr> {
+        self.wow64_process_offset
+            .map(|offset| VirtAddr(self.u64_at(offset)))
+            .filter(|pointer| !pointer.is_zero())
     }
 }
 
@@ -1912,6 +1981,7 @@ impl Guest {
                 ),
                 dtb,
                 eprocess_va: current_eprocess,
+                wow64_peb: self.wow64_peb(dtb, span.wow64_process()),
             });
 
             let flink = span.active_process_links_flink();
@@ -1940,7 +2010,23 @@ impl Guest {
             name: self.process_name_from_image_file_name(eprocess_va, dtb, span.image_file_name()),
             dtb,
             eprocess_va,
+            wow64_peb: self.wow64_peb(dtb, span.wow64_process()),
         })
+    }
+
+    /// The 32-bit PEB behind `_EPROCESS.WoW64Process`: since Windows 10 1511
+    /// the pointer is to an `_EWOW64PROCESS` holding it, before that it was
+    /// the PEB itself. Unreadable is reported as native rather than failing
+    /// process enumeration.
+    fn wow64_peb(&self, dtb: Dtb, wow64_process: Option<VirtAddr>) -> Option<VirtAddr> {
+        let pointer = wow64_process?;
+        let types = self.ntoskrnl.types_in(dtb);
+        let peb = match types.struct_at("_EWOW64PROCESS", pointer) {
+            Ok(ewow64) => ewow64.read_pointer("Peb").ok()?,
+            Err(Error::StructNotFound(_)) => pointer,
+            Err(_) => return None,
+        };
+        (!peb.is_zero()).then_some(peb)
     }
 
     /// Display name for the process at `eprocess_va` given its raw
@@ -2059,6 +2145,103 @@ impl Guest {
             }
         }
 
+        if let Some(peb32) = info.wow64_peb {
+            for mut module in self.process_modules32(info.dtb, peb32)? {
+                // Both lists carry the executable itself (one mapping, x86
+                // code) and an ntdll (two: the 32-bit copy is addressed as
+                // `ntdll32!`, as WinDbg's wow64exts does).
+                if let Some(native) = modules
+                    .iter_mut()
+                    .find(|native| native.base_address == module.base_address)
+                {
+                    native.is_32bit = true;
+                    continue;
+                }
+                if modules
+                    .iter()
+                    .any(|native| native.short_name == module.short_name)
+                {
+                    module.short_name.push_str("32");
+                }
+                modules.push(module);
+            }
+        }
+
+        Ok(modules)
+    }
+
+    /// The 32-bit loader list of a WOW64 process. `_PEB_LDR_DATA32` and
+    /// `_LDR_DATA_TABLE_ENTRY32` are not in the kernel's PDB and the 32-bit
+    /// ntdll's is not loaded before this walk finds it, so the entry layout
+    /// is the fixed x86 ABI (unchanged since Windows 2000): `DllBase` +0x18,
+    /// `EntryPoint` +0x1c, `SizeOfImage` +0x20, `BaseDllName` +0x2c,
+    /// `TimeDateStamp` +0x44.
+    fn process_modules32(&self, dtb: Dtb, peb32: VirtAddr) -> Result<Vec<ModuleInfo>> {
+        const IN_LOAD_ORDER_MODULE_LIST: u64 = 0x0c;
+        const ENTRY_LEN: usize = 0x48;
+        const MAX: usize = 1000;
+
+        let types = self.ntoskrnl.types_in(dtb);
+        let ldr: u32 = types.struct_at("_PEB32", peb32)?.read_field("Ldr")?;
+        if ldr == 0 {
+            return Ok(Vec::new());
+        }
+        let memory = self.ntoskrnl.address_space(&self.ntoskrnl.phys, dtb);
+        let head = VirtAddr(u64::from(ldr) + IN_LOAD_ORDER_MODULE_LIST);
+        let read_link = |address: VirtAddr| memory.read::<u32>(address).map(u64::from);
+
+        let mut modules = Vec::new();
+        let mut cursor = ListCursor::new(head, MAX);
+        cursor.advance(
+            read_link(head)
+                .map(VirtAddr)
+                .map_err(|error| error.to_string()),
+        );
+        while let Some(current) = cursor.next() {
+            let mut entry = [0u8; ENTRY_LEN];
+            if let Err(error) = memory.read_bytes(current, &mut entry) {
+                cursor.advance(Err(error.to_string()));
+                return Err(error);
+            }
+            let u32_at =
+                |offset: usize| u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap());
+            cursor.advance(Ok(VirtAddr(u64::from(u32_at(0)))));
+
+            let dll_base = u32_at(0x18);
+            if dll_base == 0 {
+                continue;
+            }
+            let name_len = usize::from(u16::from_le_bytes([entry[0x2c], entry[0x2d]]));
+            let name_buffer = u32_at(0x30);
+            let name = if name_len == 0 || name_buffer == 0 {
+                String::new()
+            } else {
+                let mut buf = vec![0u8; name_len];
+                memory
+                    .read_bytes(VirtAddr(u64::from(name_buffer)), &mut buf)
+                    .map(|()| {
+                        let u16s: Vec<u16> = buf
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+                        String::from_utf16_lossy(&u16s)
+                    })
+                    .unwrap_or_default()
+            };
+            let name = if name.is_empty() {
+                "<unknown>".to_string()
+            } else {
+                name
+            };
+            let mut module = ModuleInfo::new(name, VirtAddr(u64::from(dll_base)), u32_at(0x20))
+                .with_time_date_stamp(u32_at(0x44));
+            module.is_32bit = true;
+            let entry_point = u32_at(0x1c);
+            if entry_point != 0 {
+                module.entry_point = Some(VirtAddr(u64::from(entry_point)));
+            }
+            modules.push(module);
+        }
         Ok(modules)
     }
 
@@ -2431,8 +2614,8 @@ fn partition_first_occurrence<T, K: Eq + std::hash::Hash>(
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE_BLOCK, ModuleSymbolLoadReport, PE_HEADER_PROBE, PeImage, read_pe_header_page,
-        partition_first_occurrence, read_pe_image,
+        IMAGE_BLOCK, ModuleSymbolLoadReport, PE_HEADER_PROBE, PeImage, partition_first_occurrence,
+        read_pe_header_page, read_pe_image,
     };
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};

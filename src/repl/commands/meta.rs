@@ -38,6 +38,14 @@ repl_command! {
 }
 
 repl_command! {
+    cmd_effmach;
+    names: [".effmach"],
+    usage: ".effmach [x86|amd64|auto|.]",
+    summary: "Display or set the effective code machine.",
+    details: "With no argument, display the selected machine; x86 and amd64 override automatic code-bitness detection, while auto or . clears the override.",
+}
+
+repl_command! {
     cmd_version();
     names: ["vertarget", "version"],
     usage: "vertarget",
@@ -150,6 +158,34 @@ impl ReplState<'_> {
             NumberRadix::Hexadecimal => "hexadecimal",
         };
         outln!("radix {} ({name})\n", self.radix.value());
+        Ok(())
+    }
+
+    fn cmd_effmach(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.len() > 1 {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+
+        if let Some(machine) = invocation.arg(0) {
+            let machine = machine.to_ascii_lowercase();
+            self.ctx.target.effmach = match machine.as_str() {
+                "x86" => Some(crate::target::CODE_BITNESS_X86),
+                "amd64" => Some(crate::target::CODE_BITNESS_AMD64),
+                "." | "auto" => None,
+                _ => {
+                    error!("invalid effective machine '{machine}' (use x86, amd64, or auto)");
+                    return Ok(());
+                }
+            };
+        }
+
+        let machine = match self.ctx.target.effmach {
+            Some(crate::target::CODE_BITNESS_X86) => "x86",
+            Some(crate::target::CODE_BITNESS_AMD64) => "AMD64",
+            _ => "auto",
+        };
+        outln!("effective machine: {machine}\n");
         Ok(())
     }
 
@@ -428,6 +464,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!sprocess", "processes and modules"),
     ("!thread", "processes and modules"),
     ("!vad", "processes and modules"),
+    (".effmach", "processes and modules"),
     ("~", "processes and modules"),
     ("attach", "processes and modules"),
     ("detach", "processes and modules"),

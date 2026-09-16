@@ -34,6 +34,8 @@ pub struct Target {
     debugger_data: Option<DebuggerDataBlock>,
     pub current_process: Option<WinObject>,
     pub current_process_info: Option<ProcessInfo>,
+    /// Explicit code-machine override (`32` or `64`); `None` follows context.
+    pub effmach: Option<u32>,
     /// Bare WinObject for triage dumps without a discovered kernel, providing
     /// identity-mapped memory access so commands like disassemble/search work.
     triage_fallback: Option<WinObject>,
@@ -149,6 +151,50 @@ pub struct BuiltinVar {
     pub name: &'static str,
     pub value: u64,
     pub source: &'static str,
+}
+
+pub const CODE_BITNESS_X86: u32 = 32;
+pub const CODE_BITNESS_AMD64: u32 = 64;
+const COMPATIBILITY_MODE_CS: u64 = 0x23;
+const WOW64_ADDRESS_LIMIT: u64 = 1 << 32;
+
+fn decide_bitness(
+    effmach: Option<u32>,
+    cs: Option<u64>,
+    is_wow64: bool,
+    modules: &[ModuleInfo],
+    address: VirtAddr,
+) -> u32 {
+    if let Some(effmach) = effmach {
+        return if matches!(effmach, CODE_BITNESS_X86 | 0x14c) {
+            CODE_BITNESS_X86
+        } else {
+            CODE_BITNESS_AMD64
+        };
+    }
+
+    let is_user = !looks_like_kernel_pointer(address.0);
+    if is_user && cs == Some(COMPATIBILITY_MODE_CS) {
+        return CODE_BITNESS_X86;
+    }
+
+    if is_wow64 {
+        if modules
+            .iter()
+            .any(|module| module.is_32bit && module.contains_address(address))
+        {
+            return CODE_BITNESS_X86;
+        }
+        if address.0 < WOW64_ADDRESS_LIMIT
+            && !modules
+                .iter()
+                .any(|module| !module.is_32bit && module.contains_address(address))
+        {
+            return CODE_BITNESS_X86;
+        }
+    }
+
+    CODE_BITNESS_AMD64
 }
 
 #[derive(Debug, Clone)]
@@ -1263,6 +1309,7 @@ impl Target {
             debugger_data: None,
             current_process: None,
             current_process_info: None,
+            effmach: None,
             triage_fallback,
             triage_modules_cache,
             context_dtb_override: None,
@@ -1300,6 +1347,7 @@ impl Target {
             debugger_data: None,
             current_process: None,
             current_process_info: None,
+            effmach: None,
             triage_fallback: None,
             triage_modules_cache: None,
             context_dtb_override: None,
@@ -2151,6 +2199,39 @@ impl Target {
             .unwrap_or(Arch::Amd64)
     }
 
+    /// Select x86 or AMD64 decoding for a code address in the current scope.
+    /// Module enumeration is intentionally local to this query so one caller
+    /// can reuse the result for every instruction in its decode window.
+    pub fn code_bitness(&self, address: VirtAddr) -> u32 {
+        if self.effmach.is_some() {
+            return decide_bitness(self.effmach, None, false, &[], address);
+        }
+
+        let cs = if self
+            .selected_frame
+            .as_ref()
+            .is_some_and(|frame| !frame.is_live())
+        {
+            None
+        } else {
+            self.register_value("cs")
+        };
+        if decide_bitness(None, cs, false, &[], address) == CODE_BITNESS_X86 {
+            return CODE_BITNESS_X86;
+        }
+
+        let is_wow64 = self
+            .current_process_info
+            .as_ref()
+            .is_some_and(ProcessInfo::is_wow64);
+        if !is_wow64 {
+            return CODE_BITNESS_AMD64;
+        }
+
+        let modules = self.modules().unwrap_or_default();
+        decide_bitness(None, cs, true, &modules, address)
+    }
+
     /// An address space rooted at `dtb` in the resolved guest architecture. On
     /// ARM64 the kernel root (TTBR1) is threaded in so kernel-VA reads work
     /// from any space; on AMD64 one CR3 covers both halves.
@@ -2505,6 +2586,7 @@ impl Target {
             // the DTB that actually resolves.
             dtb: self.kernel_dtb(),
             eprocess_va: VirtAddr(0),
+            wow64_peb: None,
         }])
     }
 
@@ -4313,7 +4395,7 @@ impl Target {
             kernel_stack_resident: read_kthread_u8("KernelStackResident").map(|value| value != 0),
             start_address: read_ethread_ptr("StartAddress"),
             win32_start_address: read_ethread_ptr("Win32StartAddress"),
-            teb: read_ethread_ptr("Teb"),
+            teb: read_kthread_ptr("Teb").or_else(|| read_ethread_ptr("Teb")),
             kernel_stack: read_kthread_ptr("KernelStack"),
             stack_base: read_kthread_ptr("StackBase"),
             stack_limit: read_kthread_ptr("StackLimit"),
@@ -4697,12 +4779,12 @@ impl fmt::Display for PteLevel {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListTermination, ObjectNameLayout, ThreadInfo, bounded_list_walk,
-        decode_token_privilege_bitmaps, select_object_header_candidate, select_thread_process_dtb,
-        thread_owner_matches,
+        CODE_BITNESS_AMD64, CODE_BITNESS_X86, ListTermination, ObjectNameLayout, ThreadInfo,
+        bounded_list_walk, decide_bitness, decode_token_privilege_bitmaps,
+        select_object_header_candidate, select_thread_process_dtb, thread_owner_matches,
     };
     use crate::error::Error;
-    use crate::guest::ProcessInfo;
+    use crate::guest::{ModuleInfo, ProcessInfo};
     use crate::session::{Session, session_over_memory};
     use crate::types::VirtAddr;
 
@@ -4838,6 +4920,40 @@ mod tests {
     }
 
     #[test]
+    fn code_bitness_prefers_explicit_context_and_wow64_images() {
+        let mut x86 = ModuleInfo::new("wow.dll".into(), VirtAddr(0x400000), 0x1000);
+        x86.is_32bit = true;
+        let x64 = ModuleInfo::new("native.dll".into(), VirtAddr(0x0000_7ff6_0000_0000), 0x1000);
+
+        assert_eq!(
+            decide_bitness(
+                Some(CODE_BITNESS_AMD64),
+                Some(0x23),
+                true,
+                &[x86.clone()],
+                VirtAddr(0x400100),
+            ),
+            CODE_BITNESS_AMD64
+        );
+        assert_eq!(
+            decide_bitness(None, Some(0x23), false, &[], VirtAddr(0x7fff_0000),),
+            CODE_BITNESS_X86
+        );
+        assert_eq!(
+            decide_bitness(None, None, true, &[x86], VirtAddr(0x400100)),
+            CODE_BITNESS_X86
+        );
+        assert_eq!(
+            decide_bitness(None, None, true, &[x64], VirtAddr(0x0000_7ff6_0000_0100)),
+            CODE_BITNESS_AMD64
+        );
+        assert_eq!(
+            decide_bitness(None, None, false, &[], VirtAddr(0x7fff_0000)),
+            CODE_BITNESS_AMD64
+        );
+    }
+
+    #[test]
     fn owning_process_selection_prefers_eprocess_identity() {
         let thread = sample_thread();
         let same_pid_wrong_process = ProcessInfo {
@@ -4845,12 +4961,14 @@ mod tests {
             name: "reused.exe".into(),
             dtb: 0x1111_0000,
             eprocess_va: VirtAddr(0xffff_8000_0000_9999),
+            wow64_peb: None,
         };
         let owner = ProcessInfo {
             pid: 0x99,
             name: "sample.exe".into(),
             dtb: 0x2222_0000,
             eprocess_va: thread.eprocess.unwrap(),
+            wow64_peb: None,
         };
         assert!(!thread_owner_matches(&thread, &same_pid_wrong_process));
         assert!(thread_owner_matches(&thread, &owner));

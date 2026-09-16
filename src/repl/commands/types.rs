@@ -1021,6 +1021,7 @@ mod tests {
             1,
             vec![TypeInfo {
                 name: "_NODE".to_string(),
+                pointer_size: 8,
                 size: 0x30,
                 fields: fields.into_iter().collect(),
             }],

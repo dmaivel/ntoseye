@@ -69,21 +69,22 @@ impl<'a> TypeView<'a> {
     }
 
     /// Resolve a PDB type across loaded modules using the target's current
-    /// DTB, the same lookup used by `dt` and the DAP variables tree.
+    /// DTB, the same lookup used by `dt` and the DAP variables tree. A
+    /// `module!` qualifier selects the module (`ntdll32!_PEB`).
     pub fn lookup_type(&self, type_name: &str) -> Option<Arc<TypeInfo>> {
-        self.session.target.symbols.find_type_across_modules(
-            self.session.target.current_dtb(),
-            unqualified_type_name(type_name),
-        )
+        self.session
+            .target
+            .symbols
+            .find_type_across_modules(self.session.target.current_dtb(), type_name)
     }
 
     /// Resolve enum variants across loaded modules using the target's current
     /// DTB, so enum values have the same symbolic text in every host.
     pub fn lookup_enum(&self, type_name: &str) -> Option<Vec<(String, i64)>> {
-        self.session.target.symbols.find_enum_across_modules(
-            self.session.target.current_dtb(),
-            unqualified_type_name(type_name),
-        )
+        self.session
+            .target
+            .symbols
+            .find_enum_across_modules(self.session.target.current_dtb(), type_name)
     }
 
     /// Compute a parsed type's byte size using the target's PDB layouts, as
@@ -139,12 +140,12 @@ impl<'a> TypeView<'a> {
             ParsedType::Primitive(_) | ParsedType::Struct(_) | ParsedType::Union(_)
                 if named_type(&field.type_data, "_UNICODE_STRING") =>
             {
-                (self.format_unicode_string(address), None)
+                (self.format_unicode_string(address, &field.type_data), None)
             }
             ParsedType::Primitive(_) | ParsedType::Struct(_) | ParsedType::Union(_)
                 if named_type(&field.type_data, "_LIST_ENTRY") =>
             {
-                (self.format_list_entry(address), None)
+                (self.format_list_entry(address, &field.type_data), None)
             }
             ParsedType::Array(..) => (
                 field
@@ -435,8 +436,11 @@ impl<'a> TypeView<'a> {
         quote_bounded(&String::from_utf8_lossy(&bytes[..end]))
     }
 
-    fn format_unicode_string(&self, address: VirtAddr) -> String {
-        let type_info = self.lookup_type("_UNICODE_STRING");
+    /// `type_data` is the field's own type: its (possibly `module!`-qualified)
+    /// name picks the layout, so a 32-bit module's 4-byte `Buffer` is read as
+    /// such.
+    fn format_unicode_string(&self, address: VirtAddr, type_data: &ParsedType) -> String {
+        let type_info = nested_layout_name(type_data).and_then(|name| self.lookup_type(&name));
         let (length_offset, length_size, buffer_offset, buffer_size) =
             if let Some(type_info) = type_info {
                 let Some((_, length_field)) = find_field(type_info.as_ref(), "Length") else {
@@ -478,24 +482,25 @@ impl<'a> TypeView<'a> {
         quote_bounded(&String::from_utf16_lossy(&utf16))
     }
 
-    fn format_list_entry(&self, address: VirtAddr) -> String {
-        let (flink_offset, flink_size, blink_offset, blink_size) =
-            if let Some(type_info) = self.lookup_type("_LIST_ENTRY") {
-                let Some((_, flink)) = find_field(type_info.as_ref(), "Flink") else {
-                    return "<unavailable: Flink field not found>".to_string();
-                };
-                let Some((_, blink)) = find_field(type_info.as_ref(), "Blink") else {
-                    return "<unavailable: Blink field not found>".to_string();
-                };
-                (
-                    flink.offset as u64,
-                    self.field_size(flink),
-                    blink.offset as u64,
-                    self.field_size(blink),
-                )
-            } else {
-                (0, 8, 8, 8)
+    fn format_list_entry(&self, address: VirtAddr, type_data: &ParsedType) -> String {
+        let (flink_offset, flink_size, blink_offset, blink_size) = if let Some(type_info) =
+            nested_layout_name(type_data).and_then(|name| self.lookup_type(&name))
+        {
+            let Some((_, flink)) = find_field(type_info.as_ref(), "Flink") else {
+                return "<unavailable: Flink field not found>".to_string();
             };
+            let Some((_, blink)) = find_field(type_info.as_ref(), "Blink") else {
+                return "<unavailable: Blink field not found>".to_string();
+            };
+            (
+                flink.offset as u64,
+                self.field_size(flink),
+                blink.offset as u64,
+                self.field_size(blink),
+            )
+        } else {
+            (0, 8, 8, 8)
+        };
         let flink = match self.read_display_uint(address + flink_offset, flink_size) {
             Ok(value) => value,
             Err(error) => return format!("<unavailable: {error}>"),
@@ -559,9 +564,11 @@ pub fn nested_layout_name(type_data: &ParsedType) -> Option<String> {
 /// conventional leading underscore and case used by different PDB producers.
 pub fn named_type(type_data: &ParsedType, wanted: &str) -> bool {
     match type_data {
-        ParsedType::Primitive(name) | ParsedType::Struct(name) | ParsedType::Union(name) => name
-            .trim_start_matches('_')
-            .eq_ignore_ascii_case(wanted.trim_start_matches('_')),
+        ParsedType::Primitive(name) | ParsedType::Struct(name) | ParsedType::Union(name) => {
+            unqualified_type_name(name)
+                .trim_start_matches('_')
+                .eq_ignore_ascii_case(wanted.trim_start_matches('_'))
+        }
         _ => false,
     }
 }
@@ -660,12 +667,87 @@ mod tests {
         fields.insert("Value".to_string(), low);
         let info = TypeInfo {
             name: "_NODE".to_string(),
+            pointer_size: 8,
             size: 1,
             fields,
         };
         assert_eq!(
             find_field(&info, "value").map(|(name, _)| name.as_str()),
             Some("Value")
+        );
+    }
+
+    /// A field typed with a 32-bit module's `_UNICODE_STRING` (as a WOW64
+    /// process's ntdll layouts name it) reads its 4-byte `Buffer`; the
+    /// kernel's 8-byte layout would swallow the neighbouring field.
+    #[test]
+    fn qualified_unicode_string_reads_the_pointer_at_its_own_width() {
+        let mut memory = [0u8; 0x40];
+        memory[0..2].copy_from_slice(&4u16.to_le_bytes());
+        memory[4..8].copy_from_slice(&0x1020u32.to_le_bytes());
+        memory[8..12].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+        memory[0x20..0x24].copy_from_slice(
+            &"ok"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let session = session_over_memory(0x1000, &memory);
+        let dtb = session.target.current_dtb();
+        let unicode = |pointer_size: u8, buffer_offset: u32| TypeInfo {
+            name: "_UNICODE_STRING".to_string(),
+            pointer_size,
+            size: 2 * usize::from(pointer_size),
+            fields: [
+                (
+                    "Length".to_string(),
+                    FieldInfo {
+                        offset: 0,
+                        size: 2,
+                        type_data: ParsedType::Primitive("USHORT".to_string()),
+                    },
+                ),
+                (
+                    "Buffer".to_string(),
+                    FieldInfo {
+                        offset: buffer_offset,
+                        size: u64::from(pointer_size),
+                        type_data: ParsedType::Pointer(Box::new(ParsedType::Primitive(
+                            "WCHAR".to_string(),
+                        ))),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session
+            .target
+            .symbols
+            .inject_module_for_test(1, vec![unicode(8, 8)], &[]);
+        session
+            .target
+            .symbols
+            .inject_module_for_test(2, vec![unicode(4, 4)], &[]);
+        session
+            .target
+            .symbols
+            .register_module_for_test(2, "ntdll32", dtb);
+        let view = TypeView::new(&session);
+
+        let field = |type_name: &str| FieldInfo {
+            offset: 0,
+            size: 0,
+            type_data: ParsedType::Struct(type_name.to_string()),
+        };
+        assert_eq!(
+            view.value_text(VirtAddr(0x1000), &field("ntdll32!_UNICODE_STRING")),
+            "\"ok\""
+        );
+        assert!(
+            view.value_text(VirtAddr(0x1000), &field("_UNICODE_STRING"))
+                .starts_with("<unavailable")
         );
     }
 
@@ -682,6 +764,7 @@ mod tests {
             1,
             vec![TypeInfo {
                 name: "_NODE".to_string(),
+                pointer_size: 8,
                 size: 1,
                 fields: HashMap::new(),
             }],

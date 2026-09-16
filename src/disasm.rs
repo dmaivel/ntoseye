@@ -183,6 +183,14 @@ pub struct DisasmRow {
     pub comment: Option<String>,
 }
 
+fn mask_code_address(bitness: u32, address: u64) -> u64 {
+    if bitness == 32 {
+        address & u64::from(u32::MAX)
+    } else {
+        address
+    }
+}
+
 impl DisasmRow {
     /// Plain instruction text for MCP, Python, and JSON output.
     /// Use `ui::disasm_asm` for colored rendering.
@@ -191,18 +199,21 @@ impl DisasmRow {
     }
 }
 
-/// Decode `bytes` (loaded at `start_addr`) into rows, stopping after `limit`
-/// instructions when `Some`. `resolve` turns a branch / rip-relative target
+/// Decode `bytes` (loaded at `start_addr`) into rows with the given x86
+/// `bitness` (see `Target::code_bitness`), stopping after `limit`
+/// instructions when `Some`. `resolve` turns a branch / RIP-relative target
 /// into a symbol comment. The caller owns `formatter` (build it once with
 /// [`disasm_formatter`]) so it's reused across decode passes.
 pub fn decode_rows(
     bytes: &[u8],
     start_addr: u64,
     limit: Option<usize>,
+    bitness: u32,
     formatter: &mut NasmFormatter,
     resolve: impl Fn(u64) -> String,
 ) -> Vec<DisasmRow> {
-    let mut decoder = Decoder::with_ip(64, bytes, start_addr, DecoderOptions::NONE);
+    let start_ip = mask_code_address(bitness, start_addr);
+    let mut decoder = Decoder::with_ip(bitness, bytes, start_ip, DecoderOptions::NONE);
     let mut instruction = Instruction::default();
     let mut rows = Vec::new();
 
@@ -214,8 +225,8 @@ pub fn decode_rows(
         let mut tokens = Vec::new();
         formatter.format(&instruction, &mut TokenSink(&mut tokens));
 
-        let ip = instruction.ip();
-        let start_index = (ip - start_addr) as usize;
+        let ip = mask_code_address(bitness, instruction.ip());
+        let start_index = ip.wrapping_sub(start_ip) as usize;
         let instr_bytes = &bytes[start_index..start_index + instruction.len()];
         let hex = instr_bytes
             .iter()
@@ -224,12 +235,18 @@ pub fn decode_rows(
             .join(" ");
 
         let comment = if instruction.is_ip_rel_memory_operand() {
-            Some(resolve(instruction.ip_rel_memory_address()))
+            Some(resolve(mask_code_address(
+                bitness,
+                instruction.ip_rel_memory_address(),
+            )))
         } else if instruction.is_call_near()
             || instruction.is_jmp_near()
             || instruction.is_jcc_near()
         {
-            Some(resolve(instruction.near_branch_target()))
+            Some(resolve(mask_code_address(
+                bitness,
+                instruction.near_branch_target(),
+            )))
         } else {
             None
         };
@@ -570,7 +587,8 @@ pub fn max_instruction_bytes(arch: Arch) -> usize {
     }
 }
 
-/// Decode `count` instructions ending exactly at `end_addr`.
+/// Decode `count` instructions of the given x86 `bitness` ending exactly at
+/// `end_addr`.
 ///
 /// `bytes` spans `read_start..end_addr`. Try each starting offset because x86
 /// cannot decode backwards, preferring streams without invalid instructions.
@@ -581,6 +599,7 @@ pub fn decode_preceding(
     read_start: u64,
     end_addr: u64,
     count: usize,
+    bitness: u32,
     resolve: impl Fn(u64) -> String,
 ) -> Option<Vec<DisasmRow>> {
     if bytes.is_empty() || count == 0 {
@@ -588,9 +607,10 @@ pub fn decode_preceding(
     }
     let rows = match arch {
         Arch::Amd64 => {
-            let offset = preceding_start_offset(bytes, read_start, end_addr)?;
+            let offset = preceding_start_offset(bytes, read_start, end_addr, bitness)?;
             let start = read_start + offset as u64;
-            let mut decoder = Decoder::with_ip(64, &bytes[offset..], start, DecoderOptions::NONE);
+            let mut decoder =
+                Decoder::with_ip(bitness, &bytes[offset..], start, DecoderOptions::NONE);
             let mut instruction_starts = Vec::new();
             while decoder.can_decode() {
                 instruction_starts.push(decoder.ip());
@@ -607,6 +627,7 @@ pub fn decode_preceding(
                 &bytes[tail_offset..],
                 tail_start,
                 Some(count),
+                bitness,
                 &mut formatter,
                 resolve,
             )
@@ -631,7 +652,7 @@ pub fn decode_preceding(
             let Some(bytes) = bytes.get(offset..) else {
                 return false;
             };
-            let mut decoder = Decoder::with_ip(64, bytes, row.ip, DecoderOptions::NONE);
+            let mut decoder = Decoder::with_ip(bitness, bytes, row.ip, DecoderOptions::NONE);
             if !decoder.can_decode() {
                 return false;
             }
@@ -646,11 +667,16 @@ pub fn decode_preceding(
 /// Find the byte offset in the lookbehind window whose instruction stream ends
 /// exactly at `end_addr`, preferring one that decodes with no invalid
 /// instruction along the way.
-fn preceding_start_offset(bytes: &[u8], read_start: u64, end_addr: u64) -> Option<usize> {
+fn preceding_start_offset(
+    bytes: &[u8],
+    read_start: u64,
+    end_addr: u64,
+    bitness: u32,
+) -> Option<usize> {
     let mut first_candidate = None;
     for offset in 0..bytes.len() {
         let start = read_start + offset as u64;
-        let mut decoder = Decoder::with_ip(64, &bytes[offset..], start, DecoderOptions::NONE);
+        let mut decoder = Decoder::with_ip(bitness, &bytes[offset..], start, DecoderOptions::NONE);
         let mut valid = true;
         while decoder.can_decode() {
             let instruction = decoder.decode();
@@ -673,6 +699,7 @@ fn preceding_start_offset(bytes: &[u8], read_start: u64, end_addr: u64) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn classify_control_flow_instructions() {
@@ -700,6 +727,25 @@ mod tests {
             classify(&0xd503201fu32.to_le_bytes(), Arch::Arm64),
             ControlFlow::Other
         );
+    }
+
+    #[test]
+    fn x86_rows_mask_wrapping_branch_targets() {
+        let target = Cell::new(u64::MAX);
+        let mut formatter = disasm_formatter();
+        let rows = decode_rows(
+            &[0xe9, 0x0b, 0x00, 0x00, 0x00],
+            0xffff_fff0,
+            Some(1),
+            32,
+            &mut formatter,
+            |address| {
+                target.set(address);
+                String::new()
+            },
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(target.get(), 0);
     }
 
     #[test]

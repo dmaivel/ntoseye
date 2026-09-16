@@ -146,14 +146,22 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let peb = match resolve_peb(&self.ctx.target, dtb, None) {
+        // A WOW64 process's heaps hang off its 32-bit PEB; the 64-bit one
+        // lists only the wow64 layer's.
+        let wow64_peb = self
+            .ctx
+            .target
+            .current_process_info
+            .as_ref()
+            .and_then(|process| process.wow64_peb);
+        let peb = match wow64_peb.map_or_else(|| resolve_peb(&self.ctx.target, dtb, None), Ok) {
             Ok(peb) => peb,
             Err(error) => {
                 error!("{error}");
                 return Ok(());
             }
         };
-        let reader = HeapReader::new(&self.ctx.target, dtb);
+        let reader = HeapReader::new(&self.ctx.target, dtb, wow64_peb.is_some());
         let heaps = match reader.process_heaps(peb) {
             Ok(heaps) => heaps,
             Err(error) => {
@@ -680,7 +688,7 @@ fn print_block(block: &BlockMatch) {
                 } else {
                     "free"
                 },
-                ui::addr(block.0 + 0x10)
+                ui::addr(block.0 + entry.granule)
             );
         }
         BlockMatch::NtVirtual(block) => {

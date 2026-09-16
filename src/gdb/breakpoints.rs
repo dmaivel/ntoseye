@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
+use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;

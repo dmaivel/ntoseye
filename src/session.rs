@@ -927,6 +927,7 @@ impl Session {
         self.require_live_register_context()?;
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
+        self.target.registers = Some(self.register_map.to_hashmap(&regs));
         let pc = self.register_map.read_u64("rip", &regs)?;
         let dtb = self
             .register_map
@@ -955,16 +956,22 @@ impl Session {
             });
         }
 
-        let mut decoder = Decoder::with_ip(64, &bytes, pc, DecoderOptions::NONE);
+        let bitness = self.target.code_bitness(VirtAddr(pc));
+        let mut decoder = Decoder::with_ip(bitness, &bytes, pc, DecoderOptions::NONE);
         let instruction = decoder.decode();
         if instruction.code() == Code::INVALID {
             return Err(Error::DebugInfo(format!(
                 "failed to decode instruction at {pc:#x}"
             )));
         }
+        let next_ip = if bitness == 32 {
+            instruction.next_ip() & u64::from(u32::MAX)
+        } else {
+            instruction.next_ip()
+        };
         Ok(CurrentInstruction {
             is_call: instruction.mnemonic() == Mnemonic::Call,
-            next_ip: instruction.next_ip(),
+            next_ip,
         })
     }
 
@@ -1607,6 +1614,7 @@ impl Session {
                 .format_closest_symbol_for_address(dtb, VirtAddr(target))
                 .unwrap_or_default()
         };
+        let bitness = self.target.code_bitness(addr);
         match self.target.arch() {
             Arch::Amd64 => {
                 let mut formatter = disasm_formatter();
@@ -1614,6 +1622,7 @@ impl Session {
                     &buf,
                     addr.0,
                     Some(count),
+                    bitness,
                     &mut formatter,
                     resolve,
                 ))

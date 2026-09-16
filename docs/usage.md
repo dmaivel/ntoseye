@@ -336,10 +336,18 @@ Attach reclaims entries that no live session owns, restores displaced instructio
 - `!peb [address]` (`peb`) - Decode the attached process environment block and its loader list.
 - `!teb [address]` (`teb`) - Decode a thread environment block.
 - `!dlls [-c <address>]` (`dlls`) - List modules from the attached process loader lists.
-- `!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]` (`heap`) - Summarize, walk, or search the attached process's user-mode heaps. NT heaps are decoded through `_HEAP.Encoding`, with legacy-LFH blocks resolved through their user block regions; segment heaps decode VS chunks, LFH blocks, page allocations, and large allocations with the keys in `ntdll!RtlpHpHeapGlobals`. `-a` lists every entry, chunk, and block; `-x` finds the block containing an address. A heap is named by its index in the PEB list or its address. WOW64 heaps are not decoded.
+- `!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]` (`heap`) - Summarize, walk, or search the attached process's user-mode heaps. NT heaps are decoded through `_HEAP.Encoding`, with legacy-LFH blocks resolved through their user block regions; segment heaps decode VS chunks, LFH blocks, page allocations, and large allocations with the keys in `ntdll!RtlpHpHeapGlobals`. `-a` lists every entry, chunk, and block; `-x` finds the block containing an address. A heap is named by its index in the PEB list or its address. In a WOW64 process the heaps are the 32-bit ones, decoded with `ntdll32`'s layouts and keys.
 - `!gle` (`gle`) - Display the current thread's last Win32 and NT status values.
 - `!vad [pid|eprocess]` (`vmmap`) - Display a process's VAD tree; defaults to the selected process context. `vmmap [address|filter]` is the flat region view.
 - `!chkimg [-d] [-v] [-nospec] <module>` (`chkimg`) - Compare executable module sections with the cached on-disk image after relocation. Known kernel self-patches (import optimization, retpoline, `KiPatchSelf` retargets) are counted separately; `-nospec` drops them from the report.
+
+### WOW64 processes
+
+A 32-bit process on an x64 kernel (`_EPROCESS.WoW64Process` set) is marked `WOW64` by `.process`, in the `Wow64` column of `!process`/`ps`, and by its `Wow64Peb` in process detail. Attaching to one loads both loader lists: the native `ntdll` and `wow64*.dll`, and the 32-bit modules, whose symbols come from their x86 PDBs. The 32-bit ntdll is addressed as `ntdll32` (`x ntdll32!Rtl*`, `bu ntdll32!RtlAllocateHeap`); every other 32-bit module keeps its name. x86 public symbols are shown undecorated (`RtlAllocateHeap`, not `_RtlAllocateHeap@12`).
+
+Types follow the same rule: a bare name resolves the kernel's layout, `ntdll32!_PEB` the 32-bit one, and the nested types of a 32-bit layout stay 32-bit (`dt ntdll32!_LDR_DATA_TABLE_ENTRY <address>` reads 4-byte pointers and `_UNICODE_STRING`s). `!peb` adds the `PEB32` block and its process parameters, `!teb` the `TEB32` behind `WowTebOffset`, `!gle` the 32-bit TEB's last error, and `!heap` walks the 32-bit heaps.
+
+Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); `.effmach x86|amd64|.` overrides the choice. Not supported: walking the x86 user stack. `k` on a WOW64 thread ends at the `wow64cpu` transition frame; the 32-bit frames beyond it are not unwound.
 
 ## Security
 

@@ -2639,13 +2639,14 @@ impl Server {
     ) -> result::Result<Vec<DisassembledRow>, String> {
         let session = self.session()?;
         let arch = session.target.arch();
+        let bitness = session.target.code_bitness(VirtAddr(address));
         let window = count.saturating_mul(max_instruction_bytes(arch));
         let start = address.saturating_sub(window as u64);
         let mut bytes = vec![0u8; (address - start) as usize];
         if bytes.is_empty() || session.read_masked(VirtAddr(start), &mut bytes).is_err() {
             return Ok(Vec::new());
         }
-        let rows = decode_preceding(arch, &bytes, start, address, count, |target| {
+        let rows = decode_preceding(arch, &bytes, start, address, count, bitness, |target| {
             format!("{target:#x}")
         });
         Ok(rows
@@ -3317,6 +3318,7 @@ mod tests {
             1,
             vec![TypeInfo {
                 name: "_NODE".to_string(),
+                pointer_size: 8,
                 size: 8,
                 fields: HashMap::new(),
             }],
@@ -3838,6 +3840,7 @@ mod tests {
             1,
             vec![TypeInfo {
                 name: "_NODE".to_string(),
+                pointer_size: 8,
                 size: 24,
                 fields: fields.into_iter().collect(),
             }],

@@ -437,6 +437,7 @@ mod tests {
         add("SegSs", 0x80, 2);
         TypeInfo {
             name: KTRAP_FRAME_TYPE.to_string(),
+            pointer_size: 8,
             size: 0x88,
             fields,
         }
@@ -499,6 +500,7 @@ mod tests {
         add("Wvr", 0x138, 2 * 8);
         let layout = TypeInfo {
             name: KTRAP_FRAME_TYPE.to_string(),
+            pointer_size: 8,
             size: 0x148,
             fields,
         };
@@ -597,6 +599,7 @@ mod tests {
         );
         let layout = TypeInfo {
             name: KSWITCH_FRAME_TYPE.to_string(),
+            pointer_size: 8,
             size: 0x40,
             fields,
         };
@@ -617,6 +620,7 @@ mod tests {
     fn switch_frame_without_return_is_explicitly_unusable() {
         let layout = TypeInfo {
             name: KSWITCH_FRAME_TYPE.to_string(),
+            pointer_size: 8,
             size: 8,
             fields: HashMap::new(),
         };

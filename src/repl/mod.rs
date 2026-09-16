@@ -938,6 +938,7 @@ mod tests {
             vec![
                 TypeInfo {
                     name: "_NODE".to_string(),
+                    pointer_size: 8,
                     size: 0x10,
                     fields: [(
                         "Value".to_string(),
@@ -954,6 +955,7 @@ mod tests {
                 // offset pad gives way to the natural width.
                 TypeInfo {
                     name: "_WIDE".to_string(),
+                    pointer_size: 8,
                     size: 0x1160,
                     fields: [(
                         "Far".to_string(),

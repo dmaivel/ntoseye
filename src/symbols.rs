@@ -1,7 +1,7 @@
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    guest::{ModuleInfo, WinObject, read_pe_header_page},
+    guest::{ModuleInfo, WinObject, read_pe_header_page, size_of_image},
     memory,
     types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
@@ -13,11 +13,12 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use pdb2::{FallibleIterator, PrimitiveKind, TypeData, TypeFinder, TypeIndex};
 use pelite::{
+    PeFile, PeView, Wrap,
     image::{
         GUID, IMAGE_DEBUG_CV_INFO_PDB70, IMAGE_DEBUG_DIRECTORY, IMAGE_DEBUG_TYPE_CODEVIEW,
         IMAGE_DIRECTORY_ENTRY_DEBUG,
     },
-    pe64::{Pe, PeFile, PeView, debug::CodeView},
+    pe64::debug::CodeView,
 };
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
@@ -124,6 +125,9 @@ pub struct SymbolStore {
 
     mmaps: DashMap<u128, Arc<Mmap>>,
     pdb_ages: DashMap<u128, u32>,
+    /// GUID -> pointer width of the PDB's target machine (see
+    /// [`TypeInfo::pointer_size`]).
+    pdb_pointer_sizes: DashMap<u128, u8>,
     index_build_results: DashMap<u128, Arc<OnceLock<std::result::Result<(), String>>>>,
     index: DashMap<u128, SymbolIndex>,
     index_types: DashMap<u128, SymbolIndex>,
@@ -870,6 +874,7 @@ mod tests {
             SymbolStore::module_key(dtb, base),
             LoadedModule {
                 name: "driver.sys".to_string(),
+                short_name: "driver".to_string(),
                 guid: 1,
                 base_address: base,
                 size: 0x1000,
@@ -917,6 +922,7 @@ mod tests {
             SymbolStore::module_key(dtb, base),
             LoadedModule {
                 name: "driver.sys".to_string(),
+                short_name: "driver".to_string(),
                 guid: 1,
                 base_address: base,
                 size: 0x1000,
@@ -1102,6 +1108,7 @@ mod tests {
             (dtb, 0x140000000),
             LoadedModule {
                 name: "private.exe".to_string(),
+                short_name: "private".to_string(),
                 guid,
                 base_address: VirtAddr(0x140000000),
                 size: 0x1000,
@@ -1159,6 +1166,7 @@ mod tests {
             (dtb, base.0),
             LoadedModule {
                 name: "reload.dll".to_string(),
+                short_name: "reload".to_string(),
                 guid: 0x99,
                 base_address: base,
                 size: 0x1000,
@@ -1181,6 +1189,7 @@ mod tests {
         let base = VirtAddr(0x180000000);
         let module = |name: &str, guid, dtb| LoadedModule {
             name: name.to_string(),
+            short_name: ModuleInfo::derive_short_name(name),
             guid,
             base_address: base,
             size: 0x1000,
@@ -1200,6 +1209,60 @@ mod tests {
     }
 
     #[test]
+    fn type_lookup_prefers_the_kernel_unless_qualified() {
+        let store = SymbolStore::new();
+        let (kernel_dtb, dtb) = (0x2000, 0x1000);
+        let (kernel, ntdll32) = (0x22, 0x33);
+        let layout = |name: &str, size| TypeInfo {
+            name: name.to_string(),
+            size,
+            fields: HashMap::new(),
+            pointer_size: 8,
+        };
+        store.inject_module_for_test(kernel, vec![layout("_PEB", 2008)], &[]);
+        store.inject_module_for_test(ntdll32, vec![layout("_PEB", 1168)], &[]);
+        for (name, guid, module_dtb, base) in [
+            ("ntoskrnl.exe", kernel, kernel_dtb, 0xffff_f800_0000_0000),
+            ("ntdll.dll", ntdll32, dtb, 0x7773_0000),
+        ] {
+            let mut module = ModuleInfo::new(name.to_string(), VirtAddr(base), 0x1000);
+            if guid == ntdll32 {
+                module.short_name.push_str("32");
+            }
+            store.modules.insert(
+                (module_dtb, base),
+                LoadedModule {
+                    name: module.name,
+                    short_name: module.short_name,
+                    guid,
+                    base_address: VirtAddr(base),
+                    size: 0x1000,
+                    dtb: module_dtb,
+                },
+            );
+        }
+        store.set_kernel(Some(kernel), kernel_dtb);
+
+        let size = |name: &str| store.find_type_across_modules(dtb, name).map(|t| t.size);
+        assert_eq!(size("_PEB"), Some(2008));
+        assert_eq!(size("nt!_PEB"), Some(2008));
+        assert_eq!(size("ntdll32!_PEB"), Some(1168));
+        assert_eq!(size("ntdll!_PEB"), None);
+    }
+
+    #[test]
+    fn x86_public_names_lose_their_calling_convention_decoration() {
+        assert_eq!(undecorate_x86("_RtlAllocateHeap@12"), "RtlAllocateHeap");
+        assert_eq!(undecorate_x86("_RtlpLFHKey"), "RtlpLFHKey");
+        assert_eq!(undecorate_x86("@RtlpFastCall@8"), "RtlpFastCall");
+        assert_eq!(undecorate_x86("_wcslen"), "wcslen");
+        assert_eq!(
+            undecorate_x86("??_C@_0BA@HKDEHBAO@RtlAllocateHeap@"),
+            "??_C@_0BA@HKDEHBAO@RtlAllocateHeap@"
+        );
+    }
+
+    #[test]
     fn merged_indexes_cover_the_selected_address_space_only() {
         let store = SymbolStore::new();
         let kernel_dtb = 0x2000;
@@ -1210,6 +1273,7 @@ mod tests {
                 (dtb, base),
                 LoadedModule {
                     name: name.to_string(),
+                    short_name: ModuleInfo::derive_short_name(name),
                     guid,
                     base_address: VirtAddr(base),
                     size: 0x1000,
@@ -1422,6 +1486,7 @@ impl ModuleSymbolLoad {
     fn loaded_module(&self) -> LoadedModule {
         LoadedModule {
             name: self.module.name.clone(),
+            short_name: self.module.short_name.clone(),
             guid: self.guid,
             base_address: self.module.base_address,
             size: self.module.size,
@@ -1778,6 +1843,10 @@ pub struct TypeInfo {
     pub name: String,
     pub size: usize,
     pub fields: HashMap<String, FieldInfo>,
+    /// Width of a pointer in the PDB this layout came from: 4 for a 32-bit
+    /// module (a WOW64 process's ntdll), 8 otherwise. Pointer fields are
+    /// already sized by it; list links and other implicit pointers use it.
+    pub pointer_size: u8,
 }
 
 impl TypeInfo {
@@ -1861,6 +1930,9 @@ pub fn le_uint(slice: &[u8]) -> u64 {
 #[derive(Debug, Clone)]
 pub struct LoadedModule {
     pub name: String,
+    /// The `module!` qualifier (`nt`, `ntdll`, `ntdll32`); see
+    /// [`ModuleInfo::short_name`].
+    pub short_name: String,
     pub guid: u128,
     pub base_address: VirtAddr,
     pub size: u32,
@@ -1880,6 +1952,23 @@ impl LoadedModule {
 impl Default for SymbolStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The C name under an x86 public symbol's calling-convention decoration:
+/// `_name` (cdecl), `_name@N` (stdcall), `@name@N` (fastcall). C++ names
+/// (`?...`) are left as they are, as on x64, where C names are undecorated.
+fn undecorate_x86(name: &str) -> &str {
+    let Some(bare) = name.strip_prefix('_').or_else(|| name.strip_prefix('@')) else {
+        return name;
+    };
+    match bare.rsplit_once('@') {
+        Some((stem, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            stem
+        }
+        _ => bare,
     }
 }
 
@@ -2120,6 +2209,7 @@ impl SymbolStore {
             pdbs: DashMap::new(),
             mmaps: DashMap::new(),
             pdb_ages: DashMap::new(),
+            pdb_pointer_sizes: DashMap::new(),
             index_build_results: DashMap::new(),
             index: DashMap::new(),
             index_types: DashMap::new(),
@@ -2232,6 +2322,24 @@ impl SymbolStore {
         );
     }
 
+    /// Register a module with `short_name` in `dtb` so `short_name!` lookups
+    /// reach the layouts injected under `guid`.
+    #[cfg(test)]
+    pub fn register_module_for_test(&self, guid: u128, short_name: &str, dtb: Dtb) {
+        let base = VirtAddr(0x1000_0000 * (guid as u64 + 1));
+        self.modules.insert(
+            Self::module_key(dtb, base),
+            LoadedModule {
+                name: format!("{short_name}.dll"),
+                short_name: short_name.to_string(),
+                guid,
+                base_address: base,
+                size: 0x1000,
+                dtb,
+            },
+        );
+    }
+
     /// Register a loaded module and its C13 source-line records without a PDB,
     /// for tests that drive line-granular stepping over synthetic memory. Each
     /// record is `(rva, length, line)`; a `None` length means the next record
@@ -2250,6 +2358,7 @@ impl SymbolStore {
             Self::module_key(dtb, base),
             LoadedModule {
                 name: "driver.sys".to_string(),
+                short_name: "driver".to_string(),
                 guid,
                 base_address: base,
                 size,
@@ -2657,6 +2766,7 @@ impl SymbolStore {
                     module_key,
                     LoadedModule {
                         name: name.to_string(),
+                        short_name: ModuleInfo::derive_short_name(name),
                         guid,
                         base_address: object.base_address,
                         size: object.binary_size().try_into().unwrap_or(u32::MAX),
@@ -2701,6 +2811,7 @@ impl SymbolStore {
                 module_key,
                 LoadedModule {
                     name: name.to_string(),
+                    short_name: ModuleInfo::derive_short_name(name),
                     guid,
                     base_address,
                     size: size_of_image,
@@ -2822,12 +2933,13 @@ impl SymbolStore {
         Ok(())
     }
 
-    fn download_job_from_debug<'a, P>(
+    fn download_job_from_debug<'a, P32, P64>(
         &self,
-        debug: &pelite::pe64::debug::Debug<'a, P>,
+        debug: &Wrap<pelite::pe32::debug::Debug<'a, P32>, pelite::pe64::debug::Debug<'a, P64>>,
     ) -> Result<Option<(DownloadJob, u128)>>
     where
-        P: Pe<'a>,
+        P32: pelite::pe32::Pe<'a>,
+        P64: pelite::pe64::Pe<'a>,
     {
         let mut first_error = None;
 
@@ -2918,10 +3030,7 @@ impl SymbolStore {
     ) -> Result<(u32, u32)> {
         let header_buf = read_pe_header_page(base_address, memory)?;
         let view = PeView::from_bytes(&header_buf)?;
-        Ok((
-            view.file_header().TimeDateStamp,
-            view.optional_header().SizeOfImage,
-        ))
+        Ok((view.file_header().TimeDateStamp, size_of_image(&view)))
     }
 
     fn ensure_index_built(&self, guid: u128) -> Result<()> {
@@ -2967,6 +3076,10 @@ impl SymbolStore {
             age: info.age,
         };
         expected.matches(actual).map_err(Error::DebugInfo)?;
+        let pointer_size = match pdb.debug_information().and_then(|dbi| dbi.machine_type()) {
+            Ok(pdb2::MachineType::X86 | pdb2::MachineType::Arm | pdb2::MachineType::ArmNT) => 4,
+            _ => 8,
+        };
 
         // One loader wins per guid; replacing an existing entry would unmap
         // pages the stored PDB's cursor still points into.
@@ -2993,6 +3106,7 @@ impl SymbolStore {
             Entry::Vacant(entry) => {
                 self.mmaps.insert(expected.guid, mmap);
                 self.pdb_ages.insert(expected.guid, actual.age);
+                self.pdb_pointer_sizes.insert(expected.guid, pointer_size);
                 entry.insert(pdb.into());
             }
         }
@@ -3034,7 +3148,7 @@ impl SymbolStore {
             .modules
             .iter()
             .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
-            .map(|module| (module.guid, module.name.clone()))
+            .map(|module| (module.guid, module.short_name.clone()))
             .collect();
         let progress = ProgressBar::new((modules.len() + 1) as u64);
         progress.set_style(task_progress_style());
@@ -3042,16 +3156,13 @@ impl SymbolStore {
 
         let per_module: Vec<Vec<String>> = modules
             .into_par_iter()
-            .map(|(guid, name)| {
+            .map(|(guid, short)| {
                 let names = match source.get(&guid) {
-                    Some(index) if qualify => {
-                        let short = ModuleInfo::derive_short_name(&name);
-                        index
-                            .names
-                            .iter()
-                            .map(|name| format!("{short}!{name}"))
-                            .collect()
-                    }
+                    Some(index) if qualify => index
+                        .names
+                        .iter()
+                        .map(|name| format!("{short}!{name}"))
+                        .collect(),
                     Some(index) => index.names.clone(),
                     None => Vec::new(),
                 };
@@ -3074,27 +3185,45 @@ impl SymbolStore {
         SymbolIndex::from_names(all_strings)
     }
 
-    pub fn find_type_across_modules(&self, dtb: Dtb, type_name: &str) -> Option<Arc<TypeInfo>> {
-        // Kernel definitions win over same-named user-mode types (e.g. ntdll).
-        //
-        // NOTE this hands a WOW64 (32-bit) process the kernel's 64-bit layout
-        // for a shared type name instead of its own 32-bit one; revisit with
-        // `module!type` qualification if that ever matters
+    /// PDBs a type name resolves against from `dtb`, in preference order. A
+    /// `module!` qualifier names the module (`nt` is the kernel); a bare name
+    /// tries the kernel first, then the modules of that address space, so a
+    /// name both define (`_PEB`, `_LIST_ENTRY`) gets the kernel's layout. A
+    /// WOW64 process's 32-bit layouts are reached by qualifier (`ntdll32!_PEB`),
+    /// and their nested types carry it (see `nested_type_prefix`).
+    fn type_lookup_guids<'n>(&self, dtb: Dtb, type_name: &'n str) -> (Vec<u128>, &'n str) {
         let kernel_guid = self.kernel_guid();
-        if let Some(guid) = kernel_guid
-            && let Some(type_info) = self.dump_struct_with_types(guid, type_name)
-        {
-            return Some(type_info);
-        }
-        for module in self.modules.iter() {
-            if module.dtb != dtb || Some(module.guid) == kernel_guid {
-                continue;
+        if let Some((module, name)) = type_name.rsplit_once('!') {
+            let mut guids: Vec<u128> = self
+                .modules
+                .iter()
+                .filter(|entry| {
+                    self.module_in_scope(entry, dtb)
+                        && entry.short_name.eq_ignore_ascii_case(module)
+                })
+                .map(|entry| entry.guid)
+                .collect();
+            if module.eq_ignore_ascii_case("nt") {
+                guids.extend(kernel_guid);
             }
-            if let Some(type_info) = self.dump_struct_with_types(module.guid, type_name) {
-                return Some(type_info);
-            }
+            guids.dedup();
+            return (guids, name);
         }
-        None
+        let mut guids: Vec<u128> = kernel_guid.into_iter().collect();
+        guids.extend(
+            self.modules
+                .iter()
+                .filter(|module| module.dtb == dtb && Some(module.guid) != kernel_guid)
+                .map(|module| module.guid),
+        );
+        (guids, type_name)
+    }
+
+    pub fn find_type_across_modules(&self, dtb: Dtb, type_name: &str) -> Option<Arc<TypeInfo>> {
+        let (guids, name) = self.type_lookup_guids(dtb, type_name);
+        guids
+            .into_iter()
+            .find_map(|guid| self.dump_struct_with_types(guid, name))
     }
 
     /// Variants `(name, value)` of an enum, searched across the modules in the
@@ -3104,23 +3233,10 @@ impl SymbolStore {
         dtb: Dtb,
         enum_name: &str,
     ) -> Option<Vec<(String, i64)>> {
-        // Kernel-first for the same reason as `find_type_across_modules`: enum
-        // definitions don't depend on the attached address space.
-        let kernel_guid = self.kernel_guid();
-        if let Some(guid) = kernel_guid
-            && let Some(variants) = self.enum_variants(guid, enum_name)
-        {
-            return Some(variants);
-        }
-        for module in self.modules.iter() {
-            if module.dtb != dtb || Some(module.guid) == kernel_guid {
-                continue;
-            }
-            if let Some(variants) = self.enum_variants(module.guid, enum_name) {
-                return Some(variants);
-            }
-        }
-        None
+        let (guids, name) = self.type_lookup_guids(dtb, enum_name);
+        guids
+            .into_iter()
+            .find_map(|guid| self.enum_variants(guid, name))
     }
 
     /// Error text for a name that didn't resolve as a struct/union: point at the
@@ -3150,8 +3266,7 @@ impl SymbolStore {
             .iter()
             .find(|module| {
                 self.module_in_scope(module, dtb)
-                    && ModuleInfo::derive_short_name(&module.name)
-                        .eq_ignore_ascii_case(module_short)
+                    && module.short_name.eq_ignore_ascii_case(module_short)
             })
             .map(|module| module.base_address)
     }
@@ -3163,7 +3278,7 @@ impl SymbolStore {
             .modules
             .iter()
             .filter(|module| self.module_in_scope(module, dtb))
-            .map(|module| ModuleInfo::derive_short_name(&module.name))
+            .map(|module| module.short_name.clone())
             .filter(|short| {
                 short
                     .get(..prefix.len())
@@ -3188,15 +3303,14 @@ impl SymbolStore {
             if !self.module_in_scope(&module, dtb) {
                 continue;
             }
-            let short = ModuleInfo::derive_short_name(&module.name);
             if let Some(filter) = module_filter
-                && !short.eq_ignore_ascii_case(filter)
+                && !module.short_name.eq_ignore_ascii_case(filter)
             {
                 continue;
             }
             for record in self.symbol_records(module.guid, name) {
                 candidates.push(SymbolCandidate {
-                    module: short.clone(),
+                    module: module.short_name.clone(),
                     address: module.base_address + u64::from(record.rva),
                     visibility: record.visibility,
                     compiland: record.compiland,
@@ -3272,7 +3386,7 @@ impl SymbolStore {
             if !self.module_in_scope(&module, dtb) {
                 continue;
             }
-            if !ModuleInfo::derive_short_name(&module.name).eq_ignore_ascii_case(module_short) {
+            if !module.short_name.eq_ignore_ascii_case(module_short) {
                 continue;
             }
             if let Some(index) = self.index.get(&module.guid) {
@@ -3296,8 +3410,7 @@ impl SymbolStore {
                 && let Some((sym_name, offset)) =
                     self.closest_symbol(module.guid, module.base_address, address)
             {
-                let short_name = ModuleInfo::derive_short_name(&module.name);
-                return Some((short_name, sym_name, offset));
+                return Some((module.short_name.clone(), sym_name, offset));
             }
         }
         None
@@ -3386,7 +3499,8 @@ impl SymbolStore {
         is_parameter: bool,
         location: LocalVariableLocation,
     ) -> ProcedureLocal {
-        let (type_name, type_data) = match self.resolve_type(guid, finder, type_index) {
+        let prefix = self.nested_type_prefix(guid);
+        let (type_name, type_data) = match self.resolve_type(guid, finder, type_index, &prefix) {
             Ok(parsed) => (parsed.to_string(), parsed),
             Err(_) => (format!("type({:#x})", type_index.0), ParsedType::Unknown),
         };
@@ -3394,7 +3508,7 @@ impl SymbolStore {
             name,
             type_name,
             type_data,
-            byte_size: self.type_size(guid, finder, type_index, 8).ok(),
+            byte_size: self.type_size(guid, finder, type_index).ok(),
             is_parameter,
             location,
         }
@@ -3945,12 +4059,17 @@ impl SymbolStore {
 
         // Public records have intentional precedence over duplicate private
         // names, regardless of module stream order.
+        let x86 = self.pointer_size(guid) == 4;
         let symbol_table = pdb_lock.global_symbols()?;
         let mut symbols = symbol_table.iter();
         while let Some(symbol) = symbols.next()? {
             match symbol.parse() {
                 Ok(pdb2::SymbolData::Public(data)) => {
-                    let name: String = data.name.to_string().into();
+                    let name: String = if x86 {
+                        undecorate_x86(&data.name.to_string()).to_string()
+                    } else {
+                        data.name.to_string().into()
+                    };
                     if let Some(rva) = data.offset.to_rva(&address_map) {
                         insert_symbol_rva(
                             &mut rvas,
@@ -4187,13 +4306,33 @@ impl SymbolStore {
             .unwrap_or(0)
     }
 
+    /// Pointer width of the PDB `guid` (see [`TypeInfo::pointer_size`]).
+    pub fn pointer_size(&self, guid: u128) -> u8 {
+        self.pdb_pointer_sizes.get(&guid).map_or(8, |size| *size)
+    }
+
+    /// The `module!` prefix nested type names of PDB `guid` carry so that
+    /// expanding them stays in the same PDB. Only a 32-bit module's layouts
+    /// need it: its `_LIST_ENTRY` or `_UNICODE_STRING` differs from the
+    /// kernel's, which an unqualified lookup would otherwise prefer.
+    fn nested_type_prefix(&self, guid: u128) -> String {
+        if self.pointer_size(guid) == 8 {
+            return String::new();
+        }
+        self.modules
+            .iter()
+            .find(|module| module.guid == guid)
+            .map(|module| format!("{}!", module.short_name))
+            .unwrap_or_default()
+    }
+
     fn type_size<'p>(
         &self,
         guid: u128,
         finder: &pdb2::TypeFinder<'p>,
         index: pdb2::TypeIndex,
-        ptr_size: u64,
     ) -> pdb2::Result<u64> {
+        let ptr_size = u64::from(self.pointer_size(guid));
         let item = finder.find(index)?;
         match item.parse()? {
             pdb2::TypeData::Primitive(data) => {
@@ -4250,20 +4389,14 @@ impl SymbolStore {
                 data.size
             }),
             pdb2::TypeData::Pointer(_) => Ok(ptr_size),
-            pdb2::TypeData::Modifier(data) => {
-                self.type_size(guid, finder, data.underlying_type, ptr_size)
-            }
-            pdb2::TypeData::Enumeration(data) => {
-                self.type_size(guid, finder, data.underlying_type, ptr_size)
-            }
+            pdb2::TypeData::Modifier(data) => self.type_size(guid, finder, data.underlying_type),
+            pdb2::TypeData::Enumeration(data) => self.type_size(guid, finder, data.underlying_type),
             pdb2::TypeData::Array(data) => {
                 // pdb2 reports cumulative byte sizes per dimension (`int[4][4]`
                 // is `[16, 64]`), so the last entry is the whole array.
                 Ok(data.dimensions.last().map_or(0, |&bytes| u64::from(bytes)))
             }
-            pdb2::TypeData::Bitfield(data) => {
-                self.type_size(guid, finder, data.underlying_type, ptr_size)
-            }
+            pdb2::TypeData::Bitfield(data) => self.type_size(guid, finder, data.underlying_type),
             pdb2::TypeData::Procedure(_) => Ok(ptr_size),
             _ => Ok(0),
         }
@@ -4274,6 +4407,7 @@ impl SymbolStore {
         guid: u128,
         finder: &TypeFinder<'p>,
         index: TypeIndex,
+        prefix: &str,
     ) -> pdb2::Result<ParsedType> {
         let item = finder.find(index)?;
         let parsed = item.parse()?;
@@ -4309,28 +4443,29 @@ impl SymbolStore {
                 }
             }
 
-            TypeData::Class(data) => Ok(ParsedType::Struct(data.name.to_string().into_owned())),
-            TypeData::Union(data) => Ok(ParsedType::Union(data.name.to_string().into_owned())),
-            TypeData::Enumeration(data) => Ok(ParsedType::Enum(data.name.to_string().into_owned())),
+            TypeData::Class(data) => Ok(ParsedType::Struct(format!("{prefix}{}", data.name))),
+            TypeData::Union(data) => Ok(ParsedType::Union(format!("{prefix}{}", data.name))),
+            TypeData::Enumeration(data) => Ok(ParsedType::Enum(format!("{prefix}{}", data.name))),
 
             TypeData::Pointer(data) => {
-                let inner = self.resolve_type(guid, finder, data.underlying_type)?;
+                let inner = self.resolve_type(guid, finder, data.underlying_type, prefix)?;
                 Ok(ParsedType::Pointer(Box::new(inner)))
             }
 
             TypeData::Array(data) => {
-                let inner = self.resolve_type(guid, finder, data.element_type)?;
+                let inner = self.resolve_type(guid, finder, data.element_type, prefix)?;
                 // Total byte size (see `type_size`) over the element size gives
                 // the flattened element count.
                 let bytes = data.dimensions.last().copied().unwrap_or(0);
-                let sizeof_type =
-                    (self.type_size(guid, finder, data.element_type, 8)? as u32).max(1);
+                let sizeof_type = (self.type_size(guid, finder, data.element_type)? as u32).max(1);
                 Ok(ParsedType::Array(Box::new(inner), bytes / sizeof_type))
             }
 
-            TypeData::Modifier(data) => self.resolve_type(guid, finder, data.underlying_type),
+            TypeData::Modifier(data) => {
+                self.resolve_type(guid, finder, data.underlying_type, prefix)
+            }
             TypeData::Bitfield(data) => {
-                let inner = self.resolve_type(guid, finder, data.underlying_type)?;
+                let inner = self.resolve_type(guid, finder, data.underlying_type, prefix)?;
 
                 Ok(ParsedType::Bitfield {
                     underlying: Box::new(inner),
@@ -4341,7 +4476,7 @@ impl SymbolStore {
 
             pdb2::TypeData::Procedure(data) => {
                 let return_type = if let Some(idx) = data.return_type {
-                    self.resolve_type(guid, finder, idx)?
+                    self.resolve_type(guid, finder, idx, prefix)?
                 } else {
                     ParsedType::Primitive("void".to_string())
                 };
@@ -4351,7 +4486,7 @@ impl SymbolStore {
                     && let Ok(pdb2::TypeData::ArgumentList(list)) = arg_item.parse()
                 {
                     for arg_idx in list.arguments {
-                        let arg_type = self.resolve_type(guid, finder, arg_idx)?;
+                        let arg_type = self.resolve_type(guid, finder, arg_idx, prefix)?;
                         args.push(arg_type);
                     }
                 }
@@ -4368,6 +4503,7 @@ impl SymbolStore {
         guid: u128,
         type_finder: &pdb2::TypeFinder<'p>,
         field_index: pdb2::TypeIndex,
+        prefix: &str,
         fields_map: &mut HashMap<String, FieldInfo>,
     ) -> pdb2::Result<()> {
         let field_item = type_finder.find(field_index)?;
@@ -4378,13 +4514,14 @@ impl SymbolStore {
                     let name = member.name.to_string().into_owned();
                     let offset = member.offset;
 
-                    let type_info = self.resolve_type(guid, type_finder, member.field_type)?;
+                    let type_info =
+                        self.resolve_type(guid, type_finder, member.field_type, prefix)?;
 
                     fields_map.insert(
                         name,
                         FieldInfo {
                             offset: offset as u32,
-                            size: self.type_size(guid, type_finder, member.field_type, 8)?,
+                            size: self.type_size(guid, type_finder, member.field_type)?,
                             type_data: type_info,
                         },
                     );
@@ -4392,7 +4529,7 @@ impl SymbolStore {
             }
 
             if let Some(more_fields) = list.continuation {
-                self.process_field_list(guid, type_finder, more_fields, fields_map)?;
+                self.process_field_list(guid, type_finder, more_fields, prefix, fields_map)?;
             }
         }
         Ok(())
@@ -4431,16 +4568,18 @@ impl SymbolStore {
             type_finder.update(&iter);
         }
         let mut fields = HashMap::new();
-        let parsed = match self.process_field_list(guid, &type_finder, field_index, &mut fields) {
-            Err(pdb2::Error::TypeNotIndexed(..)) => {
-                while iter.next().ok()?.is_some() {
-                    type_finder.update(&iter);
+        let prefix = self.nested_type_prefix(guid);
+        let parsed =
+            match self.process_field_list(guid, &type_finder, field_index, &prefix, &mut fields) {
+                Err(pdb2::Error::TypeNotIndexed(..)) => {
+                    while iter.next().ok()?.is_some() {
+                        type_finder.update(&iter);
+                    }
+                    fields.clear();
+                    self.process_field_list(guid, &type_finder, field_index, &prefix, &mut fields)
                 }
-                fields.clear();
-                self.process_field_list(guid, &type_finder, field_index, &mut fields)
-            }
-            other => other,
-        };
+                other => other,
+            };
         if parsed.is_err() {
             self.type_cache.insert(cache_key, None);
             return None;
@@ -4450,6 +4589,7 @@ impl SymbolStore {
             name: struct_name.into(),
             size: size as usize,
             fields,
+            pointer_size: self.pointer_size(guid),
         });
         self.type_cache
             .insert(cache_key, Some(Arc::clone(&type_info)));

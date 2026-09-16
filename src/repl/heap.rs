@@ -44,7 +44,6 @@ const RANGE_FIRST: u8 = 0x02;
 const RANGE_VS: u8 = 0x04;
 const RANGE_SUBSEGMENT: u8 = 0x08;
 
-const HEAP_GRANULE: u64 = 16;
 const PAGE: u64 = 0x1000;
 /// Bound on entries decoded from one NT segment, VS subsegment, or LFH
 /// subsegment before the walk gives up on a corrupt chain.
@@ -121,25 +120,57 @@ impl Layout {
     }
 }
 
-/// Everything a walk needs: the process address space and the kernel PDB's
-/// heap layouts (ntdll and ntoskrnl share the heap source, so the layouts
-/// match the build).
+/// Everything a walk needs: the process address space and the heap layouts.
+/// A native process uses the kernel PDB's (ntdll and ntoskrnl share the heap
+/// source, so the layouts match the build); a WOW64 process's heaps are the
+/// 32-bit ntdll's, so its layouts, keys, and pointer width come from
+/// `ntdll32`.
 pub struct HeapReader<'a> {
     target: &'a Target,
     dtb: Dtb,
     memory: AddressSpace<'a, PhysMem>,
+    ntdll: &'static str,
+    pointer_size: usize,
 }
 
 impl<'a> HeapReader<'a> {
-    pub fn new(target: &'a Target, dtb: Dtb) -> Self {
+    pub fn new(target: &'a Target, dtb: Dtb, wow64: bool) -> Self {
         Self {
             target,
             dtb,
             memory: target.address_space(dtb),
+            ntdll: if wow64 { "ntdll32" } else { "ntdll" },
+            pointer_size: if wow64 { 4 } else { 8 },
         }
     }
 
     fn layout(&self, name: &str) -> Result<Layout> {
+        let qualified;
+        let name = if self.pointer_size == 4 {
+            qualified = format!("{}!{name}", self.ntdll);
+            qualified.as_str()
+        } else {
+            name
+        };
+        self.target
+            .symbols
+            .find_type_across_modules(self.dtb, name)
+            .map(Layout)
+            .ok_or_else(|| Error::StructNotFound(name.to_string()))
+    }
+
+    /// The layout a struct-typed field of `layout` has (`BusyBitmap` is an
+    /// `_RTL_BITMAP_EX` on x64 and an `_RTL_BITMAP` on x86).
+    fn field_layout(&self, layout: &Layout, field: &str) -> Result<Layout> {
+        let info = layout
+            .0
+            .fields
+            .get(field)
+            .ok_or_else(|| Error::FieldNotFound(field.to_string()))?;
+        let name = match &info.type_data {
+            ParsedType::Struct(name) | ParsedType::Union(name) => name,
+            _ => return Err(Error::FieldTypeMismatch(field.to_string(), "struct".into())),
+        };
         self.target
             .symbols
             .find_type_across_modules(self.dtb, name)
@@ -179,17 +210,23 @@ impl<'a> HeapReader<'a> {
         buf
     }
 
-    fn read_u64(&self, address: VirtAddr) -> Result<u64> {
-        self.memory.read(address)
+    fn read_pointer(&self, address: VirtAddr) -> Result<u64> {
+        let mut bytes = [0u8; 8];
+        self.memory
+            .read_bytes(address, &mut bytes[..self.pointer_size])?;
+        Ok(le_uint(&bytes[..self.pointer_size]))
     }
 
+    /// A symbol of the ntdll this process's heaps belong to.
     fn symbol(&self, name: &str) -> Result<VirtAddr> {
+        let name = format!("{}!{name}", self.ntdll);
         self.target
             .symbols
-            .find_symbol_across_modules(self.dtb, name)?
+            .find_symbol_across_modules(self.dtb, &name)?
             .ok_or_else(|| {
                 Error::DebugInfo(format!(
-                    "{name} is not resolvable; ntdll symbols are required"
+                    "{name} is not resolvable; {} symbols are required",
+                    self.ntdll
                 ))
             })
     }
@@ -198,19 +235,20 @@ impl<'a> HeapReader<'a> {
     /// link's offset inside each record. Bounded and cycle-safe.
     fn list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<VirtAddr>> {
         let mut records = Vec::new();
-        let mut link = VirtAddr(self.read_u64(head)?);
+        let mut link = VirtAddr(self.read_pointer(head)?);
         while link != head && !link.is_zero() && records.len() < MAX_LIST {
             let record = VirtAddr(link.0.wrapping_sub(link_offset));
             if records.contains(&record) {
                 break;
             }
             records.push(record);
-            link = VirtAddr(self.read_u64(link)?);
+            link = VirtAddr(self.read_pointer(link)?);
         }
         Ok(records)
     }
 
-    /// The heaps `_PEB.ProcessHeaps` lists, classified by signature.
+    /// The heaps `_PEB.ProcessHeaps` lists, classified by signature. `peb` is
+    /// the 32-bit PEB for a WOW64 process.
     pub fn process_heaps(&self, peb: VirtAddr) -> Result<Vec<ProcessHeap>> {
         let peb_layout = self.layout("_PEB")?;
         let image = self.read_struct(&peb_layout, peb)?;
@@ -220,9 +258,9 @@ impl<'a> HeapReader<'a> {
             return Ok(Vec::new());
         }
         let count = count.min(MAX_HEAPS);
-        let pointers = self.read(table, count * 8)?;
+        let pointers = self.read(table, count * self.pointer_size)?;
         pointers
-            .chunks_exact(8)
+            .chunks_exact(self.pointer_size)
             .enumerate()
             .map(|(index, bytes)| {
                 let address = VirtAddr(le_uint(bytes));
@@ -258,7 +296,11 @@ pub struct NtHeap {
     pub address: VirtAddr,
     pub flags: u32,
     pub force_flags: u32,
-    /// XOR mask over the second qword of every `_HEAP_ENTRY`, when active.
+    /// Size of `_HEAP_ENTRY`: 16 on x64 (a private-data qword, then the
+    /// metadata qword), 8 on x86 (the metadata qword alone). Block sizes are
+    /// in this unit and it is the header every block starts with.
+    pub granule: u64,
+    /// XOR mask over the metadata qword of every `_HEAP_ENTRY`, when active.
     pub encoding: Option<u64>,
     pub total_free_units: u64,
     pub virtual_threshold: u32,
@@ -306,6 +348,8 @@ pub struct NtEntry {
     pub previous_size: u64,
     pub flags: u8,
     pub unused_bytes: u8,
+    /// See [`NtHeap::granule`].
+    pub granule: u64,
     /// The header's own XOR checksum held.
     pub checksum_ok: bool,
 }
@@ -316,7 +360,7 @@ impl NtEntry {
     }
 
     pub fn user(&self) -> VirtAddr {
-        self.address + HEAP_GRANULE
+        self.address + self.granule
     }
 
     pub fn end(&self) -> VirtAddr {
@@ -326,7 +370,7 @@ impl NtEntry {
     /// Bytes the caller asked for: the block less its header and slack.
     pub fn user_size(&self) -> u64 {
         self.size
-            .saturating_sub(HEAP_GRANULE)
+            .saturating_sub(self.granule)
             .saturating_sub(u64::from(self.unused_bytes & !NT_ENTRY_LFH_BLOCK))
     }
 }
@@ -348,15 +392,16 @@ pub struct NtUserBlocks {
     pub block_count: u32,
     pub first_block: VirtAddr,
     pub stride: u64,
-    /// One bit per block, set when busy.
-    pub busy: Vec<u64>,
+    /// One bit per block, set when busy (`_RTL_BITMAP` bit order: bit `i`
+    /// is byte `i / 8`, bit `i % 8`).
+    pub busy: Vec<u8>,
 }
 
 impl NtUserBlocks {
     pub fn is_busy(&self, index: u32) -> bool {
         self.busy
-            .get(index as usize / 64)
-            .is_some_and(|word| word >> (index % 64) & 1 != 0)
+            .get(index as usize / 8)
+            .is_some_and(|byte| byte >> (index % 8) & 1 != 0)
     }
 
     pub fn busy_count(&self) -> u32 {
@@ -379,8 +424,9 @@ impl HeapReader<'_> {
             )));
         }
         let encode_mask = heap.read(&image, 0, "EncodeFlagMask")? as u32;
+        let granule = self.layout("_HEAP_ENTRY")?.size() as u64;
         let encoding = (encode_mask & NT_HEAP_ENCODING_ACTIVE != 0).then(|| {
-            let at = heap.offset("Encoding").unwrap_or(0) + 8;
+            let at = heap.offset("Encoding").unwrap_or(0) + granule as usize - 8;
             le_uint(&image[at..at + 8])
         });
         let segment_layout = self.layout("_HEAP_SEGMENT")?;
@@ -409,6 +455,7 @@ impl HeapReader<'_> {
             address,
             flags: heap.read(&image, 0, "Flags")? as u32,
             force_flags: heap.read(&image, 0, "ForceFlags")? as u32,
+            granule,
             encoding,
             total_free_units: heap.read(&image, 0, "TotalFreeSize")?,
             virtual_threshold: heap.read(&image, 0, "VirtualMemoryThreshold")? as u32,
@@ -451,6 +498,8 @@ impl HeapReader<'_> {
         let mut stopped = None;
         let mut cursor = segment.first_entry;
         let end = segment.last_valid_entry;
+        let granule = heap.granule;
+        let metadata = granule as usize - 8;
         // One read per committed run rather than one per entry.
         let mut run: Option<(VirtAddr, Vec<u8>)> = None;
         while cursor < end && entries.len() < MAX_ENTRIES {
@@ -469,9 +518,9 @@ impl HeapReader<'_> {
             }
             let raw = match &run {
                 Some((start, bytes))
-                    if cursor >= *start && cursor.0 + 16 <= start.0 + bytes.len() as u64 =>
+                    if cursor >= *start && cursor.0 + granule <= start.0 + bytes.len() as u64 =>
                 {
-                    let at = (cursor.0 - start.0) as usize + 8;
+                    let at = (cursor.0 - start.0) as usize + metadata;
                     le_uint(&bytes[at..at + 8])
                 }
                 _ => {
@@ -484,16 +533,16 @@ impl HeapReader<'_> {
                         .unwrap_or(end.0)
                         .min(end.0);
                     let bytes = self.read_prefix(cursor, (run_end - cursor.0) as usize);
-                    if bytes.len() < 16 {
+                    if bytes.len() < granule as usize {
                         stopped = Some((cursor, "header is not readable (page not resident)"));
                         break;
                     }
-                    let raw = le_uint(&bytes[8..16]);
+                    let raw = le_uint(&bytes[metadata..metadata + 8]);
                     run = Some((cursor, bytes));
                     raw
                 }
             };
-            let entry = decode_nt_entry(cursor, raw, heap.encoding);
+            let entry = decode_nt_entry(cursor, raw, heap.encoding, granule);
             let reason = if entry.size == 0 {
                 Some("header has a zero size")
             } else if !entry.checksum_ok {
@@ -518,7 +567,7 @@ impl HeapReader<'_> {
         };
         let header_layout = self.layout("_HEAP_USERDATA_HEADER")?;
         let header = entry.user();
-        if entry.size < header_layout.size() as u64 + HEAP_GRANULE {
+        if entry.size < header_layout.size() as u64 + heap.granule {
             return Ok(None);
         }
         let image = self.read_struct(&header_layout, header)?;
@@ -529,10 +578,10 @@ impl HeapReader<'_> {
         let subsegment_layout = self.layout("_HEAP_SUBSEGMENT")?;
         let subsegment_image = self.read_struct(&subsegment_layout, subsegment)?;
         let block_count = subsegment_layout.read(&subsegment_image, 0, "BlockCount")? as u32;
-        let block_size = subsegment_layout.read(&subsegment_image, 0, "BlockSize")? * HEAP_GRANULE;
+        let block_size = subsegment_layout.read(&subsegment_image, 0, "BlockSize")? * heap.granule;
         // `EncodedOffsets` is XORed with the region, the LFH key, and the front
         // end it belongs to.
-        let key: u64 = self.read_u64(self.symbol("ntdll!RtlpLFHKey")?)?;
+        let key = self.read_pointer(self.symbol("RtlpLFHKey")?)?;
         let encoded = header_layout.read(&image, 0, "EncodedOffsets")? as u32;
         let decoded = encoded ^ header.0 as u32 ^ key as u32 ^ lfh.0 as u32;
         let first_offset = u64::from(decoded & 0xFFFF);
@@ -540,16 +589,12 @@ impl HeapReader<'_> {
         if stride == 0 || first_offset == 0 {
             return Ok(None);
         }
-        let bitmap_layout = self.layout("_RTL_BITMAP_EX")?;
+        let bitmap_layout = self.field_layout(&header_layout, "BusyBitmap")?;
         let bitmap_at = header_layout.offset("BusyBitmap")?;
         let bits = bitmap_layout.read(&image, bitmap_at, "SizeOfBitMap")? as u32;
         let buffer = VirtAddr(bitmap_layout.read(&image, bitmap_at, "Buffer")?);
-        let words = (bits.max(block_count) as usize).div_ceil(64);
-        let busy = self
-            .read(buffer, words * 8)?
-            .chunks_exact(8)
-            .map(le_uint)
-            .collect();
+        let words = (bits.max(block_count) as usize).div_ceil(self.pointer_size * 8);
+        let busy = self.read(buffer, words * self.pointer_size)?;
         Ok(Some(NtUserBlocks {
             header,
             subsegment,
@@ -562,16 +607,17 @@ impl HeapReader<'_> {
     }
 }
 
-fn decode_nt_entry(address: VirtAddr, raw: u64, encoding: Option<u64>) -> NtEntry {
+fn decode_nt_entry(address: VirtAddr, raw: u64, encoding: Option<u64>, granule: u64) -> NtEntry {
     let decoded = raw ^ encoding.unwrap_or(0);
     let bytes = decoded.to_le_bytes();
     let checksum = bytes[0] ^ bytes[1] ^ bytes[2];
     NtEntry {
         address,
-        size: u64::from(u16::from_le_bytes([bytes[0], bytes[1]])) * HEAP_GRANULE,
-        previous_size: u64::from(u16::from_le_bytes([bytes[4], bytes[5]])) * HEAP_GRANULE,
+        size: u64::from(u16::from_le_bytes([bytes[0], bytes[1]])) * granule,
+        previous_size: u64::from(u16::from_le_bytes([bytes[4], bytes[5]])) * granule,
         flags: bytes[2],
         unused_bytes: bytes[7],
+        granule,
         checksum_ok: encoding.is_none() || checksum == bytes[3],
     }
 }
@@ -593,6 +639,9 @@ pub struct SegmentHeap {
     pub large_allocations: Vec<LargeAllocation>,
     /// `ntdll!RtlpHpHeapGlobals`: the VS header key and the LFH offsets key.
     pub keys: SegmentKeys,
+    /// Size of `_HEAP_VS_CHUNK_HEADER`: 16 on x64, 8 on x86. Chunk sizes are
+    /// in this unit and it is the header every chunk starts with.
+    pub granule: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -675,13 +724,15 @@ pub struct VsChunk {
     pub size: u64,
     pub previous_size: u64,
     pub busy: bool,
+    /// See [`SegmentHeap::granule`].
+    pub granule: u64,
     /// Slack recorded in the chunk's last word, when the header says so.
     pub unused_bytes: Option<u16>,
 }
 
 impl VsChunk {
     pub fn user(&self) -> VirtAddr {
-        self.address + HEAP_GRANULE
+        self.address + self.granule
     }
 
     pub fn end(&self) -> VirtAddr {
@@ -690,7 +741,7 @@ impl VsChunk {
 
     pub fn user_size(&self) -> u64 {
         self.size
-            .saturating_sub(HEAP_GRANULE)
+            .saturating_sub(self.granule)
             .saturating_sub(u64::from(self.unused_bytes.unwrap_or(0)))
     }
 }
@@ -703,16 +754,18 @@ pub struct LfhSubsegment {
     pub free_count: u32,
     pub bucket: u16,
     pub first_block: VirtAddr,
-    /// Bitmap words, 32 blocks per word: the low half's bit is set while the
-    /// block is busy.
+    /// Bitmap words (`BlockBitmap`'s element width: a qword on x64, a dword
+    /// on x86), each holding `blocks_per_word` blocks: the low half's bit is
+    /// set while the block is busy.
     pub bitmap: Vec<u64>,
+    pub blocks_per_word: u32,
 }
 
 impl LfhSubsegment {
     pub fn is_busy(&self, index: u32) -> bool {
         self.bitmap
-            .get(index as usize / 32)
-            .is_some_and(|word| word >> (index % 32) & 1 != 0)
+            .get((index / self.blocks_per_word) as usize)
+            .is_some_and(|word| word >> (index % self.blocks_per_word) & 1 != 0)
     }
 
     pub fn busy_count(&self) -> u32 {
@@ -753,6 +806,7 @@ impl HeapReader<'_> {
             )));
         }
         let keys = self.segment_keys()?;
+        let granule = self.layout("_HEAP_VS_CHUNK_HEADER")?.size() as u64;
         let stats = self.layout("_HEAP_RUNTIME_MEMORY_STATS")?;
         let stats_at = heap.offset("MemStats")?;
         let context_layout = self.layout("_HEAP_SEG_CONTEXT")?;
@@ -781,12 +835,13 @@ impl HeapReader<'_> {
             contexts,
             large_allocations,
             keys,
+            granule,
         })
     }
 
     fn segment_keys(&self) -> Result<SegmentKeys> {
         let globals = self.layout("_RTLP_HP_HEAP_GLOBALS")?;
-        let address = self.symbol("ntdll!RtlpHpHeapGlobals")?;
+        let address = self.symbol("RtlpHpHeapGlobals")?;
         let image = self.read_struct(&globals, address)?;
         Ok(SegmentKeys {
             heap_key: globals.read(&image, 0, "HeapKey")?,
@@ -809,10 +864,12 @@ impl HeapReader<'_> {
         for segment in self.list(head, 0)? {
             segments.push(self.page_segment(segment, unit_shift, first_descriptor)?);
         }
+        // A 32-bit mask (`0xFFF00000`) must complement within its own width.
+        let width_mask = u64::MAX >> (64 - 8 * self.pointer_size);
         Ok(SegContext {
             index,
             unit_shift,
-            segment_mask: layout.read(image, at, "SegmentMask")?,
+            segment_mask: layout.read(image, at, "SegmentMask")? | !width_mask,
             max_allocation_size: layout.read(image, at, "MaxAllocationSize")? as u32,
             segments,
         })
@@ -872,6 +929,10 @@ impl HeapReader<'_> {
         let data = self.layout("_HEAP_LARGE_ALLOC_DATA")?;
         let node_at = data.offset("TreeNode")? as u64;
         let (left, right) = (node.offset("Left")? as u64, node.offset("Right")? as u64);
+        let child = |image: &[u8], at: u64| {
+            let at = (node_at + at) as usize;
+            VirtAddr(le_uint(&image[at..at + self.pointer_size]) & !0x7)
+        };
         let mut out = Vec::new();
         let mut stack = vec![root];
         let mut seen = std::collections::HashSet::new();
@@ -882,49 +943,53 @@ impl HeapReader<'_> {
             let record = VirtAddr(current.0.wrapping_sub(node_at));
             let image = self.read_struct(&data, record)?;
             let virtual_address = data.read(&image, 0, "VirtualAddress")?;
-            let extra_at = data.offset("ExtraPresent")?;
-            let packed = le_uint(&image[extra_at..extra_at + 8]);
             out.push(LargeAllocation {
                 metadata: record,
                 address: VirtAddr(virtual_address & !0xFFFF),
-                pages: packed >> 12,
-                unused_bytes: virtual_address as u16,
-                extra_present: packed & 1 != 0,
+                pages: data.read(&image, 0, "AllocatedPages")?,
+                unused_bytes: data.read(&image, 0, "UnusedBytes")? as u16,
+                extra_present: data.read(&image, 0, "ExtraPresent")? != 0,
             });
-            stack.push(VirtAddr(
-                le_uint(&image[node_at as usize + right as usize..][..8]) & !0x7,
-            ));
-            stack.push(VirtAddr(
-                le_uint(&image[node_at as usize + left as usize..][..8]) & !0x7,
-            ));
+            stack.push(child(&image, right));
+            stack.push(child(&image, left));
         }
         out.sort_by_key(|allocation| allocation.address.0);
         Ok(out)
     }
 
     /// Decode the VS subsegment occupying a page range: header, then the
-    /// chunk chain, each header XORed with the heap key and its own address.
+    /// chunk chain, each header's `Sizes` XORed with the heap key and its own
+    /// address; the bit layout of the decoded sizes is the PDB's.
     pub fn vs_subsegment(&self, heap: &SegmentHeap, range: &PageRange) -> Result<VsSubsegment> {
         let layout = self.layout("_HEAP_VS_SUBSEGMENT")?;
         let image = self.read_struct(&layout, range.address)?;
         let size_units = layout.read(&image, 0, "Size")?;
         let signature = layout.read(&image, 0, "Signature")? as u16;
         let signature_ok = signature == (size_units as u16 ^ VS_SUBSEGMENT_SIGNATURE_KEY) & 0x7FFF;
-        let first_chunk = range.address + (layout.size() as u64).next_multiple_of(HEAP_GRANULE);
-        let size = (size_units * HEAP_GRANULE)
+        let granule = heap.granule;
+        let chunk_layout = self.layout("_HEAP_VS_CHUNK_HEADER")?;
+        let sizes_layout = self.field_layout(&chunk_layout, "Sizes")?;
+        let sizes_at = chunk_layout.offset("Sizes")?;
+        let sizes_len = sizes_layout.size();
+        let first_chunk = range.address + (layout.size() as u64).next_multiple_of(granule);
+        let size = (size_units * granule)
             .min(range.size().saturating_sub(first_chunk.0 - range.address.0));
         let bytes = self.read_prefix(first_chunk, size as usize);
         let mut chunks = Vec::new();
         let mut at = 0u64;
-        while at + HEAP_GRANULE <= bytes.len() as u64 && chunks.len() < MAX_ENTRIES {
+        while at + granule <= bytes.len() as u64 && chunks.len() < MAX_ENTRIES {
             let address = first_chunk + at;
-            let header =
-                le_uint(&bytes[at as usize..at as usize + 8]) ^ heap.keys.heap_key ^ address.0;
-            let chunk_size = ((header >> 16) & 0xFFFF) * HEAP_GRANULE;
-            let bits = le_uint(&bytes[at as usize + 8..at as usize + 12]) as u32;
-            let unused_flagged = bits & 0x100 != 0;
-            let busy = (header >> 48) & 0xFF != 0;
-            let unused_bytes = (busy && unused_flagged && chunk_size >= HEAP_GRANULE + 2)
+            let header = &bytes[at as usize..at as usize + granule as usize];
+            let mut decoded = header.to_vec();
+            let sizes =
+                le_uint(&header[sizes_at..sizes_at + sizes_len]) ^ heap.keys.heap_key ^ address.0;
+            decoded[sizes_at..sizes_at + sizes_len]
+                .copy_from_slice(&sizes.to_le_bytes()[..sizes_len]);
+            let chunk_size = sizes_layout.read(&decoded, sizes_at, "UnsafeSize")? * granule;
+            let previous_size = sizes_layout.read(&decoded, sizes_at, "UnsafePrevSize")? * granule;
+            let busy = sizes_layout.read(&decoded, sizes_at, "Allocated")? != 0;
+            let unused_flagged = chunk_layout.read(header, 0, "UnusedBytes")? != 0;
+            let unused_bytes = (busy && unused_flagged && chunk_size >= granule + 2)
                 .then(|| {
                     let tail = (at + chunk_size - 2) as usize;
                     bytes
@@ -935,8 +1000,9 @@ impl HeapReader<'_> {
             chunks.push(VsChunk {
                 address,
                 size: chunk_size,
-                previous_size: ((header >> 32) & 0xFFFF) * HEAP_GRANULE,
+                previous_size,
                 busy,
+                granule,
                 unused_bytes,
             });
             if chunk_size == 0 {
@@ -961,13 +1027,25 @@ impl HeapReader<'_> {
         let decoded = encoded ^ heap.keys.lfh_key as u32 ^ (range.address.0 >> 12) as u32;
         let block_size = u64::from(decoded & 0xFFFF);
         let first_offset = u64::from(decoded >> 16);
-        let words = (block_count as usize).div_ceil(32);
+        let word_size = layout
+            .0
+            .fields
+            .get("BlockBitmap")
+            .and_then(|info| match &info.type_data {
+                ParsedType::Array(_, count) if *count > 0 => Some(info.size / u64::from(*count)),
+                _ => None,
+            })
+            .filter(|size| matches!(size, 4 | 8))
+            .ok_or_else(|| Error::FieldTypeMismatch("BlockBitmap".into(), "word array".into()))?
+            as usize;
+        let blocks_per_word = (word_size * 4) as u32;
+        let words = (block_count as usize).div_ceil(word_size * 4);
         let bitmap = self
             .read(
                 range.address + layout.offset("BlockBitmap")? as u64,
-                words * 8,
+                words * word_size,
             )?
-            .chunks_exact(8)
+            .chunks_exact(word_size)
             .map(le_uint)
             .collect();
         Ok(LfhSubsegment {
@@ -978,6 +1056,7 @@ impl HeapReader<'_> {
             bucket: layout.read(&image, 0, "BucketRef")? as u16,
             first_block: range.address + first_offset,
             bitmap,
+            blocks_per_word,
         })
     }
 }
@@ -1151,7 +1230,7 @@ mod tests {
         let encoding = 0x8b99_e656_0e37u64;
         let plain = [0x05u8, 0x00, 0x01, 0x04, 0x74, 0x00, 0x00, 0x14];
         let raw = u64::from_le_bytes(plain) ^ encoding;
-        let entry = decode_nt_entry(VirtAddr(0x1190740), raw, Some(encoding));
+        let entry = decode_nt_entry(VirtAddr(0x1190740), raw, Some(encoding), 16);
         assert_eq!(entry.size, 0x50);
         assert_eq!(entry.previous_size, 0x740);
         assert!(entry.busy());
@@ -1159,8 +1238,15 @@ mod tests {
         assert_eq!(entry.unused_bytes, 0x14);
         assert_eq!(entry.user_size(), 0x50 - 0x10 - 0x14);
 
-        let corrupt = decode_nt_entry(VirtAddr(0x1190740), raw ^ 0x100, Some(encoding));
+        let corrupt = decode_nt_entry(VirtAddr(0x1190740), raw ^ 0x100, Some(encoding), 16);
         assert!(!corrupt.checksum_ok);
+
+        // The same header bytes in an x86 heap are 8-byte units behind an
+        // 8-byte header.
+        let x86 = decode_nt_entry(VirtAddr(0x1190740), raw, Some(encoding), 8);
+        assert_eq!(x86.size, 0x28);
+        assert_eq!(x86.user(), VirtAddr(0x1190748));
+        assert_eq!(x86.user_size(), 0x28 - 8 - 0x14);
     }
 
     #[test]
@@ -1174,6 +1260,7 @@ mod tests {
             first_block: VirtAddr(0x1060),
             // Blocks 0 and 33 busy; the high halves are not block state.
             bitmap: vec![0xFFFF_FFFF_0000_0001, 0xFFFF_FFFF_0000_0002],
+            blocks_per_word: 32,
         };
         assert!(subsegment.is_busy(0));
         assert!(!subsegment.is_busy(1));

@@ -2,14 +2,14 @@ use std::fs;
 
 use crate::error::{Error, Result};
 use crate::expr::Expr;
-use crate::guest::{ModuleInfo, read_pe_header_page};
+use crate::guest::{ModuleInfo, image_base, read_pe_header_page, size_of_image};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::repl::*;
 use crate::target::Target;
 use crate::types::{Arch, VirtAddr};
 use crate::ui;
 use iced_x86::{Code, Decoder, DecoderOptions};
-use pelite::pe64::{Pe, PeView};
+use pelite::{PeView, Wrap};
 use tabled::builder::Builder;
 
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
@@ -217,6 +217,17 @@ fn display_ptr(value: Result<VirtAddr>) -> String {
         .unwrap_or_else(|error| format!("<unavailable: {error}>"))
 }
 
+fn display_u32_ptr(value: Result<u32>) -> String {
+    display_ptr(value.map(VirtAddr::from))
+}
+
+/// The 32-bit TEB of a WOW64 thread sits at `_TEB.WowTebOffset` from the
+/// native one (`None` when the offset is zero: a native thread).
+fn teb32_address(teb: VirtAddr, wow_teb_offset: Option<i32>) -> Option<VirtAddr> {
+    let offset = i64::from(wow_teb_offset.filter(|offset| *offset != 0)?);
+    Some(VirtAddr(teb.0.wrapping_add_signed(offset)))
+}
+
 impl ReplState<'_> {
     fn cmd_peb(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if invocation.argv.len() > 1 {
@@ -354,6 +365,135 @@ impl ReplState<'_> {
             Ok(ldr) => outln!("  Loader data        : {}", ui::addr(ldr.0)),
             Err(error) => outln!("  Loader data        : <unavailable: {error}>"),
         }
+
+        if explicit.is_none()
+            && let Some(process) = self.ctx.target.current_process_info.as_ref()
+            && let Some(peb32) = process.wow64_peb
+        {
+            let peb32_ref = match self
+                .ctx
+                .target
+                .guest()
+                .and_then(|guest| guest.ntoskrnl.types_in(dtb).struct_at("_PEB32", peb32))
+            {
+                Ok(peb32_ref) => peb32_ref,
+                Err(error) => {
+                    outln!("PEB32 {}: <unavailable: {error}>", ui::addr(peb32.0));
+                    return Ok(());
+                }
+            };
+            outln!("PEB32 {}", ui::addr(peb32.0));
+            for (label, value) in [
+                (
+                    "ImageBaseAddress",
+                    display_u32_ptr(peb32_ref.read_field::<u32>("ImageBaseAddress")),
+                ),
+                ("Ldr", display_u32_ptr(peb32_ref.read_field::<u32>("Ldr"))),
+                (
+                    "ProcessParameters",
+                    display_u32_ptr(peb32_ref.read_field::<u32>("ProcessParameters")),
+                ),
+                (
+                    "ProcessHeap",
+                    display_u32_ptr(peb32_ref.read_field::<u32>("ProcessHeap")),
+                ),
+                (
+                    "NumberOfHeaps",
+                    display_read(peb32_ref.read_field::<u32>("NumberOfHeaps").map(u64::from)),
+                ),
+                (
+                    "ProcessHeaps",
+                    display_u32_ptr(peb32_ref.read_field::<u32>("ProcessHeaps")),
+                ),
+                (
+                    "BeingDebugged",
+                    display_read(peb32_ref.read_field::<u8>("BeingDebugged")),
+                ),
+                (
+                    "OSMajorVersion",
+                    display_read(peb32_ref.read_field::<u32>("OSMajorVersion").map(u64::from)),
+                ),
+                (
+                    "OSMinorVersion",
+                    display_read(peb32_ref.read_field::<u32>("OSMinorVersion").map(u64::from)),
+                ),
+                (
+                    "OSBuildNumber",
+                    display_read(peb32_ref.read_field::<u16>("OSBuildNumber").map(u64::from)),
+                ),
+                (
+                    "SessionId",
+                    display_read(peb32_ref.read_field::<u32>("SessionId").map(u64::from)),
+                ),
+                (
+                    "NumberOfProcessors",
+                    display_read(
+                        peb32_ref
+                            .read_field::<u32>("NumberOfProcessors")
+                            .map(u64::from),
+                    ),
+                ),
+            ] {
+                outln!("  {label:17}: {value}");
+            }
+
+            let params = peb32_ref
+                .read_field::<u32>("ProcessParameters")
+                .map(VirtAddr::from)
+                .ok()
+                .filter(|address| !address.is_zero());
+            match params {
+                Some(params) => {
+                    outln!("  Process parameters {}", ui::addr(params.0));
+                    match self.ctx.target.guest().and_then(|guest| {
+                        guest
+                            .ntoskrnl
+                            .types_in(dtb)
+                            .struct_at("ntdll32!_RTL_USER_PROCESS_PARAMETERS", params)
+                    }) {
+                        Ok(params_ref) => {
+                            outln!(
+                                "    CommandLine       : {}",
+                                params_ref
+                                    .unicode_string("CommandLine")
+                                    .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+                            );
+                            outln!(
+                                "    ImagePathName     : {}",
+                                params_ref
+                                    .unicode_string("ImagePathName")
+                                    .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+                            );
+                            let current_directory = params_ref
+                                .embedded("CurrentDirectory")
+                                .and_then(|directory| directory.unicode_string("DosPath"))
+                                .or_else(|_| params_ref.unicode_string("CurrentDirectory"));
+                            outln!(
+                                "    CurrentDirectory  : {}",
+                                current_directory
+                                    .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+                            );
+                            outln!(
+                                "    EnvironmentSize   : {}",
+                                display_read(
+                                    params_ref
+                                        .read_field::<u32>("EnvironmentSize")
+                                        .map(u64::from)
+                                )
+                            );
+                        }
+                        Err(_) => outln!("  32-bit ntdll symbols are not loaded"),
+                    }
+                }
+                None => outln!("  Process parameters : <unavailable or null>"),
+            }
+
+            match peb32_ref.read_field::<u32>("Ldr") {
+                Ok(ldr) if ldr == 0 => outln!("  Loader data        : null"),
+                Ok(ldr) => outln!("  Loader data        : {}", ui::addr(u64::from(ldr))),
+                Err(error) => outln!("  Loader data        : <unavailable: {error}>"),
+            }
+        }
         Ok(())
     }
 
@@ -405,16 +545,14 @@ impl ReplState<'_> {
             }
         };
         outln!("TEB {}", ui::addr(teb.0));
-        outln!(
-            "  {:30}: {}",
-            "StackBase",
-            display_ptr(teb_ref.read_field("StackBase"))
-        );
-        outln!(
-            "  {:30}: {}",
-            "StackLimit",
-            display_ptr(teb_ref.read_field("StackLimit"))
-        );
+        let tib = teb_ref.embedded("NtTib");
+        for field in ["StackBase", "StackLimit"] {
+            let value = tib
+                .as_ref()
+                .map_err(|error| Error::DebugInfo(error.to_string()))
+                .and_then(|tib| tib.read_pointer(field));
+            outln!("  {field:30}: {}", display_ptr(value));
+        }
         let tls = teb_ref
             .read_field::<VirtAddr>("ThreadLocalStoragePointer")
             .or_else(|_| teb_ref.read_field("TlsPointer"));
@@ -438,9 +576,10 @@ impl ReplState<'_> {
             .read_field::<VirtAddr>("ProcessEnvironmentBlock")
             .or_else(|_| teb_ref.read_field("Peb"));
         outln!("  {:30}: {}", "PEB", display_ptr(peb));
-        match teb_ref.read_field::<i32>("WowTebOffset") {
-            Ok(value) => outln!("  {:30}: {value} ({value:#x})", "WOW64"),
-            Err(_) => {
+        let wow_teb_offset = teb_ref.read_field::<i32>("WowTebOffset").ok();
+        match wow_teb_offset {
+            Some(value) => outln!("  {:30}: {value} ({value:#x})", "WOW64"),
+            None => {
                 let value = teb_ref
                     .read_field::<VirtAddr>("Wow32Reserved")
                     .or_else(|_| teb_ref.read_field("Wow64Reserved"));
@@ -473,6 +612,66 @@ impl ReplState<'_> {
                 );
             }
             Err(error) => outln!("  ClientId                       : <unavailable: {error}>"),
+        }
+
+        if let Some(teb32) = teb32_address(teb, wow_teb_offset) {
+            match self
+                .ctx
+                .target
+                .guest()
+                .and_then(|guest| guest.ntoskrnl.types_in(dtb).struct_at("_TEB32", teb32))
+            {
+                Ok(teb32_ref) => {
+                    outln!("TEB32 {}", ui::addr(teb32.0));
+                    let stack_base = teb32_ref
+                        .embedded("NtTib")
+                        .and_then(|tib| tib.read_field::<u32>("StackBase"));
+                    let stack_limit = teb32_ref
+                        .embedded("NtTib")
+                        .and_then(|tib| tib.read_field::<u32>("StackLimit"));
+                    outln!("  {:30}: {}", "StackBase", display_u32_ptr(stack_base));
+                    outln!("  {:30}: {}", "StackLimit", display_u32_ptr(stack_limit));
+                    let tls = teb32_ref
+                        .read_field::<u32>("ThreadLocalStoragePointer")
+                        .or_else(|_| teb32_ref.read_field("TlsPointer"));
+                    outln!("  {:30}: {}", "TlsPointer", display_u32_ptr(tls));
+                    outln!(
+                        "  {:30}: {}",
+                        "LastErrorValue",
+                        display_read(teb32_ref.read_field::<u32>("LastErrorValue"))
+                    );
+                    outln!(
+                        "  {:30}: {}",
+                        "LastStatusValue",
+                        display_read(teb32_ref.read_field::<u32>("LastStatusValue"))
+                    );
+                    outln!(
+                        "  {:30}: {}",
+                        "CountOfOwnedCriticalSections",
+                        display_read(teb32_ref.read_field::<u32>("CountOfOwnedCriticalSections"))
+                    );
+                    let peb = teb32_ref
+                        .read_field::<u32>("ProcessEnvironmentBlock")
+                        .or_else(|_| teb32_ref.read_field("Peb"));
+                    outln!("  {:30}: {}", "PEB", display_u32_ptr(peb));
+                    match teb32_ref.embedded("ClientId") {
+                        Ok(client) => {
+                            outln!(
+                                "  ClientId.UniqueProcess          : {}",
+                                display_u32_ptr(client.read_field::<u32>("UniqueProcess"))
+                            );
+                            outln!(
+                                "  ClientId.UniqueThread           : {}",
+                                display_u32_ptr(client.read_field::<u32>("UniqueThread"))
+                            );
+                        }
+                        Err(error) => {
+                            outln!("  ClientId                       : <unavailable: {error}>")
+                        }
+                    }
+                }
+                Err(error) => outln!("TEB32 {}: <unavailable: {error}>", ui::addr(teb32.0)),
+            }
         }
         Ok(())
     }
@@ -597,6 +796,39 @@ impl ReplState<'_> {
             }
             Err(error) => outln!("LastStatusValue = <unavailable: {error}>"),
         }
+        if let Some(teb32) = teb32_address(teb, teb_ref.read_field::<i32>("WowTebOffset").ok()) {
+            match self
+                .ctx
+                .target
+                .guest()
+                .and_then(|guest| guest.ntoskrnl.types_in(dtb).struct_at("_TEB32", teb32))
+            {
+                Ok(teb32_ref) => {
+                    match teb32_ref.read_field::<u32>("LastErrorValue") {
+                        Ok(value) => outln!(
+                            "TEB32 LastErrorValue = {value} ({})",
+                            win32_error_name(value).unwrap_or("unknown")
+                        ),
+                        Err(error) => {
+                            outln!("TEB32 LastErrorValue = <unavailable: {error}>")
+                        }
+                    }
+                    match teb32_ref.read_field::<u32>("LastStatusValue") {
+                        Ok(value) => outln!(
+                            "TEB32 LastStatusValue = {value:#010x} ({})",
+                            ntstatus_name(value).unwrap_or("unknown")
+                        ),
+                        Err(error) => {
+                            outln!("TEB32 LastStatusValue = <unavailable: {error}>")
+                        }
+                    }
+                }
+                Err(error) => {
+                    outln!("TEB32 LastErrorValue = <unavailable: {error}>");
+                    outln!("TEB32 LastStatusValue = <unavailable: {error}>");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -692,7 +924,7 @@ impl ReplState<'_> {
         }
         apply_relocations(&view, &bytes, module.base_address.0, &mut sections);
         let allow_kernel_self_patches = is_kernel_self_patch_module(&module);
-        let preferred_base = view.optional_header().ImageBase;
+        let preferred_base = image_base(&view);
         let mut genuine_total = 0u64;
         let mut self_patch_total = SelfPatchCounts::default();
         let mut ranges = Vec::new();
@@ -882,11 +1114,13 @@ impl ReplState<'_> {
 
         let mut result = SectionCheckResult::default();
         let mut offset = 0usize;
+        let bitness = self.ctx.target.code_bitness(base + section.rva as u64);
         while offset < section.expected.len() {
             let instruction_len = match self.ctx.target.arch() {
                 Arch::Amd64 => expected_instruction_len(
                     &section.expected[offset..],
                     base.0 + section.rva as u64 + offset as u64,
+                    bitness,
                 ),
                 Arch::Arm64 => 4.min(section.expected.len() - offset),
             };
@@ -1152,8 +1386,8 @@ fn is_skippable_section_read_error(error: &Error) -> bool {
     )
 }
 
-fn expected_instruction_len(bytes: &[u8], address: u64) -> usize {
-    let mut decoder = Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
+fn expected_instruction_len(bytes: &[u8], address: u64, bitness: u32) -> usize {
+    let mut decoder = Decoder::with_ip(bitness, bytes, address, DecoderOptions::NONE);
     let instruction = decoder.decode();
     if instruction.code() == Code::INVALID || instruction.len() == 0 {
         1
@@ -1250,7 +1484,7 @@ fn module_identity(target: &Target, module: &ModuleInfo) -> Result<(u32, u32)> {
             .time_date_stamp
             .unwrap_or(view.file_header().TimeDateStamp),
         if module.size == 0 {
-            view.optional_header().SizeOfImage
+            size_of_image(&view)
         } else {
             module.size
         },
@@ -1267,7 +1501,7 @@ fn section_is_checked(name: &str, characteristics: u32) -> bool {
 }
 
 fn build_check_sections(view: &PeView<'_>, image: &[u8]) -> Vec<CheckSection> {
-    let image_size = view.optional_header().SizeOfImage;
+    let image_size = size_of_image(view);
     let mut sections = Vec::new();
     for section in view.section_headers() {
         let name = section
@@ -1309,7 +1543,7 @@ fn apply_relocations(
     actual_base: u64,
     sections: &mut [CheckSection],
 ) {
-    let preferred_base = view.optional_header().ImageBase;
+    let preferred_base = image_base(view);
     let delta = actual_base.wrapping_sub(preferred_base) as i64;
     if delta == 0 {
         return;
@@ -1317,8 +1551,12 @@ fn apply_relocations(
     let Some(directory) = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_BASERELOC) else {
         return;
     };
+    let size_of_headers = match view.optional_header() {
+        Wrap::T32(header) => header.SizeOfHeaders,
+        Wrap::T64(header) => header.SizeOfHeaders,
+    };
     let rva_to_raw = |rva: u32| -> Option<usize> {
-        if rva < view.optional_header().SizeOfHeaders {
+        if rva < size_of_headers {
             return Some(rva as usize);
         }
         view.section_headers().iter().find_map(|section| {

@@ -1021,6 +1021,7 @@ mod tests {
                 name: "System".into(),
                 dtb: 0x1a_d000,
                 eprocess_va: VirtAddr(0xffff_8000_0000_1000),
+                wow64_peb: None,
             }),
             stopped_process: None,
             stopped_thread: None,

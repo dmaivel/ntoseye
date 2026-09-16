@@ -333,6 +333,7 @@ fn decode_disasm_context(
     bytes_at_rip: &[u8],
     rip: u64,
     arm64: bool,
+    bitness: u32,
     resolve: impl Fn(u64) -> String,
 ) -> Vec<DisasmRow> {
     if arm64 {
@@ -348,6 +349,7 @@ fn decode_disasm_context(
         bytes_at_rip,
         rip,
         Some(DISASM_CONTEXT_INSTRUCTIONS),
+        bitness,
         &mut formatter,
         resolve,
     )
@@ -379,7 +381,13 @@ pub fn print_disasm_context(
     breakpoints.mask_breakpoint_bytes(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
-    let rows = decode_disasm_context(&bytes, rip, debugger.arch() == Arch::Arm64, resolve);
+    let rows = decode_disasm_context(
+        &bytes,
+        rip,
+        debugger.arch() == Arch::Arm64,
+        debugger.code_bitness(VirtAddr(rip)),
+        resolve,
+    );
     render_rows(&rows, |ip| Some(ip == rip));
 }
 
@@ -490,11 +498,10 @@ fn print_stacktrace_data_impl(
 mod tests {
     use super::*;
 
-
     #[test]
     fn stop_disassembly_starts_at_rip_and_only_looks_forward() {
         let rip = 0xffff_f807_c0e1_3ae0;
-        let rows = decode_disasm_context(&[0x90; 8], rip, false, |_| String::new());
+        let rows = decode_disasm_context(&[0x90; 8], rip, false, 64, |_| String::new());
         let ips = rows.iter().map(|row| row.ip).collect::<Vec<_>>();
 
         assert_eq!(ips, (rip..rip + 7).collect::<Vec<_>>());
