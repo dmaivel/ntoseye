@@ -816,6 +816,25 @@ impl Session {
             })
     }
 
+    /// [`Self::interrupt`] keeping the classification: a breakpoint hit that
+    /// races the break-in is reported as that breakpoint (with its action and
+    /// condition result) rather than as a bare `STATUS_BREAKPOINT` stop. A
+    /// target that is not running is not broken into (KD would wait out its
+    /// break-in timeout): a stop parked by [`Self::with_target_halted`] or
+    /// [`Self::service_idle`] is surfaced, and a plain halt reports its pc.
+    pub fn interrupt_outcome(&mut self) -> Result<ContinueOutcome> {
+        if let Some(parked) = self.parked_stop.take() {
+            return Ok(parked);
+        }
+        if !self.backend.is_running() && !self.backend.has_pending_stop() {
+            return Ok(ContinueOutcome::Halted {
+                rip: self.current_rip(),
+            });
+        }
+        self.interrupt_classified()
+            .map(|(resolution, _)| self.continue_outcome_from_resolution(resolution))
+    }
+
     /// Run `edit` with the target halted, restoring the previous run state.
     /// If the target is already halted, `edit` runs directly and neither
     /// interrupts nor resumes the backend. If it is running, this method breaks

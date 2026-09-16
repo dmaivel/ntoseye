@@ -214,7 +214,7 @@ The disassembly view uses `u` and `ub` to scroll forward and backward.
 
 ### Memory
 
-The memory view reads and writes virtual memory in the current process context. Reads mask this debugger's own breakpoint bytes back to the original opcodes, so the view never shows an injected `int3`. A write that crosses into an untranslatable page reports how many bytes it committed.
+The memory view reads and writes virtual memory in the current process context. Reads mask this debugger's own breakpoint bytes back to the original opcodes, so the view never shows an injected `int3`. A write that crosses into an untranslatable page commits the bytes before it; with `allowPartial` the response reports that count, otherwise the write fails with it.
 
 ### Paging
 

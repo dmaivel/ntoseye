@@ -10,11 +10,11 @@ mod wire;
 use libc::{SIGHUP, SIGINT, SIGTERM, c_int, sighandler_t, signal as install_signal};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 #[cfg(test)]
 use std::io::Cursor;
 use std::io::{self, Write};
-use std::mem::{replace, take};
+use std::mem::replace;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 #[cfg(test)]
@@ -190,10 +190,6 @@ struct Server {
     repl: Option<ReplStore>,
     out: Box<dyn Write>,
     rx: Receiver<ClientMessage>,
-    /// Messages drained off `rx` out of band (while a step was driving the
-    /// target) and not yet handled. The loop always empties this first, so
-    /// request order is preserved.
-    pending: VecDeque<ClientMessage>,
     seq: i64,
     state: RunState,
     /// Backend vCPU ids, indexed by `DAP thread id` minus one.
@@ -222,8 +218,10 @@ struct Server {
     verified: HashMap<u32, BreakpointState>,
     /// Cursor into the guest debug-output stream (DbgPrint).
     debug_seq: u64,
-    /// Set by a `pause` request that arrives while a multi-step operation is
-    /// driving the target, so the step loop gives up promptly.
+    /// Raised by the reader thread on `pause`, `disconnect`, `terminate`, or
+    /// end of stream, so a blocking run gives up promptly. Cleared only where
+    /// the pause is consumed (`pause` itself and the stop report), never by
+    /// run control: a `pause` read before a step began still cancels it.
     cancel: Arc<AtomicBool>,
     lines_start_at_1: bool,
     columns_start_at_1: bool,
@@ -301,7 +299,6 @@ impl Server {
             repl: None,
             out,
             rx,
-            pending: VecDeque::new(),
             seq: 0,
             state: RunState::Halted,
             threads: Vec::new(),
@@ -331,10 +328,6 @@ impl Server {
                 self.detach_on_signal();
                 return;
             }
-            if let Some(message) = self.pending.pop_front() {
-                self.consume(message);
-                continue;
-            }
             match self.rx.recv_timeout(IDLE_TICK) {
                 Ok(message) => self.consume(message),
                 Err(mpsc::RecvTimeoutError::Timeout) => self.service(),
@@ -343,11 +336,7 @@ impl Server {
         }
         // Drain anything the client sent before it stopped reading, so a
         // trailing `disconnect` still gets its response.
-        let mut queued: VecDeque<ClientMessage> = take(&mut self.pending);
         while let Ok(message) = self.rx.try_recv() {
-            queued.push_back(message);
-        }
-        for message in queued {
             if let ClientMessage::Message(message) = message
                 && let Some(request) = Request::from_message(&message)
                 && request.command == "disconnect"
@@ -524,11 +513,21 @@ impl Server {
         let result = match request.command.as_str() {
             "initialize" => self.on_initialize(&request.arguments),
             "launch" | "attach" => self.on_attach(&request.arguments),
-            "configurationDone" => self.on_configuration_done(),
-            "disconnect" | "terminate" => {
+            "configurationDone" => self.on_configuration_done(&request),
+            "disconnect" => {
                 // Detach before replying: clients may kill the adapter on the response.
+                let released = !matches!(self.state, RunState::Detached);
                 self.shutdown_session();
                 self.done = true;
+                if released {
+                    self.send_event("terminated", json!({}));
+                }
+                Ok(None)
+            }
+            "terminate" => {
+                // The client follows `terminated` with a `disconnect` of its
+                // own; stay up to answer it.
+                self.shutdown_session();
                 self.send_event("terminated", json!({}));
                 Ok(None)
             }
@@ -560,7 +559,7 @@ impl Server {
         // only a failure raised before it got that far is answered here.
         if matches!(
             request.command.as_str(),
-            "continue" | "pause" | "next" | "stepIn" | "stepOut"
+            "configurationDone" | "continue" | "pause" | "next" | "stepIn" | "stepOut"
         ) {
             if let Err(message) = result {
                 self.respond(&request, Err(message));
@@ -626,11 +625,14 @@ impl Server {
         Ok(())
     }
 
-    fn on_configuration_done(&mut self) -> Handled {
+    /// Answers its own request, so the entry stop follows the response the
+    /// way every other stop follows the run-control request that produced it.
+    fn on_configuration_done(&mut self, request: &Request) -> Handled {
         self.configured = true;
         let status = self.session()?.run_status();
         let running = status.running;
         let rip = status.rip.unwrap_or(0);
+        self.respond(request, Ok(None));
         if running {
             self.state = RunState::Running;
         } else {
@@ -641,7 +643,6 @@ impl Server {
     }
 
     fn on_continue(&mut self, request: &Request) -> Handled {
-        self.cancel.store(false, Ordering::Relaxed);
         let result = self.session()?.resume().map_err(|error| error.to_string());
         match result {
             Ok(()) => {
@@ -659,33 +660,32 @@ impl Server {
     }
 
     fn on_pause(&mut self, request: &Request) -> Handled {
-        self.cancel.store(true, Ordering::Relaxed);
-        // Already halted (a step this pause interrupted has since reported its
-        // stop): the client's view is current, so acknowledge without
-        // interrupting a target that is not running.
+        // The reader raised the flag for this request; it is consumed here.
+        self.cancel.store(false, Ordering::Relaxed);
+        // The client already holds the stop (a step this pause interrupted
+        // reported where it ended), so there is nothing to interrupt.
         if matches!(self.state, RunState::Halted) {
             self.respond(request, Ok(None));
             return Ok(None);
         }
         let result = self
             .session()?
-            .interrupt()
+            .interrupt_outcome()
             .map_err(|error| error.to_string());
         match result {
-            Ok(event) => {
+            Ok(outcome) => {
                 self.respond(request, Ok(None));
-                // A break-in arrives as `STATUS_BREAKPOINT`; the client asked
-                // for it, so report it as a pause while keeping the real
-                // exception detail for `exceptionInfo`.
-                self.report_stop_as(
-                    ContinueOutcome::Stopped {
-                        rip: event.program_counter.unwrap_or(0),
-                        exception_code: event.exception_code,
-                        first_chance: event.first_chance,
-                        exception_address: event.exception_address,
-                    },
-                    Some("pause"),
-                );
+                // A break-in arrives as `STATUS_BREAKPOINT` and a target found
+                // halted has no event; both are the pause the client asked
+                // for (the exception detail stays for `exceptionInfo`). A
+                // breakpoint, bugcheck, or reboot the break-in raced is
+                // reported as itself.
+                let forced = matches!(
+                    outcome,
+                    ContinueOutcome::Stopped { .. } | ContinueOutcome::Halted { .. }
+                )
+                .then_some("pause");
+                self.report_stop_as(outcome, forced);
             }
             Err(message) => self.respond(request, Err(message)),
         }
@@ -693,7 +693,6 @@ impl Server {
     }
 
     fn on_step(&mut self, request: &Request, mode: StepMode) -> Handled {
-        self.cancel.store(false, Ordering::Relaxed);
         let instruction_granularity =
             arg_str(&request.arguments, "granularity").as_deref() == Some("instruction");
         if let Some(thread) = arg_i64(&request.arguments, "threadId")
@@ -774,7 +773,6 @@ impl Server {
                     }
                 }
             }
-            self.poll_for_pause();
         }
         Ok(ContinueOutcome::Step { rip })
     }
@@ -847,26 +845,6 @@ impl Server {
                 .step_over(&cancel)
                 .map_err(|error| error.to_string()),
             StepMode::Out => session.step_out(&cancel).map_err(|error| error.to_string()),
-        }
-    }
-
-    /// Notice a `pause` request that lands mid-step. The loop is
-    /// single-threaded, so a source-line step drains the channel itself:
-    /// a queued `pause` raises the cancel flag that `run_to` inside
-    /// `step_over` already honors, and every message is re-queued so it is
-    /// still handled in arrival order once the step finishes.
-    fn poll_for_pause(&mut self) {
-        let mut drained = Vec::new();
-        while let Ok(message) = self.rx.try_recv() {
-            drained.push(message);
-        }
-        for message in drained {
-            if let ClientMessage::Message(value) = &message
-                && Request::from_message(value).is_some_and(|request| request.command == "pause")
-            {
-                self.cancel.store(true, Ordering::Relaxed);
-            }
-            self.pending.push_back(message);
         }
     }
 
@@ -965,6 +943,28 @@ impl Server {
     /// whose transport encoding hides the real cause (a break-in is delivered
     /// as a breakpoint exception).
     fn report_stop_as(&mut self, outcome: ContinueOutcome, forced_reason: Option<&'static str>) {
+        // A cancelled run: `run_to` halts the target to remove its temporary
+        // breakpoint before reporting `Running`, so the client's `pause` has
+        // its stop. Only a target still running (the halt failed) stays on
+        // its run.
+        let (outcome, forced_reason) = match outcome {
+            ContinueOutcome::Running => {
+                let halted_rip = self
+                    .session
+                    .as_mut()
+                    .filter(|session| !session.backend.is_running())
+                    .and_then(|session| session.run_status().rip);
+                match halted_rip {
+                    Some(rip) => (ContinueOutcome::Halted { rip }, Some("pause")),
+                    None => {
+                        self.invalidate_stop_state();
+                        self.state = RunState::Running;
+                        return;
+                    }
+                }
+            }
+            outcome => (outcome, forced_reason),
+        };
         self.invalidate_stop_state();
         self.state = RunState::Halted;
         self.cancel.store(false, Ordering::Relaxed);
@@ -973,10 +973,7 @@ impl Server {
 
         let mut action = None;
         let stop = match outcome {
-            ContinueOutcome::Running => {
-                self.state = RunState::Running;
-                return;
-            }
+            ContinueOutcome::Running => unreachable!("a running target was reported above"),
             ContinueOutcome::Breakpoint {
                 id,
                 address,
@@ -1178,6 +1175,11 @@ impl Server {
             Ok(vcpus) => vcpus.into_iter().map(|vcpu| vcpu.id).collect(),
             Err(_) => vec![session.current_thread.clone()],
         };
+        self.set_threads(ids);
+    }
+
+    /// Install the vCPU list, announcing additions and removals.
+    fn set_threads(&mut self, ids: Vec<String>) {
         if ids == self.threads {
             return;
         }
@@ -1208,9 +1210,9 @@ impl Server {
                 .collect::<Vec<_>>();
             return Ok(Some(json!({"threads": threads})));
         }
-        self.sync_threads();
         let session = self.session()?;
         let vcpus = session.vcpus().map_err(|error| error.to_string())?;
+        self.set_threads(vcpus.iter().map(|vcpu| vcpu.id.clone()).collect());
         let threads = vcpus
             .iter()
             .enumerate()
@@ -1610,9 +1612,11 @@ impl Server {
         variables
     }
 
-    /// Re-read the live register file into a frame-0 handle after a register
-    /// write, so the frame context this adapter installs for locals and
-    /// expressions matches the target.
+    /// Re-read the live register file into a frame-0 handle, so the frame
+    /// context this adapter installs for locals and expressions matches the
+    /// target after a write (`setVariable`, or `r rax=...` in the console).
+    /// Caller frames keep their recovered snapshot, and so does a parked
+    /// Windows thread, whose `read_registers` is refused.
     fn refresh_live_frame(&mut self, handle: usize) {
         if self.frames[handle].index != 0 {
             return;
@@ -1634,6 +1638,7 @@ impl Server {
     /// current context, because handles outlive the client's last stack walk.
     fn select_frame(&mut self, handle: usize) -> result::Result<(), String> {
         self.select_thread(self.frames[handle].thread)?;
+        self.refresh_live_frame(handle);
         let frame = &self.frames[handle];
         let selected = SelectedFrame {
             index: frame.index,
@@ -1655,9 +1660,15 @@ impl Server {
         let name = arg_str(args, "name").ok_or_else(|| "missing name".to_string())?;
         let expression = arg_str(args, "value").ok_or_else(|| "missing value".to_string())?;
         let index = self.var_index(reference)?;
-
+        let target = self.vars[index].clone();
+        // A scope row's value expression (`index + 1`, `@rcx`) means what it
+        // means in that row's frame, not in whichever frame the previous
+        // request installed. Aggregates address the guest directly.
+        if let VarRef::Locals(handle) | VarRef::Registers(handle) = target {
+            self.select_frame(handle)?;
+        }
         let value = self.evaluate_expression(&expression)?;
-        match self.vars[index].clone() {
+        match target {
             VarRef::Registers(handle) => {
                 if self.frames[handle].index != 0 {
                     return Err(
@@ -1665,10 +1676,6 @@ impl Server {
                             .to_string(),
                     );
                 }
-                // Handles outlive the client's last stack walk, so the write
-                // has to name the handle's thread rather than whichever vCPU
-                // the previous request happened to select.
-                self.select_thread(self.frames[handle].thread)?;
                 let session = self.session()?;
                 if session.parked_windows_thread().is_some() {
                     return Err(
@@ -1686,7 +1693,6 @@ impl Server {
             VarRef::Locals(handle) => {
                 let ip = self.frames[handle].ip;
                 let live_frame = self.frames[handle].index == 0;
-                self.select_frame(handle)?;
                 let session = self.session()?;
                 let locals = session
                     .target
@@ -2055,51 +2061,44 @@ impl Server {
         let key = arg_str(&source, "path")
             .or_else(|| arg_str(&source, "name"))
             .ok_or_else(|| "source breakpoints need a path or name".to_string())?;
-
-        for previous in self.source_breakpoints.remove(&key).unwrap_or_default() {
-            self.clear_ids(&previous);
-        }
-
         let requested = args
             .get("breakpoints")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut installed = Vec::new();
-        let mut response = Vec::new();
-        for entry in &requested {
-            let Some(line) = arg_i64(entry, "line") else {
-                response.push(json!({"verified": false, "message": "breakpoint without a line"}));
-                continue;
-            };
-            let source_line = self.to_source_line(line);
-            let config = match breakpoint_config(entry) {
-                Ok(config) => config,
-                Err(message) => {
-                    response.push(json!({
-                        "verified": false,
-                        "line": line,
-                        "message": message,
-                    }));
-                    continue;
-                }
-            };
-            let spec = self.source_spec(&key, source_line);
-            let result = {
-                let session = self.session()?;
-                session
-                    .with_target_halted(|session| session.add_source_breakpoint_with(spec, config))
-            };
+        let lines: Vec<Option<i64>> = requested
+            .iter()
+            .map(|entry| arg_i64(entry, "line"))
+            .collect();
+        let plan = requested
+            .iter()
+            .zip(&lines)
+            .map(|(entry, line)| {
+                let line = line.ok_or_else(|| "breakpoint without a line".to_string())?;
+                let config = breakpoint_config(entry)?;
+                let spec = self.source_spec(&key, self.to_source_line(line));
+                Ok(Install::Source(spec, config))
+            })
+            .collect();
+        let previous: Vec<u32> = self
+            .source_breakpoints
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect();
+        let results = self.install_breakpoints(previous, plan)?;
+        self.source_breakpoints.remove(&key);
+        let mut installed = Vec::with_capacity(results.len());
+        let mut response = Vec::with_capacity(results.len());
+        for (result, line) in results.into_iter().zip(lines) {
             match result {
                 Ok(ids) => {
-                    response.push(self.breakpoint_value(&ids, Some(line)));
+                    response.push(self.breakpoint_value(&ids, line));
                     installed.push(ids);
                 }
-                Err(error) => response.push(json!({
-                    "verified": false,
-                    "line": line,
-                    "message": error.to_string(),
-                })),
+                Err(message) => response.push(refused_breakpoint(message, line)),
             }
         }
         self.source_breakpoints.insert(key, installed);
@@ -2123,102 +2122,46 @@ impl Server {
     }
 
     fn on_set_function_breakpoints(&mut self, args: &Value) -> Handled {
-        let stale = take(&mut self.function_breakpoints);
-        self.clear_ids(&stale);
         let requested = args
             .get("breakpoints")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut response = Vec::new();
-        for entry in &requested {
-            let Some(name) = arg_str(entry, "name") else {
-                response.push(json!({"verified": false, "message": "breakpoint without a name"}));
-                continue;
-            };
-            let config = match breakpoint_config(entry) {
-                Ok(config) => config,
-                Err(message) => {
-                    response.push(json!({"verified": false, "message": message}));
-                    continue;
-                }
-            };
-            // Skip the prologue so arguments occupy their PDB locations.
-            // Console `bu` still breaks at the symbol address.
-            let config = BreakpointConfig {
-                skip_prologue: true,
-                ..config
-            };
-            let result = {
-                let session = self.session()?;
-                let name = name.clone();
-                session
-                    .with_target_halted(|session| session.add_symbol_breakpoint_with(name, config))
-            };
-            match result {
-                Ok(id) => {
-                    response.push(self.breakpoint_value(&[id], None));
-                    self.function_breakpoints.push(id);
-                }
-                Err(error) => response.push(json!({
-                    "verified": false,
-                    "message": error.to_string(),
-                })),
-            }
-        }
-        Ok(Some(json!({"breakpoints": response})))
+        let plan = requested
+            .iter()
+            .map(|entry| {
+                let name = arg_str(entry, "name")
+                    .ok_or_else(|| "breakpoint without a name".to_string())?;
+                // Skip the prologue so arguments occupy their PDB locations.
+                // Console `bu` still breaks at the symbol address.
+                let config = BreakpointConfig {
+                    skip_prologue: true,
+                    ..breakpoint_config(entry)?
+                };
+                Ok(Install::Symbol(name, config))
+            })
+            .collect();
+        self.replace_owned_set(OwnedSet::Function, plan)
     }
 
     fn on_set_instruction_breakpoints(&mut self, args: &Value) -> Handled {
-        let stale = take(&mut self.instruction_breakpoints);
-        self.clear_ids(&stale);
         let requested = args
             .get("breakpoints")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut response = Vec::new();
-        for entry in &requested {
-            let address = match arg_str(entry, "instructionReference")
-                .ok_or_else(|| "breakpoint without an instructionReference".to_string())
-                .and_then(|reference| parse_address(&reference))
-            {
-                Ok(address) => {
-                    let offset = arg_i64(entry, "offset").unwrap_or(0);
-                    address.wrapping_add_signed(offset)
-                }
-                Err(message) => {
-                    response.push(json!({"verified": false, "message": message}));
-                    continue;
-                }
-            };
-            let config = match breakpoint_config(entry) {
-                Ok(config) => config,
-                Err(message) => {
-                    response.push(json!({"verified": false, "message": message}));
-                    continue;
-                }
-            };
-            let result = {
-                let session = self.session()?;
-                session.with_target_halted(|session| {
-                    // An instruction breakpoint names an address out of the
-                    // disassembly view, so it has no symbol to re-resolve.
-                    session.add_breakpoint_with(VirtAddr(address), None, config)
-                })
-            };
-            match result {
-                Ok(id) => {
-                    response.push(self.breakpoint_value(&[id], None));
-                    self.instruction_breakpoints.push(id);
-                }
-                Err(error) => response.push(json!({
-                    "verified": false,
-                    "message": error.to_string(),
-                })),
-            }
-        }
-        Ok(Some(json!({"breakpoints": response})))
+        let plan = requested
+            .iter()
+            .map(|entry| {
+                let address = arg_str(entry, "instructionReference")
+                    .ok_or_else(|| "breakpoint without an instructionReference".to_string())
+                    .and_then(|reference| parse_address(&reference))?
+                    .wrapping_add_signed(arg_i64(entry, "offset").unwrap_or(0));
+                let config = breakpoint_config(entry)?;
+                Ok(Install::Address(address, config))
+            })
+            .collect();
+        self.replace_owned_set(OwnedSet::Instruction, plan)
     }
 
     fn on_data_breakpoint_info(&mut self, args: &Value) -> Handled {
@@ -2388,72 +2331,105 @@ impl Server {
     }
 
     fn on_set_data_breakpoints(&mut self, args: &Value) -> Handled {
-        let stale = take(&mut self.data_breakpoints);
-        self.clear_ids(&stale);
         let requested = args
             .get("breakpoints")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut response = Vec::new();
-        for entry in &requested {
-            let parsed = arg_str(entry, "dataId")
-                .ok_or_else(|| "breakpoint without a dataId".to_string())
-                .and_then(|id| parse_data_id(&id));
-            let (address, len) = match parsed {
-                Ok(parsed) => parsed,
-                Err(message) => {
-                    response.push(json!({"verified": false, "message": message}));
-                    continue;
-                }
-            };
-            let access = match arg_str(entry, "accessType").as_deref() {
-                Some("read") | Some("readWrite") => WatchpointAccess::ReadWrite,
-                _ => WatchpointAccess::Write,
-            };
-            let config = match breakpoint_config(entry) {
-                Ok(config) => config,
-                Err(message) => {
-                    response.push(json!({"verified": false, "message": message}));
-                    continue;
-                }
-            };
-            let result = {
-                let session = self.session()?;
-                session.with_target_halted(|session| {
-                    // A data breakpoint watches the storage a `dataId` already
-                    // resolved to, so there is no symbol left to defer on.
-                    session.add_watchpoint_with(VirtAddr(address), access, len, None, config)
+        let plan = requested
+            .iter()
+            .map(|entry| {
+                let (address, len) = arg_str(entry, "dataId")
+                    .ok_or_else(|| "breakpoint without a dataId".to_string())
+                    .and_then(|id| parse_data_id(&id))?;
+                let access = match arg_str(entry, "accessType").as_deref() {
+                    Some("read") | Some("readWrite") => WatchpointAccess::ReadWrite,
+                    _ => WatchpointAccess::Write,
+                };
+                let config = breakpoint_config(entry)?;
+                Ok(Install::Watch {
+                    address,
+                    access,
+                    len,
+                    config,
                 })
-            };
+            })
+            .collect();
+        self.replace_owned_set(OwnedSet::Data, plan)
+    }
+
+    fn owned_set(&mut self, set: OwnedSet) -> &mut Vec<u32> {
+        match set {
+            OwnedSet::Function => &mut self.function_breakpoints,
+            OwnedSet::Instruction => &mut self.instruction_breakpoints,
+            OwnedSet::Data => &mut self.data_breakpoints,
+        }
+    }
+
+    /// Answer a `set*Breakpoints` request for a set without source lines.
+    fn replace_owned_set(
+        &mut self,
+        set: OwnedSet,
+        plan: Vec<result::Result<Install, String>>,
+    ) -> Handled {
+        let previous = self.owned_set(set).clone();
+        let results = self.install_breakpoints(previous, plan)?;
+        self.owned_set(set).clear();
+        let mut response = Vec::with_capacity(results.len());
+        for result in results {
             match result {
-                Ok(id) => {
-                    response.push(self.breakpoint_value(&[id], None));
-                    self.data_breakpoints.push(id);
+                Ok(ids) => {
+                    response.push(self.breakpoint_value(&ids, None));
+                    self.owned_set(set).extend(ids);
                 }
-                Err(error) => response.push(json!({
-                    "verified": false,
-                    "message": error.to_string(),
-                })),
+                Err(message) => response.push(refused_breakpoint(message, None)),
             }
         }
         Ok(Some(json!({"breakpoints": response})))
     }
 
-    fn clear_ids(&mut self, ids: &[u32]) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        if ids.is_empty() {
-            return;
-        }
-        // Remove the batch in one halt/resume round trip.
-        let _ = session.with_target_halted(|session| {
-            for id in ids {
+    /// Replace one client-owned breakpoint set in a single halt/resume round
+    /// trip: remove what the client last sent, install what it sends now.
+    /// Results align with `plan`; a slot refused before the target was
+    /// touched passes through.
+    ///
+    /// `Err` means the target could not be halted and nothing changed. A
+    /// failure to resume afterwards is reported to the console instead: the
+    /// edits stand, and the next service tick surfaces the halt.
+    fn install_breakpoints(
+        &mut self,
+        remove: Vec<u32>,
+        mut plan: Vec<result::Result<Install, String>>,
+    ) -> result::Result<Vec<result::Result<Vec<u32>, String>>, String> {
+        let session = self.session()?;
+        let mut results = Vec::with_capacity(plan.len());
+        let mut edited = false;
+        let outcome = session.with_target_halted(|session| {
+            edited = true;
+            for id in &remove {
                 let _ = session.remove_breakpoint(*id);
             }
+            results.extend(plan.drain(..).map(|slot| {
+                slot.and_then(|install| install.apply(session).map_err(|error| error.to_string()))
+            }));
             Ok(())
         });
+        match outcome {
+            Ok(()) => {}
+            Err(error) if !edited => {
+                return Err(format!(
+                    "breakpoints unchanged; the target could not be halted: {error}"
+                ));
+            }
+            Err(error) => self.emit_output(
+                "important",
+                format!("ntoseye: breakpoints changed but the target did not resume: {error}\n"),
+            ),
+        }
+        for id in &remove {
+            self.verified.remove(id);
+        }
+        Ok(results)
     }
 
     /// Report one installed breakpoint: verified once an address is resolved,
@@ -2566,15 +2542,22 @@ impl Server {
         if bytes.is_empty() {
             return Ok(Some(json!({"bytesWritten": 0})));
         }
+        let allow_partial = arg_bool(args, "allowPartial").unwrap_or(false);
         let session = self.session()?;
-        session
+        let written = session
             .target
             .current_process()
             .map_err(|error| error.to_string())?
             .memory()
-            .write_bytes(VirtAddr(address), &bytes)
-            .map_err(|error| error.to_string())?;
-        Ok(Some(json!({"bytesWritten": bytes.len() as i64})))
+            .write_bytes(VirtAddr(address), &bytes);
+        let written = match written {
+            Ok(()) => bytes.len(),
+            // The write ran into an untranslatable page after committing a
+            // prefix. The client decides whether that prefix stands.
+            Err(Error::PartialWrite(committed)) if allow_partial => committed,
+            Err(error) => return Err(error.to_string()),
+        };
+        Ok(Some(json!({"bytesWritten": written as i64})))
     }
 
     fn on_disassemble(&mut self, args: &Value) -> Handled {
@@ -2590,14 +2573,21 @@ impl Server {
             return Ok(Some(json!({"instructions": []})));
         }
 
-        let mut rows = Vec::new();
+        // Row `i` is instruction `instructionOffset + i` from the reference.
+        // A client records the reference's address positionally and derives
+        // instruction-breakpoint offsets from it, so a hole is an invalid
+        // row, never a shifted one.
+        let mut rows: Vec<Option<DisassembledRow>> = Vec::with_capacity(count);
         // Negative offsets ask for the instructions *before* the reference, so
-        // decode backwards into the gap first.
+        // decode backwards into the gap first; a short decode leaves its hole
+        // at the far end.
         let backwards = usize::try_from(instruction_offset.min(0).saturating_neg())
             .unwrap_or(0)
             .min(MAX_DISASSEMBLE_INSTRUCTIONS);
         if backwards > 0 {
-            rows.extend(self.disassemble_preceding(address, backwards)?);
+            let preceding = self.disassemble_preceding(address, backwards)?;
+            rows.resize_with(backwards.saturating_sub(preceding.len()), || None);
+            rows.extend(preceding.into_iter().map(Some));
         }
         let forward_start = if instruction_offset > 0 {
             // Skip forward by decoding and dropping instructions.
@@ -2614,22 +2604,24 @@ impl Server {
         if remaining > 0 {
             let session = self.session()?;
             match session.disassemble(VirtAddr(forward_start), remaining) {
-                Ok(decoded) => rows.extend(decoded.into_iter().map(|row| DisassembledRow {
-                    address: row.ip,
-                    bytes: Some(row.hex.clone()),
-                    text: row.asm(),
+                Ok(decoded) => rows.extend(decoded.into_iter().map(|row| {
+                    Some(DisassembledRow {
+                        address: row.ip,
+                        bytes: Some(row.hex.clone()),
+                        text: row.asm(),
+                    })
                 })),
-                Err(error) => rows.push(DisassembledRow {
+                Err(error) => rows.push(Some(DisassembledRow {
                     address: forward_start,
                     bytes: None,
                     text: format!("<{error}>"),
-                }),
+                })),
             }
         }
 
-        // The protocol requires exactly `instructionCount` entries; pad rather
-        // than lie about what decoded.
-        let instructions = self.disassembly_values(rows, count);
+        // The protocol requires exactly `instructionCount` entries.
+        rows.resize_with(count, || None);
+        let instructions = self.disassembly_values(rows);
         Ok(Some(json!({"instructions": instructions})))
     }
 
@@ -2660,9 +2652,20 @@ impl Server {
             .collect())
     }
 
-    fn disassembly_values(&mut self, rows: Vec<DisassembledRow>, count: usize) -> Vec<Value> {
-        let mut instructions = Vec::with_capacity(count);
-        for row in rows.into_iter().take(count) {
+    /// A `None` row is the invalid-instruction value. Its address is `-1`,
+    /// which no instruction has, so a client keying rows by address (VS Code
+    /// sorts and merges on it) drops it rather than filing it under 0.
+    fn disassembly_values(&mut self, rows: Vec<Option<DisassembledRow>>) -> Vec<Value> {
+        let mut instructions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let Some(row) = row else {
+                instructions.push(json!({
+                    "address": "-1",
+                    "instruction": "(unreadable)",
+                    "presentationHint": "invalid",
+                }));
+                continue;
+            };
             let symbol = self.session.as_ref().and_then(|session| {
                 session
                     .target
@@ -2687,14 +2690,6 @@ impl Server {
                 value["line"] = json!(self.to_client_line(location.line as i64));
             }
             instructions.push(value);
-        }
-        // Padding keeps the client's window aligned; it is marked invalid.
-        while instructions.len() < count {
-            instructions.push(json!({
-                "address": "0x0",
-                "instruction": "(unreadable)",
-                "presentationHint": "invalid",
-            }));
         }
         instructions
     }
@@ -2854,6 +2849,63 @@ fn breakpoint_config(entry: &Value) -> result::Result<BreakpointConfig, String> 
         },
         ..BreakpointConfig::default()
     })
+}
+
+/// One breakpoint a `set*Breakpoints` request asks for, resolved as far as
+/// possible before the target is halted for the batch.
+enum Install {
+    /// `bu file:line`; may resolve to several addresses.
+    Source(String, BreakpointConfig),
+    /// `bu symbol`, deferred until its module loads.
+    Symbol(String, BreakpointConfig),
+    /// `bp address` out of the disassembly view, with no symbol to re-resolve.
+    Address(u64, BreakpointConfig),
+    /// `ba` on storage a `dataId` already resolved, with no symbol to defer on.
+    Watch {
+        address: u64,
+        access: WatchpointAccess,
+        len: u8,
+        config: BreakpointConfig,
+    },
+}
+
+impl Install {
+    fn apply(self, session: &mut Session) -> Result<Vec<u32>> {
+        match self {
+            Self::Source(spec, config) => session.add_source_breakpoint_with(spec, config),
+            Self::Symbol(name, config) => session
+                .add_symbol_breakpoint_with(name, config)
+                .map(|id| vec![id]),
+            Self::Address(address, config) => session
+                .add_breakpoint_with(VirtAddr(address), None, config)
+                .map(|id| vec![id]),
+            Self::Watch {
+                address,
+                access,
+                len,
+                config,
+            } => session
+                .add_watchpoint_with(VirtAddr(address), access, len, None, config)
+                .map(|id| vec![id]),
+        }
+    }
+}
+
+/// A breakpoint set the client replaces wholesale with one request.
+#[derive(Clone, Copy)]
+enum OwnedSet {
+    Function,
+    Instruction,
+    Data,
+}
+
+/// A breakpoint row the request refused, with the client's line when it had one.
+fn refused_breakpoint(message: String, line: Option<i64>) -> Value {
+    let mut row = json!({"verified": false, "message": message});
+    if let Some(line) = line {
+        row["line"] = json!(line);
+    }
+    row
 }
 
 /// Compile log placeholders into a `.printf` action followed by `gc`.
@@ -3158,6 +3210,88 @@ mod tests {
 
         let instructions = answer["instructions"].as_array().expect("instructions");
         assert_eq!(instructions.len(), MAX_DISASSEMBLE_INSTRUCTIONS);
+    }
+
+    #[test]
+    fn a_short_backward_decode_keeps_the_reference_at_its_offset() {
+        // Nothing is mapped below 0x1000, so the eight instructions before
+        // the reference cannot be decoded. The client takes the reference's
+        // address from row `-instructionOffset`, so the hole goes in front.
+        let session = session_over_memory(0x1000, &[0x90u8; 0x1000]);
+        let (_tx, rx) = mpsc::channel();
+        let (mut server, _sink) = server_with_sink(Some(session), rx);
+
+        let answer = server
+            .on_disassemble(&json!({
+                "memoryReference": "0x1000",
+                "instructionOffset": -8,
+                "instructionCount": 16,
+            }))
+            .unwrap()
+            .unwrap();
+
+        let instructions = answer["instructions"].as_array().unwrap();
+        assert_eq!(instructions.len(), 16);
+        for row in &instructions[..8] {
+            assert_eq!(row["address"], "-1", "{row}");
+            assert_eq!(row["presentationHint"], "invalid");
+        }
+        assert_eq!(instructions[8]["address"], "0x1000");
+        assert_eq!(instructions[9]["address"], "0x1001");
+    }
+
+    #[test]
+    fn a_cancelled_run_that_left_the_target_halted_is_a_pause_stop() {
+        // `run_to` halts the target to lift its temporary breakpoint before
+        // reporting `Running` for a cancelled step; that halt is the stop the
+        // client's `pause` asked for.
+        let session = session_over_memory(0x1000, &[0x90u8; 0x40]);
+        let (_tx, rx) = mpsc::channel();
+        let (mut server, sink) = server_with_sink(Some(session), rx);
+        server.state = RunState::Running;
+
+        server.report_stop(ContinueOutcome::Running);
+
+        assert!(matches!(server.state, RunState::Halted));
+        let messages = decode_sink(&sink);
+        let stopped = messages
+            .iter()
+            .find(|message| message["event"] == "stopped")
+            .unwrap_or_else(|| panic!("no stopped event in {messages:?}"));
+        assert_eq!(stopped["body"]["reason"], "pause");
+    }
+
+    #[test]
+    fn terminate_keeps_serving_until_the_client_disconnects() {
+        // The client follows `terminated` with its own `disconnect`.
+        let session = session_over_memory(0x1000, &[0u8; 0x40]);
+        let messages = serve_script_with(
+            Some(session),
+            &[
+                request(1, "terminate"),
+                request(2, "threads"),
+                request(3, "disconnect"),
+            ],
+        );
+
+        let responses: Vec<&Value> = messages
+            .iter()
+            .filter(|message| message["type"] == "response")
+            .collect();
+        assert_eq!(responses.len(), 3, "{messages:?}");
+        assert_eq!(responses[0]["command"], "terminate");
+        assert_eq!(responses[0]["success"], true);
+        assert_eq!(responses[1]["command"], "threads");
+        assert_eq!(responses[1]["success"], false, "the target was released");
+        assert_eq!(responses[2]["command"], "disconnect");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["event"] == "terminated")
+                .count(),
+            1,
+            "{messages:?}"
+        );
     }
 
     #[test]
