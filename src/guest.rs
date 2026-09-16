@@ -2259,7 +2259,18 @@ impl Guest {
                     .progress_chars("#-"),
             );
 
-            let results = ready_to_load
+            // Two modules can share a PDB guid, and indexing one guid is
+            // serialized behind a per-guid `OnceLock` inside the symbol store.
+            // Indexing also nests rayon, and a worker that blocks in a nested
+            // region steals other items from this very loop: if it picked up a
+            // second module with the guid it is already initializing, it would
+            // park on that `OnceLock` waiting for itself. Give the parallel
+            // pass one module per guid and run any duplicates afterwards, where
+            // they take the already-indexed fast path.
+            let (first_per_guid, duplicate_guids) =
+                partition_first_occurrence(ready_to_load, |load| load.guid);
+
+            let mut results = first_per_guid
                 .into_par_iter()
                 .map(|load| {
                     let result = symbols.load_downloaded_pdb(&load);
@@ -2267,6 +2278,11 @@ impl Guest {
                     (load, result)
                 })
                 .collect::<Vec<_>>();
+            results.extend(duplicate_guids.into_iter().map(|load| {
+                let result = symbols.load_downloaded_pdb(&load);
+                pb.inc(1);
+                (load, result)
+            }));
 
             pb.finish_and_clear();
 
@@ -2390,11 +2406,33 @@ impl Guest {
     }
 }
 
+/// Split `items` into the first item per distinct key and every later item
+/// sharing a key already seen, preserving input order in both halves.
+///
+/// Used to keep a parallel pass to one item per key while still processing the
+/// rest; nothing is dropped.
+fn partition_first_occurrence<T, K: Eq + std::hash::Hash>(
+    items: Vec<T>,
+    key: impl Fn(&T) -> K,
+) -> (Vec<T>, Vec<T>) {
+    let mut first = Vec::with_capacity(items.len());
+    let mut rest = Vec::new();
+    let mut seen = HashSet::new();
+    for item in items {
+        if seen.insert(key(&item)) {
+            first.push(item);
+        } else {
+            rest.push(item);
+        }
+    }
+    (first, rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         IMAGE_BLOCK, ModuleSymbolLoadReport, PE_HEADER_PROBE, PeImage, read_pe_header_page,
-        read_pe_image,
+        partition_first_occurrence, read_pe_image,
     };
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
@@ -2403,6 +2441,27 @@ mod tests {
     use crate::types::{PhysAddr, VirtAddr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Indexing one PDB guid is serialized behind a per-guid `OnceLock`, and a
+    /// rayon worker blocked in a nested parallel region steals other items
+    /// from the same loop. Two modules sharing a guid must therefore never be
+    /// in the parallel pass together, and neither may be dropped.
+    #[test]
+    fn same_key_items_are_deferred_out_of_the_parallel_pass() {
+        let modules = vec![
+            (7u32, "a.sys"),
+            (9, "b.sys"),
+            (7, "c.sys"),
+            (8, "d.sys"),
+            (7, "e.sys"),
+            (9, "f.sys"),
+        ];
+
+        let (first, rest) = partition_first_occurrence(modules, |(guid, _)| *guid);
+
+        assert_eq!(first, vec![(7, "a.sys"), (9, "b.sys"), (8, "d.sys")]);
+        assert_eq!(rest, vec![(7, "c.sys"), (7, "e.sys"), (9, "f.sys")]);
+    }
 
     /// Identity-mapped memory holding one image at `base`; reads outside it
     /// fail like an unmapped page. Counts the bytes handed out.

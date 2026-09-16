@@ -106,6 +106,19 @@ pub struct SymbolIndexDiagnostic {
     pub message: String,
 }
 
+/// Everything one PDB contributes to the symbol store, parsed while the PDB is
+/// locked so that building the searchable indexes from it (which is parallel)
+/// runs with no lock held.
+struct ParsedIndexData {
+    strings: Vec<String>,
+    rvas: HashMap<String, Vec<IndexedSymbol>>,
+    source_lines: Vec<SourceLineEntry>,
+    type_strings: Vec<String>,
+    enum_strings: Vec<String>,
+    struct_defs: HashMap<String, (u64, TypeIndex)>,
+    diagnostics: Vec<SymbolIndexDiagnostic>,
+}
+
 pub struct SymbolStore {
     pdbs: DashMap<u128, Mutex<pdb2::PDB<'static, Cursor<&'static [u8]>>>>,
 
@@ -3696,7 +3709,11 @@ impl SymbolStore {
         Ok(None)
     }
 
-    fn build_index(&self, guid: u128) -> Result<()> {
+    /// Parse every index input out of the PDB for `guid`.
+    ///
+    /// The `pdbs` shard guard and the PDB mutex are held for exactly this
+    /// call. See [`Self::build_index`] for why they must not outlive it.
+    fn parse_index_data(&self, guid: u128) -> Result<ParsedIndexData> {
         let pdb = self.pdbs.get_mut(&guid).ok_or(Error::ExpectedSymbols)?;
         let mut pdb_lock = pdb.lock();
         let address_map = pdb_lock.address_map()?;
@@ -4018,19 +4035,43 @@ impl SymbolStore {
         enum_strings.sort();
         enum_strings.dedup();
 
+        Ok(ParsedIndexData {
+            strings,
+            rvas,
+            source_lines,
+            type_strings,
+            enum_strings,
+            struct_defs,
+            diagnostics,
+        })
+    }
+
+    /// Build and publish every derived index for `guid`.
+    ///
+    /// [`SymbolIndex::from_names`] is itself parallel, and the module load that
+    /// calls this (`Guest::load_module_symbols`) is a `par_iter` on the same
+    /// global rayon pool. A worker that blocks in a nested parallel region
+    /// steals other outer items, so holding the `pdbs` shard guard across
+    /// `from_names` let a worker re-enter `get_mut` for a guid hashing to the
+    /// shard it already held and park on a non-reentrant lock forever, with
+    /// every other worker piling onto the same shard. Parsing therefore
+    /// finishes and releases both locks before any parallel work starts.
+    fn build_index(&self, guid: u128) -> Result<()> {
+        let parsed = self.parse_index_data(guid)?;
+
         // Publish every derived index together only after all mandatory PDB
         // streams have been parsed. A fatal type/public stream error must not
         // leave a partially indexed PDB that later lookups mistake for success.
-        self.index.insert(guid, SymbolIndex::from_names(strings));
-        self.symbol_rvas.insert(guid, rvas);
-        self.source_lines.insert(guid, source_lines);
+        self.index
+            .insert(guid, SymbolIndex::from_names(parsed.strings));
+        self.symbol_rvas.insert(guid, parsed.rvas);
+        self.source_lines.insert(guid, parsed.source_lines);
         self.index_types
-            .insert(guid, SymbolIndex::from_names(type_strings));
+            .insert(guid, SymbolIndex::from_names(parsed.type_strings));
         self.index_enums
-            .insert(guid, SymbolIndex::from_names(enum_strings));
-        self.struct_defs.insert(guid, struct_defs);
-
-        self.index_diagnostics.insert(guid, diagnostics);
+            .insert(guid, SymbolIndex::from_names(parsed.enum_strings));
+        self.struct_defs.insert(guid, parsed.struct_defs);
+        self.index_diagnostics.insert(guid, parsed.diagnostics);
         Ok(())
     }
 
