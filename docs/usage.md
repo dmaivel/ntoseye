@@ -336,6 +336,7 @@ Attach reclaims entries that no live session owns, restores displaced instructio
 - `!peb [address]` (`peb`) - Decode the attached process environment block and its loader list.
 - `!teb [address]` (`teb`) - Decode a thread environment block.
 - `!dlls [-c <address>]` (`dlls`) - List modules from the attached process loader lists.
+- `!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]` (`heap`) - Summarize, walk, or search the attached process's user-mode heaps. NT heaps are decoded through `_HEAP.Encoding`, with legacy-LFH blocks resolved through their user block regions; segment heaps decode VS chunks, LFH blocks, page allocations, and large allocations with the keys in `ntdll!RtlpHpHeapGlobals`. `-a` lists every entry, chunk, and block; `-x` finds the block containing an address. A heap is named by its index in the PEB list or its address. WOW64 heaps are not decoded.
 - `!gle` (`gle`) - Display the current thread's last Win32 and NT status values.
 - `!vad [pid|eprocess]` (`vmmap`) - Display a process's VAD tree; defaults to the selected process context. `vmmap [address|filter]` is the flat region view.
 - `!chkimg [-d] [-v] [-nospec] <module>` (`chkimg`) - Compare executable module sections with the cached on-disk image after relocation. Known kernel self-patches (import optimization, retpoline, `KiPatchSelf` retargets) are counted separately; `-nospec` drops them from the report.

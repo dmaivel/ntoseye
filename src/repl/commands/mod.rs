@@ -10,6 +10,7 @@ mod diagnostics;
 mod exceptions;
 mod exec;
 mod frames;
+mod heap;
 mod inspect;
 mod memory;
 mod meta;

@@ -86,6 +86,7 @@ mod commands;
 mod completion;
 mod disasm;
 mod exception_policy;
+mod heap;
 #[cfg(feature = "cli")]
 mod line_editor;
 mod memory_view;
@@ -99,6 +100,7 @@ pub use command::*;
 pub use completion::*;
 pub use disasm::*;
 pub use exception_policy::*;
+pub use heap::*;
 #[cfg(feature = "cli")]
 use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;

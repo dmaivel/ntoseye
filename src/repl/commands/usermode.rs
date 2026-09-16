@@ -161,7 +161,7 @@ struct ByteDiff {
     kind: Option<SelfPatchKind>,
 }
 
-fn attached_dtb(target: &Target) -> Result<u64> {
+pub(super) fn attached_dtb(target: &Target) -> Result<u64> {
     target
         .current_process_info
         .as_ref()
@@ -181,7 +181,11 @@ fn selected_thread_dtb(target: &Target, attached_dtb: u64) -> Result<u64> {
     })
 }
 
-fn resolve_peb(target: &Target, dtb: u64, explicit: Option<VirtAddr>) -> Result<VirtAddr> {
+pub(super) fn resolve_peb(
+    target: &Target,
+    dtb: u64,
+    explicit: Option<VirtAddr>,
+) -> Result<VirtAddr> {
     if let Some(address) = explicit {
         return Ok(address);
     }

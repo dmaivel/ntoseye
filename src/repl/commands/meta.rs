@@ -439,6 +439,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("threads", "processes and modules"),
     ("vcpu", "processes and modules"),
     ("!dlls", "user mode"),
+    ("!heap", "user mode"),
     ("!peb", "user mode"),
     ("!teb", "user mode"),
     ("!gle", "user mode"),
