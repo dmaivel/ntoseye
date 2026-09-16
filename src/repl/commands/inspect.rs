@@ -306,7 +306,16 @@ impl ReplState<'_> {
     }
 
     fn cmd_registers(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(frame) = self.ctx.target.selected_frame.as_ref() {
+        // A live frame 0 (`.frame 0`, or the frame an editor client keeps
+        // selected) is the vCPU's own register file. Only a recovered context
+        // is shown from its snapshot and refused assignment.
+        if let Some(frame) = self
+            .ctx
+            .target
+            .selected_frame
+            .as_ref()
+            .filter(|frame| !frame.is_live())
+        {
             let tail = invocation.raw_tail.trim();
             if tail.contains('=') {
                 error!(

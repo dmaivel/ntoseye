@@ -1101,7 +1101,19 @@ impl Session {
         let mut regs = self.read_registers()?;
         self.register_map.write_u64(name, &mut regs, value)?;
         self.backend.write_registers(&regs)?;
-        self.target.registers = Some(self.register_map.to_hashmap(&regs));
+        let values = self.register_map.to_hashmap(&regs);
+        // A live frame 0 selection is this register file; keep it, and the
+        // seed a `.frame N` walk starts from, in step with the write.
+        if let Some(frame) = self
+            .target
+            .selected_frame
+            .as_mut()
+            .filter(|frame| frame.is_live())
+        {
+            frame.registers.clone_from(&values);
+            frame.seed_registers.clone_from(&values);
+        }
+        self.target.registers = Some(values);
         Ok(())
     }
 

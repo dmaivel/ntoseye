@@ -18,6 +18,10 @@ use crate::repl::*;
 
 const MAX_FRAME_INDEX: usize = 4095;
 
+/// A recovered trace, the registers its walk was seeded from, and whether
+/// that seed is the live vCPU file (a `.cxr`/`.trap` context is not).
+type SeededTrace = (RecoveredStackTrace, HashMap<String, u64>, bool);
+
 repl_command! {
     cmd_frame;
     names: [".frame", "frame"],
@@ -124,14 +128,14 @@ impl ReplState<'_> {
                 self.print_selected_frame(frame, show_registers);
                 return Ok(());
             }
-            let Some((recovered, seed)) = self.recovered_live_trace(1)? else {
+            let Some((recovered, seed, live)) = self.recovered_live_trace(1)? else {
                 return Ok(());
             };
             let Some(frame) = recovered.frames.first() else {
                 error!("current frame is unavailable");
                 return Ok(());
             };
-            let selected = SelectedFrame::from_recovered(frame, 0, Some(&seed));
+            let selected = SelectedFrame::from_recovered(frame, 0, Some(&seed), live);
             self.print_selected_frame(&selected, show_registers);
             return Ok(());
         };
@@ -141,23 +145,20 @@ impl ReplState<'_> {
         }
 
         let limit = index.saturating_add(1);
-        let Some((recovered, seed)) = self.recovered_live_trace(limit)? else {
+        let Some((recovered, seed, live)) = self.recovered_live_trace(limit)? else {
             return Ok(());
         };
         let Some(frame) = recovered.frames.get(index) else {
             error!("frame {} is unavailable", index);
             return Ok(());
         };
-        let selected = SelectedFrame::from_recovered(frame, index, Some(&seed));
+        let selected = SelectedFrame::from_recovered(frame, index, Some(&seed), live);
         self.set_selected_frame(selected.clone());
         self.print_selected_frame(&selected, show_registers);
         Ok(())
     }
 
-    fn recovered_live_trace(
-        &mut self,
-        limit: usize,
-    ) -> Result<Option<(RecoveredStackTrace, HashMap<String, u64>)>> {
+    fn recovered_live_trace(&mut self, limit: usize) -> Result<Option<SeededTrace>> {
         if let Some(selected) = self.ctx.target.selected_frame.as_ref() {
             let seed = if selected.seed_registers.is_empty() {
                 &selected.registers
@@ -171,7 +172,7 @@ impl ReplState<'_> {
                 &seed,
                 limit,
             );
-            return Ok(Some((trace, seed)));
+            return Ok(Some((trace, seed, selected.seed_live)));
         }
         if self.ctx.parked_windows_thread().is_some() {
             error!("frame selection requires a live register context; use `vcpu <id>`");
@@ -191,7 +192,7 @@ impl ReplState<'_> {
             &registers,
             limit,
         );
-        Ok(Some((trace, seed)))
+        Ok(Some((trace, seed, true)))
     }
 
     fn cmd_cxr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

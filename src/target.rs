@@ -61,9 +61,9 @@ pub struct Target {
     pub last_exception_code: Option<u32>,
 }
 
-/// A debugger-selected non-live register context. Register values are kept as
-/// a sparse map because unwind metadata can recover only a subset of the full
-/// live register file for caller frames; `seed_registers` keeps the original
+/// A debugger-selected register context. Register values are kept as a sparse
+/// map because unwind metadata can recover only a subset of the full live
+/// register file for caller frames; `seed_registers` keeps the original
 /// context available when `.frame N` navigates repeatedly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedFrame {
@@ -75,15 +75,28 @@ pub struct SelectedFrame {
     /// Sparse register context from which this selection's stack walk started.
     /// It remains stable as `.frame N` moves through the recovered trace.
     pub seed_registers: HashMap<String, u64>,
+    /// Whether `seed_registers` is the live vCPU register file, as opposed to
+    /// a `.cxr`/`.trap` context read from memory. Decides [`Self::is_live`].
+    pub seed_live: bool,
 }
 
 impl SelectedFrame {
+    /// Frame 0 of a walk seeded from the live vCPU register file: the context
+    /// the target is halted in, so its registers are the target's and can be
+    /// written. Caller frames and `.cxr`/`.trap` contexts are recovered from
+    /// memory or unwind metadata and are read-only.
+    pub fn is_live(&self) -> bool {
+        self.seed_live && self.index == 0
+    }
+
     /// Select frame `index` of a recovered trace, keeping the walk's seed
     /// context so repeated selections stay anchored to the same register file.
+    /// `seed_live` says whether that seed was the vCPU's own register file.
     pub fn from_recovered(
         frame: &RecoveredFrame,
         index: usize,
         seed_registers: Option<&HashMap<String, u64>>,
+        seed_live: bool,
     ) -> Self {
         Self {
             index,
@@ -95,6 +108,7 @@ impl SelectedFrame {
                 .filter(|registers| !registers.is_empty())
                 .cloned()
                 .unwrap_or_else(|| frame.registers.clone()),
+            seed_live,
         }
     }
 
@@ -119,6 +133,7 @@ impl SelectedFrame {
             frame_base: None,
             registers,
             seed_registers,
+            seed_live: false,
         }
     }
 }

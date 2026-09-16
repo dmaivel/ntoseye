@@ -1639,6 +1639,12 @@ impl Server {
     fn select_frame(&mut self, handle: usize) -> result::Result<(), String> {
         self.select_thread(self.frames[handle].thread)?;
         self.refresh_live_frame(handle);
+        // The walk was seeded from the vCPU unless a parked Windows thread
+        // supplied its saved context.
+        let seed_live = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.parked_windows_thread().is_none());
         let frame = &self.frames[handle];
         let selected = SelectedFrame {
             index: frame.index,
@@ -1647,6 +1653,7 @@ impl Server {
             frame_base: frame.frame_base,
             registers: frame.registers.clone(),
             seed_registers: frame.seed_registers.clone(),
+            seed_live,
         };
         if let Some(session) = self.session.as_mut() {
             session.select_frame(selected);
