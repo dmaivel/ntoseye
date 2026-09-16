@@ -546,7 +546,10 @@ pub fn await_state_change(
                 }
             }
             PACKET_TYPE_KD_FILE_IO => {
-                handle_file_io(framing, &pkt.payload)?;
+                // Allow a full reply ACK; the pump restores PUMP_POLL next iteration.
+                with_framing_read_timeout_raw(framing, KD_REQUEST_TIMEOUT, |framing| {
+                    handle_file_io(framing, &pkt.payload)
+                })?;
             }
             _ => {
                 // Orphan packet, likely a manipulate reply from a previous
@@ -791,7 +794,6 @@ pub fn run_pump(
         link.reported_stop.store(true, Ordering::SeqCst);
         let _ = link.stop_tx.send(result);
     };
-    let _ = framing.transport_mut().set_read_timeout(Some(PUMP_POLL));
     // Persists across poll iterations: once the fatal-error print is seen, the
     // next state-change is surfaced even if a timeout intervened first
     let mut bugcheck = false;
@@ -801,6 +803,9 @@ pub fn run_pump(
     let mut assist_breakin_count = 0u32;
     let mut assisted_breakin_pending = false;
     while !link.shutdown.load(Ordering::SeqCst) {
+        // Request handlers leave a longer timeout installed. Restore the poll
+        // interval to keep shutdown and assist-poke scheduling responsive.
+        let _ = framing.transport_mut().set_read_timeout(Some(PUMP_POLL));
         // Bound each await to a poll interval so assist-poke scheduling runs on
         // time even while boot traffic streams in continuously (otherwise the
         // WouldBlock branch below, where assists are sent, never runs).
@@ -825,7 +830,6 @@ pub fn run_pump(
                         report(Err(e.to_string()));
                         break;
                     }
-                    let _ = framing.transport_mut().set_read_timeout(Some(PUMP_POLL));
                     continue;
                 }
                 report(Ok(stop));

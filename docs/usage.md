@@ -379,6 +379,7 @@ Attach reclaims entries that no live session owns, restores displaced instructio
 - `unalias <name>` - Remove a command alias.
 - `reload-scripts` - Reload custom commands and aliases.
 - `.dump [/f] [/ma] <file>` (`dump`) - Write a full PAGEDU64 kernel dump from the halted target.
+- `.kdfiles [<map-file>] [-m <target> <host>] [-d <target>] [-c]` - Serve driver images to the target from the host, so a rebuilt driver loads without being copied into the guest. See [the driver replacement map](kdfiles.md).
 - `dbgprint [count]` - Show captured guest debug output (DbgPrint).
 - `capabilities` - Display backend capabilities.
 - `status` - Display current VM status.

@@ -1,15 +1,13 @@
 use std::io::{Read, Write};
 
 use crate::dbg_backend::{BugcheckInfo, DebugLog};
-use crate::error::{Error, Result};
-use crate::kd::framing::{KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO};
+use crate::error::Result;
+use crate::kd::framing::{KdFraming, PACKET_TYPE_KD_DEBUG_IO};
 use crate::kd::wire::{read_u16, read_u32, write_u16, write_u32};
 
 use super::{
-    DBGKD_CLOSE_FILE_API, DBGKD_CREATE_FILE_API, DBGKD_DEBUG_IO_HEADER_SIZE,
-    DBGKD_DEBUG_IO_MIN_HEADER_SIZE, DBGKD_FILE_IO_HEADER_SIZE, DBGKD_GET_STRING_API,
-    DBGKD_PRINT_STRING_API, DBGKD_READ_FILE_API, DBGKD_WRITE_FILE_API, KD_REFRESH_MESSAGE,
-    STATUS_UNSUCCESSFUL,
+    DBGKD_DEBUG_IO_HEADER_SIZE, DBGKD_DEBUG_IO_MIN_HEADER_SIZE, DBGKD_GET_STRING_API,
+    DBGKD_PRINT_STRING_API, KD_REFRESH_MESSAGE,
 };
 
 pub enum DebugIo<'a> {
@@ -265,29 +263,3 @@ fn send_debug_io_response<T: Read + Write>(
     framing.send_data(PACKET_TYPE_KD_DEBUG_IO, &reply)
 }
 
-pub fn handle_file_io<T: Read + Write>(framing: &mut KdFraming<T>, payload: &[u8]) -> Result<()> {
-    if payload.len() < 8 {
-        return Err(Error::Kd(format!(
-            "KD file I/O payload too short: {} bytes",
-            payload.len()
-        )));
-    }
-
-    let api = read_u32(payload, 0);
-    let mut reply = [0u8; DBGKD_FILE_IO_HEADER_SIZE];
-    write_u32(&mut reply, 0, api);
-    write_u32(&mut reply, 4, STATUS_UNSUCCESSFUL);
-
-    kd_trace!(
-        "kd: file_io: failing {} request",
-        match api {
-            DBGKD_CREATE_FILE_API => "CreateFile",
-            DBGKD_READ_FILE_API => "ReadFile",
-            DBGKD_WRITE_FILE_API => "WriteFile",
-            DBGKD_CLOSE_FILE_API => "CloseFile",
-            _ => "unknown",
-        }
-    );
-
-    framing.send_data(PACKET_TYPE_KD_FILE_IO, &reply)
-}

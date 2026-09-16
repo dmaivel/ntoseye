@@ -21,6 +21,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 - Public and private PDB symbols, source lines, and local variables
 - Conditional and deferred breakpoints, hardware watchpoints, and breakpoint commands
 - [KD/KDNET, QEMU GDB, and passive memory backends](docs/backends.md)
+- [Host-served driver images for driver development](docs/kdfiles.md)
 - [Python SDK and custom commands](docs/sdk.md)
 - [Editor integration over DAP](docs/dap.md)
 - [Agent integration over MCP](docs/mcp.md)
@@ -122,6 +123,7 @@ The debugger is self-documented: run `ntoseye --help` for command-line arguments
 - [Choosing a backend](docs/backends.md): kd/kdnet/gdb/memory comparison, per-hypervisor setup for [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md)
 - [KDNET](docs/kdnet.md): `kdnet.exe` guest setup, host launch, reboot behavior
 - [Crash dumps](docs/dumps.md): offline dump analysis, generating dumps, guest tweaks
+- [Driver replacement map](docs/kdfiles.md): `.kdfiles`, loading a driver from the host instead of the guest
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)
 - [Editor integration (DAP)](docs/dap.md): source-level debugging from VS Code, Emacs (dape), or nvim-dap

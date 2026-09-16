@@ -177,6 +177,7 @@ fn recv_manipulate_reply(
                 continue;
             }
             PACKET_TYPE_KD_FILE_IO => {
+                // with_framing_read_timeout already allows a full reply ACK.
                 handle_file_io(framing, &pkt.payload)?;
                 continue;
             }

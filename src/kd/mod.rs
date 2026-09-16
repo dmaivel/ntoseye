@@ -72,6 +72,8 @@ use transport::KdTransport;
 
 mod debug_io;
 pub use debug_io::*;
+mod file_io;
+pub use file_io::*;
 mod event_loop;
 pub use event_loop::*;
 pub mod wire;
@@ -2354,6 +2356,10 @@ impl DebugBackend for KdBackend {
         true
     }
 
+    fn supports_target_file_io(&self) -> bool {
+        true
+    }
+
     fn reboot_target(&mut self) -> Result<()> {
         let processor = self.current_processor;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
@@ -2404,6 +2410,10 @@ impl DebugBackend for KdBackend {
             BackendCapability {
                 capability: DebugCapability::TargetControl,
                 supported: self.supports_target_control(),
+            },
+            BackendCapability {
+                capability: DebugCapability::TargetFileIo,
+                supported: self.supports_target_file_io(),
             },
         ]
     }
@@ -2739,6 +2749,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn supports_target_control(&self) -> bool {
         self.lock().supports_target_control()
+    }
+
+    fn supports_target_file_io(&self) -> bool {
+        self.lock().supports_target_file_io()
     }
 
     fn reboot_target(&mut self) -> Result<()> {

@@ -2,8 +2,6 @@
 
 `ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server. Agents may use either this, for WinDbg syntax with bounded run-control, or the [Python SDK](sdk.md), for structured values and scripted loops (conditional stops, bulk enumeration); both drive the same debugger.
 
-The surface is deliberately thin: the debugger's REPL command language is the API.
-
 | Tool | Purpose |
 | --- | --- |
 | `command` | Run one REPL line in ntoseye's WinDbg-style syntax (`!process 0 0`, `dt nt!_EPROCESS <addr>`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, ...) and return its text, styling stripped. `help` lists every command. Commands that resume until the next stop (`g`, `gh`, `gn`, `p`, `pa`, `ta`, `pc`, `tc`, `pt`, `tt`, `ph`, `th`, `gu`, `wt`, `.reboot`, `.crash`) are refused because they would block the session; use the run-control tools below. `t`/`si` (one instruction) is allowed. |
@@ -57,4 +55,4 @@ For web MCP clients that connect over the network instead of spawning a subproce
 ntoseye mcp --http 127.0.0.1:8080
 ```
 
-The service is mounted at `http://127.0.0.1:8080/mcp`. HTTP binds are loopback-only by default, since `command` grants execution control and guest writes; pass `--unsafe-http` to bind a non-loopback address and expose those tools to the network (only on trusted hosts).
+The service is mounted at `http://127.0.0.1:8080/mcp`. HTTP binds are loopback-only by default. The `command` tool exposes the full REPL, including execution control, guest memory writes (`eb`, `!eb`), host filesystem writes (`.dump`, `.logopen`), and host files served to the guest (`.kdfiles`). Use `--unsafe-http` to bind a non-loopback address only on trusted networks.

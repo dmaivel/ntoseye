@@ -367,6 +367,7 @@ pub enum DebugCapability {
     DebugOutput,
     Msr,
     TargetControl,
+    TargetFileIo,
 }
 
 impl DebugCapability {
@@ -391,6 +392,7 @@ impl DebugCapability {
             Self::DebugOutput => "debug_output",
             Self::Msr => "msr",
             Self::TargetControl => "target_control",
+            Self::TargetFileIo => "target_file_io",
         }
     }
 
@@ -414,6 +416,7 @@ impl DebugCapability {
             Self::DebugOutput => "debug output",
             Self::Msr => "model-specific registers",
             Self::TargetControl => "reboot / forced crash",
+            Self::TargetFileIo => "host-served target files",
         }
     }
 }
@@ -525,6 +528,10 @@ pub trait DebugBackend {
             BackendCapability {
                 capability: DebugCapability::TargetControl,
                 supported: self.supports_target_control(),
+            },
+            BackendCapability {
+                capability: DebugCapability::TargetFileIo,
+                supported: self.supports_target_file_io(),
             },
         ]
     }
@@ -680,6 +687,11 @@ pub trait DebugBackend {
     /// (`.reboot` / `.crash`). KD implements these with `DbgKdRebootApi` and
     /// `DbgKdCauseBugCheckApi`.
     fn supports_target_control(&self) -> bool {
+        false
+    }
+
+    /// Whether the transport supports target file requests for `.kdfiles`.
+    fn supports_target_file_io(&self) -> bool {
         false
     }
 

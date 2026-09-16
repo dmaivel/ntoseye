@@ -30,7 +30,7 @@ use crate::gdb::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
 };
 use crate::guest::{ModuleSymbolLoadReport, ProcessInfo};
-use crate::kd::{KdBackend, KdMemorySource, hwbp, trace_enabled};
+use crate::kd::{KdBackend, KdMemorySource, hwbp, kd_files, trace_enabled};
 use crate::memory::DTB_IDENTITY;
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
@@ -2445,6 +2445,8 @@ pub fn perform_target_reload(
     // Target-specific numeric breakpoints and hardware slots cannot survive a
     // rebuild. Symbolic code breakpoints retain identity and become deferred.
     breakpoints.prepare_target_reload(backend);
+    // Release file handles owned by the previous target.
+    kd_files().reset_handles();
     let hint = event_hint.or_else(|| backend.target_kernel_base_hint().ok().flatten());
     let report = target.reload_guest_with_kernel_base_hint(hint);
     // The attach-time identity check only proved the host mapping matched the

@@ -1051,6 +1051,7 @@ impl DebugBackend for DmpBackend {
             BackendCapability::unsupported(DebugCapability::DebugOutput),
             BackendCapability::unsupported(DebugCapability::Msr),
             BackendCapability::unsupported(DebugCapability::TargetControl),
+            BackendCapability::unsupported(DebugCapability::TargetFileIo),
         ]
     }
 

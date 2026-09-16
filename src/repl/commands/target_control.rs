@@ -2,10 +2,12 @@ use crate::backend::MemoryOps;
 use crate::bugchecks::current_bugcheck;
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::dbg_backend::DebugCapability;
+use crate::diagnostics::print_warning;
 use crate::dump_writer::{
     DumpException, DumpMetadata, MAX_PHYSICAL_MEMORY_RUNS, write_kernel_dump,
 };
 use crate::error::{Error, Result};
+use crate::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::memory::PAGE_SIZE;
 use crate::phys::PhysMem;
 use crate::repl::*;
@@ -13,6 +15,7 @@ use crate::symbols::{FieldInfo, ParsedType};
 use crate::target::Target;
 use crate::types::VirtAddr;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 
 const WINDOWS_MAJOR_VERSION: u32 = 0xf;
@@ -47,6 +50,15 @@ repl_command! {
     run_state: Halted,
 }
 
+repl_command! {
+    cmd_kdfiles;
+    names: [".kdfiles"],
+    usage: ".kdfiles [<map-file>] [-m <target> <host>] [-d <target>] [-c]",
+    summary: "Serve driver images from host files using a driver replacement map.",
+    details: "With no arguments, show mappings and serving statistics. A path loads a WinDbg map file containing three-line records of `map`, target name, and host path. -m adds a mapping, -d removes one, -c clears the map. Target names match case-insensitively on path suffix boundaries; a bare filename matches any directory. Changes take effect on the next driver load.",
+    completion: None,
+}
+
 fn target_control_available(state: &ReplState<'_>) -> bool {
     let capabilities = state.ctx.capabilities();
     if supports_capability(&capabilities, DebugCapability::TargetControl) {
@@ -61,6 +73,110 @@ fn target_control_available(state: &ReplState<'_>) -> bool {
 }
 
 impl ReplState<'_> {
+    fn cmd_kdfiles(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        match invocation.argv.first().map(|arg| arg.as_ref()) {
+            None => {
+                self.show_kdfiles();
+                return Ok(());
+            }
+            Some("-c") => {
+                if invocation.argv.len() != 1 {
+                    outln!("{}\n", command_help(invocation.name));
+                    return Ok(());
+                }
+                kd_files().clear();
+                outln!("Driver replacement map cleared.");
+            }
+            Some("-d") => {
+                let Some(target) = invocation.arg(1).filter(|_| invocation.argv.len() == 2) else {
+                    outln!("{}\n", command_help(invocation.name));
+                    return Ok(());
+                };
+                if kd_files().remove(target) {
+                    outln!("Removed mapping for {target}.");
+                } else {
+                    error!("no mapping for {target}");
+                    return Ok(());
+                }
+            }
+            Some("-m") => {
+                let (Some(target), Some(host)) = (invocation.arg(1), invocation.arg(2)) else {
+                    outln!("{}\n", command_help(invocation.name));
+                    return Ok(());
+                };
+                if invocation.argv.len() != 3 {
+                    outln!("{}\n", command_help(invocation.name));
+                    return Ok(());
+                }
+                match kd_files().add(target, Path::new(host)) {
+                    Ok(mapping) => outln!(
+                        "Mapped {} -> {}.",
+                        mapping.target,
+                        mapping.host.display()
+                    ),
+                    Err(error) => {
+                        error!("{error}");
+                        return Ok(());
+                    }
+                }
+            }
+            Some(path) => match load_map_file(Path::new(path)) {
+                Ok(mappings) => {
+                    let count = mappings.len();
+                    kd_files().set(mappings);
+                    outln!(
+                        "Loaded {count} mapping{} from {path}.",
+                        if count == 1 { "" } else { "s" }
+                    );
+                }
+                Err(error) => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            },
+        }
+        self.warn_if_file_io_unsupported();
+        Ok(())
+    }
+
+    fn show_kdfiles(&mut self) {
+        let mappings = kd_files().mappings();
+        if mappings.is_empty() {
+            outln!("No driver replacement map. Use `.kdfiles -m <target> <host>`.\n");
+            return;
+        }
+        let width = mappings
+            .iter()
+            .map(|mapping| mapping.target.chars().count())
+            .max()
+            .unwrap_or(0);
+        for KdFileMapping { target, host } in &mappings {
+            outln!("{target:<width$}  ->  {}", host.display());
+        }
+        let stats = kd_files().stats();
+        outln!();
+        outln!(
+            "served {} open{}, {} byte{} read, {} refused",
+            stats.opened,
+            if stats.opened == 1 { "" } else { "s" },
+            stats.bytes_read,
+            if stats.bytes_read == 1 { "" } else { "s" },
+            stats.refused
+        );
+        self.warn_if_file_io_unsupported();
+        outln!();
+    }
+
+    fn warn_if_file_io_unsupported(&mut self) {
+        let capabilities = self.ctx.capabilities();
+        if !supports_capability(&capabilities, DebugCapability::TargetFileIo) {
+            print_warning(format!(
+                "the {} backend cannot serve target file requests; the map will never be consulted",
+                self.ctx.backend.name()
+            ));
+        }
+    }
+
     fn cmd_reboot(&mut self) -> Result<()> {
         if !target_control_available(self) {
             return Ok(());
