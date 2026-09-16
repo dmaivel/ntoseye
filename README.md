@@ -1,6 +1,6 @@
 # ntoseye
 
-<img align="right" width="22%" src="media/ntoseye.svg" alt="logo">
+<img align="right" width="32%" src="media/ntoseye.svg" alt="logo">
 
 [![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square&labelColor=1c1c1c)](LICENSE)
 [![release](https://img.shields.io/github/v/release/dmaivel/ntoseye?style=flat-square&labelColor=1c1c1c&logo=github&logoColor=white)](https://github.com/dmaivel/ntoseye/releases/latest)
