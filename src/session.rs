@@ -2285,7 +2285,7 @@ fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
     let key = format!("ntoseye-{:016x}", fnv1a_64(canonical.as_bytes()));
     // macOS backs the lock with a flock file at this path; keep it out of cwd.
     #[cfg(target_os = "macos")]
-    let key = temp_dir().join(&key).display().to_string();
+    let key = std::env::temp_dir().join(&key).display().to_string();
     let instance = SingleInstance::new(&key).map_err(|err| {
         Error::DebugInfo(format!("failed to create single-instance guard: {err:?}"))
     })?;
