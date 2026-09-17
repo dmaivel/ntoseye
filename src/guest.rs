@@ -1292,6 +1292,9 @@ struct HaltMemo {
     processes: Option<Vec<ProcessInfo>>,
     kernel_modules: Option<Vec<ModuleInfo>>,
     drivers: Option<Vec<DriverObjectInfo>>,
+    /// Loader lists by `_EPROCESS`; every thread of a process walked in one
+    /// halt shares them.
+    process_modules: HashMap<VirtAddr, Option<Vec<ModuleInfo>>>,
 }
 
 fn is_valid_kernel_dtb_amd64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
@@ -2118,6 +2121,13 @@ impl Guest {
     }
 
     pub fn process_modules(&self, info: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
+        self.memoized(
+            |memo| memo.process_modules.entry(info.eprocess_va).or_default(),
+            || self.walk_process_modules(info),
+        )
+    }
+
+    fn walk_process_modules(&self, info: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
         let eprocess = self
             .ntoskrnl
             .types_in(info.dtb)

@@ -43,6 +43,14 @@ pub trait MemoryOps<A> {
         None
     }
 
+    /// Read a page-table entry's bytes. Page tables are RAM the target's
+    /// own walker reads, so a backend may fetch a whole run of entries and
+    /// keep them for as long as the tables cannot change; an arbitrary
+    /// physical read gets no such read-ahead, since it may touch a device.
+    fn read_page_table_bytes(&self, addr: A, buf: &mut [u8]) -> Result<()> {
+        self.read_bytes(addr, buf)
+    }
+
     fn read<T: Copy + FromZeros + FromBytes + IntoBytes>(&self, addr: A) -> Result<T> {
         let mut obj = T::new_zeroed();
 
@@ -84,5 +92,9 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn translation_cache(&self) -> Option<&TranslationCache> {
         (**self).translation_cache()
+    }
+
+    fn read_page_table_bytes(&self, addr: A, buf: &mut [u8]) -> Result<()> {
+        (**self).read_page_table_bytes(addr, buf)
     }
 }

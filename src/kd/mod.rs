@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::io::{ErrorKind, Write};
 use std::mem::take;
 use std::os::unix::net::UnixStream;
@@ -189,14 +190,14 @@ const KD_EXIT_MAX_CONTINUES: u32 = 8;
 /// burst, so a timeout this size only ever fires in the idle gap between packets.
 const PUMP_POLL: Duration = Duration::from_millis(100);
 const KD_REMOTE_MEMORY_CHUNK: usize = 0x800;
-/// Unit of [`VirtualLineCache`]. A serial link pays per byte (a QEMU UART
+/// Unit of [`LineCache`]. A serial link pays per byte (a QEMU UART
 /// exits the guest for each one: about 2 ms per request plus 5 us per
 /// byte), so a line is sized to pay for itself after a few field reads
 /// rather than to fill a request.
 const KD_VIRTUAL_LINE: usize = 0x200;
-/// Lines [`VirtualLineCache`] holds before starting over; 16 MiB of guest
+/// Lines a [`LineCache`] holds before starting over; 16 MiB of guest
 /// memory, past what one halt's commands read short of an image scan.
-const VIRTUAL_LINE_CACHE_LIMIT: usize = 32768;
+const LINE_CACHE_LIMIT: usize = 32768;
 /// Windows KD encoding of `TTBR1_EL1`: op0=3, op1=0, CRn=2, CRm=0, op2=1.
 const ARM64_WINDBG_TTBR1_EL1: u32 = 0x0003_0201;
 /// Windows KD encodings of ARM64 system registers (op0/op1/CRn/CRm/op2).
@@ -614,26 +615,34 @@ impl Link {
     }
 }
 
-/// `DbgKdReadVirtualMemoryApi` replies remembered while the target is
-/// halted, keyed by the processor that resolved them (user space follows
-/// that processor's root) and the `KD_VIRTUAL_LINE`-aligned line.
-/// Nothing but this debugger changes guest memory during a halt, so a line
-/// stays valid until the target runs or the debugger writes.
-#[derive(Default)]
-struct VirtualLineCache {
-    lines: HashMap<(u16, u64), Vec<u8>>,
+/// Memory read through the target, remembered in `KD_VIRTUAL_LINE`-aligned
+/// lines while it is halted. Nothing but this debugger changes guest memory
+/// during a halt, so a line stays valid until the target runs or the
+/// debugger writes. Virtual lines are keyed by the processor that resolved
+/// them as well (user space follows that processor's root); page-table
+/// lines by physical address.
+struct LineCache<K> {
+    lines: HashMap<K, Vec<u8>>,
 }
 
-impl VirtualLineCache {
-    fn get(&self, processor: u16, line: u64) -> Option<&[u8]> {
-        self.lines.get(&(processor, line)).map(Vec::as_slice)
+impl<K: Eq + Hash> Default for LineCache<K> {
+    fn default() -> Self {
+        Self {
+            lines: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash> LineCache<K> {
+    fn get(&self, key: K) -> Option<&[u8]> {
+        self.lines.get(&key).map(Vec::as_slice)
     }
 
-    fn insert(&mut self, processor: u16, line: u64, data: Vec<u8>) {
-        if self.lines.len() >= VIRTUAL_LINE_CACHE_LIMIT {
+    fn insert(&mut self, key: K, data: Vec<u8>) {
+        if self.lines.len() >= LINE_CACHE_LIMIT {
             self.lines.clear();
         }
-        self.lines.insert((processor, line), data);
+        self.lines.insert(key, data);
     }
 
     fn clear(&mut self) {
@@ -669,7 +678,10 @@ pub struct KdBackend {
     efer_cache: HashMap<u16, u64>,
     /// Virtual memory read through the target for the current halt; see
     /// [`Self::read_virtual_bytes`].
-    virtual_lines: VirtualLineCache,
+    virtual_lines: LineCache<(u16, u64)>,
+    /// Page-table entries read for the host page walk this halt; see
+    /// [`Self::read_page_table_bytes`].
+    table_lines: LineCache<u64>,
     /// Set after an explicit frontend cleanup. Prevents `Drop` from overriding
     /// a deliberate halted exit after breakpoint restoration failed.
     exit_prepared: bool,
@@ -766,6 +778,10 @@ impl MemoryOps<PhysAddr> for KdMemory {
 
     fn translation_cache(&self) -> Option<&TranslationCache> {
         Some(&self.translations)
+    }
+
+    fn read_page_table_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+        self.lock().read_page_table_bytes(addr, buf)
     }
 }
 
@@ -916,7 +932,8 @@ impl KdBackend {
             context_cache: HashMap::new(),
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
-            virtual_lines: VirtualLineCache::default(),
+            virtual_lines: LineCache::default(),
+            table_lines: LineCache::default(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -1205,6 +1222,7 @@ impl KdBackend {
         self.context_cache.clear();
         self.efer_cache.clear();
         self.virtual_lines.clear();
+        self.table_lines.clear();
         self.translations.resume();
     }
 
@@ -1899,11 +1917,57 @@ impl KdBackend {
         Ok(())
     }
 
+    /// Page-table entries for the host page walk, a line of them per
+    /// request: a walk of adjacent pages shares its upper-level entries and
+    /// its run of PTEs, so the four reads a page costs become closer to one.
+    fn read_page_table_bytes(&mut self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+        self.require_remote_memory_stopped()?;
+        let processor = self.current_processor;
+        let mut completed = 0usize;
+        while completed < buf.len() {
+            let chunk_addr = addr
+                .checked_add(completed as u64)
+                .ok_or_else(|| Error::Kd("physical-memory read address overflow".into()))?;
+            let line = chunk_addr & !(KD_VIRTUAL_LINE as u64 - 1);
+            let offset = (chunk_addr - line) as usize;
+            if self.table_lines.get(line).is_none() {
+                let data = match with_framing_read_timeout(
+                    self.framing()?,
+                    KD_REQUEST_TIMEOUT,
+                    |framing| {
+                        api::read_physical_memory(framing, processor, line, KD_VIRTUAL_LINE as u32)
+                    },
+                ) {
+                    Ok(data) => data,
+                    Err(Error::KdStatus { .. }) => {
+                        return Err(Error::BadPhysicalAddress(chunk_addr));
+                    }
+                    Err(error) => return Err(error),
+                };
+                kd_trace!(
+                    "kd: remote table read {line:#x}+{KD_VIRTUAL_LINE:#x} -> {:#x}",
+                    data.len()
+                );
+                self.table_lines.insert(line, data);
+            }
+            let data = self.table_lines.get(line).expect("line was just inserted");
+            let available = data.len().saturating_sub(offset);
+            if available == 0 {
+                return Err(Error::BadPhysicalAddress(chunk_addr));
+            }
+            let end = completed + available.min(buf.len() - completed);
+            buf[completed..end].copy_from_slice(&data[offset..offset + end - completed]);
+            completed = end;
+        }
+        Ok(())
+    }
+
     fn write_physical_bytes(&mut self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
         self.require_remote_memory_stopped()?;
         // The write may land in a page table.
         self.translations.clear();
         self.virtual_lines.clear();
+        self.table_lines.clear();
         let processor = self.current_processor;
         let mut completed = 0usize;
         while completed < buf.len() {
@@ -1999,6 +2063,7 @@ impl KdBackend {
         // The write may land in a page table.
         self.translations.clear();
         self.virtual_lines.clear();
+        self.table_lines.clear();
         let processor = self.current_processor;
         let mut completed = 0usize;
         while completed < buf.len() {
@@ -2068,7 +2133,7 @@ impl KdBackend {
                     Error::BadVirtualAddress(VirtAddr(chunk_addr))
                 }
             };
-            if self.virtual_lines.get(processor, line).is_none() {
+            if self.virtual_lines.get((processor, line)).is_none() {
                 let wanted = request_end.next_multiple_of(KD_VIRTUAL_LINE as u64) - line;
                 let to_page_end = PAGE_SIZE as u64 - (line & (PAGE_SIZE as u64 - 1));
                 let fill = wanted.min(KD_REMOTE_MEMORY_CHUNK as u64).min(to_page_end) as usize;
@@ -2087,15 +2152,14 @@ impl KdBackend {
                 );
                 for (index, piece) in data.chunks(KD_VIRTUAL_LINE).enumerate() {
                     self.virtual_lines.insert(
-                        processor,
-                        line + (index * KD_VIRTUAL_LINE) as u64,
+                        (processor, line + (index * KD_VIRTUAL_LINE) as u64),
                         piece.to_vec(),
                     );
                 }
             }
             let data = self
                 .virtual_lines
-                .get(processor, line)
+                .get((processor, line))
                 .expect("line was just inserted");
             // The target answers a line with fewer bytes only when it runs
             // into an unmapped page, which within one page is never.
@@ -3687,7 +3751,8 @@ mod tests {
             context_cache: HashMap::new(),
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
-            virtual_lines: VirtualLineCache::default(),
+            virtual_lines: LineCache::default(),
+            table_lines: LineCache::default(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -3803,7 +3868,8 @@ mod tests {
             context_cache: HashMap::new(),
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
-            virtual_lines: VirtualLineCache::default(),
+            virtual_lines: LineCache::default(),
+            table_lines: LineCache::default(),
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -3912,10 +3978,11 @@ mod tests {
         assert!(error.to_string().contains("requires a halted target"));
     }
 
-    /// A halted fake kernel serving `DbgKd{Read,Write}VirtualMemory` from a
-    /// map of kernel-space regions until the host hangs up; returns the
-    /// request count so tests can assert how many round trips a guest walk
-    /// costs.
+    /// A halted fake kernel serving `DbgKd{Read,Write}VirtualMemory` and
+    /// `DbgKdReadPhysicalMemory` from one map of regions (a region's address
+    /// is whichever kind the request names) until the host hangs up; returns
+    /// the request count so tests can assert how many round trips a guest
+    /// walk costs.
     /// Like a real one it answers a request that touches mapped memory in
     /// full, with zeros where no region says otherwise, and refuses one that
     /// touches none.
@@ -3974,7 +4041,10 @@ mod tests {
                     kernel_id ^= 1;
                     continue;
                 }
-                assert_eq!(api_number, api::DBGKD_READ_VIRTUAL_MEMORY);
+                assert!(matches!(
+                    api_number,
+                    api::DBGKD_READ_VIRTUAL_MEMORY | api::DBGKD_READ_PHYSICAL_MEMORY
+                ));
                 let mut data = vec![0u8; wanted];
                 let mut mapped = false;
                 for (base, bytes) in &regions {
@@ -4564,6 +4634,44 @@ mod tests {
         drop(guest);
         drop(backend);
         // read, write, read, read, refused read
+        assert_eq!(worker.join().unwrap(), 5);
+    }
+
+    #[test]
+    fn page_table_lines_serve_a_halt_and_drop_on_write_and_resume() {
+        const TABLE: u64 = 0x1ad000;
+        let mut table = vec![0u8; PAGE_SIZE];
+        put_u64(&mut table, 0x10, 0x1111);
+        put_u64(&mut table, 0x18, 0x2222);
+        put_u64(&mut table, 0x800, 0x3333);
+        let (guest, backend, worker) = synthetic_guest(vec![(TABLE, table)], Vec::new(), &[]);
+        let read = |at: u64| {
+            let mut out = [0u8; 8];
+            backend
+                .lock()
+                .unwrap()
+                .read_page_table_bytes(at, &mut out)
+                .unwrap();
+            u64::from_le_bytes(out)
+        };
+
+        // Two entries of one line: one request; another line: one more.
+        assert_eq!(read(TABLE + 0x10), 0x1111);
+        assert_eq!(read(TABLE + 0x18), 0x2222);
+        assert_eq!(read(TABLE + 0x800), 0x3333);
+        // A virtual write may land in a table: the lines are dropped.
+        backend
+            .lock()
+            .unwrap()
+            .write_virtual_bytes(VirtAddr(FAKE_KERNEL_BASE), &[0u8; 8])
+            .unwrap();
+        assert_eq!(read(TABLE + 0x10), 0x1111);
+        resume_and_halt(&backend);
+        assert_eq!(read(TABLE + 0x18), 0x2222);
+
+        drop(guest);
+        drop(backend);
+        // two lines, write, line, line
         assert_eq!(worker.join().unwrap(), 5);
     }
 

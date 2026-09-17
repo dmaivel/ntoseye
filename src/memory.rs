@@ -235,8 +235,12 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     }
 
     fn read_pt_entry(&self, table_base: PhysAddr, index: usize) -> Result<Option<PageTableEntry>> {
-        match self.backend.read(table_base + 8 * index as u64) {
-            Ok(entry) => Ok(Some(entry)),
+        let mut entry = [0u8; 8];
+        match self
+            .backend
+            .read_page_table_bytes(table_base + 8 * index as u64, &mut entry)
+        {
+            Ok(()) => Ok(Some(PageTableEntry(u64::from_le_bytes(entry)))),
             Err(Error::BadPhysicalAddress(_)) => Ok(None),
             Err(e) => Err(e),
         }

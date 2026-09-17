@@ -168,4 +168,11 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Self::Live { .. } | Self::Dmp(_) => None,
         }
     }
+
+    fn read_page_table_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+        match self {
+            Self::Remote(kd) => kd.read_page_table_bytes(addr, buf),
+            Self::Live { .. } | Self::Dmp(_) => self.read_bytes(addr, buf),
+        }
+    }
 }
