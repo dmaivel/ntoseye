@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::expr::{Expr, ExprValue};
 use crate::symbols::{
-    FieldInfo, ModuleSymbolStatus, format_symbol_with_offset, parse_source_paths,
+    FieldInfo, ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, parse_source_paths,
     parse_symbol_sources,
 };
 use crate::target::UserVar;
@@ -95,6 +96,23 @@ repl_command! {
     names: [".srcpath+"],
     usage: ".srcpath+ <local-root|recorded-prefix=local-root> ...",
     summary: "Append local source path mappings.",
+}
+
+repl_command! {
+    cmd_ls;
+    names: ["ls"],
+    usage: "ls [.] [first][,count]",
+    summary: "List source lines of the current scope's file.",
+    details: "With no arguments, continues after the lines the previous ls or lsa listed; `.` restarts at the current line. `first` is a line number; `count` defaults to 10. The file is the one the current scope IP maps to, found through .srcpath.",
+}
+
+repl_command! {
+    cmd_lsa;
+    names: ["lsa"],
+    usage: "lsa [address][,first][,count]",
+    summary: "List source lines around an address.",
+    details: "Defaults to the current scope IP, five lines before it, and twelve lines in all. `first` is an offset from the address's line (negative for lines before it). The line at the address is marked `>`.",
+    completion: Expression,
 }
 
 repl_command! {
@@ -495,6 +513,155 @@ impl ReplState<'_> {
         outln!();
     }
 
+    /// The selected frame's IP, else the live one.
+    fn scope_ip(&self) -> Option<VirtAddr> {
+        self.ctx
+            .target
+            .selected_frame
+            .as_ref()
+            .map(|frame| frame.ip)
+            .or_else(|| {
+                self.ctx
+                    .target
+                    .register_value(self.ctx.target.instruction_pointer_register())
+            })
+            .map(VirtAddr)
+    }
+
+    /// The source line `address` maps to, with its local file: the error
+    /// names what is missing (line info, or the file `.srcpath` should map).
+    fn source_file_at(
+        &self,
+        address: VirtAddr,
+    ) -> std::result::Result<(PathBuf, SourceLocation), String> {
+        let Some(location) = self.ctx.target.source_location(address) else {
+            return Err(format!(
+                "no source line information for {}",
+                ui::addr(address.0)
+            ));
+        };
+        match location
+            .local_path
+            .clone()
+            .filter(|_| location.local_exists)
+        {
+            Some(path) => Ok((path, location)),
+            None => Err(format!(
+                "source file for {} is not available locally (recorded as {}); map it with .srcpath",
+                ui::addr(address.0),
+                location.file
+            )),
+        }
+    }
+
+    /// Print `count` lines of `path` from 1-based line `first`, marking
+    /// `current` with `>`. Returns the line after the last one printed.
+    fn list_source(&mut self, path: &Path, first: u32, count: u32, current: Option<u32>) -> u32 {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                error!("failed to read {}: {error}", path.display());
+                return first;
+            }
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let first = first.max(1);
+        if first as usize > lines.len() {
+            outln!(
+                "{}: line {first} is past the end ({} lines)\n",
+                path.display(),
+                lines.len()
+            );
+            return first;
+        }
+        let last = (first as usize + count as usize - 1).min(lines.len());
+        outln!("{}:", path.display());
+        for number in first as usize..=last {
+            let mark = if Some(number as u32) == current {
+                '>'
+            } else {
+                ' '
+            };
+            outln!("{mark}{number:>6}: {}", lines[number - 1]);
+        }
+        outln!();
+        let next = last as u32 + 1;
+        self.source_cursor = Some((path.to_path_buf(), next));
+        next
+    }
+
+    fn cmd_ls(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        const DEFAULT_COUNT: u32 = 10;
+        let Some(spec) = parse_ls_args(&invocation.argv) else {
+            outln!("{}\n", command_help("ls"));
+            return Ok(());
+        };
+        let count = spec.count.unwrap_or(DEFAULT_COUNT);
+        let (path, first, current) = match (spec.first, spec.restart, &self.source_cursor) {
+            (None, false, Some((path, next))) => (path.clone(), *next, None),
+            _ => {
+                let Some(ip) = self.scope_ip() else {
+                    error!("ls requires a halted register context");
+                    return Ok(());
+                };
+                let (path, location) = match self.source_file_at(ip) {
+                    Ok(found) => found,
+                    Err(message) => {
+                        error!("{message}");
+                        return Ok(());
+                    }
+                };
+                (
+                    path,
+                    spec.first.unwrap_or(location.line),
+                    Some(location.line),
+                )
+            }
+        };
+        self.list_source(&path, first, count, current);
+        Ok(())
+    }
+
+    fn cmd_lsa(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        const DEFAULT_FIRST: i64 = -5;
+        const DEFAULT_COUNT: u32 = 12;
+        let Some(spec) = parse_lsa_args(&invocation.argv) else {
+            outln!("{}\n", command_help("lsa"));
+            return Ok(());
+        };
+        let address = match spec.address {
+            Some(text) => match Expr::eval_with_radix(&text, &self.ctx.target, self.radix) {
+                Ok(address) => address,
+                Err(error) => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            },
+            None => match self.scope_ip() {
+                Some(ip) => ip,
+                None => {
+                    error!("lsa requires an address or a halted register context");
+                    return Ok(());
+                }
+            },
+        };
+        let (path, location) = match self.source_file_at(address) {
+            Ok(found) => found,
+            Err(message) => {
+                error!("{message}");
+                return Ok(());
+            }
+        };
+        let first = (i64::from(location.line) + spec.first.unwrap_or(DEFAULT_FIRST)).max(1) as u32;
+        self.list_source(
+            &path,
+            first,
+            spec.count.unwrap_or(DEFAULT_COUNT),
+            Some(location.line),
+        );
+        Ok(())
+    }
+
     fn cmd_dv(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let address = if let Some(arg) = invocation.arg(0) {
             match Expr::eval_with_radix(arg, &self.ctx.target, self.radix) {
@@ -505,18 +672,11 @@ impl ReplState<'_> {
                 }
             }
         } else {
-            let Some(rip) = self
-                .ctx
-                .target
-                .selected_frame
-                .as_ref()
-                .map(|frame| frame.ip)
-                .or_else(|| self.ctx.target.register_value("rip"))
-            else {
+            let Some(rip) = self.scope_ip() else {
                 error!("dv requires a halted register context or an explicit address");
                 return Ok(());
             };
-            VirtAddr(rip)
+            rip
         };
 
         let Some(locals) = self.ctx.target.procedure_locals(address)? else {
@@ -666,12 +826,172 @@ impl ReplState<'_> {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LsArgs {
+    /// `.`: list from the current line rather than continuing.
+    restart: bool,
+    first: Option<u32>,
+    count: Option<u32>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LsaArgs {
+    address: Option<String>,
+    first: Option<i64>,
+    count: Option<u32>,
+}
+
+/// WinDbg's `ls [.] [first][,count]`: the line and count are decimal, and
+/// the comma may carry spaces around it (`ls 10, 5`, `ls ,20`).
+fn parse_ls_args<S: AsRef<str>>(argv: &[S]) -> Option<LsArgs> {
+    let mut spec = LsArgs::default();
+    let joined = argv.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(" ");
+    let mut rest = joined.trim();
+    if let Some(tail) = rest.strip_prefix('.') {
+        spec.restart = true;
+        rest = tail.trim_start();
+    }
+    if rest.is_empty() {
+        return Some(spec);
+    }
+    let (first, count) = match rest.split_once(',') {
+        Some((first, count)) => (first.trim(), Some(count.trim())),
+        None => (rest, None),
+    };
+    if !first.is_empty() {
+        spec.first = Some(first.parse().ok().filter(|line| *line > 0)?);
+    }
+    if let Some(count) = count {
+        spec.count = Some(count.parse().ok().filter(|count| *count > 0)?);
+    }
+    Some(spec)
+}
+
+/// WinDbg's `lsa [address][,first][,count]`: the address is an expression
+/// (so it may contain spaces), the offset is a signed decimal, the count a
+/// positive decimal.
+fn parse_lsa_args<S: AsRef<str>>(argv: &[S]) -> Option<LsaArgs> {
+    let joined = argv.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(" ");
+    let mut parts = joined.split(',').map(str::trim);
+    let mut spec = LsaArgs {
+        address: parts
+            .next()
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+        ..LsaArgs::default()
+    };
+    if let Some(first) = parts.next().filter(|text| !text.is_empty()) {
+        spec.first = Some(first.parse().ok()?);
+    }
+    if let Some(count) = parts.next().filter(|text| !text.is_empty()) {
+        spec.count = Some(count.parse().ok().filter(|count| *count > 0)?);
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(spec)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{LsArgs, LsaArgs, parse_ls_args, parse_lsa_args};
     use crate::output::capture;
     use crate::repl::{CommandStyle, ReplState, parse_command};
     use crate::session::session_over_memory;
-    use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
+    use crate::symbols::{FieldInfo, ParsedType, TypeInfo, parse_source_paths};
+    use crate::types::VirtAddr;
+
+    #[test]
+    fn source_listing_arguments_follow_windbg() {
+        let ls = |argv: &[&str]| parse_ls_args(argv);
+        assert_eq!(ls(&[]), Some(LsArgs::default()));
+        assert_eq!(
+            ls(&["."]),
+            Some(LsArgs {
+                restart: true,
+                ..LsArgs::default()
+            })
+        );
+        assert_eq!(
+            ls(&["120,", "5"]),
+            Some(LsArgs {
+                restart: false,
+                first: Some(120),
+                count: Some(5),
+            })
+        );
+        assert_eq!(
+            ls(&[",20"]),
+            Some(LsArgs {
+                count: Some(20),
+                ..LsArgs::default()
+            })
+        );
+        assert_eq!(ls(&["0"]), None);
+        assert_eq!(ls(&["12,0"]), None);
+
+        let lsa = |argv: &[&str]| parse_lsa_args(argv);
+        assert_eq!(lsa(&[]), Some(LsaArgs::default()));
+        assert_eq!(
+            lsa(&["nt!KeBugCheckEx", "+", "0x10,-2,4"]),
+            Some(LsaArgs {
+                address: Some("nt!KeBugCheckEx + 0x10".to_string()),
+                first: Some(-2),
+                count: Some(4),
+            })
+        );
+        assert_eq!(
+            lsa(&[",,3"]),
+            Some(LsaArgs {
+                count: Some(3),
+                ..LsaArgs::default()
+            })
+        );
+        assert_eq!(lsa(&["1000,1,2,3"]), None);
+    }
+
+    /// `lsa` lists around the address's line and marks it; a following bare
+    /// `ls` picks up after the listed window.
+    #[test]
+    fn lsa_marks_the_line_and_ls_continues_after_it() {
+        let dir = std::env::temp_dir().join(format!("ntoseye-ls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("driver.c");
+        let text: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&source, text).unwrap();
+
+        let mut session = session_over_memory(0x1000, &[0x90; 0x100]);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.inject_source_lines_for_test(
+            7,
+            dtb,
+            VirtAddr(0x1000),
+            0x100,
+            "D:\\src\\driver.c",
+            &[(0x0, Some(0x10), 12), (0x10, Some(0x10), 20)],
+        );
+        session
+            .target
+            .symbols
+            .set_source_paths(parse_source_paths(&[format!("D:\\src={}", dir.display())]));
+        let mut state = ReplState::for_oneshot(&mut session);
+
+        let (result, text) = capture(|| state.dispatch_line("lsa 0x1014,-1,3"));
+        result.unwrap();
+        let listed: Vec<&str> = text.lines().skip(1).take(3).collect();
+        assert_eq!(
+            listed,
+            ["     19: line 19", ">    20: line 20", "     21: line 21"],
+            "{text}"
+        );
+
+        let (result, text) = capture(|| state.dispatch_line("ls ,2"));
+        result.unwrap();
+        let listed: Vec<&str> = text.lines().skip(1).take(2).collect();
+        assert_eq!(listed, ["     22: line 22", "     23: line 23"], "{text}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn ev_keeps_expression_tail() {

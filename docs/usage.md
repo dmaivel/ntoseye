@@ -231,6 +231,8 @@ For `dt`, `-r` expands nested structures, `-a` expands bounded arrays, `-v` show
 - `.symfix` - Restore the ntoseye cache and Microsoft symbol server defaults.
 - `.srcpath [<local-root|recorded-prefix=local-root> ...]` - Display or replace ordered local source path mappings.
 - `.srcpath+ <local-root|recorded-prefix=local-root> ...` - Append local source path mappings.
+- `ls [.] [first][,count]` - List source lines of the current scope's file (the file `$scopeip` maps to, found through `.srcpath`). A bare `ls` continues after the previous `ls`/`lsa`; `.` restarts at the current line; `count` defaults to 10.
+- `lsa [address][,first][,count]` - List source lines around an address (default `$scopeip`): `first` is an offset from the address's line (default -5), `count` defaults to 12, and the line at the address is marked `>`.
 - `dv [address]` - Display procedure locals and parameters at an address.
 - `.reload [module]` - Reload symbols for one module or every module in the current scope.
 - `ld <module>` - Force symbol source selection and indexing for one module.

@@ -15,6 +15,7 @@ use std::io;
 use std::io::{BufRead, Write};
 #[cfg(all(feature = "cli", unix))]
 use std::mem::zeroed;
+use std::path::PathBuf;
 #[cfg(all(feature = "cli", unix))]
 use std::ptr::null_mut;
 use std::sync::Arc;
@@ -248,6 +249,8 @@ pub struct ReplState<'a> {
     /// Set while a multi-step command (`pa`, `pt`, `wt`...) drives the
     /// target: intermediate stops are not rendered, only the final one.
     pub quiet_stops: bool,
+    /// Where `ls` continues: the file and the line after the last one listed.
+    pub source_cursor: Option<(PathBuf, u32)>,
 }
 
 /// Where a command line comes from. Event-driven and remote contexts must not
@@ -287,6 +290,7 @@ pub struct ReplStore {
     exception_policies: ExceptionPolicyTable,
     radix: NumberRadix,
     context: DispatchContext,
+    source_cursor: Option<(PathBuf, u32)>,
 }
 
 impl ReplStore {
@@ -317,6 +321,7 @@ impl ReplStore {
             exception_policies: ExceptionPolicyTable::default(),
             radix: NumberRadix::Hexadecimal,
             context,
+            source_cursor: None,
         }
     }
 
@@ -388,6 +393,7 @@ impl<'a> ReplState<'a> {
             line: String::new(),
             context: store.context,
             quiet_stops: false,
+            source_cursor: store.source_cursor,
         }
     }
 
@@ -400,6 +406,7 @@ impl<'a> ReplState<'a> {
             exception_policies: self.exception_policies,
             radix: self.radix,
             context: self.context,
+            source_cursor: self.source_cursor,
         }
     }
 
@@ -712,6 +719,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         line: String::new(),
         context: DispatchContext::Interactive,
         quiet_stops: false,
+        source_cursor: None,
     };
     // An empty module list at startup means we attached before rediscovery completed.
     state.ctx.reload_module_list_pending = reload_module_list_pending;
