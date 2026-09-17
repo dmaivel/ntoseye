@@ -16,6 +16,7 @@ mod memory;
 mod meta;
 mod mm;
 mod physical;
+mod pnp;
 mod process;
 mod sched;
 mod security;

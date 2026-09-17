@@ -325,6 +325,9 @@ Attach reclaims entries that no live session owns, restores displaced instructio
 - `!object <object-expression>` (`object`) - Inspect an executive object header and body.
 - `!drvobj <driver-object-expression-or-name>` (`drvobj`) - Inspect a DRIVER_OBJECT, its device chain, and dispatch table.
 - `!devobj <device-object-expression>` (`devobj`) - Inspect a DEVICE_OBJECT and its attached stack.
+- `!devstack <device-object|devnode>` (`devstack`) - Display a device stack top-down (`!DevObj`, `!DrvObj`, `!DevExt`, object name) from any device in it or its device node, marking the argument with `>`, then the PDO's device node.
+- `!devnode [node|0] [-r]` (`devnode`) - Display a PnP device node (instance path, service, state and state history, flags, problem code, pending IRP); no argument or `0` is the root, `-r` (or WinDbg's trailing `1`) lists the subtree one node per line.
+- `!pnptriage` (`pnptriage`) - Walk the device tree and report nodes with a problem code, nodes not started, and nodes with a pending PnP IRP.
 - `!irp <address-expression>` (`irp`) - Inspect an IRP and its current IO_STACK_LOCATION.
 - `irps [process-filter|driver-filter]` - Discover in-flight IRPs from thread IrpLists and device CurrentIrp.
 - `!handle [handle-expression]` - List bounded handles for the selected process, or inspect one handle.
