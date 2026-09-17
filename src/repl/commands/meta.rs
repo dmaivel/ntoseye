@@ -540,6 +540,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!token", "security"),
     ("!chkimg", "analysis"),
     ("!error", "analysis"),
+    ("!verifier", "analysis"),
     ("?", "symbols, types, and expressions"),
     ("dt", "symbols, types, and expressions"),
     ("dv", "symbols, types, and expressions"),

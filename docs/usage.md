@@ -368,6 +368,7 @@ Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); 
 
 - `!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]` (`analyze`) - Short crash verdict (bugcheck line, failure signature, culprit, verifier/WHEA findings, relevant modules); `-v` adds the full bugcheck arguments, faulting context, stack, and every module; `-show` decodes a bugcheck code without a crash; `-hang` triages per-processor waits.
 - `!error <code>` (`!ntstatus`) - Decode an NTSTATUS, Win32, or HRESULT error code.
+- `!verifier [module]` (`verifier`) - Display Driver Verifier's level (decoded options), global statistics, and the verified driver list from `ViTargetDriversAvl` plus configured-but-unloaded drivers from `VfSuspectDriversList`; with a module, that driver's per-driver counters, image, signing level, and load counts.
 - `vertarget` (`version`) - Display target, kernel, symbol, processor, and debugger version information.
 - `.time` - Display target UTC time and system uptime.
 - `.lastevent` - Show the most recently observed target event.

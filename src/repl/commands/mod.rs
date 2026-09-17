@@ -24,6 +24,7 @@ mod symbols;
 mod target_control;
 mod types;
 mod usermode;
+mod verifier;
 
 impl ReplState<'_> {
     pub fn dispatch_line(&mut self, line: &str) -> Result<Flow> {
