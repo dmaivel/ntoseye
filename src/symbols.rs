@@ -36,7 +36,7 @@ use std::{
     path::{Path, PathBuf},
     ptr,
     sync::{
-        Arc, OnceLock, PoisonError,
+        Arc, LazyLock, OnceLock, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -51,22 +51,36 @@ pub static PDB_SERVERS: OnceLock<Vec<String>> = OnceLock::new();
 
 const DEFAULT_SYMBOL_SERVER: &str = "https://msdl.microsoft.com/download/symbols";
 
-fn pdb_servers() -> &'static [String] {
-    static RESOLVED: OnceLock<Vec<String>> = OnceLock::new();
-    RESOLVED.get_or_init(|| {
-        let mut servers = PDB_SERVERS.get().cloned().unwrap_or_default();
-        if let Ok(env_val) = std::env::var("NTOSEYE_PDB_SERVERS") {
-            servers.extend(
-                env_val
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from),
-            );
-        }
-        servers.push(DEFAULT_SYMBOL_SERVER.to_string());
-        servers
-    })
+/// The symbol path a store starts with: the cache, then `--pdb-server` and
+/// `NTOSEYE_PDB_SERVERS` entries ahead of Microsoft's server.
+static DEFAULT_SYMBOL_SOURCES: LazyLock<Vec<SymbolSource>> = LazyLock::new(|| {
+    let mut sources = vec![SymbolSource::Cache];
+    let servers = PDB_SERVERS.get().cloned().unwrap_or_default();
+    sources.extend(servers.into_iter().map(SymbolSource::Http));
+    sources.extend(
+        std::env::var("NTOSEYE_PDB_SERVERS")
+            .ok()
+            .iter()
+            .flat_map(|env| env.split(';'))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| SymbolSource::Http(s.to_string())),
+    );
+    sources.push(SymbolSource::Http(DEFAULT_SYMBOL_SERVER.to_string()));
+    sources
+});
+
+/// `index_path` under every symbol server in the default symbol path.
+fn server_urls(index_path: &str) -> Vec<String> {
+    DEFAULT_SYMBOL_SOURCES
+        .iter()
+        .filter_map(|source| match source {
+            SymbolSource::Http(base) => {
+                Some(format!("{}/{index_path}", base.trim_end_matches('/')))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Default, Clone)]
@@ -221,13 +235,6 @@ pub enum SymbolSource {
     Http(String),
 }
 
-fn symbol_sources_from_servers(servers: &[String]) -> Vec<SymbolSource> {
-    let mut sources = Vec::with_capacity(servers.len() + 1);
-    sources.push(SymbolSource::Cache);
-    sources.extend(servers.iter().cloned().map(SymbolSource::Http));
-    sources
-}
-
 impl fmt::Display for SymbolSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -333,6 +340,8 @@ impl PdbIdentity {
     }
 
     fn symbol_store_key(self) -> String {
+        // `guid_to_u128` packs the GUID fields big-endian in field order, so
+        // the hex of the u128 is the symbol server's GUID spelling.
         format!("{:032X}{:X}", self.guid, self.age)
     }
 }
@@ -473,14 +482,22 @@ fn user_home_dir() -> Option<PathBuf> {
 
 fn symbols_directory() -> Option<PathBuf> {
     let symbols_path = ntoseye_home()?.join("symbols");
-    std::fs::create_dir_all(&symbols_path).ok()?;
+    // SymSrv treats a directory as a symbol store only when `pingme.txt`
+    // exists at its root; Ghidra also wants `000admin` (symstore's
+    // transaction directory) or it guesses the layout and warns.
+    std::fs::create_dir_all(symbols_path.join("000admin")).ok()?;
+    let pingme = symbols_path.join("pingme.txt");
+    if !pingme.exists() {
+        File::create(pingme).ok()?;
+    }
     Some(symbols_path)
 }
 
-fn images_directory() -> Option<PathBuf> {
-    let images_path = ntoseye_home()?.join("images");
-    std::fs::create_dir_all(&images_path).ok()?;
-    Some(images_path)
+/// Where a symbol store keeps `file_name` under `key`: the layout DbgHelp,
+/// symstore, and the public symbol servers share, so the cache is a store
+/// any of them can read and any of theirs can serve as the cache.
+fn store_path(root: &Path, file_name: &str, key: &str) -> PathBuf {
+    root.join(file_name).join(key).join(file_name)
 }
 
 /// The image identity the symbol server keys on: file name, `TimeDateStamp`,
@@ -759,6 +776,12 @@ mod tests {
             job.urls[0].ends_with("/driver.pdb/0123456789ABCDEF0123456789ABCDEF2/driver.pdb"),
             "{}",
             job.urls[0]
+        );
+        assert!(
+            job.path
+                .ends_with("driver.pdb/0123456789ABCDEF0123456789ABCDEF2/driver.pdb"),
+            "{}",
+            job.path.display()
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1657,9 +1680,7 @@ fn validate_pdb_identity(path: &Path, expected: PdbIdentity) -> std::result::Res
 fn local_source_candidates(root: &Path, server_name: &str, identity: PdbIdentity) -> Vec<PathBuf> {
     vec![
         root.join(server_name),
-        root.join(server_name)
-            .join(identity.symbol_store_key())
-            .join(server_name),
+        store_path(root, server_name, &identity.symbol_store_key()),
     ]
 }
 
@@ -1691,28 +1712,14 @@ fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> 
                     attempts.push(format!("{}: skipped by force-download", source));
                     continue;
                 }
-                let candidates = std::iter::once(job.path.clone()).chain(
-                    job.path.parent().into_iter().flat_map(|root| {
-                        local_source_candidates(root, &request.server_name, request.identity)
-                    }),
-                );
-                for candidate in candidates {
-                    if !seen_paths.insert(candidate.clone()) {
-                        continue;
-                    }
-                    if !candidate.is_file() {
-                        attempts.push(format!("{}: not found", candidate.display()));
-                        continue;
-                    }
-                    match validate_pdb_identity(&candidate, request.identity) {
-                        Ok(()) => {
-                            install_local_pdb(&candidate, &job.path)?;
-                            return Ok(());
-                        }
-                        Err(reason) => {
-                            attempts.push(format!("{}: {}", candidate.display(), reason))
-                        }
-                    }
+                seen_paths.insert(job.path.clone());
+                if !job.path.is_file() {
+                    attempts.push(format!("{}: not found", job.path.display()));
+                    continue;
+                }
+                match validate_pdb_identity(&job.path, request.identity) {
+                    Ok(()) => return Ok(()),
+                    Err(reason) => attempts.push(format!("{}: {}", job.path.display(), reason)),
                 }
             }
             SymbolSource::LocalDirectory(root) => {
@@ -2296,7 +2303,7 @@ impl SymbolStore {
             modules: DashMap::new(),
             module_status: DashMap::new(),
             module_source: DashMap::new(),
-            sources: RwLock::new(Self::default_symbol_sources()),
+            sources: RwLock::new(DEFAULT_SYMBOL_SOURCES.clone()),
             source_paths: RwLock::new(Vec::new()),
             kernel_guid: Mutex::new(None),
             kernel_dtb: Mutex::new(None),
@@ -2309,10 +2316,6 @@ impl SymbolStore {
             .get(&guid)
             .map(|diagnostics| diagnostics.clone())
             .unwrap_or_default()
-    }
-
-    fn default_symbol_sources() -> Vec<SymbolSource> {
-        symbol_sources_from_servers(pdb_servers())
     }
 
     pub fn symbol_sources(&self) -> Vec<SymbolSource> {
@@ -2328,7 +2331,7 @@ impl SymbolStore {
     }
 
     pub fn reset_symbol_sources(&self) {
-        *self.sources.write() = Self::default_symbol_sources();
+        *self.sources.write() = DEFAULT_SYMBOL_SOURCES.clone();
     }
 
     pub fn source_paths(&self) -> Vec<SourcePathMapping> {
@@ -2741,31 +2744,18 @@ impl SymbolStore {
         age: u32,
     ) -> Result<(DownloadJob, u128)> {
         let server_name = Self::symbol_server_file_name(pdb_file_name);
-        // `guid_to_u128` packs the GUID fields big-endian in field order, so
-        // the hex of the u128 is the symbol server's GUID spelling.
-        let guid_str = format!("{guid:032X}");
-
-        let index_path = format!("{}/{}{:X}/{}", server_name, guid_str, age, server_name);
-        let urls: Vec<String> = pdb_servers()
-            .iter()
-            .map(|base| format!("{}/{}", base.trim_end_matches('/'), index_path))
-            .collect();
-
-        let stem = server_name
-            .rsplit_once('.')
-            .map(|(stem, _)| stem)
-            .unwrap_or(server_name);
-
-        let filename = format!("{}.{}{:X}.pdb", stem, guid_str, age);
+        let identity = PdbIdentity { guid, age };
+        let key = identity.symbol_store_key();
+        let urls = server_urls(&format!("{server_name}/{key}/{server_name}"));
         let storage_dir = symbols_directory().ok_or(Error::StorageNotFound)?;
-        let path = storage_dir.join(&filename);
+        let path = store_path(&storage_dir, server_name, &key);
 
         let job = DownloadJob {
             urls,
             path,
-            filename: format!("{}.pdb", stem),
+            filename: server_name.to_string(),
             pdb: Some(PdbRequest {
-                identity: PdbIdentity { guid, age },
+                identity,
                 server_name: server_name.to_string(),
                 sources: self.symbol_sources(),
             }),
@@ -2817,14 +2807,10 @@ impl SymbolStore {
         size_of_image: u32,
     ) -> Result<DownloadJob> {
         let server_name = Self::symbol_server_file_name(image_file_name);
-        let image_id = format!("{time_date_stamp:08X}{size_of_image:X}");
-        let index_path = format!("{}/{}/{}", server_name, image_id, server_name);
-        let urls: Vec<String> = pdb_servers()
-            .iter()
-            .map(|base| format!("{}/{}", base.trim_end_matches('/'), index_path))
-            .collect();
-        let storage_dir = images_directory().ok_or(Error::StorageNotFound)?;
-        let path = storage_dir.join(format!("{}.{}", image_id, server_name));
+        let key = format!("{time_date_stamp:08X}{size_of_image:X}");
+        let urls = server_urls(&format!("{server_name}/{key}/{server_name}"));
+        let storage_dir = symbols_directory().ok_or(Error::StorageNotFound)?;
+        let path = store_path(&storage_dir, server_name, &key);
 
         Ok(DownloadJob {
             urls,

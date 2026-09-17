@@ -1,5 +1,7 @@
 # Private PDBs and local source
 
+The symbol path starts as the managed cache (`~/.ntoseye/symbols`) followed by any `--pdb-server`/`NTOSEYE_PDB_SERVERS` servers and Microsoft's public server. The cache is a symbol store in the layout `symstore` writes and SymSrv, IDA's PDB loader, Ghidra, and rizin read: `<file>/<GUID><age>/<file>` for PDBs, `<file>/<TimeDateStamp><SizeOfImage>/<file>` for images, with the `pingme.txt`/`000admin` control files at the root. Point another tool's symbol path at it (`srv*~/.ntoseye/symbols` or a plain directory entry) and it serves that tool too; a store another tool populated serves ntoseye through `.sympath+`. Flat `~/.ntoseye/symbols/*.pdb` files and `~/.ntoseye/images` are left by versions up to 0.30 and can be deleted.
+
 Symbol and source paths are configured independently. The host needs the private PDB and, for source display, a copy of the source tree. Use the full linker PDB (`/DEBUG:FULL`, not a stripped/public PDB) when procedure locals are needed. ntoseye validates the selected PDB's GUID and age against the CodeView identity in the loaded guest image and rejects a mismatch.
 
 Append the directory containing the PDB with `.sympath+`. The `+` preserves the managed cache and Microsoft's public symbol server; bare `.sympath` replaces the entire active list:

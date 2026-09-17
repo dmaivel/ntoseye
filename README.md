@@ -39,8 +39,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 `ntoseye` downloads symbols and images from Microsoft's official symbol server when required. Config, cache, and REPL state live under `~/.ntoseye`:
 
 - `~/.ntoseye/commands/` for custom scripted commands
-- `~/.ntoseye/images/` for binaries downloaded from the VM
-- `~/.ntoseye/symbols/` for PDBs
+- `~/.ntoseye/symbols/` for PDBs and images, a symbol store in the `symstore` layout that WinDbg, IDA, Ghidra, and rizin read
 - `~/.ntoseye/aliases` for command aliases
 - `~/.ntoseye/history` for persistent REPL history
 
