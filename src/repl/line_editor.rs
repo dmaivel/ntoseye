@@ -842,7 +842,7 @@ mod tests {
 
     use super::*;
     use crate::symbols::{SymbolIndex, SymbolStore};
-    use crate::target::DriverObjectInfo;
+    use crate::target::object::DriverObjectInfo;
     use crate::types::VirtAddr;
 
     fn completer() -> MyCompleter {

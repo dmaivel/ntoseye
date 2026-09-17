@@ -4,16 +4,31 @@
 
 | Tool | Purpose |
 | --- | --- |
-| `command` | Run one REPL line in ntoseye's WinDbg-style syntax (`!process 0 0`, `dt nt!_EPROCESS <addr>`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, ...) and return its text, styling stripped. `help` lists every command. Commands that resume until the next stop (`g`, `gh`, `gn`, `p`, `pa`, `ta`, `pc`, `tc`, `pt`, `tt`, `ph`, `th`, `gu`, `wt`, `.reboot`, `.crash`) are refused because they would block the session; use the run-control tools below. `t`/`si` (one instruction) is allowed. |
-| `status` | Where the target is now: `{running, current_thread, rip, symbol, attached_process, stopped_process, stopped_thread, coherent, kernel_base}`. The three context fields answer different questions: `attached_process` is the inspection scope memory commands read through (chosen with `.process`, and it survives resumes), `stopped_process` is the process whose page tables the stopped vCPU has loaded, and `stopped_thread` is the Windows thread that vCPU is running. A thread attached to another address space runs on borrowed page tables, so the last two can legitimately disagree. |
-| `interrupt` | Pause a running VM (needed before `k`, `r`, `bp`, `t`, ...). |
-| `resume` | Resume, non-blocking; optional `disposition: handled \| not_handled` (KD only). |
-| `wait_for_stop` | Wait up to `timeout_ms` (default 10 s, max 20 s) for the next stop without resuming; returns `{stop: "breakpoint" \| "watchpoint" \| "exception" \| "bugcheck" \| "step" \| "target_reloaded" \| "running" \| "halted", ...}`. Poll by calling again while it returns `running`. |
+| `command` | Run one REPL line in ntoseye's WinDbg-style syntax (`!process 0 0`, `dt nt!_EPROCESS <addr>`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, `g`, `p`, `break`, ...) with REPL semantics (`;` separates commands on one line) and return its text, styling stripped, followed by a one-line `[target ...]` trailer. `help` lists every command. Arguments: `line`, `timeout_ms` (default 10 s, max 20 s), `format` (`text` or `json`). |
 | `open` / `close` | Attach to a target (`backend: kd \| kdnet \| gdb \| memory \| dump`, plus `connect` and, for kdnet, `key`) or release it. One session at a time. The KD memory source is an operator setting (`--memory-source` on the command line), not a tool argument. |
 
-Run-control is split so no request blocks: a typical breakpoint flow is `interrupt`, `command("bp nt!NtCreateFile")`, `resume`, `wait_for_stop` (until `stop:"breakpoint"`), then `command("k")`.
+## Run control
 
-The server reads the top-level `--backend`/`--connect`/`--kdnet-key`/`--dump` flags to attach at launch, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Without those flags it starts empty and the client attaches with `open`.
+The `command` tool behaves like the REPL prompt, with one difference: it never blocks longer than `timeout_ms`.
+
+- A resuming command (`g`, `gh`, `gn`, `p`, `t`, `gu`, `pa`, `wt`, `.reboot`, ...) resumes and waits up to `timeout_ms` for the next stop. A stop is rendered the way the REPL renders it (breakpoint banner, registers, stack). If nothing stops in time the result ends with `[target running]`; the target keeps running and nothing is lost.
+- An **empty** `line` runs nothing and waits up to `timeout_ms` for the next stop. Keep calling it while the trailer says `running`.
+- `break` interrupts a running target.
+- Commands that need a halted target (`k`, `r`, `bp`, `t`, ...) report `VM is running` immediately; they never wait. Memory, process, module, and struct commands work while the guest runs.
+- A stop that arrived between calls (the guest hit a breakpoint while the agent was thinking) is rendered at the top of the next result. If that next call was itself a resuming command it is refused once, so the agent sees the stop before continuing past it.
+- A multi-step command (`pa`, `pt`, `gu`, `wt`) that overruns the budget leaves the target running toward its next stop; an empty-line call collects it.
+
+The trailer reads `[target running]` or `[target halted @ <vcpu> <rip> <symbol> | process <name> (<pid>) | scope <name> (<pid>)]`, where `process` is the process whose page tables the stopped vCPU has loaded and `scope` is the `.process` inspection scope memory commands read through (it survives resumes, so the two can differ). After a reboot it adds `rediscovery pending` until the kernel is rediscovered; wait rather than enumerating stale state.
+
+Guest debug output (`DbgPrint`) captured since the previous call is appended as `[dbgprint] ...` lines.
+
+A typical breakpoint flow: `break`, `bp nt!NtCreateFile`, `g` (then empty-line calls until the breakpoint renders), `k`.
+
+## Structured results
+
+`format: "json"` returns `{ok, output, result, target, debug_output}` as structured content: `output` is the text the command printed, `target` is the run-state snapshot (`{running, current_thread, rip, symbol, attached_process, stopped_process, stopped_thread, coherent, kernel_base}`), `debug_output` the captured `DbgPrint` lines, and `result` the typed decoding for commands that have one, else `null`. The decodings are the same ones the [Python SDK](sdk.md) exposes as methods (the `!` inspectors, `lm`, `!process`, `k`, `bl`, `dt`, `?`, `r`, `!analyze`, ...); see the SDK surface table for the set.
+
+The server reads the top-level `--backend`/`--connect`/`--kdnet-key`/`--dump` flags to attach at launch, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Without those flags it starts empty and the client attaches with `open`. The guest runs freely between calls; wrong-process hits on shared-page breakpoints are absorbed in the background so it is never left frozen.
 
 ## stdio (default)
 

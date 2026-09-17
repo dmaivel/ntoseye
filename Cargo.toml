@@ -79,10 +79,13 @@ libc = "0.2"
 
 [features]
 default = ["cli", "mcp", "dap", "python-embed"]
-cli = ["dep:ctrlc", "dep:argh", "dep:dialoguer", "dep:nu-ansi-term", "dep:reedline"]
-mcp = ["dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:tower-http", "dep:anyhow"]
-dap = ["dep:serde_json", "dep:base64"]
-python = ["dep:pyo3"]
+# The command engine (parser, dispatcher, renderers) every host drives; the
+# interactive prompt itself needs `cli`. Off, the crate is the debugger core.
+repl = []
+cli = ["repl", "dep:ctrlc", "dep:argh", "dep:dialoguer", "dep:nu-ansi-term", "dep:reedline"]
+mcp = ["repl", "dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:tower-http", "dep:anyhow"]
+dap = ["repl", "dep:serde_json", "dep:base64"]
+python = ["repl", "dep:pyo3"]
 python-embed = ["python", "pyo3/auto-initialize"]
 python-extension = ["python", "pyo3/extension-module"]
 

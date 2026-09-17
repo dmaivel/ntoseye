@@ -6,7 +6,8 @@ use std::sync::{Mutex, RwLock};
 use crate::dbg_backend::DebugBackend;
 use crate::gdb::BreakpointManager;
 use crate::symbols::{SymbolIndex, SymbolStore};
-use crate::target::{DriverObjectInfo, Target, ThreadInfo};
+use crate::target::object::DriverObjectInfo;
+use crate::target::{Target, ThreadInfo};
 use crate::types::{Dtb, VirtAddr};
 
 const PROCESS_COMPLETION_LIMIT: usize = 4096;

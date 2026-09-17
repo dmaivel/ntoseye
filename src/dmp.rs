@@ -14,7 +14,6 @@ use crate::backend::MemoryOps;
 use crate::cpu_state;
 use crate::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
 use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
-use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::context;
@@ -432,6 +431,9 @@ pub struct DmpInfo {
     pub triage_prcb_info: Option<TriagePrcbInfo>,
     pub broken_driver: Option<String>,
     pub triage_overflowed: bool,
+    /// Whether the DGRT integrity signature at `ValidOffset` was present and
+    /// intact; false means the triage dump may be truncated or corrupt.
+    pub triage_signature_valid: bool,
     pub kern_base: Option<u64>,
 }
 
@@ -572,6 +574,7 @@ impl DmpMem {
             triage_prcb_info: None,
             broken_driver: None,
             triage_overflowed: false,
+            triage_signature_valid: true,
             kern_base: None,
             context,
         };
@@ -702,6 +705,9 @@ pub struct DmpBackend {
     directory_table_base: u64,
     triage_crash_info: Option<TriageCrashInfo>,
     debugger_data_hint: Option<DebuggerDataCandidate>,
+    /// Dump-integrity and per-CPU context warnings raised while opening,
+    /// drained by the session through [`DebugBackend::take_notices`].
+    notices: Vec<String>,
 }
 
 impl DmpBackend {
@@ -749,6 +755,14 @@ impl DmpBackend {
                     source: MetadataSource::DumpHeader,
                 }),
             triage_crash_info: None,
+            notices: (!info.triage_signature_valid)
+                .then(|| {
+                    "triage dump DGRT integrity signature mismatch; the dump may be truncated \
+                     or corrupt"
+                        .to_string()
+                })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -781,22 +795,20 @@ impl DmpBackend {
             let prcb = match cpu_state::kprcb_for_processor(target, index) {
                 Ok(prcb) => prcb,
                 Err(error) => {
-                    diagnostics::eprint_warning(format!(
-                        "KiProcessorBlock[{i}] unavailable: {error}"
-                    ));
+                    self.notices
+                        .push(format!("KiProcessorBlock[{i}] unavailable: {error}"));
                     continue;
                 }
             };
             let context_ptr = match context_pointer(prcb) {
                 Ok(context_ptr) if !context_ptr.is_zero() => context_ptr,
                 Ok(_) => {
-                    diagnostics::eprint_warning(format!(
-                        "PRCB[{i}] Context pointer is null, skipping"
-                    ));
+                    self.notices
+                        .push(format!("PRCB[{i}] Context pointer is null, skipping"));
                     continue;
                 }
                 Err(error) => {
-                    diagnostics::eprint_warning(format!(
+                    self.notices.push(format!(
                         "failed to read {context_label}[{i}] context pointer: {error}"
                     ));
                     continue;
@@ -805,7 +817,7 @@ impl DmpBackend {
 
             let mut ctx_buf = vec![0u8; context_size];
             if let Err(error) = memory.read_bytes(context_ptr, &mut ctx_buf) {
-                diagnostics::eprint_warning(format!(
+                self.notices.push(format!(
                     "failed to read {context_label}[{i}] context: {error}"
                 ));
                 continue;
@@ -992,10 +1004,13 @@ impl DebugBackend for DmpBackend {
     fn name(&self) -> &'static str {
         "dmp"
     }
+    fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
+    }
     fn initialize_from_target(&mut self, target: &Target) {
         if self.header_context.is_arm64() {
             if let Err(e) = self.read_arm64_prcb_contexts(target) {
-                diagnostics::eprint_warning(format!(
+                self.notices.push(format!(
                     "could not read ARM64 PRCB ContextFrame contexts from dump: {e}"
                 ));
             }
@@ -1007,9 +1022,8 @@ impl DebugBackend for DmpBackend {
             if let Some(offset) = offset {
                 self.prcb_context_offset = Some(offset);
                 if let Err(e) = self.read_prcb_contexts(target, offset) {
-                    diagnostics::eprint_warning(format!(
-                        "could not read PRCB contexts from dump: {e}"
-                    ));
+                    self.notices
+                        .push(format!("could not read PRCB contexts from dump: {e}"));
                 }
                 self.select_crash_processor();
             }
@@ -1195,6 +1209,7 @@ mod tests {
             triage_prcb_info: None,
             broken_driver: None,
             triage_overflowed: false,
+            triage_signature_valid: true,
             kern_base: None,
             context: DmpContext {
                 rax: 0x1111111111111111,

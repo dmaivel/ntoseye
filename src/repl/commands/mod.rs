@@ -1,3 +1,4 @@
+use crate::diagnostics::print_warning;
 use crate::repl::*;
 
 const ALIAS_RECURSION_LIMIT: usize = 16;
@@ -28,7 +29,47 @@ mod verifier;
 
 impl ReplState<'_> {
     pub fn dispatch_line(&mut self, line: &str) -> Result<Flow> {
-        self.dispatch_line_inner(line, 0)
+        let flow = self.dispatch_line_inner(line, 0);
+        self.flush_notices();
+        flow
+    }
+
+    /// Print the diagnostics the core raised since the last boundary, so a
+    /// breakpoint that failed to re-arm during a stop is not lost silently.
+    pub fn flush_notices(&mut self) {
+        for notice in self.ctx.take_notices() {
+            print_warning(notice);
+        }
+    }
+
+    /// Whether any command on `line` (aliases expanded) can move the target.
+    /// A host that hands control back while the target runs uses this to
+    /// refuse a resume issued against a stop the client has not seen yet.
+    pub fn line_moves_target(&self, line: &str) -> bool {
+        self.line_moves_target_inner(line, 0)
+    }
+
+    fn line_moves_target_inner(&self, line: &str, depth: usize) -> bool {
+        let Ok(commands) = split_command_list(line) else {
+            return false;
+        };
+        commands.into_iter().any(|command| {
+            let Ok(Some(parsed)) = parse_command(command) else {
+                return false;
+            };
+            if let Some(spec) = command_registry().get(parsed.name) {
+                return spec.run != RunEffect::None;
+            }
+            let Ok(invocation) = parsed.invocation(CommandStyle::StructuredArgs) else {
+                return false;
+            };
+            match self.aliases.expand(invocation.name, &invocation.argv) {
+                Ok(Some(expanded)) if depth < ALIAS_RECURSION_LIMIT => {
+                    self.line_moves_target_inner(&expanded, depth + 1)
+                }
+                _ => false,
+            }
+        })
     }
     /// Execute frontend-owned breakpoint commands while keeping the core free
     /// of REPL state. A trailing WinDbg-style `gc` requests automatic resume.
@@ -138,12 +179,6 @@ impl ReplState<'_> {
                 Some(format!(
                     "run-control command '{name}' must not appear inside an exception command; \
                      use the policy's -f break, -f gh, or -f gn"
-                ))
-            }
-            DispatchContext::Remote(RemoteClient::Mcp) if spec.run == RunEffect::Run => {
-                Some(format!(
-                    "'{name}' would block this session until the next stop; use the resume tool, \
-                 then poll wait_for_stop"
                 ))
             }
             DispatchContext::Remote(RemoteClient::Dap) if spec.run == RunEffect::Run => {

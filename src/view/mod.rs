@@ -1,22 +1,36 @@
+pub mod cpu;
+pub mod heap;
+pub mod meta;
+pub mod mm;
+pub mod pnp;
+pub mod sched;
+pub mod security;
+pub mod usermode;
+
 use crate::bugchecks::{BugcheckAnalysis, BugcheckTrapFrame};
 use crate::dbg_backend::{BackendCapability, DebugOutputPage};
 use crate::disasm::DisasmRow;
 use crate::dmp::{DmpException, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
 use crate::gdb::breakpoints::Breakpoint;
-use crate::guest::{ModuleInfo, ProcessInfo};
+use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::{RunStatus, VcpuInfo};
 use crate::symbols::{
     LocalVariableLocation, ProcedureLocal, SourceLocation, SymbolCandidate, SymbolVisibility,
     TypeInfo, format_symbol_with_offset,
 };
+use crate::target::mm::{
+    AddressDescription, AddressModule, MemoryRegionInfo, ProcessMemoryUsage, PteLevel, PteWalk,
+    SystemMemorySummary,
+};
+use crate::target::object::{
+    DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, FileObjectDetail, HandleEntryDetail,
+    HandleTableSummary, IoStackLocationInfo, IrpHit, IrpInfo, NotifyCallback, ObjectHeaderDetail,
+    ResourceDetail, ResourceListSummary, ResourceOwner, SsdtTable,
+};
+use crate::target::security::{PrivilegeInfo, SidAndAttributes, TokenDetail};
 use crate::target::{
-    AddressDescription, AddressModule, DeviceObjectDetail, DiagnosticMetric, DiagnosticValue,
-    DriverObjectDetail, DriverObjectInfo, FileObjectDetail, HandleEntryDetail, HandleTableSummary,
-    IoStackLocationInfo, IrpHit, IrpInfo, ListTermination, MemoryRegionInfo, MemorySearchMatch,
-    NotifyCallback, ObjectHeaderDetail, PrivilegeInfo, ProcessMemoryUsage, PteLevel, PteWalk,
-    ResourceDetail, ResourceListSummary, ResourceOwner, SidAndAttributes, SsdtTable,
-    SymbolSearchMatch, SystemMemorySummary, Target, ThreadInfo, TokenDetail,
-    irp_major_function_name, kthread_state_name, wait_reason_name,
+    DiagnosticMetric, DiagnosticValue, ListTermination, MemorySearchMatch, SymbolSearchMatch,
+    Target, ThreadInfo, irp_major_function_name, kthread_state_name, wait_reason_name,
 };
 use crate::trapframe::{KtrapFrame, KtrapFrameData};
 use crate::triage::TriagePrcbInfo;
@@ -49,6 +63,17 @@ pub enum View {
     List(Vec<View>),
     /// An ordered key/value object (insertion order is preserved on render).
     Object(Vec<(&'static str, View)>),
+    /// A value that can fail to read on its own: `{available, value, error}`
+    /// on both surfaces.
+    Diagnostic(Box<DiagnosticView>),
+}
+
+pub struct DiagnosticView {
+    pub value: Option<View>,
+    pub error: Option<String>,
+    /// `Some` for a metric, whose provenance is part of the shape even when
+    /// unknown (`source: null`).
+    pub source: Option<Option<String>>,
 }
 
 /// Render a [`View`] to JSON (MCP): addresses become `0x` hex strings.
@@ -71,6 +96,25 @@ pub fn to_json(v: &View) -> serde_json::Value {
             let mut map = serde_json::Map::new();
             for (key, val) in fields {
                 map.insert((*key).to_string(), to_json(val));
+            }
+            Value::Object(map)
+        }
+        View::Diagnostic(diagnostic) => {
+            let mut map = serde_json::Map::new();
+            map.insert("available".into(), Value::from(diagnostic.error.is_none()));
+            map.insert(
+                "value".into(),
+                diagnostic.value.as_ref().map_or(Value::Null, to_json),
+            );
+            map.insert(
+                "error".into(),
+                diagnostic.error.clone().map_or(Value::Null, Value::from),
+            );
+            if let Some(source) = &diagnostic.source {
+                map.insert(
+                    "source".into(),
+                    source.clone().map_or(Value::Null, Value::from),
+                );
             }
             Value::Object(map)
         }
@@ -115,6 +159,22 @@ pub fn to_py<'py>(
             let dict = PyDict::new(py);
             for (key, val) in fields {
                 dict.set_item(key, to_py(py, val)?)?;
+            }
+            dict.into_any()
+        }
+        View::Diagnostic(diagnostic) => {
+            let dict = PyDict::new(py);
+            dict.set_item("available", diagnostic.error.is_none())?;
+            dict.set_item(
+                "value",
+                match &diagnostic.value {
+                    Some(value) => to_py(py, value)?,
+                    None => py.None().into_bound(py),
+                },
+            )?;
+            dict.set_item("error", diagnostic.error.as_deref())?;
+            if let Some(source) = &diagnostic.source {
+                dict.set_item("source", source.as_deref())?;
             }
             dict.into_any()
         }
@@ -702,6 +762,40 @@ pub fn module(module: &ModuleInfo) -> View {
     View::Object(fields)
 }
 
+/// The outcome of a symbol reload: how many modules loaded, lacked a PDB,
+/// were skipped, or failed, plus the first diagnostics (bounded).
+pub fn module_symbol_report(report: &ModuleSymbolLoadReport) -> View {
+    View::Object(vec![
+        ("total", View::Num(report.total as u64)),
+        ("loaded", View::Num(report.loaded as u64)),
+        ("unloaded", View::Num(report.unloaded as u64)),
+        ("no_pdb", View::Num(report.no_pdb as u64)),
+        ("skipped", View::Num(report.skipped as u64)),
+        ("failed", View::Num(report.failed as u64)),
+        (
+            "diagnostic_count",
+            View::Num(report.diagnostic_count as u64),
+        ),
+        (
+            "diagnostics",
+            View::List(
+                report
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| {
+                        View::Object(vec![
+                            ("module", View::Str(diagnostic.module.clone())),
+                            ("phase", View::Str(diagnostic.phase.to_string())),
+                            ("compiland", View::OptStr(diagnostic.compiland.clone())),
+                            ("message", View::Str(diagnostic.message.clone())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
 /// One decoded instruction: bytes, text, and the resolved branch/rip-relative
 /// target comment when there is one.
 pub fn disasm_row(row: &DisasmRow) -> View {
@@ -1266,31 +1360,24 @@ pub fn procedure_local(target: &Target, address: VirtAddr, local: &ProcedureLoca
     ])
 }
 
-fn diagnostic<T>(value: &DiagnosticValue<T>, encode: impl FnOnce(&T) -> View) -> View {
-    match value {
-        DiagnosticValue::Available(value) => View::Object(vec![
-            ("available", View::Bool(true)),
-            ("value", encode(value)),
-            ("error", View::Null),
-        ]),
-        DiagnosticValue::Unavailable(error) => View::Object(vec![
-            ("available", View::Bool(false)),
-            ("value", View::Null),
-            ("error", View::Str(error.clone())),
-        ]),
-    }
+pub fn diagnostic<T>(value: &DiagnosticValue<T>, encode: impl FnOnce(&T) -> View) -> View {
+    let (value, error) = match value {
+        DiagnosticValue::Available(value) => (Some(encode(value)), None),
+        DiagnosticValue::Unavailable(error) => (None, Some(error.clone())),
+    };
+    View::Diagnostic(Box::new(DiagnosticView {
+        value,
+        error,
+        source: None,
+    }))
 }
 
-fn diagnostic_metric<T>(metric: &DiagnosticMetric<T>, encode: impl FnOnce(&T) -> View) -> View {
-    let mut fields = match diagnostic(&metric.value, encode) {
-        View::Object(fields) => fields,
-        _ => unreachable!(),
+pub fn diagnostic_metric<T>(metric: &DiagnosticMetric<T>, encode: impl FnOnce(&T) -> View) -> View {
+    let View::Diagnostic(mut diagnostic) = diagnostic(&metric.value, encode) else {
+        unreachable!()
     };
-    fields.push((
-        "source",
-        View::OptStr(metric.source.map(|source| source.to_string())),
-    ));
-    View::Object(fields)
+    diagnostic.source = Some(metric.source.map(|source| source.to_string()));
+    View::Diagnostic(diagnostic)
 }
 
 pub fn process(process: &ProcessInfo) -> View {
@@ -1648,7 +1735,8 @@ mod tests {
     use super::{bugcheck_trap_frame, memory_usage, to_json};
     use crate::bugchecks::BugcheckTrapFrame;
     use crate::debugger_data::MetadataSource;
-    use crate::target::{DiagnosticMetric, DiagnosticValue, SystemMemorySummary};
+    use crate::target::mm::SystemMemorySummary;
+    use crate::target::{DiagnosticMetric, DiagnosticValue};
 
     #[test]
     fn bugcheck_trap_frame_exposes_decode_failure() {

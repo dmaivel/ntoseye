@@ -10,9 +10,7 @@ use crate::target::{SavedThreadRegisters, SelectedFrame, Target};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
-use crate::unwind::{
-    RecoveredStackTrace, build_stacktrace_with_context, build_stacktrace_with_register_values,
-};
+use crate::unwind::RecoveredStackTrace;
 
 use crate::repl::*;
 
@@ -62,9 +60,7 @@ impl ReplState<'_> {
     /// command that changes the execution context (`~Ns`, `vcpu`, `.thread`,
     /// `.process`, run control) so a stale frame never shadows live registers.
     pub fn clear_selected_frame(&mut self) {
-        if self.ctx.target.selected_frame.take().is_some() {
-            self.ctx.restore_live_register_cache();
-        }
+        self.ctx.clear_selected_frame();
     }
 
     fn set_selected_frame(&mut self, selected: SelectedFrame) {
@@ -159,40 +155,13 @@ impl ReplState<'_> {
     }
 
     fn recovered_live_trace(&mut self, limit: usize) -> Result<Option<SeededTrace>> {
-        if let Some(selected) = self.ctx.target.selected_frame.as_ref() {
-            let seed = if selected.seed_registers.is_empty() {
-                &selected.registers
-            } else {
-                &selected.seed_registers
-            };
-            let seed = seed.clone();
-            let trace = build_stacktrace_with_register_values(
-                &self.ctx.target,
-                &self.ctx.register_map,
-                &seed,
-                limit,
-            );
-            return Ok(Some((trace, seed, selected.seed_live)));
-        }
-        if self.ctx.parked_windows_thread().is_some() {
-            error!("frame selection requires a live register context; use `vcpu <id>`");
-            return Ok(None);
-        }
-        let registers = match self.ctx.read_registers() {
-            Ok(registers) => registers,
+        match self.ctx.recovered_live_trace(limit) {
+            Ok(trace) => Ok(Some(trace)),
             Err(error) => {
-                error!("failed to read registers: {}", error);
-                return Ok(None);
+                error!("{}", error);
+                Ok(None)
             }
-        };
-        let seed = self.ctx.register_map.to_hashmap(&registers);
-        let trace = build_stacktrace_with_context(
-            &self.ctx.target,
-            &self.ctx.register_map,
-            &registers,
-            limit,
-        );
-        Ok(Some((trace, seed, true)))
+        }
     }
 
     fn cmd_cxr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

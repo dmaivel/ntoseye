@@ -2,20 +2,16 @@ use std::collections::BTreeMap;
 use std::io::IsTerminal;
 
 use crate::backend::MemoryOps;
-use crate::cpu_state::processor_count;
-use crate::dbg_backend::DebugBackend;
 use crate::error::Result;
 use crate::expr::{Expr, NumberRadix};
-use crate::kuser_shared::{
-    read_interrupt_time, read_nt_build_number, read_nt_major_version, read_nt_minor_version,
-    read_nt_product_type, read_system_time,
-};
-use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;
-use crate::target::Target;
-use crate::triage_report::filetime_to_iso;
+use crate::target::meta::{
+    ErrorCodeDetail, TargetTimeDetail, TargetVersionDetail, decode_error_code,
+    decode_error_code_as_ntstatus,
+};
+use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, Target};
 use crate::types::VirtAddr;
 
 use crate::repl::*;
@@ -170,8 +166,8 @@ impl ReplState<'_> {
         if let Some(machine) = invocation.arg(0) {
             let machine = machine.to_ascii_lowercase();
             self.ctx.target.effmach = match machine.as_str() {
-                "x86" => Some(crate::target::CODE_BITNESS_X86),
-                "amd64" => Some(crate::target::CODE_BITNESS_AMD64),
+                "x86" => Some(CODE_BITNESS_X86),
+                "amd64" => Some(CODE_BITNESS_AMD64),
                 "." | "auto" => None,
                 _ => {
                     error!("invalid effective machine '{machine}' (use x86, amd64, or auto)");
@@ -181,8 +177,8 @@ impl ReplState<'_> {
         }
 
         let machine = match self.ctx.target.effmach {
-            Some(crate::target::CODE_BITNESS_X86) => "x86",
-            Some(crate::target::CODE_BITNESS_AMD64) => "AMD64",
+            Some(CODE_BITNESS_X86) => "x86",
+            Some(CODE_BITNESS_AMD64) => "AMD64",
             _ => "auto",
         };
         outln!("effective machine: {machine}\n");
@@ -190,27 +186,15 @@ impl ReplState<'_> {
     }
 
     fn cmd_version(&mut self) -> Result<()> {
-        print_target_version(
-            &self.ctx.target,
-            self.ctx.backend.name(),
-            &mut *self.ctx.backend,
-        );
+        let detail = self.ctx.target_version()?;
+        print_target_version(&detail);
         outln!();
         Ok(())
     }
 
     fn cmd_time(&mut self) -> Result<()> {
-        let target = &self.ctx.target;
-        let (system_time, uptime) = target_times(target);
-        outln!("{}", ui::label("target time"));
-        match system_time.and_then(filetime_to_iso) {
-            Some(time) => outln!("  {} {}", ui::muted("system time"), time),
-            None => outln!("  {} unavailable", ui::muted("system time")),
-        }
-        match uptime {
-            Some(ticks) => outln!("  {} {}", ui::muted("uptime"), format_uptime(ticks)),
-            None => outln!("  {} unavailable", ui::muted("uptime")),
-        }
+        let detail = self.ctx.target.target_time()?;
+        print_target_time(&detail);
         outln!();
         Ok(())
     }
@@ -374,11 +358,16 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let Ok(code) = u32::try_from(code) else {
+        if u32::try_from(code).is_err() {
             error!("error code '{text}' exceeds 32 bits");
             return Ok(());
+        }
+        let detail = if invocation.name == "!ntstatus" {
+            decode_error_code_as_ntstatus(code)
+        } else {
+            decode_error_code(code)
         };
-        print_error_code(code, invocation.name == "!ntstatus");
+        print_error_code(&detail);
         Ok(())
     }
 
@@ -568,185 +557,165 @@ fn command_category(name: &str) -> &'static str {
     }
 }
 
-fn dump_system_time(target: &Target) -> Option<u64> {
-    target
-        .phys
-        .dmp_info()
-        .and_then(|info| info.system_info.as_ref())
-        .map(|info| info.system_time)
-        .filter(|time| *time > 0)
-        .map(|time| time as u64)
-}
-
-fn dump_uptime(target: &Target) -> Option<u64> {
-    target
-        .phys
-        .dmp_info()
-        .and_then(|info| info.system_info.as_ref())
-        .map(|info| info.system_up_time)
-        .filter(|time| *time > 0)
-        .map(|time| time as u64)
-}
-
-fn target_times(target: &Target) -> (Option<u64>, Option<u64>) {
-    let system_time = dump_system_time(target).or_else(|| read_system_time(target));
-    let uptime = dump_uptime(target).or_else(|| read_interrupt_time(target));
-    (system_time, uptime)
-}
-
-fn shared_build_lab(target: &Target) -> Option<String> {
-    let guest = target.guest().ok()?;
-    let address = guest.ntoskrnl.symbol("NtBuildLab").ok()?.address();
-    let mut bytes = [0u8; 128];
-    guest
-        .ntoskrnl
-        .memory()
-        .read_bytes(address, &mut bytes)
-        .ok()?;
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    let text = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
-    (!text.is_empty()).then_some(text)
-}
-
-fn symbol_build_number(target: &Target) -> Option<u64> {
-    let guest = target.guest().ok()?;
-    guest
-        .ntoskrnl
-        .symbol("NtBuildNumber")
-        .and_then(|symbol| symbol.read::<u16>())
-        .ok()
-        .map(u64::from)
-}
-
-fn format_uptime(ticks: u64) -> String {
-    let seconds = ticks / 10_000_000;
-    let days = seconds / 86_400;
-    let hours = (seconds / 3_600) % 24;
-    let minutes = (seconds / 60) % 60;
-    let seconds = seconds % 60;
-    format!("{days}d {hours:02}:{minutes:02}:{seconds:02}")
-}
-
-fn print_target_version(target: &Target, backend: &str, client: &mut dyn DebugBackend) {
-    let dump_info = target
-        .phys
-        .dmp_info()
-        .and_then(|info| info.system_info.as_ref());
-    let major = dump_info
-        .map(|info| info.major_version as u64)
-        .filter(|value| *value != 0)
-        .or_else(|| read_nt_major_version(target));
-    let minor = dump_info
-        .map(|info| info.minor_version as u64)
-        .filter(|value| *value != 0)
-        .or_else(|| read_nt_minor_version(target));
-    let build = symbol_build_number(target)
-        .or_else(|| read_nt_build_number(target))
-        .map(|value| value & 0xffff);
-    let product = dump_info
-        .map(|info| info.product_type as u64)
-        .filter(|value| *value != 0)
-        .or_else(|| read_nt_product_type(target));
-    let (system_time, uptime) = target_times(target);
-    let modules = target.kernel_modules().unwrap_or_default();
-    let kernel = target
-        .kernel_base()
-        .and_then(|base| {
-            modules
-                .iter()
-                .find(|module| module.base_address == base)
-                .cloned()
-        })
-        .or_else(|| {
-            modules
-                .iter()
-                .find(|module| module.short_name == "nt")
-                .cloned()
-        });
-    let base = kernel
-        .as_ref()
-        .map(|module| module.base_address)
-        .or_else(|| target.kernel_base());
-    let identity = base.and_then(|base| {
-        target
-            .symbols
-            .module_pdb_identity(target.kernel_dtb(), base)
-    });
-    let processors = processor_count(target).ok().or_else(|| {
-        client
-            .thread_list()
-            .ok()
-            .map(|threads| threads.len() as u16)
-    });
-    let product_label = match product {
-        Some(1) => "Workstation",
-        Some(2) => "DomainController",
-        Some(3) => "Server",
-        _ => "unknown",
-    };
-
+fn print_target_version(detail: &TargetVersionDetail) {
     outln!("{}", ui::label("target version"));
     outln!(
         "  {} Windows {}.{} build {}{}",
         ui::muted("target"),
-        major.map_or_else(|| "?".into(), |value| value.to_string()),
-        minor.map_or_else(|| "?".into(), |value| value.to_string()),
-        build.map_or_else(|| "?".into(), |value| value.to_string()),
-        shared_build_lab(target)
+        detail
+            .major_version
+            .map_or_else(|| "?".to_string(), |value| value.to_string()),
+        detail
+            .minor_version
+            .map_or_else(|| "?".to_string(), |value| value.to_string()),
+        detail
+            .build_number
+            .map_or_else(|| "?".to_string(), |value| value.to_string()),
+        detail
+            .build_lab
+            .as_ref()
             .map(|lab| format!(" ({lab})"))
             .unwrap_or_default()
     );
-    outln!("  {} {}", ui::muted("arch"), target.arch().label());
-    match (base, kernel.as_ref().map(|module| module.size)) {
-        (Some(base), Some(size)) => outln!(
-            "  {} {} size {:#x}",
-            ui::muted("kernel"),
-            ui::addr(base.0),
-            size
-        ),
-        (Some(base), None) => outln!(
-            "  {} {} size unknown",
-            ui::muted("kernel"),
-            ui::addr(base.0)
-        ),
-        _ => outln!("  {} unavailable", ui::muted("kernel")),
+    outln!("  {} {}", ui::muted("arch"), detail.architecture);
+    if let Some(kernel) = &detail.kernel {
+        match kernel.size {
+            Some(size) => outln!(
+                "  {} {} size {:#x}",
+                ui::muted("kernel"),
+                ui::addr(kernel.base.0),
+                size
+            ),
+            None => outln!(
+                "  {} {} size unknown",
+                ui::muted("kernel"),
+                ui::addr(kernel.base.0)
+            ),
+        }
+    } else {
+        outln!("  {} unavailable", ui::muted("kernel"));
     }
-    if let Some(identity) = identity {
+    let pdb_guid = detail
+        .kernel
+        .as_ref()
+        .and_then(|kernel| kernel.pdb_guid.as_deref());
+    let pdb_age = detail.kernel.as_ref().and_then(|kernel| kernel.pdb_age);
+    if let (Some(guid), Some(age)) = (pdb_guid, pdb_age) {
         outln!(
-            "  {} ntoskrnl.pdb GUID {:032X} age {}",
+            "  {} ntoskrnl.pdb GUID {} age {}",
             ui::muted("pdb"),
-            identity.guid,
-            identity.age
+            guid,
+            age
         );
     } else {
         outln!("  {} unavailable", ui::muted("pdb"));
     }
+    if let Some(kernel) = &detail.kernel {
+        if let Some(version) = &kernel.file_version {
+            outln!("  {} file version {}", ui::muted("kernel"), version);
+        }
+        if let Some(version) = &kernel.product_version {
+            outln!("  {} product version {}", ui::muted("kernel"), version);
+        }
+    }
     outln!(
         "  {} {}",
         ui::muted("processors"),
-        processors.map_or_else(|| "unknown".into(), |value| value.to_string())
+        detail
+            .processors
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string())
     );
-    outln!("  {} {}", ui::muted("product"), product_label);
+    outln!("  {} {}", ui::muted("product"), detail.product);
     outln!(
         "  {} {}",
         ui::muted("uptime"),
-        uptime.map_or_else(|| "unknown".into(), format_uptime)
+        detail.uptime.as_deref().unwrap_or("unknown")
     );
-    outln!("  {} {}", ui::muted("backend"), backend);
-    outln!("  {} {}", ui::muted("ntoseye"), env!("CARGO_PKG_VERSION"));
-    let symbol_path = target
-        .symbols
-        .symbol_sources()
-        .into_iter()
-        .map(|source| source.to_string())
-        .collect::<Vec<_>>()
-        .join("; ");
-    outln!("  {} {}", ui::muted("symbol path"), symbol_path);
-    if let Some(time) = system_time.and_then(filetime_to_iso) {
+    outln!(
+        "  {} {}",
+        ui::muted("backend"),
+        detail.backend.as_deref().unwrap_or("unknown")
+    );
+    outln!("  {} {}", ui::muted("ntoseye"), detail.debugger_version);
+    outln!("  {} {}", ui::muted("symbol path"), detail.symbol_path);
+    outln!(
+        "  {} {}",
+        ui::muted("symbol status"),
+        detail.symbol_status.as_deref().unwrap_or("unknown")
+    );
+    if let Some(time) = detail.system_time_iso.as_deref() {
         outln!("  {} {}", ui::muted("system time"), time);
+    }
+    if let Some(dump) = &detail.dump {
+        outln!(
+            "  {} {} (bugcheck: {:#x})",
+            ui::muted("dump"),
+            if dump.is_triage { "yes" } else { "no" },
+            dump.bugcheck_code
+        );
+        outln!(
+            "  {} {} processors, machine {:#x}, service-pack build {}",
+            ui::muted("dump metadata"),
+            dump.number_processors,
+            dump.machine_image_type,
+            dump.service_pack_build
+        );
+        outln!(
+            "  {} dtb {:#x}, kernel {:#x}, exception {}",
+            ui::muted("dump metadata"),
+            dump.directory_table_base.0,
+            dump.kernel_base.map_or(0, |base| base.0),
+            dump.exception_code
+                .map_or_else(|| "none".to_string(), |code| format!("{code:#x}"))
+        );
+        let parameters = dump
+            .bugcheck_parameters
+            .iter()
+            .map(|value| format!("{value:#x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        outln!(
+            "  {} parameters [{}]",
+            ui::muted("dump metadata"),
+            parameters
+        );
+        outln!(
+            "  {} Windows {}.{} product type {}",
+            ui::muted("dump metadata"),
+            dump.major_version,
+            dump.minor_version,
+            dump.product_type
+        );
+        outln!(
+            "  {} system time {}, uptime {}",
+            ui::muted("dump metadata"),
+            dump.system_time
+                .map_or_else(|| "unknown".to_string(), |time| format!("{time:#x}")),
+            dump.uptime_seconds
+                .map_or_else(|| "unknown".to_string(), |seconds| format!("{seconds}s"))
+        );
+        outln!(
+            "  {} triage overflowed {}",
+            ui::muted("dump metadata"),
+            if dump.triage_overflowed { "yes" } else { "no" }
+        );
+    }
+}
+
+fn print_target_time(detail: &TargetTimeDetail) {
+    outln!("{}", ui::label("target time"));
+    match (detail.system_time, detail.system_time_iso.as_deref()) {
+        (Some(raw), Some(iso)) => outln!("  {} {} ({raw:#x})", ui::muted("system time"), iso),
+        (Some(raw), None) => outln!("  {} unavailable ({raw:#x})", ui::muted("system time")),
+        _ => outln!("  {} unavailable", ui::muted("system time")),
+    }
+    match (detail.uptime_seconds, detail.uptime.as_deref()) {
+        (Some(seconds), Some(formatted)) => outln!(
+            "  {} {} ({seconds} seconds)",
+            ui::muted("uptime"),
+            formatted
+        ),
+        _ => outln!("  {} unavailable", ui::muted("uptime")),
     }
 }
 
@@ -878,49 +847,32 @@ fn format_printf(
     Ok(output)
 }
 
-fn print_error_code(code: u32, force_ntstatus: bool) {
-    let is_ntstatus = force_ntstatus || code >= 0xc000_0000;
-    if is_ntstatus {
-        let severity = match code >> 30 {
-            0 => "success",
-            1 => "informational",
-            2 => "warning",
-            _ => "error",
-        };
-        let facility = (code >> 16) & 0x0fff;
-        let name = ntstatus_name(code).unwrap_or("STATUS_UNKNOWN");
-        outln!("NTSTATUS {code:#010x}: {name}");
-        outln!(
-            "  severity: {severity}; facility: {facility:#x}; customer: {}",
-            if code & 0x2000_0000 != 0 { "yes" } else { "no" }
-        );
-        return;
-    }
-
-    if code & 0x8000_0000 != 0 {
-        let severity = "error";
-        let facility = (code >> 16) & 0x1fff;
-        let win32 = if facility == 7 {
-            Some(code & 0xffff)
-        } else {
-            None
-        };
-        let name = win32
-            .and_then(win32_error_name)
-            .unwrap_or("HRESULT_UNKNOWN");
-        outln!("HRESULT {code:#010x}: {name}");
-        outln!(
-            "  severity: {severity}; facility: {facility:#x}; customer: {}",
-            if code & 0x2000_0000 != 0 { "yes" } else { "no" }
-        );
-        if let Some(win32) = win32 {
-            outln!("  Win32 code: {win32} ({win32:#x})");
+fn print_error_code(detail: &ErrorCodeDetail) {
+    match detail.kind.as_str() {
+        "NTSTATUS" => {
+            outln!("NTSTATUS {:#010x}: {}", detail.code, detail.name);
+            outln!("  {}", detail.description);
         }
-        return;
+        "HRESULT" => {
+            outln!("HRESULT {:#010x}: {}", detail.code, detail.name);
+            outln!("  {}", detail.description);
+            if let Some(win32) = detail.win32_code {
+                outln!("  Win32 code: {win32} ({win32:#x})");
+            }
+        }
+        "Win32" => outln!(
+            "Win32 error {} ({:#x}): {}",
+            detail.code,
+            detail.code,
+            detail.name
+        ),
+        _ => outln!(
+            "Unknown error code {} ({:#x}): {}",
+            detail.code,
+            detail.code,
+            detail.description
+        ),
     }
-
-    let name = win32_error_name(code).unwrap_or("ERROR_UNKNOWN");
-    outln!("Win32 error {code} ({code:#x}): {name}");
 }
 
 #[cfg(test)]

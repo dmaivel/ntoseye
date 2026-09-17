@@ -1,6 +1,6 @@
 # Python SDK
 
-Drive the debugger from Python with the `ntoseye` module: the same introspection and run-control surface as the REPL (memory/struct reads, expression eval, symbol/type lookup, disassembly, backtraces, trap-frame decoding, code breakpoints, data watchpoints, execution control, process enumeration), with Python owning the loop. `dbg.watchpoint(target, access="write"|"read_write", length=1|2|4|8)` returns the same live handle type as `dbg.breakpoint(...)`; `dbg.inspect_trap_frame()` decodes the current thread's saved `_KTRAP_FRAME`, or accepts an explicit address. The wheel is self-contained, so this needs neither the `ntoseye` CLI nor a build with the embedded interpreter.
+Drive the debugger from Python with the `ntoseye` module: the same introspection and run-control surface as the REPL, with Python owning the loop. The wheel is self-contained, so this needs neither the `ntoseye` CLI nor a build with the embedded interpreter. The module ships type stubs, so an editor shows every method and its docstring; the outline below maps REPL commands to methods.
 
 Data watchpoints currently require KD (KDCOM or KDNET), apply globally across guest address spaces, and at most four can be active at a time.
 

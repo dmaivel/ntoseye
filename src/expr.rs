@@ -5,8 +5,6 @@ use crate::symbols::{
 };
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
-use crate::ui;
-use owo_colors::OwoColorize;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::ops::Range;
@@ -191,16 +189,18 @@ impl ExprParseError {
         }
     }
 
+    /// The input with a caret line under the offending span. Plain text: it
+    /// travels inside [`Error::InvalidExpression`] to every host, including
+    /// Python exception messages.
     pub fn render(&self, input: &str) -> String {
         let start = self.span.start.min(input.len());
         let end = self.span.end.min(input.len()).max(start + 1);
         let caret_width = end.saturating_sub(start).max(1);
         format!(
-            "{}\n{}{} {}",
-            input,
+            "{input}\n{}{} {}",
             " ".repeat(start),
-            "^".repeat(caret_width).red(),
-            ui::muted(&self.label)
+            "^".repeat(caret_width),
+            self.label
         )
     }
 }

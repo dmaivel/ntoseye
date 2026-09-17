@@ -20,9 +20,8 @@ use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
-#[cfg(feature = "cli")]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use tabled::builder::Builder;
 use tabled::settings::Padding;
@@ -38,7 +37,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::expr::NumberRadix;
 use crate::guest::ModuleSymbolLoadReport;
-use crate::memory::DTB_IDENTITY;
 #[cfg(feature = "cli")]
 use crate::output::log_input_line;
 #[cfg(feature = "python")]
@@ -50,9 +48,9 @@ use crate::symbols::ntoseye_home;
 use crate::target::Target;
 use crate::ui;
 
-pub static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Set by [`note_termination`]; polled by the prompt loops so a termination
 /// signal leaves through the same teardown as `q`.
+#[cfg(feature = "cli")]
 static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub const BREAK_STACKTRACE_DISPLAY_LIMIT: usize = 6;
 pub const BREAK_STACKTRACE_PROBE_LIMIT: usize = 64;
@@ -86,26 +84,23 @@ mod command;
 mod commands;
 mod completion;
 mod disasm;
-mod exception_policy;
 mod heap;
 #[cfg(feature = "cli")]
 mod line_editor;
 mod memory_view;
-mod pool;
 mod stop;
 
+pub use crate::exception_policy::*;
 pub use crate::repl_command;
 pub use aliases::*;
 pub use bugcheck::*;
 pub use command::*;
 pub use completion::*;
 pub use disasm::*;
-pub use exception_policy::*;
 pub use heap::*;
 #[cfg(feature = "cli")]
 use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
-pub use pool::*;
 pub use stop::*;
 
 pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
@@ -238,7 +233,6 @@ pub struct ReplState<'a> {
     pub ctx: &'a mut Session,
     pub caches: ReplCaches,
     pub aliases: UserAliases,
-    pub exception_policies: ExceptionPolicyTable,
     /// Nested automatic exception-command executions. Bounded so an event
     /// command that resumes into the same exception cannot recurse forever.
     pub event_command_depth: usize,
@@ -251,6 +245,35 @@ pub struct ReplState<'a> {
     pub quiet_stops: bool,
     /// Where `ls` continues: the file and the line after the last one listed.
     pub source_cursor: Option<(PathBuf, u32)>,
+    /// How long a resuming command may wait for the next stop before handing
+    /// control back with the target still running. `None` (the interactive
+    /// prompt) waits until a stop or Ctrl+C. A request/response host sets it
+    /// per dispatch so no call blocks past the client's patience; the target
+    /// keeps running and the host collects the stop on a later call with
+    /// [`ReplState::collect_stop`].
+    pub stop_wait: Option<StopWaitBudget>,
+}
+
+/// Deadline for a bounded stop wait, plus a host-owned cancel flag (client
+/// disconnect, server shutdown) that ends the wait early. Elapsing never
+/// interrupts the target; it only returns control.
+#[derive(Clone, Debug)]
+pub struct StopWaitBudget {
+    pub deadline: Instant,
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl StopWaitBudget {
+    pub fn new(timeout: Duration, cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            deadline: Instant::now() + timeout,
+            cancel,
+        }
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed) || Instant::now() >= self.deadline
+    }
 }
 
 /// Where a command line comes from. Event-driven and remote contexts must not
@@ -272,7 +295,8 @@ pub enum DispatchContext {
 /// The protocol server behind a [`DispatchContext::Remote`] session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteClient {
-    /// The MCP `command` tool, alongside the `resume`/`wait_for_stop` tools.
+    /// The MCP `command` tool. Resumes are allowed but bounded by
+    /// [`ReplState::stop_wait`]; `quit` is refused (the client closes).
     Mcp,
     /// The DAP Debug Console, alongside the client's own run-control buttons.
     Dap,
@@ -287,7 +311,6 @@ pub enum RemoteClient {
 pub struct ReplStore {
     caches: ReplCaches,
     aliases: UserAliases,
-    exception_policies: ExceptionPolicyTable,
     radix: NumberRadix,
     context: DispatchContext,
     source_cursor: Option<(PathBuf, u32)>,
@@ -318,7 +341,6 @@ impl ReplStore {
         Self {
             caches,
             aliases,
-            exception_policies: ExceptionPolicyTable::default(),
             radix: NumberRadix::Hexadecimal,
             context,
             source_cursor: None,
@@ -346,39 +368,6 @@ pub fn initial_user_commands() -> Vec<(String, String, Vec<CompletionStrategy>)>
     }
 }
 
-impl Session {
-    pub fn restore_live_register_cache(&mut self) {
-        if self.backend.is_running() || self.parked_windows_thread().is_some() {
-            self.target.registers = None;
-            self.target.clear_context_dtb_override();
-            return;
-        }
-
-        let registers = match self.read_registers() {
-            Ok(registers) => registers,
-            Err(_) => {
-                self.target.registers = None;
-                self.target.clear_context_dtb_override();
-                return;
-            }
-        };
-        self.target.registers = Some(self.register_map.to_hashmap(&registers));
-        match self
-            .register_map
-            .read_u64(self.target.arch().dtb_register(), &registers)
-        {
-            Ok(dtb)
-                if dtb != 0
-                    && self.target.guest.is_some()
-                    && self.target.kernel_dtb() != DTB_IDENTITY =>
-            {
-                self.target.set_context_dtb_override(dtb);
-            }
-            _ => self.target.clear_context_dtb_override(),
-        }
-    }
-}
-
 impl<'a> ReplState<'a> {
     /// Bind stored REPL state to a session for one dispatch; [`Self::detach`]
     /// hands the state back afterwards.
@@ -387,13 +376,13 @@ impl<'a> ReplState<'a> {
             ctx,
             caches: store.caches,
             aliases: store.aliases,
-            exception_policies: store.exception_policies,
             event_command_depth: 0,
             radix: store.radix,
             line: String::new(),
             context: store.context,
             quiet_stops: false,
             source_cursor: store.source_cursor,
+            stop_wait: None,
         }
     }
 
@@ -403,7 +392,6 @@ impl<'a> ReplState<'a> {
         ReplStore {
             caches: self.caches,
             aliases: self.aliases,
-            exception_policies: self.exception_policies,
             radix: self.radix,
             context: self.context,
             source_cursor: self.source_cursor,
@@ -512,11 +500,17 @@ pub fn start_plain_repl(ctx: &mut Session) -> Result<()> {
 
 #[cfg(feature = "cli")]
 fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
+    // Warnings the attach raised (unreadable PRCB contexts, a corrupt triage
+    // signature, kernel discovery falling back) precede the banner.
+    for notice in ctx.take_notices() {
+        diagnostics::print_warning(notice);
+    }
     let debugger: &mut Target = &mut ctx.target;
     let client: &mut dyn DebugBackend = ctx.backend.as_mut();
 
+    let interrupt = Arc::clone(&debugger.interrupt);
     ctrlc::set_handler(move || {
-        INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
+        interrupt.store(true, Ordering::SeqCst);
     })?;
     install_termination_handler();
 
@@ -713,13 +707,13 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         ctx,
         caches,
         aliases,
-        exception_policies: ExceptionPolicyTable::default(),
         event_command_depth: 0,
         radix: NumberRadix::Hexadecimal,
         line: String::new(),
         context: DispatchContext::Interactive,
         quiet_stops: false,
         source_cursor: None,
+        stop_wait: None,
     };
     // An empty module list at startup means we attached before rediscovery completed.
     state.ctx.reload_module_list_pending = reload_module_list_pending;
@@ -846,7 +840,8 @@ mod tests {
     use crate::dbg_backend::BugcheckInfo;
     use crate::output::capture;
     use crate::repl::ReplState;
-    use crate::session::session_over_memory;
+    use crate::session::tests::{MockBackend, breakpoint_event, session_with_mock};
+    use crate::session::{Session, session_over_memory};
     use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
     use crate::types::VirtAddr;
 
@@ -1036,5 +1031,51 @@ mod tests {
         let (result, text) = capture(|| state.dispatch_line("? 42"));
         result.unwrap();
         assert!(text.contains("0000000000000042"), "hex radix: {text:?}");
+    }
+
+    fn remote_state(session: &mut Session, budget_ms: u64) -> ReplState<'_> {
+        let mut state = ReplState::for_oneshot(session);
+        state.context = super::DispatchContext::Remote(super::RemoteClient::Mcp);
+        state.stop_wait = Some(super::StopWaitBudget::new(
+            std::time::Duration::from_millis(budget_ms),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ));
+        state
+    }
+
+    #[test]
+    fn bounded_wait_hands_back_a_running_target_instead_of_blocking() {
+        let mut session = session_with_mock(MockBackend::default().running());
+        let mut state = remote_state(&mut session, 150);
+        let started = std::time::Instant::now();
+        let (result, text) = capture(|| state.collect_stop());
+        result.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(text.contains("target still running"), "{text:?}");
+        assert!(state.ctx.backend.is_running());
+    }
+
+    #[test]
+    fn bounded_wait_renders_the_stop_that_arrives_within_budget() {
+        let mut backend = MockBackend::default().running();
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| state.collect_stop());
+        result.unwrap();
+        assert!(!state.ctx.backend.is_running());
+        assert!(!text.contains("target still running"), "{text:?}");
+    }
+
+    #[test]
+    fn resuming_line_is_recognized_through_aliases() {
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let state = ReplState::for_oneshot(&mut session);
+        assert!(state.line_moves_target("g"));
+        assert!(state.line_moves_target("lm; p"));
+        assert!(state.line_moves_target("t"));
+        assert!(!state.line_moves_target("lm"));
+        assert!(!state.line_moves_target(""));
+        assert!(!state.line_moves_target("break"));
     }
 }

@@ -25,7 +25,9 @@ use crate::dbg_backend::{
 use crate::disasm::{DisasmRow, decode_rows, decode_rows_arm64, disasm_formatter};
 use crate::dmp::DmpBackend;
 use crate::error::{Error, Result};
-use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig};
+use crate::exception_policy::{ExceptionPolicyAction, ExceptionPolicyTable};
+use crate::expr::Expr;
+use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig, BreakpointScope};
 use crate::gdb::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
 };
@@ -40,8 +42,8 @@ use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackTrace, build_parked_thread_recovered_stack,
-    build_parked_thread_stack, build_stacktrace, build_stacktrace_with_context, preferred_code_dtb,
-    resolve_thread_trace_context,
+    build_parked_thread_stack, build_stacktrace, build_stacktrace_with_context,
+    build_stacktrace_with_register_values, preferred_code_dtb, resolve_thread_trace_context,
 };
 use crate::{Backend, TargetSpec};
 #[cfg(test)]
@@ -347,6 +349,11 @@ pub struct Session {
     pub breakpoints: BreakpointManager,
     pub register_map: RegisterMap,
     pub current_thread: String,
+    /// Per-exception-code stop policy (`sxe`/`sxd`/`sxn`/`sxi`). Session state
+    /// so every host shares one table: the REPL loop applies it (including
+    /// its `-c` commands), and the shared [`Self::wait_for_stop_bounded`]
+    /// auto-continues the command-free `Continue` policies for the SDK/MCP.
+    pub exception_policies: ExceptionPolicyTable,
     /// ETHREAD selected for stack-only inspection while the backend remains on
     /// `current_thread`. Its register file does not exist as a coherent snapshot.
     parked_windows_thread: Option<VirtAddr>,
@@ -374,6 +381,11 @@ pub struct Session {
     /// render its existing module-symbol summary after the core reconciles
     /// breakpoints. Other hosts simply leave it unconsumed.
     module_refresh_report: Option<ModuleSymbolLoadReport>,
+    /// Diagnostics the core raised while acting on the host's behalf (a
+    /// breakpoint that failed to re-arm at a stop, host memory that stopped
+    /// matching the guest after a reload). Core never prints; the host drains
+    /// these at its next output boundary via [`Self::take_notices`].
+    notices: Vec<String>,
     /// Most recently observed backend stop and the disposition used when it was
     /// subsequently continued.
     pub last_event: Option<LastEvent>,
@@ -410,6 +422,13 @@ impl Session {
     /// than racing on the handshake; dumps and passive memory are read-only
     /// and coexist with anything.
     pub fn open(spec: &TargetSpec) -> Result<Self> {
+        Self::open_with_progress(spec, &mut |_| {})
+    }
+
+    /// [`Self::open`], reporting connection progress (transport banners, the
+    /// KD wait for a target, the memory-source decision) through `progress`
+    /// one line at a time. Only live KD attaches report anything.
+    pub fn open_with_progress(spec: &TargetSpec, progress: &mut dyn FnMut(&str)) -> Result<Self> {
         spec.validate().map_err(Error::DebugInfo)?;
         match spec {
             TargetSpec::Dump(path) => {
@@ -427,14 +446,19 @@ impl Session {
                 ..
             } => {
                 let endpoint = spec.endpoint().expect("KD/KDNET always have an endpoint");
-                Self::connect_kd(endpoint, *memory_source, || match backend {
-                    Backend::Kd => KdBackend::connect(endpoint),
-                    Backend::KdNet => {
-                        let key = kdnet_key.as_deref().expect("validated above");
-                        KdBackend::connect_net(endpoint, key)
-                    }
-                    Backend::Gdb | Backend::Memory => unreachable!("matched KD above"),
-                })
+                Self::connect_kd(
+                    endpoint,
+                    *memory_source,
+                    progress,
+                    |progress| match backend {
+                        Backend::Kd => KdBackend::connect(endpoint, progress),
+                        Backend::KdNet => {
+                            let key = kdnet_key.as_deref().expect("validated above");
+                            KdBackend::connect_net(endpoint, key, progress)
+                        }
+                        Backend::Gdb | Backend::Memory => unreachable!("matched KD above"),
+                    },
+                )
             }
             TargetSpec::Live { backend, .. } => {
                 let phys = Arc::new(PhysMem::live()?);
@@ -468,17 +492,19 @@ impl Session {
 
     /// Connect KD/KDNET, select a validated memory source, and build the
     /// session. `Auto` prefers matching host VM memory and safely falls back to
-    /// target-mediated KD physical-memory requests.
+    /// target-mediated KD physical-memory requests. Connection progress and
+    /// the memory-source decision are reported through `progress`.
     pub fn connect_kd<F>(
         resource: &str,
         memory_source: KdMemorySource,
+        progress: &mut dyn FnMut(&str),
         make_backend: F,
     ) -> Result<Self>
     where
-        F: FnOnce() -> Result<KdBackend>,
+        F: FnOnce(&mut dyn FnMut(&str)) -> Result<KdBackend>,
     {
         let guard = Some(acquire_instance_guard(resource)?);
-        let mut backend = make_backend()?;
+        let mut backend = make_backend(progress)?;
         let hints = backend.target_hints()?;
 
         let host_phys: Option<PhysMem> = match memory_source {
@@ -494,18 +520,18 @@ impl Session {
                 Ok(phys) => match backend.validate_host_memory(&phys, hints) {
                     Ok(()) => Some(phys),
                     Err(error) => {
-                        eprintln!(
+                        progress(&format!(
                             "{}: host memory rejected ({error}); falling back to KD memory",
                             backend.name()
-                        );
+                        ));
                         None
                     }
                 },
                 Err(error) => {
-                    eprintln!(
+                    progress(&format!(
                         "{}: host memory unavailable ({error}); falling back to KD memory",
                         backend.name()
-                    );
+                    ));
                     None
                 }
             },
@@ -514,7 +540,9 @@ impl Session {
         let backend_name = backend.name();
         let (target, backend): (Target, Box<dyn DebugBackend>) = match host_phys {
             Some(host) => {
-                eprintln!("{backend_name}: memory source host (validated VM-process memory)");
+                progress(&format!(
+                    "{backend_name}: memory source host (validated VM-process memory)"
+                ));
                 // Host reads can bypass KD, but writes must preserve guest protection,
                 // copy-on-write, and residency handling.
                 let (backend, memory) = backend.into_remote_memory();
@@ -531,7 +559,7 @@ impl Session {
             }
             None => {
                 let (backend, memory) = backend.into_remote_memory();
-                eprintln!("{}", kd_memory_source_notice(backend_name));
+                progress(&kd_memory_source_notice(backend_name));
                 let phys = Arc::new(PhysMem::remote(memory));
                 (
                     Target::with_remote_phys(
@@ -588,11 +616,13 @@ impl Session {
             breakpoints: BreakpointManager::new(),
             register_map,
             current_thread,
+            exception_policies: ExceptionPolicyTable::default(),
             parked_windows_thread: None,
             reload_module_list_pending: false,
             reload_surface_pending: false,
             parked_stop: None,
             module_refresh_report: None,
+            notices: Vec::new(),
             last_event: None,
             _instance_guard: None,
         };
@@ -637,7 +667,9 @@ impl Session {
             .breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)
         {
-            eprintln!("failed to re-arm breakpoints after the step: {error}");
+            self.notices.push(format!(
+                "failed to re-arm breakpoints after the step: {error}"
+            ));
         }
         if let Ok(tid) = self.backend.stopped_thread_id() {
             self.current_thread = tid;
@@ -692,6 +724,153 @@ impl Session {
             .windows_thread_selection
             .as_ref()
             .filter(|thread| thread.ethread == ethread)
+    }
+
+    /// Every Windows thread the target knows plus the ones currently on a
+    /// vCPU (which a mid-creation walk may not list yet). The candidate set
+    /// for selecting a thread by tid/ETHREAD/KTHREAD.
+    pub fn windows_thread_candidates(&mut self) -> Result<Vec<ThreadInfo>> {
+        let mut threads = self.target.enumerate_threads()?;
+        let active = self.active_thread_map();
+        for (_, thread) in active.values() {
+            if !threads.iter().any(|known| known.ethread == thread.ethread) {
+                threads.push(thread.clone());
+            }
+        }
+        if threads.is_empty()
+            && let Some(thread) = self.target.windows_thread_selection.clone()
+        {
+            threads.push(thread);
+        }
+        Ok(threads)
+    }
+
+    /// The one Windows thread `value` names: a thread id, an ETHREAD, or a
+    /// KTHREAD address. Ambiguity (a tid colliding with an address) is an
+    /// error rather than a guess.
+    pub fn find_windows_thread(&mut self, value: u64) -> Result<ThreadInfo> {
+        let matches: Vec<ThreadInfo> = self
+            .windows_thread_candidates()?
+            .into_iter()
+            .filter(|thread| {
+                thread.tid == Some(value) || thread.ethread.0 == value || thread.kthread.0 == value
+            })
+            .collect();
+        match matches.len() {
+            1 => Ok(matches.into_iter().next().unwrap()),
+            0 => Err(Error::DebugInfo(format!(
+                "no Windows thread matches {value:#x} (tid, ETHREAD, or KTHREAD)"
+            ))),
+            many => Err(Error::DebugInfo(format!(
+                "ambiguous Windows thread {value:#x}: {many} matches"
+            ))),
+        }
+    }
+
+    /// Make `thread` the inspection context (`.thread`): a thread that is on
+    /// a vCPU switches the live register context to that vCPU; any other
+    /// thread is parked (stack-only, no coherent register file). Returns the
+    /// vCPU id when the selection is live.
+    pub fn select_windows_thread(&mut self, thread: &ThreadInfo) -> Result<Option<String>> {
+        let active = self.active_thread_map();
+        match active.get(&thread.ethread.0) {
+            Some((vcpu, _)) => {
+                let vcpu = vcpu.clone();
+                self.set_current_thread(&vcpu)?;
+                self.target.selected_frame = None;
+                self.target
+                    .set_current_windows_thread_context(thread.clone());
+                Ok(Some(vcpu))
+            }
+            None => {
+                self.select_parked_windows_thread(thread);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Drop any Windows-thread selection and return to the backend's current
+    /// vCPU context (`.thread` with no argument).
+    pub fn reset_windows_thread(&mut self) -> Result<()> {
+        let current = self.current_thread.clone();
+        self.set_current_thread(&current)?;
+        self.target.selected_frame = None;
+        self.target.clear_current_windows_thread_context();
+        Ok(())
+    }
+
+    /// Select stack frame `index` (`.frame N`) of the current live thread as
+    /// the inspection context, so registers, locals, and expressions see that
+    /// frame's recovered register file. Returns the frame. A parked thread has
+    /// no register file to unwind from and is refused.
+    pub fn select_frame_index(&mut self, index: usize) -> Result<SelectedFrame> {
+        const MAX_FRAME_INDEX: usize = 4096;
+        if index > MAX_FRAME_INDEX {
+            return Err(Error::InvalidArgument("frame index is too large".into()));
+        }
+        let (trace, seed, live) = self.recovered_live_trace(index.saturating_add(1))?;
+        let frame = trace
+            .frames
+            .get(index)
+            .ok_or_else(|| Error::DebugInfo(format!("frame {index} is unavailable")))?;
+        let selected = SelectedFrame::from_recovered(frame, index, Some(&seed), live);
+        self.select_frame(selected.clone());
+        Ok(selected)
+    }
+
+    /// Refill the target's register cache from the live backend context, or
+    /// clear it while the VM runs or a parked thread is selected, so
+    /// expression evaluation follows the current thread's address space.
+    pub fn restore_live_register_cache(&mut self) {
+        let registers = if self.backend.is_running() || self.parked_windows_thread().is_some() {
+            Err(Error::TargetRunning)
+        } else {
+            self.read_registers()
+        };
+        update_target_context_from_registers(&mut self.target, &self.register_map, registers);
+    }
+
+    /// Forget a selected frame/context and go back to the live register file
+    /// (`.frame` reset / `.cxr` with no argument).
+    pub fn clear_selected_frame(&mut self) {
+        if self.target.selected_frame.take().is_some() {
+            self.restore_live_register_cache();
+        }
+    }
+
+    /// Unwind `limit` frames from the current context: the selected frame's
+    /// seed registers when one is selected, else the live vCPU file. Returns
+    /// the trace, the seed register values, and whether that seed is the
+    /// vCPU's own register file (a `.cxr`/`.trap` context is not).
+    pub fn recovered_live_trace(
+        &mut self,
+        limit: usize,
+    ) -> Result<(RecoveredStackTrace, HashMap<String, u64>, bool)> {
+        if let Some(selected) = self.target.selected_frame.as_ref() {
+            let seed = if selected.seed_registers.is_empty() {
+                &selected.registers
+            } else {
+                &selected.seed_registers
+            };
+            let seed = seed.clone();
+            let trace = build_stacktrace_with_register_values(
+                &self.target,
+                &self.register_map,
+                &seed,
+                limit,
+            );
+            return Ok((trace, seed, selected.seed_live));
+        }
+        if self.parked_windows_thread().is_some() {
+            return Err(Error::DebugInfo(
+                "frame selection requires a live register context; use `vcpu <id>`".into(),
+            ));
+        }
+        let registers = self.read_registers()?;
+        let seed = self.register_map.to_hashmap(&registers);
+        let trace =
+            build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit);
+        Ok((trace, seed, true))
     }
 
     fn require_live_register_context(&self) -> Result<()> {
@@ -1022,13 +1201,13 @@ impl Session {
             .enabled_breakpoint_id_for_current_context(&self.target, address)
             .is_some()
         {
-            return self.continue_until_break(None, cancel);
+            return self.continue_until_break(None, cancel, ContinueDisposition::Handled);
         }
 
         let temp_id =
             self.breakpoints
                 .add_temporary_code(self.backend.as_mut(), &self.target, address)?;
-        let outcome = self.continue_until_break(None, cancel);
+        let outcome = self.continue_until_break(None, cancel, ContinueDisposition::Handled);
 
         // Removing a breakpoint writes guest memory, so halt first if a cancel
         // left the VM running. A target reload already cleared the manager, so
@@ -1189,6 +1368,13 @@ impl Session {
         }
     }
 
+    /// Hand over a stop [`Self::service_idle`] parked while the host was idle,
+    /// for hosts that render stops themselves rather than through
+    /// [`Self::wait_for_stop_bounded`]. The VM is halted at it.
+    pub fn take_parked_stop(&mut self) -> Option<ContinueOutcome> {
+        self.parked_stop.take()
+    }
+
     /// Resolve the stopped vCPU's process and Windows thread from the target.
     /// Select that thread for inspection. The attached process scope is separate
     /// and persists across resumes.
@@ -1247,33 +1433,12 @@ impl Session {
         }
     }
 
-    /// Set a code breakpoint at `addr`. Returns the breakpoint id.
-    pub fn add_breakpoint(&mut self, addr: VirtAddr) -> Result<u32> {
-        self.add_breakpoint_with(addr, None, BreakpointConfig::default())
-    }
-
-    /// Set a code breakpoint at `addr` with an optional break condition
-    /// (re-evaluated each hit; the run-control loop steps over and keeps running
-    /// when it is false). The breakpoint's scope is derived from the current
-    /// inspection context at install time. Returns the breakpoint id.
-    pub fn add_breakpoint_with_condition(
-        &mut self,
-        addr: VirtAddr,
-        condition: Option<String>,
-    ) -> Result<u32> {
-        self.add_breakpoint_with(
-            addr,
-            None,
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
-    }
-
     /// Set a code breakpoint at `addr` with an optional display `symbol` and
-    /// explicit configuration (pass count, one-shot, and command action).
-    pub fn add_breakpoint_with(
+    /// its configuration (condition, pass count, one-shot, command action;
+    /// `BreakpointConfig::default()` for a plain one). The breakpoint's scope
+    /// is derived from the current inspection context at install time.
+    /// Returns the breakpoint id.
+    pub fn add_breakpoint(
         &mut self,
         addr: VirtAddr,
         symbol: Option<String>,
@@ -1283,26 +1448,9 @@ impl Session {
             .add_configured(self.backend.as_mut(), &self.target, addr, symbol, config)
     }
 
-    /// Set a symbol-identity breakpoint that survives module unload/reload and
+    /// Set a symbol-identity breakpoint: it survives module unload/reload and
     /// may remain deferred until matching symbols are loaded.
     pub fn add_symbol_breakpoint(
-        &mut self,
-        symbol: String,
-        condition: Option<String>,
-    ) -> Result<u32> {
-        self.add_symbol_breakpoint_with(
-            symbol,
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
-    }
-
-    /// Set a symbol-identity breakpoint with an explicit configuration (pass
-    /// count, one-shot, command action). Hosts that expose the full breakpoint
-    /// grammar (the REPL, DAP) use this instead of the condition-only form.
-    pub fn add_symbol_breakpoint_with(
         &mut self,
         symbol: String,
         config: BreakpointConfig,
@@ -1312,24 +1460,9 @@ impl Session {
     }
 
     /// Set one source identity for every address matching `file:line`, or one
-    /// deferred identity when no matching module is currently loaded.
+    /// deferred identity when no matching module is currently loaded. Returns
+    /// one id per matching address (or the single deferred id).
     pub fn add_source_breakpoint(
-        &mut self,
-        source: String,
-        condition: Option<String>,
-    ) -> Result<Vec<u32>> {
-        self.add_source_breakpoint_with(
-            source,
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
-    }
-
-    /// Set source-line breakpoints with an explicit configuration. Returns one
-    /// id per matching address (or a single deferred id).
-    pub fn add_source_breakpoint_with(
         &mut self,
         source: String,
         config: BreakpointConfig,
@@ -1338,41 +1471,80 @@ impl Session {
             .add_source(self.backend.as_mut(), &self.target, source, config)
     }
 
-    /// Watch data accesses at `addr`. Watches are global across guest address
-    /// spaces. Returns the stop-point id.
+    /// Set one symbol-identity breakpoint per symbol matching `pattern`
+    /// (`bm`): `*`/`?` globs, optionally `module!`-qualified; at most `limit`
+    /// matches. Returns the ids created, and the count of matches that
+    /// failed to install (already reported through `errors`).
+    pub fn add_pattern_breakpoints(
+        &mut self,
+        pattern: &str,
+        config: BreakpointConfig,
+        limit: usize,
+    ) -> Result<(Vec<u32>, Vec<Error>)> {
+        let dtb = self.target.current_dtb();
+        let names: Vec<String> = match pattern.split_once('!') {
+            Some((module, query)) => self
+                .target
+                .symbols
+                .search_symbols_in_module(dtb, module, query, limit)
+                .into_iter()
+                .map(|name| format!("{module}!{name}"))
+                .collect(),
+            None => self.target.current_symbol_index().search(pattern, limit),
+        };
+        let mut ids = Vec::new();
+        let mut errors = Vec::new();
+        for name in names.into_iter().take(limit) {
+            let canonical = self
+                .target
+                .symbols
+                .find_symbol_with_module(dtb, &name)?
+                .map(|(_, module)| {
+                    let bare = name
+                        .rsplit_once('!')
+                        .map_or(name.as_str(), |(_, bare)| bare);
+                    format!("{module}!{bare}")
+                })
+                .unwrap_or_else(|| name.clone());
+            match self.add_symbol_breakpoint(canonical, config.clone()) {
+                Ok(id) => ids.push(id),
+                Err(error) => errors.push(error),
+            }
+        }
+        Ok((ids, errors))
+    }
+
+    /// The `/p <pid>` breakpoint scope: hits are reported only from that
+    /// process's address space.
+    pub fn breakpoint_scope_for_pid(&self, pid: u64) -> Result<BreakpointScope> {
+        let process = self
+            .target
+            .guest
+            .as_ref()
+            .ok_or(Error::NtoskrnlNotFound)?
+            .enumerate_processes()?
+            .into_iter()
+            .find(|process| process.pid == pid)
+            .ok_or_else(|| Error::InvalidArgument(format!("process {pid} not found")))?;
+        Ok(BreakpointScope::process(&process))
+    }
+
+    /// Replace (or clear) a breakpoint's condition, compiling it with the
+    /// default expression grammar.
+    pub fn set_breakpoint_condition(&mut self, id: u32, condition: Option<String>) -> Result<()> {
+        let compiled = condition
+            .as_deref()
+            .map(Expr::parse)
+            .transpose()?
+            .map(Arc::new);
+        self.breakpoints.set_condition(id, condition, compiled)
+    }
+
+    /// Watch data accesses at `addr` (global across guest address spaces),
+    /// with an optional host-resolved display symbol. Hosts choose write or
+    /// read/write behavior while the backend implementation remains private.
+    /// Returns the stop-point id.
     pub fn add_watchpoint(
-        &mut self,
-        addr: VirtAddr,
-        access: WatchpointAccess,
-        len: u8,
-    ) -> Result<u32> {
-        self.add_watchpoint_with(addr, access, len, None, BreakpointConfig::default())
-    }
-
-    /// Watch data accesses with an optional condition evaluated on each hit.
-    pub fn add_watchpoint_with_condition(
-        &mut self,
-        addr: VirtAddr,
-        access: WatchpointAccess,
-        len: u8,
-        condition: Option<String>,
-    ) -> Result<u32> {
-        self.add_watchpoint_with(
-            addr,
-            access,
-            len,
-            None,
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
-    }
-
-    /// Watch data accesses while retaining an optional host-resolved display
-    /// symbol and explicit configuration. Hosts choose write or read/write
-    /// behavior while the backend implementation remains private.
-    pub fn add_watchpoint_with(
         &mut self,
         addr: VirtAddr,
         access: WatchpointAccess,
@@ -1825,7 +1997,9 @@ impl Session {
                     .breakpoints
                     .refresh_enabled(self.backend.as_mut(), &self.target)
                 {
-                    eprintln!("failed to re-arm breakpoints at this stop: {error}");
+                    self.notices.push(format!(
+                        "failed to re-arm breakpoints at this stop: {error}"
+                    ));
                 }
 
                 self.breakpoints.mark_one_shot_hit(bp.id)?;
@@ -1870,7 +2044,9 @@ impl Session {
                 changed
             }
             Err(error) => {
-                eprintln!("failed to refresh module symbols after module change: {error}");
+                self.notices.push(format!(
+                    "failed to refresh module symbols after module change: {error}"
+                ));
                 false
             }
         };
@@ -1880,7 +2056,9 @@ impl Session {
                 .breakpoints
                 .reconcile_symbolic_after_module_refresh(self.backend.as_mut(), &self.target)
         {
-            eprintln!("failed to reconcile breakpoints after module refresh: {error}");
+            self.notices.push(format!(
+                "failed to reconcile breakpoints after module refresh: {error}"
+            ));
         }
         modules_changed
     }
@@ -1889,6 +2067,15 @@ impl Session {
     /// The report is private to the REPL's summary path.
     pub fn take_module_refresh_report(&mut self) -> Option<ModuleSymbolLoadReport> {
         self.module_refresh_report.take()
+    }
+
+    /// Drain the diagnostics core and backend raised since the last drain, in
+    /// the order they happened. Hosts call this at each output boundary.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        let mut notices = std::mem::take(&mut self.target.notices);
+        notices.append(&mut self.notices);
+        notices.extend(self.backend.take_notices());
+        notices
     }
 
     /// Classify one raw backend stop and perform every core-owned transition.
@@ -2005,23 +2192,14 @@ impl Session {
         Ok(resolution)
     }
 
-    /// Resume the VM (unless already running) and wait up to `timeout` for a
-    /// meaningful stop; wrong-process int3 hits and false conditional
+    /// Resume the VM (unless already running, in which case no exception
+    /// acknowledgment is sent) with `disposition`, then wait up to `timeout`
+    /// for a meaningful stop; wrong-process int3 hits and false conditional
     /// breakpoints are stepped over silently. `None` waits indefinitely;
-    /// `cancel` or an elapsed timeout returns [`ContinueOutcome::Running`] with
-    /// the VM left running. Non-resuming observation is
+    /// `cancel` or an elapsed timeout returns [`ContinueOutcome::Running`]
+    /// with the VM left running. Non-resuming observation is
     /// [`Self::wait_for_stop_bounded`].
     pub fn continue_until_break(
-        &mut self,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
-    ) -> Result<ContinueOutcome> {
-        self.continue_until_break_with_disposition(timeout, cancel, ContinueDisposition::Handled)
-    }
-
-    /// Resume with an explicit exception acknowledgment, then wait for a
-    /// meaningful stop. When already running, no acknowledgment is sent.
-    pub fn continue_until_break_with_disposition(
         &mut self,
         timeout: Option<Duration>,
         cancel: &AtomicBool,
@@ -2108,6 +2286,21 @@ impl Session {
                     );
                     return Ok(self.continue_outcome_from_resolution(resolution));
                 }
+                StopResolution::Stopped { event, .. }
+                    if let ExceptionPolicyAction::Continue {
+                        disposition,
+                        command: None,
+                        ..
+                    } = self.exception_policies.action_for(&event) =>
+                {
+                    // A policy with a command needs the REPL to run it, so it
+                    // surfaces here; the command-free ones are pure run control.
+                    self.target.selected_frame = None;
+                    self.backend
+                        .continue_execution_with_disposition(disposition)?;
+                    self.record_continuation_disposition(disposition);
+                    continue;
+                }
                 resolution => return Ok(self.continue_outcome_from_resolution(resolution)),
             }
         }
@@ -2134,12 +2327,7 @@ impl Session {
     pub fn reload_with_hint(&mut self, hint: Option<VirtAddr>) -> Result<()> {
         self.target.last_exception_code = None;
         self.module_refresh_report = None;
-        let outcome = perform_target_reload(
-            self.backend.as_mut(),
-            &mut self.target,
-            &mut self.breakpoints,
-            hint,
-        );
+        let outcome = self.perform_target_reload(hint);
         self.reload_module_list_pending = !outcome
             .report
             .as_ref()
@@ -2232,12 +2420,7 @@ impl Session {
                 report,
                 hint,
                 breakpoint_error,
-            } = perform_target_reload(
-                self.backend.as_mut(),
-                &mut self.target,
-                &mut self.breakpoints,
-                event.target_kernel_base_hint,
-            );
+            } = self.perform_target_reload(event.target_kernel_base_hint);
             if let Some(error) = breakpoint_error {
                 return Err(error);
             }
@@ -2469,57 +2652,57 @@ pub struct TargetReloadOutcome {
     pub breakpoint_error: Option<Error>,
 }
 
-/// Rebuild guest state after a detected reboot: drop the now-stale breakpoints,
-/// resolve a kernel-base hint (preferring the stop event's, else the backend's),
-/// reload the guest image, and tell the backend whether rediscovery completed so
-/// it stops (or keeps) its reconnect-assist poking. The shared reload *action*
-/// behind [`Session::classify_reload_stop`] and the REPL's
-/// `apply_target_reload_if_needed`; callers layer their own state/caches/output
-/// on top of the returned outcome.
-pub fn perform_target_reload(
-    backend: &mut dyn DebugBackend,
-    target: &mut Target,
-    breakpoints: &mut BreakpointManager,
-    event_hint: Option<VirtAddr>,
-) -> TargetReloadOutcome {
-    // Target-specific numeric breakpoints and hardware slots cannot survive a
-    // rebuild. Symbolic code breakpoints retain identity and become deferred.
-    breakpoints.prepare_target_reload(backend);
-    // Release file handles owned by the previous target.
-    kd_files().reset_handles();
-    let hint = event_hint.or_else(|| backend.target_kernel_base_hint().ok().flatten());
-    let report = target.reload_guest_with_kernel_base_hint(hint);
-    // The attach-time identity check only proved the host mapping matched the
-    // kernel that was running then. Re-check it against the rebuilt target
-    // before anything reads through it again.
-    if report.is_ok()
-        && let Err(error) = backend.revalidate_host_memory(&target.phys)
-    {
-        eprintln!(
-            "host memory no longer matches the target after the reload ({error}); every read \
-             through it is now suspect - reattach with --memory-source kd"
-        );
-    }
-    let breakpoint_error = if report.is_ok() {
-        let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
-        target.refresh_debugger_data(debugger_data_hint);
-        breakpoints.resolve_symbolic(backend, target).err()
-    } else {
-        None
-    };
-    match &report {
-        // Once the kernel image is rediscovered, stop reconnect-assist pokes. The
-        // remaining module-list completion is polled from live memory; forced
-        // break-ins here would freeze early boot and delay the list we're waiting on.
-        Ok(_) => backend.note_target_rediscovery_complete(),
-        // Kernel not discoverable at all (no base to read): the assist poke is the
-        // only way to force a stop where the rebuild can be retried, so keep it.
-        Err(_) => backend.note_target_rediscovery_pending(),
-    }
-    TargetReloadOutcome {
-        report,
-        hint,
-        breakpoint_error,
+impl Session {
+    /// Rebuild guest state after a detected reboot: drop the now-stale
+    /// breakpoints, resolve a kernel-base hint (preferring the stop event's,
+    /// else the backend's), reload the guest image, and tell the backend
+    /// whether rediscovery completed so it stops (or keeps) its
+    /// reconnect-assist poking. The reload *action* behind
+    /// [`Self::classify_reload_stop`] and [`Self::reload_with_hint`]; callers
+    /// layer their own state on top of the returned outcome.
+    fn perform_target_reload(&mut self, event_hint: Option<VirtAddr>) -> TargetReloadOutcome {
+        let backend = self.backend.as_mut();
+        let target = &mut self.target;
+        let breakpoints = &mut self.breakpoints;
+        // Target-specific numeric breakpoints and hardware slots cannot survive a
+        // rebuild. Symbolic code breakpoints retain identity and become deferred.
+        breakpoints.prepare_target_reload(backend);
+        // Release file handles owned by the previous target.
+        kd_files().reset_handles();
+        let hint = event_hint.or_else(|| backend.target_kernel_base_hint().ok().flatten());
+        let report = target.reload_guest_with_kernel_base_hint(hint);
+        // The attach-time identity check only proved the host mapping matched the
+        // kernel that was running then. Re-check it against the rebuilt target
+        // before anything reads through it again.
+        if report.is_ok()
+            && let Err(error) = backend.revalidate_host_memory(&target.phys)
+        {
+            self.notices.push(format!(
+                "host memory no longer matches the target after the reload ({error}); every \
+                 read through it is now suspect - reattach with --memory-source kd"
+            ));
+        }
+        let breakpoint_error = if report.is_ok() {
+            let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
+            target.refresh_debugger_data(debugger_data_hint);
+            breakpoints.resolve_symbolic(backend, target).err()
+        } else {
+            None
+        };
+        match &report {
+            // Once the kernel image is rediscovered, stop reconnect-assist pokes. The
+            // remaining module-list completion is polled from live memory; forced
+            // break-ins here would freeze early boot and delay the list we're waiting on.
+            Ok(_) => backend.note_target_rediscovery_complete(),
+            // Kernel not discoverable at all (no base to read): the assist poke is the
+            // only way to force a stop where the rebuild can be retried, so keep it.
+            Err(_) => backend.note_target_rediscovery_pending(),
+        }
+        TargetReloadOutcome {
+            report,
+            hint,
+            breakpoint_error,
+        }
     }
 }
 
@@ -2904,8 +3087,10 @@ pub fn clear_trap_flag(backend: &mut dyn DebugBackend, register_map: &RegisterMa
 /// If RIP sits on one of our enabled breakpoints, disable it, step the
 /// underlying instruction, then re-enable; returns whether a step was
 /// performed. A stale breakpoint (its address space gone) is silently
-/// discarded. Callers must have selected the desired thread first. Shared by the
-/// REPL and [`Session::step`].
+/// discarded. A target that owns its sites (KD) has already dropped the one
+/// at the PC while reporting the stop, so the disable is a no-op there and
+/// the re-enable is what writes it back. Callers must have selected the
+/// desired thread first. Shared by the REPL and [`Session::step`].
 pub fn step_over_current_breakpoint(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
@@ -2976,628 +3161,4 @@ pub fn session_over_memory(base: u64, memory: &[u8]) -> Session {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gdb::breakpoints::HardwareBreakpoint;
-    use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
-    use std::collections::VecDeque;
-    use std::sync::atomic::AtomicUsize;
-
-    /// DR6.BS (bit 14): a status bit outside B0-B3 that the functions under
-    /// test must leave untouched.
-    const DR6_BS: u64 = 1 << 14;
-    /// RFLAGS.RF (bit 16), the resume flag an execute hit must set.
-    const RF: u64 = 1 << 16;
-    /// RFLAGS.TF (bit 8), the trap flag `clear_trap_flag` clears.
-    const TF: u64 = 1 << 8;
-    /// An eflags value with a few innocent bits (IF | reserved bit 1) that
-    /// must survive every rewrite.
-    const EFLAGS_BASE: u64 = 0x202;
-
-    /// Minimal register-file backend: a KD-layout register buffer the map's
-    /// offsets index into, plus a write counter for no-op assertions. Every
-    /// non-register operation is out of scope for these tests.
-    struct MockBackend {
-        register_map: RegisterMap,
-        regs: Vec<u8>,
-        writes: usize,
-        fail_writes: bool,
-        allow_breakpoints: bool,
-        exit_requests: Vec<bool>,
-        fail_exit: bool,
-        running: bool,
-        interrupts: Arc<AtomicUsize>,
-        continues: Arc<AtomicUsize>,
-        interrupt_events: VecDeque<StopEvent>,
-        modules_changed: bool,
-        target_manages_sites: bool,
-    }
-
-    impl MockBackend {
-        fn new() -> Self {
-            Self {
-                register_map: build_register_map(),
-                regs: vec![0u8; REGISTER_BUFFER_SIZE],
-                writes: 0,
-                fail_writes: false,
-                allow_breakpoints: false,
-                exit_requests: Vec::new(),
-                fail_exit: false,
-                running: false,
-                interrupts: Arc::new(AtomicUsize::new(0)),
-                continues: Arc::new(AtomicUsize::new(0)),
-                interrupt_events: VecDeque::new(),
-                modules_changed: false,
-                target_manages_sites: false,
-            }
-        }
-
-        fn running(mut self) -> Self {
-            self.running = true;
-            self
-        }
-
-        /// Model a target that owns its breakpoint table (KD), not a stub
-        /// that leaves our patched byte in place across a stop.
-        fn target_managed_sites(mut self) -> Self {
-            self.target_manages_sites = true;
-            self
-        }
-
-        fn queue_interrupt(&mut self, event: StopEvent) {
-            self.interrupt_events.push_back(event);
-        }
-
-        fn set(&mut self, name: &str, value: u64) {
-            self.register_map
-                .write_u64(name, &mut self.regs, value)
-                .unwrap();
-        }
-
-        fn get(&self, name: &str) -> u64 {
-            self.register_map.read_u64(name, &self.regs).unwrap()
-        }
-    }
-
-    impl DebugBackend for MockBackend {
-        fn register_map(&self) -> &RegisterMap {
-            &self.register_map
-        }
-        fn read_registers(&mut self) -> Result<Vec<u8>> {
-            Ok(self.regs.clone())
-        }
-        fn write_registers(&mut self, data: &[u8]) -> Result<()> {
-            self.writes += 1;
-            if self.fail_writes {
-                return Err(Error::Kd("injected register write failure".into()));
-            }
-            self.regs = data.to_vec();
-            Ok(())
-        }
-        fn set_breakpoint(&mut self, _addr: u64) -> Result<()> {
-            if self.allow_breakpoints {
-                Ok(())
-            } else {
-                Err(Error::NotSupported)
-            }
-        }
-        fn remove_breakpoint(&mut self, _addr: u64) -> Result<()> {
-            if self.allow_breakpoints {
-                Ok(())
-            } else {
-                Err(Error::NotSupported)
-            }
-        }
-        fn target_manages_breakpoint_sites(&self) -> bool {
-            self.target_manages_sites
-        }
-        fn continue_execution(&mut self) -> Result<()> {
-            self.continues.fetch_add(1, Ordering::Relaxed);
-            self.running = true;
-            Ok(())
-        }
-        fn step(&mut self) -> Result<()> {
-            Err(Error::NotSupported)
-        }
-        fn interrupt(&mut self) -> Result<StopEvent> {
-            self.interrupts.fetch_add(1, Ordering::Relaxed);
-            let event = self
-                .interrupt_events
-                .pop_front()
-                .ok_or(Error::NotSupported)?;
-            self.running = false;
-            Ok(event)
-        }
-        fn wait_for_stop(&mut self) -> Result<StopEvent> {
-            let event = self
-                .interrupt_events
-                .pop_front()
-                .ok_or(Error::NotSupported)?;
-            self.running = false;
-            Ok(event)
-        }
-        fn try_wait_for_stop(&mut self, _timeout: Duration) -> Result<Option<StopEvent>> {
-            let event = self.interrupt_events.pop_front();
-            if event.is_some() {
-                self.running = false;
-            }
-            Ok(event)
-        }
-        fn thread_list(&mut self) -> Result<Vec<String>> {
-            Err(Error::NotSupported)
-        }
-        fn set_current_thread(&mut self, _thread_id: &str) -> Result<()> {
-            Err(Error::NotSupported)
-        }
-        fn stopped_thread_id(&mut self) -> Result<String> {
-            Err(Error::NotSupported)
-        }
-        fn is_running(&self) -> bool {
-            self.running
-        }
-
-        fn take_modules_changed(&mut self) -> bool {
-            take(&mut self.modules_changed)
-        }
-        fn prepare_for_exit(&mut self, leave_running: bool) -> Result<()> {
-            self.exit_requests.push(leave_running);
-            if self.fail_exit {
-                Err(Error::Kd("injected backend teardown failure".into()))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    fn single_step_event() -> StopEvent {
-        StopEvent {
-            thread_id: None,
-            exception_code: Some(STATUS_SINGLE_STEP),
-            first_chance: Some(true),
-            exception_address: None,
-            program_counter: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            target_kernel_base_hint: None,
-            modules_changed: false,
-            assisted_breakin: false,
-        }
-    }
-
-    fn breakpoint_event(pc: u64) -> StopEvent {
-        StopEvent {
-            thread_id: None,
-            exception_code: Some(STATUS_BREAKPOINT),
-            first_chance: Some(true),
-            exception_address: Some(pc),
-            program_counter: Some(pc),
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            target_kernel_base_hint: None,
-            modules_changed: false,
-            assisted_breakin: false,
-        }
-    }
-
-    fn module_change_event() -> StopEvent {
-        StopEvent {
-            thread_id: None,
-            exception_code: None,
-            first_chance: None,
-            exception_address: None,
-            program_counter: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            target_kernel_base_hint: None,
-            modules_changed: true,
-            assisted_breakin: false,
-        }
-    }
-
-    fn session_with_mock(backend: MockBackend) -> Session {
-        let mut session = session_over_memory(0x1000, &[0; 0x100]);
-        session.backend = Box::new(backend);
-        session.register_map = build_register_map();
-        session
-    }
-
-    #[test]
-    fn with_target_halted_runs_directly_when_already_halted() {
-        let backend = MockBackend::new();
-        let interrupts = Arc::clone(&backend.interrupts);
-        let continues = Arc::clone(&backend.continues);
-        let mut session = session_with_mock(backend);
-        let value = session.with_target_halted(|_| Ok(7u32)).unwrap();
-
-        assert_eq!(value, 7);
-        assert_eq!(interrupts.load(Ordering::Relaxed), 0);
-        assert_eq!(continues.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn with_target_halted_interrupts_edits_and_resumes_running_target() {
-        let mut backend = MockBackend::new().running();
-        let interrupts = Arc::clone(&backend.interrupts);
-        let continues = Arc::clone(&backend.continues);
-        backend.queue_interrupt(breakpoint_event(0x2000));
-        let mut session = session_with_mock(backend);
-
-        session.with_target_halted(|_| Ok(())).unwrap();
-
-        assert_eq!(interrupts.load(Ordering::Relaxed), 1);
-        assert_eq!(continues.load(Ordering::Relaxed), 1);
-        assert!(session.backend.is_running());
-    }
-
-    #[test]
-    fn with_target_halted_resumes_after_edit_error() {
-        let mut backend = MockBackend::new().running();
-        let continues = Arc::clone(&backend.continues);
-        backend.queue_interrupt(breakpoint_event(0x2000));
-        let mut session = session_with_mock(backend);
-
-        let error = session
-            .with_target_halted(|_| Err::<(), _>(Error::DebugInfo("edit failed".into())))
-            .unwrap_err();
-
-        assert!(error.to_string().contains("edit failed"));
-        assert_eq!(continues.load(Ordering::Relaxed), 1);
-        assert!(session.backend.is_running());
-    }
-
-    #[test]
-    fn with_target_halted_parks_a_genuine_pending_breakpoint() {
-        let mut backend = MockBackend::new().running();
-        backend.set("rip", 0x1000);
-        let continues = Arc::clone(&backend.continues);
-        backend.queue_interrupt(breakpoint_event(0x1000));
-        let mut session = session_with_mock(backend);
-        session
-            .breakpoints
-            .insert_for_test(1, VirtAddr(0x1000), true, None);
-
-        session.with_target_halted(|_| Ok(())).unwrap();
-
-        assert_eq!(continues.load(Ordering::Relaxed), 0);
-        assert!(!session.backend.is_running());
-        let cancel = AtomicBool::new(false);
-        assert!(matches!(
-            session.wait_for_stop_bounded(Some(Duration::ZERO), &cancel),
-            Ok(ContinueOutcome::Breakpoint { id: 1, .. })
-        ));
-    }
-
-    #[test]
-    fn load_symbols_stop_reconciles_and_resumes_as_modules_changed() {
-        let mut backend = MockBackend::new().running();
-        backend.modules_changed = true;
-        backend.allow_breakpoints = true;
-        let continues = Arc::clone(&backend.continues);
-        let mut session = session_with_mock(backend);
-        let id = session
-            .add_symbol_breakpoint("driver!DeferredFn".into(), None)
-            .unwrap();
-        assert!(
-            session
-                .breakpoints
-                .list()
-                .into_iter()
-                .find(|breakpoint| breakpoint.id == id)
-                .is_some_and(|breakpoint| !breakpoint.resolved)
-        );
-
-        let dtb = session.target.current_dtb();
-        session.target.symbols.inject_source_lines_for_test(
-            1,
-            dtb,
-            VirtAddr(0x1000),
-            0x100,
-            "driver.c",
-            &[],
-        );
-        session
-            .target
-            .symbols
-            .inject_module_for_test(1, Vec::new(), &[("DeferredFn", 0x10)]);
-
-        let resolution = session.classify_stop_event(module_change_event()).unwrap();
-
-        assert!(matches!(resolution, StopResolution::ModulesChanged));
-        assert_eq!(continues.load(Ordering::Relaxed), 1);
-        let breakpoint = session
-            .breakpoints
-            .list()
-            .into_iter()
-            .find(|breakpoint| breakpoint.id == id)
-            .unwrap();
-        assert!(breakpoint.resolved);
-        assert_eq!(breakpoint.address, VirtAddr(0x1010));
-    }
-
-    #[test]
-    fn breakpoint_rewind_realigns_the_reporting_thread_without_thread_enumeration() {
-        let mut backend = MockBackend::new();
-        assert!(backend.thread_list().is_err(), "precondition");
-        backend.set("rip", 0x1001);
-        let mut manager = BreakpointManager::new();
-        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
-        let register_map = backend.register_map().clone();
-
-        rewind_thread_off_breakpoint(&mut backend, &register_map, &manager, Arch::Amd64);
-
-        assert_eq!(backend.get("rip"), 0x1000);
-    }
-
-    #[test]
-    fn breakpoint_rewind_leaves_an_unrelated_program_counter_alone() {
-        let mut backend = MockBackend::new();
-        backend.set("rip", 0x2001);
-        let mut manager = BreakpointManager::new();
-        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
-        let register_map = backend.register_map().clone();
-
-        rewind_thread_off_breakpoint(&mut backend, &register_map, &manager, Arch::Amd64);
-
-        assert_eq!(backend.get("rip"), 0x2001);
-        assert_eq!(backend.writes, 0);
-    }
-
-    #[test]
-    fn a_target_owned_breakpoint_is_left_for_the_target_to_step_over() {
-        let session = session_over_memory(0x1000, &[0u8; 0x80]);
-        let mut backend = MockBackend::new().target_managed_sites();
-        // A dance would succeed here, so only the ownership check can stop it.
-        backend.allow_breakpoints = true;
-        backend.set("rip", 0x1000);
-        let mut manager = BreakpointManager::new();
-        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
-        let register_map = backend.register_map().clone();
-
-        let stepped = step_over_current_breakpoint(
-            &mut backend,
-            &register_map,
-            &session.target,
-            &mut manager,
-        )
-        .unwrap();
-
-        assert!(!stepped, "host stepped a site the target owns");
-        assert!(
-            manager.list()[0].enabled,
-            "the site was disowned across the resume"
-        );
-        assert_eq!(backend.writes, 0, "the guest context was rewritten");
-    }
-
-    fn manager_with_hw(slot: u8, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {
-        let mut manager = BreakpointManager::new();
-        let len = match access {
-            HwBreakpointAccess::Execute => 1,
-            _ => 4,
-        };
-        manager.insert_for_test(
-            7,
-            VirtAddr(0x1000),
-            enabled,
-            Some(HardwareBreakpoint { access, len, slot }),
-        );
-        manager
-    }
-
-    #[test]
-    fn backend_default_rejects_not_handled_continuation() {
-        let mut backend = MockBackend::new();
-        assert!(matches!(
-            backend.continue_execution_with_disposition(ContinueDisposition::NotHandled),
-            Err(Error::ExceptionDispositionUnsupported)
-        ));
-    }
-
-    #[test]
-    fn successful_breakpoint_cleanup_requests_running_exit() {
-        let mut backend = MockBackend::new();
-
-        prepare_backend_after_cleanup(&mut backend, Ok(())).unwrap();
-
-        assert_eq!(backend.exit_requests, vec![true]);
-    }
-
-    #[test]
-    fn failed_breakpoint_cleanup_requests_halted_exit() {
-        let mut backend = MockBackend::new();
-
-        let error = prepare_backend_after_cleanup(
-            &mut backend,
-            Err(Error::Kd("injected breakpoint removal failure".into())),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("breakpoint removal failure"));
-        assert_eq!(backend.exit_requests, vec![false]);
-    }
-
-    #[test]
-    fn cleanup_reports_breakpoint_and_backend_teardown_failures() {
-        let mut backend = MockBackend::new();
-        backend.fail_exit = true;
-
-        let error = prepare_backend_after_cleanup(
-            &mut backend,
-            Err(Error::Kd("injected breakpoint removal failure".into())),
-        )
-        .unwrap_err();
-
-        let message = error.to_string();
-        assert!(message.contains("breakpoint removal failure"));
-        assert!(message.contains("backend teardown failure"));
-        assert_eq!(backend.exit_requests, vec![false]);
-    }
-
-    #[test]
-    fn hardware_breakpoint_hit_claims_matching_dr6_bit_and_clears_status() {
-        let manager = manager_with_hw(2, HwBreakpointAccess::Write, true);
-        let mut backend = MockBackend::new();
-        backend.set("dr6", (1 << 2) | DR6_BS);
-        backend.set("eflags", EFLAGS_BASE);
-
-        let map = build_register_map();
-        let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event())
-            .expect("register update must succeed")
-            .expect("slot 2 #DB must be claimed by the registered watch");
-        assert_eq!(hit.id, 7);
-        assert_eq!(hit.hardware.expect("hw params").slot, 2);
-
-        assert_eq!(backend.get("dr6"), DR6_BS);
-        assert_eq!(backend.writes, 1);
-        assert_eq!(backend.get("eflags"), EFLAGS_BASE);
-    }
-
-    #[test]
-    fn hardware_breakpoint_hit_sets_resume_flag_only_for_execute_watches() {
-        for (access, want_rf) in [
-            (HwBreakpointAccess::Execute, true),
-            (HwBreakpointAccess::Write, false),
-            (HwBreakpointAccess::ReadWrite, false),
-        ] {
-            let manager = manager_with_hw(0, access, true);
-            let mut backend = MockBackend::new();
-            backend.set("dr6", 1);
-            backend.set("eflags", EFLAGS_BASE);
-
-            let map = build_register_map();
-            let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event())
-                .unwrap();
-            assert!(hit.is_some(), "{access:?} hit must be claimed");
-
-            let eflags = backend.get("eflags");
-            assert_eq!(eflags & RF != 0, want_rf, "{access:?}: RF mismatch");
-            assert_eq!(eflags & !RF, EFLAGS_BASE, "{access:?}: eflags clobbered");
-            assert_eq!(backend.get("dr6"), 0, "{access:?}: B0 not cleared");
-        }
-    }
-
-    #[test]
-    fn hardware_breakpoint_hit_propagates_required_register_write_failure() {
-        let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);
-        let mut backend = MockBackend::new();
-        backend.set("dr6", 1);
-        backend.set("eflags", EFLAGS_BASE);
-        backend.fail_writes = true;
-
-        let map = build_register_map();
-        assert!(
-            hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event()).is_err()
-        );
-        assert_eq!(backend.get("dr6"), 1);
-        assert_eq!(backend.get("eflags"), EFLAGS_BASE);
-        assert_eq!(backend.writes, 1);
-    }
-
-    #[test]
-    fn hardware_breakpoint_hit_ignores_non_single_step_stops() {
-        let manager = manager_with_hw(0, HwBreakpointAccess::Write, true);
-        let mut backend = MockBackend::new();
-        backend.set("dr6", 1); // would match slot 0 if the gate were open
-        let before = backend.regs.clone();
-        let map = build_register_map();
-
-        let mut event = single_step_event();
-        event.exception_code = Some(0x8000_0003);
-        assert!(
-            hardware_breakpoint_hit(&mut backend, &map, &manager, &event)
-                .unwrap()
-                .is_none()
-        );
-
-        event.exception_code = None;
-        assert!(
-            hardware_breakpoint_hit(&mut backend, &map, &manager, &event)
-                .unwrap()
-                .is_none()
-        );
-
-        event.exception_code = Some(STATUS_SINGLE_STEP);
-        event.is_bugcheck = true;
-        assert!(
-            hardware_breakpoint_hit(&mut backend, &map, &manager, &event)
-                .unwrap()
-                .is_none()
-        );
-
-        assert_eq!(backend.writes, 0);
-        assert_eq!(backend.regs, before);
-    }
-
-    #[test]
-    fn hardware_breakpoint_hit_requires_an_enabled_hardware_breakpoint() {
-        let map = build_register_map();
-        let mut backend = MockBackend::new();
-        backend.set("dr6", 1);
-        let before = backend.regs.clone();
-
-        let empty = BreakpointManager::new();
-        assert!(
-            hardware_breakpoint_hit(&mut backend, &map, &empty, &single_step_event())
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(backend.writes, 0);
-        assert_eq!(backend.regs, before);
-
-        let manager = manager_with_hw(0, HwBreakpointAccess::Write, false);
-        assert!(
-            hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event())
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(backend.writes, 0);
-        assert_eq!(backend.regs, before);
-    }
-
-    #[test]
-    fn hardware_breakpoint_hit_clears_stale_dr6_bits_for_unregistered_slots() {
-        let manager = manager_with_hw(1, HwBreakpointAccess::Write, true);
-        let mut backend = MockBackend::new();
-        backend.set("dr6", (1 << 3) | DR6_BS);
-
-        let map = build_register_map();
-        assert!(
-            hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event())
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(backend.get("dr6"), DR6_BS);
-        assert_eq!(backend.writes, 1);
-    }
-
-    #[test]
-    fn clear_trap_flag_clears_tf_and_dr6_status_in_one_write() {
-        let mut backend = MockBackend::new();
-        backend.set("eflags", TF | EFLAGS_BASE);
-        backend.set("dr6", 0b1011 | DR6_BS);
-
-        let map = build_register_map();
-        clear_trap_flag(&mut backend, &map).unwrap();
-
-        assert_eq!(backend.get("eflags"), EFLAGS_BASE);
-        assert_eq!(backend.get("dr6"), DR6_BS);
-        assert_eq!(backend.writes, 1);
-    }
-
-    #[test]
-    fn clear_trap_flag_skips_the_write_when_nothing_is_set() {
-        let mut backend = MockBackend::new();
-        backend.set("eflags", EFLAGS_BASE);
-        backend.set("dr6", DR6_BS);
-        let before = backend.regs.clone();
-
-        let map = build_register_map();
-        clear_trap_flag(&mut backend, &map).unwrap();
-
-        assert_eq!(backend.writes, 0);
-        assert_eq!(backend.regs, before);
-    }
-}
+pub mod tests;

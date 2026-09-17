@@ -1,17 +1,13 @@
-use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use crate::backend::MemoryOps;
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::error::{Error, Result};
 use crate::memory::PAGE_SIZE;
-use crate::repl::INTERRUPT_REQUESTED;
 use crate::symbols::{FieldInfo, ParsedType, TypeInfo, format_symbol_with_offset, le_uint};
 use crate::target::Target;
 use crate::types::VirtAddr;
-use crate::ui;
 
 pub const POOL_ALIGN: u64 = 0x10;
 
@@ -328,7 +324,7 @@ where
     let mut stopped = false;
     let mut index = 0u64;
     'scan: while index < advertised {
-        if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+        if debugger.interrupted() {
             break;
         }
         let count = BIG_POOL_ENTRY_CHUNK.min(advertised - index);
@@ -341,7 +337,7 @@ where
             .map_err(|error| error.to_string())?;
         unreadable_pages = unreadable_pages.saturating_add(unreadable);
         for (chunk_index, entry_buf) in table_bytes.chunks_exact(entry_size_usize).enumerate() {
-            if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+            if debugger.interrupted() {
                 break 'scan;
             }
             let entry_index = index + chunk_index as u64;
@@ -383,7 +379,8 @@ where
 }
 
 /// Walk `PoolBigPageTable` in bounded chunks, invoking `visit` for each valid
-/// entry. Returning true from `visit` stops the walk immediately.
+/// entry. Returning true from `visit` stops the walk immediately; so does the
+/// host's interrupt flag.
 pub fn scan_big_pool_entries<F>(
     debugger: &Target,
     big_pool_type: Option<&TypeInfo>,
@@ -417,7 +414,7 @@ where
     if report.stopped {
         status.push_str(" (stopped)");
     }
-    if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+    if debugger.interrupted() {
         status.push_str(" (interrupted)");
     }
     if report.unreadable_pages != 0 {
@@ -436,6 +433,7 @@ fn tracker_counter_from_buf(ti: &TypeInfo, buf: &[u8], field: &str) -> Option<i6
 }
 
 fn aggregate_tracker_table(
+    debugger: &Target,
     rows: &mut BTreeMap<u32, PoolUsageRow>,
     rows_truncated: &mut bool,
     ti: &TypeInfo,
@@ -444,7 +442,7 @@ fn aggregate_tracker_table(
 ) -> u64 {
     let mut scanned = 0u64;
     for entry in table_bytes.chunks_exact(entry_size) {
-        if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+        if debugger.interrupted() {
             break;
         }
         let Some(tag) =
@@ -562,13 +560,14 @@ fn collect_tracker_usage(
     let mut unreadable_pages = 0u64;
     let mut unreadable_tables = 0u64;
     for table in &tables {
-        if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+        if debugger.interrupted() {
             break;
         }
         match read_pool_table(&memory, *table, scan_count, entry_size) {
             Ok((table_bytes, unreadable)) => {
                 unreadable_pages = unreadable_pages.saturating_add(unreadable);
                 scanned = scanned.saturating_add(aggregate_tracker_table(
+                    debugger,
                     rows,
                     rows_truncated,
                     &ti,
@@ -586,7 +585,7 @@ fn collect_tracker_usage(
     if scan_count < count {
         status.push_str(" (bounded)");
     }
-    if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+    if debugger.interrupted() {
         status.push_str(" (interrupted)");
     }
     if unreadable_tables != 0 {
@@ -836,7 +835,7 @@ pub fn walk_pool_page_lax(
     };
     let mut blocks = Vec::new();
     let mut addr = base;
-    while addr.0 < page_end && !INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+    while addr.0 < page_end && !debugger.interrupted() {
         if let Some(h) = try_pool_header_lax(debugger, layout, addr).filter(|h| {
             h.header
                 .0
@@ -851,7 +850,7 @@ pub fn walk_pool_page_lax(
         } else {
             let mut advanced = false;
             for step in 1..=POOL_MAX_GAP_UNITS {
-                if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+                if debugger.interrupted() {
                     break;
                 }
                 let Some(probe) = addr
@@ -893,7 +892,7 @@ pub fn scan_pool_page_lax(
     };
     let mut candidates = Vec::new();
     let mut off = 0;
-    while off < POOL_PAGE_SIZE && !INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+    while off < POOL_PAGE_SIZE && !debugger.interrupted() {
         let Some(addr) = base.0.checked_add(off).map(VirtAddr) else {
             break;
         };
@@ -1127,77 +1126,4 @@ pub fn annotate_near_symbol(debugger: &Target, addr: VirtAddr) -> Option<String>
         .symbols
         .find_closest_symbol_for_address(debugger.current_dtb(), addr)?;
     (offset <= 0x1000).then(|| format_symbol_with_offset(&module, &name, offset))
-}
-
-pub fn print_pool_page_listing(blocks: &[PoolHeader], target_idx: Option<usize>, target: VirtAddr) {
-    if blocks.is_empty() {
-        outln!("  (no plausible pool block found for this address)");
-        return;
-    }
-    outln!(
-        "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
-        "header",
-        "size",
-        "prev",
-        "state",
-        "type"
-    );
-    for (i, h) in blocks.iter().enumerate() {
-        let marker = if Some(i) == target_idx {
-            ">".yellow().to_string()
-        } else {
-            " ".to_string()
-        };
-        outln!(
-            "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} '{}'",
-            marker,
-            ui::addr(h.header.0),
-            h.size,
-            h.previous_size,
-            pool_block_state(h),
-            h.pool_type,
-            tag_string(h.tag)
-        );
-    }
-    if let Some(idx) = target_idx {
-        let h = &blocks[idx];
-        let offset = target.0.saturating_sub(h.body.0);
-        outln!(
-            "  target offset : 0x{:x} into body (block @ {}, body @ {})",
-            offset,
-            ui::addr(h.header.0),
-            ui::addr(h.body.0)
-        );
-    }
-}
-
-pub fn print_big_pool(target: VirtAddr, entry: &BigPoolEntry) {
-    let offset = target.0 - entry.va.0;
-    let end_addr = entry.va + entry.size;
-    outln!("big pool @ {}", ui::addr(entry.va.0));
-    outln!("  target        : {}", ui::addr(target.0));
-    outln!(
-        "  range         : {} - {} ({} bytes)",
-        ui::addr(entry.va.0),
-        ui::addr(end_addr.0),
-        entry.size
-    );
-    outln!("  offset        : 0x{:x} / 0x{:x}", offset, entry.size);
-    outln!(
-        "  tag           : '{}' (0x{:08x})",
-        tag_string(entry.tag),
-        entry.tag
-    );
-    outln!(
-        "  table entry   : {}[{}]",
-        ui::addr(entry.entry.0),
-        entry.index
-    );
-    outln!(
-        "  nonpaged      : {}",
-        if entry.nonpaged { "yes" } else { "no" }
-    );
-    outln!("  pattern       : 0x{:x}", entry.pattern);
-    outln!("  pool flags    : 0x{:x}", entry.pool_flags);
-    outln!("  slush size    : 0x{:x}", entry.slush_size);
 }

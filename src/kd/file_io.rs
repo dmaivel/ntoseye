@@ -39,7 +39,6 @@ use std::io::{ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use crate::diagnostics::eprint_note;
 use crate::error::{Error, Result};
 use crate::kd::framing::{KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_FILE_IO};
 use crate::kd::wire::{read_u32, read_u64, write_u32, write_u64};
@@ -123,6 +122,9 @@ struct Inner {
     open: HashMap<u64, OpenFile>,
     next_handle: u64,
     stats: KdFileStats,
+    /// Opens the pump served since the host last drained them, worded for
+    /// the operator; surfaced through the backend's notices.
+    served: Vec<String>,
 }
 
 /// Driver replacement map shared by the background pump and foreground
@@ -159,6 +161,11 @@ impl KdFileMap {
 
     pub fn stats(&self) -> KdFileStats {
         self.lock().stats
+    }
+
+    /// Drain the "target opened X -> Y" lines recorded since the last drain.
+    pub fn take_served(&self) -> Vec<String> {
+        std::mem::take(&mut self.lock().served)
     }
 
     /// Replace the map without closing handles still owned by the target.
@@ -453,7 +460,7 @@ pub fn serve_file_io(map: &KdFileMap, request: &FileIoRequest) -> FileIoReply {
                     mapping.host.display(),
                     name
                 );
-                eprint_note(format!(
+                map.lock().served.push(format!(
                     "kdfiles: target opened {name} -> {} ({len} bytes)",
                     mapping.host.display()
                 ));

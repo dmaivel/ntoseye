@@ -5,7 +5,7 @@ use owo_colors::OwoColorize;
 use crate::dbg_backend::{BugcheckInfo, DebugBackend, StopEvent};
 use crate::error::Result;
 use crate::gdb::{BreakpointManager, RegisterMap};
-use crate::session::{Session, StopResolution};
+use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::target::{ReloadReport, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -241,6 +241,118 @@ pub fn is_target_reload_load_symbols_stop(
         && event.target_kernel_base_hint.is_some()
 }
 
+/// Render a stop the session already classified and parked (see
+/// [`Session::take_parked_stop`]) the way the continue loop would have,
+/// so a request/response host's stops read like the interactive REPL's.
+pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome: ContinueOutcome) {
+    session.target.selected_frame = None;
+    refresh_stop_caches_pre(session, caches);
+    refresh_stop_caches_post(&session.target, caches);
+    refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);
+
+    match outcome {
+        ContinueOutcome::Running | ContinueOutcome::Halted { .. } => (),
+        ContinueOutcome::Breakpoint {
+            id,
+            temporary,
+            condition_error,
+            ..
+        } => {
+            print_stop_separator();
+            if let Some(error) = condition_error {
+                error!("breakpoint condition failed: {error}");
+            }
+            let cause = session.breakpoint(id).map(|breakpoint| {
+                let label = if breakpoint.hardware.is_some() {
+                    "watchpoint"
+                } else {
+                    "breakpoint"
+                };
+                let mut cause = format!("{} {}", ui::muted(label), ui::bp_id(id));
+                if breakpoint.hardware.is_some() {
+                    cause.push_str(&format!(" at {}", ui::addr(breakpoint.address.0)));
+                    if let Some(symbol) = breakpoint.symbol.as_deref() {
+                        cause.push_str(&format!(" ({})", ui::symbol(symbol)));
+                    }
+                }
+                cause
+            });
+            print_break_context_at(
+                &mut *session.backend,
+                &session.register_map,
+                &mut session.target,
+                &session.breakpoints,
+                &session.current_thread,
+                None,
+                cause.filter(|_| !temporary),
+            );
+        }
+        ContinueOutcome::Bugcheck { info, .. } => {
+            print_stop_separator();
+            print_bugcheck_summary(&session.target, info.as_ref());
+            outln!();
+            print_break_context_for_bugcheck(
+                &mut *session.backend,
+                &session.register_map,
+                &mut session.target,
+                &session.breakpoints,
+                &session.current_thread,
+                info.as_ref(),
+            );
+        }
+        ContinueOutcome::TargetReloaded { coherent, .. } => {
+            print_stop_separator();
+            caches.clear_threads();
+            match session.last_event.as_ref().map(|last| last.stop.clone()) {
+                Some(event) => print_target_reload_notification_context(
+                    &session.target,
+                    &session.current_thread,
+                    &event,
+                    TargetReloadStatus::Reloaded {
+                        loaded_module_list_available: coherent,
+                    },
+                ),
+                None => outln!(
+                    "{} kernel reloaded{}",
+                    "target:".bright_black(),
+                    if coherent {
+                        ""
+                    } else {
+                        "; module list is not available yet"
+                    }
+                ),
+            }
+        }
+        ContinueOutcome::Stopped {
+            rip,
+            exception_code,
+            ..
+        } => {
+            print_stop_separator();
+            let cause = stop_exception_cause(exception_code, Some(rip));
+            print_break_context_at(
+                &mut *session.backend,
+                &session.register_map,
+                &mut session.target,
+                &session.breakpoints,
+                &session.current_thread,
+                None,
+                cause,
+            );
+        }
+        ContinueOutcome::Step { .. } => {
+            print_stop_separator();
+            print_break_context(
+                &mut *session.backend,
+                &session.register_map,
+                &mut session.target,
+                &session.breakpoints,
+                &session.current_thread,
+            );
+        }
+    }
+}
+
 pub fn print_target_reload_notification_context(
     debugger: &Target,
     current_thread: &str,
@@ -324,11 +436,7 @@ pub fn pending_reload_register_kernel_base_hint(
 /// stop was surfaced to the user; a noise stop that was resumed (or an
 /// exception a policy continued) leaves the target running and returns
 /// `false`, so callers that want a stop keep going and break in.
-pub fn surface_pending_stop(
-    session: &mut Session,
-    caches: &ReplCaches,
-    exception_policies: &ExceptionPolicyTable,
-) -> Result<bool> {
+pub fn surface_pending_stop(session: &mut Session, caches: &ReplCaches) -> Result<bool> {
     let Some(event) = session.backend.try_wait_for_stop(REPL_STOP_POLL)? else {
         return Ok(false);
     };
@@ -345,7 +453,7 @@ pub fn surface_pending_stop(
             notify,
             disposition,
             command: None,
-        } = exception_policies.action_for(event)
+        } = session.exception_policies.action_for(event)
     {
         if notify {
             let code = event.exception_code.unwrap_or_default();

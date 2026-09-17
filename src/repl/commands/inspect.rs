@@ -249,55 +249,97 @@ impl ReplState<'_> {
             }
         };
 
-        let layout = match pool_layout(&self.ctx.target) {
-            Ok(l) => l,
-            Err(e) => {
-                error!("{}", e);
+        let detail = match self.ctx.target.inspect_pool(target) {
+            Ok(detail) => detail,
+            Err(error) => {
+                error!("{}", error);
                 return Ok(());
             }
         };
-
-        if target.0 & (POOL_PAGE_SIZE - 1) == 0
-            && let Some(big) = find_big_pool(&self.ctx.target, &layout, target)
-        {
-            print_big_pool(target, &big);
+        if let Some(big) = &detail.big {
+            outln!("big pool @ {}", ui::addr(big.address.0));
+            outln!("  target        : {}", ui::addr(big.target.0));
+            outln!(
+                "  range         : {} - {} ({} bytes)",
+                ui::addr(big.address.0),
+                ui::addr(big.address.0.saturating_add(big.size)),
+                big.size
+            );
+            outln!("  offset        : 0x{:x} / 0x{:x}", big.offset, big.size);
+            outln!("  tag           : '{}' (0x{:08x})", big.tag_name, big.tag);
+            outln!("  table entry   : {}[{}]", ui::addr(big.entry.0), big.index);
+            outln!(
+                "  nonpaged      : {}",
+                if big.nonpaged { "yes" } else { "no" }
+            );
+            outln!("  pattern       : 0x{:x}", big.pattern);
+            outln!("  pool flags    : 0x{:x}", big.pool_flags);
+            outln!("  slush size    : 0x{:x}", big.slush_size);
             return Ok(());
         }
 
-        let region = classify_pool_region(&self.ctx.target, target);
-        let (blocks, idx, base) = locate_pool_block_in_page(&self.ctx.target, &layout, target);
-        outln!("pool page {}", ui::addr(base.0));
+        outln!("pool page {}", ui::addr(detail.page.0));
         outln!("  target        : {}", ui::addr(target.0));
-        if let Some((name, start, end)) = region {
+        if let Some(region) = &detail.region {
             outln!(
                 "  region        : {} [{} - {}]",
-                name,
-                ui::addr(start.0),
-                ui::addr(end.0)
+                region.name,
+                ui::addr(region.start.0),
+                ui::addr(region.end.0)
             );
         }
-        if let Some(idx) = idx {
+        if let Some(idx) = detail.target_index {
             outln!(
                 "  blocks in run : {} (target is #{})",
-                blocks.len(),
+                detail.blocks.len(),
                 idx + 1
             );
         }
         outln!();
-        print_pool_page_listing(&blocks, idx, target);
-
-        if idx.is_none() {
-            if let Some(big) = find_big_pool(&self.ctx.target, &layout, target) {
-                outln!();
-                print_big_pool(target, &big);
-                return Ok(());
+        if detail.blocks.is_empty() {
+            outln!("  (no plausible pool block found for this address)");
+        } else {
+            outln!(
+                "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
+                "header",
+                "size",
+                "prev",
+                "state",
+                "type"
+            );
+            for block in &detail.blocks {
+                let marker = if block.marked { ">" } else { " " };
+                outln!(
+                    "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} '{}'",
+                    marker,
+                    ui::addr(block.header.0),
+                    block.size,
+                    block.previous_size,
+                    block.state,
+                    block.pool_type,
+                    block.tag_name
+                );
             }
-            outln!("  address does not lie inside a recognizable _POOL_HEADER block.");
+            if let Some(idx) = detail.target_index {
+                let block = &detail.blocks[idx];
+                if let Some(offset) = block.target_offset {
+                    outln!(
+                        "  target offset : 0x{:x} into body (block @ {}, body @ {})",
+                        offset,
+                        ui::addr(block.header.0),
+                        ui::addr(block.body.0)
+                    );
+                }
+            }
+        }
+
+        if let Some(message) = &detail.message {
+            outln!("  {message}.");
             outln!("  it may be segment heap, special pool, a mapped view, or image/stack.");
-            if let Some(hint) = segment_heap_hint(&self.ctx.target) {
+            if let Some(hint) = &detail.segment_heap_hint {
                 outln!("  hint          : {}", hint);
             }
-            if let Some(near) = annotate_near_symbol(&self.ctx.target, target) {
+            if let Some(near) = &detail.near_symbol {
                 outln!("  near symbol   : {}", near);
             }
         }

@@ -3,10 +3,15 @@ use tabled::builder::Builder;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::repl::*;
+use crate::target::DiagnosticValue;
+use crate::target::heap::{
+    BlockMatch, HeapBlockDetail, HeapBlockSearchDetail, HeapDetail, HeapKind, HeapSelector,
+    HeapSummaryDetail, NT_ENTRY_EXTRA_PRESENT, NT_ENTRY_FILL_PATTERN, NT_ENTRY_LAST,
+    NT_ENTRY_VIRTUAL_ALLOC, NtEntry, NtHeapDetail, RangeKind, SegmentHeapDetail,
+    SegmentRangeDetail, SegmentSubsegment, VsChunk,
+};
 use crate::types::VirtAddr;
 use crate::ui;
-
-use super::usermode::{attached_dtb, resolve_peb};
 
 repl_command! {
     cmd_heap;
@@ -78,14 +83,6 @@ fn flag_names(flags: u32) -> String {
     }
 }
 
-fn kind_name(kind: HeapKind) -> String {
-    match kind {
-        HeapKind::Nt => "nt".into(),
-        HeapKind::Segment => "segment".into(),
-        HeapKind::Unknown(signature) => format!("unknown ({signature:#x})"),
-    }
-}
-
 fn nt_entry_line(entry: &NtEntry) -> String {
     let mut flags = Vec::new();
     if entry.busy() {
@@ -133,49 +130,50 @@ fn vs_chunk_line(chunk: &VsChunk) -> String {
     line
 }
 
+fn heap_block_line(block: &HeapBlockDetail) -> String {
+    let mut line = format!(
+        "{}  size {:<7}",
+        ui::addr(block.address.0),
+        format!("{:#x}", block.size)
+    );
+    if let Some(previous_size) = block.previous_size {
+        line.push_str(&format!("  prev {:<7}", format!("{previous_size:#x}")));
+    }
+    line.push_str(&format!("  {}", block.state));
+    if let Some(unused_bytes) = block.unused_bytes {
+        line.push_str(&format!("  unused {unused_bytes:#x}"));
+    }
+    line
+}
+
 impl ReplState<'_> {
     fn cmd_heap(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let Some(request) = parse_request(&invocation.argv) else {
             outln!("{}\n", command_help("!heap"));
             return Ok(());
         };
-        let dtb = match attached_dtb(&self.ctx.target) {
-            Ok(dtb) => dtb,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        // A WOW64 process's heaps hang off its 32-bit PEB; the 64-bit one
-        // lists only the wow64 layer's.
-        let wow64_peb = self
-            .ctx
-            .target
-            .current_process_info
-            .as_ref()
-            .and_then(|process| process.wow64_peb);
-        let peb = match wow64_peb.map_or_else(|| resolve_peb(&self.ctx.target, dtb, None), Ok) {
-            Ok(peb) => peb,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let reader = HeapReader::new(&self.ctx.target, dtb, wow64_peb.is_some());
-        let heaps = match reader.process_heaps(peb) {
-            Ok(heaps) => heaps,
-            Err(error) => {
-                error!("failed to read the PEB heap list: {error}");
-                return Ok(());
-            }
-        };
         match request {
-            Request::Summary => self.heap_summary(&reader, peb, &heaps),
+            Request::Summary => match self.ctx.target.heap_summary() {
+                Ok(summary) => self.heap_summary(&summary),
+                Err(error) => {
+                    error!("{error}");
+                    Ok(())
+                }
+            },
             Request::Detail { heap, entries } => {
-                let Some(heap) = self.select_heap(&heaps, &heap) else {
+                let Some(selector) = self.parse_heap_selector(&heap) else {
                     return Ok(());
                 };
-                self.heap_detail(&reader, heap, entries)
+                match self.ctx.target.inspect_heap(selector, entries) {
+                    Ok(detail) => {
+                        self.heap_detail(&detail);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        error!("{error}");
+                        Ok(())
+                    }
+                }
             }
             Request::Find(text) => {
                 let address = match Expr::eval_with_radix(&text, &self.ctx.target, self.radix) {
@@ -185,13 +183,24 @@ impl ReplState<'_> {
                         return Ok(());
                     }
                 };
-                self.heap_find(&reader, &heaps, address)
+                match self.ctx.target.find_heap_block(address) {
+                    Ok(detail) => {
+                        self.heap_find(&detail);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        error!("{error}");
+                        Ok(())
+                    }
+                }
             }
         }
     }
 
-    /// A heap named by its PEB index or its address.
-    fn select_heap(&self, heaps: &[ProcessHeap], text: &str) -> Option<ProcessHeap> {
+    /// Preserve WinDbg's index-first selection while passing a plain selector
+    /// to the target core.  A numeric value is an index when that index exists;
+    /// otherwise it is interpreted as a heap address.
+    fn parse_heap_selector(&self, text: &str) -> Option<HeapSelector> {
         let value = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
             Ok(value) => value.0,
             Err(error) => {
@@ -199,31 +208,33 @@ impl ReplState<'_> {
                 return None;
             }
         };
-        if let Some(heap) = usize::try_from(value)
+        let summary = match self.ctx.target.heap_summary() {
+            Ok(summary) => summary,
+            Err(error) => {
+                error!("{error}");
+                return None;
+            }
+        };
+        if usize::try_from(value)
             .ok()
-            .and_then(|index| heaps.get(index))
+            .is_some_and(|index| summary.heaps.iter().any(|heap| heap.index == index))
         {
-            return Some(*heap);
+            Some(HeapSelector::Index(value as usize))
+        } else {
+            Some(HeapSelector::Address(VirtAddr(value)))
         }
-        if let Some(heap) = heaps.iter().find(|heap| heap.address.0 == value) {
-            return Some(*heap);
-        }
-        error!(
-            "{} is neither a heap index (0..{}) nor a heap in the PEB list",
-            ui::addr(value),
-            heaps.len()
-        );
-        None
     }
 
-    fn heap_summary(
-        &self,
-        reader: &HeapReader<'_>,
-        peb: VirtAddr,
-        heaps: &[ProcessHeap],
-    ) -> Result<()> {
-        outln!("{} process heap(s), PEB {}", heaps.len(), ui::addr(peb.0));
-        if heaps.is_empty() {
+    fn heap_summary(&self, summary: &HeapSummaryDetail) -> Result<()> {
+        outln!(
+            "{} process heap(s), PEB {}",
+            summary.heaps.len(),
+            ui::addr(summary.peb.0)
+        );
+        if summary.truncated {
+            outln!("heap list truncated at the decoder bound");
+        }
+        if summary.heaps.is_empty() {
             return Ok(());
         }
         let mut builder = Builder::default();
@@ -237,87 +248,50 @@ impl ReplState<'_> {
             "Free",
             "Detail",
         ]);
-        for heap in heaps {
-            let row = match heap.kind {
-                HeapKind::Nt => match reader.nt_heap(heap.address) {
-                    Ok(nt) => {
-                        let reserved: u64 = nt
-                            .segments
-                            .iter()
-                            .map(|s| u64::from(s.pages) * 0x1000)
-                            .sum();
-                        let uncommitted: u64 = nt
-                            .segments
-                            .iter()
-                            .map(|s| u64::from(s.uncommitted_pages) * 0x1000)
-                            .sum();
-                        [
-                            format!("{:#x}", nt.flags),
-                            format!("{reserved:#x}"),
-                            format!("{:#x}", reserved - uncommitted),
-                            format!("{:#x}", nt.total_free_units * 16),
-                            format!(
-                                "{} segment(s), {} virtual block(s){}",
-                                nt.segments.len(),
-                                nt.virtual_blocks.len(),
-                                if nt.front_end.is_some() { ", LFH" } else { "" }
-                            ),
-                        ]
-                    }
-                    Err(error) => [
-                        "-".into(),
-                        "-".into(),
-                        "-".into(),
-                        "-".into(),
-                        format!("<unavailable: {error}>"),
-                    ],
-                },
-                HeapKind::Segment => match reader.segment_heap(heap.address) {
-                    Ok(segment) => {
-                        let subsegments = |kind: RangeKind| {
-                            segment
-                                .contexts
-                                .iter()
-                                .flat_map(|context| &context.segments)
-                                .flat_map(|segment| &segment.ranges)
-                                .filter(|range| range.kind == kind)
-                                .count()
-                        };
-                        [
-                            format!("{:#x}", segment.global_flags),
-                            format!("{:#x}", segment.reserved_pages * 0x1000),
-                            format!("{:#x}", segment.committed_pages * 0x1000),
-                            format!("{:#x}", segment.free_committed_pages * 0x1000),
-                            format!(
-                                "{} vs, {} lfh, {} page, {} large",
-                                subsegments(RangeKind::Vs),
-                                subsegments(RangeKind::Lfh),
-                                subsegments(RangeKind::Direct),
-                                segment.large_allocations.len()
-                            ),
-                        ]
-                    }
-                    Err(error) => [
-                        "-".into(),
-                        "-".into(),
-                        "-".into(),
-                        "-".into(),
-                        format!("<unavailable: {error}>"),
-                    ],
-                },
-                HeapKind::Unknown(_) => [
+        for heap in &summary.heaps {
+            let row = match &heap.stats {
+                DiagnosticValue::Available(stats) => {
+                    let detail = match heap.kind {
+                        HeapKind::Nt => format!(
+                            "{} segment(s), {} virtual block(s){}",
+                            stats.segments,
+                            stats.virtual_blocks,
+                            if stats.front_end.is_some() {
+                                ", LFH"
+                            } else {
+                                ""
+                            }
+                        ),
+                        HeapKind::Segment => format!(
+                            "{} vs, {} lfh, {} page, {} large",
+                            stats.vs_subsegments,
+                            stats.lfh_subsegments,
+                            stats.page_allocations,
+                            stats.large_allocations
+                        ),
+                        HeapKind::Unknown(_) => String::new(),
+                    };
+                    [
+                        format!("{:#x}", stats.flags),
+                        format!("{:#x}", stats.reserved),
+                        format!("{:#x}", stats.committed),
+                        format!("{:#x}", stats.free),
+                        detail,
+                    ]
+                }
+                DiagnosticValue::Unavailable(error) => [
                     "-".into(),
                     "-".into(),
                     "-".into(),
                     "-".into(),
-                    String::new(),
+                    format!("<unavailable: {error}>"),
                 ],
             };
             let [flags, reserved, committed, free, detail] = row;
             builder.push_record([
                 heap.index.to_string(),
                 ui::addr(heap.address.0),
-                kind_name(heap.kind),
+                heap_kind_name(heap.kind),
                 flags,
                 reserved,
                 committed,
@@ -329,39 +303,23 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn heap_detail(&self, reader: &HeapReader<'_>, heap: ProcessHeap, entries: bool) -> Result<()> {
-        match heap.kind {
-            HeapKind::Nt => {
-                let nt = match reader.nt_heap(heap.address) {
-                    Ok(nt) => nt,
-                    Err(error) => {
-                        error!("{error}");
-                        return Ok(());
-                    }
-                };
-                self.nt_detail(reader, &nt, entries)
-            }
-            HeapKind::Segment => {
-                let segment = match reader.segment_heap(heap.address) {
-                    Ok(segment) => segment,
-                    Err(error) => {
-                        error!("{error}");
-                        return Ok(());
-                    }
-                };
-                self.segment_detail(reader, &segment, entries)
-            }
-            HeapKind::Unknown(signature) => {
-                error!(
-                    "heap {} carries neither heap signature (found {signature:#x})",
-                    ui::addr(heap.address.0)
-                );
-                Ok(())
-            }
+    fn heap_detail(&self, detail: &HeapDetail) {
+        if let Some(error) = detail.error.as_deref() {
+            error!("{error}");
+            return;
+        }
+        match (&detail.nt, &detail.segment) {
+            (Some(nt), None) => self.nt_detail(nt, detail.list_entries),
+            (None, Some(segment)) => self.segment_detail(segment, detail.list_entries),
+            _ => error!(
+                "heap {} has no decodable allocator detail",
+                ui::addr(detail.address.0)
+            ),
         }
     }
 
-    fn nt_detail(&self, reader: &HeapReader<'_>, heap: &NtHeap, entries: bool) -> Result<()> {
+    fn nt_detail(&self, detail: &NtHeapDetail, list_entries: bool) {
+        let heap = &detail.heap;
         outln!("heap {}: NT heap", ui::addr(heap.address.0));
         outln!(
             "  flags {}  force flags {:#x}  encoding {}",
@@ -390,7 +348,8 @@ impl ReplState<'_> {
             "FirstEntry",
             "LastValidEntry",
         ]);
-        for segment in &heap.segments {
+        for segment in &detail.segments {
+            let segment = &segment.segment;
             builder.push_record([
                 ui::addr(segment.address.0),
                 ui::addr(segment.base.0),
@@ -418,21 +377,25 @@ impl ReplState<'_> {
                 );
             }
         }
-        if !entries {
-            return Ok(());
+        if !list_entries {
+            return;
         }
-        for segment in &heap.segments {
+        for segment_detail in &detail.segments {
+            let segment = &segment_detail.segment;
             outln!("  segment {} entries:", ui::addr(segment.address.0));
-            let walk = reader.nt_segment_entries(heap, segment);
             let (mut busy, mut free) = (0usize, 0usize);
-            for entry in &walk.entries {
+            for entry_detail in &segment_detail.entries {
+                let entry = &entry_detail.entry;
                 outln!("    {}", nt_entry_line(entry));
                 if entry.busy() {
                     busy += 1;
                 } else {
                     free += 1;
                 }
-                if let Ok(Some(region)) = reader.nt_user_blocks(heap, entry) {
+                if let Some(error) = entry_detail.lfh_error.as_deref() {
+                    outln!("      LFH user blocks: <unavailable: {error}>");
+                }
+                if let Some(region) = &entry_detail.lfh {
                     outln!(
                         "      LFH user blocks: subsegment {}  {} x {:#x}  {} busy",
                         ui::addr(region.subsegment.0),
@@ -440,16 +403,11 @@ impl ReplState<'_> {
                         region.block_size,
                         region.busy_count()
                     );
-                    for index in 0..region.block_count {
-                        outln!(
-                            "        {}  {}",
-                            ui::addr(region.block(index).0),
-                            if region.is_busy(index) {
-                                "busy"
-                            } else {
-                                "free"
-                            }
-                        );
+                    for block in &entry_detail.lfh_blocks {
+                        outln!("        {}  {}", ui::addr(block.address.0), block.state);
+                    }
+                    if entry_detail.lfh_truncated {
+                        outln!("        <LFH block listing truncated>");
                     }
                 }
             }
@@ -460,23 +418,22 @@ impl ReplState<'_> {
                     ui::addr(range.end)
                 );
             }
-            if let Some((address, reason)) = walk.stopped {
-                outln!("    walk stopped at {}: {reason}", ui::addr(address.0));
+            if let Some(stopped) = &segment_detail.stopped {
+                outln!(
+                    "    walk stopped at {}: {}",
+                    ui::addr(stopped.address.0),
+                    stopped.reason
+                );
             }
             outln!(
                 "    {} entries: {busy} busy, {free} free",
-                walk.entries.len()
+                segment_detail.entries.len()
             );
         }
-        Ok(())
     }
 
-    fn segment_detail(
-        &self,
-        reader: &HeapReader<'_>,
-        heap: &SegmentHeap,
-        entries: bool,
-    ) -> Result<()> {
+    fn segment_detail(&self, detail: &SegmentHeapDetail, list_entries: bool) {
+        let heap = &detail.heap;
         outln!("heap {}: segment heap", ui::addr(heap.address.0));
         outln!(
             "  global flags {:#x}  reserved {:#x}  committed {:#x}  free committed {:#x} (lfh {:#x}, vs {:#x})",
@@ -495,7 +452,8 @@ impl ReplState<'_> {
             heap.keys.heap_key,
             heap.keys.lfh_key
         );
-        for context in &heap.contexts {
+        for context_detail in &detail.contexts {
+            let context = &context_detail.context;
             outln!(
                 "  context {}: {:#x}-byte units, {:#x}-byte segments, max allocation {:#x}, {} segment(s)",
                 context.index,
@@ -504,10 +462,10 @@ impl ReplState<'_> {
                 context.max_allocation_size,
                 context.segments.len()
             );
-            for segment in &context.segments {
-                outln!("    segment {}", ui::addr(segment.address.0));
+            for segment in &context_detail.segments {
+                outln!("    segment {}", ui::addr(segment.segment.address.0));
                 for range in &segment.ranges {
-                    self.segment_range(reader, heap, range, entries);
+                    self.segment_range(range, list_entries);
                 }
             }
         }
@@ -523,32 +481,26 @@ impl ReplState<'_> {
                 );
             }
         }
-        Ok(())
     }
 
-    fn segment_range(
-        &self,
-        reader: &HeapReader<'_>,
-        heap: &SegmentHeap,
-        range: &PageRange,
-        entries: bool,
-    ) {
+    fn segment_range(&self, range: &SegmentRangeDetail, list_entries: bool) {
+        let range_data = &range.range;
         let head = format!(
             "      {}  {:>4} unit(s)  {:#04x}",
-            ui::addr(range.address.0),
-            range.units,
-            range.flags
+            ui::addr(range_data.address.0),
+            range_data.units,
+            range_data.flags
         );
-        match range.kind {
+        match range_data.kind {
             RangeKind::Unused => outln!("{head}  unused"),
             RangeKind::Free => outln!("{head}  free"),
             RangeKind::Direct => outln!(
                 "{head}  page allocation  user {}  unused {:#x}",
-                ui::addr(range.address.0),
-                range.unused_bytes
+                ui::addr(range_data.address.0),
+                range_data.unused_bytes
             ),
-            RangeKind::Vs => match reader.vs_subsegment(heap, range) {
-                Ok(subsegment) => {
+            RangeKind::Vs => match (&range.subsegment, &range.error) {
+                (Some(SegmentSubsegment::Vs(subsegment)), _) => {
                     let busy = subsegment.chunks.iter().filter(|chunk| chunk.busy).count();
                     outln!(
                         "{head}  VS subsegment  {} chunk(s): {busy} busy, {} free{}",
@@ -560,16 +512,20 @@ impl ReplState<'_> {
                             "  (bad signature)"
                         }
                     );
-                    if entries {
-                        for chunk in &subsegment.chunks {
-                            outln!("        {}", vs_chunk_line(chunk));
+                    if list_entries {
+                        for block in &range.blocks {
+                            outln!("        {}", heap_block_line(block));
+                        }
+                        if range.truncated {
+                            outln!("        <VS chunk listing truncated>");
                         }
                     }
                 }
-                Err(error) => outln!("{head}  VS subsegment  <unavailable: {error}>"),
+                (_, Some(error)) => outln!("{head}  VS subsegment  <unavailable: {error}>"),
+                _ => outln!("{head}  VS subsegment  <unavailable>"),
             },
-            RangeKind::Lfh => match reader.lfh_subsegment(heap, range) {
-                Ok(subsegment) => {
+            RangeKind::Lfh => match (&range.subsegment, &range.error) {
+                (Some(SegmentSubsegment::Lfh(subsegment)), _) => {
                     outln!(
                         "{head}  LFH subsegment  bucket {}: {} x {:#x}, {} busy, {} free",
                         subsegment.bucket,
@@ -578,78 +534,45 @@ impl ReplState<'_> {
                         subsegment.busy_count(),
                         subsegment.free_count
                     );
-                    if entries {
-                        for index in 0..subsegment.block_count {
-                            outln!(
-                                "        {}  {}",
-                                ui::addr(subsegment.block(index).0),
-                                if subsegment.is_busy(index) {
-                                    "busy"
-                                } else {
-                                    "free"
-                                }
-                            );
+                    if list_entries {
+                        for block in &range.blocks {
+                            outln!("        {}  {}", ui::addr(block.address.0), block.state);
+                        }
+                        if range.truncated {
+                            outln!("        <LFH block listing truncated>");
                         }
                     }
                 }
-                Err(error) => outln!("{head}  LFH subsegment  <unavailable: {error}>"),
+                (_, Some(error)) => outln!("{head}  LFH subsegment  <unavailable: {error}>"),
+                _ => outln!("{head}  LFH subsegment  <unavailable>"),
             },
         }
     }
 
-    fn heap_find(
-        &self,
-        reader: &HeapReader<'_>,
-        heaps: &[ProcessHeap],
-        address: VirtAddr,
-    ) -> Result<()> {
-        for heap in heaps {
-            let found = match heap.kind {
-                HeapKind::Nt => {
-                    let nt = match reader.nt_heap(heap.address) {
-                        Ok(nt) => nt,
-                        Err(error) => {
-                            error!("heap {}: {error}", ui::addr(heap.address.0));
-                            continue;
-                        }
-                    };
-                    reader.find_in_nt(&nt, address)
-                }
-                HeapKind::Segment => {
-                    let segment = match reader.segment_heap(heap.address) {
-                        Ok(segment) => segment,
-                        Err(error) => {
-                            error!("heap {}: {error}", ui::addr(heap.address.0));
-                            continue;
-                        }
-                    };
-                    reader.find_in_segment(&segment, address)
-                }
-                HeapKind::Unknown(_) => Ok(None),
-            };
-            let block = match found {
-                Ok(Some(block)) => block,
-                Ok(None) => continue,
-                Err(error) => {
-                    error!("heap {}: {error}", ui::addr(heap.address.0));
-                    continue;
-                }
-            };
-            outln!(
-                "{} is in heap {} ({} heap, index {})",
-                ui::addr(address.0),
-                ui::addr(heap.address.0),
-                kind_name(heap.kind),
-                heap.index
-            );
-            print_block(&block);
-            return Ok(());
+    fn heap_find(&self, detail: &HeapBlockSearchDetail) {
+        for error in &detail.errors {
+            error!("{error}");
         }
+        if detail.truncated {
+            error!("heap list truncated at the decoder bound");
+        }
+        let Some(heap) = &detail.heap else {
+            outln!(
+                "{} is not inside any heap in the PEB list",
+                ui::addr(detail.address.0)
+            );
+            return;
+        };
         outln!(
-            "{} is not inside any heap in the PEB list",
-            ui::addr(address.0)
+            "{} is in heap {} ({} heap, index {})",
+            ui::addr(detail.address.0),
+            ui::addr(heap.address.0),
+            heap_kind_name(heap.kind),
+            heap.index
         );
-        Ok(())
+        if let Some(block) = &detail.block {
+            print_block(block);
+        }
     }
 }
 

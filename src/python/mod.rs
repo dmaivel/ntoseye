@@ -14,24 +14,34 @@ use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use crate::backend::MemoryOps;
 use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck};
 use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
+use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::error::Error;
+use crate::exception_policy::{
+    ExceptionPolicyFinalAction, ExceptionPolicyMode, exception_alias, parse_exception_code,
+};
 use crate::expr::Expr;
 use crate::gdb::breakpoints::{Breakpoint as CoreBreakpoint, BreakpointConfig};
 use crate::guest::ProcessInfo;
 use crate::kd::KdMemorySource;
 use crate::output;
+use crate::phys::PhysMem;
 use crate::repl::ReplState;
-use crate::session::{ContinueOutcome, Session};
-use crate::symbols::{FieldValue, ParsedType, TypeInfo, le_uint};
-use crate::target::ThreadInfo;
-use crate::target::{
-    AddressModule as CoreAddressModule, MemoryRegionInfo,
-    MemorySearchMatch as CoreMemorySearchMatch,
+use crate::session::{ContinueOutcome, Session, processor_index_from_backend_thread_id};
+use crate::symbols::{
+    FieldValue, ParsedType, TypeInfo, le_uint, parse_source_paths, parse_symbol_sources,
 };
+use crate::target::MemorySearchMatch as CoreMemorySearchMatch;
+use crate::target::cpu::parse_msr_name;
+use crate::target::heap::HeapSelector;
+use crate::target::meta::decode_error_code;
+use crate::target::mm::{AddressModule as CoreAddressModule, MemoryRegionInfo};
+use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
+use crate::target::sched::ApcSelector;
+use crate::target::{SelectedFrame, ThreadInfo};
 use crate::trapframe::read_ktrap_frame_at_or_current;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
-use crate::view;
+use crate::view::{self, View};
 use crate::{Backend, TargetSpec};
 
 pub mod embed;
@@ -137,6 +147,71 @@ fn breakpoint_target_arg(
     Err(PyTypeError::new_err(
         "expected a breakpoint address or debugger expression",
     ))
+}
+
+/// The breakpoint options every `breakpoint()`/`watchpoint()` form shares,
+/// mapped onto the core [`BreakpointConfig`] (`bp /1 /p <pid> <target>
+/// <passes> if <cond> do <action>`).
+fn breakpoint_config_arg(
+    dbg: &Debugger,
+    condition: Option<String>,
+    pass_count: u64,
+    one_shot: bool,
+    process: Option<u64>,
+    action: Option<String>,
+) -> PyResult<BreakpointConfig> {
+    let scope = process
+        .map(|pid| dbg.inner.breakpoint_scope_for_pid(pid))
+        .transpose()
+        .map_err(err)?;
+    Ok(BreakpointConfig {
+        condition,
+        condition_expr: None,
+        pass_count,
+        one_shot,
+        action,
+        scope,
+        skip_prologue: false,
+    })
+}
+
+/// An exception code argument: an NTSTATUS int, or a WinDbg alias / numeric
+/// string (`"av"`, `"0xc0000005"`).
+fn exception_code_arg(value: &Bound<'_, PyAny>) -> PyResult<u32> {
+    if let Ok(code) = value.extract::<u64>() {
+        return u32::try_from(code)
+            .map_err(|_| raise(format!("exception code {code:#x} does not fit in 32 bits")));
+    }
+    let text: String = value
+        .extract()
+        .map_err(|_| PyTypeError::new_err("expected an exception code (int) or alias (str)"))?;
+    parse_exception_code(&text).map_err(raise)
+}
+
+/// An MSR argument: a number or an `IA32_*`/`MSR_*` name.
+fn msr_arg(value: &Bound<'_, PyAny>) -> PyResult<u32> {
+    if let Ok(number) = value.extract::<u64>() {
+        return u32::try_from(number)
+            .map_err(|_| raise(format!("MSR {number:#x} does not fit in 32 bits")));
+    }
+    let text: String = value
+        .extract()
+        .map_err(|_| PyTypeError::new_err("expected an MSR number or IA32_* name"))?;
+    parse_msr_name(&text).ok_or_else(|| raise(format!("unknown MSR name '{text}'")))
+}
+
+fn selected_frame_record<'py>(
+    py: Python<'py>,
+    frame: &SelectedFrame,
+) -> PyResult<Bound<'py, PyDict>> {
+    view_dict(
+        py,
+        &View::Object(vec![
+            ("index", View::Num(frame.index as u64)),
+            ("ip", View::Hex(frame.ip)),
+            ("sp", View::Hex(frame.sp)),
+        ]),
+    )
 }
 
 /// A live debugging session. `unsendable`: the session is single-threaded.
@@ -427,6 +502,49 @@ impl Breakpoint {
         } else {
             self.disable(py)
         }
+    }
+
+    /// Replace the break condition (`None` clears it), like `bpc`. Takes
+    /// effect at the next hit; no target write is involved.
+    #[setter]
+    fn set_condition(&self, py: Python<'_>, condition: Option<String>) -> PyResult<()> {
+        let mut dbg = self.require_live_debugger(py)?;
+        dbg.inner
+            .set_breakpoint_condition(self.snapshot.id, condition)
+            .map_err(err)
+    }
+
+    /// Reset the pass count (`bpp`): the hit number to break on; 0 and 1
+    /// both break on the next hit. GDB calls this the ignore count.
+    #[setter]
+    fn set_pass_count(&self, py: Python<'_>, pass_count: u64) -> PyResult<()> {
+        let mut dbg = self.require_live_debugger(py)?;
+        dbg.inner
+            .breakpoints
+            .set_pass_count(self.snapshot.id, pass_count)
+            .map_err(err)
+    }
+
+    /// Set or clear the REPL command string run at each hit (`bs`). A
+    /// trailing `gc` continues after it; scripts that own the loop usually
+    /// inspect the `StopOutcome` instead.
+    #[setter]
+    fn set_action(&self, py: Python<'_>, action: Option<String>) -> PyResult<()> {
+        let mut dbg = self.require_live_debugger(py)?;
+        dbg.inner
+            .breakpoints
+            .set_action(self.snapshot.id, action)
+            .map_err(err)
+    }
+
+    /// Make the breakpoint clear itself after its next reported hit (`/1`).
+    #[setter]
+    fn set_one_shot(&self, py: Python<'_>, one_shot: bool) -> PyResult<()> {
+        let mut dbg = self.require_live_debugger(py)?;
+        dbg.inner
+            .breakpoints
+            .set_one_shot(self.snapshot.id, one_shot)
+            .map_err(err)
     }
 
     /// Remove this breakpoint from the target.
@@ -1113,6 +1231,68 @@ impl Debugger {
         self.write(addr, &value.to_le_bytes())
     }
 
+    /// The target's pointer width in bytes (`$ptrsize`): 8, both supported
+    /// architectures are LP64. 32-bit WOW64 layouts are read through their
+    /// own `ntdll32!` types, whose pointer fields are 4 bytes.
+    #[getter]
+    fn pointer_size(&self) -> u64 {
+        8
+    }
+
+    /// Read a pointer-sized value at `addr` (`poi`).
+    fn read_pointer(&self, addr: u64) -> PyResult<u64> {
+        self.read_u64(addr)
+    }
+
+    /// Read a NUL-terminated ANSI string at `addr` (`da`), at most `max_len`
+    /// bytes.
+    #[pyo3(signature = (addr, max_len=256))]
+    fn read_string(&self, addr: u64, max_len: usize) -> PyResult<String> {
+        self.inner
+            .target
+            .read_c_string(VirtAddr(addr), max_len)
+            .map_err(err)
+    }
+
+    /// Read a NUL-terminated UTF-16 string at `addr` (`du`), at most
+    /// `max_len` characters.
+    #[pyo3(signature = (addr, max_len=256))]
+    fn read_wstring(&self, addr: u64, max_len: usize) -> PyResult<String> {
+        let mut units = Vec::with_capacity(max_len.min(256));
+        let mut cursor = addr;
+        while units.len() < max_len {
+            let unit = self.read_u16(cursor)?;
+            if unit == 0 {
+                break;
+            }
+            units.push(unit);
+            cursor += 2;
+        }
+        Ok(String::from_utf16_lossy(&units))
+    }
+
+    /// Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`).
+    fn read_unicode_string(&self, addr: u64) -> PyResult<String> {
+        self.inner
+            .target
+            .read_unicode_string(VirtAddr(addr))
+            .map_err(err)
+    }
+
+    /// Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`).
+    fn read_ansi_string(&self, addr: u64) -> PyResult<String> {
+        let length = self.read_u16(addr)?;
+        let buffer = self.read_pointer(addr + 8)?;
+        if length == 0 || buffer == 0 {
+            return Ok(String::new());
+        }
+        let mut buf = vec![0u8; usize::from(length)];
+        self.inner
+            .read_masked(VirtAddr(buffer), &mut buf)
+            .map_err(err)?;
+        Ok(buf.iter().map(|&b| b as char).collect())
+    }
+
     /// Evaluate a debugger expression (symbols, registers, arithmetic) to an
     /// address/integer.
     fn eval(&self, expr: &str) -> PyResult<u64> {
@@ -1200,15 +1380,11 @@ impl Debugger {
         Self::stop_outcome(slf, py, |dbg| match timeout_ms {
             Some(ms) => dbg
                 .inner
-                .continue_until_break_with_disposition(
-                    Some(Duration::from_millis(ms)),
-                    &NEVER_CANCEL,
-                    disposition,
-                )
+                .continue_until_break(Some(Duration::from_millis(ms)), &NEVER_CANCEL, disposition)
                 .map_err(err),
             None => Self::wait_until_stop(py, |slice| {
                 dbg.inner
-                    .continue_until_break_with_disposition(Some(slice), &NEVER_CANCEL, disposition)
+                    .continue_until_break(Some(slice), &NEVER_CANCEL, disposition)
                     .map_err(err)
             }),
         })
@@ -1267,6 +1443,254 @@ impl Debugger {
         self.inner.current_thread.clone()
     }
 
+    /// Select a Windows thread (`.thread`) by thread id, ETHREAD, or KTHREAD
+    /// address as the inspection context. A thread that is on a vCPU switches
+    /// the live register context to it and returns that vCPU id; any other
+    /// thread is parked (stack and metadata only, no register file) and
+    /// returns `None`. `select_thread(None)` returns to the backend's current
+    /// vCPU. Requires the VM halted.
+    #[pyo3(signature = (thread))]
+    fn select_thread(&mut self, thread: Option<u64>) -> PyResult<Option<String>> {
+        self.require_halted("select_thread")?;
+        let Some(value) = thread else {
+            self.inner.reset_windows_thread().map_err(err)?;
+            return Ok(None);
+        };
+        let info = self.inner.find_windows_thread(value).map_err(err)?;
+        self.inner.select_windows_thread(&info).map_err(err)
+    }
+
+    /// The selected Windows thread as a dict (`threads()` shape), or `None`
+    /// when no `.thread` selection is in effect.
+    fn selected_thread<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.inner
+            .target
+            .windows_thread_selection
+            .as_ref()
+            .map(|thread| view_dict(py, &view::thread(thread, None)))
+            .transpose()
+    }
+
+    /// Resolve a thread id / ETHREAD / KTHREAD to its `_ETHREAD` cursor, the
+    /// thread counterpart of `process()`.
+    fn thread(slf: Bound<'_, Self>, thread: u64) -> PyResult<Struct> {
+        let (info, ethread) = {
+            let mut dbg = slf.borrow_mut();
+            let found = dbg.inner.find_windows_thread(thread).map_err(err)?;
+            (dbg.resolve_type("_ETHREAD")?, found.ethread.0)
+        };
+        Ok(Struct {
+            dbg: slf.unbind(),
+            name: "_ETHREAD".to_string(),
+            info,
+            base: ethread,
+        })
+    }
+
+    /// Select stack frame `index` (`.frame N`, zero-based) of the current
+    /// live thread, so `registers()`, `procedure_locals()`, and expressions
+    /// use that frame's recovered register file; returns `{index, ip, sp}`.
+    /// `select_frame(None)` returns to the live register file. Requires a
+    /// halted VM and a live (not parked) thread.
+    #[pyo3(signature = (index))]
+    fn select_frame<'py>(
+        &mut self,
+        py: Python<'py>,
+        index: Option<usize>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.require_halted("select_frame")?;
+        let Some(index) = index else {
+            self.inner.clear_selected_frame();
+            return Ok(None);
+        };
+        let frame = self.inner.select_frame_index(index).map_err(err)?;
+        Ok(Some(selected_frame_record(py, &frame)?))
+    }
+
+    /// The selected frame as `{index, ip, sp}`, or `None` at the live frame.
+    fn selected_frame<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.inner
+            .target
+            .selected_frame
+            .as_ref()
+            .map(|frame| selected_frame_record(py, frame))
+            .transpose()
+    }
+
+    /// Walk the call stack of any Windows thread by thread id / ETHREAD /
+    /// KTHREAD without selecting it: a parked thread's saved kernel stack, or
+    /// the live trace when the thread is on a vCPU. Same frame shape as
+    /// `backtrace()` plus `source` naming how the stack was recovered.
+    #[pyo3(signature = (thread, limit=64))]
+    fn backtrace_thread<'py>(
+        &mut self,
+        py: Python<'py>,
+        thread: u64,
+        limit: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let info = self.inner.find_windows_thread(thread).map_err(err)?;
+        let trace = self
+            .inner
+            .backtrace_thread(&info, limit.clamp(1, 4096))
+            .map_err(err)?;
+        let frames = View::List(
+            trace
+                .stacktrace
+                .frames
+                .iter()
+                .map(view::stack_frame)
+                .collect(),
+        );
+        view_dict(
+            py,
+            &View::Object(vec![
+                ("ethread", View::Hex(info.ethread.0)),
+                ("tid", View::OptNum(info.tid)),
+                (
+                    "source",
+                    View::Str(format!("{:?}", trace.source).to_ascii_lowercase()),
+                ),
+                ("frames", frames),
+            ]),
+        )
+    }
+
+    /// Run until `target` (an address or expression) is reached, like `g
+    /// <address>`/`pa`: a temporary breakpoint is planted there and removed
+    /// afterwards. Any other breakpoint, exception, or bugcheck en route is
+    /// returned as-is. With `timeout_ms` set and the address not reached in
+    /// time, the target is interrupted where it is, the temporary site is
+    /// removed, and the outcome is `halted`; with `None`, blocks until a stop.
+    /// Requires the VM halted.
+    #[pyo3(signature = (target, timeout_ms=None))]
+    fn run_to<'py>(
+        slf: Bound<'py, Self>,
+        py: Python<'py>,
+        target: &Bound<'_, PyAny>,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<StopOutcome> {
+        let (addr, _) = breakpoint_target_arg(&slf.borrow(), target)?;
+        Self::stop_outcome(slf, py, |dbg| {
+            dbg.require_halted("run_to")?;
+            match timeout_ms {
+                Some(ms) => {
+                    let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+                    let cancel = AtomicBool::new(false);
+
+                    std::thread::scope(|scope| {
+                        // `run_to` blocks until a stop; flip its cancel flag
+                        // from a helper thread when the budget elapses.
+                        let cancel_ref = &cancel;
+                        let handle = scope.spawn(move || {
+                            while std::time::Instant::now() < deadline {
+                                std::thread::sleep(Duration::from_millis(20));
+                                if cancel_ref.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                            }
+                            cancel_ref.store(true, Ordering::Relaxed);
+                        });
+                        let outcome = dbg.inner.run_to(VirtAddr(addr), &cancel).map_err(err);
+                        cancel.store(true, Ordering::Relaxed);
+                        let _ = handle.join();
+                        match outcome {
+                            Ok(ContinueOutcome::Running) if !dbg.inner.backend.is_running() => {
+                                let rip = dbg
+                                    .inner
+                                    .read_registers()
+                                    .ok()
+                                    .and_then(|r| dbg.inner.register_map.read_u64("rip", &r).ok())
+                                    .unwrap_or(0);
+                                Ok(ContinueOutcome::Halted { rip })
+                            }
+                            other => other,
+                        }
+                    })
+                }
+                None => dbg.inner.run_to(VirtAddr(addr), &NEVER_CANCEL).map_err(err),
+            }
+        })
+    }
+
+    /// Set the stop policy for an exception code (`sxe`/`sxd`/`sxn`/`sxi`),
+    /// the analogue of GDB's `handle`. `code` is a numeric NTSTATUS or a
+    /// WinDbg alias (`"av"`, `"sse"`, `"ii"`, ...). `mode` is `"break"`
+    /// (stop on every chance), `"second_chance"` (pass first-chance, stop on
+    /// second), `"notify"`, or `"ignore"` (both continue without stopping;
+    /// `notify` only differs in the REPL, which prints a line). `disposition`
+    /// (`"handled"`/`"not_handled"`) fixes how a continued exception is
+    /// acknowledged, like `-f gh`/`-f gn`. Policies apply to `run()`,
+    /// `wait_for_stop()`, and `run_to()`.
+    #[pyo3(signature = (code, mode, *, disposition=None))]
+    fn set_exception_policy(
+        &mut self,
+        code: &Bound<'_, PyAny>,
+        mode: &str,
+        disposition: Option<&str>,
+    ) -> PyResult<()> {
+        let code = exception_code_arg(code)?;
+        let mode = match mode {
+            "break" => ExceptionPolicyMode::Break,
+            "second_chance" => ExceptionPolicyMode::SecondChance,
+            "notify" => ExceptionPolicyMode::Notify,
+            "ignore" => ExceptionPolicyMode::Ignore,
+            other => {
+                return Err(raise(format!(
+                    "unknown exception policy mode '{other}' (break, second_chance, notify, ignore)"
+                )));
+            }
+        };
+        let final_action = disposition
+            .map(|text| text.parse::<ContinueDisposition>().map_err(err))
+            .transpose()?
+            .map(ExceptionPolicyFinalAction::Continue);
+        self.inner
+            .exception_policies
+            .set_with_options(code, mode, None, final_action);
+        Ok(())
+    }
+
+    /// The configured exception policies as `{code, alias, mode, disposition,
+    /// command}` dicts (`sx`). Unlisted codes break by default.
+    fn exception_policies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let rows = self
+            .inner
+            .exception_policies
+            .entries()
+            .map(|(code, policy)| {
+                let mode = match policy.mode {
+                    ExceptionPolicyMode::Break => "break",
+                    ExceptionPolicyMode::SecondChance => "second_chance",
+                    ExceptionPolicyMode::Notify => "notify",
+                    ExceptionPolicyMode::Ignore => "ignore",
+                };
+                let disposition = match policy.final_action {
+                    Some(ExceptionPolicyFinalAction::Continue(disposition)) => {
+                        Some(disposition.name().to_string())
+                    }
+                    Some(ExceptionPolicyFinalAction::Break) => Some("break".to_string()),
+                    None => None,
+                };
+                View::Object(vec![
+                    ("code", View::Hex(u64::from(code))),
+                    (
+                        "alias",
+                        View::OptStr(exception_alias(code).map(str::to_string)),
+                    ),
+                    ("mode", View::Str(mode.to_string())),
+                    ("disposition", View::OptStr(disposition)),
+                    ("command", View::OptStr(policy.command.clone())),
+                ])
+            })
+            .collect();
+        view_list(py, &View::List(rows))
+    }
+
+    /// Forget every exception policy (`sxr`); ordinary exceptions break again.
+    fn reset_exception_policies(&mut self) {
+        self.inner.exception_policies.reset();
+    }
+
     /// Whether the VM is currently running.
     fn is_running(&self) -> bool {
         self.inner.backend.is_running()
@@ -1313,6 +1737,116 @@ impl Debugger {
     /// it (e.g. after attaching to a guest that rebooted).
     fn reload(&mut self) -> PyResult<()> {
         self.inner.reload().map_err(err)
+    }
+
+    /// The ordered symbol sources (`.sympath`): `cache*<dir>`, local
+    /// directories, and `http(s)://` servers, as strings.
+    #[getter]
+    fn symbol_path(&self) -> Vec<String> {
+        self.inner
+            .target
+            .symbols
+            .symbol_sources()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Replace the symbol sources (`.sympath <entries>`); each entry uses the
+    /// same syntax as the REPL (`;`-separated is accepted too).
+    #[setter]
+    fn set_symbol_path(&self, sources: Vec<String>) {
+        self.inner
+            .target
+            .symbols
+            .set_symbol_sources(parse_symbol_sources(&sources));
+    }
+
+    /// Append a symbol source (`.sympath+`).
+    fn add_symbol_path(&self, source: &str) {
+        for source in parse_symbol_sources(&[source]) {
+            self.inner.target.symbols.append_symbol_source(source);
+        }
+    }
+
+    /// Restore the default symbol sources (`.symfix`).
+    fn reset_symbol_path(&self) {
+        self.inner.target.symbols.reset_symbol_sources();
+    }
+
+    /// The ordered source-path mappings (`.srcpath`): `<local-root>` or
+    /// `<recorded-prefix>=<local-root>` strings.
+    #[getter]
+    fn source_path(&self) -> Vec<String> {
+        self.inner
+            .target
+            .symbols
+            .source_paths()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Replace the source-path mappings (`.srcpath <entries>`).
+    #[setter]
+    fn set_source_path(&self, paths: Vec<String>) {
+        self.inner
+            .target
+            .symbols
+            .set_source_paths(parse_source_paths(&paths));
+    }
+
+    /// Append a source-path mapping (`.srcpath+`).
+    fn add_source_path(&self, mapping: &str) {
+        for mapping in parse_source_paths(&[mapping]) {
+            self.inner.target.symbols.append_source_path(mapping);
+        }
+    }
+
+    /// Reload symbols for one module or, with `None`, every module in the
+    /// current scope (`.reload`), then re-resolve symbolic breakpoints.
+    /// Returns `{loaded, failed, skipped}` module-name lists.
+    #[pyo3(signature = (module=None))]
+    fn reload_symbols<'py>(
+        &mut self,
+        py: Python<'py>,
+        module: Option<&str>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let report = self
+            .inner
+            .target
+            .reload_module_symbols(module)
+            .map_err(err)?;
+        let session: &mut Session = &mut self.inner;
+        session
+            .breakpoints
+            .resolve_symbolic(session.backend.as_mut(), &session.target)
+            .map_err(err)?;
+        view_dict(py, &view::module_symbol_report(&report))
+    }
+
+    /// Write a full `PAGEDU64` kernel dump of the halted target to `path`
+    /// (`.dump /f`). Streams every physical page; returns the number of
+    /// unreadable pages that were zero-filled. Requires memory introspection
+    /// (not a dump-file session) and the VM halted.
+    fn write_dump(&mut self, py: Python<'_>, path: &str) -> PyResult<u64> {
+        self.require_halted("write_dump")?;
+        if matches!(&*self.inner.target.phys, PhysMem::Dmp(_)) {
+            return Err(raise("write_dump is not applicable to a static crash dump"));
+        }
+        let metadata = collect_dump_metadata(&mut self.inner).map_err(err)?;
+        let memory = &*self.inner.target.phys;
+        let interrupted = AtomicBool::new(false);
+        let unreadable = py.detach(|| {
+            write_kernel_dump(
+                path,
+                memory,
+                &metadata,
+                || interrupted.load(Ordering::Relaxed),
+                || {},
+            )
+        });
+        unreadable.map_err(err)
     }
 
     /// List running processes as `_EPROCESS` cursors. Read fields straight off
@@ -1428,11 +1962,32 @@ impl Debugger {
             .collect()
     }
 
-    /// Return private locals/parameters in scope at `addr`; scalar `value` is
-    /// present only when `addr` equals the current halted RIP and the PDB recipe
-    /// can be evaluated safely.
-    fn procedure_locals<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, PyList>> {
-        let address = VirtAddr(addr);
+    /// Return private locals/parameters in scope at `addr`, defaulting to the
+    /// selected frame's IP (`select_frame`) or the halted RIP (`dv`); scalar
+    /// `value` is present only when the PDB recipe can be evaluated safely in
+    /// the current register context.
+    #[pyo3(signature = (addr=None))]
+    fn procedure_locals<'py>(
+        &mut self,
+        py: Python<'py>,
+        addr: Option<u64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let address = match addr {
+            Some(addr) => VirtAddr(addr),
+            None => match self.inner.target.selected_frame.as_ref() {
+                Some(frame) => VirtAddr(frame.ip),
+                None => {
+                    self.require_halted("procedure_locals")?;
+                    let regs = self.inner.read_registers().map_err(err)?;
+                    VirtAddr(
+                        self.inner
+                            .register_map
+                            .read_u64("rip", &regs)
+                            .map_err(err)?,
+                    )
+                }
+            },
+        };
         let locals = self
             .inner
             .target
@@ -1949,29 +2504,37 @@ impl Debugger {
         )
     }
 
+    /// Drain the diagnostics the debugger raised since the last call: a
+    /// breakpoint that failed to re-arm at a stop, a stranded breakpoint
+    /// table entry it reclaimed, host memory that stopped matching the guest
+    /// after a reload. The REPL prints these as warnings; the SDK leaves them
+    /// to you. Empty when nothing happened.
+    fn notices(&mut self) -> Vec<String> {
+        self.inner.take_notices()
+    }
+
     /// Set a code breakpoint from an address or debugger expression, with an
     /// optional break `condition` (normal expression grammar, re-evaluated each
     /// hit; the run loop steps over and keeps going when it is false). Returns
     /// a live breakpoint handle.
-    #[pyo3(signature = (target, condition=None))]
+    #[pyo3(signature = (target, condition=None, *, pass_count=0, one_shot=false, process=None, action=None))]
     fn breakpoint(
         slf: Bound<'_, Self>,
         target: &Bound<'_, PyAny>,
         condition: Option<String>,
+        pass_count: u64,
+        one_shot: bool,
+        process: Option<u64>,
+        action: Option<String>,
     ) -> PyResult<Breakpoint> {
         let id = {
             let mut dbg = slf.borrow_mut();
             dbg.require_halted("breakpoint")?;
             let (addr, symbol) = breakpoint_target_arg(&dbg, target)?;
+            let config =
+                breakpoint_config_arg(&dbg, condition, pass_count, one_shot, process, action)?;
             dbg.inner
-                .add_breakpoint_with(
-                    VirtAddr(addr),
-                    symbol,
-                    BreakpointConfig {
-                        condition,
-                        ..BreakpointConfig::default()
-                    },
-                )
+                .add_breakpoint(VirtAddr(addr), symbol, config)
                 .map_err(err)?
         };
         Self::breakpoint_handle(&slf, id)
@@ -1979,36 +2542,88 @@ impl Debugger {
 
     /// Set a symbol-identity breakpoint that survives module unload/reload and
     /// may remain deferred until matching symbols are loaded.
-    #[pyo3(signature = (symbol, condition=None))]
+    #[pyo3(signature = (symbol, condition=None, *, pass_count=0, one_shot=false, process=None, action=None))]
     fn set_symbol_breakpoint(
         slf: Bound<'_, Self>,
         symbol: String,
         condition: Option<String>,
+        pass_count: u64,
+        one_shot: bool,
+        process: Option<u64>,
+        action: Option<String>,
     ) -> PyResult<Breakpoint> {
         let id = {
             let mut dbg = slf.borrow_mut();
             dbg.require_halted("set_symbol_breakpoint")?;
+            let config =
+                breakpoint_config_arg(&dbg, condition, pass_count, one_shot, process, action)?;
             dbg.inner
-                .add_symbol_breakpoint(symbol, condition)
+                .add_symbol_breakpoint(symbol, config)
                 .map_err(err)?
         };
         Self::breakpoint_handle(&slf, id)
     }
 
+    /// Set one symbol-identity breakpoint per symbol matching a `*`/`?`
+    /// glob, optionally `module!`-qualified (`bm`). Returns the handles
+    /// created; symbols that failed to install raise after the rest are set.
+    #[pyo3(signature = (pattern, condition=None, *, pass_count=0, one_shot=false, process=None, action=None, limit=256))]
+    fn set_pattern_breakpoints(
+        slf: Bound<'_, Self>,
+        pattern: &str,
+        condition: Option<String>,
+        pass_count: u64,
+        one_shot: bool,
+        process: Option<u64>,
+        action: Option<String>,
+        limit: usize,
+    ) -> PyResult<Vec<Breakpoint>> {
+        let (ids, errors) = {
+            let mut dbg = slf.borrow_mut();
+            dbg.require_halted("set_pattern_breakpoints")?;
+            let config =
+                breakpoint_config_arg(&dbg, condition, pass_count, one_shot, process, action)?;
+            dbg.inner
+                .add_pattern_breakpoints(pattern, config, limit.clamp(1, 4096))
+                .map_err(err)?
+        };
+        let handles: Vec<Breakpoint> = ids
+            .into_iter()
+            .map(|id| Self::breakpoint_handle(&slf, id))
+            .collect::<PyResult<_>>()?;
+        if let Some(first) = errors.first() {
+            return Err(raise(format!(
+                "{} of {} matching symbols failed to install (first: {first})",
+                errors.len(),
+                errors.len() + handles.len()
+            )));
+        }
+        if handles.is_empty() {
+            return Err(raise(format!("no symbols match '{pattern}'")));
+        }
+        Ok(handles)
+    }
+
     /// Set source-identity breakpoints for every loaded address matching
     /// `file:line`, or one deferred breakpoint when no module currently matches.
-    #[pyo3(signature = (file, line, condition=None))]
+    #[pyo3(signature = (file, line, condition=None, *, pass_count=0, one_shot=false, process=None, action=None))]
     fn set_source_breakpoint(
         slf: Bound<'_, Self>,
         file: &str,
         line: u32,
         condition: Option<String>,
+        pass_count: u64,
+        one_shot: bool,
+        process: Option<u64>,
+        action: Option<String>,
     ) -> PyResult<Vec<Breakpoint>> {
         let ids = {
             let mut dbg = slf.borrow_mut();
             dbg.require_halted("set_source_breakpoint")?;
+            let config =
+                breakpoint_config_arg(&dbg, condition, pass_count, one_shot, process, action)?;
             dbg.inner
-                .add_source_breakpoint(format!("{file}:{line}"), condition)
+                .add_source_breakpoint(format!("{file}:{line}"), config)
                 .map_err(err)?
         };
         ids.into_iter()
@@ -2021,30 +2636,27 @@ impl Debugger {
     /// trapping writes. `length` is 1, 2, 4, or 8 and requires natural
     /// alignment. Watches are global across guest address spaces and currently
     /// require KD. Returns a live stop-point handle.
-    #[pyo3(signature = (target, *, access="write", length=1, condition=None))]
+    #[pyo3(signature = (target, *, access="write", length=1, condition=None, pass_count=0, one_shot=false, process=None, action=None))]
     fn watchpoint(
         slf: Bound<'_, Self>,
         target: &Bound<'_, PyAny>,
         access: &str,
         length: u8,
         condition: Option<String>,
+        pass_count: u64,
+        one_shot: bool,
+        process: Option<u64>,
+        action: Option<String>,
     ) -> PyResult<Breakpoint> {
         let id = {
             let mut dbg = slf.borrow_mut();
             dbg.require_halted("watchpoint")?;
             let access = access.parse::<WatchpointAccess>().map_err(err)?;
             let (addr, symbol) = breakpoint_target_arg(&dbg, target)?;
+            let config =
+                breakpoint_config_arg(&dbg, condition, pass_count, one_shot, process, action)?;
             dbg.inner
-                .add_watchpoint_with(
-                    VirtAddr(addr),
-                    access,
-                    length,
-                    symbol,
-                    BreakpointConfig {
-                        condition,
-                        ..BreakpointConfig::default()
-                    },
-                )
+                .add_watchpoint(VirtAddr(addr), access, length, symbol, config)
                 .map_err(err)?
         };
         Self::breakpoint_handle(&slf, id)
@@ -2089,6 +2701,673 @@ impl Debugger {
                 snapshot: BreakpointSnapshot::from_core(b),
             })
             .collect()
+    }
+
+    /// KPCR/KPRCB essentials for `processor` (default: the current vCPU's):
+    /// thread pointers, descriptor registers (IDTR/GDTR/TSS), and IRQL (`!pcr`).
+    #[pyo3(signature = (processor=None))]
+    fn inspect_pcr<'py>(
+        &mut self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let processor = self.processor_arg(processor);
+        let detail = self.inner.inspect_pcr(processor).map_err(err)?;
+        view_dict(py, &view::cpu::pcr(&detail))
+    }
+
+    /// `_KPRCB` counters, thread pointers, and processor state for
+    /// `processor` (default: current) (`!prcb`).
+    #[pyo3(signature = (processor=None))]
+    fn inspect_prcb<'py>(
+        &self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let processor = self.processor_arg(processor);
+        let detail = self.inner.target.inspect_prcb(processor).map_err(err)?;
+        view_dict(py, &view::cpu::prcb(&detail))
+    }
+
+    /// The current IRQL and its level name for `processor` (`!irql`). At a KD
+    /// break-in this is the debugger-observed IRQL.
+    #[pyo3(signature = (processor=None))]
+    fn inspect_irql<'py>(
+        &self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let processor = self.processor_arg(processor);
+        let detail = self.inner.target.inspect_irql(processor).map_err(err)?;
+        view_dict(py, &view::cpu::irql(&detail))
+    }
+
+    /// One IDT vector or the bounded 256-entry table with handler symbols, gate
+    /// types, non-nt hooks, and `KiIsrThunk` chain hints (`!idt`; AMD64 only).
+    #[pyo3(signature = (vector=None, processor=None))]
+    fn inspect_idt<'py>(
+        &mut self,
+        py: Python<'py>,
+        vector: Option<u16>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let processor = self.processor_arg(processor);
+        let detail = self.inner.inspect_idt(processor, vector).map_err(err)?;
+        view_dict(py, &view::cpu::idt(&detail))
+    }
+
+    /// The bounded GDT with base/limit/privilege/mode/presence per entry
+    /// (`!gdt`; AMD64 only).
+    #[pyo3(signature = (processor=None))]
+    fn inspect_gdt<'py>(
+        &mut self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let processor = self.processor_arg(processor);
+        let detail = self.inner.inspect_gdt(processor).map_err(err)?;
+        view_dict(py, &view::cpu::gdt(&detail))
+    }
+
+    /// Vendor, family/model/stepping, speed, and feature bits (`!cpuinfo`).
+    #[pyo3(signature = (processor=None))]
+    fn inspect_cpuinfo<'py>(
+        &self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let processor = self.processor_arg(processor);
+        let detail = self.inner.target.inspect_cpuinfo(processor).map_err(err)?;
+        view_dict(py, &view::cpu::cpuinfo(&detail))
+    }
+
+    /// Read a model-specific register (`rdmsr`); `msr` is a number or an
+    /// `IA32_*` name. KD only; requires the VM halted.
+    #[pyo3(signature = (msr, processor=None))]
+    fn read_msr(&mut self, msr: &Bound<'_, PyAny>, processor: Option<u16>) -> PyResult<u64> {
+        let msr = msr_arg(msr)?;
+        let processor = self.processor_arg(processor);
+        self.inner.read_msr(processor, msr).map_err(err)
+    }
+
+    /// Write a model-specific register (`wrmsr`). KD only; requires the VM halted.
+    #[pyo3(signature = (msr, value, processor=None))]
+    fn write_msr(
+        &mut self,
+        msr: &Bound<'_, PyAny>,
+        value: u64,
+        processor: Option<u16>,
+    ) -> PyResult<()> {
+        let msr = msr_arg(msr)?;
+        let processor = self.processor_arg(processor);
+        self.inner.write_msr(processor, msr, value).map_err(err)
+    }
+
+    /// The current/next/idle thread on each processor, optionally with a short
+    /// kernel stack per processor (`!running`).
+    #[pyo3(signature = (include_idle=false, include_stacks=false))]
+    fn running<'py>(
+        &self,
+        py: Python<'py>,
+        include_idle: bool,
+        include_stacks: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .inspect_running(include_idle, include_stacks)
+            .map_err(err)?;
+        view_dict(py, &view::sched::running(&detail))
+    }
+
+    /// Bounded dispatcher-ready queues for every processor or one (`!ready`).
+    #[pyo3(signature = (processor=None))]
+    fn ready_queues<'py>(
+        &self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_ready_queues(processor)
+            .map_err(err)?;
+        view_dict(py, &view::sched::ready_queues(&detail))
+    }
+
+    /// DPCs queued on each processor's two `_KPRCB.DpcData` queues (`!dpcs`).
+    fn dpc_queues<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.inspect_dpc_queues().map_err(err)?;
+        view_dict(py, &view::sched::dpc_queues(&detail))
+    }
+
+    /// Bounded kernel timer-table entries with their DPCs (`!timer`).
+    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.timer_list().map_err(err)?;
+        view_dict(py, &view::sched::timer_list(&detail))
+    }
+
+    /// Decode one `_KTIMER` and its DPC (`!timer <address>`).
+    fn inspect_timer<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_timer(VirtAddr(address))
+            .map_err(err)?;
+        view_dict(py, &view::sched::timer(&detail))
+    }
+
+    /// Kernel and user APCs (`!apc`): `target=None` is the selected Windows
+    /// thread, `"*"` every thread, an int a thread (tid/ETHREAD/KTHREAD) or,
+    /// when no thread matches, a process (pid/EPROCESS); a string a process
+    /// name substring.
+    #[pyo3(signature = (target=None))]
+    fn apcs<'py>(
+        &mut self,
+        py: Python<'py>,
+        target: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let selector = match target {
+            None => ApcSelector::CurrentThread,
+            Some(value) => {
+                if let Ok(number) = value.extract::<u64>() {
+                    if self.inner.find_windows_thread(number).is_ok() {
+                        ApcSelector::Thread(VirtAddr(number))
+                    } else {
+                        ApcSelector::Process(number)
+                    }
+                } else {
+                    let text: String = value.extract().map_err(|_| {
+                        PyTypeError::new_err(
+                            "apcs target must be None, \"*\", an int, or a process name",
+                        )
+                    })?;
+                    if text == "*" {
+                        ApcSelector::All
+                    } else if text == "." {
+                        ApcSelector::CurrentThread
+                    } else {
+                        let processes = self
+                            .inner
+                            .target
+                            .matching_processes(Some(&text))
+                            .map_err(err)?;
+                        match processes.as_slice() {
+                            [process] => ApcSelector::Process(process.pid),
+                            [] => return Err(raise(format!("no process matches '{text}'"))),
+                            many => {
+                                return Err(raise(format!(
+                                    "ambiguous process '{text}': {} matches",
+                                    many.len()
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let detail = self.inner.inspect_apcs(selector).map_err(err)?;
+        view_dict(py, &view::sched::apcs(&detail))
+    }
+
+    /// Every thread's state, wait reason, and top stack symbol (`!stacks`);
+    /// `level` 1/2 add bounded full stacks, `filter` matches process names or
+    /// stack symbols.
+    #[pyo3(signature = (level=0, filter=None))]
+    fn stacks<'py>(
+        &mut self,
+        py: Python<'py>,
+        level: u8,
+        filter: Option<&str>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.inspect_stacks(level, filter).map_err(err)?;
+        view_dict(py, &view::sched::stacks(&detail))
+    }
+
+    /// Decode the attached process's PEB (or the one at `address`) and its
+    /// process parameters and loader-list heads; includes the WOW64 PEB for a
+    /// 32-bit process (`!peb`).
+    #[pyo3(signature = (address=None))]
+    fn inspect_peb<'py>(
+        &self,
+        py: Python<'py>,
+        address: Option<u64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_peb(address.map(VirtAddr))
+            .map_err(err)?;
+        view_dict(py, &view::usermode::peb(&detail))
+    }
+
+    /// Decode the selected thread's TEB (or the one at `address`), plus the
+    /// WOW64 TEB when present (`!teb`).
+    #[pyo3(signature = (address=None))]
+    fn inspect_teb<'py>(
+        &self,
+        py: Python<'py>,
+        address: Option<u64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_teb(address.map(VirtAddr))
+            .map_err(err)?;
+        view_dict(py, &view::usermode::teb(&detail))
+    }
+
+    /// Modules from the attached process loader lists, optionally only the one
+    /// containing `containing` (`!dlls`).
+    #[pyo3(signature = (containing=None))]
+    fn loader_modules<'py>(
+        &self,
+        py: Python<'py>,
+        containing: Option<u64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .loader_modules(containing.map(VirtAddr))
+            .map_err(err)?;
+        view_dict(py, &view::usermode::loader_modules(&detail))
+    }
+
+    /// The selected thread's last Win32 error and NT status with names (`!gle`).
+    fn last_error<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.last_error().map_err(err)?;
+        view_dict(py, &view::usermode::last_error(&detail))
+    }
+
+    /// Compare a module's executable sections against the cached on-disk image
+    /// after relocation (`!chkimg`): per-section results, mismatch ranges with
+    /// kernel self-patches counted separately, and bounded byte diffs when
+    /// `include_diffs`.
+    #[pyo3(signature = (module, include_diffs=false))]
+    fn check_image<'py>(
+        &self,
+        py: Python<'py>,
+        module: &str,
+        include_diffs: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .check_image(module, include_diffs)
+            .map_err(err)?;
+        view_dict(py, &view::usermode::image_check(&detail))
+    }
+
+    /// Every heap in the attached process PEB with kind and sizes (`!heap`).
+    fn heap_summary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.heap_summary().map_err(err)?;
+        view_dict(py, &view::heap::heap_summary(&detail))
+    }
+
+    /// Decode one NT or segment heap by PEB-list index (when that index
+    /// exists) or address (`!heap -h`); `list_entries` materializes every
+    /// entry, chunk, and block (`!heap -a`).
+    #[pyo3(signature = (heap, list_entries=false))]
+    fn inspect_heap<'py>(
+        &self,
+        py: Python<'py>,
+        heap: u64,
+        list_entries: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let summary = self.inner.target.heap_summary().map_err(err)?;
+        let selector = if (heap as usize) < summary.heaps.len() {
+            HeapSelector::Index(heap as usize)
+        } else {
+            HeapSelector::Address(VirtAddr(heap))
+        };
+        let detail = self
+            .inner
+            .target
+            .inspect_heap(selector, list_entries)
+            .map_err(err)?;
+        view_dict(py, &view::heap::heap(&detail))
+    }
+
+    /// The heap allocation containing `address`, or a not-found result with
+    /// per-heap decode errors (`!heap -x`).
+    fn find_heap_block<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .find_heap_block(VirtAddr(address))
+            .map_err(err)?;
+        view_dict(py, &view::heap::heap_block_search(&detail))
+    }
+
+    /// System memory, pool, PTE, and page-file counters, plus bounded
+    /// per-process usage rows unless `include_processes` is false (`!vm`).
+    #[pyo3(signature = (include_processes=true))]
+    fn inspect_vm<'py>(
+        &self,
+        py: Python<'py>,
+        include_processes: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_vm(include_processes)
+            .map_err(err)?;
+        view_dict(py, &view::mm::vm(&detail))
+    }
+
+    /// Decode an `_MMPFN` by page frame number, or by physical address when
+    /// `physical_address` is true (`!pfn`).
+    #[pyo3(signature = (value, physical_address=false))]
+    fn inspect_pfn<'py>(
+        &self,
+        py: Python<'py>,
+        value: u64,
+        physical_address: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let selector = if physical_address {
+            PfnSelector::PhysicalAddress(value)
+        } else {
+            PfnSelector::Pfn(value)
+        };
+        let detail = self.inner.target.inspect_pfn(selector).map_err(err)?;
+        view_dict(py, &view::mm::pfn(&detail))
+    }
+
+    /// Translate a virtual address to physical through `dtb` (default: the
+    /// current context); `None` when not present (`!vtop`).
+    #[pyo3(signature = (addr, dtb=None))]
+    fn vtop(&self, addr: u64, dtb: Option<u64>) -> PyResult<Option<u64>> {
+        self.inner
+            .target
+            .virt_to_phys(dtb, VirtAddr(addr))
+            .map_err(err)
+    }
+
+    /// The full translation of `addr` through `dtb` (default: the current
+    /// context): every page-table level and the final physical address
+    /// (`!vtop`); `pte_walk` is the same for the current context.
+    #[pyo3(signature = (addr, dtb=None))]
+    fn inspect_translation<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+        dtb: Option<u64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .vtop(dtb.unwrap_or(0), VirtAddr(addr))
+            .map_err(err)?;
+        view_dict(py, &view::mm::vtop(&detail))
+    }
+
+    /// Bounded reverse walk: the current-DTB virtual mappings of a physical
+    /// address (`!ptov`; AMD64 only).
+    fn ptov<'py>(&self, py: Python<'py>, physical: u64) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.ptov(physical).map_err(err)?;
+        view_dict(py, &view::mm::ptov(&detail))
+    }
+
+    /// The pool page (or big-pool allocation) containing `address` and every
+    /// block on it, marking the one containing the address (`!pool`).
+    fn inspect_pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_pool(VirtAddr(address))
+            .map_err(err)?;
+        view_dict(py, &view::mm::pool_page(&detail))
+    }
+
+    /// Pool tracker usage aggregated by tag (`!poolused`): `sort` is `"tag"`,
+    /// `"nonpaged"`, or `"paged"` (bytes); `tag` is a case-sensitive `*`/`?`
+    /// glob; `include_counts` adds allocation/free counts.
+    #[pyo3(signature = (tag=None, *, sort="tag", include_counts=false))]
+    fn pool_usage<'py>(
+        &self,
+        py: Python<'py>,
+        tag: Option<&str>,
+        sort: &str,
+        include_counts: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let sort = match sort {
+            "tag" => PoolUsageSort::Tag,
+            "nonpaged" => PoolUsageSort::NonPagedBytes,
+            "paged" => PoolUsageSort::PagedBytes,
+            other => {
+                return Err(raise(format!(
+                    "unknown pool_usage sort '{other}' (tag, nonpaged, paged)"
+                )));
+            }
+        };
+        let detail = self
+            .inner
+            .target
+            .pool_usage(sort, tag, include_counts)
+            .map_err(err)?;
+        view_dict(py, &view::mm::pool_usage(&detail))
+    }
+
+    /// Find pool blocks whose tag matches (`!poolfind`); `pool_type` narrows to
+    /// `"nonpaged"` or `"paged"`. Bounded scan of the virtual pool ranges and
+    /// the big-page table.
+    #[pyo3(signature = (tag, pool_type=None))]
+    fn pool_find<'py>(
+        &self,
+        py: Python<'py>,
+        tag: &str,
+        pool_type: Option<&str>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let pool_type = match pool_type {
+            None => None,
+            Some("nonpaged") => Some(PoolType::NonPaged),
+            Some("paged") => Some(PoolType::Paged),
+            Some(other) => {
+                return Err(raise(format!(
+                    "unknown pool type '{other}' (nonpaged, paged)"
+                )));
+            }
+        };
+        let detail = self.inner.target.pool_find(tag, pool_type).map_err(err)?;
+        view_dict(py, &view::mm::pool_find(&detail))
+    }
+
+    /// The exported nonpaged and paged `GENERAL_LOOKASIDE` lists (`!lookaside`).
+    fn lookaside_lists<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.lookaside_lists().map_err(err)?;
+        view_dict(py, &view::mm::lookaside_lists(&detail))
+    }
+
+    /// Decode one `GENERAL_LOOKASIDE` (`!lookaside <address>`).
+    fn inspect_lookaside<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_lookaside(VirtAddr(address))
+            .map_err(err)?;
+        view_dict(py, &view::mm::lookaside(&detail))
+    }
+
+    /// Read `len` bytes of guest-physical memory (`!db`).
+    fn read_physical<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+        len: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        if len > MAX_READ_LEN {
+            return Err(raise(format!(
+                "read length {len} exceeds cap {MAX_READ_LEN} (0x{MAX_READ_LEN:x})"
+            )));
+        }
+        let mut buf = vec![0u8; len];
+        self.inner
+            .target
+            .read_physical(addr, &mut buf)
+            .map_err(err)?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Write bytes to guest-physical memory (`!eb`).
+    fn write_physical(&self, addr: u64, data: &[u8]) -> PyResult<()> {
+        self.inner.target.write_physical(addr, data).map_err(err)
+    }
+
+    /// Decode a `SECURITY_DESCRIPTOR` (absolute or self-relative) with its
+    /// owner/group SIDs and DACL/SACL; `annotate_well_known` names well-known
+    /// SIDs (`!sd`).
+    #[pyo3(signature = (address, annotate_well_known=false))]
+    fn inspect_security_descriptor<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+        annotate_well_known: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_security_descriptor(VirtAddr(address), annotate_well_known)
+            .map_err(err)?;
+        view_dict(py, &view::security::security_descriptor(&detail))
+    }
+
+    /// Decode an ACL and its ACEs (`!acl`).
+    fn inspect_acl<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_acl(VirtAddr(address))
+            .map_err(err)?;
+        view_dict(py, &view::security::acl(&detail))
+    }
+
+    /// Decode a SID in guest memory to its string form, authority, and
+    /// well-known name (`!sid`).
+    fn inspect_sid<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_sid(VirtAddr(address))
+            .map_err(err)?;
+        view_dict(py, &view::security::sid(&detail))
+    }
+
+    /// The security descriptor referenced by an object's header (`!objsd`).
+    fn inspect_object_security<'py>(
+        &self,
+        py: Python<'py>,
+        object: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_object_security(VirtAddr(object))
+            .map_err(err)?;
+        view_dict(py, &view::security::object_security(&detail))
+    }
+
+    /// Sessions and the processes in each (`!session`); `session` selects one
+    /// (`-1` = current), `None` lists all.
+    #[pyo3(signature = (session=None))]
+    fn sessions<'py>(&self, py: Python<'py>, session: Option<i64>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.sessions(session).map_err(err)?;
+        view_dict(py, &view::security::sessions(&detail))
+    }
+
+    /// Processes in a session (`!sprocess`): `session` `None` = the attached
+    /// process's session when known, `-1` current, `-4` all; `image_glob`
+    /// filters image names case-insensitively.
+    #[pyo3(signature = (session=None, detailed=false, image_glob=None))]
+    fn session_processes<'py>(
+        &self,
+        py: Python<'py>,
+        session: Option<i64>,
+        detailed: bool,
+        image_glob: Option<&str>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .session_processes(session, detailed, image_glob)
+            .map_err(err)?;
+        view_dict(py, &view::security::session_processes(&detail))
+    }
+
+    /// Decode a PnP device node (default: the root): instance path, service,
+    /// state and history, flags, problem code, pending IRP; `recurse` adds the
+    /// bounded flat subtree (`!devnode`).
+    #[pyo3(signature = (node=None, recurse=false))]
+    fn inspect_devnode<'py>(
+        &self,
+        py: Python<'py>,
+        node: Option<u64>,
+        recurse: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_devnode(node.map(VirtAddr), recurse)
+            .map_err(err)?;
+        view_dict(py, &view::pnp::devnode(&detail))
+    }
+
+    /// The device stack, top filter down to the PDO, from any device object in
+    /// it or its device node, then the PDO's node (`!devstack`).
+    fn inspect_device_stack<'py>(
+        &self,
+        py: Python<'py>,
+        device_or_node: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self
+            .inner
+            .target
+            .inspect_device_stack(VirtAddr(device_or_node))
+            .map_err(err)?;
+        view_dict(py, &view::pnp::device_stack(&detail))
+    }
+
+    /// Device nodes with problem codes, not started, or with a pending PnP IRP
+    /// (`!pnptriage`).
+    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.pnp_triage().map_err(err)?;
+        view_dict(py, &view::pnp::pnp_triage(&detail))
+    }
+
+    /// Driver Verifier level, statistics, verified drivers, and
+    /// configured-but-unloaded drivers (`!verifier`).
+    fn verifier_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.verifier_status().map_err(err)?;
+        view_dict(py, &view::meta::verifier(&detail))
+    }
+
+    /// One verified driver's image, signing level, and verifier counters
+    /// (`!verifier <module>`).
+    fn verifier_driver<'py>(&self, py: Python<'py>, module: &str) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.verifier_driver(module).map_err(err)?;
+        view_dict(py, &view::meta::verifier_driver(&detail))
+    }
+
+    /// Target, kernel, symbol, processor, and debugger version information
+    /// (`vertarget`).
+    fn version<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target_version().map_err(err)?;
+        view_dict(py, &view::meta::target_version(&detail))
+    }
+
+    /// Target system time (FILETIME and ISO-8601) and uptime (`.time`).
+    fn target_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let detail = self.inner.target.target_time().map_err(err)?;
+        view_dict(py, &view::meta::target_time(&detail))
+    }
+
+    /// Decode an NTSTATUS, Win32, or HRESULT code to its name and description
+    /// (`!error`). Needs no target.
+    #[staticmethod]
+    fn decode_error<'py>(py: Python<'py>, code: u64) -> PyResult<Bound<'py, PyDict>> {
+        view_dict(py, &view::meta::error_code(&decode_error_code(code)))
     }
 
     /// Run any REPL command (e.g. `"dt _EPROCESS"`, `"lm"`, `"!analyze"`) and
@@ -2178,6 +3457,13 @@ impl Debugger {
         symbols
             .find_type_across_modules(dtb, name)
             .ok_or_else(|| raise(symbols.unresolved_type_message(dtb, name)))
+    }
+
+    /// `processor` argument default: the current vCPU's processor index.
+    fn processor_arg(&self, processor: Option<u16>) -> u16 {
+        processor.unwrap_or_else(|| {
+            processor_index_from_backend_thread_id(&self.inner.current_thread).unwrap_or(0)
+        })
     }
 
     /// A live handle for breakpoint `id`, snapshotted right after install.
@@ -2480,6 +3766,54 @@ impl Struct {
             .map_err(err)
     }
 
+    /// An array field as a Python list: struct/union elements become child
+    /// cursors (no read); pointers and 1/2/4/8-byte scalars become ints from
+    /// one bulk read; anything else becomes per-element `bytes`.
+    fn array_field(
+        &self,
+        py: Python<'_>,
+        element: &ParsedType,
+        count: u32,
+        addr: u64,
+        total_size: u64,
+    ) -> PyResult<Py<PyAny>> {
+        let count = count as usize;
+        let stride = (total_size as usize) / count;
+        let list = PyList::empty(py);
+        if let ParsedType::Struct(sname) | ParsedType::Union(sname) = element {
+            let stride = if stride == 0 {
+                self.dbg.borrow(py).resolve_type(sname)?.size
+            } else {
+                stride
+            };
+            for index in 0..count {
+                let child = self.cursor_at(py, sname, addr + (index * stride) as u64)?;
+                list.append(Py::new(py, child)?)?;
+            }
+            return Ok(list.into_any().unbind());
+        }
+        if stride == 0 {
+            return Err(raise(format!(
+                "array field at {addr:#x} has zero-sized elements"
+            )));
+        }
+        let mut buf = vec![0u8; stride * count];
+        self.dbg
+            .borrow(py)
+            .inner
+            .read_masked(VirtAddr(addr), &mut buf)
+            .map_err(err)?;
+        let scalar = matches!(element, ParsedType::Pointer(_)) || matches!(stride, 1 | 2 | 4 | 8);
+        for chunk in buf.chunks_exact(stride) {
+            if scalar {
+                list.append(le_uint(chunk))?;
+            } else {
+                list.append(PyBytes::new(py, chunk))?;
+            }
+        }
+        Ok(list.into_any().unbind())
+    }
+
     /// Write one field. Scalars/pointers take an int (encoded little-endian to
     /// the field's width); bitfields take an int and are written via a
     /// read-modify-write of just their storage span; sized aggregates take
@@ -2555,8 +3889,9 @@ impl Struct {
     /// Read one field, decoding by its PDB type: nested struct/union → a child
     /// cursor; pointer → the raw address; bitfield → the masked value; 1/2/4/8-
     /// byte scalars → int; a CHAR/UCHAR array → a NUL-trimmed `str` (e.g.
-    /// `_EPROCESS.ImageFileName`); anything else (other arrays, larger
-    /// aggregates) → bytes.
+    /// `_EPROCESS.ImageFileName`); any other array → a list of its elements
+    /// decoded by the same rules (struct elements are child cursors); anything
+    /// else → bytes.
     fn get_field(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let field = self
             .info
@@ -2578,6 +3913,13 @@ impl Struct {
         if let ParsedType::Struct(sname) | ParsedType::Union(sname) = &field.type_data {
             let child = self.cursor_at(py, sname, addr)?;
             return Ok(Py::new(py, child)?.into_any());
+        }
+
+        if let ParsedType::Array(element, count) = &field.type_data
+            && field.type_data.c_string_len().is_none()
+            && *count > 0
+        {
+            return self.array_field(py, element, *count, addr, field.size);
         }
 
         let sz = field.size as usize;
@@ -2762,13 +4104,43 @@ impl Struct {
         self.get_field(py, name)
     }
 
-    /// `proc["FieldName"]`; collision-proof field access (works even when a
-    /// field name shadows a method).
-    fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        if !self.info.fields.contains_key(name) {
-            return Err(pyo3::exceptions::PyKeyError::new_err(name.to_string()));
+    /// `proc["FieldName"]`: collision-proof field access (works even when a
+    /// field name shadows a method). `cursor[i]` with an int treats the cursor
+    /// as the first element of an array and returns the cursor `i` elements
+    /// along (`addr + i * size`), the typed-pointer indexing of `((T*)p)[i]`.
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(index) = key.extract::<i64>() {
+            let size = self.info.size as i64;
+            if size == 0 {
+                return Err(raise(format!("{} has no size to index by", self.name)));
+            }
+            let base = (self.base as i64).wrapping_add(index.wrapping_mul(size)) as u64;
+            let sibling = Struct {
+                dbg: self.dbg.clone_ref(py),
+                name: self.name.clone(),
+                info: Arc::clone(&self.info),
+                base,
+            };
+            return Ok(Py::new(py, sibling)?.into_any());
         }
-        self.get_field(py, name)
+        let name: String = key
+            .extract()
+            .map_err(|_| PyTypeError::new_err("Struct index must be a field name or an int"))?;
+        if !self.info.fields.contains_key(&name) {
+            return Err(pyo3::exceptions::PyKeyError::new_err(name));
+        }
+        self.get_field(py, &name)
+    }
+
+    /// Size of the layout in bytes (`sizeof`).
+    #[getter]
+    fn size(&self) -> u64 {
+        self.info.size as u64
+    }
+
+    /// Reinterpret this address as another PDB type (`(OTHER*)addr`).
+    fn cast(&self, py: Python<'_>, type_name: &str) -> PyResult<Struct> {
+        self.cursor_at(py, type_name, self.base)
     }
 
     /// Expose field names to `dir()` / tab-completion, alongside the methods.
@@ -2787,6 +4159,8 @@ impl Struct {
             "fields",
             "addr",
             "type_name",
+            "size",
+            "cast",
         ] {
             v.push(m.to_string());
         }
@@ -2841,7 +4215,7 @@ fn attach(
             memory_source,
         }
     };
-    let inner = Session::open(&spec).map_err(err)?;
+    let inner = Session::open_with_progress(&spec, &mut |line| eprintln!("{line}")).map_err(err)?;
     Ok(Debugger {
         inner: SessionHandle::Owned(Box::new(inner)),
     })

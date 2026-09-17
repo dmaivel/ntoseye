@@ -121,6 +121,7 @@ pub fn capturing() -> bool {
 }
 
 /// `print!` that honors an active [`capture`].
+#[cfg_attr(not(feature = "repl"), allow(unused_macros))]
 macro_rules! out {
     ($($arg:tt)*) => {
         $crate::output::write_fmt(format_args!($($arg)*))

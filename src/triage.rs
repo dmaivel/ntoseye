@@ -1,4 +1,3 @@
-use crate::diagnostics;
 #[cfg(test)]
 use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
 use crate::dmp::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
@@ -278,8 +277,6 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
         }
     });
 
-    validate_triage_signature(mmap, triage_hdr);
-
     let exception = parse_exception_record(mmap, triage_hdr);
 
     let service_pack_build = read_u32(triage_hdr, TRIAGE_SERVICE_PACK_BUILD);
@@ -342,6 +339,7 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
             .and_then(|dd| parse_prcb_info(mmap, triage_hdr, dd)),
         broken_driver: parse_broken_driver(mmap, triage_hdr),
         triage_overflowed: read_u32(triage_hdr, TRIAGE_OPTIONS) & TRIAGE_OPTION_OVERFLOWED != 0,
+        triage_signature_valid: triage_signature_valid(mmap, triage_hdr),
         kern_base: debugger_data.as_ref().and_then(|d| d.kern_base),
         context,
     };
@@ -443,19 +441,14 @@ fn read_string_pool_entry(
     Some(String::from_utf16_lossy(&code_units))
 }
 
-/// Validate the triage dump integrity by checking the DGRT ('TRGD' LE)
-/// signature at the offset stored in ValidOffset.
-fn validate_triage_signature(mmap: &[u8], triage_hdr: &[u8]) {
+/// Whether the DGRT ('TRGD' LE) integrity signature at the offset stored in
+/// ValidOffset is intact. An absent offset is not a mismatch.
+fn triage_signature_valid(mmap: &[u8], triage_hdr: &[u8]) -> bool {
     let valid_offset = read_u32(triage_hdr, TRIAGE_VALID_OFFSET) as usize;
     if valid_offset == 0 || valid_offset + 4 > mmap.len() {
-        return;
+        return true;
     }
-    let sig = &mmap[valid_offset..valid_offset + 4];
-    if sig != b"TRGD" {
-        diagnostics::eprint_warning(
-            "triage dump DGRT integrity signature mismatch — dump may be truncated or corrupt",
-        );
-    }
+    &mmap[valid_offset..valid_offset + 4] == b"TRGD"
 }
 
 fn parse_broken_driver(mmap: &[u8], triage_hdr: &[u8]) -> Option<String> {
@@ -787,6 +780,21 @@ mod tests {
         assert!(info.is_triage);
         assert_eq!(info.context.rip, 0xfffff80012345678);
         assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn dgrt_signature_state_is_reported_not_printed() {
+        let mut dump = make_triage_dump(&[], &[]);
+        assert!(parse_triage(&dump).unwrap().0.triage_signature_valid);
+
+        let valid_offset = 0x8000u32;
+        let field = DUMP_HEADER64_SIZE + TRIAGE_VALID_OFFSET;
+        dump[field..field + 4].copy_from_slice(&valid_offset.to_le_bytes());
+        dump[valid_offset as usize..valid_offset as usize + 4].copy_from_slice(b"TRGD");
+        assert!(parse_triage(&dump).unwrap().0.triage_signature_valid);
+
+        dump[valid_offset as usize] = b'X';
+        assert!(!parse_triage(&dump).unwrap().0.triage_signature_valid);
     }
 
     #[test]

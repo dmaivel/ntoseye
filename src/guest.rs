@@ -8,7 +8,8 @@ use crate::{
         ModuleSymbolStatus, ParsedType, SymbolIndexDiagnostic, SymbolStore, TypeInfo,
         download_jobs_parallel, le_uint,
     },
-    target::{DriverObjectInfo, ListCursor},
+    target::ListCursor,
+    target::object::DriverObjectInfo,
     types::*,
 };
 use indicatif::{ProgressBar, ProgressStyle};

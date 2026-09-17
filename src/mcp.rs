@@ -1,9 +1,11 @@
 //! MCP server: the debugger's REPL command language over the Model Context
 //! Protocol, for clients that cannot run Python themselves.
 //!
-//! One `command` tool runs a REPL line and returns its text; `resume`
-//! (non-blocking), `wait_for_stop` (bounded), `interrupt`, and `status` cover
-//! run control; `open`/`close` manage the single session slot.
+//! One `command` tool runs a REPL line with REPL semantics, bounded: a
+//! resuming command waits up to `timeout_ms` for the next stop and otherwise
+//! hands control back with the target running, an empty line waits for the
+//! next stop, `break` interrupts. Guest debug output and a run-state trailer
+//! ride along with every result. `open`/`close` manage the single session slot.
 
 use rmcp::{
     ErrorData as McpError, ServiceExt,
@@ -26,15 +28,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck};
-use crate::dbg_backend::ContinueDisposition;
 use crate::diagnostics;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::output;
-use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore};
-use crate::session::{ContinueOutcome, Session};
-use crate::types::VirtAddr;
+use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitBudget};
+use crate::session::{RunStatus, Session};
+use crate::structured;
 use crate::view;
 use crate::{Backend, TargetSpec};
 
@@ -43,6 +43,9 @@ use crate::{Backend, TargetSpec};
 struct Actor {
     ctx: Session,
     repl: Option<ReplStore>,
+    /// Cursor into the guest debug-output stream (DbgPrint); every `command`
+    /// result carries the lines captured since the previous one.
+    debug_seq: u64,
 }
 
 /// A unit of work run on the actor thread. MCP handlers are async/`Send`
@@ -70,8 +73,9 @@ const SERVICE_TICK: Duration = Duration::from_millis(20);
 
 const CONTINUE_DEFAULT_TIMEOUT_MS: u64 = 10_000;
 /// Capped well under common MCP client request timeouts (30 s is typical) so a
-/// wait returns `{stop:"running"}` and frees the single-session actor before
-/// the client gives up. No indefinite wait is offered over MCP.
+/// resuming command hands control back with the target running and frees the
+/// single-session actor before the client gives up. No indefinite wait is
+/// offered over MCP.
 const CONTINUE_MAX_TIMEOUT_MS: u64 = 20_000;
 
 fn cleanup_session(ctx: &mut Session) {
@@ -100,10 +104,14 @@ fn spawn_session(
 
     std::thread::spawn(move || {
         let is_dump = matches!(spec, TargetSpec::Dump(_));
-        let mut actor = match Session::open(&spec) {
+        let mut actor = match Session::open_with_progress(&spec, &mut |line| eprintln!("{line}")) {
             Ok(ctx) => {
                 let _ = ready_tx.send(Ok(()));
-                Actor { ctx, repl: None }
+                Actor {
+                    ctx,
+                    repl: None,
+                    debug_seq: 0,
+                }
             }
             Err(e) => {
                 let _ = ready_tx.send(Err(e.to_string()));
@@ -226,7 +234,7 @@ impl Drop for InterruptResetGuard {
 struct NtoseyeMcp {
     session: SharedSession,
     tool_router: ToolRouter<Self>,
-    /// Flipped on shutdown so an in-flight `wait_for_stop` bails out promptly
+    /// Flipped on shutdown so an in-flight bounded wait bails out promptly
     /// and the actor can run cleanup (resume the VM) before exit.
     interrupt: Arc<AtomicBool>,
 }
@@ -258,45 +266,29 @@ struct OpenArgs {
     key: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum OutputFormat {
+    #[default]
+    Text,
+    Json,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CommandArgs {
     #[schemars(
-        description = "A REPL command line in ntoseye's WinDbg-style syntax, e.g. `!process 0 0`, `dt nt!_EPROCESS ffff...`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`. Several commands may be separated by `;`. Run `help` for the list and `help <cmd>` for one command."
+        description = "A REPL command line in ntoseye's WinDbg-style syntax, e.g. `!process 0 0`, `dt nt!_EPROCESS ffff...`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, `g`, `p`, `break`. Several commands may be separated by `;`. An empty line runs nothing and just waits (up to timeout_ms) for the next stop. Run `help` for the list and `help <cmd>` for one command."
     )]
     line: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum ContinueDispositionArg {
-    Handled,
-    NotHandled,
-}
-
-impl From<ContinueDispositionArg> for ContinueDisposition {
-    fn from(disposition: ContinueDispositionArg) -> Self {
-        match disposition {
-            ContinueDispositionArg::Handled => Self::Handled,
-            ContinueDispositionArg::NotHandled => Self::NotHandled,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ResumeArgs {
-    #[schemars(
-        description = "Exception acknowledgment: handled (default) or not_handled. not_handled requires native transport support (currently KD) and otherwise returns an error."
-    )]
-    disposition: Option<ContinueDispositionArg>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WaitArgs {
     #[schemars(
         range(min = 0, max = 20000),
-        description = "How long to wait for a stop before returning {stop:\"running\"} (default 10000, max 20000; 0 means the default). Bounded by design: poll by calling again while it returns running. A long wait blocks every other tool on the single debugger session."
+        description = "How long a resuming command (g, p, gu, pa, ..., or an empty line) may wait for the next stop before returning with the target still running (default 10000, max 20000; 0 = default). Non-resuming commands ignore it. Bounded by design: keep calling with an empty line while the trailer says running."
     )]
     timeout_ms: Option<u64>,
+    #[schemars(
+        description = "text (default): the REPL's output with a one-line `[target ...]` trailer. json: a structured envelope {output, result, target, debug_output}; `result` is the typed decoding for commands that have one (the ! inspectors, lm, !process, k, bl, dt, ?, r, !analyze, ...) and null otherwise."
+    )]
+    format: Option<OutputFormat>,
 }
 
 /// A tool failure from the session, classified so a guest memory fault stays
@@ -364,130 +356,155 @@ fn json(v: Value) -> Result<CallToolResult, ToolError> {
     Ok(CallToolResult::structured(v))
 }
 
-/// Format an address/value as a `0x` hex string. JSON numbers are decimal-only,
-/// so addresses (which debugger users always read in hex) are emitted as
-/// strings.
-fn hex(v: u64) -> String {
-    format!("{v:#x}")
+/// One line of run state appended to every text result so a client always
+/// knows whether the next call may inspect registers or must wait.
+fn status_trailer(status: &RunStatus) -> String {
+    if status.running {
+        return "[target running]".to_string();
+    }
+    let mut line = format!("[target halted @ {}", status.current_thread);
+    match (status.rip, status.symbol.as_deref()) {
+        (Some(rip), Some(symbol)) => line.push_str(&format!(" {rip:#x} {symbol}")),
+        (Some(rip), None) => line.push_str(&format!(" {rip:#x}")),
+        (None, _) => {}
+    }
+    if let Some(process) = &status.stopped_process {
+        line.push_str(&format!(" | process {} ({})", process.name, process.pid));
+    }
+    if let Some(scope) = &status.attached_process {
+        line.push_str(&format!(" | scope {} ({})", scope.name, scope.pid));
+    }
+    if !status.coherent {
+        line.push_str(" | rediscovery pending");
+    }
+    line.push(']');
+    line
 }
 
-/// Render a [`ContinueOutcome`] as JSON, enriching breakpoint/exception stops
-/// with the resolved symbol and the stop's context from `ctx`.
+/// Everything one `command` call produced, before choosing a rendering.
+struct CommandOutput {
+    ok: bool,
+    text: String,
+    result: Option<serde_json::Value>,
+    status: RunStatus,
+    debug_output: Vec<serde_json::Value>,
+}
+
+impl CommandOutput {
+    fn into_text(mut self) -> CallToolResult {
+        for line in &self.debug_output {
+            if let Some(text) = line.get("text").and_then(|t| t.as_str()) {
+                self.text.push_str(&format!("[dbgprint] {text}\n"));
+            }
+        }
+        if !self.text.is_empty() && !self.text.ends_with('\n') {
+            self.text.push('\n');
+        }
+        self.text.push_str(&status_trailer(&self.status));
+        let content = vec![ContentBlock::text(self.text)];
+        if self.ok {
+            CallToolResult::success(content)
+        } else {
+            CallToolResult::error(content)
+        }
+    }
+
+    fn into_json(self) -> CallToolResult {
+        let value = serde_json::json!({
+            "ok": self.ok,
+            "output": self.text,
+            "result": self.result,
+            "target": view::to_json(&view::run_status(&self.status)),
+            "debug_output": self.debug_output,
+        });
+        let mut result = CallToolResult::structured(value);
+        if !self.ok {
+            result.is_error = Some(true);
+        }
+        result
+    }
+}
+
+/// Run one REPL line on the actor with REPL semantics, bounded by `budget`.
 ///
-/// The context is three separate answers, because collapsing them is how a
-/// client ends up trusting an attached scope many stops old as the process
-/// that is executing: `attached_process` is the operator's inspection scope,
-/// `stopped_process` owns the page tables the stopped vCPU has loaded, and
-/// `stopped_thread` is the Windows thread it is running.
-fn continue_outcome_json(ctx: &mut Session, outcome: ContinueOutcome) -> Value {
-    let (stopped_process, stopped_thread) = ctx.stopped_context();
-    let stopped_process = stopped_process.map(|p| view::to_json(&view::process(&p)));
-    let stopped_thread = stopped_thread.map(|t| view::to_json(&view::thread(&t, None)));
-    let attached_process = ctx
-        .target
-        .current_process_info
-        .as_ref()
-        .map(|p| view::to_json(&view::process(p)));
-    let symbol_at = |rip: u64| ctx.target.closest_symbol_current_context(VirtAddr(rip));
-    match outcome {
-        ContinueOutcome::Breakpoint {
-            id,
-            address,
-            symbol,
-            temporary,
-            rip,
-            condition_error,
-            ..
-        } => {
-            let bp = ctx.breakpoint(id);
-            let watch_access = bp.and_then(|bp| bp.watch_access_name());
-            serde_json::json!({
-                "stop": if watch_access.is_some() { "watchpoint" } else { "breakpoint" },
-                "id": id,
-                "address": hex(address),
-                "symbol": symbol.or_else(|| symbol_at(rip)),
-                "temporary": temporary,
-                "rip": hex(rip),
-                "attached_process": attached_process,
-                "stopped_process": stopped_process,
-                "stopped_thread": stopped_thread,
-                "watch_access": watch_access,
-                "watch_length": bp.and_then(|bp| bp.watch_length()),
-                "condition_error": condition_error,
-            })
+/// A stop the idle servicer parked since the last call is rendered first; if
+/// the line would then move the target, it is refused so the client acts on
+/// that stop instead of blowing past it. An empty line waits for the next
+/// stop. Guest debug output captured since the previous call and the run
+/// state are gathered afterwards.
+fn run_command(
+    actor: &mut Actor,
+    line: &str,
+    budget: StopWaitBudget,
+    format: OutputFormat,
+) -> CommandOutput {
+    let store = actor
+        .repl
+        .take()
+        .unwrap_or_else(|| ReplStore::new(&actor.ctx, DispatchContext::Remote(RemoteClient::Mcp)));
+    let mut state = ReplState::attach(&mut actor.ctx, store);
+    state.stop_wait = Some(budget);
+    state.line = line.trim().to_string();
+    let mut result = None;
+    let (flow, mut text) = output::capture(|| {
+        let surfaced = state.surface_parked_stop();
+        if state.line.is_empty() {
+            return state.collect_stop().map(|_| Flow::Continue);
         }
-        ContinueOutcome::Bugcheck { rip, info } => {
-            let analysis = info
-                .map(|i| analyze_bugcheck(&ctx.target, &i))
-                .or_else(|| current_bugcheck(&ctx.target))
-                .or_else(|| bugcheck_from_dump_info(&ctx.target));
-            serde_json::json!({
-                "stop": "bugcheck",
-                "rip": rip.map(hex),
-                "bugcheck": analysis.as_ref().map(|a| view::to_json(&view::bugcheck(a))),
-            })
+        if surfaced && state.line_moves_target(&state.line) {
+            outln!(
+                "{}",
+                "the target stopped since the last call (above); the command was not run so \
+                 the stop is not skipped. Re-issue it to continue."
+            );
+            return Ok(Flow::Denied);
         }
-        ContinueOutcome::Stopped {
-            rip,
-            exception_code,
-            first_chance,
-            exception_address,
-        } => serde_json::json!({
-            "stop": "exception",
-            "rip": hex(rip),
-            "exception_code": exception_code,
-            "first_chance": first_chance,
-            "exception_address": exception_address.map(hex),
-            "symbol": symbol_at(rip),
-            "attached_process": attached_process,
-            "stopped_process": stopped_process,
-            "stopped_thread": stopped_thread,
-        }),
-        ContinueOutcome::Step { rip } => serde_json::json!({
-            "stop": "step",
-            "rip": hex(rip),
-            "symbol": symbol_at(rip),
-            "attached_process": attached_process,
-            "stopped_process": stopped_process,
-            "stopped_thread": stopped_thread,
-        }),
-        ContinueOutcome::TargetReloaded {
-            kernel_base,
-            coherent,
-        } => {
-            let note = if coherent {
-                "The guest rebooted and debugger state is now fully rebuilt against \
-                 the new kernel. The VM is halted at an internal KD break-in (an \
-                 arbitrary landing site). Every prior address (eprocess, ethread, \
-                 module base, dtb) is invalid; re-enumerate before acting."
-            } else {
-                "The guest rebooted and the VM is halted at the earliest post-reboot \
-                 stop, before kernel initialization: kernel symbols are loaded, but \
-                 the loaded-module list does not exist yet, so process/thread/module \
-                 enumeration is UNAVAILABLE at this stop. Every prior address is now \
-                 invalid. Use this stop to debug early boot (breakpoints on init paths \
-                 work); otherwise resume, poll wait_for_stop, and enumerate only once \
-                 status reports coherent:true."
-            };
-            serde_json::json!({
-                "stop": "target_reloaded",
-                "kernel_base": kernel_base.map(hex),
-                "coherent": coherent,
-                "note": note,
-            })
+        let line = state.line.clone();
+        if format == OutputFormat::Json {
+            match structured::structured_command(&mut state, &line) {
+                Some(Ok(view)) => {
+                    result = Some(view::to_json(&view));
+                    return Ok(Flow::Continue);
+                }
+                Some(Err(error)) => {
+                    outln!("error: {error}");
+                    return Ok(Flow::Denied);
+                }
+                None => {}
+            }
         }
-        ContinueOutcome::Running => serde_json::json!({ "stop": "running" }),
-        ContinueOutcome::Halted { rip } => serde_json::json!({
-            "stop": "halted",
-            // Not a new event; the VM was already parked here.
-            "event": false,
-            "rip": hex(rip),
-            "symbol": symbol_at(rip),
-            "attached_process": attached_process,
-            "stopped_process": stopped_process,
-            "stopped_thread": stopped_thread,
-            "coherent": ctx.kernel_coherent(),
-        }),
+        state.dispatch_line(&line)
+    });
+    let ok = match flow {
+        Ok(Flow::Continue | Flow::Quit) => true,
+        Ok(Flow::Denied) => false,
+        Err(e) => {
+            text.push_str(&format!("error: {e}\n"));
+            false
+        }
+    };
+    let status = state.ctx.run_status();
+    // `run_status` may have ingested a stop that arrived during the command;
+    // show it now rather than on the next call.
+    let (_, late) = output::capture(|| state.surface_parked_stop());
+    text.push_str(&late);
+    actor.repl = Some(state.detach());
+
+    let page = actor.ctx.read_debug_output(actor.debug_seq);
+    actor.debug_seq = page.next_seq;
+    let debug_output = match view::to_json(&view::debug_log(&page)) {
+        serde_json::Value::Object(mut map) => match map.remove("lines") {
+            Some(serde_json::Value::Array(lines)) => lines,
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    CommandOutput {
+        ok,
+        text,
+        result,
+        status,
+        debug_output,
     }
 }
 
@@ -537,84 +554,20 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Run one line of ntoseye's WinDbg-style REPL and return its text output (styling stripped). This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope; `attach`/`detach` aliases), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; VM must be halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!pte <addr>`, `!analyze`. Commands that resume until the next stop (g, gh, gn, p, pa, pc, pt, ph, ta, tc, tt, th, gu, wt, .reboot, .crash) are refused here because they would block the session: use the resume tool then poll wait_for_stop. `t`/`si` (one instruction) is allowed. Addresses accept expressions (symbols, registers, hex, arithmetic, poi())."
+        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its output (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control has REPL semantics, bounded: `g`/`p`/`t`/`gu`/`pa`... resume and wait up to timeout_ms for the next stop, which is rendered like the REPL renders it; if none arrives the result ends with `[target running]` and the target keeps running. Call again with an EMPTY line to keep waiting for that stop, or `break` to interrupt. Commands that need a halted target report `VM is running` immediately (they never wait). A stop that happened between calls is rendered at the top of the next result; a resuming command issued against such an unseen stop is refused once so it is not skipped. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`. format=json returns {ok, output, result, target, debug_output} with a typed `result` for commands that have a structured decoding."
     )]
     async fn command(
         &self,
-        Parameters(CommandArgs { line }): Parameters<CommandArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(move |actor| {
-            let store = actor.repl.take().unwrap_or_else(|| {
-                ReplStore::new(&actor.ctx, DispatchContext::Remote(RemoteClient::Mcp))
-            });
-            let mut state = ReplState::attach(&mut actor.ctx, store);
-            state.line = line.trim().to_string();
-            let (result, mut text) = output::capture(|| state.dispatch_line(&line));
-            actor.repl = Some(state.detach());
-            let ok = match result {
-                Ok(Flow::Continue | Flow::Quit) => true,
-                Ok(Flow::Denied) => false,
-                Err(e) => {
-                    text.push_str(&format!("error: {e}\n"));
-                    false
-                }
-            };
-            let content = vec![ContentBlock::text(text)];
-            Ok(if ok {
-                CallToolResult::success(content)
-            } else {
-                CallToolResult::error(content)
-            })
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Read-only run-control state (where am I): {running, current_thread, rip, symbol, attached_process:{pid,name,eprocess}|null, stopped_process:{pid,name,eprocess}|null, stopped_thread|null, coherent, kernel_base}. The context fields are three different answers: attached_process is the inspection scope memory commands read through (set with `.process`, persists across resumes), stopped_process owns the page tables the stopped vCPU has loaded, and stopped_thread is the Windows thread it is running - a thread attached to another address space runs on borrowed page tables, so the last two can legitimately differ. rip/symbol are null while running. coherent=false means the guest rebooted and rediscovery is still in progress, so enumeration is not yet meaningful; resume + wait_for_stop rather than reading stale state."
-    )]
-    async fn status(&self) -> Result<CallToolResult, McpError> {
-        self.run(|actor| json(view::to_json(&view::run_status(&actor.ctx.run_status()))))
-            .await
-    }
-
-    #[tool(
-        description = "Resume the VM with an optional exception acknowledgment (handled by default, or not_handled; KD only). Non-blocking: returns {running:true, already_running, disposition}. To wait for the next stop, call wait_for_stop."
-    )]
-    async fn resume(
-        &self,
-        Parameters(ResumeArgs { disposition }): Parameters<ResumeArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let disposition =
-            disposition.map_or(ContinueDisposition::Handled, ContinueDisposition::from);
-        self.run(move |actor| {
-            let ctx = &mut actor.ctx;
-            // Drain any stop the servicer caught so a real halt that already
-            // surfaced is reflected as `already_running:false` and the resume
-            // actually advances past it.
-            ctx.settle_pending_stop()?;
-            let already_running = ctx.backend.is_running();
-            if !already_running {
-                ctx.resume_with_disposition(disposition)?;
-            }
-            json(serde_json::json!({
-                "running": true,
-                "already_running": already_running,
-                "disposition": disposition.name(),
-            }))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Wait up to timeout_ms for the next stop WITHOUT resuming (default 10000, max 20000; 0 = default). Returns {stop:\"breakpoint\"|\"watchpoint\"|\"exception\"|\"bugcheck\"|\"step\"|\"target_reloaded\"} with context, {stop:\"running\"} if the wait elapsed (call again; no stops are lost between calls), or {stop:\"halted\"} immediately if the VM is already parked with nothing pending. Does not resume; call resume to advance. Poll with short timeouts; there is no indefinite wait."
-    )]
-    async fn wait_for_stop(
-        &self,
-        Parameters(WaitArgs { timeout_ms }): Parameters<WaitArgs>,
+        Parameters(CommandArgs {
+            line,
+            timeout_ms,
+            format,
+        }): Parameters<CommandArgs>,
         ct: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let timeout_ms = optional_timeout_ms(timeout_ms)?;
-        // Per-request cancel flag the actor's wait loop polls. Set when the
+        let format = format.unwrap_or_default();
+        // Per-request cancel flag the REPL's bounded wait polls. Set when the
         // client cancels this request (`ct`) or the server is shutting down
         // (`self.interrupt`), so an in-flight wait returns and frees the actor
         // instead of pinning it for the whole timeout.
@@ -640,43 +593,16 @@ impl NtoseyeMcp {
         };
         let result = self
             .run(move |actor| {
-                let ctx = &mut actor.ctx;
-                let outcome =
-                    ctx.wait_for_stop_bounded(Some(Duration::from_millis(timeout_ms)), &cancel)?;
-                json(continue_outcome_json(ctx, outcome))
+                let budget = StopWaitBudget::new(Duration::from_millis(timeout_ms), cancel);
+                let output = run_command(actor, &line, budget, format);
+                Ok(match format {
+                    OutputFormat::Text => output.into_text(),
+                    OutputFormat::Json => output.into_json(),
+                })
             })
             .await;
         watcher.abort();
         result
-    }
-
-    #[tool(
-        description = "Pause a running VM (needed before k, r, bp, t and other halted-only commands); returns {already_halted, rip}. If already halted, no action is taken. Resume with resume."
-    )]
-    async fn interrupt(&self) -> Result<CallToolResult, McpError> {
-        self.run(|actor| {
-            let ctx = &mut actor.ctx;
-            // A stop the servicer already caught means the VM is halted now;
-            // ingest it so `already_halted` is truthful and we don't send a
-            // redundant break-in over it.
-            ctx.settle_pending_stop()?;
-            let already_halted = !ctx.backend.is_running();
-            let event_rip = if already_halted {
-                None
-            } else {
-                ctx.interrupt()?.program_counter
-            };
-            let rip = event_rip.or_else(|| {
-                ctx.read_registers()
-                    .ok()
-                    .and_then(|r| ctx.register_map.read_u64("rip", &r).ok())
-            });
-            json(serde_json::json!({
-                "already_halted": already_halted,
-                "rip": rip.map(hex),
-            }))
-        })
-        .await
     }
 
     #[tool(
@@ -829,21 +755,22 @@ impl rmcp::ServerHandler for NtoseyeMcp {
             .with_instructions(
                 "ntoseye: a WinDbg-like kernel debugger for a Windows VM (KVM/QEMU, \
                  VMware, UTM) or a crash dump. Drive it with the `command` tool, which \
-                 runs one REPL line in WinDbg-style syntax and returns its text; `help` \
-                 lists commands. The guest runs freely by default: memory, process, \
-                 module, and struct commands work live, while registers, backtraces, \
-                 stepping, and breakpoint changes need the VM halted (call `interrupt` \
-                 first, or be stopped at a breakpoint). Run-control is split so no \
-                 request blocks: `resume` returns immediately, `wait_for_stop` polls \
-                 (bounded) for the next stop, `status` reports where the target is now. \
-                 Typical breakpoint flow: interrupt, command(\"bp nt!NtCreateFile\"), \
-                 resume, wait_for_stop until stop:\"breakpoint\", then command(\"k\"). \
-                 After a reboot, status reports coherent:false until rediscovery \
-                 finishes; wait for it rather than enumerating stale state. Addresses \
-                 in JSON results are 0x hex strings. If no session is open and the \
-                 user has not said how the VM is exposed (kd socket path, kdnet key, \
-                 gdb address, or a dump file), ask them before calling `open` rather \
-                 than guessing; the defaults only fit the documented QEMU setup.",
+                 runs one REPL line in WinDbg-style syntax and returns its text plus a \
+                 `[target ...]` trailer; `help` lists commands. The guest runs freely by \
+                 default: memory, process, module, and struct commands work live, while \
+                 registers, backtraces, stepping, and breakpoint changes need the VM \
+                 halted (`break` first, or be stopped at a breakpoint). Resuming commands \
+                 (`g`, `p`, `t`, `gu`, ...) wait up to timeout_ms for the next stop and \
+                 render it; if the trailer says running, call `command` with an empty \
+                 line to keep waiting (no stop is lost between calls). Typical breakpoint \
+                 flow: `break`, `bp nt!NtCreateFile`, `g` (repeat empty-line calls until \
+                 the breakpoint renders), then `k`. After a reboot the trailer says \
+                 rediscovery pending until the kernel is rediscovered; wait rather than \
+                 enumerating stale state. Use format=json when you need typed values \
+                 instead of parsing text. If no session is open and the user has not said \
+                 how the VM is exposed (kd socket path, kdnet key, gdb address, or a dump \
+                 file), ask them before calling `open` rather than guessing; the defaults \
+                 only fit the documented QEMU setup.",
             )
     }
 }
@@ -1216,7 +1143,14 @@ mod tests {
     async fn command_requires_session() {
         let mcp = empty_mcp();
         let err = mcp
-            .command(Parameters(CommandArgs { line: "lm".into() }))
+            .command(
+                Parameters(CommandArgs {
+                    line: "lm".into(),
+                    timeout_ms: None,
+                    format: None,
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap_err();
         assert!(err.message.contains("no debugger session"), "{err:?}");

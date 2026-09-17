@@ -5,9 +5,9 @@ use tabled::builder::Builder;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::repl::*;
-use crate::target::{
-    DiagnosticMetric, DiagnosticValue, ListTermination, ResourceDetail, SystemMemorySummary,
-};
+use crate::target::mm::SystemMemorySummary;
+use crate::target::object::ResourceDetail;
+use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination};
 use crate::types::VirtAddr;
 use crate::ui;
 

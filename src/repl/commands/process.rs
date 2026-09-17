@@ -13,9 +13,10 @@ use crate::guest::{ModuleInfo, ProcessInfo, StructRef};
 use crate::memory::PAGE_SIZE;
 use crate::session::processor_index_from_backend_thread_id;
 use crate::symbols::{ModuleSymbolStatus, glob_matches};
+use crate::target::mm::MemoryRegionInfo;
 use crate::target::{
-    AttachReport, MemoryRegionInfo, Target, ThreadInfo, decimal_pid_literal, kthread_state_name,
-    process_matches, wait_reason_name,
+    AttachReport, Target, ThreadInfo, decimal_pid_literal, kthread_state_name, process_matches,
+    wait_reason_name,
 };
 use crate::triage_report::filetime_to_iso;
 use crate::types::{Value, VirtAddr};
@@ -843,19 +844,7 @@ impl ReplState<'_> {
     }
 
     fn windows_thread_candidates(&mut self) -> Result<Vec<ThreadInfo>> {
-        let mut threads = self.ctx.target.enumerate_threads()?;
-        let active = self.ctx.active_thread_map();
-        for (_, thread) in active.values() {
-            if !threads.iter().any(|known| known.ethread == thread.ethread) {
-                threads.push(thread.clone());
-            }
-        }
-        if threads.is_empty()
-            && let Some(thread) = self.ctx.target.windows_thread_selection.clone()
-        {
-            threads.push(thread);
-        }
-        Ok(threads)
+        self.ctx.windows_thread_candidates()
     }
 
     fn thread_matches_value(thread: &ThreadInfo, value: Option<u64>) -> bool {
@@ -1073,12 +1062,11 @@ impl ReplState<'_> {
     fn cmd_dot_thread(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let Some(selector) = invocation.arg(0) else {
             let current = self.ctx.current_thread.clone();
-            if let Err(error) = self.ctx.set_current_thread(&current) {
+            if let Err(error) = self.ctx.reset_windows_thread() {
                 error!("failed to reset thread context: {}", error);
                 return Ok(());
             }
             self.clear_selected_frame();
-            self.ctx.target.clear_current_windows_thread_context();
             self.caches.refresh_symbol_context(&self.ctx.target);
             outln!("reset thread context to {}\n", current);
             return Ok(());
@@ -1091,7 +1079,6 @@ impl ReplState<'_> {
                 Vec::new()
             }
         };
-        let active = self.ctx.active_thread_map();
         let target_value = Expr::eval_with_radix(selector, &self.ctx.target, self.radix)
             .ok()
             .map(|address| address.0);
@@ -1117,27 +1104,27 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        if let Some((vcpu, _)) = active.get(&thread.ethread.0) {
-            if let Err(error) = self.ctx.set_current_thread(vcpu) {
-                error!("failed to switch to vCPU {}: {}", vcpu, error);
+        let thread = thread.clone();
+        match self.ctx.select_windows_thread(&thread) {
+            Ok(Some(vcpu)) => {
+                self.clear_selected_frame();
+                outln!(
+                    "switched register context to {} (ETHREAD {})\n",
+                    vcpu,
+                    ui::addr(thread.ethread.0)
+                );
+            }
+            Ok(None) => {
+                self.clear_selected_frame();
+                outln!(
+                    "selected parked thread context ETHREAD {} (stack only)\n",
+                    ui::addr(thread.ethread.0)
+                );
+            }
+            Err(error) => {
+                error!("failed to switch thread context: {}", error);
                 return Ok(());
             }
-            self.clear_selected_frame();
-            self.ctx
-                .target
-                .set_current_windows_thread_context((*thread).clone());
-            outln!(
-                "switched register context to {} (ETHREAD {})\n",
-                vcpu,
-                ui::addr(thread.ethread.0)
-            );
-        } else {
-            self.ctx.select_parked_windows_thread(thread);
-            self.clear_selected_frame();
-            outln!(
-                "selected parked thread context ETHREAD {} (stack only)\n",
-                ui::addr(thread.ethread.0)
-            );
         }
         self.caches.refresh_symbol_context(&self.ctx.target);
         Ok(())

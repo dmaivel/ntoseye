@@ -146,7 +146,8 @@ impl ReplState<'_> {
             error!("{err}");
             return Ok(());
         }
-        self.exception_policies
+        self.ctx
+            .exception_policies
             .set_with_options(code, mode, command, final_action);
         let alias = exception_alias(code)
             .map(|alias| format!(" ({alias})"))
@@ -179,7 +180,7 @@ impl ReplState<'_> {
     }
 
     fn cmd_sx(&mut self) -> Result<()> {
-        let entries: Vec<_> = self.exception_policies.entries().collect();
+        let entries: Vec<_> = self.ctx.exception_policies.entries().collect();
         if entries.is_empty() {
             outln!("No exception policies configured (ordinary exceptions break by default).\n");
             return Ok(());
@@ -209,7 +210,7 @@ impl ReplState<'_> {
     }
 
     fn cmd_sxr(&mut self) -> Result<()> {
-        self.exception_policies.reset();
+        self.ctx.exception_policies.reset();
         outln!("Exception policies reset; ordinary exceptions break by default.\n");
         Ok(())
     }

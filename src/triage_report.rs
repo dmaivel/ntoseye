@@ -1083,6 +1083,7 @@ mod tests {
             }),
             broken_driver: Some("sample.sys".into()),
             triage_overflowed: true,
+            triage_signature_valid: true,
             kern_base: Some(0xffff_f800_0000_0000),
         }
     }

@@ -201,9 +201,38 @@ fn render_trace_frame(frame: &TraceFrame, depth: usize) {
 }
 
 impl ReplState<'_> {
+    /// Collect the next stop for a host that hands control back while the
+    /// target runs: a stop the idle servicer already parked is rendered at
+    /// once; otherwise wait (within [`ReplState::stop_wait`]) for one and
+    /// render it. A halted target with nothing pending returns immediately.
+    pub fn collect_stop(&mut self) -> Result<()> {
+        if self.surface_parked_stop() {
+            return Ok(());
+        }
+        if self.ctx.backend.is_running() {
+            self.clear_selected_frame();
+            let waited = self.wait_for_stop_after_resume();
+            self.flush_notices();
+            return waited;
+        }
+        Ok(())
+    }
+
+    /// Render a stop the idle servicer parked since the last dispatch, if
+    /// any, without waiting. Returns whether one was rendered.
+    pub fn surface_parked_stop(&mut self) -> bool {
+        let Some(outcome) = self.ctx.take_parked_stop() else {
+            return false;
+        };
+        self.clear_selected_frame();
+        print_parked_outcome(self.ctx, &self.caches, outcome);
+        self.flush_notices();
+        true
+    }
+
     pub fn interrupt_running_vm(&mut self) -> Result<()> {
         self.clear_selected_frame();
-        match surface_pending_stop(self.ctx, &self.caches, &self.exception_policies) {
+        match surface_pending_stop(self.ctx, &self.caches) {
             Ok(true) => {
                 if let Err(error) = self.apply_buffered_exception_policy() {
                     error!("failed to apply exception policy: {error}");
@@ -271,7 +300,7 @@ impl ReplState<'_> {
         let Some(event) = self.ctx.last_event.as_ref().map(|last| last.stop.clone()) else {
             return Ok(());
         };
-        match self.exception_policies.action_for(&event) {
+        match self.ctx.exception_policies.action_for(&event) {
             ExceptionPolicyAction::Surface {
                 command: Some(command),
             } => self.run_exception_policy_command(Some(&command)),
@@ -301,7 +330,7 @@ impl ReplState<'_> {
     fn continue_vm_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
         self.clear_selected_frame();
         if self.ctx.backend.is_running() {
-            match surface_pending_stop(self.ctx, &self.caches, &self.exception_policies) {
+            match surface_pending_stop(self.ctx, &self.caches) {
                 Ok(true) => {
                     if let Err(error) = self.apply_buffered_exception_policy() {
                         error!("failed to apply exception policy: {error}");
@@ -322,17 +351,17 @@ impl ReplState<'_> {
     }
 
     pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
-        if !self.quiet_stops {
+        if !self.quiet_stops && self.stop_wait.is_none() {
             outln!(
                 "{}",
                 "VM running, waiting for stop (Ctrl+C to pause)...".bright_black()
             );
         }
 
-        INTERRUPT_REQUESTED.store(false, Ordering::SeqCst);
+        self.ctx.target.interrupt.store(false, Ordering::SeqCst);
 
         loop {
-            let interrupt_requested = INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst);
+            let interrupt_requested = self.ctx.target.interrupt.swap(false, Ordering::SeqCst);
             let stop_result = if interrupt_requested {
                 outln!();
                 match self.ctx.backend.try_wait_for_stop(REPL_STOP_POLL) {
@@ -349,7 +378,7 @@ impl ReplState<'_> {
                     let resolution = match self.ctx.classify_stop_event(event) {
                         Ok(StopResolution::Resumed) => continue,
                         Ok(StopResolution::ModulesChanged) => {
-                            INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
+                            self.ctx.target.interrupt.store(true, Ordering::SeqCst);
                             continue;
                         }
                         Ok(resolution) => resolution,
@@ -442,7 +471,7 @@ impl ReplState<'_> {
                             break;
                         }
                         StopResolution::Stopped { event, .. } => {
-                            match self.exception_policies.action_for(&event) {
+                            match self.ctx.exception_policies.action_for(&event) {
                                 ExceptionPolicyAction::Surface { command } => {
                                     if let Err(error) =
                                         self.run_exception_policy_command(command.as_deref())
@@ -512,6 +541,21 @@ impl ReplState<'_> {
                             break;
                         }
                     }
+                }
+                Ok(None)
+                    if self
+                        .stop_wait
+                        .as_ref()
+                        .is_some_and(StopWaitBudget::exhausted) =>
+                {
+                    outln!(
+                        "{}",
+                        ui::muted(
+                            "target still running; send an empty command to keep waiting, \
+                             or `break` to interrupt"
+                        )
+                    );
+                    break;
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -671,6 +715,12 @@ impl ReplState<'_> {
 
         let result = self.continue_vm_with_disposition(disposition);
 
+        // A bounded wait that elapsed leaves the target running toward the
+        // temporary site; it is consumed by its own hit, so leave it armed.
+        if self.ctx.backend.is_running() {
+            return result.map(|_| false);
+        }
+
         // Temporary sites are removed when the stop is consumed (a one-shot hit
         // clears itself); anything else left in place is a real problem.
         if let Err(e) =
@@ -799,7 +849,7 @@ impl ReplState<'_> {
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<bool> {
         for _ in 0..STEP_UNTIL_LIMIT {
-            if INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst) {
+            if self.ctx.target.interrupt.swap(false, Ordering::SeqCst) {
                 outln!();
                 return Ok(true);
             }
@@ -920,7 +970,7 @@ impl ReplState<'_> {
         let mut instructions = 0usize;
 
         while instructions < limit {
-            if INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst) {
+            if self.ctx.target.interrupt.swap(false, Ordering::SeqCst) {
                 outln!("wt interrupted after {instructions} instructions");
                 break;
             }

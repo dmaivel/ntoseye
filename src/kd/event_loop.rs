@@ -7,8 +7,6 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use owo_colors::OwoColorize;
-
 use super::transport::KdTransport;
 use crate::dbg_backend::DebugLog;
 use crate::error::{Error, Result};
@@ -184,6 +182,7 @@ pub fn kd_initial_timeout() -> Result<Duration> {
 pub fn poll_for_initial_break(
     framing: &mut KdFraming<KdTransport>,
     budget: Duration,
+    progress: &mut dyn FnMut(&str),
 ) -> Result<StateChange> {
     let deadline = Instant::now() + budget;
 
@@ -235,10 +234,7 @@ pub fn poll_for_initial_break(
                     budget.saturating_sub(deadline.saturating_duration_since(Instant::now()));
                 let now = Instant::now();
                 if now >= next_progress_at {
-                    eprintln!(
-                        "{}",
-                        format!("kd: no response after {}s", elapsed.as_secs()).bright_black()
-                    );
+                    progress(&format!("kd: no response after {}s", elapsed.as_secs()));
                     next_progress_at += KD_INITIAL_PROGRESS_INTERVAL;
                 }
                 if now >= deadline {

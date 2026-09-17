@@ -1,5 +1,6 @@
 use argh::from_env;
 use argh::{FromArgValue, FromArgs};
+use owo_colors::OwoColorize;
 use std::mem::take;
 
 use std::path::PathBuf;
@@ -366,7 +367,9 @@ fn run() -> Result<()> {
         Some(dump) => TargetSpec::Dump(dump.clone()),
         None => live_spec(&args, backend),
     };
-    let mut ctx = Session::open(&spec)?;
+    let mut ctx = Session::open_with_progress(&spec, &mut |line| {
+        eprintln!("{}", line.bright_black());
+    })?;
     if args.plain_repl {
         start_plain_repl(&mut ctx)
     } else {

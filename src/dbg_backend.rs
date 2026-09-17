@@ -650,6 +650,13 @@ pub trait DebugBackend {
         DebugOutputPage::default()
     }
 
+    /// Drain operator-facing diagnostics the backend raised mid-operation
+    /// (e.g. breakpoint table entries it reclaimed from a dead session).
+    /// Default empty; the session forwards them to the host.
+    fn take_notices(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Return (and clear) whether a kernel module/driver loaded or unloaded since
     /// the last call, used to invalidate module-dependent caches (driver
     /// completions). Default `false`: backends without a load event rely instead

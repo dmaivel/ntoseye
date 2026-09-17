@@ -141,6 +141,7 @@ pub mod disasm;
 pub mod dmp;
 pub mod dump_writer;
 pub mod error;
+pub mod exception_policy;
 pub mod expr;
 pub mod gdb;
 pub mod guest;
@@ -155,8 +156,11 @@ pub mod ntstatus;
 pub mod phys;
 #[cfg(feature = "python")]
 pub mod python;
+#[cfg(feature = "repl")]
 pub mod repl;
 pub mod session;
+#[cfg(feature = "mcp")]
+pub mod structured;
 pub mod symbols;
 pub mod target;
 pub mod trapframe;
@@ -164,6 +168,7 @@ pub mod triage;
 pub mod triage_report;
 pub mod types;
 pub mod typeview;
+#[cfg(feature = "repl")]
 pub mod ui;
 pub mod unwind;
 #[cfg(any(feature = "mcp", feature = "python"))]
