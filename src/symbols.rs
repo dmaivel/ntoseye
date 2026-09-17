@@ -92,6 +92,16 @@ struct IndexedSymbol {
     compiland: Option<String>,
 }
 
+/// One address-bearing record of the RVA-sorted index behind
+/// [`SymbolStore::closest_symbol`]. Records sharing an RVA are ordered by
+/// the resolution preference (public first, then name, then compiland), so
+/// the first record of an equal-RVA run is the one to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddressEntry {
+    rva: u32,
+    name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolCandidate {
     pub module: String,
@@ -142,6 +152,8 @@ pub struct SymbolStore {
     /// duplicates retain their compiland identity; resolution prefers public
     /// records when present but never collapses distinct candidate addresses.
     symbol_rvas: DashMap<u128, HashMap<String, Vec<IndexedSymbol>>>,
+    /// GUID -> the same records sorted by RVA, for address-to-symbol lookups.
+    symbol_addresses: DashMap<u128, Vec<AddressEntry>>,
     source_lines: DashMap<u128, Vec<SourceLineEntry>>,
     index_diagnostics: DashMap<u128, Vec<SymbolIndexDiagnostic>>,
 
@@ -881,7 +893,7 @@ mod tests {
                 dtb,
             },
         );
-        store.symbol_rvas.insert(
+        store.publish_symbol_rvas(
             1,
             HashMap::from([(
                 "worker".to_string(),
@@ -929,7 +941,7 @@ mod tests {
                 dtb,
             },
         );
-        store.symbol_rvas.insert(
+        store.publish_symbol_rvas(
             1,
             HashMap::from([(
                 "worker".to_string(),
@@ -952,6 +964,36 @@ mod tests {
             store.find_symbol_with_module(dtb, "driver!worker").unwrap(),
             Some((base + 0x300_u64, "driver".to_string()))
         );
+    }
+
+    #[test]
+    fn closest_symbol_picks_nearest_lower_record_and_prefers_public_at_ties() {
+        let store = SymbolStore::new();
+        let base = VirtAddr(0x0000_0001_8000_0000);
+        let mut rvas = HashMap::new();
+        let mut insert = |name: &str, rva, visibility, compiland: Option<&str>| {
+            insert_symbol_rva(
+                &mut rvas,
+                name.to_string(),
+                rva,
+                visibility,
+                compiland.map(str::to_string),
+            );
+        };
+        insert("zeta", 0x100, SymbolVisibility::Public, None);
+        insert("alpha", 0x100, SymbolVisibility::Private, Some("a.obj"));
+        insert("later", 0x200, SymbolVisibility::Private, Some("b.obj"));
+        insert("far", 0x8000, SymbolVisibility::Public, None);
+        store.publish_symbol_rvas(1, rvas);
+
+        let closest = |rva: u64| store.closest_symbol(1, base, base + rva);
+        assert_eq!(closest(0x0), None);
+        assert_eq!(closest(0x100), Some(("zeta".to_string(), 0)));
+        assert_eq!(closest(0x1ff), Some(("zeta".to_string(), 0xff)));
+        assert_eq!(closest(0x200), Some(("later".to_string(), 0)));
+        assert_eq!(closest(0x200 + 8192), Some(("later".to_string(), 8192)));
+        assert_eq!(closest(0x200 + 8193), None);
+        assert_eq!(closest(0x8010), Some(("far".to_string(), 0x10)));
     }
 
     #[test]
@@ -2002,6 +2044,29 @@ fn preferred_symbol_records(records: &[IndexedSymbol]) -> Vec<&IndexedSymbol> {
         .collect()
 }
 
+fn address_index(rvas: &HashMap<String, Vec<IndexedSymbol>>) -> Vec<AddressEntry> {
+    let rank = |visibility| match visibility {
+        SymbolVisibility::Public => 0u8,
+        SymbolVisibility::Private => 1,
+    };
+    let mut entries: Vec<(u32, u8, &String, &Option<String>)> = rvas
+        .iter()
+        .flat_map(|(name, records)| {
+            records
+                .iter()
+                .map(move |record| (record.rva, rank(record.visibility), name, &record.compiland))
+        })
+        .collect();
+    entries.sort_unstable();
+    entries
+        .into_iter()
+        .map(|(rva, _, name, _)| AddressEntry {
+            rva,
+            name: name.clone(),
+        })
+        .collect()
+}
+
 fn record_index_diagnostic(
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
     phase: &'static str,
@@ -2216,6 +2281,7 @@ impl SymbolStore {
             index_enums: DashMap::new(),
             struct_defs: DashMap::new(),
             symbol_rvas: DashMap::new(),
+            symbol_addresses: DashMap::new(),
             source_lines: DashMap::new(),
             index_diagnostics: DashMap::new(),
             type_cache: DashMap::new(),
@@ -2304,7 +2370,7 @@ impl SymbolStore {
             self.type_cache
                 .insert((guid, type_info.name.clone()), Some(Arc::new(type_info)));
         }
-        self.symbol_rvas.insert(
+        self.publish_symbol_rvas(
             guid,
             symbols
                 .iter()
@@ -2444,6 +2510,7 @@ impl SymbolStore {
             self.index_types.remove(&guid);
             self.index_enums.remove(&guid);
             self.symbol_rvas.remove(&guid);
+            self.symbol_addresses.remove(&guid);
             self.source_lines.remove(&guid);
             self.index_diagnostics.remove(&guid);
             self.type_cache
@@ -4183,7 +4250,7 @@ impl SymbolStore {
         // leave a partially indexed PDB that later lookups mistake for success.
         self.index
             .insert(guid, SymbolIndex::from_names(parsed.strings));
-        self.symbol_rvas.insert(guid, parsed.rvas);
+        self.publish_symbol_rvas(guid, parsed.rvas);
         self.source_lines.insert(guid, parsed.source_lines);
         self.index_types
             .insert(guid, SymbolIndex::from_names(parsed.type_strings));
@@ -4192,6 +4259,11 @@ impl SymbolStore {
         self.struct_defs.insert(guid, parsed.struct_defs);
         self.index_diagnostics.insert(guid, parsed.diagnostics);
         Ok(())
+    }
+
+    fn publish_symbol_rvas(&self, guid: u128, rvas: HashMap<String, Vec<IndexedSymbol>>) {
+        self.symbol_addresses.insert(guid, address_index(&rvas));
+        self.symbol_rvas.insert(guid, rvas);
     }
 
     fn symbol_records(&self, guid: u128, symbol_name: &str) -> Vec<IndexedSymbol> {
@@ -4272,31 +4344,17 @@ impl SymbolStore {
         address: VirtAddr,
     ) -> Option<(String, u32)> {
         let target_rva = u32::try_from(address.0.checked_sub(base_address.0)?).ok()?;
-        let symbols = self.symbol_rvas.get(&guid)?;
-        symbols
-            .iter()
-            .flat_map(|(name, records)| {
-                records.iter().filter_map(move |record| {
-                    target_rva
-                        .checked_sub(record.rva)
-                        .filter(|offset| *offset <= 8192)
-                        .map(|offset| (name, offset, record.visibility, &record.compiland))
-                })
-            })
-            .min_by(|left, right| {
-                left.1
-                    .cmp(&right.1)
-                    .then_with(|| {
-                        let rank = |visibility| match visibility {
-                            SymbolVisibility::Public => 0,
-                            SymbolVisibility::Private => 1,
-                        };
-                        rank(left.2).cmp(&rank(right.2))
-                    })
-                    .then_with(|| left.0.cmp(right.0))
-                    .then_with(|| left.3.cmp(right.3))
-            })
-            .map(|(name, offset, _, _)| (name.clone(), offset))
+        let entries = self.symbol_addresses.get(&guid)?;
+        let last = entries
+            .partition_point(|entry| entry.rva <= target_rva)
+            .checked_sub(1)?;
+        let rva = entries[last].rva;
+        let offset = target_rva - rva;
+        if offset > 8192 {
+            return None;
+        }
+        let first = entries.partition_point(|entry| entry.rva < rva);
+        Some((entries[first].name.clone(), offset))
     }
 
     fn struct_size_by_name(&self, guid: u128, name: &str) -> u64 {
