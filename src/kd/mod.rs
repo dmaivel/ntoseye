@@ -682,6 +682,10 @@ pub struct KdBackend {
     /// Page-table entries read for the host page walk this halt; see
     /// [`Self::read_page_table_bytes`].
     table_lines: LineCache<u64>,
+    /// Most bytes one virtual-read fill asks for: a chunk, until a reply
+    /// comes back shorter than asked (a KDNET datagram carries 0x448), after
+    /// which fills stay within what the transport returns.
+    virtual_fill_cap: usize,
     /// Set after an explicit frontend cleanup. Prevents `Drop` from overriding
     /// a deliberate halted exit after breakpoint restoration failed.
     exit_prepared: bool,
@@ -934,6 +938,7 @@ impl KdBackend {
             efer_cache: HashMap::new(),
             virtual_lines: LineCache::default(),
             table_lines: LineCache::default(),
+            virtual_fill_cap: KD_REMOTE_MEMORY_CHUNK,
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -2113,7 +2118,9 @@ impl KdBackend {
     /// structure cost one request between them, and a large read costs the
     /// same chunks it always did. Lines never cross a page, and a page is
     /// mapped or not as a whole, so a refused fill is exactly the hole a
-    /// page walk reports.
+    /// page walk reports. A reply shorter than the fill is the transport's
+    /// limit, not a hole: its whole lines are kept and the rest asked for
+    /// again.
     fn read_virtual_bytes(&mut self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
         self.require_remote_memory_stopped()?;
         let processor = self.current_processor;
@@ -2136,7 +2143,7 @@ impl KdBackend {
             if self.virtual_lines.get((processor, line)).is_none() {
                 let wanted = request_end.next_multiple_of(KD_VIRTUAL_LINE as u64) - line;
                 let to_page_end = PAGE_SIZE as u64 - (line & (PAGE_SIZE as u64 - 1));
-                let fill = wanted.min(KD_REMOTE_MEMORY_CHUNK as u64).min(to_page_end) as usize;
+                let fill = wanted.min(self.virtual_fill_cap as u64).min(to_page_end) as usize;
                 let data = match with_framing_read_timeout(
                     self.framing()?,
                     KD_REQUEST_TIMEOUT,
@@ -2150,7 +2157,14 @@ impl KdBackend {
                     "kd: remote virtual read {line:#x}+{fill:#x} -> {:#x}",
                     data.len()
                 );
-                for (index, piece) in data.chunks(KD_VIRTUAL_LINE).enumerate() {
+                let whole = data.len() / KD_VIRTUAL_LINE * KD_VIRTUAL_LINE;
+                if whole == 0 {
+                    return Err(refused(completed));
+                }
+                if data.len() < fill {
+                    self.virtual_fill_cap = whole;
+                }
+                for (index, piece) in data[..whole].chunks(KD_VIRTUAL_LINE).enumerate() {
                     self.virtual_lines.insert(
                         (processor, line + (index * KD_VIRTUAL_LINE) as u64),
                         piece.to_vec(),
@@ -2161,13 +2175,7 @@ impl KdBackend {
                 .virtual_lines
                 .get((processor, line))
                 .expect("line was just inserted");
-            // The target answers a line with fewer bytes only when it runs
-            // into an unmapped page, which within one page is never.
-            let available = data.len().saturating_sub(offset);
-            if available == 0 {
-                return Err(refused(completed));
-            }
-            let end = completed + available.min(buf.len() - completed);
+            let end = completed + (data.len() - offset).min(buf.len() - completed);
             buf[completed..end].copy_from_slice(&data[offset..offset + end - completed]);
             completed = end;
         }
@@ -3753,6 +3761,7 @@ mod tests {
             efer_cache: HashMap::new(),
             virtual_lines: LineCache::default(),
             table_lines: LineCache::default(),
+            virtual_fill_cap: KD_REMOTE_MEMORY_CHUNK,
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -3870,6 +3879,7 @@ mod tests {
             efer_cache: HashMap::new(),
             virtual_lines: LineCache::default(),
             table_lines: LineCache::default(),
+            virtual_fill_cap: KD_REMOTE_MEMORY_CHUNK,
             exit_prepared: false,
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
@@ -3986,9 +3996,16 @@ mod tests {
     /// Like a real one it answers a request that touches mapped memory in
     /// full, with zeros where no region says otherwise, and refuses one that
     /// touches none.
-    fn serve_virtual_memory(
+    fn serve_virtual_memory(kernel: UnixStream, regions: Vec<(u64, Vec<u8>)>) -> JoinHandle<usize> {
+        serve_virtual_memory_capped(kernel, regions, usize::MAX)
+    }
+
+    /// [`serve_virtual_memory`] over a transport whose reply carries at most
+    /// `reply_cap` bytes of data, as a KDNET datagram does.
+    fn serve_virtual_memory_capped(
         mut kernel: UnixStream,
         mut regions: Vec<(u64, Vec<u8>)>,
+        reply_cap: usize,
     ) -> JoinHandle<usize> {
         const UNION: usize = 16;
         spawn(move || {
@@ -4059,8 +4076,9 @@ mod tests {
                     }
                 }
                 if mapped {
-                    reply[UNION + 12..UNION + 16].copy_from_slice(&(wanted as u32).to_le_bytes());
-                    reply.extend_from_slice(&data);
+                    let sent = wanted.min(reply_cap);
+                    reply[UNION + 12..UNION + 16].copy_from_slice(&(sent as u32).to_le_bytes());
+                    reply.extend_from_slice(&data[..sent]);
                 } else {
                     reply[8..12].copy_from_slice(&0xC000_0005u32.to_le_bytes());
                 }
@@ -4673,6 +4691,35 @@ mod tests {
         drop(backend);
         // two lines, write, line, line
         assert_eq!(worker.join().unwrap(), 5);
+    }
+
+    #[test]
+    fn truncated_fills_keep_whole_lines_and_finish_the_read() {
+        let (kernel, host) = UnixStream::pair().unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.link.set_inline_running(false);
+        backend.exit_prepared = true;
+        let bytes: Vec<u8> = (0..0x1000u32).map(|i| i as u8 ^ (i >> 8) as u8).collect();
+        let worker =
+            serve_virtual_memory_capped(kernel, vec![(FAKE_KERNEL_BASE, bytes.clone())], 0x300);
+
+        let mut out = vec![0u8; 0x800];
+        backend
+            .read_virtual_bytes(VirtAddr(FAKE_KERNEL_BASE), &mut out)
+            .unwrap();
+        assert_eq!(out, bytes[..0x800]);
+        // The tail of the truncated reply was not kept as a short line.
+        let mut tail = [0u8; 8];
+        backend
+            .read_virtual_bytes(VirtAddr(FAKE_KERNEL_BASE + 0x2f8), &mut tail)
+            .unwrap();
+        assert_eq!(tail, bytes[0x2f8..0x300]);
+        // Later fills stay within what the transport returns.
+        assert_eq!(backend.virtual_fill_cap, KD_VIRTUAL_LINE);
+
+        drop(backend);
+        // 0x800 asked and 0x300 answered, then one line per request.
+        assert_eq!(worker.join().unwrap(), 1 + 3);
     }
 
     fn read_special_registers_reply_payload(processor: u16) -> Vec<u8> {

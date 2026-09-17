@@ -94,6 +94,10 @@ fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
 impl GdbClient {
     pub fn connect(addr: &str) -> Result<Self> {
         let stream = TcpStream::connect(addr).map_err(|err| gdb_connect_error(addr, err))?;
+        // Every exchange is a small request, a one-byte ack, and a small
+        // reply; with Nagle on, each ack waits out the peer's delayed ACK
+        // (~40 ms) before it leaves.
+        stream.set_nodelay(true)?;
 
         let mut client = GdbClient {
             stream,
