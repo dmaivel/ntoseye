@@ -13,6 +13,8 @@ use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, VirtAddr};
 
 const MAX_FIELD_BYTES: usize = 0x1000;
+/// [`Error::TargetRunning`] payload for MSR access.
+const MSRS_NEED_HALT: &str = "MSRs are read on a halted processor.";
 const IDT_VECTOR_COUNT: u16 = 256;
 const MAX_GDT_ENTRIES: usize = 256;
 
@@ -1267,7 +1269,7 @@ impl Session {
     /// capability. The backend error is returned unchanged to the caller.
     pub fn read_msr(&mut self, processor: u16, msr: u32) -> Result<u64> {
         if self.backend.is_running() {
-            return Err(Error::TargetRunning);
+            return Err(Error::TargetRunning(MSRS_NEED_HALT));
         }
         if !self
             .backend
@@ -1284,7 +1286,7 @@ impl Session {
     /// capability. The backend error is returned unchanged to the caller.
     pub fn write_msr(&mut self, processor: u16, msr: u32, value: u64) -> Result<()> {
         if self.backend.is_running() {
-            return Err(Error::TargetRunning);
+            return Err(Error::TargetRunning(MSRS_NEED_HALT));
         }
         if !self
             .backend

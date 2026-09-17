@@ -753,6 +753,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
         released_handles: HashSet::new(),
+        running_reason: MEMORY_OVER_KD_CHOSEN,
     }
 }
 
@@ -873,6 +874,7 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
         released_handles: HashSet::new(),
+        running_reason: MEMORY_OVER_KD_CHOSEN,
     }
 }
 
@@ -975,7 +977,7 @@ fn kd_memory_rejects_reads_while_target_runs() {
         translations: Arc::new(TranslationCache::default()),
     };
     let error = memory.read_bytes(0x1000, &mut [0u8; 8]).unwrap_err();
-    assert!(error.to_string().contains("requires a halted target"));
+    assert!(matches!(error, Error::TargetRunning(_)), "{error}");
 }
 
 /// A halted fake kernel serving `DbgKd{Read,Write}VirtualMemory` and

@@ -64,7 +64,7 @@ repl_command! {
 }
 
 impl ReplState<'_> {
-    fn read_physical_best_effort(&self, range: &AddressRange) -> (Vec<u8>, Vec<bool>) {
+    fn read_physical_best_effort(&self, range: &AddressRange) -> Result<(Vec<u8>, Vec<bool>)> {
         read_page_chunks(range.start, range.len(), |address, buf| {
             self.ctx.target.phys.read_bytes(address.0, buf)
         })
@@ -94,7 +94,13 @@ impl ReplState<'_> {
             error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
             return Ok(());
         }
-        let (data, valid) = self.read_physical_best_effort(&range);
+        let (data, valid) = match self.read_physical_best_effort(&range) {
+            Ok(read) => read,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
         display_memory_with_validity(range.start, &data, Some(&valid), &mode);
         Ok(())
     }

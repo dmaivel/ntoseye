@@ -93,7 +93,6 @@ repl_command! {
     usage: "bpc <id> <condition|clear>",
     summary: "Update or clear a breakpoint condition.",
     completion: [Breakpoint, Expression],
-    run_state: Halted,
 }
 
 repl_command! {
@@ -102,7 +101,6 @@ repl_command! {
     usage: "bs <id> <commands|clear>",
     summary: "Set or clear a breakpoint command action.",
     completion: Breakpoint,
-    run_state: Halted,
 }
 
 repl_command! {
@@ -111,7 +109,6 @@ repl_command! {
     usage: "br <id> <newid>",
     summary: "Renumber a breakpoint.",
     completion: Breakpoint,
-    run_state: Halted,
 }
 
 repl_command! {
@@ -120,7 +117,6 @@ repl_command! {
     usage: "bpp <id> <passes>",
     summary: "Reset a breakpoint pass count.",
     completion: Breakpoint,
-    run_state: Halted,
 }
 
 struct CodeBreakpointArgs {

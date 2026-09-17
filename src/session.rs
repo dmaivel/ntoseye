@@ -336,6 +336,9 @@ const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 /// [`stop_is_stray_single_step`]).
 const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
 
+/// [`Error::TargetRunning`] payload for the live register file.
+const REGISTERS_NEED_HALT: &str = "Registers belong to the halted context.";
+
 /// The root owner of a live debugging session: the introspection context, the
 /// backend that drives the target, and the session state layered on top.
 pub struct Session {
@@ -524,6 +527,7 @@ impl Session {
                             "{}: host memory rejected ({error}); falling back to KD memory",
                             backend.name()
                         ));
+                        backend.note_host_memory_unavailable();
                         None
                     }
                 },
@@ -532,6 +536,7 @@ impl Session {
                         "{}: host memory unavailable ({error}); falling back to KD memory",
                         backend.name()
                     ));
+                    backend.note_host_memory_unavailable();
                     None
                 }
             },
@@ -823,7 +828,7 @@ impl Session {
     /// expression evaluation follows the current thread's address space.
     pub fn restore_live_register_cache(&mut self) {
         let registers = if self.backend.is_running() || self.parked_windows_thread().is_some() {
-            Err(Error::TargetRunning)
+            Err(Error::TargetRunning(REGISTERS_NEED_HALT))
         } else {
             self.read_registers()
         };
@@ -1263,7 +1268,7 @@ impl Session {
     pub fn read_registers(&mut self) -> Result<Vec<u8>> {
         self.require_live_register_context()?;
         if self.backend.is_running() {
-            return Err(Error::TargetRunning);
+            return Err(Error::TargetRunning(REGISTERS_NEED_HALT));
         }
         self.backend.set_current_thread(&self.current_thread)?;
         self.backend.read_registers()
@@ -1274,7 +1279,7 @@ impl Session {
     pub fn write_register(&mut self, name: &str, value: u64) -> Result<()> {
         self.require_live_register_context()?;
         if self.backend.is_running() {
-            return Err(Error::TargetRunning);
+            return Err(Error::TargetRunning(REGISTERS_NEED_HALT));
         }
         if !self
             .backend

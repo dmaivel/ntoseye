@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
 use crate::memory::PAGE_SIZE;
 use crate::types::{Arch, VirtAddr};
@@ -310,19 +310,30 @@ pub fn for_each_page_chunk(
     }
 }
 
+/// Read `length` bytes a page at a time, marking each page readable or not,
+/// so one missing page does not hide the rest. A running target is not a
+/// missing page: that refusal applies to the whole range and is returned.
 pub fn read_page_chunks(
     start: VirtAddr,
     length: usize,
     mut read: impl FnMut(VirtAddr, &mut [u8]) -> Result<()>,
-) -> (Vec<u8>, Vec<bool>) {
+) -> Result<(Vec<u8>, Vec<bool>)> {
     let mut data = vec![0u8; length];
     let mut valid = vec![false; length];
-    for_each_page_chunk(start, length, |offset, address, chunk_len| {
-        if read(address, &mut data[offset..offset + chunk_len]).is_ok() {
-            valid[offset..offset + chunk_len].fill(true);
-        }
-    });
-    (data, valid)
+    let mut running = Ok(());
+    for_each_page_chunk(
+        start,
+        length,
+        |offset, address, chunk_len| match best_effort(read(
+            address,
+            &mut data[offset..offset + chunk_len],
+        )) {
+            Ok(Some(())) => valid[offset..offset + chunk_len].fill(true),
+            Ok(None) => {}
+            Err(error) => running = Err(error),
+        },
+    );
+    running.map(|()| (data, valid))
 }
 
 pub fn parse_write_values(
@@ -363,7 +374,7 @@ impl ReplState<'_> {
     /// Read a range a page at a time so one missing page does not hide the
     /// readable rows before and after it.  The returned bitmap is byte based;
     /// display modes use it to mark an entire partially unreadable item.
-    fn read_virtual_best_effort(&self, range: &AddressRange) -> (Vec<u8>, Vec<bool>) {
+    fn read_virtual_best_effort(&self, range: &AddressRange) -> Result<(Vec<u8>, Vec<bool>)> {
         read_page_chunks(range.start, range.len(), |address, buf| {
             self.read_for_display(address, buf)
         })
@@ -394,7 +405,13 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let (data, valid) = self.read_virtual_best_effort(&range);
+        let (data, valid) = match self.read_virtual_best_effort(&range) {
+            Ok(read) => read,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
         display_memory_with_validity(range.start, &data, Some(&valid), &mode);
 
         Ok(())
@@ -507,7 +524,13 @@ impl ReplState<'_> {
             error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
             return Ok(());
         }
-        let (data, valid) = self.read_virtual_best_effort(&range);
+        let (data, valid) = match self.read_virtual_best_effort(&range) {
+            Ok(read) => read,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
         let dtb = self.ctx.target.current_process()?.dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         for (index, chunk) in data.chunks(item_size).enumerate() {
@@ -654,9 +677,9 @@ impl ReplState<'_> {
         for type_name in type_names {
             if let Ok(cursor) = process.types().struct_at(type_name, address) {
                 let fields = StringDescriptorFields {
-                    length: cursor.read_field::<u16>("Length").ok(),
-                    maximum_length: cursor.read_field::<u16>("MaximumLength").ok(),
-                    buffer: cursor.read_field::<VirtAddr>("Buffer").ok(),
+                    length: best_effort(cursor.read_field::<u16>("Length"))?,
+                    maximum_length: best_effort(cursor.read_field::<u16>("MaximumLength"))?,
+                    buffer: best_effort(cursor.read_field::<VirtAddr>("Buffer"))?,
                 };
                 if fields.length.is_some()
                     || fields.maximum_length.is_some()
@@ -672,9 +695,9 @@ impl ReplState<'_> {
         // otherwise tiny string type.
         let mem = process.memory();
         Ok(StringDescriptorFields {
-            length: mem.read(address).ok(),
-            maximum_length: mem.read(address + 2u64).ok(),
-            buffer: mem.read(address + 8u64).ok(),
+            length: best_effort(mem.read(address))?,
+            maximum_length: best_effort(mem.read(address + 2u64))?,
+            buffer: best_effort(mem.read(address + 8u64))?,
         })
     }
 
@@ -744,7 +767,13 @@ impl ReplState<'_> {
             start: buffer,
             end: buffer + byte_len as u64,
         };
-        let (data, valid) = self.read_virtual_best_effort(&range);
+        let (data, valid) = match self.read_virtual_best_effort(&range) {
+            Ok(read) => read,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
         let text = if unicode {
             let units = data
                 .as_chunks::<2>()
@@ -943,7 +972,7 @@ impl ReplState<'_> {
             let readable = page_end.saturating_sub(start_addr.0).min(byte_len) as usize;
             bytes.truncate(readable);
             if let Err(e) = self.read_for_display(start_addr, &mut bytes) {
-                outln!("{e}\n");
+                error!("{e}");
                 return Ok(());
             }
         }
@@ -1006,7 +1035,13 @@ impl ReplState<'_> {
             start: initial_start,
             end: address,
         };
-        let (data, valid) = self.read_virtual_best_effort(&range);
+        let (data, valid) = match self.read_virtual_best_effort(&range) {
+            Ok(read) => read,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
         let mut suffix_len = valid.iter().rev().take_while(|valid| **valid).count();
         if self.ctx.target.arch() == Arch::Arm64 {
             suffix_len -= suffix_len % 4;

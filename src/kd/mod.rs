@@ -103,6 +103,12 @@ struct PendingWriteBreakpoint {
 /// can't grow memory without limit; older lines are evicted and a reader that
 /// falls behind sees `dropped`.
 const DEBUG_LOG_CAPACITY: usize = 4096;
+/// [`KdBackend::running_reason`] when the operator picked `--memory-source kd`.
+const MEMORY_OVER_KD_CHOSEN: &str = "Guest memory is read over KD on this session, and KD only \
+     answers while the target is halted (--memory-source auto reads host memory live).";
+/// [`KdBackend::running_reason`] when `auto` found no usable host memory.
+const MEMORY_OVER_KD_FALLBACK: &str = "Guest memory is read over KD on this session (host memory \
+     was unavailable at connect), and KD only answers while the target is halted.";
 
 const DBG_KD_EXCEPTION_STATE_CHANGE: u32 = 0x0000_3030;
 /// Symbol load/unload notification. The kernel emits these (including during
@@ -576,10 +582,11 @@ enum Link {
 }
 
 impl Link {
-    fn framing(&mut self) -> Result<&mut KdFraming<KdTransport>> {
+    /// `running` explains the refusal while the pump owns the framing.
+    fn framing(&mut self, running: &'static str) -> Result<&mut KdFraming<KdTransport>> {
         match self {
             Self::Halted(framing) | Self::RunningInline(framing) => Ok(framing),
-            Self::RunningPumped(_) => Err(Error::Kd("KD transport is busy: VM is running".into())),
+            Self::RunningPumped(_) => Err(Error::TargetRunning(running)),
             Self::Lost => Err(Error::Kd(
                 "KD transport lost: the servicing thread panicked".into(),
             )),
@@ -707,6 +714,9 @@ pub struct KdBackend {
     /// Table handles reclaimed from dead sessions; see
     /// [`restore_unowned_breakpoint_handles`].
     released_handles: HashSet<u32>,
+    /// Why a request cannot be served while the target runs, for the error
+    /// a running target answers with; see [`Self::note_host_memory_unavailable`].
+    running_reason: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -961,6 +971,7 @@ impl KdBackend {
             translations: Arc::new(TranslationCache::default()),
             notices: Vec::new(),
             released_handles,
+            running_reason: MEMORY_OVER_KD_CHOSEN,
         })
     }
 
@@ -977,7 +988,14 @@ impl KdBackend {
     /// breakpoint completion path may use this, since it exists precisely to
     /// drain that outstanding reply
     fn framing_unchecked(&mut self) -> Result<&mut KdFraming<KdTransport>> {
-        self.link.framing()
+        self.link.framing(self.running_reason)
+    }
+
+    /// Record that `--memory-source auto` fell back to KD memory, so the
+    /// refusal a running target answers with does not suggest a setting the
+    /// operator is already on.
+    pub fn note_host_memory_unavailable(&mut self) {
+        self.running_reason = MEMORY_OVER_KD_FALLBACK;
     }
 
     /// Hand the framing to a freshly spawned background pump. The target has
@@ -1288,11 +1306,17 @@ impl KdBackend {
         self.require_no_pending_write_breakpoint()?;
         let arch = self.arch;
         let register_map = self.register_map.clone();
-        let pc = read_program_counter(self.link.framing()?, &register_map, arch, processor)?;
+        let pc = read_program_counter(
+            self.link.framing(self.running_reason)?,
+            &register_map,
+            arch,
+            processor,
+        )?;
         if self.managed_bp_addresses.contains(&pc) {
             return Ok(());
         }
-        if !breakpoint_instruction_at(self.link.framing()?, arch, processor, pc) {
+        if !breakpoint_instruction_at(self.link.framing(self.running_reason)?, arch, processor, pc)
+        {
             kd_trace!(
                 "kd: stop at {pc:#x} reported a breakpoint but memory holds none; resuming in place"
             );
@@ -1301,13 +1325,20 @@ impl KdBackend {
 
         let owned: HashSet<u32> = self.bp_handles.values().copied().collect();
         let reclaimed = restore_unowned_breakpoint_handles(
-            self.link.framing()?,
+            self.link.framing(self.running_reason)?,
             processor,
             &owned,
             &mut self.released_handles,
         );
         self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
-        if reclaimed != 0 && !breakpoint_instruction_at(self.link.framing()?, arch, processor, pc) {
+        if reclaimed != 0
+            && !breakpoint_instruction_at(
+                self.link.framing(self.running_reason)?,
+                arch,
+                processor,
+                pc,
+            )
+        {
             kd_trace!("kd: released a stranded breakpoint at {pc:#x}; resuming in place");
             return Ok(());
         }
@@ -1319,7 +1350,13 @@ impl KdBackend {
         // The PC goes straight through the context API, behind
         // `write_registers` and its cache invalidation.
         self.context_cache.remove(&processor);
-        advance_pc_past_breakpoint(self.link.framing()?, &register_map, arch, processor, pc)
+        advance_pc_past_breakpoint(
+            self.link.framing(self.running_reason)?,
+            &register_map,
+            arch,
+            processor,
+            pc,
+        )
     }
 
     fn read_dr_slot_state(&mut self, slot: u8) -> Result<DebugRegisterSlotState> {
@@ -1752,7 +1789,7 @@ impl KdBackend {
     /// the number of entries actually recovered.
     fn reclaim_stranded_breakpoints(&mut self, processor: u16) -> usize {
         let owned: HashSet<u32> = self.bp_handles.values().copied().collect();
-        let Ok(framing) = self.link.framing() else {
+        let Ok(framing) = self.link.framing(self.running_reason) else {
             return 0;
         };
         restore_unowned_breakpoint_handles(framing, processor, &owned, &mut self.released_handles)
@@ -1907,10 +1944,7 @@ impl KdBackend {
 
     fn require_remote_memory_stopped(&self) -> Result<()> {
         if self.link.is_running() {
-            return Err(Error::Kd(
-                "KD remote memory requires a halted target; interrupt it before reading memory"
-                    .into(),
-            ));
+            return Err(Error::TargetRunning(self.running_reason));
         }
         self.require_no_pending_write_breakpoint()
     }
@@ -2390,7 +2424,12 @@ impl DebugBackend for KdBackend {
                 // the middle of the instruction it displaced. Keep the
                 // handle so a retry (and exit) can still release the entry.
                 let arch = self.arch;
-                if breakpoint_instruction_at(self.link.framing()?, arch, processor, addr) {
+                if breakpoint_instruction_at(
+                    self.link.framing(self.running_reason)?,
+                    arch,
+                    processor,
+                    addr,
+                ) {
                     return Err(Error::Kd(format!(
                         "target refused to release the breakpoint at {addr:#x} (handle {handle}) \
                          and the site still holds a breakpoint instruction"

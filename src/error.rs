@@ -64,8 +64,9 @@ pub enum Error {
     #[error("Not supported")]
     NotSupported,
 
-    #[error("target must be halted to write registers")]
-    TargetRunning,
+    /// The payload says what the halted target is needed for.
+    #[error("target is running; `break` first, or wait for the next stop. {0}")]
+    TargetRunning(&'static str),
 
     #[error("the current backend does not support register writes")]
     RegisterWriteUnsupported,
@@ -187,3 +188,14 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Tolerate a failed read in a best-effort reader (a missing page becomes
+/// `None`), except a running target: that refusal is not about the page and
+/// stands for the whole operation.
+pub fn best_effort<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error @ Error::TargetRunning(_)) => Err(error),
+        Err(_) => Ok(None),
+    }
+}
