@@ -71,7 +71,7 @@ trap 'rm -rf "$smoke_venv"' EXIT
 python -m venv "$smoke_venv"
 "$smoke_venv/bin/python" -m pip install --quiet --upgrade pip
 "$smoke_venv/bin/python" -m pip install --quiet dist/*.whl
-"$smoke_venv/bin/python" - <<'PY'
+"$smoke_venv/bin/python" -I - <<'PY'
 import ntoseye
 print("version:", ntoseye.__version__)
 assert hasattr(ntoseye, "attach"), "attach missing"

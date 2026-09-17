@@ -1,5 +1,5 @@
 [workspace]
-members = ["ntoseye-py"]
+members = ["python"]
 
 [workspace.package]
 version = "0.32.0"

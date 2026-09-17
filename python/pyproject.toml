@@ -30,8 +30,8 @@ Repository = "https://github.com/dmaivel/ntoseye"
 Issues = "https://github.com/dmaivel/ntoseye/issues"
 
 [tool.maturin]
-# the `ntoseye` package (python/ntoseye/) wraps the private `_ntoseye`
+# the `ntoseye` package (ntoseye/) wraps the private `_ntoseye`
 # rust extension and carries the PEP 561 stub + py.typed marker.
 features = ["pyo3/extension-module"]
 module-name = "ntoseye._ntoseye"
-python-source = "python"
+python-source = "."

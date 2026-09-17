@@ -32,7 +32,7 @@ print(hex(fun), dbg.read(fun, 16).hex())
 print(dbg.run_command("!analyze -v"))
 ```
 
-The module is a native extension built with [maturin](https://www.maturin.rs/); see [`ntoseye-py/README.md`](../ntoseye-py/README.md) for build info and [`examples/standalone/`](../examples/standalone/) for standalone scripts.
+The module is a native extension built with [maturin](https://www.maturin.rs/); see [`python/README.md`](../python/README.md) for build info and [`examples/standalone/`](../examples/standalone/) for standalone scripts.
 
 # Custom commands
 

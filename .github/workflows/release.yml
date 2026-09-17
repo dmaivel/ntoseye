@@ -143,12 +143,12 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and smoke-test wheel
-        run: ./ntoseye-py/build-wheel.sh
+        run: ./python/build-wheel.sh
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-python-wheel-${{ matrix.label }}
-          path: ntoseye-py/dist/*.whl
+          path: python/dist/*.whl
           if-no-files-found: error
 
   # Build and packages all the platform-specific things

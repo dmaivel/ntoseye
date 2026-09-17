@@ -12,7 +12,7 @@ pip install ntoseye
 Or build from source into a virtualenv with maturin:
 
 ```sh
-cd ntoseye-py
+cd python
 python3 -m venv .venv
 source .venv/bin/activate
 maturin develop --release
@@ -21,7 +21,7 @@ maturin develop --release
 Or build a wheel and install it:
 
 ```sh
-cd ntoseye-py
+cd python
 maturin build --release --out dist
 pip install dist/ntoseye-*.whl
 ```

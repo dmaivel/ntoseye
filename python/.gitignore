@@ -2,5 +2,5 @@
 /target
 /.venv
 
-python/ntoseye/_ntoseye.abi3.so
+/ntoseye/_ntoseye.abi3.so
 __pycache__/

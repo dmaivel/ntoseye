@@ -4225,7 +4225,7 @@ fn attach(
 }
 
 /// Populate the `_ntoseye` extension module. The `#[pymodule]` entry point (and
-/// thus the exported `PyInit__ntoseye` symbol) lives in the `ntoseye-py` wheel
+/// thus the exported `PyInit__ntoseye` symbol) lives in the `python/` crate's
 /// shim, which calls this; that keeps the symbol in the cdylib where the linker
 /// can't strip it, while the actual SDK lives here in core.
 pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
