@@ -977,10 +977,6 @@ mod tests {
         owner
             .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
-        let stranger = UdpSocket::bind("127.0.0.2:0").unwrap();
-        stranger
-            .set_read_timeout(Some(Duration::from_millis(200)))
-            .unwrap();
         let mut scratch = [0u8; 8];
 
         owner
@@ -1008,17 +1004,17 @@ mod tests {
         let mut bridged = vec![0u8; owner_packet.len() + 1];
         host.read_exact(&mut bridged).unwrap();
 
+        // Only 127.0.0.1 is bound on macOS loopback, so the stranger's pokes
+        // enter after the socket layer, where the source address is data.
+        let stranger: SocketAddr = "10.0.0.2:50000".parse().unwrap();
         for sequence in 1..=2 {
-            stranger
-                .send_to(&poke_datagram(0x22, sequence, key, &hmac_key), host_addr)
-                .unwrap();
-            let _ = host.read(&mut scratch);
+            let mut poke = poke_datagram(0x22, sequence, key, &hmac_key);
+            decrypt_payload(&mut poke, key).unwrap();
+            verify_authentication(&poke, &hmac_key).unwrap();
+            host.handle_control_packet(&poke, stranger, 5).unwrap();
         }
 
-        assert!(
-            recv_datagram(&stranger).is_none(),
-            "a stranger's pokes must go unanswered"
-        );
+        assert_ne!(*read_lock(&host.state.peer).unwrap(), Some(stranger));
         assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(owner_key));
         assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
 
