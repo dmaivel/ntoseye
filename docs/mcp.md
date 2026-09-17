@@ -4,25 +4,25 @@
 
 | Tool | Purpose |
 | --- | --- |
-| `command` | Run one REPL line in ntoseye's WinDbg-style syntax (`!process 0 0`, `dt nt!_EPROCESS <addr>`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, `g`, `p`, `break`, ...) with REPL semantics (`;` separates commands on one line) and return its text, styling stripped, followed by a one-line `[target ...]` trailer. `help` lists every command. Arguments: `line`, `timeout_ms` (default 10 s, max 20 s), `format` (`text` or `json`). |
+| `command` | Run one REPL line in ntoseye's WinDbg-style syntax (`!process 0 0`, `dt nt!_EPROCESS <addr>`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, `g`, `p`, `break`, ...) with REPL semantics (`;` separates commands on one line) and return its text, styling stripped, followed by a one-line `[target ...]` trailer. `help` lists every command. Arguments: `line`, `timeout_ms` (default 10 s, max 5 min), `format` (`text` or `json`). |
 | `open` / `close` | Attach to a target (`backend: kd \| kdnet \| gdb \| memory \| dump`, plus `connect` and, for kdnet, `key`) or release it. One session at a time. The KD memory source is an operator setting (`--memory-source` on the command line), not a tool argument. |
 
 ## Run control
 
-The `command` tool behaves like the REPL prompt, with one difference: it never blocks longer than `timeout_ms`.
+The `command` tool behaves like a WinDbg prompt, with one difference: it never blocks longer than `timeout_ms`.
 
 - A resuming command (`g`, `gh`, `gn`, `p`, `t`, `gu`, `pa`, `wt`, `.reboot`, ...) resumes and waits up to `timeout_ms` for the next stop. A stop is rendered the way the REPL renders it (breakpoint banner, registers, stack). If nothing stops in time the result ends with `[target running]`; the target keeps running and nothing is lost.
-- An **empty** `line` runs nothing and waits up to `timeout_ms` for the next stop. Keep calling it while the trailer says `running`.
+- A command that needs a halted target (`k`, `r`, `bp`, `t`, ...) sent while the target runs waits up to `timeout_ms` for the stop, renders it, then runs, the way WinDbg queues input typed at a running debuggee. If the target is still running when the budget ends, the result says so and the command was not run; re-issue it to keep waiting. Memory, process, module, and struct commands do not wait: on KD they fail while the guest runs, on the other backends they work live.
+- A resuming command sent while the target runs also waits, but is then refused once so the stop is seen before it is continued past.
 - `break` interrupts a running target.
-- Commands that need a halted target (`k`, `r`, `bp`, `t`, ...) report `VM is running` immediately; they never wait. Memory, process, module, and struct commands work while the guest runs.
 - A stop that arrived between calls (the guest hit a breakpoint while the agent was thinking) is rendered at the top of the next result. If that next call was itself a resuming command it is refused once, so the agent sees the stop before continuing past it.
-- A multi-step command (`pa`, `pt`, `gu`, `wt`) that overruns the budget leaves the target running toward its next stop; an empty-line call collects it.
+- A multi-step command (`pa`, `pt`, `gu`, `wt`) that overruns the budget leaves the target running toward its next stop; the next halted-only command collects it. An empty `line` runs nothing and only waits.
 
 The trailer reads `[target running]` or `[target halted @ <vcpu> <rip> <symbol> | process <name> (<pid>) | scope <name> (<pid>)]`, where `process` is the process whose page tables the stopped vCPU has loaded and `scope` is the `.process` inspection scope memory commands read through (it survives resumes, so the two can differ). After a reboot it adds `rediscovery pending` until the kernel is rediscovered; wait rather than enumerating stale state.
 
 Guest debug output (`DbgPrint`) captured since the previous call is appended as `[dbgprint] ...` lines.
 
-A typical breakpoint flow: `break`, `bp nt!NtCreateFile`, `g` (then empty-line calls until the breakpoint renders), `k`.
+A typical breakpoint flow: `break`, `bp nt!NtCreateFile`, `g`, `k` (which waits for the breakpoint if `g` returned with the target still running).
 
 ## Structured results
 

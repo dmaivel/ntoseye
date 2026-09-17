@@ -839,7 +839,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 mod tests {
     use crate::dbg_backend::BugcheckInfo;
     use crate::output::capture;
-    use crate::repl::ReplState;
+    use crate::repl::{Flow, ReplState};
     use crate::session::tests::{MockBackend, breakpoint_event, session_with_mock};
     use crate::session::{Session, session_over_memory};
     use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
@@ -1065,6 +1065,53 @@ mod tests {
         result.unwrap();
         assert!(!state.ctx.backend.is_running());
         assert!(!text.contains("target still running"), "{text:?}");
+    }
+
+    #[test]
+    fn halted_only_line_waits_for_the_stop_then_runs() {
+        let mut backend = MockBackend::default().running();
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, _) = capture(|| state.gate_remote_line("k"));
+        assert!(result.unwrap().is_none(), "k was not let through");
+        assert!(!state.ctx.backend.is_running());
+    }
+
+    #[test]
+    fn halted_only_line_is_not_run_on_a_target_still_running() {
+        let mut session = session_with_mock(MockBackend::default().running());
+        let mut state = remote_state(&mut session, 150);
+        let (result, text) = capture(|| state.gate_remote_line("k"));
+        assert_eq!(result.unwrap(), Some(Flow::Denied));
+        assert!(text.contains("not run"), "{text:?}");
+        assert!(state.ctx.backend.is_running());
+    }
+
+    #[test]
+    fn resuming_line_is_refused_against_the_stop_it_waited_for() {
+        let mut backend = MockBackend::default().running();
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| state.gate_remote_line("g"));
+        assert_eq!(result.unwrap(), Some(Flow::Denied));
+        assert!(text.contains("not run"), "{text:?}");
+        assert!(
+            !state.ctx.backend.is_running(),
+            "the stop was continued past"
+        );
+    }
+
+    #[test]
+    fn running_safe_line_runs_without_waiting() {
+        let mut session = session_with_mock(MockBackend::default().running());
+        let mut state = remote_state(&mut session, 5_000);
+        let started = std::time::Instant::now();
+        let (result, _) = capture(|| state.gate_remote_line("help"));
+        assert!(result.unwrap().is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(state.ctx.backend.is_running());
     }
 
     #[test]

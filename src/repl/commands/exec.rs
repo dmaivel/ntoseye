@@ -218,6 +218,40 @@ impl ReplState<'_> {
         Ok(())
     }
 
+    /// The front half of a dispatch for a host that hands control back while
+    /// the target runs. A stop parked since the last line is rendered first;
+    /// then, as WinDbg queues input typed at a running debuggee, a line that
+    /// needs the target halted (or would move it) waits within the stop
+    /// budget for the halt. Returns the flow to report instead of dispatching
+    /// `line`: an empty line only waits, nothing runs while the target is
+    /// still running, and a resume is refused once against a stop rendered
+    /// here so the stop is seen before it is continued past. `None` means
+    /// `line` should run now.
+    pub fn gate_remote_line(&mut self, line: &str) -> Result<Option<Flow>> {
+        let mut surfaced = self.surface_parked_stop();
+        if line.is_empty() {
+            self.collect_stop()?;
+            return Ok(Some(Flow::Continue));
+        }
+        let moves = self.line_moves_target(line);
+        if !surfaced && self.ctx.backend.is_running() && (moves || self.line_needs_halt(line)) {
+            self.collect_stop()?;
+            if self.ctx.backend.is_running() {
+                outln!("the command was not run.");
+                return Ok(Some(Flow::Denied));
+            }
+            surfaced = true;
+        }
+        if surfaced && moves {
+            outln!(
+                "the target stopped (above); the command was not run so the stop is not \
+                 skipped. Re-issue it to continue."
+            );
+            return Ok(Some(Flow::Denied));
+        }
+        Ok(None)
+    }
+
     /// Render a stop the idle servicer parked since the last dispatch, if
     /// any, without waiting. Returns whether one was rendered.
     pub fn surface_parked_stop(&mut self) -> bool {
@@ -551,8 +585,8 @@ impl ReplState<'_> {
                     outln!(
                         "{}",
                         ui::muted(
-                            "target still running; send an empty command to keep waiting, \
-                             or `break` to interrupt"
+                            "target still running; call again to keep waiting, or `break` to \
+                             interrupt"
                         )
                     );
                     break;

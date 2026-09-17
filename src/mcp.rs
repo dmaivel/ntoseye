@@ -3,8 +3,8 @@
 //!
 //! One `command` tool runs a REPL line with REPL semantics, bounded: a
 //! resuming command waits up to `timeout_ms` for the next stop and otherwise
-//! hands control back with the target running, an empty line waits for the
-//! next stop, `break` interrupts. Guest debug output and a run-state trailer
+//! hands control back with the target running, a halted-only command sent
+//! while it runs waits for that stop first, `break` interrupts. Guest debug output and a run-state trailer
 //! ride along with every result. `open`/`close` manage the single session slot.
 
 use rmcp::{
@@ -76,7 +76,7 @@ const CONTINUE_DEFAULT_TIMEOUT_MS: u64 = 10_000;
 /// resuming command hands control back with the target running and frees the
 /// single-session actor before the client gives up. No indefinite wait is
 /// offered over MCP.
-const CONTINUE_MAX_TIMEOUT_MS: u64 = 20_000;
+const CONTINUE_MAX_TIMEOUT_MS: u64 = 300_000;
 
 fn cleanup_session(ctx: &mut Session) {
     if let Err(error) = ctx.cleanup_for_exit() {
@@ -277,12 +277,12 @@ enum OutputFormat {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CommandArgs {
     #[schemars(
-        description = "A REPL command line in ntoseye's WinDbg-style syntax, e.g. `!process 0 0`, `dt nt!_EPROCESS ffff...`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, `g`, `p`, `break`. Several commands may be separated by `;`. An empty line runs nothing and just waits (up to timeout_ms) for the next stop. Run `help` for the list and `help <cmd>` for one command."
+        description = "A REPL command line in ntoseye's WinDbg-style syntax, e.g. `!process 0 0`, `dt nt!_EPROCESS ffff...`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, `g`, `p`, `break`. Several commands may be separated by `;`. Run `help` for the list and `help <cmd>` for one command."
     )]
     line: String,
     #[schemars(
-        range(min = 0, max = 20000),
-        description = "How long a resuming command (g, p, gu, pa, ..., or an empty line) may wait for the next stop before returning with the target still running (default 10000, max 20000; 0 = default). Non-resuming commands ignore it. Bounded by design: keep calling with an empty line while the trailer says running."
+        range(min = 0, max = 300000),
+        description = "How long the call may wait for the target to stop before returning with it still running (default 10000, max 300000; 0 = default): a resuming command (g, p, gu, pa, ...) waits for the stop it causes, and a halted-only command (k, r, bp, ...) issued while the target runs waits for the stop before running. Commands that work on a running target ignore it."
     )]
     timeout_ms: Option<u64>,
     #[schemars(
@@ -427,11 +427,9 @@ impl CommandOutput {
 
 /// Run one REPL line on the actor with REPL semantics, bounded by `budget`.
 ///
-/// A stop the idle servicer parked since the last call is rendered first; if
-/// the line would then move the target, it is refused so the client acts on
-/// that stop instead of blowing past it. An empty line waits for the next
-/// stop. Guest debug output captured since the previous call and the run
-/// state are gathered afterwards.
+/// [`ReplState::gate_remote_line`] renders a parked stop and waits for the
+/// halt a line needs first. Guest debug output captured since the previous
+/// call and the run state are gathered afterwards.
 fn run_command(
     actor: &mut Actor,
     line: &str,
@@ -447,19 +445,10 @@ fn run_command(
     state.line = line.trim().to_string();
     let mut result = None;
     let (flow, mut text) = output::capture(|| {
-        let surfaced = state.surface_parked_stop();
-        if state.line.is_empty() {
-            return state.collect_stop().map(|_| Flow::Continue);
-        }
-        if surfaced && state.line_moves_target(&state.line) {
-            outln!(
-                "{}",
-                "the target stopped since the last call (above); the command was not run so \
-                 the stop is not skipped. Re-issue it to continue."
-            );
-            return Ok(Flow::Denied);
-        }
         let line = state.line.clone();
+        if let Some(flow) = state.gate_remote_line(&line)? {
+            return Ok(flow);
+        }
         if format == OutputFormat::Json {
             match structured::structured_command(&mut state, &line) {
                 Some(Ok(view)) => {
@@ -554,7 +543,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its output (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control has REPL semantics, bounded: `g`/`p`/`t`/`gu`/`pa`... resume and wait up to timeout_ms for the next stop, which is rendered like the REPL renders it; if none arrives the result ends with `[target running]` and the target keeps running. Call again with an EMPTY line to keep waiting for that stop, or `break` to interrupt. Commands that need a halted target report `VM is running` immediately (they never wait). A stop that happened between calls is rendered at the top of the next result; a resuming command issued against such an unseen stop is refused once so it is not skipped. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`. format=json returns {ok, output, result, target, debug_output} with a typed `result` for commands that have a structured decoding."
+        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its output (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control has REPL semantics, bounded by timeout_ms: `g`/`p`/`t`/`gu`/`pa`... resume and wait for the next stop, which is rendered like the REPL renders it; if none arrives the result ends with `[target running]` and the target keeps running. Like typing at a running WinDbg, a halted-only command (`k`, `r`, `bp`, ...) or another resuming command sent while the target runs waits up to timeout_ms for the stop first, then runs (a resuming one is instead refused once, so the stop is seen before it is continued past); `break` interrupts. A stop that happened between calls is rendered at the top of the next result. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`. format=json returns {ok, output, result, target, debug_output} with a typed `result` for commands that have a structured decoding."
     )]
     async fn command(
         &self,
@@ -761,10 +750,10 @@ impl rmcp::ServerHandler for NtoseyeMcp {
                  registers, backtraces, stepping, and breakpoint changes need the VM \
                  halted (`break` first, or be stopped at a breakpoint). Resuming commands \
                  (`g`, `p`, `t`, `gu`, ...) wait up to timeout_ms for the next stop and \
-                 render it; if the trailer says running, call `command` with an empty \
-                 line to keep waiting (no stop is lost between calls). Typical breakpoint \
-                 flow: `break`, `bp nt!NtCreateFile`, `g` (repeat empty-line calls until \
-                 the breakpoint renders), then `k`. After a reboot the trailer says \
+                 render it; if the trailer says running, the next halted-only command \
+                 (`k`, `r`, ...) waits for the stop before running, so just carry on (no \
+                 stop is lost between calls). Typical breakpoint flow: `break`, \
+                 `bp nt!NtCreateFile`, `g`, then `k`. After a reboot the trailer says \
                  rediscovery pending until the kernel is rediscovered; wait rather than \
                  enumerating stale state. Use format=json when you need typed values \
                  instead of parsing text. If no session is open and the user has not said \

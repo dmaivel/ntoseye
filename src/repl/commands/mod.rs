@@ -46,10 +46,23 @@ impl ReplState<'_> {
     /// A host that hands control back while the target runs uses this to
     /// refuse a resume issued against a stop the client has not seen yet.
     pub fn line_moves_target(&self, line: &str) -> bool {
-        self.line_moves_target_inner(line, 0)
+        self.line_has_command(line, 0, &|spec| spec.run != RunEffect::None)
     }
 
-    fn line_moves_target_inner(&self, line: &str, depth: usize) -> bool {
+    /// Whether any command on `line` (aliases expanded) declares it needs a
+    /// halted target. A host that hands control back while the target runs
+    /// uses this to wait for the stop before running the line, as WinDbg
+    /// queues input typed at a running debuggee.
+    pub fn line_needs_halt(&self, line: &str) -> bool {
+        self.line_has_command(line, 0, &|spec| spec.run_state == Some(RunState::Halted))
+    }
+
+    fn line_has_command(
+        &self,
+        line: &str,
+        depth: usize,
+        matches: &dyn Fn(&CommandSpec) -> bool,
+    ) -> bool {
         let Ok(commands) = split_command_list(line) else {
             return false;
         };
@@ -58,14 +71,14 @@ impl ReplState<'_> {
                 return false;
             };
             if let Some(spec) = command_registry().get(parsed.name) {
-                return spec.run != RunEffect::None;
+                return matches(spec);
             }
             let Ok(invocation) = parsed.invocation(CommandStyle::StructuredArgs) else {
                 return false;
             };
             match self.aliases.expand(invocation.name, &invocation.argv) {
                 Ok(Some(expanded)) if depth < ALIAS_RECURSION_LIMIT => {
-                    self.line_moves_target_inner(&expanded, depth + 1)
+                    self.line_has_command(&expanded, depth + 1, matches)
                 }
                 _ => false,
             }
