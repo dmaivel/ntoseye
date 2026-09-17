@@ -924,7 +924,7 @@ impl<'a> Types<'a> {
         cursor.advance(Ok(initial));
 
         Ok(std::iter::from_fn(move || {
-            let current = cursor.next()?;
+            let current = cursor.take_current()?;
 
             let record = Types { obj, dtb }
                 .struct_with_layout(
@@ -2197,7 +2197,7 @@ impl Guest {
                 .map(VirtAddr)
                 .map_err(|error| error.to_string()),
         );
-        while let Some(current) = cursor.next() {
+        while let Some(current) = cursor.take_current() {
             let mut entry = [0u8; ENTRY_LEN];
             if let Err(error) = memory.read_bytes(current, &mut entry) {
                 cursor.advance(Err(error.to_string()));

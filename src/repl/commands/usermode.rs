@@ -489,7 +489,7 @@ impl ReplState<'_> {
             }
 
             match peb32_ref.read_field::<u32>("Ldr") {
-                Ok(ldr) if ldr == 0 => outln!("  Loader data        : null"),
+                Ok(0) => outln!("  Loader data        : null"),
                 Ok(ldr) => outln!("  Loader data        : {}", ui::addr(u64::from(ldr))),
                 Err(error) => outln!("  Loader data        : <unavailable: {error}>"),
             }
@@ -934,7 +934,6 @@ impl ReplState<'_> {
         let mut diffs = Vec::new();
         for section in &sections {
             let result = self.compare_section(
-                module.base_address,
                 section,
                 preferred_base,
                 &module,
@@ -1074,7 +1073,6 @@ impl ReplState<'_> {
 
     fn compare_section(
         &self,
-        base: VirtAddr,
         section: &CheckSection,
         preferred_base: u64,
         module: &ModuleInfo,
@@ -1082,6 +1080,7 @@ impl ReplState<'_> {
         no_spec: bool,
         show_diffs: bool,
     ) -> SectionCheckResult {
+        let base = module.base_address;
         if section.discardable {
             return SectionCheckResult {
                 skipped: true,
@@ -1130,7 +1129,6 @@ impl ReplState<'_> {
             if expected != actual {
                 let patch = if allow_kernel_self_patches && !no_spec {
                     self.classify_self_patch(
-                        base,
                         section,
                         offset,
                         preferred_base,
@@ -1182,7 +1180,6 @@ impl ReplState<'_> {
 
     fn classify_self_patch(
         &self,
-        base: VirtAddr,
         section: &CheckSection,
         offset: usize,
         preferred_base: u64,
@@ -1190,6 +1187,7 @@ impl ReplState<'_> {
         expected: &[u8],
         actual: &[u8],
     ) -> Option<SelfPatchMatch> {
+        let base = module.base_address;
         if expected.len() == 6
             && actual.len() == 6
             && (expected.starts_with(&[0xff, 0x15]) || expected.starts_with(&[0xff, 0x25]))

@@ -109,11 +109,9 @@ impl ReplState<'_> {
                     return Ok(());
                 }
                 match kd_files().add(target, Path::new(host)) {
-                    Ok(mapping) => outln!(
-                        "Mapped {} -> {}.",
-                        mapping.target,
-                        mapping.host.display()
-                    ),
+                    Ok(mapping) => {
+                        outln!("Mapped {} -> {}.", mapping.target, mapping.host.display())
+                    }
                     Err(error) => {
                         error!("{error}");
                         return Ok(());

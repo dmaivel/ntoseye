@@ -68,7 +68,7 @@ pub struct Amd64TrapFrame {
 #[derive(Clone, Debug)]
 pub enum KtrapFrameData {
     Amd64(Amd64TrapFrame),
-    Arm64(Arm64TrapFrame),
+    Arm64(Box<Arm64TrapFrame>),
 }
 
 /// A decoded `_KTRAP_FRAME` with architecture-specific register names.
@@ -216,7 +216,7 @@ impl KtrapFrame {
         let previous_irql = field(&["PreviousIrql"]).unwrap_or(0) as u8;
         Ok(Self {
             address,
-            data: KtrapFrameData::Arm64(Arm64TrapFrame {
+            data: KtrapFrameData::Arm64(Box::new(Arm64TrapFrame {
                 x,
                 lr,
                 fp,
@@ -231,7 +231,7 @@ impl KtrapFrame {
                 wvr,
                 previous_mode,
                 previous_irql,
-            }),
+            })),
         })
     }
 }

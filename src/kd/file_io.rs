@@ -180,9 +180,9 @@ impl KdFileMap {
         if target.is_empty() {
             return Err(Error::DebugInfo("target file name is empty".into()));
         }
-        let host = host.canonicalize().map_err(|err| {
-            Error::DebugInfo(format!("cannot serve {}: {err}", host.display()))
-        })?;
+        let host = host
+            .canonicalize()
+            .map_err(|err| Error::DebugInfo(format!("cannot serve {}: {err}", host.display())))?;
         if !host.is_file() {
             return Err(Error::DebugInfo(format!(
                 "cannot serve {}: not a regular file",
@@ -197,7 +197,9 @@ impl KdFileMap {
         };
         let mut inner = self.lock();
         let key = normalize(target);
-        inner.mappings.retain(|entry| normalize(&entry.target) != key);
+        inner
+            .mappings
+            .retain(|entry| normalize(&entry.target) != key);
         inner.mappings.push(mapping.clone());
         inner.stats = KdFileStats::default();
         Ok(mapping)
@@ -207,7 +209,9 @@ impl KdFileMap {
         let key = normalize(target);
         let mut inner = self.lock();
         let before = inner.mappings.len();
-        inner.mappings.retain(|entry| normalize(&entry.target) != key);
+        inner
+            .mappings
+            .retain(|entry| normalize(&entry.target) != key);
         inner.mappings.len() != before
     }
 
@@ -236,10 +240,7 @@ impl KdFileMap {
         let len = match file.metadata() {
             Ok(metadata) => metadata.len(),
             Err(err) => {
-                kd_trace!(
-                    "kd: kdfiles: cannot stat {}: {err}",
-                    mapping.host.display()
-                );
+                kd_trace!("kd: kdfiles: cannot stat {}: {err}", mapping.host.display());
                 self.lock().stats.refused += 1;
                 return None;
             }
@@ -440,29 +441,27 @@ pub fn serve_file_io(map: &KdFileMap, request: &FileIoRequest) -> FileIoReply {
             name,
             desired_access,
             create_disposition,
-        } => {
-            match map.open(name) {
-                Some((handle, len, mapping)) => {
-                    let mut reply = FileIoReply::new(DBGKD_CREATE_FILE_API, STATUS_SUCCESS);
-                    write_u64(&mut reply.header, 32, handle);
-                    write_u64(&mut reply.header, 40, len);
-                    kd_trace!(
-                        "kd: kdfiles: serving {} as {} ({len} bytes, handle {handle:#x}, access {desired_access:#x}, disposition {create_disposition:#x})",
-                        mapping.host.display(),
-                        name
-                    );
-                    eprint_note(format!(
-                        "kdfiles: target opened {name} -> {} ({len} bytes)",
-                        mapping.host.display()
-                    ));
-                    reply
-                }
-                None => {
-                    kd_trace!("kd: kdfiles: no mapping for {name}, target will use its own copy");
-                    FileIoReply::new(DBGKD_CREATE_FILE_API, STATUS_UNSUCCESSFUL)
-                }
+        } => match map.open(name) {
+            Some((handle, len, mapping)) => {
+                let mut reply = FileIoReply::new(DBGKD_CREATE_FILE_API, STATUS_SUCCESS);
+                write_u64(&mut reply.header, 32, handle);
+                write_u64(&mut reply.header, 40, len);
+                kd_trace!(
+                    "kd: kdfiles: serving {} as {} ({len} bytes, handle {handle:#x}, access {desired_access:#x}, disposition {create_disposition:#x})",
+                    mapping.host.display(),
+                    name
+                );
+                eprint_note(format!(
+                    "kdfiles: target opened {name} -> {} ({len} bytes)",
+                    mapping.host.display()
+                ));
+                reply
             }
-        }
+            None => {
+                kd_trace!("kd: kdfiles: no mapping for {name}, target will use its own copy");
+                FileIoReply::new(DBGKD_CREATE_FILE_API, STATUS_UNSUCCESSFUL)
+            }
+        },
         FileIoRequest::Read {
             handle,
             offset,
@@ -719,10 +718,7 @@ mod tests {
         assert_eq!(serve_file_io(&map, &close).status(), STATUS_SUCCESS);
 
         let read = parse_file_io(&read_payload(handle, 0, 8)).unwrap();
-        assert_eq!(
-            serve_file_io(&map, &read).status(),
-            STATUS_INVALID_HANDLE
-        );
+        assert_eq!(serve_file_io(&map, &read).status(), STATUS_INVALID_HANDLE);
     }
 
     #[test]

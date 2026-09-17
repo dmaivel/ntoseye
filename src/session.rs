@@ -247,7 +247,7 @@ pub enum StopResolution {
     ModulesChanged,
     /// A software or hardware breakpoint worth surfacing.
     Breakpoint {
-        breakpoint: Breakpoint,
+        breakpoint: Box<Breakpoint>,
         event: StopEvent,
         rip: u64,
         condition_error: Option<String>,
@@ -1951,7 +1951,7 @@ impl Session {
                     .and_then(|registers| registers.get("rip").copied())
                     .unwrap_or(0);
                 let resolution = StopResolution::Breakpoint {
-                    breakpoint,
+                    breakpoint: Box::new(breakpoint),
                     event,
                     rip,
                     condition_error,
@@ -1993,7 +1993,7 @@ impl Session {
                 breakpoint,
                 condition_error,
             } => StopResolution::Breakpoint {
-                breakpoint,
+                breakpoint: Box::new(breakpoint),
                 event,
                 rip,
                 condition_error,

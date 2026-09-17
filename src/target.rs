@@ -1006,7 +1006,7 @@ impl ListCursor {
         }
     }
 
-    pub fn next(&mut self) -> Option<VirtAddr> {
+    pub fn take_current(&mut self) -> Option<VirtAddr> {
         if self.termination.is_some() {
             return None;
         }
@@ -1045,11 +1045,11 @@ impl ListCursor {
         };
     }
 
-    /// The termination reached; the walk must have been driven to `next()`
+    /// The termination reached; the walk must have been driven to `take_current()`
     /// returning `None`.
     pub fn finish(self) -> ListTermination {
         self.termination
-            .expect("ListCursor::finish called before next() returned None")
+            .expect("ListCursor::finish called before take_current() returned None")
     }
 }
 
@@ -1096,7 +1096,7 @@ where
     let mut links = Vec::new();
     let mut cursor = ListCursor::new(head, limit);
     cursor.advance(read_next(head).map_err(|error| error.to_string()));
-    while let Some(current) = cursor.next() {
+    while let Some(current) = cursor.take_current() {
         links.push(current);
         cursor.advance(read_next(current).map_err(|error| error.to_string()));
     }
@@ -1485,7 +1485,7 @@ impl Target {
         let mut cursor = ListCursor::new(head, MAX);
         cursor.advance(Ok(mem.read::<VirtAddr>(head)?));
         let mut out = Vec::new();
-        while let Some(current) = cursor.next() {
+        while let Some(current) = cursor.take_current() {
             out.push(current.0.wrapping_sub(link_offset));
             cursor.advance(
                 mem.read::<VirtAddr>(current)
@@ -4509,7 +4509,7 @@ impl Target {
             }
 
             let vad = node - vad_node_offset;
-            if let Some(region) = self.read_vad_region(
+            if let Some(region) = Self::read_vad_region(
                 &memory,
                 &vad_layout,
                 flags_layout.as_deref(),
@@ -4584,7 +4584,6 @@ impl Target {
     }
 
     fn read_vad_region(
-        &self,
         memory: &impl MemoryOps<VirtAddr>,
         vad_layout: &TypeInfo,
         flags_layout: Option<&TypeInfo>,

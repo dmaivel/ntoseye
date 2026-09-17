@@ -1294,13 +1294,13 @@ impl KdBackend {
     fn update_slot_on_all_processors<S: Copy>(
         &mut self,
         slot: u8,
-        slot_count: u8,
         operation: &str,
         label: &str,
         mut read: impl FnMut(&mut Self, u8) -> Result<S>,
         mut restore: impl FnMut(&mut Self, u8, S) -> Result<()>,
         mut update: impl FnMut(&mut Self) -> Result<()>,
     ) -> Result<()> {
+        let slot_count = self.hardware_breakpoint_slots();
         if slot >= slot_count {
             return Err(Error::Kd(format!(
                 "invalid hardware breakpoint slot {slot} (expected 0-{})",
@@ -2273,7 +2273,6 @@ impl DebugBackend for KdBackend {
                 // untracked partial set.
                 self.update_slot_on_all_processors(
                     slot,
-                    HW_BREAKPOINT_SLOTS,
                     "install",
                     "hardware breakpoint",
                     |backend, slot| backend.read_dr_slot_state(slot),
@@ -2285,7 +2284,6 @@ impl DebugBackend for KdBackend {
                 arm64_slot_offsets_for_access(slot, access)?;
                 self.update_slot_on_all_processors(
                     slot,
-                    hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS,
                     "install",
                     "ARM64 hardware breakpoint",
                     |backend, slot| backend.read_arm64_slot_state(slot),
@@ -2305,7 +2303,6 @@ impl DebugBackend for KdBackend {
         match self.arch {
             Arch::Amd64 => self.update_slot_on_all_processors(
                 slot,
-                HW_BREAKPOINT_SLOTS,
                 "clear",
                 "hardware breakpoint",
                 |backend, slot| backend.read_dr_slot_state(slot),
@@ -2316,7 +2313,6 @@ impl DebugBackend for KdBackend {
                 arm64_slot_offsets(slot)?;
                 self.update_slot_on_all_processors(
                     slot,
-                    hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS,
                     "clear",
                     "ARM64 hardware breakpoint",
                     |backend, slot| backend.read_arm64_slot_state(slot),

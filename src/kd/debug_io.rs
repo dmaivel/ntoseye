@@ -262,4 +262,3 @@ fn send_debug_io_response<T: Read + Write>(
     reply[DBGKD_DEBUG_IO_HEADER_SIZE..].copy_from_slice(response);
     framing.send_data(PACKET_TYPE_KD_DEBUG_IO, &reply)
 }
-

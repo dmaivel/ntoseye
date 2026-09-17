@@ -89,6 +89,10 @@ python-extension = ["python", "pyo3/extension-module"]
 [profile.dev.package.pdb2]
 debug-assertions = false
 
+[lints.clippy]
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+
 [profile.test.package.pdb2]
 debug-assertions = false
 

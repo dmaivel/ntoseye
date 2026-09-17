@@ -165,7 +165,7 @@ fn walk_list_nodes(
     let mut cursor = ListCursor::new(head, limit.min(MAX_LIST_ENTRIES));
     cursor.advance(read_list_next(target, head).map_err(|error| error.to_string()));
     let mut nodes = Vec::new();
-    while let Some(current) = cursor.next() {
+    while let Some(current) = cursor.take_current() {
         nodes.push(current);
         cursor.advance(read_list_next(target, current).map_err(|error| error.to_string()));
     }

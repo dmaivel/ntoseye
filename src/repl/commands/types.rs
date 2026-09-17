@@ -284,7 +284,6 @@ impl ReplState<'_> {
         options: &DtOptions,
         indent: usize,
         depth: usize,
-        recurse_struct: bool,
     ) {
         match &field.type_data {
             // A nested layout prints its own fields rather than a value, but
@@ -294,7 +293,7 @@ impl ReplState<'_> {
                     && !named_type(&field.type_data, "_LIST_ENTRY") =>
             {
                 outln!("{}", label);
-                if recurse_struct {
+                if depth > 0 {
                     if let Some(type_info) = self.lookup_type(type_name) {
                         self.print_struct_fields(
                             type_info.as_ref(),
@@ -314,13 +313,11 @@ impl ReplState<'_> {
                 }
             }
             // An array prints its elements, unless it is an inline C string.
-            ParsedType::Array(inner, count) if field.type_data.c_string_len().is_none() => {
+            ParsedType::Array(_, _) if field.type_data.c_string_len().is_none() => {
                 outln!("{}", label);
                 self.print_array_elements(
                     address,
                     field,
-                    inner,
-                    *count,
                     options,
                     indent + 2,
                     depth.saturating_sub(1),
@@ -346,23 +343,24 @@ impl ReplState<'_> {
         &self,
         address: VirtAddr,
         field: &FieldInfo,
-        inner: &ParsedType,
-        count: u32,
         options: &DtOptions,
         indent: usize,
         depth: usize,
     ) {
+        let ParsedType::Array(inner, count) = &field.type_data else {
+            return;
+        };
         let max_elements = options
             .array_limit
             .unwrap_or(MAX_ARRAY_ELEMENTS)
             .min(MAX_ARRAY_ELEMENTS);
-        let count_usize = count as usize;
+        let count_usize = *count as usize;
         let shown = count_usize.min(max_elements);
         if shown == 0 {
             return;
         }
         let total_size = self.type_view().field_size(field);
-        let Some(element_size) = self.type_view().element_stride(total_size, inner, count) else {
+        let Some(element_size) = self.type_view().element_stride(total_size, inner, *count) else {
             outln!(
                 "{}[array elements unavailable: element size is unknown]",
                 " ".repeat(indent)
@@ -375,7 +373,7 @@ impl ReplState<'_> {
             let element_field = FieldInfo {
                 offset: 0,
                 size: element_size as u64,
-                type_data: inner.clone(),
+                type_data: inner.as_ref().clone(),
             };
             let prefix = " ".repeat(indent);
             self.print_field_value(
@@ -384,8 +382,7 @@ impl ReplState<'_> {
                 &format!("{}[{}] : {}", prefix, index, inner),
                 options,
                 indent,
-                depth,
-                true,
+                depth.max(1),
             );
         }
         if shown < count_usize {
@@ -414,15 +411,7 @@ impl ReplState<'_> {
             }
             let address = base + field.offset as u64;
             let descriptor = self.field_descriptor(indent, name, field, options);
-            self.print_field_value(
-                address,
-                field,
-                &descriptor,
-                options,
-                indent,
-                depth,
-                depth > 0,
-            );
+            self.print_field_value(address, field, &descriptor, options, indent, depth);
         }
     }
 
@@ -533,7 +522,6 @@ impl ReplState<'_> {
             options,
             2,
             options.recursive_depth.max(1),
-            true,
         );
     }
 
@@ -584,7 +572,7 @@ impl ReplState<'_> {
         }
         let mut cursor = ListCursor::from_first(first, MAX_LIST_ENTRIES);
         let mut records = Vec::new();
-        while let Some(link) = cursor.next() {
+        while let Some(link) = cursor.take_current() {
             let record = link - link_offset;
             records.push(record);
             cursor.advance(
@@ -781,7 +769,7 @@ impl ReplState<'_> {
         let limit = requested.min(MAX_LIST_ENTRIES);
         let mut cursor = ListCursor::from_first(address, limit);
         let mut bytes = [0u8; MAX_DL_WORDS * 8];
-        while let Some(current) = cursor.next() {
+        while let Some(current) = cursor.take_current() {
             let read_words = display_words.max(2);
             let width = read_words * 8;
             if let Err(error) = self.ctx.read_masked(current, &mut bytes[..width]) {
