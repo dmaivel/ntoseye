@@ -1,10 +1,12 @@
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
+use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::guest::{ModuleInfo, ProcessInfo, StructRef};
@@ -23,6 +25,12 @@ use crate::repl::*;
 
 const MAX_PROCESSOR_SELECTION: usize = 256;
 const MAX_PROCESS_THREADS: usize = 512;
+
+enum ThreadResolution {
+    Found(ThreadInfo),
+    Missing,
+    Ambiguous(usize),
+}
 const THREAD_STACK_LIMIT: usize = 32;
 const DEFAULT_THREAD_FRAME_LIMIT: usize = 16;
 const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
@@ -858,17 +866,43 @@ impl ReplState<'_> {
         })
     }
 
-    fn cmd_thread(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let threads = match self.windows_thread_candidates() {
-            Ok(threads) => threads,
-            Err(e) => {
-                error!("failed to enumerate threads: {}", e);
-                Vec::new()
+    /// The thread `value` names. A running thread and an ETHREAD (or
+    /// KTHREAD, which shares its base) of a listed process are read
+    /// directly; only a thread id pays for the walk over every process.
+    fn resolve_windows_thread(
+        &mut self,
+        value: Option<u64>,
+        active: &HashMap<u64, (String, ThreadInfo)>,
+    ) -> Result<ThreadResolution> {
+        if let Some(value) = value {
+            if let Some((_, thread)) = active.get(&value) {
+                return Ok(ThreadResolution::Found(thread.clone()));
             }
-        };
-
-        let active = self.ctx.active_thread_map();
+            if looks_like_kernel_pointer(value)
+                && let Ok(thread) = self.ctx.target.thread_info_from_ethread(VirtAddr(value))
+                && let Ok(processes) = self.ctx.target.guest()?.enumerate_processes()
+                && thread
+                    .eprocess
+                    .is_some_and(|owner| processes.iter().any(|p| p.eprocess_va == owner))
+            {
+                return Ok(ThreadResolution::Found(thread));
+            }
+        }
+        let threads = self.windows_thread_candidates()?;
         *self.caches.threads.write().unwrap() = threads.clone();
+        let mut matches: Vec<ThreadInfo> = threads
+            .into_iter()
+            .filter(|thread| Self::thread_matches_value(thread, value))
+            .collect();
+        Ok(match matches.len() {
+            0 => ThreadResolution::Missing,
+            1 => ThreadResolution::Found(matches.remove(0)),
+            count => ThreadResolution::Ambiguous(count),
+        })
+    }
+
+    fn cmd_thread(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let active = self.ctx.active_thread_map();
 
         let target = invocation.arg(0).unwrap_or(".");
         let current_alias_address = if target == "." {
@@ -894,26 +928,22 @@ impl ReplState<'_> {
         let target_value = current_alias_address
             .or_else(|| Expr::eval_with_radix(target, &self.ctx.target, self.radix).ok())
             .map(|address| address.0);
-        let matches = threads
-            .iter()
-            .filter(|thread| Self::thread_matches_value(thread, target_value))
-            .collect::<Vec<_>>();
-
-        let thread = match matches.as_slice() {
-            [thread] => *thread,
-            [] => {
+        let thread = match self.resolve_windows_thread(target_value, &active) {
+            Ok(ThreadResolution::Found(thread)) => thread,
+            Ok(ThreadResolution::Missing) => {
                 error!("no Windows thread matches '{}'", target);
                 return Ok(());
             }
-            many => {
-                error!(
-                    "ambiguous Windows thread '{}': {} matches",
-                    target,
-                    many.len()
-                );
+            Ok(ThreadResolution::Ambiguous(count)) => {
+                error!("ambiguous Windows thread '{}': {} matches", target, count);
+                return Ok(());
+            }
+            Err(e) => {
+                error!("failed to enumerate threads: {}", e);
                 return Ok(());
             }
         };
+        let thread = &thread;
 
         let action = invocation.arg(1);
         let numeric_action = action.and_then(|text| {
