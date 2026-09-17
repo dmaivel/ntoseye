@@ -1865,7 +1865,9 @@ impl Session {
     /// when both operations succeed. Any failure explicitly prepares the
     /// backend to leave the target halted.
     pub fn cleanup_for_exit(&mut self) -> Result<()> {
-        let halted = if self.backend.is_running() {
+        // Halting is only for restoring sites; with none to restore a passive
+        // backend (which cannot interrupt) exits cleanly too.
+        let halted = if self.backend.is_running() && !self.breakpoints.list().is_empty() {
             self.interrupt().map(|_| ())
         } else {
             Ok(())
