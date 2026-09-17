@@ -183,6 +183,9 @@ struct StopInfo {
     description: String,
     exception_id: Option<String>,
     detail: Option<String>,
+    /// The breakpoint that caused the stop, reported as `hitBreakpointIds`
+    /// so the client can highlight it.
+    breakpoint_id: Option<u32>,
 }
 
 struct Server {
@@ -1005,6 +1008,7 @@ impl Server {
                     description: format!("breakpoint {id} at {where_}"),
                     exception_id: None,
                     detail: Some(format!("address {address:#x}")),
+                    breakpoint_id: Some(id),
                 }
             }
             ContinueOutcome::Step { rip } => StopInfo {
@@ -1012,12 +1016,14 @@ impl Server {
                 description: format!("step to {rip:#x}"),
                 exception_id: None,
                 detail: None,
+                breakpoint_id: None,
             },
             ContinueOutcome::Halted { rip } => StopInfo {
                 reason: "entry",
                 description: format!("halted at {rip:#x}"),
                 exception_id: None,
                 detail: None,
+                breakpoint_id: None,
             },
             ContinueOutcome::Stopped {
                 rip,
@@ -1038,6 +1044,7 @@ impl Server {
                         exception_id: Some(format!("{code:#010x}")),
                         detail: exception_address
                             .map(|address| format!("exception record address {address:#x}")),
+                        breakpoint_id: None,
                     }
                 }
                 None => StopInfo {
@@ -1045,6 +1052,7 @@ impl Server {
                     description: format!("halted at {rip:#x}"),
                     exception_id: None,
                     detail: None,
+                    breakpoint_id: None,
                 },
             },
             ContinueOutcome::Bugcheck { rip, info } => {
@@ -1072,6 +1080,7 @@ impl Server {
                     },
                     exception_id: Some("bugcheck".to_string()),
                     detail: Some(detail),
+                    breakpoint_id: None,
                 }
             }
             ContinueOutcome::TargetReloaded {
@@ -1097,6 +1106,7 @@ impl Server {
                     description: format!("target rebooted (nt {base})"),
                     exception_id: None,
                     detail: None,
+                    breakpoint_id: None,
                 }
             }
         };
@@ -1135,6 +1145,9 @@ impl Server {
             && let Some(detail) = &stop.detail
         {
             body["text"] = json!(detail);
+        }
+        if let Some(id) = stop.breakpoint_id {
+            body["hitBreakpointIds"] = json!([id]);
         }
         self.last_stop = Some(stop);
         self.send_event("stopped", body);
