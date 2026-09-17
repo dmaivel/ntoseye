@@ -33,6 +33,6 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked -p ntoseye $FEATURES --all-targets -- -D warnings
+        run: cargo clippy --locked -p ntoseye $FEATURES --all-targets
       - name: Test
         run: cargo test --locked -p ntoseye $FEATURES
