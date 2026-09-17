@@ -1088,17 +1088,17 @@ impl BreakpointManager {
             .cloned()
             .collect();
         enabled.sort_by_key(|bp| bp.id);
+        let dropped = client.sites_dropped_by_stop();
 
         for bp in enabled {
-            // A target that owns its sites re-arms them itself on every
-            // resume. Lifting and rewriting the entry here would churn the
-            // target's breakpoint table and, in the window between the two
-            // requests, leave a site the target may already have re-armed
-            // with nothing claiming it. A site whose displaced byte we never
-            // saw still goes through the reinstall below, to pick that byte
-            // up now the page is resident.
+            // A target that owns its sites keeps them across a stop, except
+            // the ones it dropped while reporting it; lifting and rewriting
+            // the survivors would only churn its table. A site whose
+            // displaced byte we never saw still goes through the reinstall
+            // below, to pick that byte up now the page is resident.
             if client.target_manages_breakpoint_sites()
                 && matches!(&bp.backend, BreakpointBackend::Kernel { original: Some(_) })
+                && !dropped.contains(&bp.address.0)
             {
                 continue;
             }
@@ -1492,15 +1492,6 @@ impl BreakpointManager {
             .values()
             .find(|bp| bp.resolved && bp.enabled && bp.hardware.is_none() && bp.address.0 == rip)
             .map(|bp| bp.id)
-    }
-
-    /// Whether the target, not this debugger, wrote the breakpoint instruction
-    /// at `id` - so removing, stepping and rewriting it is the target's job.
-    /// An unknown id answers `false`: nothing to defer to.
-    pub fn target_owns_site(&self, id: u32) -> bool {
-        self.breakpoints
-            .get(&id)
-            .is_some_and(|bp| matches!(bp.backend, BreakpointBackend::Kernel { .. }))
     }
 
     fn ensure_site_available(

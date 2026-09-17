@@ -2590,11 +2590,25 @@ impl DebugBackend for KdBackend {
     }
 
     /// The target's `KdpBreakpointTable` owns every site written through
-    /// `DbgKdWriteBreakPointApi`: the kernel lifts those breakpoints out of
-    /// guest code when it takes control and writes them back on the continue,
-    /// stepping the reporting thread over its own site.
+    /// `DbgKdWriteBreakPointApi`: the kernel keeps the displaced bytes and
+    /// hides them from memory reads. It does not, however, step the
+    /// reporting thread over its own site; see [`Self::sites_dropped_by_stop`].
     fn target_manages_breakpoint_sites(&self) -> bool {
         true
+    }
+
+    /// `KdpReportExceptionStateChange` calls `KdpDeleteBreakpointRange` over
+    /// the `DBGKD_MAXSTREAM` bytes it reports from the stop PC, so every
+    /// table entry there is gone (and its handle dead) once the stop is on
+    /// the wire. The full window is reported even when the stream was cut
+    /// short by a page end: rewriting a surviving entry only churns it.
+    fn sites_dropped_by_stop(&self) -> Vec<u64> {
+        let window = self.last_rip..self.last_rip.saturating_add(api::DBGKD_MAXSTREAM);
+        self.bp_handles
+            .keys()
+            .copied()
+            .filter(|addr| window.contains(addr))
+            .collect()
     }
 
     fn note_target_rediscovery_pending(&mut self) {
@@ -2952,6 +2966,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn target_manages_breakpoint_sites(&self) -> bool {
         self.lock().target_manages_breakpoint_sites()
+    }
+
+    fn sites_dropped_by_stop(&self) -> Vec<u64> {
+        self.lock().sites_dropped_by_stop()
     }
 
     fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {

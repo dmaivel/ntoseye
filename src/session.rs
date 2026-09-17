@@ -1965,26 +1965,14 @@ impl Session {
                 // condition evaluation. A pass skip uses the same canonical
                 // step-over/resume path as a false condition.
                 if self.breakpoints.record_hit(bp.id)? == BreakpointHitDisposition::SkipPass {
-                    step_over_current_breakpoint(
-                        self.backend.as_mut(),
-                        &self.register_map,
-                        &self.target,
-                        &mut self.breakpoints,
-                    )?;
-                    self.backend.continue_execution()?;
+                    self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
                 }
                 // A false condition is absorbed. Evaluation errors fail safe:
                 // surface the stop and carry the error to every host.
                 let condition_error = match bp.evaluate_condition(&self.target) {
                     Ok(false) => {
-                        step_over_current_breakpoint(
-                            self.backend.as_mut(),
-                            &self.register_map,
-                            &self.target,
-                            &mut self.breakpoints,
-                        )?;
-                        self.backend.continue_execution()?;
+                        self.step_over_and_resume()?;
                         return Ok(BreakpointStopAction::Resumed);
                     }
                     Ok(true) => None,
@@ -2013,19 +2001,27 @@ impl Session {
                 // different address space): silently step over so the wrong
                 // process keeps running, then resume waiting for the right one.
                 if self.breakpoints.breakpoint_id_at_address(rip).is_some() {
-                    step_over_current_breakpoint(
-                        self.backend.as_mut(),
-                        &self.register_map,
-                        &self.target,
-                        &mut self.breakpoints,
-                    )?;
-                    self.backend.continue_execution()?;
+                    self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
                 }
 
                 Ok(BreakpointStopAction::NotBreakpoint)
             }
         }
+    }
+
+    /// Silently continue past the breakpoint at the PC: step over it, rewrite
+    /// whatever sites the stop dropped, and resume without surfacing anything.
+    fn step_over_and_resume(&mut self) -> Result<()> {
+        step_over_current_breakpoint(
+            self.backend.as_mut(),
+            &self.register_map,
+            &self.target,
+            &mut self.breakpoints,
+        )?;
+        self.breakpoints
+            .refresh_enabled(self.backend.as_mut(), &self.target)?;
+        self.backend.continue_execution()
     }
 
     /// Consult and clear the module-change signals, reconciling symbolic
@@ -3110,12 +3106,6 @@ pub fn step_over_current_breakpoint(
     let Some(bp_id) = breakpoints.breakpoint_id_at_address(rip) else {
         return Ok(false);
     };
-
-    // KD removes and reinstalls its own breakpoint sites around stops.
-    // Host-side step-over would temporarily leave the site untracked.
-    if backend.target_manages_breakpoint_sites() && breakpoints.target_owns_site(bp_id) {
-        return Ok(false);
-    }
 
     match (breakpoints.disable(backend, debugger, bp_id), cr3) {
         (Ok(()), _) => {}

@@ -19,6 +19,10 @@ pub const DBGKD_WRITE_VIRTUAL_MEMORY: u32 = 0x0000_3131;
 pub const DBGKD_GET_CONTEXT: u32 = 0x0000_3132;
 pub const DBGKD_WRITE_BREAKPOINT: u32 = 0x0000_3134;
 pub const DBGKD_RESTORE_BREAKPOINT: u32 = 0x0000_3135;
+/// Bytes of `InstructionStream` a state change carries from the stop PC;
+/// the kernel deletes every breakpoint table entry inside that window
+/// before it copies them.
+pub const DBGKD_MAXSTREAM: u64 = 16;
 pub const DBGKD_READ_CONTROL_SPACE: u32 = 0x0000_3137;
 pub const DBGKD_WRITE_CONTROL_SPACE: u32 = 0x0000_3138;
 pub const DBGKD_CONTINUE_API2: u32 = 0x0000_313C;

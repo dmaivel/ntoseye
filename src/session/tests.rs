@@ -32,6 +32,10 @@ pub struct MockBackend {
     interrupt_events: VecDeque<StopEvent>,
     modules_changed: bool,
     target_manages_sites: bool,
+    /// Sites the target reports as dropped by its last stop.
+    dropped_sites: Vec<u64>,
+    /// `set_breakpoint` (true) / `remove_breakpoint` (false) calls in order.
+    site_writes: Vec<(u64, bool)>,
 }
 
 impl Default for MockBackend {
@@ -50,6 +54,8 @@ impl Default for MockBackend {
             interrupt_events: VecDeque::new(),
             modules_changed: false,
             target_manages_sites: false,
+            dropped_sites: Vec::new(),
+            site_writes: Vec::new(),
         }
     }
 }
@@ -97,15 +103,17 @@ impl DebugBackend for MockBackend {
         self.regs = data.to_vec();
         Ok(())
     }
-    fn set_breakpoint(&mut self, _addr: u64) -> Result<()> {
+    fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
         if self.allow_breakpoints {
+            self.site_writes.push((addr, true));
             Ok(())
         } else {
             Err(Error::NotSupported)
         }
     }
-    fn remove_breakpoint(&mut self, _addr: u64) -> Result<()> {
+    fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
         if self.allow_breakpoints {
+            self.site_writes.push((addr, false));
             Ok(())
         } else {
             Err(Error::NotSupported)
@@ -113,6 +121,9 @@ impl DebugBackend for MockBackend {
     }
     fn target_manages_breakpoint_sites(&self) -> bool {
         self.target_manages_sites
+    }
+    fn sites_dropped_by_stop(&self) -> Vec<u64> {
+        self.dropped_sites.clone()
     }
     fn continue_execution(&mut self) -> Result<()> {
         self.continues.fetch_add(1, Ordering::Relaxed);
@@ -373,10 +384,9 @@ fn breakpoint_rewind_leaves_an_unrelated_program_counter_alone() {
 }
 
 #[test]
-fn a_target_owned_breakpoint_is_left_for_the_target_to_step_over() {
+fn a_target_owned_breakpoint_is_stepped_over_and_written_back() {
     let session = session_over_memory(0x1000, &[0u8; 0x80]);
     let mut backend = MockBackend::default().target_managed_sites();
-    // A dance would succeed here, so only the ownership check can stop it.
     backend.allow_breakpoints = true;
     backend.set("rip", 0x1000);
     let mut manager = BreakpointManager::new();
@@ -387,12 +397,30 @@ fn a_target_owned_breakpoint_is_left_for_the_target_to_step_over() {
         step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
             .unwrap();
 
-    assert!(!stepped, "host stepped a site the target owns");
-    assert!(
-        manager.list()[0].enabled,
-        "the site was disowned across the resume"
-    );
-    assert_eq!(backend.writes, 0, "the guest context was rewritten");
+    assert!(stepped);
+    assert_eq!(backend.get("rip"), 0x1001);
+    assert!(manager.list()[0].enabled);
+    // The target dropped the entry when it reported the hit; the step
+    // executes the displaced instruction and the site is written again.
+    assert_eq!(backend.site_writes, [(0x1000, false), (0x1000, true)]);
+}
+
+#[test]
+fn refresh_rewrites_only_the_sites_the_stop_dropped() {
+    let session = session_over_memory(0x1000, &[0u8; 0x80]);
+    let mut backend = MockBackend::default().target_managed_sites();
+    backend.allow_breakpoints = true;
+    backend.dropped_sites = vec![0x1008];
+    let mut manager = BreakpointManager::new();
+    manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+    manager.insert_for_test(2, VirtAddr(0x1008), true, None);
+    manager.insert_for_test(3, VirtAddr(0x2000), true, None);
+
+    manager
+        .refresh_enabled(&mut backend, &session.target)
+        .unwrap();
+
+    assert_eq!(backend.site_writes, [(0x1008, false), (0x1008, true)]);
 }
 
 fn manager_with_hw(slot: u8, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {

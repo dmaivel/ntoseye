@@ -565,6 +565,15 @@ pub trait DebugBackend {
         false
     }
 
+    /// Sites the target dropped from its own breakpoint table when it
+    /// reported the last stop. Windows deletes every `KdpBreakpointTable`
+    /// entry inside the instruction stream it reports (up to 16 bytes from
+    /// the stop PC), so those need [`Self::set_breakpoint`] again before the
+    /// next resume. Empty for backends whose sites survive a stop.
+    fn sites_dropped_by_stop(&self) -> Vec<u64> {
+        Vec::new()
+    }
+
     /// Called once after the [`Target`] is constructed, giving the backend a
     /// chance to read guest state that requires symbol resolution. DmpBackend
     /// uses this to extract per-CPU registers from the PRCB ContextFrame.
