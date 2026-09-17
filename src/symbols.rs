@@ -1,7 +1,9 @@
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    guest::{ModuleInfo, WinObject, read_pe_header_page, size_of_image},
+    guest::{
+        ModuleInfo, PeImage, WinObject, read_pe_header_page, read_pe_image_from_file, size_of_image,
+    },
     memory,
     types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
@@ -172,6 +174,10 @@ pub struct SymbolStore {
     /// Locations are static PDB recipes (registers are applied at use time),
     /// so an entry stays valid for the lifetime of the guid.
     locals_cache: DashMap<(u128, u32), Option<Arc<Vec<ProcedureLocal>>>>,
+    /// Complete on-disk images by cache path. A stack walk builds its module
+    /// cache anew, and expanding a kernel image is 13 MiB of copying it
+    /// should not repeat per thread.
+    on_disk_images: DashMap<PathBuf, Arc<PeImage>>,
 
     modules: DashMap<(Dtb, u64), LoadedModule>,
     module_status: DashMap<(Dtb, u64), ModuleSymbolStatus>,
@@ -2286,6 +2292,7 @@ impl SymbolStore {
             index_diagnostics: DashMap::new(),
             type_cache: DashMap::new(),
             locals_cache: DashMap::new(),
+            on_disk_images: DashMap::new(),
             modules: DashMap::new(),
             module_status: DashMap::new(),
             module_source: DashMap::new(),
@@ -2769,8 +2776,7 @@ impl SymbolStore {
 
     /// Ensure the module's on-disk PE image (matched by TimeDateStamp +
     /// SizeOfImage, the symbol-server image key) is in the image cache,
-    /// downloading it if absent, and return its path. Lets the unwinder recover
-    /// read-only data (unwind tables) when the in-memory `.pdata` is paged out.
+    /// downloading it if absent, and return its path.
     pub fn ensure_module_image_on_disk(
         &self,
         image_file_name: &str,
@@ -2780,6 +2786,29 @@ impl SymbolStore {
         let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         download_job(&job, ProgressBar::new(0))?;
         Ok(job.path)
+    }
+
+    /// The module's complete on-disk PE image from the image cache, expanded
+    /// once per session, downloaded first when `download` and absent. Lets
+    /// the unwinder read unwind tables without the target, or recover them
+    /// when the in-memory `.pdata` is paged out.
+    pub fn module_image_on_disk(
+        &self,
+        image_file_name: &str,
+        time_date_stamp: u32,
+        size_of_image: u32,
+        download: bool,
+    ) -> Result<Arc<PeImage>> {
+        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        if let Some(image) = self.on_disk_images.get(&job.path) {
+            return Ok(Arc::clone(&image));
+        }
+        if download {
+            download_job(&job, ProgressBar::new(0))?;
+        }
+        let image = Arc::new(read_pe_image_from_file(&job.path)?);
+        self.on_disk_images.insert(job.path, Arc::clone(&image));
+        Ok(image)
     }
 
     pub fn build_image_download_job(

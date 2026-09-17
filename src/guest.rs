@@ -309,7 +309,7 @@ const PE_HEADER_PROBE: usize = 0x400;
 /// Where the section table of the headers in `probe` ends, or `None` when
 /// the NT headers themselves extend past the probe. A buffer that is not a
 /// PE ends at the probe: reading more of it changes nothing.
-fn pe_headers_end(probe: &[u8]) -> Option<usize> {
+pub fn pe_headers_end(probe: &[u8]) -> Option<usize> {
     if probe.len() < 0x40 || &probe[..2] != b"MZ" {
         return Some(probe.len());
     }

@@ -36,7 +36,7 @@ use crate::{
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
-    guest::{Guest, ModuleInfo, PeImage, WinObject, read_pe_image, read_pe_image_from_file},
+    guest::{Guest, ModuleInfo, PeImage, WinObject, pe_headers_end, read_pe_image},
     kd::{context, context_arm64},
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
@@ -1494,7 +1494,7 @@ impl<'a> StackTracer<'a> {
             if cached.image.is_complete() {
                 return false;
             }
-            self.load_on_disk_image(&cached.image, &module.info)
+            self.on_disk_image(&cached.image, &module.info, true)
         };
         let Some(disk) = disk else {
             return false;
@@ -1509,7 +1509,7 @@ impl<'a> StackTracer<'a> {
             key,
             CachedModule {
                 info: module.info.clone(),
-                image: Arc::new(disk),
+                image: disk,
                 executable_ranges,
             },
         );
@@ -1544,14 +1544,22 @@ impl<'a> StackTracer<'a> {
                             "unwind: in-memory PE unreadable for {}, downloading via timestamp",
                             module.info.short_name
                         );
-                        let path = self
-                            .symbols
-                            .ensure_module_image_on_disk(&module.info.name, tds, module.info.size)
-                            .ok()?;
-                        Arc::new(read_pe_image_from_file(&path).ok()?)
+                        self.symbols
+                            .module_image_on_disk(&module.info.name, tds, module.info.size, true)
+                            .ok()?
                     }
                 }
             }
+        };
+        let image = match self.cached_on_disk_image(&image, &module.info) {
+            Some(disk) if !image.is_complete() => {
+                unwind_trace!(
+                    "unwind: using cached on-disk image for {}",
+                    module.info.short_name
+                );
+                disk
+            }
+            _ => image,
         };
         let executable_ranges = executable_ranges(&image);
 
@@ -1567,19 +1575,39 @@ impl<'a> StackTracer<'a> {
         Some(())
     }
 
-    /// Download (if needed) and load the module's complete on-disk PE image,
-    /// matched by the in-memory header's TimeDateStamp + SizeOfImage. The caller
-    /// re-resolves against it to decide whether it actually recovered anything.
-    fn load_on_disk_image(&self, image: &PeImage, info: &ModuleInfo) -> Option<PeImage> {
-        let view = PeView::from_bytes(image.headers()).ok()?;
-        let time_date_stamp = view.file_header().TimeDateStamp;
-        let size_of_image = view.optional_header().SizeOfImage;
+    /// The module's on-disk image when the image cache already holds it: its
+    /// unwind tables are the guest's, relocation-free, and cost no reads
+    /// from the target. The file must open with the headers the guest
+    /// mapped; a mismatch keeps the guest image. Nothing is downloaded here.
+    fn cached_on_disk_image(&self, image: &PeImage, info: &ModuleInfo) -> Option<Arc<PeImage>> {
+        let disk = self.on_disk_image(image, info, false)?;
+        let headers_end = pe_headers_end(image.headers())?;
+        headers_match_relocated(
+            disk.headers().get(..headers_end)?,
+            image.headers().get(..headers_end)?,
+        )
+        .then_some(disk)
+    }
 
-        let path = self
-            .symbols
-            .ensure_module_image_on_disk(&info.name, time_date_stamp, size_of_image)
-            .ok()?;
-        read_pe_image_from_file(&path).ok()
+    /// The module's complete on-disk PE image, matched by the in-memory
+    /// header's TimeDateStamp + SizeOfImage and downloaded if needed when
+    /// `download`. A recovering caller re-resolves against it to decide
+    /// whether it actually recovered anything.
+    fn on_disk_image(
+        &self,
+        image: &PeImage,
+        info: &ModuleInfo,
+        download: bool,
+    ) -> Option<Arc<PeImage>> {
+        let view = PeView::from_bytes(image.headers()).ok()?;
+        self.symbols
+            .module_image_on_disk(
+                &info.name,
+                view.file_header().TimeDateStamp,
+                view.optional_header().SizeOfImage,
+                download,
+            )
+            .ok()
     }
 }
 
@@ -1605,6 +1633,30 @@ fn executable_ranges(image: &PeImage) -> Vec<(u32, u32)> {
             ))
         })
         .collect()
+}
+
+/// Whether `disk` is the file `mapped` was loaded from: the headers agree
+/// except in `OptionalHeader.ImageBase`, which the loader rewrites to the
+/// address it relocated the image to.
+fn headers_match_relocated(disk: &[u8], mapped: &[u8]) -> bool {
+    if disk.len() != mapped.len() || disk.len() < 0x40 {
+        return false;
+    }
+    let e_lfanew = u32::from_le_bytes(disk[0x3c..0x40].try_into().unwrap()) as usize;
+    let optional = e_lfanew + 24;
+    let Some(magic) = disk.get(optional..optional + 2) else {
+        return false;
+    };
+    let image_base = match u16::from_le_bytes([magic[0], magic[1]]) {
+        0x20b => optional + 24..optional + 32,
+        0x10b => optional + 28..optional + 32,
+        _ => return false,
+    };
+    if image_base.end > disk.len() {
+        return false;
+    }
+    disk[..image_base.start] == mapped[..image_base.start]
+        && disk[image_base.end..] == mapped[image_base.end..]
 }
 
 /// Resolution of an rip against a module's unwind tables.
