@@ -64,7 +64,8 @@ pub enum View {
     /// An ordered key/value object (insertion order is preserved on render).
     Object(Vec<(&'static str, View)>),
     /// A value that can fail to read on its own: `{available, value, error}`
-    /// on both surfaces.
+    /// for MCP, an [`ntoseye.Diagnostic`](crate::python::record::Diagnostic)
+    /// for Python.
     Diagnostic(Box<DiagnosticView>),
 }
 
@@ -127,6 +128,7 @@ pub fn to_py<'py>(
     py: pyo3::Python<'py>,
     v: &View,
 ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+    use crate::python::record::{Diagnostic, Record};
     use pyo3::IntoPyObjectExt;
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
@@ -157,27 +159,28 @@ pub fn to_py<'py>(
         }
         View::Object(fields) => {
             let dict = PyDict::new(py);
+            let mut hex = Vec::new();
             for (key, val) in fields {
+                if matches!(val, View::Hex(_) | View::OptHex(Some(_))) {
+                    hex.push(*key);
+                }
                 dict.set_item(key, to_py(py, val)?)?;
             }
-            dict.into_any()
+            Bound::new(py, Record::new(dict.unbind(), hex))?.into_any()
         }
-        View::Diagnostic(diagnostic) => {
-            let dict = PyDict::new(py);
-            dict.set_item("available", diagnostic.error.is_none())?;
-            dict.set_item(
-                "value",
-                match &diagnostic.value {
-                    Some(value) => to_py(py, value)?,
-                    None => py.None().into_bound(py),
+        View::Diagnostic(diagnostic) => Bound::new(
+            py,
+            Diagnostic {
+                value: match &diagnostic.value {
+                    Some(value) => to_py(py, value)?.unbind(),
+                    None => py.None(),
                 },
-            )?;
-            dict.set_item("error", diagnostic.error.as_deref())?;
-            if let Some(source) = &diagnostic.source {
-                dict.set_item("source", source.as_deref())?;
-            }
-            dict.into_any()
-        }
+                hex: matches!(diagnostic.value, Some(View::Hex(_) | View::OptHex(Some(_)))),
+                error: diagnostic.error.clone(),
+                source: diagnostic.source.clone(),
+            },
+        )?
+        .into_any(),
     })
 }
 

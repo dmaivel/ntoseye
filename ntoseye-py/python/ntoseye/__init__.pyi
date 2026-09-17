@@ -4,7 +4,7 @@ Drive the ntoseye Windows kernel debugger from Python. See the project README
 and `examples/` for usage.
 """
 
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 __version__: str
 
@@ -15,6 +15,42 @@ class MemoryAccessError(NtoseyeError):
     """A guest memory access fault (unmapped page, partial read/write). Catch
     this to skip unreadable regions in sparse-memory walks without swallowing
     other errors."""
+
+class Record:
+    """An immutable, ordered set of named fields with attribute access: what
+    every structured result (`backtrace()` frames, `threads()`, `status()`,
+    the inspectors) returns. `record.ip`, or `record["ip"]`; `in`, `len`,
+    iteration over field names, `keys()`/`values()`/`items()`/`get()`, and
+    `to_dict()` for the plain nested dict the MCP JSON surface documents.
+    Addresses are ints; `repr` shows them as hex."""
+
+    def __getattr__(self, name: str) -> Any: ...
+    def __getitem__(self, key: str) -> Any: ...
+    def __contains__(self, key: str) -> bool: ...
+    def __len__(self) -> int: ...
+    def __iter__(self) -> Iterator[str]: ...
+    def keys(self) -> list[str]: ...
+    def values(self) -> list[Any]: ...
+    def items(self) -> list[tuple[str, Any]]: ...
+    def get(self, key: str, default: Any = None) -> Any: ...
+    def to_dict(self) -> dict[str, Any]: ...
+
+class Diagnostic:
+    """One field that reads independently of its record: `value` when it did,
+    `error` when it did not. Truthy exactly when available, so
+    `if peb.ldr: use(peb.ldr.value)`. Metrics also carry `source`, the
+    provenance of the value (`"dump header"`, `"KDBG"`, ...)."""
+
+    @property
+    def available(self) -> bool: ...
+    @property
+    def value(self) -> Any: ...
+    @property
+    def error(self) -> str | None: ...
+    @property
+    def source(self) -> str | None: ...
+    def __bool__(self) -> bool: ...
+    def to_dict(self) -> dict[str, Any]: ...
 
 class AddressModule:
     """Loaded-module context for a structured memory-search hit."""
@@ -168,18 +204,18 @@ class StopOutcome:
     @property
     def symbol(self) -> str | None: ...
     @property
-    def attached_process(self) -> dict[str, Any] | None:
+    def attached_process(self) -> Record | None:
         """The inspection scope at the stop as `{pid, name, dtb, eprocess}`. This
         is the operator's selection (`.process`) and persists across resumes, so
         it is not necessarily what the guest was executing."""
         ...
     @property
-    def stopped_process(self) -> dict[str, Any] | None:
+    def stopped_process(self) -> Record | None:
         """The process whose page tables the stopped vCPU had loaded, resolved
         from CR3 at the stop."""
         ...
     @property
-    def stopped_thread(self) -> dict[str, Any] | None:
+    def stopped_thread(self) -> Record | None:
         """The Windows thread the stopped vCPU was running, walked from its
         KPRCB. Its owner can differ from `stopped_process` when the thread is
         attached to another address space."""
@@ -208,7 +244,7 @@ class StopOutcome:
     @property
     def exception_address(self) -> int | None: ...
     @property
-    def bugcheck_info(self) -> dict[str, Any] | None: ...
+    def bugcheck_info(self) -> Record | None: ...
     @property
     def kernel_base(self) -> int | None: ...
     @property
@@ -288,29 +324,29 @@ class Debugger:
     def eval(self, expr: str) -> int:
         """Evaluate a debugger expression to an address/integer."""
         ...
-    def symbol_candidates(self, name: str) -> list[dict[str, Any]]:
+    def symbol_candidates(self, name: str) -> list[Record]:
         """Exact PDB symbol matches with module/visibility/compiland provenance."""
         ...
-    def nearest_symbol(self, addr: int) -> dict[str, Any]:
+    def nearest_symbol(self, addr: int) -> Record:
         """Nearest symbol as `{address, module, name, offset}`."""
         ...
-    def search_symbols(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+    def search_symbols(self, query: str, limit: int = 50) -> list[Record]:
         """Fuzzy-search symbols; use `module!query` to scope one module."""
         ...
-    def source_location(self, addr: int) -> dict[str, Any] | None:
+    def source_location(self, addr: int) -> Record | None:
         """PDB source location and remapped local path for an address."""
         ...
     def source_addresses(self, file: str, line: int) -> list[int]:
         """Every loaded address matching a PDB source file and line."""
         ...
-    def procedure_locals(self, addr: int | None = None) -> list[dict[str, Any]]:
+    def procedure_locals(self, addr: int | None = None) -> list[Record]:
         """Private locals/parameters in scope at `addr`, defaulting to the selected
         frame (`select_frame`) or the halted RIP (`dv`); scalar values when safely
         readable in the current register context."""
         ...
     def type_size(self, ty: str) -> int: ...
     def offset_of(self, ty: str, field: str) -> int: ...
-    def fields(self, ty: str) -> dict[str, Any]:
+    def fields(self, ty: str) -> Record:
         """Type layout `{name, size, fields: [{name, offset, size, type}]}`,
         fields sorted by offset."""
         ...
@@ -340,15 +376,15 @@ class Debugger:
     def closest_symbol(self, addr: int) -> str | None:
         """Nearest symbol as `module!name+0x..`, or `None`."""
         ...
-    def disassemble(self, addr: int, count: int) -> list[dict[str, Any]]:
+    def disassemble(self, addr: int, count: int) -> list[Record]:
         """Disassemble `count` instructions as `{ip, hex, asm, comment}` dicts."""
         ...
-    def inspect_trap_frame(self, address: int | None = None) -> dict[str, Any]:
+    def inspect_trap_frame(self, address: int | None = None) -> Record:
         """Decode an x64 `_KTRAP_FRAME` at `address`, or the current Windows
         thread's saved trap frame when omitted. Returns `{address, rip_symbol,
         frame}` with the decoded register fields in `frame`."""
         ...
-    def backtrace(self, limit: int = 64) -> list[dict[str, Any]]:
+    def backtrace(self, limit: int = 64) -> list[Record]:
         """Walk the current thread's call stack as `{ip, sp, symbol, source,
         source_location}` dicts.
 
@@ -368,7 +404,7 @@ class Debugger:
         """
         ...
     def current_dtb(self) -> int: ...
-    def pte_walk(self, addr: int) -> dict[str, Any]:
+    def pte_walk(self, addr: int) -> Record:
         """Walk the page tables for `addr`.
 
         Returns `{"address": int, "levels": [...]}`, where each level dict has
@@ -424,21 +460,21 @@ class Debugger:
         registers), `None` when it is parked (stack only). `None` resets to the
         backend's current vCPU. Requires the VM halted."""
         ...
-    def selected_thread(self) -> dict[str, Any] | None:
+    def selected_thread(self) -> Record | None:
         """The `.thread` selection in the `threads()` dict shape, or `None`."""
         ...
     def thread(self, thread: int) -> Struct:
         """Resolve a tid / ETHREAD / KTHREAD to its `_ETHREAD` cursor."""
         ...
-    def select_frame(self, index: int | None) -> dict[str, Any] | None:
+    def select_frame(self, index: int | None) -> Record | None:
         """Select stack frame `index` (`.frame N`) so registers, locals, and
         expressions use its recovered register file; returns `{index, ip, sp}`.
         `None` returns to the live frame. Requires a halted, live (not parked) thread."""
         ...
-    def selected_frame(self) -> dict[str, Any] | None:
+    def selected_frame(self) -> Record | None:
         """The selected frame as `{index, ip, sp}`, or `None` at the live frame."""
         ...
-    def backtrace_thread(self, thread: int, limit: int = 64) -> dict[str, Any]:
+    def backtrace_thread(self, thread: int, limit: int = 64) -> Record:
         """Walk any Windows thread's stack without selecting it: `{ethread, tid,
         source, frames}` with `backtrace()`-shaped frames."""
         ...
@@ -460,7 +496,7 @@ class Debugger:
         `disposition` fixes the acknowledgment of a continued exception (`-f gh`/`-f gn`).
         Applies to `run()`, `wait_for_stop()`, and `run_to()`."""
         ...
-    def exception_policies(self) -> list[dict[str, Any]]:
+    def exception_policies(self) -> list[Record]:
         """Configured policies as `{code, alias, mode, disposition, command}` (`sx`)."""
         ...
     def reset_exception_policies(self) -> None:
@@ -474,7 +510,7 @@ class Debugger:
         """Write a model-specific register (`wrmsr`). KD only, halted."""
         ...
     def is_running(self) -> bool: ...
-    def status(self) -> dict[str, Any]:
+    def status(self) -> Record:
         """Read-only run-control snapshot (where am I): `{running, current_thread,
         rip, symbol, attached_process: {pid, name, eprocess} | None,
         stopped_process: {pid, name, eprocess} | None, stopped_thread | None,
@@ -506,14 +542,14 @@ class Debugger:
         `running` true if nothing stopped in that window (poll again); with
         `None`, blocks until a stop."""
         ...
-    def bugcheck(self) -> dict[str, Any] | None:
+    def bugcheck(self) -> Record | None:
         """Analyze the current bugcheck (BSOD) from `nt!KiBugCheckData`. Returns
         `{code, code_hex, name, description, driver, args, fault, trap_frames,
         source}` (each trap frame is `{address, rip_symbol, frame, error}` with
         decoded `_KTRAP_FRAME` registers in `frame`, or `None` plus an `error`
         explaining why decoding failed) or `None` if the guest is not bugchecking."""
         ...
-    def triage(self) -> dict[str, Any]:
+    def triage(self) -> Record:
         """Build a one-shot crash/debug report with status, bugcheck or exception,
         stack, modules, dump metadata, failure signature, culprit evidence,
         verifier/WHEA findings, and blackbox-stream availability."""
@@ -535,7 +571,7 @@ class Debugger:
     def add_source_path(self, mapping: str) -> None:
         """Append a source-path mapping (`.srcpath+`)."""
         ...
-    def reload_symbols(self, module: str | None = None) -> dict[str, Any]:
+    def reload_symbols(self, module: str | None = None) -> Record:
         """Reload symbols for one module or every module in scope (`.reload`), then
         re-resolve symbolic breakpoints. Returns `{total, loaded, unloaded, no_pdb,
         skipped, failed, diagnostic_count, diagnostics}`."""
@@ -544,11 +580,11 @@ class Debugger:
         """Write a full `PAGEDU64` kernel dump of the halted target (`.dump /f`);
         returns the number of unreadable pages that were zero-filled."""
         ...
-    def version(self) -> dict[str, Any]:
+    def version(self) -> Record:
         """Target, kernel, symbol, processor, and debugger version information
         (`vertarget`)."""
         ...
-    def target_time(self) -> dict[str, Any]:
+    def target_time(self) -> Record:
         """Target system time and uptime (`.time`)."""
         ...
 
@@ -656,10 +692,10 @@ class Debugger:
     def detach(self) -> None:
         """Return to the default (kernel) inspection context."""
         ...
-    def current_process(self) -> dict[str, Any] | None:
+    def current_process(self) -> Record | None:
         """`{pid, name, dtb, eprocess}` of the attached process, or `None`."""
         ...
-    def memory_map(self, pid: int | None = None) -> list[dict[str, Any]]:
+    def memory_map(self, pid: int | None = None) -> list[Record]:
         """VAD regions of process `pid` (default: the attached process) as
         dicts `{start, end, size, protection, vad_type, private_memory,
         commit_charge, details}`."""
@@ -680,37 +716,37 @@ class Debugger:
         cursor. Raises if nothing matches or a name is ambiguous; use
         `processes(filter)` for the full matching list."""
         ...
-    def kernel_modules(self) -> list[dict[str, Any]]:
+    def kernel_modules(self) -> list[Record]:
         """Kernel modules (regardless of attach state) as `{name, short_name,
         base, end, size, time_date_stamp?, checksum?, file_version?,
         product_version?}` dicts."""
         ...
-    def modules(self) -> list[dict[str, Any]]:
+    def modules(self) -> list[Record]:
         """Modules for the current scope, same shape as `kernel_modules()`: the
         attached process's user-mode modules when attached, else the kernel
         modules."""
         ...
-    def driver_objects(self) -> list[dict[str, Any]]:
+    def driver_objects(self) -> list[Record]:
         """Driver objects as `{name, object, driver_start, driver_size,
         device_object, driver_unload}` dicts."""
         ...
-    def threads(self) -> list[dict[str, Any]]:
+    def threads(self) -> list[Record]:
         """Windows threads as dicts `{tid, pid, process_name, ethread, kthread,
         eprocess, state, state_name, wait_reason, wait_reason_name, active}`,
         where `active` is the vCPU id currently running the thread (e.g.
         `"p1.1"`) or `None`."""
         ...
-    def vcpus(self) -> list[dict[str, Any]]:
+    def vcpus(self) -> list[Record]:
         """Per-vCPU state as dicts `{id, rip, context, symbol, error}`; the
         address space (`"kernel"` / process name / `"unknown"`) and nearest
         symbol each vCPU is executing. Requires the VM halted."""
         ...
-    def capabilities(self) -> list[dict[str, Any]]:
+    def capabilities(self) -> list[Record]:
         """Backend capability matrix as `{capability, label, supported}` dicts."""
         ...
 
     # --- structured inspectors ---
-    def describe_address(self, addr: int) -> dict[str, Any]:
+    def describe_address(self, addr: int) -> Record:
         """Describe what `addr` belongs to: `{address, dtb, kind, module, section,
         va_type, region}`. `kind` is
         kernel-module/user-image/kernel-region/private/mapped/unknown;
@@ -718,152 +754,152 @@ class Debugger:
         kernel address; `module`/`section`/`va_type`/`region` are None when not
         applicable. Complements `pte_walk` (how it's mapped) with where it lives."""
         ...
-    def inspect_irp(self, addr: int) -> dict[str, Any]:
+    def inspect_irp(self, addr: int) -> Record:
         """Decode an `_IRP` and its current `_IO_STACK_LOCATION`."""
         ...
-    def inspect_driver_object(self, addr: int) -> dict[str, Any]:
+    def inspect_driver_object(self, addr: int) -> Record:
         """Decode a `_DRIVER_OBJECT` (accepts a pointer to one): header fields,
         device chain, and the 28-entry `MajorFunction` dispatch table."""
         ...
-    def inspect_device_object(self, addr: int) -> dict[str, Any]:
+    def inspect_device_object(self, addr: int) -> Record:
         """Decode a `_DEVICE_OBJECT` (accepts a pointer to one) and its
         `AttachedDevice` stack."""
         ...
-    def inspect_object_header(self, addr: int) -> dict[str, Any]:
+    def inspect_object_header(self, addr: int) -> Record:
         """Decode the executive `_OBJECT_HEADER` for an object body or header;
         resolves the type and name."""
         ...
-    def handles(self, limit: int = 256) -> dict[str, Any]:
+    def handles(self, limit: int = 256) -> Record:
         """Enumerate bounded handles for the selected/current process."""
         ...
-    def inspect_handle(self, handle: int) -> dict[str, Any]:
+    def inspect_handle(self, handle: int) -> Record:
         """Decode one handle from the selected/current process handle table."""
         ...
-    def inspect_process_token(self) -> dict[str, Any]:
+    def inspect_process_token(self) -> Record:
         """Decode the selected/current process primary token."""
         ...
-    def inspect_file_object(self, addr: int) -> dict[str, Any]:
+    def inspect_file_object(self, addr: int) -> Record:
         """Decode a `_FILE_OBJECT` and its device/name relationships."""
         ...
-    def inspect_resource(self, addr: int) -> dict[str, Any]:
+    def inspect_resource(self, addr: int) -> Record:
         """Decode one executive resource."""
         ...
-    def resources(self, limit: int = 256) -> dict[str, Any]:
+    def resources(self, limit: int = 256) -> Record:
         """Enumerate the symbol-backed executive-resource list."""
         ...
-    def memory_usage(self, process_limit: int = 64) -> dict[str, Any]:
+    def memory_usage(self, process_limit: int = 64) -> Record:
         """Return bounded system and per-process memory-use counters."""
         ...
-    def notify_callbacks(self) -> list[dict[str, Any]]:
+    def notify_callbacks(self) -> list[Record]:
         """Process/thread/image notification callbacks (`Psp*NotifyRoutine`)."""
         ...
-    def ssdt(self) -> list[dict[str, Any]]:
+    def ssdt(self) -> list[Record]:
         """The kernel SSDT and, when initialized, the win32k shadow table, as
         `{label, base, limit, entries:[...]}` dicts."""
         ...
-    def discover_irps(self, filter: str | None = None) -> list[dict[str, Any]]:
+    def discover_irps(self, filter: str | None = None) -> list[Record]:
         """Discover in-flight IRPs from thread `IrpList`s and device `CurrentIrp`.
         `filter` scopes processes (pid/name) and driver names."""
         ...
 
     # --- structured inspectors: CPU ---
-    def inspect_pcr(self, processor: int | None = None) -> dict[str, Any]:
+    def inspect_pcr(self, processor: int | None = None) -> Record:
         """KPCR/KPRCB essentials for `processor` (default: current vCPU's): thread
         pointers, IDTR/GDTR/TSS, IRQL (`!pcr`)."""
         ...
-    def inspect_prcb(self, processor: int | None = None) -> dict[str, Any]:
+    def inspect_prcb(self, processor: int | None = None) -> Record:
         """`_KPRCB` counters, thread pointers, and processor state (`!prcb`)."""
         ...
-    def inspect_irql(self, processor: int | None = None) -> dict[str, Any]:
+    def inspect_irql(self, processor: int | None = None) -> Record:
         """Current IRQL and level name (`!irql`); debugger-observed at a KD break-in."""
         ...
-    def inspect_idt(self, vector: int | None = None, processor: int | None = None) -> dict[str, Any]:
+    def inspect_idt(self, vector: int | None = None, processor: int | None = None) -> Record:
         """One IDT vector or the bounded 256-entry table with handler symbols, gate
         types, non-nt hooks, and `KiIsrThunk` hints (`!idt`; AMD64 only)."""
         ...
-    def inspect_gdt(self, processor: int | None = None) -> dict[str, Any]:
+    def inspect_gdt(self, processor: int | None = None) -> Record:
         """The bounded GDT (`!gdt`; AMD64 only)."""
         ...
-    def inspect_cpuinfo(self, processor: int | None = None) -> dict[str, Any]:
+    def inspect_cpuinfo(self, processor: int | None = None) -> Record:
         """Vendor, family/model/stepping, speed, feature bits (`!cpuinfo`)."""
         ...
 
     # --- structured inspectors: scheduler ---
-    def running(self, include_idle: bool = False, include_stacks: bool = False) -> dict[str, Any]:
+    def running(self, include_idle: bool = False, include_stacks: bool = False) -> Record:
         """The current/next/idle thread per processor, optionally with a short
         kernel stack each (`!running`)."""
         ...
-    def ready_queues(self, processor: int | None = None) -> dict[str, Any]:
+    def ready_queues(self, processor: int | None = None) -> Record:
         """Bounded dispatcher-ready queues (`!ready`)."""
         ...
-    def dpc_queues(self) -> dict[str, Any]:
+    def dpc_queues(self) -> Record:
         """DPCs queued on each processor (`!dpcs`)."""
         ...
-    def timers(self) -> dict[str, Any]:
+    def timers(self) -> Record:
         """Bounded kernel timer-table entries with their DPCs (`!timer`)."""
         ...
-    def inspect_timer(self, address: int) -> dict[str, Any]:
+    def inspect_timer(self, address: int) -> Record:
         """Decode one `_KTIMER` and its DPC (`!timer <address>`)."""
         ...
-    def apcs(self, target: int | str | None = None) -> dict[str, Any]:
+    def apcs(self, target: int | str | None = None) -> Record:
         """Kernel and user APCs (`!apc`): `None` the selected thread, `"*"` every
         thread, an int a thread (tid/ETHREAD) or else a process (pid/EPROCESS), a
         string a process-name substring."""
         ...
-    def stacks(self, level: int = 0, filter: str | None = None) -> dict[str, Any]:
+    def stacks(self, level: int = 0, filter: str | None = None) -> Record:
         """Every thread's state, wait reason, and top symbol (`!stacks`); `level`
         1/2 add bounded stacks; `filter` matches process names or symbols."""
         ...
 
     # --- structured inspectors: user mode ---
-    def inspect_peb(self, address: int | None = None) -> dict[str, Any]:
+    def inspect_peb(self, address: int | None = None) -> Record:
         """The attached process's PEB (or the one at `address`), process parameters,
         loader-list heads, and the WOW64 PEB when present (`!peb`)."""
         ...
-    def inspect_teb(self, address: int | None = None) -> dict[str, Any]:
+    def inspect_teb(self, address: int | None = None) -> Record:
         """The selected thread's TEB (or the one at `address`) plus the WOW64 TEB
         when present (`!teb`)."""
         ...
-    def loader_modules(self, containing: int | None = None) -> dict[str, Any]:
+    def loader_modules(self, containing: int | None = None) -> Record:
         """Modules from the attached process loader lists, optionally only the one
         containing an address (`!dlls`)."""
         ...
-    def last_error(self) -> dict[str, Any]:
+    def last_error(self) -> Record:
         """The selected thread's last Win32 error and NT status with names (`!gle`)."""
         ...
-    def check_image(self, module: str, include_diffs: bool = False) -> dict[str, Any]:
+    def check_image(self, module: str, include_diffs: bool = False) -> Record:
         """Compare a module's executable sections with the on-disk image after
         relocation (`!chkimg`); kernel self-patches are counted separately."""
         ...
 
     # --- structured inspectors: heap ---
-    def heap_summary(self) -> dict[str, Any]:
+    def heap_summary(self) -> Record:
         """Every heap in the attached process PEB with kind and sizes (`!heap`)."""
         ...
-    def inspect_heap(self, heap: int, list_entries: bool = False) -> dict[str, Any]:
+    def inspect_heap(self, heap: int, list_entries: bool = False) -> Record:
         """One NT or segment heap by PEB-list index (when it exists) or address
         (`!heap -h`); `list_entries` materializes every entry/chunk/block (`-a`)."""
         ...
-    def find_heap_block(self, address: int) -> dict[str, Any]:
+    def find_heap_block(self, address: int) -> Record:
         """The heap allocation containing `address` (`!heap -x`)."""
         ...
 
     # --- structured inspectors: memory manager ---
-    def inspect_vm(self, include_processes: bool = True) -> dict[str, Any]:
+    def inspect_vm(self, include_processes: bool = True) -> Record:
         """System memory, pool, PTE, page-file counters and per-process rows (`!vm`)."""
         ...
-    def inspect_pfn(self, value: int, physical_address: bool = False) -> dict[str, Any]:
+    def inspect_pfn(self, value: int, physical_address: bool = False) -> Record:
         """Decode an `_MMPFN` by page frame number, or physical address (`!pfn`)."""
         ...
-    def inspect_translation(self, addr: int, dtb: int | None = None) -> dict[str, Any]:
+    def inspect_translation(self, addr: int, dtb: int | None = None) -> Record:
         """Every page-table level and the final physical address of `addr` through
         `dtb` (default: current context) (`!vtop`)."""
         ...
-    def ptov(self, physical: int) -> dict[str, Any]:
+    def ptov(self, physical: int) -> Record:
         """Bounded reverse walk: current-DTB virtual mappings of a physical address
         (`!ptov`; AMD64 only)."""
         ...
-    def inspect_pool(self, address: int) -> dict[str, Any]:
+    def inspect_pool(self, address: int) -> Record:
         """The pool page or big-pool allocation containing `address` (`!pool`)."""
         ...
     def pool_usage(
@@ -872,63 +908,63 @@ class Debugger:
         *,
         sort: Literal["tag", "nonpaged", "paged"] = "tag",
         include_counts: bool = False,
-    ) -> dict[str, Any]:
+    ) -> Record:
         """Pool tracker usage by tag (`!poolused`); `tag` is a case-sensitive glob."""
         ...
-    def pool_find(self, tag: str, pool_type: Literal["nonpaged", "paged"] | None = None) -> dict[str, Any]:
+    def pool_find(self, tag: str, pool_type: Literal["nonpaged", "paged"] | None = None) -> Record:
         """Bounded scan for pool blocks with a matching tag (`!poolfind`)."""
         ...
-    def lookaside_lists(self) -> dict[str, Any]:
+    def lookaside_lists(self) -> Record:
         """The exported nonpaged and paged lookaside lists (`!lookaside`)."""
         ...
-    def inspect_lookaside(self, address: int) -> dict[str, Any]:
+    def inspect_lookaside(self, address: int) -> Record:
         """Decode one `GENERAL_LOOKASIDE` (`!lookaside <address>`)."""
         ...
 
     # --- structured inspectors: security ---
-    def inspect_security_descriptor(self, address: int, annotate_well_known: bool = False) -> dict[str, Any]:
+    def inspect_security_descriptor(self, address: int, annotate_well_known: bool = False) -> Record:
         """Decode a `SECURITY_DESCRIPTOR` with its owner/group and DACL/SACL (`!sd`)."""
         ...
-    def inspect_acl(self, address: int) -> dict[str, Any]:
+    def inspect_acl(self, address: int) -> Record:
         """Decode an ACL and its ACEs (`!acl`)."""
         ...
-    def inspect_sid(self, address: int) -> dict[str, Any]:
+    def inspect_sid(self, address: int) -> Record:
         """Decode a SID to its string form, authority, and well-known name (`!sid`)."""
         ...
-    def inspect_object_security(self, object: int) -> dict[str, Any]:
+    def inspect_object_security(self, object: int) -> Record:
         """The security descriptor referenced by an object's header (`!objsd`)."""
         ...
-    def sessions(self, session: int | None = None) -> dict[str, Any]:
+    def sessions(self, session: int | None = None) -> Record:
         """Sessions and their processes (`!session`); `-1` is the current session."""
         ...
     def session_processes(
         self, session: int | None = None, detailed: bool = False, image_glob: str | None = None
-    ) -> dict[str, Any]:
+    ) -> Record:
         """Processes in a session (`!sprocess`): `None` the attached process's, `-1`
         current, `-4` all; `image_glob` filters case-insensitively."""
         ...
 
     # --- structured inspectors: PnP ---
-    def inspect_devnode(self, node: int | None = None, recurse: bool = False) -> dict[str, Any]:
+    def inspect_devnode(self, node: int | None = None, recurse: bool = False) -> Record:
         """A PnP device node (default: root) with state history, problem code, and
         pending IRP; `recurse` adds the bounded subtree (`!devnode`)."""
         ...
-    def inspect_device_stack(self, device_or_node: int) -> dict[str, Any]:
+    def inspect_device_stack(self, device_or_node: int) -> Record:
         """The device stack top-down from any device object or node in it (`!devstack`)."""
         ...
-    def pnp_triage(self) -> dict[str, Any]:
+    def pnp_triage(self) -> Record:
         """Device nodes with problems, not started, or with pending IRPs (`!pnptriage`)."""
         ...
 
     # --- structured inspectors: verifier / target ---
-    def verifier_status(self) -> dict[str, Any]:
+    def verifier_status(self) -> Record:
         """Driver Verifier level, statistics, and driver lists (`!verifier`)."""
         ...
-    def verifier_driver(self, module: str) -> dict[str, Any]:
+    def verifier_driver(self, module: str) -> Record:
         """One verified driver's image, signing level, and counters (`!verifier <module>`)."""
         ...
     @staticmethod
-    def decode_error(code: int) -> dict[str, Any]:
+    def decode_error(code: int) -> Record:
         """Decode an NTSTATUS, Win32, or HRESULT code (`!error`); needs no target."""
         ...
 
@@ -939,7 +975,7 @@ class Debugger:
         without a typed method. Commands that resume the target block until
         the next stop, like `cont()`/`run()`."""
         ...
-    def debug_log(self, since_seq: int = 0) -> dict[str, Any]:
+    def debug_log(self, since_seq: int = 0) -> Record:
         """Captured guest debug output (DbgPrint) since sequence `since_seq`;
         returns a cursored snapshot for polling. Empty on gdb/memory backends."""
         ...

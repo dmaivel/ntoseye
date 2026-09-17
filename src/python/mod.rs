@@ -11,6 +11,8 @@ use pyo3::exceptions::{PyAttributeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 
+use record::{Diagnostic, Record};
+
 use crate::backend::MemoryOps;
 use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck};
 use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
@@ -45,6 +47,7 @@ use crate::view::{self, View};
 use crate::{Backend, TargetSpec};
 
 pub mod embed;
+pub mod record;
 
 /// Cancel flag for the SDK's blocking waits: Python drives them in bounded
 /// slices and checks for `KeyboardInterrupt` between them, so the in-loop
@@ -104,11 +107,11 @@ fn walk_list_bases(dbg: &Debugger, head: u64, link_offset: u64) -> PyResult<Vec<
         .map_err(err)
 }
 
-/// Render a neutral [`view::View`] object into a Python `dict` (the shared shape
+/// Render a neutral [`view::View`] object into a [`Record`] (the shared shape
 /// with the MCP surface; here addresses come through as ints, there as hex).
-fn view_dict<'py>(py: Python<'py>, v: &view::View) -> PyResult<Bound<'py, PyDict>> {
+fn view_record<'py>(py: Python<'py>, v: &view::View) -> PyResult<Bound<'py, Record>> {
     view::to_py(py, v)?
-        .cast_into::<PyDict>()
+        .cast_into::<Record>()
         .map_err(|e| raise(e.to_string()))
 }
 
@@ -203,8 +206,8 @@ fn msr_arg(value: &Bound<'_, PyAny>) -> PyResult<u32> {
 fn selected_frame_record<'py>(
     py: Python<'py>,
     frame: &SelectedFrame,
-) -> PyResult<Bound<'py, PyDict>> {
-    view_dict(
+) -> PyResult<Bound<'py, Record>> {
+    view_record(
         py,
         &View::Object(vec![
             ("index", View::Num(frame.index as u64)),
@@ -1017,22 +1020,22 @@ impl StopOutcome {
     /// (`.process`) and persists across resumes, so it is not necessarily what
     /// the guest was executing: for that, see `stopped_process`.
     #[getter]
-    fn attached_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn attached_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
         self.data
             .attached_process
             .as_ref()
-            .map(|p| view_dict(py, &view::process(p)))
+            .map(|p| view_record(py, &view::process(p)))
             .transpose()
     }
 
     /// The process whose page tables the stopped vCPU had loaded, as
     /// `{pid, name, dtb, eprocess}`. Resolved from CR3 at the stop.
     #[getter]
-    fn stopped_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn stopped_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
         self.data
             .stopped_process
             .as_ref()
-            .map(|p| view_dict(py, &view::process(p)))
+            .map(|p| view_record(py, &view::process(p)))
             .transpose()
     }
 
@@ -1040,11 +1043,11 @@ impl StopOutcome {
     /// Its owner can differ from `stopped_process` when the thread is attached
     /// to another address space.
     #[getter]
-    fn stopped_thread<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn stopped_thread<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
         self.data
             .stopped_thread
             .as_ref()
-            .map(|t| view_dict(py, &view::thread(t, None)))
+            .map(|t| view_record(py, &view::thread(t, None)))
             .transpose()
     }
 
@@ -1462,12 +1465,12 @@ impl Debugger {
 
     /// The selected Windows thread as a dict (`threads()` shape), or `None`
     /// when no `.thread` selection is in effect.
-    fn selected_thread<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn selected_thread<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
         self.inner
             .target
             .windows_thread_selection
             .as_ref()
-            .map(|thread| view_dict(py, &view::thread(thread, None)))
+            .map(|thread| view_record(py, &view::thread(thread, None)))
             .transpose()
     }
 
@@ -1497,7 +1500,7 @@ impl Debugger {
         &mut self,
         py: Python<'py>,
         index: Option<usize>,
-    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+    ) -> PyResult<Option<Bound<'py, Record>>> {
         self.require_halted("select_frame")?;
         let Some(index) = index else {
             self.inner.clear_selected_frame();
@@ -1508,7 +1511,7 @@ impl Debugger {
     }
 
     /// The selected frame as `{index, ip, sp}`, or `None` at the live frame.
-    fn selected_frame<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn selected_frame<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
         self.inner
             .target
             .selected_frame
@@ -1527,7 +1530,7 @@ impl Debugger {
         py: Python<'py>,
         thread: u64,
         limit: usize,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let info = self.inner.find_windows_thread(thread).map_err(err)?;
         let trace = self
             .inner
@@ -1541,7 +1544,7 @@ impl Debugger {
                 .map(view::stack_frame)
                 .collect(),
         );
-        view_dict(
+        view_record(
             py,
             &View::Object(vec![
                 ("ethread", View::Hex(info.ethread.0)),
@@ -1705,8 +1708,8 @@ impl Debugger {
     /// `rip`/`symbol` are None while running. `coherent` is False when the guest
     /// rebooted and rediscovery is still pending, so process/module enumeration
     /// is not yet meaningful; wait for it rather than reading stale state.
-    fn status<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        view_dict(py, &view::run_status(&self.inner.run_status()))
+    fn status<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        view_record(py, &view::run_status(&self.inner.run_status()))
     }
 
     /// Analyze the current bugcheck (BSOD) by reading `nt!KiBugCheckData` from
@@ -1716,19 +1719,19 @@ impl Debugger {
     /// `frame` is the decoded `_KTRAP_FRAME` registers, or `None` with `error`
     /// explaining why decoding failed. Returns `None` if the guest is not
     /// bugchecking.
-    fn bugcheck<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn bugcheck<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
         match current_bugcheck(&self.inner.target)
             .or_else(|| bugcheck_from_dump_info(&self.inner.target))
         {
-            Some(analysis) => Ok(Some(view_dict(py, &view::bugcheck(&analysis))?)),
+            Some(analysis) => Ok(Some(view_record(py, &view::bugcheck(&analysis))?)),
             None => Ok(None),
         }
     }
 
     /// Build the same structured one-shot crash/debug report as MCP `triage`.
-    fn triage<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn triage<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let report = TriageReport::build(&mut self.inner);
-        view_dict(py, &view::triage_report(&report, usize::MAX))
+        view_record(py, &view::triage_report(&report, usize::MAX))
     }
 
     /// Rebuild guest state after a reboot/reload (drops breakpoints and
@@ -1811,7 +1814,7 @@ impl Debugger {
         &mut self,
         py: Python<'py>,
         module: Option<&str>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let report = self
             .inner
             .target
@@ -1822,7 +1825,7 @@ impl Debugger {
             .breakpoints
             .resolve_symbolic(session.backend.as_mut(), &session.target)
             .map_err(err)?;
-        view_dict(py, &view::module_symbol_report(&report))
+        view_record(py, &view::module_symbol_report(&report))
     }
 
     /// Write a full `PAGEDU64` kernel dump of the halted target to `path`
@@ -1907,9 +1910,9 @@ impl Debugger {
     }
 
     /// Return the nearest symbol as `{address,module,name,offset}`.
-    fn nearest_symbol<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn nearest_symbol<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         let address = VirtAddr(addr);
-        view_dict(
+        view_record(
             py,
             &view::nearest_symbol(
                 address,
@@ -1944,11 +1947,11 @@ impl Debugger {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+    ) -> PyResult<Option<Bound<'py, Record>>> {
         self.inner
             .target
             .source_location(VirtAddr(addr))
-            .map(|location| view_dict(py, &view::source_location(&location)))
+            .map(|location| view_record(py, &view::source_location(&location)))
             .transpose()
     }
 
@@ -2014,9 +2017,9 @@ impl Debugger {
     /// Field layout of a type as `{name, size, fields: [{name, offset, size,
     /// type}]}` with fields sorted by offset. Use `type(ty)` for a handle that
     /// can also bind to an address.
-    fn fields<'py>(&self, py: Python<'py>, ty: &str) -> PyResult<Bound<'py, PyDict>> {
+    fn fields<'py>(&self, py: Python<'py>, ty: &str) -> PyResult<Bound<'py, Record>> {
         let info = self.resolve_type(ty)?;
-        view_dict(py, &view::type_layout(ty, &info))
+        view_record(py, &view::type_layout(ty, &info))
     }
 
     /// Variants `(name, value)` of a PDB enum (e.g. `_MI_SYSTEM_VA_TYPE`,
@@ -2127,14 +2130,14 @@ impl Debugger {
         &self,
         py: Python<'py>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let frame = read_ktrap_frame_at_or_current(&self.inner.target, address.map(VirtAddr))
             .map_err(err)?;
         let rip_symbol = self
             .inner
             .target
             .closest_symbol_current_context(VirtAddr(frame.instruction_pointer()));
-        view_dict(py, &view::trap_frame(&frame, rip_symbol))
+        view_record(py, &view::trap_frame(&frame, rip_symbol))
     }
 
     /// Walk the current thread's call stack. Returns up to `limit` frames
@@ -2171,33 +2174,33 @@ impl Debugger {
     /// `writable`, `user`, `nx`, and a WinDbg-style `flags` string. A large-page
     /// mapping short-circuits, so fewer levels are returned (e.g. a 2 MiB page
     /// stops at PDE).
-    fn pte_walk<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn pte_walk<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         let walk = self
             .inner
             .target
             .pte_traverse(VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::pte_walk(&walk))
+        view_record(py, &view::pte_walk(&walk))
     }
 
     /// Describe what `addr` belongs to: the loaded module (and PE section), or
     /// the process VAD region, else unknown. `module`/`section`/`region` are
     /// `None` when not applicable.
-    fn describe_address<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn describe_address<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         let d = self
             .inner
             .target
             .describe_address(VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::address_description(&d))
+        view_record(py, &view::address_description(&d))
     }
 
     /// Inspect the `_IRP` at `addr` and its current `_IO_STACK_LOCATION`.
     /// Returns a dict of decoded fields; `current_stack` is a nested dict, or
     /// `None` when `CurrentLocation` is out of range or the slot is unreadable.
-    fn inspect_irp<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_irp<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         let irp = self.inner.target.inspect_irp(VirtAddr(addr)).map_err(err)?;
-        view_dict(py, &view::irp(&irp))
+        view_record(py, &view::irp(&irp))
     }
 
     /// Inspect the `_DRIVER_OBJECT` at `addr` (or the pointer it points to),
@@ -2206,13 +2209,13 @@ impl Debugger {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let d = self
             .inner
             .target
             .inspect_driver_object(VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::driver_object(&self.inner.target, &d))
+        view_record(py, &view::driver_object(&self.inner.target, &d))
     }
 
     /// Inspect the `_DEVICE_OBJECT` at `addr` (or the pointer it points to) and
@@ -2221,13 +2224,13 @@ impl Debugger {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let d = self
             .inner
             .target
             .inspect_device_object(VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::device_object(&d))
+        view_record(py, &view::device_object(&d))
     }
 
     /// Inspect the executive `_OBJECT_HEADER` for `addr`, accepting either the
@@ -2236,59 +2239,59 @@ impl Debugger {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let o = self
             .inner
             .target
             .inspect_object_header(VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::object_header(&o))
+        view_record(py, &view::object_header(&o))
     }
 
     /// Enumerate a bounded window of handles in the selected/current process.
     #[pyo3(signature = (limit = 256))]
-    fn handles<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Bound<'py, PyDict>> {
+    fn handles<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Bound<'py, Record>> {
         let summary = self.inner.target.enumerate_handles(limit).map_err(err)?;
-        view_dict(py, &view::handle_table(&summary))
+        view_record(py, &view::handle_table(&summary))
     }
 
     /// Decode one handle from the selected/current process handle table.
-    fn inspect_handle<'py>(&self, py: Python<'py>, handle: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_handle<'py>(&self, py: Python<'py>, handle: u64) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.inspect_handle(handle).map_err(err)?;
-        view_dict(py, &view::handle_entry(&detail))
+        view_record(py, &view::handle_entry(&detail))
     }
 
     /// Decode the selected/current process primary token.
-    fn inspect_process_token<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_process_token<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let token = self.inner.target.inspect_process_token().map_err(err)?;
-        view_dict(py, &view::token(&token))
+        view_record(py, &view::token(&token))
     }
 
     /// Decode a `_FILE_OBJECT` using the loaded kernel PDB layout.
-    fn inspect_file_object<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_file_object<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         let file = self
             .inner
             .target
             .inspect_file_object(VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::file_object(&file))
+        view_record(py, &view::file_object(&file))
     }
 
     /// Decode one executive resource at an explicit address.
-    fn inspect_resource<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_resource<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         let resource = self
             .inner
             .target
             .inspect_resource(VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::resource(&resource))
+        view_record(py, &view::resource(&resource))
     }
 
     /// Enumerate the symbol-backed executive-resource list without scanning memory.
     #[pyo3(signature = (limit = 256))]
-    fn resources<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Bound<'py, PyDict>> {
+    fn resources<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Bound<'py, Record>> {
         let resources = self.inner.target.enumerate_resources(limit).map_err(err)?;
-        view_dict(py, &view::resource_list(&resources))
+        view_record(py, &view::resource_list(&resources))
     }
 
     /// Return bounded system and per-process memory-use counters.
@@ -2297,13 +2300,13 @@ impl Debugger {
         &self,
         py: Python<'py>,
         process_limit: usize,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let summary = self
             .inner
             .target
             .memory_use_summary(process_limit)
             .map_err(err)?;
-        view_dict(py, &view::memory_usage(&summary))
+        view_record(py, &view::memory_usage(&summary))
     }
 
     /// Enumerate process/thread/image notification callbacks. Returns a list of
@@ -2369,12 +2372,12 @@ impl Debugger {
 
     /// The currently attached process as `{pid, name, dtb, eprocess}`, or
     /// `None` when inspecting the default kernel context.
-    fn current_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn current_process<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
         self.inner
             .target
             .current_process_info
             .as_ref()
-            .map(|p| view_dict(py, &view::process(p)))
+            .map(|p| view_record(py, &view::process(p)))
             .transpose()
     }
 
@@ -2497,8 +2500,8 @@ impl Debugger {
     /// (`cont()`/`run()`), so an empty result is not proof the guest is silent.
     /// Empty on backends without a debug stream (gdb/memory).
     #[pyo3(signature = (since_seq=0))]
-    fn debug_log<'py>(&self, py: Python<'py>, since_seq: u64) -> PyResult<Bound<'py, PyDict>> {
-        view_dict(
+    fn debug_log<'py>(&self, py: Python<'py>, since_seq: u64) -> PyResult<Bound<'py, Record>> {
+        view_record(
             py,
             &view::debug_log(&self.inner.read_debug_output(since_seq)),
         )
@@ -2710,10 +2713,10 @@ impl Debugger {
         &mut self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let processor = self.processor_arg(processor);
         let detail = self.inner.inspect_pcr(processor).map_err(err)?;
-        view_dict(py, &view::cpu::pcr(&detail))
+        view_record(py, &view::cpu::pcr(&detail))
     }
 
     /// `_KPRCB` counters, thread pointers, and processor state for
@@ -2723,10 +2726,10 @@ impl Debugger {
         &self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let processor = self.processor_arg(processor);
         let detail = self.inner.target.inspect_prcb(processor).map_err(err)?;
-        view_dict(py, &view::cpu::prcb(&detail))
+        view_record(py, &view::cpu::prcb(&detail))
     }
 
     /// The current IRQL and its level name for `processor` (`!irql`). At a KD
@@ -2736,10 +2739,10 @@ impl Debugger {
         &self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let processor = self.processor_arg(processor);
         let detail = self.inner.target.inspect_irql(processor).map_err(err)?;
-        view_dict(py, &view::cpu::irql(&detail))
+        view_record(py, &view::cpu::irql(&detail))
     }
 
     /// One IDT vector or the bounded 256-entry table with handler symbols, gate
@@ -2750,10 +2753,10 @@ impl Debugger {
         py: Python<'py>,
         vector: Option<u16>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let processor = self.processor_arg(processor);
         let detail = self.inner.inspect_idt(processor, vector).map_err(err)?;
-        view_dict(py, &view::cpu::idt(&detail))
+        view_record(py, &view::cpu::idt(&detail))
     }
 
     /// The bounded GDT with base/limit/privilege/mode/presence per entry
@@ -2763,10 +2766,10 @@ impl Debugger {
         &mut self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let processor = self.processor_arg(processor);
         let detail = self.inner.inspect_gdt(processor).map_err(err)?;
-        view_dict(py, &view::cpu::gdt(&detail))
+        view_record(py, &view::cpu::gdt(&detail))
     }
 
     /// Vendor, family/model/stepping, speed, and feature bits (`!cpuinfo`).
@@ -2775,10 +2778,10 @@ impl Debugger {
         &self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let processor = self.processor_arg(processor);
         let detail = self.inner.target.inspect_cpuinfo(processor).map_err(err)?;
-        view_dict(py, &view::cpu::cpuinfo(&detail))
+        view_record(py, &view::cpu::cpuinfo(&detail))
     }
 
     /// Read a model-specific register (`rdmsr`); `msr` is a number or an
@@ -2811,12 +2814,12 @@ impl Debugger {
         py: Python<'py>,
         include_idle: bool,
         include_stacks: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .inspect_running(include_idle, include_stacks)
             .map_err(err)?;
-        view_dict(py, &view::sched::running(&detail))
+        view_record(py, &view::sched::running(&detail))
     }
 
     /// Bounded dispatcher-ready queues for every processor or one (`!ready`).
@@ -2825,35 +2828,35 @@ impl Debugger {
         &self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_ready_queues(processor)
             .map_err(err)?;
-        view_dict(py, &view::sched::ready_queues(&detail))
+        view_record(py, &view::sched::ready_queues(&detail))
     }
 
     /// DPCs queued on each processor's two `_KPRCB.DpcData` queues (`!dpcs`).
-    fn dpc_queues<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn dpc_queues<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.inspect_dpc_queues().map_err(err)?;
-        view_dict(py, &view::sched::dpc_queues(&detail))
+        view_record(py, &view::sched::dpc_queues(&detail))
     }
 
     /// Bounded kernel timer-table entries with their DPCs (`!timer`).
-    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.timer_list().map_err(err)?;
-        view_dict(py, &view::sched::timer_list(&detail))
+        view_record(py, &view::sched::timer_list(&detail))
     }
 
     /// Decode one `_KTIMER` and its DPC (`!timer <address>`).
-    fn inspect_timer<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_timer<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_timer(VirtAddr(address))
             .map_err(err)?;
-        view_dict(py, &view::sched::timer(&detail))
+        view_record(py, &view::sched::timer(&detail))
     }
 
     /// Kernel and user APCs (`!apc`): `target=None` is the selected Windows
@@ -2865,7 +2868,7 @@ impl Debugger {
         &mut self,
         py: Python<'py>,
         target: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let selector = match target {
             None => ApcSelector::CurrentThread,
             Some(value) => {
@@ -2906,7 +2909,7 @@ impl Debugger {
             }
         };
         let detail = self.inner.inspect_apcs(selector).map_err(err)?;
-        view_dict(py, &view::sched::apcs(&detail))
+        view_record(py, &view::sched::apcs(&detail))
     }
 
     /// Every thread's state, wait reason, and top stack symbol (`!stacks`);
@@ -2918,9 +2921,9 @@ impl Debugger {
         py: Python<'py>,
         level: u8,
         filter: Option<&str>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.inspect_stacks(level, filter).map_err(err)?;
-        view_dict(py, &view::sched::stacks(&detail))
+        view_record(py, &view::sched::stacks(&detail))
     }
 
     /// Decode the attached process's PEB (or the one at `address`) and its
@@ -2931,13 +2934,13 @@ impl Debugger {
         &self,
         py: Python<'py>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_peb(address.map(VirtAddr))
             .map_err(err)?;
-        view_dict(py, &view::usermode::peb(&detail))
+        view_record(py, &view::usermode::peb(&detail))
     }
 
     /// Decode the selected thread's TEB (or the one at `address`), plus the
@@ -2947,13 +2950,13 @@ impl Debugger {
         &self,
         py: Python<'py>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_teb(address.map(VirtAddr))
             .map_err(err)?;
-        view_dict(py, &view::usermode::teb(&detail))
+        view_record(py, &view::usermode::teb(&detail))
     }
 
     /// Modules from the attached process loader lists, optionally only the one
@@ -2963,19 +2966,19 @@ impl Debugger {
         &self,
         py: Python<'py>,
         containing: Option<u64>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .loader_modules(containing.map(VirtAddr))
             .map_err(err)?;
-        view_dict(py, &view::usermode::loader_modules(&detail))
+        view_record(py, &view::usermode::loader_modules(&detail))
     }
 
     /// The selected thread's last Win32 error and NT status with names (`!gle`).
-    fn last_error<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn last_error<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.last_error().map_err(err)?;
-        view_dict(py, &view::usermode::last_error(&detail))
+        view_record(py, &view::usermode::last_error(&detail))
     }
 
     /// Compare a module's executable sections against the cached on-disk image
@@ -2988,19 +2991,19 @@ impl Debugger {
         py: Python<'py>,
         module: &str,
         include_diffs: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .check_image(module, include_diffs)
             .map_err(err)?;
-        view_dict(py, &view::usermode::image_check(&detail))
+        view_record(py, &view::usermode::image_check(&detail))
     }
 
     /// Every heap in the attached process PEB with kind and sizes (`!heap`).
-    fn heap_summary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn heap_summary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.heap_summary().map_err(err)?;
-        view_dict(py, &view::heap::heap_summary(&detail))
+        view_record(py, &view::heap::heap_summary(&detail))
     }
 
     /// Decode one NT or segment heap by PEB-list index (when that index
@@ -3012,7 +3015,7 @@ impl Debugger {
         py: Python<'py>,
         heap: u64,
         list_entries: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let summary = self.inner.target.heap_summary().map_err(err)?;
         let selector = if (heap as usize) < summary.heaps.len() {
             HeapSelector::Index(heap as usize)
@@ -3024,18 +3027,18 @@ impl Debugger {
             .target
             .inspect_heap(selector, list_entries)
             .map_err(err)?;
-        view_dict(py, &view::heap::heap(&detail))
+        view_record(py, &view::heap::heap(&detail))
     }
 
     /// The heap allocation containing `address`, or a not-found result with
     /// per-heap decode errors (`!heap -x`).
-    fn find_heap_block<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn find_heap_block<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .find_heap_block(VirtAddr(address))
             .map_err(err)?;
-        view_dict(py, &view::heap::heap_block_search(&detail))
+        view_record(py, &view::heap::heap_block_search(&detail))
     }
 
     /// System memory, pool, PTE, and page-file counters, plus bounded
@@ -3045,13 +3048,13 @@ impl Debugger {
         &self,
         py: Python<'py>,
         include_processes: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_vm(include_processes)
             .map_err(err)?;
-        view_dict(py, &view::mm::vm(&detail))
+        view_record(py, &view::mm::vm(&detail))
     }
 
     /// Decode an `_MMPFN` by page frame number, or by physical address when
@@ -3062,14 +3065,14 @@ impl Debugger {
         py: Python<'py>,
         value: u64,
         physical_address: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let selector = if physical_address {
             PfnSelector::PhysicalAddress(value)
         } else {
             PfnSelector::Pfn(value)
         };
         let detail = self.inner.target.inspect_pfn(selector).map_err(err)?;
-        view_dict(py, &view::mm::pfn(&detail))
+        view_record(py, &view::mm::pfn(&detail))
     }
 
     /// Translate a virtual address to physical through `dtb` (default: the
@@ -3091,31 +3094,31 @@ impl Debugger {
         py: Python<'py>,
         addr: u64,
         dtb: Option<u64>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .vtop(dtb.unwrap_or(0), VirtAddr(addr))
             .map_err(err)?;
-        view_dict(py, &view::mm::vtop(&detail))
+        view_record(py, &view::mm::vtop(&detail))
     }
 
     /// Bounded reverse walk: the current-DTB virtual mappings of a physical
     /// address (`!ptov`; AMD64 only).
-    fn ptov<'py>(&self, py: Python<'py>, physical: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn ptov<'py>(&self, py: Python<'py>, physical: u64) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.ptov(physical).map_err(err)?;
-        view_dict(py, &view::mm::ptov(&detail))
+        view_record(py, &view::mm::ptov(&detail))
     }
 
     /// The pool page (or big-pool allocation) containing `address` and every
     /// block on it, marking the one containing the address (`!pool`).
-    fn inspect_pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_pool(VirtAddr(address))
             .map_err(err)?;
-        view_dict(py, &view::mm::pool_page(&detail))
+        view_record(py, &view::mm::pool_page(&detail))
     }
 
     /// Pool tracker usage aggregated by tag (`!poolused`): `sort` is `"tag"`,
@@ -3128,7 +3131,7 @@ impl Debugger {
         tag: Option<&str>,
         sort: &str,
         include_counts: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let sort = match sort {
             "tag" => PoolUsageSort::Tag,
             "nonpaged" => PoolUsageSort::NonPagedBytes,
@@ -3144,7 +3147,7 @@ impl Debugger {
             .target
             .pool_usage(sort, tag, include_counts)
             .map_err(err)?;
-        view_dict(py, &view::mm::pool_usage(&detail))
+        view_record(py, &view::mm::pool_usage(&detail))
     }
 
     /// Find pool blocks whose tag matches (`!poolfind`); `pool_type` narrows to
@@ -3156,7 +3159,7 @@ impl Debugger {
         py: Python<'py>,
         tag: &str,
         pool_type: Option<&str>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let pool_type = match pool_type {
             None => None,
             Some("nonpaged") => Some(PoolType::NonPaged),
@@ -3168,13 +3171,13 @@ impl Debugger {
             }
         };
         let detail = self.inner.target.pool_find(tag, pool_type).map_err(err)?;
-        view_dict(py, &view::mm::pool_find(&detail))
+        view_record(py, &view::mm::pool_find(&detail))
     }
 
     /// The exported nonpaged and paged `GENERAL_LOOKASIDE` lists (`!lookaside`).
-    fn lookaside_lists<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn lookaside_lists<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.lookaside_lists().map_err(err)?;
-        view_dict(py, &view::mm::lookaside_lists(&detail))
+        view_record(py, &view::mm::lookaside_lists(&detail))
     }
 
     /// Decode one `GENERAL_LOOKASIDE` (`!lookaside <address>`).
@@ -3182,13 +3185,13 @@ impl Debugger {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_lookaside(VirtAddr(address))
             .map_err(err)?;
-        view_dict(py, &view::mm::lookaside(&detail))
+        view_record(py, &view::mm::lookaside(&detail))
     }
 
     /// Read `len` bytes of guest-physical memory (`!db`).
@@ -3225,34 +3228,34 @@ impl Debugger {
         py: Python<'py>,
         address: u64,
         annotate_well_known: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_security_descriptor(VirtAddr(address), annotate_well_known)
             .map_err(err)?;
-        view_dict(py, &view::security::security_descriptor(&detail))
+        view_record(py, &view::security::security_descriptor(&detail))
     }
 
     /// Decode an ACL and its ACEs (`!acl`).
-    fn inspect_acl<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_acl<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_acl(VirtAddr(address))
             .map_err(err)?;
-        view_dict(py, &view::security::acl(&detail))
+        view_record(py, &view::security::acl(&detail))
     }
 
     /// Decode a SID in guest memory to its string form, authority, and
     /// well-known name (`!sid`).
-    fn inspect_sid<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, PyDict>> {
+    fn inspect_sid<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_sid(VirtAddr(address))
             .map_err(err)?;
-        view_dict(py, &view::security::sid(&detail))
+        view_record(py, &view::security::sid(&detail))
     }
 
     /// The security descriptor referenced by an object's header (`!objsd`).
@@ -3260,21 +3263,21 @@ impl Debugger {
         &self,
         py: Python<'py>,
         object: u64,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_object_security(VirtAddr(object))
             .map_err(err)?;
-        view_dict(py, &view::security::object_security(&detail))
+        view_record(py, &view::security::object_security(&detail))
     }
 
     /// Sessions and the processes in each (`!session`); `session` selects one
     /// (`-1` = current), `None` lists all.
     #[pyo3(signature = (session=None))]
-    fn sessions<'py>(&self, py: Python<'py>, session: Option<i64>) -> PyResult<Bound<'py, PyDict>> {
+    fn sessions<'py>(&self, py: Python<'py>, session: Option<i64>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.sessions(session).map_err(err)?;
-        view_dict(py, &view::security::sessions(&detail))
+        view_record(py, &view::security::sessions(&detail))
     }
 
     /// Processes in a session (`!sprocess`): `session` `None` = the attached
@@ -3287,13 +3290,13 @@ impl Debugger {
         session: Option<i64>,
         detailed: bool,
         image_glob: Option<&str>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .session_processes(session, detailed, image_glob)
             .map_err(err)?;
-        view_dict(py, &view::security::session_processes(&detail))
+        view_record(py, &view::security::session_processes(&detail))
     }
 
     /// Decode a PnP device node (default: the root): instance path, service,
@@ -3305,13 +3308,13 @@ impl Debugger {
         py: Python<'py>,
         node: Option<u64>,
         recurse: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_devnode(node.map(VirtAddr), recurse)
             .map_err(err)?;
-        view_dict(py, &view::pnp::devnode(&detail))
+        view_record(py, &view::pnp::devnode(&detail))
     }
 
     /// The device stack, top filter down to the PDO, from any device object in
@@ -3320,54 +3323,54 @@ impl Debugger {
         &self,
         py: Python<'py>,
         device_or_node: u64,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, Record>> {
         let detail = self
             .inner
             .target
             .inspect_device_stack(VirtAddr(device_or_node))
             .map_err(err)?;
-        view_dict(py, &view::pnp::device_stack(&detail))
+        view_record(py, &view::pnp::device_stack(&detail))
     }
 
     /// Device nodes with problem codes, not started, or with a pending PnP IRP
     /// (`!pnptriage`).
-    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.pnp_triage().map_err(err)?;
-        view_dict(py, &view::pnp::pnp_triage(&detail))
+        view_record(py, &view::pnp::pnp_triage(&detail))
     }
 
     /// Driver Verifier level, statistics, verified drivers, and
     /// configured-but-unloaded drivers (`!verifier`).
-    fn verifier_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn verifier_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.verifier_status().map_err(err)?;
-        view_dict(py, &view::meta::verifier(&detail))
+        view_record(py, &view::meta::verifier(&detail))
     }
 
     /// One verified driver's image, signing level, and verifier counters
     /// (`!verifier <module>`).
-    fn verifier_driver<'py>(&self, py: Python<'py>, module: &str) -> PyResult<Bound<'py, PyDict>> {
+    fn verifier_driver<'py>(&self, py: Python<'py>, module: &str) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.verifier_driver(module).map_err(err)?;
-        view_dict(py, &view::meta::verifier_driver(&detail))
+        view_record(py, &view::meta::verifier_driver(&detail))
     }
 
     /// Target, kernel, symbol, processor, and debugger version information
     /// (`vertarget`).
-    fn version<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn version<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target_version().map_err(err)?;
-        view_dict(py, &view::meta::target_version(&detail))
+        view_record(py, &view::meta::target_version(&detail))
     }
 
     /// Target system time (FILETIME and ISO-8601) and uptime (`.time`).
-    fn target_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn target_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.inner.target.target_time().map_err(err)?;
-        view_dict(py, &view::meta::target_time(&detail))
+        view_record(py, &view::meta::target_time(&detail))
     }
 
     /// Decode an NTSTATUS, Win32, or HRESULT code to its name and description
     /// (`!error`). Needs no target.
     #[staticmethod]
-    fn decode_error<'py>(py: Python<'py>, code: u64) -> PyResult<Bound<'py, PyDict>> {
-        view_dict(py, &view::meta::error_code(&decode_error_code(code)))
+    fn decode_error<'py>(py: Python<'py>, code: u64) -> PyResult<Bound<'py, Record>> {
+        view_record(py, &view::meta::error_code(&decode_error_code(code)))
     }
 
     /// Run any REPL command (e.g. `"dt _EPROCESS"`, `"lm"`, `"!analyze"`) and
@@ -3542,7 +3545,7 @@ impl Debugger {
                     .or_else(|| current_bugcheck(&self.inner.target))
                     .or_else(|| bugcheck_from_dump_info(&self.inner.target));
                 let bugcheck_info = analysis
-                    .map(|a| view_dict(py, &view::bugcheck(&a)).map(|d| d.into_any().unbind()))
+                    .map(|a| view_record(py, &view::bugcheck(&a)).map(|d| d.into_any().unbind()))
                     .transpose()?;
                 StopOutcomeData {
                     kind: StopKind::Bugcheck,
@@ -4234,6 +4237,8 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MemorySearchMatch>()?;
     m.add_class::<Type>()?;
     m.add_class::<Struct>()?;
+    m.add_class::<Record>()?;
+    m.add_class::<Diagnostic>()?;
     m.add_function(wrap_pyfunction!(attach, m)?)?;
     m.add("NtoseyeError", m.py().get_type::<NtoseyeError>())?;
     m.add("MemoryAccessError", m.py().get_type::<MemoryAccessError>())?;
