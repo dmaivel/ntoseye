@@ -437,33 +437,15 @@ pub fn format_symbol_with_offset(module: &str, name: &str, offset: u32) -> Strin
 }
 
 static HOME_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-static HOME_MIGRATION: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
 
 pub fn ntoseye_home() -> Option<PathBuf> {
     HOME_PATH.get_or_init(resolve_ntoseye_home).clone()
 }
 
-pub fn home_migration() -> Option<(PathBuf, PathBuf)> {
-    let _ = ntoseye_home();
-    HOME_MIGRATION.get().and_then(|migration| migration.clone())
-}
-
 fn resolve_ntoseye_home() -> Option<PathBuf> {
-    let user_home = user_home_dir()?;
-    let path = user_home.join(".ntoseye");
-    let legacy = user_home.join(".config").join("ntoseye");
-    let migration = migrate_legacy_home(&legacy, &path).ok()?;
-    let _ = HOME_MIGRATION.set(migration);
+    let path = user_home_dir()?.join(".ntoseye");
     std::fs::create_dir_all(&path).ok()?;
     Some(path)
-}
-
-fn migrate_legacy_home(legacy: &Path, home: &Path) -> std::io::Result<Option<(PathBuf, PathBuf)>> {
-    if legacy.is_dir() && !home.exists() {
-        std::fs::rename(legacy, home)?;
-        return Ok(Some((legacy.to_path_buf(), home.to_path_buf())));
-    }
-    Ok(None)
 }
 
 fn user_home_dir() -> Option<PathBuf> {
@@ -783,40 +765,6 @@ mod tests {
             "{}",
             job.path.display()
         );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migrate_legacy_home_moves_directory() {
-        let root = temp_root("home-migrate");
-        let legacy = root.join(".config").join("ntoseye");
-        let home = root.join(".ntoseye");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("aliases"), "alias ubp bp ${1}; g\n").unwrap();
-
-        let migration = migrate_legacy_home(&legacy, &home).unwrap();
-
-        assert!(migration.is_some());
-        assert!(!legacy.exists());
-        assert!(home.join("aliases").exists());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migrate_legacy_home_does_not_merge_when_new_home_exists() {
-        let root = temp_root("home-existing");
-        let legacy = root.join(".config").join("ntoseye");
-        let home = root.join(".ntoseye");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-
-        let migration = migrate_legacy_home(&legacy, &home).unwrap();
-
-        assert!(migration.is_none());
-        assert!(legacy.exists());
-        assert!(home.exists());
-
         let _ = std::fs::remove_dir_all(root);
     }
 

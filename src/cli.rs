@@ -300,8 +300,6 @@ fn run() -> Result<()> {
         ));
     }
 
-    print_home_migration();
-
     symbols::FORCE_DOWNLOADS
         .set(args.redownload_symbols)
         .map_err(|_| {
@@ -416,14 +414,4 @@ fn server_startup_spec(
         );
     }
     None
-}
-
-fn print_home_migration() {
-    if let Some((old, new)) = symbols::home_migration() {
-        diagnostics::eprint_note(format!(
-            "migrated ntoseye home from {} to {}",
-            old.display(),
-            new.display()
-        ));
-    }
 }
