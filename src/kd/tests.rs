@@ -752,6 +752,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
+        released_handles: HashSet::new(),
     }
 }
 
@@ -871,6 +872,7 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
+        released_handles: HashSet::new(),
     }
 }
 

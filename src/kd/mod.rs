@@ -356,16 +356,21 @@ fn restore_unowned_breakpoint_handles(
     framing: &mut KdFraming<KdTransport>,
     processor: u16,
     owned: &HashSet<u32>,
+    released: &mut HashSet<u32>,
 ) -> usize {
     let mut reclaimed = 0;
     for handle in 1..=KD_BREAKPOINT_TABLE_SIZE {
-        if owned.contains(&handle) {
+        if owned.contains(&handle) || released.contains(&handle) {
             continue;
         }
         match with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
             api::restore_breakpoint(framing, processor, handle)
         }) {
-            Ok(()) => reclaimed += 1,
+            Ok(()) => {
+                kd_trace!("kd: reclaim: released handle {handle}");
+                released.insert(handle);
+                reclaimed += 1;
+            }
             // An empty slot refuses the handle; that is the common answer.
             Err(Error::KdStatus { .. }) => {}
             // Transport trouble will resurface on whatever the caller does
@@ -699,6 +704,9 @@ pub struct KdBackend {
     /// Operator-facing diagnostics raised mid-operation, drained by the
     /// session through [`DebugBackend::take_notices`].
     notices: Vec<String>,
+    /// Table handles reclaimed from dead sessions; see
+    /// [`restore_unowned_breakpoint_handles`].
+    released_handles: HashSet<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -883,10 +891,12 @@ impl KdBackend {
         // held until the guest reboots. Release them before anything reads
         // guest memory or resumes, so no later decision has to reason about an
         // `int3` nobody can account for.
+        let mut released_handles = HashSet::new();
         if let Some(notice) = reclaimed_breakpoints_notice(restore_unowned_breakpoint_handles(
             &mut framing,
             initial_stop.processor,
             &HashSet::new(),
+            &mut released_handles,
         )) {
             progress(&notice);
         }
@@ -950,6 +960,7 @@ impl KdBackend {
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
             notices: Vec::new(),
+            released_handles,
         })
     }
 
@@ -1289,7 +1300,12 @@ impl KdBackend {
         }
 
         let owned: HashSet<u32> = self.bp_handles.values().copied().collect();
-        let reclaimed = restore_unowned_breakpoint_handles(self.link.framing()?, processor, &owned);
+        let reclaimed = restore_unowned_breakpoint_handles(
+            self.link.framing()?,
+            processor,
+            &owned,
+            &mut self.released_handles,
+        );
         self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
         if reclaimed != 0 && !breakpoint_instruction_at(self.link.framing()?, arch, processor, pc) {
             kd_trace!("kd: released a stranded breakpoint at {pc:#x}; resuming in place");
@@ -1739,7 +1755,7 @@ impl KdBackend {
         let Ok(framing) = self.link.framing() else {
             return 0;
         };
-        restore_unowned_breakpoint_handles(framing, processor, &owned)
+        restore_unowned_breakpoint_handles(framing, processor, &owned, &mut self.released_handles)
     }
 
     /// Name the cause the raw NTSTATUS hides. WinDbg reports this as
