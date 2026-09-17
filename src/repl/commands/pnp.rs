@@ -291,8 +291,10 @@ impl<'a> DevNodeReader<'a> {
             .struct_at("_DEVICE_NODE", address)?;
         let history_bytes = node.read_field_bytes("StateHistory", 0x100)?;
         let state_history = history_bytes
-            .chunks_exact(4)
-            .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_le_bytes(*bytes))
             .collect();
 
         Ok(DevNode {

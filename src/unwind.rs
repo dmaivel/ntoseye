@@ -1784,7 +1784,7 @@ fn parse_unwind_info(image: &PeImage, unwind_rva: u32) -> Option<ParsedUnwindInf
     };
 
     let mut codes = Vec::with_capacity(count_of_codes);
-    for raw in codes_bytes.chunks_exact(2) {
+    for raw in codes_bytes.as_chunks::<2>().0 {
         codes.push(UnwindCodeSlot {
             code_offset: raw[0],
             unwind_op: raw[1] & 0x0f,

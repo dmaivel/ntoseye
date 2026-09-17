@@ -431,8 +431,10 @@ fn read_string_pool_entry(
     }
     let wchar_buf = &data[pos + 4..pos + 4 + char_count * 2];
     let code_units: Vec<u16> = wchar_buf
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .take_while(|&c| c != 0)
         .collect();
     if code_units.is_empty() {

@@ -747,8 +747,10 @@ impl ReplState<'_> {
         let (data, valid) = self.read_virtual_best_effort(&range);
         let text = if unicode {
             let units = data
-                .chunks_exact(2)
-                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| u16::from_le_bytes(*chunk));
             String::from_utf16_lossy(&units.collect::<Vec<_>>())
         } else {
             String::from_utf8_lossy(&data).into_owned()

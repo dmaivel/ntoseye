@@ -774,8 +774,8 @@ fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Opt
         .read_bytes(address, &mut bytes)
         .ok()?;
     let mut text = String::new();
-    for chunk in bytes.chunks_exact(2) {
-        let value = u16::from_le_bytes([chunk[0], chunk[1]]);
+    for chunk in bytes.as_chunks::<2>().0 {
+        let value = u16::from_le_bytes(*chunk);
         if value == 0 {
             break;
         }

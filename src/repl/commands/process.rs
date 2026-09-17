@@ -764,9 +764,9 @@ impl ReplState<'_> {
                 None => (ui::muted("unavailable"), vcpu.error.unwrap_or_default()),
             };
             builder.push_record(vec![
-                format!("{}", vcpu.id),
-                format!("{}", rip_cell),
-                format!("{}", vcpu.context),
+                vcpu.id.to_string(),
+                rip_cell.to_string(),
+                vcpu.context.to_string(),
                 symbol_cell,
             ]);
         }
@@ -814,27 +814,25 @@ impl ReplState<'_> {
                 .unwrap_or("-");
             let start = thread.start_address.or(thread.win32_start_address);
             builder.push_record(vec![
-                format!("{}", active_vcpu),
-                format!("{}", ui::addr(thread.ethread.0)),
-                format!(
-                    "{}",
-                    thread
-                        .pid
-                        .map(Value)
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "-".to_string())
-                ),
-                format!(
-                    "{}",
-                    thread
-                        .tid
-                        .map(Value)
-                        .map(|tid| tid.to_string())
-                        .unwrap_or_else(|| "-".to_string())
-                ),
-                format!("{}", thread.process_name.as_deref().unwrap_or("unknown")),
-                format!("{}", thread_state_label(thread)),
-                format!("{}", wait_reason_label(thread)),
+                active_vcpu.to_string(),
+                ui::addr(thread.ethread.0).to_string(),
+                thread
+                    .pid
+                    .map(Value)
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                thread
+                    .tid
+                    .map(Value)
+                    .map(|tid| tid.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                thread
+                    .process_name
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                thread_state_label(thread).to_string(),
+                wait_reason_label(thread).to_string(),
                 start
                     .map(|addr| ui::addr(addr.0))
                     .unwrap_or_else(|| "-".to_string()),
@@ -1234,18 +1232,15 @@ impl ReplState<'_> {
                     ]);
                 } else {
                     builder.push_record(vec![
-                        format!("{}", ui::addr(region.start.0)),
-                        format!("{}", ui::addr(region.end.0)),
-                        format!("{}", format_region_size(region.size())),
-                        format!("{}", vad_protection_label(region.protection)),
-                        format!("{}", vad_type_label(region)),
-                        format!(
-                            "{}",
-                            region
-                                .commit_charge
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "-".to_string())
-                        ),
+                        ui::addr(region.start.0).to_string(),
+                        ui::addr(region.end.0).to_string(),
+                        format_region_size(region.size()).to_string(),
+                        vad_protection_label(region.protection).to_string(),
+                        vad_type_label(region).to_string(),
+                        region
+                            .commit_charge
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
                         region.details.as_deref().unwrap_or("-").to_string(),
                     ]);
                 }
@@ -1303,10 +1298,10 @@ impl ReplState<'_> {
             }
             shown += 1;
             builder.push_record(vec![
-                format!("{}", ui::addr(module.base_address.0)),
-                format!("{}", ui::addr(module.end_address().0)),
-                format!("{}", format_region_size(module.size as u64)),
-                format!("{}", module.short_name),
+                ui::addr(module.base_address.0).to_string(),
+                ui::addr(module.end_address().0).to_string(),
+                format_region_size(module.size as u64).to_string(),
+                module.short_name.to_string(),
                 module.name,
             ]);
         }
@@ -1535,9 +1530,9 @@ impl ReplState<'_> {
             }
             count += 1;
             builder.push_record(vec![
-                format!("{}", process.name),
+                process.name.to_string(),
                 format!("{}", Value(process.pid)),
-                format!("{}", ui::addr(process.eprocess_va.0)),
+                ui::addr(process.eprocess_va.0).to_string(),
                 ui::addr(process.dtb),
                 if process.is_wow64() { "x86" } else { "-" }.to_string(),
             ]);
@@ -1583,12 +1578,12 @@ impl ReplState<'_> {
                         .map(|module| module.name)
                         .unwrap_or_else(|| "-".to_string());
                     builder.push_record(vec![
-                        format!("{}", ui::addr(driver.object.0)),
-                        format!("{}", driver.name),
-                        format!("{}", ui::addr(driver.driver_start.0)),
+                        ui::addr(driver.object.0).to_string(),
+                        driver.name.to_string(),
+                        ui::addr(driver.driver_start.0).to_string(),
                         format!("0x{:x}", driver.driver_size),
-                        format!("{}", module),
-                        format!("{}", ui::addr(driver.device_object.0)),
+                        module.to_string(),
+                        ui::addr(driver.device_object.0).to_string(),
                         ui::addr(driver.driver_unload.0),
                     ]);
                 }
@@ -1763,28 +1758,22 @@ impl ReplState<'_> {
                     }
                     count += 1;
                     let mut row = vec![
-                        format!("{}", ui::addr(module.base_address.0)),
-                        format!("{}", ui::addr(module.end_address().0)),
-                        format!("{}", module.short_name),
-                        format!("{}", module.file_version.as_deref().unwrap_or("-")),
-                        format!(
-                            "{}",
-                            self.ctx
-                                .target
-                                .symbols
-                                .module_symbol_status(dtb, module.base_address)
-                                .map(|status| status.label().to_string())
-                                .unwrap_or_else(|| "unknown".to_string())
-                        ),
-                        format!(
-                            "{}",
-                            self.ctx
-                                .target
-                                .symbols
-                                .module_symbol_source(dtb, module.base_address)
-                                .map(|source| source.label().to_string())
-                                .unwrap_or_else(|| "-".to_string())
-                        ),
+                        ui::addr(module.base_address.0).to_string(),
+                        ui::addr(module.end_address().0).to_string(),
+                        module.short_name.to_string(),
+                        module.file_version.as_deref().unwrap_or("-").to_string(),
+                        self.ctx
+                            .target
+                            .symbols
+                            .module_symbol_status(dtb, module.base_address)
+                            .map(|status| status.label().to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        self.ctx
+                            .target
+                            .symbols
+                            .module_symbol_source(dtb, module.base_address)
+                            .map(|source| source.label().to_string())
+                            .unwrap_or_else(|| "-".to_string()),
                     ];
                     if timestamp {
                         row.push(

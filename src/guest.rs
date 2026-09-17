@@ -1137,8 +1137,10 @@ impl<'a> StructRef<'a> {
         let mut buf = vec![0u8; length as usize];
         self.memory().read_bytes(buffer, &mut buf)?;
         let u16s: Vec<u16> = buf
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         Ok(String::from_utf16_lossy(&u16s))
     }
@@ -1456,7 +1458,7 @@ fn find_kernel_dtb_arm64_candidates(phys: &PhysMem) -> Result<Vec<Dtb>> {
 fn is_ntoskrnl_header(header: &[u8]) -> bool {
     header.len() >= 4
         && header[..4] == [0x4d, 0x5a, 0x90, 0x00]
-        && header.chunks_exact(8).any(|c| c == b"POOLCODE")
+        && header.as_chunks::<8>().0.iter().any(|c| c == b"POOLCODE")
 }
 
 fn is_ntoskrnl_pte(phys: &PhysMem, pte: PageTableEntry) -> Result<bool> {
@@ -2231,8 +2233,10 @@ impl Guest {
                     .read_bytes(VirtAddr(u64::from(name_buffer)), &mut buf)
                     .map(|()| {
                         let u16s: Vec<u16> = buf
-                            .chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|c| u16::from_le_bytes(*c))
                             .collect();
                         String::from_utf16_lossy(&u16s)
                     })
