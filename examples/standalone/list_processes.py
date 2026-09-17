@@ -28,7 +28,7 @@ def main() -> None:
     mods = dbg.kernel_modules()
     print(f"\n{len(mods)} kernel modules (first 10):")
     for m in mods[:10]:
-        print(f"  {m['base']:#018x}  {m['size']:>#9x}  {m['name']}")
+        print(f"  {m.base:#018x}  {m.size:>#9x}  {m.name}")
 
 
 if __name__ == "__main__":

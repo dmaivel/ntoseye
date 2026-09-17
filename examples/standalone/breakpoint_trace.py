@@ -63,8 +63,8 @@ def main() -> None:
             )
             # show the next two instructions at the hit
             for row in dbg.disassemble(rip, 2):
-                c = f"   ; {row['comment']}" if row["comment"] else ""
-                print(f"    {row['ip']:#x}: {row['asm']}{c}")
+                c = f"   ; {row.comment}" if row.comment else ""
+                print(f"    {row.ip:#x}: {row.asm}{c}")
     finally:
         if timed_out:
             dbg.interrupt()

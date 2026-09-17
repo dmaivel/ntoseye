@@ -20,7 +20,7 @@ def main() -> None:
 
     dbg = ntoseye.attach(backend=args.backend, connect=args.connect)
 
-    head = dbg.eval("PsLoadedModuleList")
+    head = dbg.eval("nt!PsLoadedModuleList")
     modules = dbg.walk_list("_KLDR_DATA_TABLE_ENTRY", "InLoadOrderLinks", head)
 
     print(f"{len(modules)} loaded modules\n")
