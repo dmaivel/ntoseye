@@ -41,7 +41,7 @@ use crate::{
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
-    target::{SavedThreadRegisters, Target, ThreadInfo, lookup_register},
+    target::{KTHREAD_STATE_TERMINATED, SavedThreadRegisters, Target, ThreadInfo, lookup_register},
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
     types::{Arch, Dtb, VirtAddr},
 };
@@ -756,6 +756,19 @@ pub fn build_parked_thread_recovered_stack(
         Error::DebugInfo("parked thread owning process DTB is unavailable".into())
     })?;
     let trace = resolve_thread_trace_context(debugger, process_dtb);
+    // The trap frame and the context-switch frame both live on the kernel
+    // stack: a terminated thread has freed it, and a long wait gets it
+    // swapped out. Either way there is nothing to walk.
+    if thread.state == Some(KTHREAD_STATE_TERMINATED) {
+        return Err(Error::DebugInfo(
+            "parked thread stack unavailable: the thread has terminated".into(),
+        ));
+    }
+    if thread.kernel_stack_resident == Some(false) {
+        return Err(Error::DebugInfo(
+            "parked thread stack unavailable: kernel stack is not resident (swapped out)".into(),
+        ));
+    }
     let mut failures = Vec::new();
 
     if let Some(address) = thread.trap_frame {

@@ -446,13 +446,16 @@ pub fn decimal_pid_literal(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
+/// `KTHREAD.State` of a thread whose kernel stack has been freed.
+pub const KTHREAD_STATE_TERMINATED: u8 = 4;
+
 pub fn kthread_state_name(state: u8) -> &'static str {
     match state {
         0 => "Initialized",
         1 => "Ready",
         2 => "Running",
         3 => "Standby",
-        4 => "Terminated",
+        KTHREAD_STATE_TERMINATED => "Terminated",
         5 => "Waiting",
         6 => "Transition",
         7 => "DeferredReady",

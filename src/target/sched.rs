@@ -1490,7 +1490,11 @@ impl Target {
             priority: read_kthread_u8("Priority"),
             base_priority: read_kthread_u8("BasePriority"),
             wait_irql: read_kthread_u8("WaitIrql"),
-            kernel_stack_resident: read_kthread_u8("KernelStackResident").map(|value| value != 0),
+            // A one-bit field inside `MiscFlags`: the whole byte is never zero.
+            kernel_stack_resident: self
+                .extract_layout_bits(&kthread_layout, kthread, "KernelStackResident")
+                .ok()
+                .map(|value| value != 0),
             start_address: read_ethread_ptr("StartAddress"),
             win32_start_address: read_ethread_ptr("Win32StartAddress"),
             teb: read_kthread_ptr("Teb").or_else(|| read_ethread_ptr("Teb")),
