@@ -50,7 +50,9 @@ KD and KDNET accept `--memory-source auto|host|kd`:
 - `host` requires matching direct VM-process memory and fails on mismatch.
 - `kd` forces target-mediated reads: kernel-space addresses under any process context, and user-space addresses of the process the current processor is running (AMD64), go through `DbgKdReadVirtualMemory`; user space of any other process goes through `DbgKdReadPhysicalMemory` behind a host page walk whose translations are cached until the target next runs. Session space resolves in the halted processor's session, as in WinDbg.
 
-The source controls reads. Where the target can service virtual writes, all sources use `DbgKdWriteVirtualMemory`; other addresses use a page walk and `DbgKdWritePhysicalMemory`. Virtual writes preserve guest write protection, copy-on-write, and residency handling. Physical or host-memory writes bypass those protections, and edits follow the physical frame if the guest remaps it.
+The source controls reads. Where the target can service virtual writes, all sources use `DbgKdWriteVirtualMemory`; other addresses use a page walk and `DbgKdWritePhysicalMemory`. A virtual write resolves through the target's own page tables and refuses a page it will not write; a physical or host-memory write reaches whatever frame is mapped, reports nothing, and follows that frame if the guest remaps it.
+
+Neither preserves write protection or copy-on-write. The kernel services a debugger write with `MMDBG_COPY_UNSAFE`, which makes the PTE writable for the duration instead of taking the fault that would copy a shared page; the copy-on-write path beside it requires IRQL <= APC_LEVEL, which a debugger holding every other processor frozen can never reach. A breakpoint written into a shared image page is therefore visible to every process mapping that page, however it was written. See [breakpoints](#user-mode-breakpoints-in-shared-pages).
 
 The host mapping's identity is re-checked after a guest reboot rebuilds debugger state, not just at attach.
 

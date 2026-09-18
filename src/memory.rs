@@ -415,9 +415,10 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
     }
 
     fn write_bytes(&self, addr: VirtAddr, buf: &[u8]) -> Result<()> {
-        // A target that can service the write itself honors the page's own
-        // protection, copy-on-write state and residency; the page walk below
-        // reaches the frame directly and honors none of them.
+        // A target that can service the write itself refuses an address it
+        // will not write, where the page walk below reaches whatever frame is
+        // mapped and reports nothing. Neither preserves write protection or
+        // copy-on-write; see `KdBackend::write_virtual_direct`.
         if let Some(result) = self
             .backend
             .write_virtual_direct(addr, self.root_for(addr), buf)

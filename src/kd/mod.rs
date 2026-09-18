@@ -2103,12 +2103,20 @@ impl KdBackend {
     /// the same address spaces.
     ///
     /// `DbgKdWriteVirtualMemoryApi` is serviced by the guest's own
-    /// debug-memory path, which honors the page's write protection,
-    /// copy-on-write state and residency. Writing the frame instead, through
-    /// a host mapping or `DbgKdWritePhysicalMemory`, honors none of those: it
-    /// can modify a page the guest believes is read-only or shared, and a
-    /// frame the guest reclaims afterwards carries the edit to whatever lands
-    /// there next.
+    /// debug-memory path, which resolves the address through the target's own
+    /// page tables and refuses a page it will not write. Writing the frame
+    /// instead, through a host mapping or `DbgKdWritePhysicalMemory`, reaches
+    /// whatever is mapped and reports nothing: a frame the guest reclaims
+    /// afterwards carries the edit to whatever lands there next.
+    ///
+    /// Neither preserves write protection or copy-on-write. `KdpWriteVirtual`
+    /// reaches `MmDbgCopyMemory` with `MMDBG_COPY_UNSAFE`, whose
+    /// `MiDbgWriteCheck` makes the PTE writable for the duration instead of
+    /// taking the fault that would copy a shared page; the CoW-capable path
+    /// next to it requires IRQL <= APC_LEVEL, which the debugger, running
+    /// with every other processor frozen, can never satisfy. So a breakpoint
+    /// in a shared image page is seen by every process mapping that page,
+    /// however it was written.
     fn write_virtual_direct(
         &mut self,
         addr: VirtAddr,
