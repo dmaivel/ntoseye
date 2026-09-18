@@ -114,6 +114,9 @@ pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
     if report.skipped > 0 {
         summary.push_str(&format!(", {} skipped", report.skipped));
     }
+    if report.fetching > 0 {
+        summary.push_str(&format!(", {} fetching in background", report.fetching));
+    }
     if report.diagnostic_count > 0 {
         summary.push_str(&format!(
             ", {} PDB warning{}",
@@ -252,6 +255,13 @@ pub struct ReplState<'a> {
     /// keeps running and the host collects the stop on a later call with
     /// [`ReplState::collect_stop`].
     pub stop_wait: Option<StopWaitBudget>,
+    /// Set once this dispatch rendered a stop the remote client has not seen
+    /// (parked between calls, or collected while waiting for a halt), so a
+    /// resume later on the same line is refused once rather than continuing
+    /// past it unread. Stops the line itself causes (`break`, a resume
+    /// landing on a breakpoint) do not set it; see
+    /// [`ReplState::gate_remote_command`].
+    pub unseen_stop_rendered: bool,
 }
 
 /// Deadline for a bounded stop wait, plus a host-owned cancel flag (client
@@ -383,6 +393,7 @@ impl<'a> ReplState<'a> {
             quiet_stops: false,
             source_cursor: store.source_cursor,
             stop_wait: None,
+            unseen_stop_rendered: false,
         }
     }
 
@@ -714,6 +725,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         quiet_stops: false,
         source_cursor: None,
         stop_wait: None,
+        unseen_stop_rendered: false,
     };
     // An empty module list at startup means we attached before rediscovery completed.
     state.ctx.reload_module_list_pending = reload_module_list_pending;
@@ -1067,35 +1079,46 @@ mod tests {
         assert!(!text.contains("target still running"), "{text:?}");
     }
 
+    /// A halted-only command that runs on the mock (`r`/`k` need a thread
+    /// context it does not model): bare `bd` prints its usage.
+    const HALTED_PROBE: &str = "bd";
+    const HALTED_PROBE_RAN: &str = "bd <id";
+
     #[test]
-    fn halted_only_line_waits_for_the_stop_then_runs() {
+    fn halted_only_command_waits_for_the_stop_then_runs() {
         let mut backend = MockBackend::default().running();
         backend.queue_interrupt(breakpoint_event(0x1000));
         let mut session = session_with_mock(backend);
         let mut state = remote_state(&mut session, 5_000);
-        let (result, _) = capture(|| state.gate_remote_line("k"));
-        assert!(result.unwrap().is_none(), "k was not let through");
+        let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
+        assert_eq!(result.unwrap(), Flow::Continue);
+        assert!(!text.contains("not run"), "{text:?}");
+        assert!(text.contains(HALTED_PROBE_RAN), "bd did not run: {text:?}");
         assert!(!state.ctx.backend.is_running());
     }
 
     #[test]
-    fn halted_only_line_is_not_run_on_a_target_still_running() {
+    fn halted_only_command_is_not_run_on_a_target_still_running() {
         let mut session = session_with_mock(MockBackend::default().running());
         let mut state = remote_state(&mut session, 150);
-        let (result, text) = capture(|| state.gate_remote_line("k"));
-        assert_eq!(result.unwrap(), Some(Flow::Denied));
+        let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
+        assert_eq!(result.unwrap(), Flow::Denied);
         assert!(text.contains("not run"), "{text:?}");
+        assert!(
+            !text.contains(HALTED_PROBE_RAN),
+            "bd ran on a running target: {text:?}"
+        );
         assert!(state.ctx.backend.is_running());
     }
 
     #[test]
-    fn resuming_line_is_refused_against_the_stop_it_waited_for() {
+    fn resuming_command_is_refused_against_the_stop_it_waited_for() {
         let mut backend = MockBackend::default().running();
         backend.queue_interrupt(breakpoint_event(0x1000));
         let mut session = session_with_mock(backend);
         let mut state = remote_state(&mut session, 5_000);
-        let (result, text) = capture(|| state.gate_remote_line("g"));
-        assert_eq!(result.unwrap(), Some(Flow::Denied));
+        let (result, text) = capture(|| state.dispatch_line("g"));
+        assert_eq!(result.unwrap(), Flow::Denied);
         assert!(text.contains("not run"), "{text:?}");
         assert!(
             !state.ctx.backend.is_running(),
@@ -1104,25 +1127,71 @@ mod tests {
     }
 
     #[test]
-    fn running_safe_line_runs_without_waiting() {
+    fn resuming_command_is_refused_against_a_parked_stop_after_earlier_commands_ran() {
+        let mut backend = MockBackend::default().running().with_pending_stop();
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        session.service_idle();
+        assert!(!session.backend.is_running(), "the stop was not parked");
+        let mut state = remote_state(&mut session, 5_000);
+        let (begin, _) = capture(|| state.begin_remote_line("bd; g"));
+        assert!(begin.unwrap().is_none());
+        let (result, text) = capture(|| state.dispatch_line("bd; g"));
+        assert_eq!(result.unwrap(), Flow::Denied);
+        assert!(
+            text.contains(HALTED_PROBE_RAN),
+            "bd before the refused g did not run: {text:?}"
+        );
+        assert!(text.contains("not run"), "{text:?}");
+        assert!(
+            !state.ctx.backend.is_running(),
+            "the parked stop was continued past"
+        );
+    }
+
+    #[test]
+    fn running_safe_command_runs_without_waiting() {
         let mut session = session_with_mock(MockBackend::default().running());
         let mut state = remote_state(&mut session, 5_000);
         let started = std::time::Instant::now();
-        let (result, _) = capture(|| state.gate_remote_line("help"));
-        assert!(result.unwrap().is_none());
+        let (result, _) = capture(|| state.dispatch_line("help"));
+        assert_eq!(result.unwrap(), Flow::Continue);
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert!(state.ctx.backend.is_running());
     }
 
     #[test]
-    fn resuming_line_is_recognized_through_aliases() {
-        let mut session = session_over_memory(0x1000, &[0u8; 8]);
-        let state = ReplState::for_oneshot(&mut session);
-        assert!(state.line_moves_target("g"));
-        assert!(state.line_moves_target("lm; p"));
-        assert!(state.line_moves_target("t"));
-        assert!(!state.line_moves_target("lm"));
-        assert!(!state.line_moves_target(""));
-        assert!(!state.line_moves_target("break"));
+    fn break_earlier_on_the_line_halts_the_target_for_a_later_command() {
+        // A guest that only stops when broken into: waiting for a halt before
+        // running the line would burn the budget and never run `break`.
+        let mut backend = MockBackend::default().running().halts_only_on_interrupt();
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        let mut state = remote_state(&mut session, 150);
+        let started = std::time::Instant::now();
+        let (result, text) = capture(|| state.dispatch_line("break; bd"));
+        assert_eq!(result.unwrap(), Flow::Continue);
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert!(!text.contains("not run"), "{text:?}");
+        assert!(
+            text.contains(HALTED_PROBE_RAN),
+            "bd after break did not run: {text:?}"
+        );
+        assert!(!state.ctx.backend.is_running());
+    }
+
+    #[test]
+    fn resume_after_break_on_the_same_line_is_allowed() {
+        let mut backend = MockBackend::default().running().halts_only_on_interrupt();
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        let mut state = remote_state(&mut session, 150);
+        let (result, text) = capture(|| state.dispatch_line("break; g"));
+        assert_eq!(result.unwrap(), Flow::Continue);
+        assert!(!text.contains("not run"), "{text:?}");
+        assert!(
+            state.ctx.backend.is_running(),
+            "g after break did not resume"
+        );
     }
 }

@@ -218,33 +218,47 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    /// The front half of a dispatch for a host that hands control back while
-    /// the target runs. A stop parked since the last line is rendered first;
-    /// then, as WinDbg queues input typed at a running debuggee, a line that
-    /// needs the target halted (or would move it) waits within the stop
-    /// budget for the halt. Returns the flow to report instead of dispatching
-    /// `line`: an empty line only waits, nothing runs while the target is
-    /// still running, and a resume is refused once against a stop rendered
-    /// here so the stop is seen before it is continued past. `None` means
-    /// `line` should run now.
-    pub fn gate_remote_line(&mut self, line: &str) -> Result<Option<Flow>> {
-        let mut surfaced = self.surface_parked_stop();
+    /// The start of a call from a host that hands control back while the
+    /// target runs: a stop parked since the last call is rendered first, and
+    /// an empty line only waits for the next stop. Returns the flow to report
+    /// instead of dispatching `line`; `None` means dispatch it (each command
+    /// on it is then admitted by [`ReplState::gate_remote_command`]).
+    pub fn begin_remote_line(&mut self, line: &str) -> Result<Option<Flow>> {
+        self.surface_parked_stop();
         if line.is_empty() {
             self.collect_stop()?;
             return Ok(Some(Flow::Continue));
         }
-        let moves = self.line_moves_target(line);
-        if !surfaced && self.ctx.backend.is_running() && (moves || self.line_needs_halt(line)) {
+        Ok(None)
+    }
+
+    /// Admit one resolved command for a remote host, against the target's
+    /// state at this point in the line (a `break` earlier on the same line
+    /// has already halted it). As WinDbg queues input typed at a running
+    /// debuggee, a command that needs the target halted (or would move it)
+    /// waits within the stop budget for the halt; nothing runs while the
+    /// target is still running. A resume is refused once against a stop the
+    /// client has not seen (parked between calls, or collected here) so the
+    /// stop is seen before it is continued past. Returns the flow to report
+    /// instead of running the command; `None` means run it now.
+    pub fn gate_remote_command(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
+        if self.context != DispatchContext::Remote(RemoteClient::Mcp) {
+            return Ok(None);
+        }
+        let name = spec.names[0];
+        let moves = spec.run != RunEffect::None;
+        let needs_halt = spec.run_state == Some(RunState::Halted);
+        if self.ctx.backend.is_running() && (moves || needs_halt) {
             self.collect_stop()?;
             if self.ctx.backend.is_running() {
-                outln!("the command was not run.");
+                outln!("'{name}' was not run.");
                 return Ok(Some(Flow::Denied));
             }
-            surfaced = true;
+            self.unseen_stop_rendered = true;
         }
-        if surfaced && moves {
+        if self.unseen_stop_rendered && moves {
             outln!(
-                "the target stopped (above); the command was not run so the stop is not \
+                "the target stopped (above); '{name}' was not run so the stop is not \
                  skipped. Re-issue it to continue."
             );
             return Ok(Some(Flow::Denied));
@@ -253,7 +267,8 @@ impl ReplState<'_> {
     }
 
     /// Render a stop the idle servicer parked since the last dispatch, if
-    /// any, without waiting. Returns whether one was rendered.
+    /// any, without waiting. Returns whether one was rendered; a remote host
+    /// then refuses to resume past it on this call.
     pub fn surface_parked_stop(&mut self) -> bool {
         let Some(outcome) = self.ctx.take_parked_stop() else {
             return false;
@@ -261,6 +276,7 @@ impl ReplState<'_> {
         self.clear_selected_frame();
         print_parked_outcome(self.ctx, &self.caches, outcome);
         self.flush_notices();
+        self.unseen_stop_rendered = true;
         true
     }
 

@@ -30,6 +30,10 @@ mod verifier;
 impl ReplState<'_> {
     pub fn dispatch_line(&mut self, line: &str) -> Result<Flow> {
         let flow = self.dispatch_line_inner(line, 0);
+        // `.process /p`, `.reload`, a backtrace's lazy frame load, or a
+        // background fetch that finished meanwhile may have made a deferred
+        // breakpoint resolvable.
+        self.ctx.reconcile_breakpoints_if_symbols_changed();
         self.flush_notices();
         flow
     }
@@ -42,48 +46,6 @@ impl ReplState<'_> {
         }
     }
 
-    /// Whether any command on `line` (aliases expanded) can move the target.
-    /// A host that hands control back while the target runs uses this to
-    /// refuse a resume issued against a stop the client has not seen yet.
-    pub fn line_moves_target(&self, line: &str) -> bool {
-        self.line_has_command(line, 0, &|spec| spec.run != RunEffect::None)
-    }
-
-    /// Whether any command on `line` (aliases expanded) declares it needs a
-    /// halted target. A host that hands control back while the target runs
-    /// uses this to wait for the stop before running the line, as WinDbg
-    /// queues input typed at a running debuggee.
-    pub fn line_needs_halt(&self, line: &str) -> bool {
-        self.line_has_command(line, 0, &|spec| spec.run_state == Some(RunState::Halted))
-    }
-
-    fn line_has_command(
-        &self,
-        line: &str,
-        depth: usize,
-        matches: &dyn Fn(&CommandSpec) -> bool,
-    ) -> bool {
-        let Ok(commands) = split_command_list(line) else {
-            return false;
-        };
-        commands.into_iter().any(|command| {
-            let Ok(Some(parsed)) = parse_command(command) else {
-                return false;
-            };
-            if let Some(spec) = command_registry().get(parsed.name) {
-                return matches(spec);
-            }
-            let Ok(invocation) = parsed.invocation(CommandStyle::StructuredArgs) else {
-                return false;
-            };
-            match self.aliases.expand(invocation.name, &invocation.argv) {
-                Ok(Some(expanded)) if depth < ALIAS_RECURSION_LIMIT => {
-                    self.line_has_command(&expanded, depth + 1, matches)
-                }
-                _ => false,
-            }
-        })
-    }
     /// Execute frontend-owned breakpoint commands while keeping the core free
     /// of REPL state. A trailing WinDbg-style `gc` requests automatic resume.
     /// Recursive actions are bounded even when an alias resumes into another
@@ -231,18 +193,32 @@ impl ReplState<'_> {
         Ok(Flow::Continue)
     }
 
+    /// The per-command policy every dispatch path shares: the context's
+    /// run-control denial, then a remote host's wait for the halt the command
+    /// needs (against the target's state right now, so a `break` earlier on
+    /// the line counts), then the run-state check. `None` means run it.
+    fn admit(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
+        if let Some(reason) = self.run_control_denial(spec) {
+            error!("{reason}");
+            return Ok(Some(Flow::Denied));
+        }
+        if let Some(flow) = self.gate_remote_command(spec)? {
+            return Ok(Some(flow));
+        }
+        if !check_run_state(self, spec) {
+            return Ok(Some(Flow::Continue));
+        }
+        Ok(None)
+    }
+
     fn dispatch_one(&mut self, line: &str, depth: usize) -> Result<Flow> {
         // WinDbg processor syntax (`~`, `~2s`, `~*k`) is one token with the
         // selector glued on, so it never matches a registered name.
         if line.trim_start().starts_with('~') {
-            if let Some(spec) = command_registry().get("~") {
-                if let Some(reason) = self.run_control_denial(spec) {
-                    error!("{reason}");
-                    return Ok(Flow::Denied);
-                }
-                if !check_run_state(self, spec) {
-                    return Ok(Flow::Continue);
-                }
+            if let Some(spec) = command_registry().get("~")
+                && let Some(flow) = self.admit(spec)?
+            {
+                return Ok(flow);
             }
             return self.cmd_tilde(line.trim());
         }
@@ -256,12 +232,8 @@ impl ReplState<'_> {
         };
 
         if let Some(spec) = command_registry().get(parsed.name) {
-            if let Some(reason) = self.run_control_denial(spec) {
-                error!("{reason}");
-                return Ok(Flow::Denied);
-            }
-            if !check_run_state(self, spec) {
-                return Ok(Flow::Continue);
+            if let Some(flow) = self.admit(spec)? {
+                return Ok(flow);
             }
             match spec.handler {
                 CommandHandler::NoArgs(handler) => {

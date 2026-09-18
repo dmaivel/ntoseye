@@ -32,7 +32,10 @@ use crate::diagnostics;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::output;
-use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitBudget};
+use crate::repl::{
+    DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitBudget, command_registry,
+    parse_command,
+};
 use crate::session::{RunStatus, Session};
 use crate::structured;
 use crate::view;
@@ -427,9 +430,11 @@ impl CommandOutput {
 
 /// Run one REPL line on the actor with REPL semantics, bounded by `budget`.
 ///
-/// [`ReplState::gate_remote_line`] renders a parked stop and waits for the
-/// halt a line needs first. Guest debug output captured since the previous
-/// call and the run state are gathered afterwards.
+/// [`ReplState::begin_remote_line`] renders a parked stop first; each command
+/// on the line is then admitted by [`ReplState::gate_remote_command`] against
+/// the target's state at that point, so `break; bp ...; g` is one call. Guest
+/// debug output captured since the previous call and the run state are
+/// gathered afterwards.
 fn run_command(
     actor: &mut Actor,
     line: &str,
@@ -446,10 +451,23 @@ fn run_command(
     let mut result = None;
     let (flow, mut text) = output::capture(|| {
         let line = state.line.clone();
-        if let Some(flow) = state.gate_remote_line(&line)? {
+        if let Some(flow) = state.begin_remote_line(&line)? {
             return Ok(flow);
         }
         if format == OutputFormat::Json {
+            // The structured decoders bypass `dispatch_one` and its gate, so
+            // admit the (single) command here. A line without a decoding
+            // falls through to `dispatch_line`, whose gate is then a no-op:
+            // the target is already halted or the command never needed it.
+            let spec = parse_command(&line)
+                .ok()
+                .flatten()
+                .and_then(|parsed| command_registry().get(parsed.name));
+            if let Some(spec) = spec
+                && let Some(flow) = state.gate_remote_command(spec)?
+            {
+                return Ok(flow);
+            }
             match structured::structured_command(&mut state, &line) {
                 Some(Ok(view)) => {
                     result = Some(view::to_json(&view));
@@ -543,7 +561,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its output (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control has REPL semantics, bounded by timeout_ms: `g`/`p`/`t`/`gu`/`pa`... resume and wait for the next stop, which is rendered like the REPL renders it; if none arrives the result ends with `[target running]` and the target keeps running. Like typing at a running WinDbg, a halted-only command (`k`, `r`, `bp`, ...) or another resuming command sent while the target runs waits up to timeout_ms for the stop first, then runs (a resuming one is instead refused once, so the stop is seen before it is continued past); `break` interrupts. A stop that happened between calls is rendered at the top of the next result. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`. format=json returns {ok, output, result, target, debug_output} with a typed `result` for commands that have a structured decoding."
+        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its output (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control has REPL semantics, bounded by timeout_ms: `g`/`p`/`t`/`gu`/`pa`... resume and wait for the next stop, which is rendered like the REPL renders it; if none arrives the result ends with `[target running]` and the target keeps running. Like typing at a running WinDbg, a halted-only command (`k`, `r`, `bp`, ...) or another resuming command sent while the target runs waits up to timeout_ms for the stop first, then runs (a resuming one is instead refused once, so the stop is seen before it is continued past); `break` interrupts. Each command on a `;` line is admitted against the target's state at that point, so to set a breakpoint on a freely running guest send `break; bp <addr>; g` as one line rather than waiting for a stop that will not come. A stop that happened between calls is rendered at the top of the next result. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`. format=json returns {ok, output, result, target, debug_output} with a typed `result` for commands that have a structured decoding."
     )]
     async fn command(
         &self,
@@ -752,8 +770,16 @@ impl rmcp::ServerHandler for NtoseyeMcp {
                  (`g`, `p`, `t`, `gu`, ...) wait up to timeout_ms for the next stop and \
                  render it; if the trailer says running, the next halted-only command \
                  (`k`, `r`, ...) waits for the stop before running, so just carry on (no \
-                 stop is lost between calls). Typical breakpoint flow: `break`, \
-                 `bp nt!NtCreateFile`, `g`, then `k`. After a reboot the trailer says \
+                 stop is lost between calls). To set a breakpoint on a freely running \
+                 guest, halt it on the same line: `break; bp nt!NtCreateFile; g`, then \
+                 `k` once it hits (a bare `bp` while the guest runs only waits for a \
+                 stop that nothing will cause). A user-mode symbol like \
+                 `user32!PeekMessageW` lives in a process, so name it: \
+                 `break; bu /p <pid> user32!PeekMessageW; g` resolves the symbol in that \
+                 process without a prior `.process /p`. A backtrace through a module \
+                 whose PDB is not cached shows `module+offset` and fetches it in the \
+                 background; run `k` again for the names. After a \
+                 reboot the trailer says \
                  rediscovery pending until the kernel is rediscovered; wait rather than \
                  enumerating stale state. Use format=json when you need typed values \
                  instead of parsing text. If no session is open and the user has not said \

@@ -32,6 +32,12 @@ pub struct MockBackend {
     interrupt_events: VecDeque<StopEvent>,
     modules_changed: bool,
     target_manages_sites: bool,
+    /// Queued events surface only through `interrupt()`, never by polling:
+    /// a guest that runs freely until the debugger breaks in.
+    halts_only_on_interrupt: bool,
+    /// The backend caught a stop no host has drained yet (a breakpoint hit
+    /// while the host was idle); cleared once an event is handed out.
+    pending_stop: bool,
     /// Sites the target reports as dropped by its last stop.
     dropped_sites: Vec<u64>,
     /// `set_breakpoint` (true) / `remove_breakpoint` (false) calls in order.
@@ -54,6 +60,8 @@ impl Default for MockBackend {
             interrupt_events: VecDeque::new(),
             modules_changed: false,
             target_manages_sites: false,
+            halts_only_on_interrupt: false,
+            pending_stop: false,
             dropped_sites: Vec::new(),
             site_writes: Vec::new(),
         }
@@ -75,6 +83,16 @@ impl MockBackend {
 
     pub fn queue_interrupt(&mut self, event: StopEvent) {
         self.interrupt_events.push_back(event);
+    }
+
+    pub fn halts_only_on_interrupt(mut self) -> Self {
+        self.halts_only_on_interrupt = true;
+        self
+    }
+
+    pub fn with_pending_stop(mut self) -> Self {
+        self.pending_stop = true;
+        self
     }
 
     fn set(&mut self, name: &str, value: u64) {
@@ -155,9 +173,13 @@ impl DebugBackend for MockBackend {
         Ok(event)
     }
     fn try_wait_for_stop(&mut self, _timeout: Duration) -> Result<Option<StopEvent>> {
+        if self.halts_only_on_interrupt {
+            return Ok(None);
+        }
         let event = self.interrupt_events.pop_front();
         if event.is_some() {
             self.running = false;
+            self.pending_stop = false;
         }
         Ok(event)
     }
@@ -172,6 +194,9 @@ impl DebugBackend for MockBackend {
     }
     fn is_running(&self) -> bool {
         self.running
+    }
+    fn has_pending_stop(&self) -> bool {
+        self.pending_stop
     }
 
     fn take_modules_changed(&mut self) -> bool {

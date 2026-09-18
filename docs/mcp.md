@@ -14,6 +14,7 @@ The `command` tool behaves like a WinDbg prompt, with one difference: it never b
 - A resuming command (`g`, `gh`, `gn`, `p`, `t`, `gu`, `pa`, `wt`, `.reboot`, ...) resumes and waits up to `timeout_ms` for the next stop. A stop is rendered the way the REPL renders it (breakpoint banner, registers, stack). If nothing stops in time the result ends with `[target running]`; the target keeps running and nothing is lost.
 - A command that needs a halted target (`k`, `r`, `bp`, `t`, ...) sent while the target runs waits up to `timeout_ms` for the stop, renders it, then runs, the way WinDbg queues input typed at a running debuggee. If the target is still running when the budget ends, the result says so and the command was not run; re-issue it to keep waiting. Memory, process, module, and struct commands do not wait: they work live when memory comes from the host (the default `--memory-source auto` with a local VM, and the memory/gdb backends), and fail with a message saying why on a session that reads memory over KD.
 - A resuming command sent while the target runs also waits, but is then refused once so the stop is seen before it is continued past.
+- Each command on a `;` line is admitted against the target's state at that point, not the state when the line arrived. `break; bp nt!NtCreateFile; g` therefore works as one call: `break` halts the guest, `bp` runs on the halted target, `g` resumes. A bare `bp` on a guest that nothing will stop only waits out `timeout_ms` and reports that it was not run.
 - `break` interrupts a running target.
 - A stop that arrived between calls (the guest hit a breakpoint while the agent was thinking) is rendered at the top of the next result. If that next call was itself a resuming command it is refused once, so the agent sees the stop before continuing past it.
 - A multi-step command (`pa`, `pt`, `gu`, `wt`) that overruns the budget leaves the target running toward its next stop; the next halted-only command collects it. An empty `line` runs nothing and only waits.
@@ -22,7 +23,9 @@ The trailer reads `[target running]` or `[target halted @ <vcpu> <rip> <symbol> 
 
 Guest debug output (`DbgPrint`) captured since the previous call is appended as `[dbgprint] ...` lines.
 
-A typical breakpoint flow: `break`, `bp nt!NtCreateFile`, `g`, `k` (which waits for the breakpoint if `g` returned with the target still running).
+A typical breakpoint flow: `break; bp nt!NtCreateFile; g`, then `k` (which waits for the breakpoint if `g` returned with the target still running). For a user-mode breakpoint name the process and the symbol resolves in it: `break; bu /p <pid> user32!PeekMessageW; g`. No prior `.process /p` is needed, because the debugger loads that module's symbols itself (see [symbols](symbols.md)).
+
+A backtrace through a module whose PDB is not cached yet renders those frames as `module+offset` and fetches the PDB in the background rather than holding the call open; a later `k` shows the names.
 
 ## Structured results
 
