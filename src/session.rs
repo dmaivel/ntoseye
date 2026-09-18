@@ -1147,8 +1147,12 @@ impl Session {
         let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
-        self.breakpoints
-            .mask_breakpoint_bytes(VirtAddr(pc), &mut bytes, trace.active_dtb);
+        self.breakpoints.mask_breakpoint_bytes(
+            &self.target,
+            VirtAddr(pc),
+            &mut bytes,
+            trace.active_dtb,
+        );
 
         if self.target.arch() == Arch::Arm64 {
             let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -1790,7 +1794,7 @@ impl Session {
         let process = self.target.current_process()?;
         process.memory().read_bytes(addr, buf)?;
         self.breakpoints
-            .mask_breakpoint_bytes(addr, buf, process.dtb());
+            .mask_breakpoint_bytes(&self.target, addr, buf, process.dtb());
         Ok(())
     }
 

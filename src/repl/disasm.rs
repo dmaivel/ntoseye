@@ -378,7 +378,7 @@ pub fn print_disasm_context(
         return;
     }
 
-    breakpoints.mask_breakpoint_bytes(VirtAddr(rip), &mut bytes, trace.active_dtb);
+    breakpoints.mask_breakpoint_bytes(debugger, VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
     let rows = decode_disasm_context(

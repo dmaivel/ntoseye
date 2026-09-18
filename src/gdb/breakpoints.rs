@@ -13,6 +13,7 @@ use crate::dbg_backend::{
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::guest::{ModuleInfo, ProcessInfo, read_pe_header_page};
+use crate::memory::PAGE_SIZE;
 use crate::target::Target;
 use crate::types::{Arch, Dtb, VirtAddr};
 
@@ -1496,15 +1497,30 @@ impl BreakpointManager {
 
     /// Overlay our breakpoints' original bytes onto a buffer read for display,
     /// so no view ever shows the int3 we injected. `start` is the buffer's
-    /// guest VA; `cr3` scopes process breakpoints to the address space the
-    /// bytes were read from (kernel breakpoints are global).
-    pub fn mask_breakpoint_bytes(&self, start: VirtAddr, buf: &mut [u8], cr3: u64) {
+    /// guest VA and `cr3` the address space it was read from.
+    ///
+    /// A site is masked wherever the read reaches the frame the byte was
+    /// written into, since that is what decides whether our `int3` is what
+    /// the caller would otherwise see. One rule covers a kernel site under
+    /// every address space and a user site in a shared image page under every
+    /// process mapping it, while leaving a process that merely has its own
+    /// memory at the same address untouched.
+    pub fn mask_breakpoint_bytes(
+        &self,
+        debugger: &Target,
+        start: VirtAddr,
+        buf: &mut [u8],
+        cr3: u64,
+    ) {
         let end = start.0.wrapping_add(buf.len() as u64);
         for bp in self.breakpoints.values() {
-            if !bp.resolved || !bp.enabled || bp.hardware.is_some() || !bp.scope.matches_cr3(cr3) {
+            if !bp.resolved || !bp.enabled || bp.hardware.is_some() {
                 continue;
             }
             if bp.address.0 < start.0 || bp.address.0 >= end {
+                continue;
+            }
+            if !Self::site_is_in_view(debugger, bp, cr3) {
                 continue;
             }
             let offset = (bp.address.0 - start.0) as usize;
@@ -1512,6 +1528,32 @@ impl BreakpointManager {
             if offset + bytes.len() <= buf.len() {
                 buf[offset..offset + bytes.len()].copy_from_slice(bytes);
             }
+        }
+    }
+
+    /// Whether a read under `cr3` reaches the frame `bp` patched.
+    ///
+    /// Both sides are translated rather than remembered: a frame recorded at
+    /// install would go stale the moment the guest remapped the page, and the
+    /// translations are cached per halt anyway. Scope is the fallback for an
+    /// address space that cannot resolve the site at all, such as a
+    /// non-resident page or a dump carrying no page tables.
+    fn site_is_in_view(debugger: &Target, bp: &Breakpoint, cr3: u64) -> bool {
+        let owner = match &bp.scope {
+            BreakpointScope::Process { dtb, .. } => *dtb,
+            BreakpointScope::Kernel => debugger.kernel_dtb(),
+        };
+        let frame = |dtb| {
+            debugger
+                .address_space(dtb)
+                .virt_to_phys(bp.address)
+                .ok()
+                .flatten()
+                .map(|translation| translation.address & !(PAGE_SIZE as u64 - 1))
+        };
+        match (frame(owner), frame(cr3)) {
+            (Some(patched), Some(viewed)) => patched == viewed,
+            _ => bp.scope.matches_cr3(cr3),
         }
     }
 
@@ -2223,7 +2265,12 @@ mod tests {
         // Nothing was displaced while the page remained unreadable, so there
         // is no byte to mask into a view yet.
         let mut buffer = [0xccu8; 4];
-        manager.mask_breakpoint_bytes(address, &mut buffer, session.target.current_dtb());
+        manager.mask_breakpoint_bytes(
+            &session.target,
+            address,
+            &mut buffer,
+            session.target.current_dtb(),
+        );
         assert_eq!(buffer, [0xcc; 4], "masked bytes it never read");
     }
 

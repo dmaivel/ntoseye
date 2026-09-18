@@ -69,6 +69,8 @@ Process, kernel-module, and driver-object lists are walked only when something n
 
 A software breakpoint is an `int3` written into a physical frame, and an image page is shared by every process mapping it. `bu /p <pid> user32!PeekMessageW` puts the byte in the single frame backing `user32.dll` for the whole machine, so every process calling that function traps. Scoping is a host-side filter: `ntoseye` compares the trapping process against the breakpoint's scope and *absorbs* a hit belonging to anyone else, removing the byte, single-stepping the instruction, writing the byte back and resuming without reporting anything.
 
+No view shows the injected byte. A site is masked out of any read reaching the frame it was written into, so the original instruction appears under every process mapping a shared page, while a process that merely has its own memory at the same address is left alone. Only the debugger's views hide the `int3`; the guest still executes it.
+
 An absorb halts every vCPU, so a breakpoint on a busy shared symbol costs the absorb rate times the absorb cost whether or not the scoped process ever runs. Measured on a 4-vCPU Windows 11 guest, breakpoint on `nt!NtCreateFile`, file-enumeration loop running:
 
 | Transport | Host service per absorb | Absorbs/s sustained | Guest speed |
