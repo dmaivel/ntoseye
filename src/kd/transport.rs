@@ -19,7 +19,7 @@ impl KdTransport {
         }
     }
 
-    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
             Self::Serial(stream) => stream.set_read_timeout(timeout),
             Self::Network(stream) => stream.set_read_timeout(timeout),

@@ -2,7 +2,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aes::Aes256;
 use cbc::cipher::block_padding::NoPadding;
@@ -69,6 +69,9 @@ pub struct KdNetStream {
     /// A break-in written before the target had negotiated a session; sent
     /// the moment it has one, so attach does not wait for the next attempt.
     deferred_breakin: bool,
+    /// How long one read may wait in total. The socket timeout alone only
+    /// bounds a single `recvfrom`. See [`KdNetStream::recv_before`].
+    read_timeout: Option<Duration>,
 }
 
 impl KdNetStream {
@@ -102,6 +105,7 @@ impl KdNetStream {
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
             deferred_breakin: false,
+            read_timeout: None,
         })
     }
 
@@ -116,10 +120,14 @@ impl KdNetStream {
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
             deferred_breakin: false,
+            // The dup shares one socket, so it shares the timeout already set
+            // on it.
+            read_timeout: self.read_timeout,
         })
     }
 
-    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.read_timeout = timeout;
         self.socket.set_read_timeout(timeout)
     }
 
@@ -134,10 +142,38 @@ impl KdNetStream {
         result
     }
 
+    /// Receive one datagram, never waiting past `deadline`.
+    ///
+    /// The socket timeout cannot express this on its own: it bounds a single
+    /// `recvfrom`, and most datagrams carry no KD payload. A target that has
+    /// lost its session pokes the control channel every few seconds, so a
+    /// timeout that restarts on each of them never expires, and the request
+    /// waiting on it never fails, retransmits, or returns.
+    fn recv_before(
+        &self,
+        deadline: Option<Instant>,
+        datagram: &mut [u8],
+    ) -> io::Result<(usize, SocketAddr)> {
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            // Zero means "no timeout" to the socket, so spend what is left
+            // only while there is some.
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "KDNET read deadline expired",
+                ));
+            }
+            self.socket.set_read_timeout(Some(remaining))?;
+        }
+        self.socket.recv_from(datagram)
+    }
+
     fn receive_packet_with(&mut self, datagram: &mut Vec<u8>) -> io::Result<()> {
+        let deadline = self.read_timeout.map(|timeout| Instant::now() + timeout);
         loop {
             datagram.resize(MAX_DATAGRAM_SIZE, 0);
-            let (size, source) = self.socket.recv_from(datagram)?;
+            let (size, source) = self.recv_before(deadline, datagram)?;
             self.received_datagrams = self.received_datagrams.saturating_add(1);
             kd_trace!("kdnet: received {size}-byte UDP datagram from {source}");
             if size < HEADER_SIZE + METADATA_SIZE + AUTH_TAG_SIZE {
@@ -584,6 +620,8 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
     use crate::kd::framing::KdFraming;
     use crate::kd::transport::KdTransport;
@@ -964,6 +1002,58 @@ mod tests {
         assert_eq!(answered, 0, "keepalive pokes must not be answered");
         assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(accepted));
         assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+    }
+
+    /// A target that has lost its data session pokes the control channel
+    /// every few seconds. Those datagrams carry no KD payload, so a timeout
+    /// that restarts on each one never expires: the request waiting on it
+    /// cannot fail, cannot retransmit, and the debugger hangs with no CPU
+    /// use and no way out.
+    #[test]
+    fn control_pokes_do_not_renew_a_read_timeout() {
+        let (key, hmac_key) = test_keys();
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        host.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let host_addr = host.local_addr();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        let poking = Arc::new(AtomicBool::new(true));
+        let stop_poking = Arc::clone(&poking);
+        let poker = std::thread::spawn(move || {
+            let mut sequence = 1u64;
+            while stop_poking.load(Ordering::Relaxed) {
+                let poke = poke_datagram(0x33, sequence, key, &hmac_key);
+                let _ = target.send_to(&poke, host_addr);
+                sequence += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        // The read runs on its own thread so that a regression fails the test
+        // instead of hanging it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = host.read(&mut [0u8; 8]);
+            let _ = tx.send((outcome.err().map(|error| error.kind()), started.elapsed()));
+        });
+        let settled = rx.recv_timeout(Duration::from_secs(5));
+        poking.store(false, Ordering::Relaxed);
+        poker.join().unwrap();
+
+        let (kind, waited) = settled.expect("a poked read must still reach its timeout");
+        assert!(
+            kind.is_some_and(|kind| matches!(
+                kind,
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            )),
+            "a poke carries no KD payload, so the read has nothing to return: {kind:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "a poke every 20ms must not extend a 200ms read: waited {waited:?}"
+        );
     }
 
     #[test]
