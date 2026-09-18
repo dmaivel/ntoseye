@@ -132,6 +132,8 @@ pub struct ModuleSymbolLoadReport {
     pub no_pdb: usize,
     pub skipped: usize,
     pub failed: usize,
+    /// Handed to the background fetcher; not yet loaded or failed.
+    pub fetching: usize,
     pub diagnostic_count: usize,
     pub diagnostics: Vec<ModuleSymbolDiagnostic>,
 }
@@ -157,6 +159,9 @@ impl ModuleSymbolLoadReport {
             }
             ModuleSymbolStatus::Failed(_) => {
                 self.failed += 1;
+            }
+            ModuleSymbolStatus::Fetching => {
+                self.fetching += 1;
             }
         }
     }
@@ -187,8 +192,69 @@ impl ModuleSymbolLoadReport {
         self.no_pdb += other.no_pdb;
         self.skipped += other.skipped;
         self.failed += other.failed;
+        self.fetching += other.fetching;
         self.diagnostic_count += other.diagnostic_count;
         self.diagnostics.extend(other.diagnostics);
+    }
+}
+
+/// What symbol discovery found for a batch of modules, before any file or
+/// network work (see [`Guest::plan_module_symbol_loads`]).
+#[derive(Default)]
+struct ModuleSymbolPlan {
+    /// PDB already on disk; only indexing remains.
+    ready: Vec<ModuleSymbolLoad>,
+    /// PDB identity known; the file must be acquired.
+    downloads: Vec<ModuleSymbolLoad>,
+    /// Headers unreadable in memory; the image must be fetched to learn the
+    /// PDB identity, then treated as `downloads`.
+    image_jobs: Vec<(DownloadJob, ModuleInfo)>,
+}
+
+impl ModuleSymbolPlan {
+    fn queue(&mut self, symbols: &SymbolStore, load: ModuleSymbolLoad) {
+        // Parsed already, or on disk with the right identity: no source to
+        // consult, so it is never a fetch (which the stop render defers).
+        if symbols.has_matching_pdb(&load.job) || load.job.cached_pdb_matches() {
+            self.ready.push(load);
+        } else {
+            self.downloads.push(load);
+        }
+    }
+
+    /// Split off everything that needs the network, leaving `ready`.
+    fn take_fetches(&mut self) -> Self {
+        Self {
+            ready: Vec::new(),
+            downloads: std::mem::take(&mut self.downloads),
+            image_jobs: std::mem::take(&mut self.image_jobs),
+        }
+    }
+
+    fn absorb(&mut self, other: Self) {
+        self.ready.extend(other.ready);
+        self.downloads.extend(other.downloads);
+        self.image_jobs.extend(other.image_jobs);
+    }
+
+    fn needs_fetch(&self) -> bool {
+        !self.downloads.is_empty() || !self.image_jobs.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.ready.len() + self.downloads.len() + self.image_jobs.len()
+    }
+
+    fn modules(&self) -> impl Iterator<Item = &ModuleInfo> {
+        self.ready
+            .iter()
+            .chain(&self.downloads)
+            .map(|load| &load.module)
+            .chain(self.image_jobs.iter().map(|(_, module)| module))
+    }
+
+    fn module_names(&self) -> Vec<String> {
+        self.modules().map(|module| module.name.clone()).collect()
     }
 }
 
@@ -1824,19 +1890,6 @@ impl Guest {
         self.memoized(|memo| &mut memo.drivers, walk)
     }
 
-    fn queue_module_symbol_load(
-        symbols: &SymbolStore,
-        downloads: &mut Vec<ModuleSymbolLoad>,
-        ready: &mut Vec<ModuleSymbolLoad>,
-        load: ModuleSymbolLoad,
-    ) {
-        if symbols.has_matching_pdb(&load.job) {
-            ready.push(load);
-        } else {
-            downloads.push(load);
-        }
-    }
-
     fn apply_module_symbol_status(
         symbols: &SymbolStore,
         report: &mut ModuleSymbolLoadReport,
@@ -2312,6 +2365,11 @@ impl Guest {
         prefix == 0xFFFF8 || prefix == 0xFFFF9 || prefix == 0xFFFFA
     }
 
+    /// Load symbols for `modules` under `dtb`: discover each module's PDB
+    /// identity from guest memory, acquire the PDBs (cache, local stores,
+    /// symbol servers), index them. Blocks for the whole of it; the stop
+    /// render uses [`Guest::load_module_symbols_or_fetch_later`] instead so a
+    /// stack walk through an uncached module never waits on the network.
     pub fn load_module_symbols(
         phys: &PhysMem,
         symbols: &SymbolStore,
@@ -2321,15 +2379,158 @@ impl Guest {
         arch: Arch,
     ) -> Result<ModuleSymbolLoadReport> {
         let mut report = ModuleSymbolLoadReport::new(modules.len());
-        let mut jobs_with_info: Vec<ModuleSymbolLoad> = Vec::new();
-        let mut image_jobs: Vec<(DownloadJob, ModuleInfo)> = Vec::new();
-        let mut ready_to_load: Vec<ModuleSymbolLoad> = Vec::new();
+        let plan = Self::plan_module_symbol_loads(
+            phys,
+            symbols,
+            modules,
+            dtb,
+            skip_session_space,
+            arch,
+            &mut report,
+        );
+        let stale_identities =
+            Self::complete_module_symbol_loads(symbols, plan, dtb, &mut report, false);
+
+        // Modules whose remembered PDB no longer resolves: forget the record
+        // and rediscover them from the target.
+        if !stale_identities.is_empty() {
+            for module in &stale_identities {
+                symbols.forget_module_identity(module);
+            }
+            report.absorb(Self::load_module_symbols(
+                phys,
+                symbols,
+                stale_identities,
+                dtb,
+                skip_session_space,
+                arch,
+            )?);
+        }
+
+        Ok(report)
+    }
+
+    /// The stop-render variant of [`Guest::load_module_symbols`]: index what
+    /// is already on disk now, and hand anything that needs a download to a
+    /// background thread. Frames in a module being fetched render as
+    /// `module+offset` until it lands; the store's load generation moves when
+    /// it does, so the session re-resolves deferred breakpoints and the next
+    /// backtrace shows names. Start and finish are reported through the
+    /// store's notices.
+    ///
+    /// Discovery (guest memory) runs on the caller's thread: a KD-mediated
+    /// memory source is only usable from the thread that owns the transport.
+    /// A remembered identity that turns out stale is rediscovered once, here,
+    /// before anything is handed off.
+    pub fn load_module_symbols_or_fetch_later(
+        phys: &PhysMem,
+        symbols: &Arc<SymbolStore>,
+        modules: Vec<ModuleInfo>,
+        dtb: Dtb,
+        arch: Arch,
+    ) -> ModuleSymbolLoadReport {
+        let mut report = ModuleSymbolLoadReport::new(modules.len());
+        let mut plan =
+            Self::plan_module_symbol_loads(phys, symbols, modules, dtb, false, arch, &mut report);
+        let mut deferred = plan.take_fetches();
+        let stale = Self::complete_module_symbol_loads(symbols, plan, dtb, &mut report, false);
+        if !stale.is_empty() {
+            for module in &stale {
+                symbols.forget_module_identity(module);
+            }
+            let mut replan =
+                Self::plan_module_symbol_loads(phys, symbols, stale, dtb, false, arch, &mut report);
+            deferred.absorb(replan.take_fetches());
+            for module in
+                Self::complete_module_symbol_loads(symbols, replan, dtb, &mut report, false)
+            {
+                Self::apply_module_symbol_status(
+                    symbols,
+                    &mut report,
+                    dtb,
+                    &module,
+                    ModuleSymbolStatus::Failed(
+                        "remembered PDB no longer matches the image".to_string(),
+                    ),
+                );
+            }
+        }
+
+        if !deferred.needs_fetch() {
+            return report;
+        }
+        let names = deferred.module_names();
+        for module in deferred.modules() {
+            Self::apply_module_symbol_status(
+                symbols,
+                &mut report,
+                dtb,
+                module,
+                ModuleSymbolStatus::Fetching,
+            );
+        }
+        symbols.push_notice(format!(
+            "fetching symbols for {} in the background; frames there show module+offset \
+             until it finishes (lm shows `fetching`)",
+            names.join(", ")
+        ));
+
+        let store = Arc::clone(symbols);
+        let spawned = std::thread::Builder::new()
+            .name("ntoseye-symbol-fetch".to_string())
+            .spawn(move || {
+                let symbols = store;
+                let mut report = ModuleSymbolLoadReport::new(deferred.len());
+                let stale =
+                    Self::complete_module_symbol_loads(&symbols, deferred, dtb, &mut report, true);
+                for module in &stale {
+                    symbols.forget_module_identity(module);
+                    Self::apply_module_symbol_status(
+                        &symbols,
+                        &mut report,
+                        dtb,
+                        module,
+                        ModuleSymbolStatus::Failed(
+                            "remembered PDB no longer matches the image; run .reload <module>"
+                                .to_string(),
+                        ),
+                    );
+                }
+                symbols.push_notice(format!(
+                    "background symbol fetch finished for {}: {} loaded, {} failed",
+                    names.join(", "),
+                    report.loaded,
+                    report.failed + report.no_pdb
+                ));
+            });
+        if let Err(error) = spawned {
+            symbols.push_notice(format!("could not start background symbol fetch: {error}"));
+        }
+        report
+    }
+
+    /// Discovery half of a symbol load: read each module's debug directory
+    /// from guest memory (or its remembered identity) and sort the modules
+    /// into loads whose PDB is already on disk, loads that need a download,
+    /// and modules whose headers were unreadable so the image itself must be
+    /// fetched to learn the PDB identity. Touches guest memory; never the
+    /// network.
+    fn plan_module_symbol_loads(
+        phys: &PhysMem,
+        symbols: &SymbolStore,
+        modules: Vec<ModuleInfo>,
+        dtb: Dtb,
+        skip_session_space: bool,
+        arch: Arch,
+        report: &mut ModuleSymbolLoadReport,
+    ) -> ModuleSymbolPlan {
+        let mut plan = ModuleSymbolPlan::default();
 
         for module in modules {
             if skip_session_space && Self::is_session_space(module.base_address) {
                 Self::apply_module_symbol_status(
                     symbols,
-                    &mut report,
+                    report,
                     dtb,
                     &module,
                     ModuleSymbolStatus::Skipped,
@@ -2339,23 +2540,21 @@ impl Guest {
 
             match symbols.extract_download_job(phys, dtb, &module, arch) {
                 Ok(ModuleSymbolDiscovery::Ready { job, guid, source }) => {
-                    Self::queue_module_symbol_load(
+                    plan.queue(
                         symbols,
-                        &mut jobs_with_info,
-                        &mut ready_to_load,
                         ModuleSymbolLoad::new(job, guid, source, module, dtb),
                     );
                 }
                 Ok(ModuleSymbolDiscovery::NeedsImage { image_job }) => {
-                    image_jobs.push((image_job, module));
+                    plan.image_jobs.push((image_job, module));
                 }
                 Err(_e) if module.time_date_stamp.is_some() => {
                     let tds = module.time_date_stamp.unwrap();
                     match SymbolStore::build_image_download_job(&module.name, tds, module.size) {
-                        Ok(image_job) => image_jobs.push((image_job, module)),
+                        Ok(image_job) => plan.image_jobs.push((image_job, module)),
                         Err(e) => Self::apply_module_symbol_status(
                             symbols,
-                            &mut report,
+                            report,
                             dtb,
                             &module,
                             ModuleSymbolStatus::Failed(e.to_string()),
@@ -2365,7 +2564,7 @@ impl Guest {
                 Err(e) => {
                     Self::apply_module_symbol_status(
                         symbols,
-                        &mut report,
+                        report,
                         dtb,
                         &module,
                         ModuleSymbolStatus::Failed(e.to_string()),
@@ -2373,31 +2572,52 @@ impl Guest {
                 }
             }
         }
+        plan
+    }
 
-        let image_results =
-            download_jobs_parallel(image_jobs.iter().map(|(job, _)| job.clone()).collect());
+    /// Acquisition half of a symbol load: download images and PDBs the plan
+    /// asked for, then index everything that is on disk. Files and network
+    /// only, so it may run off the session thread. Returns the modules whose
+    /// remembered identity no longer resolves; the caller decides whether to
+    /// rediscover them (needs guest memory) or give up.
+    fn complete_module_symbol_loads(
+        symbols: &SymbolStore,
+        plan: ModuleSymbolPlan,
+        dtb: Dtb,
+        report: &mut ModuleSymbolLoadReport,
+        quiet: bool,
+    ) -> Vec<ModuleInfo> {
+        let ModuleSymbolPlan {
+            mut ready,
+            mut downloads,
+            image_jobs,
+        } = plan;
 
+        let image_results = download_jobs_parallel(
+            image_jobs.iter().map(|(job, _)| job.clone()).collect(),
+            quiet,
+        );
         for ((image_job, module), result) in image_jobs.into_iter().zip(image_results) {
             match result {
                 Ok(_) => match symbols.extract_download_job_from_image_file(&image_job.path) {
                     Ok(Some((job, guid))) => {
-                        Self::queue_module_symbol_load(
-                            symbols,
-                            &mut jobs_with_info,
-                            &mut ready_to_load,
-                            ModuleSymbolLoad::new(
-                                job,
-                                guid,
-                                ModuleSymbolSource::Image,
-                                module,
-                                dtb,
-                            ),
+                        let load = ModuleSymbolLoad::new(
+                            job,
+                            guid,
+                            ModuleSymbolSource::Image,
+                            module,
+                            dtb,
                         );
+                        if symbols.has_matching_pdb(&load.job) || load.job.cached_pdb_matches() {
+                            ready.push(load);
+                        } else {
+                            downloads.push(load);
+                        }
                     }
                     Ok(None) => {
                         Self::apply_module_symbol_status(
                             symbols,
-                            &mut report,
+                            report,
                             dtb,
                             &module,
                             ModuleSymbolStatus::MissingDebugInfo,
@@ -2406,7 +2626,7 @@ impl Guest {
                     Err(e) => {
                         Self::apply_module_symbol_status(
                             symbols,
-                            &mut report,
+                            report,
                             dtb,
                             &module,
                             ModuleSymbolStatus::Failed(e.to_string()),
@@ -2416,7 +2636,7 @@ impl Guest {
                 Err(e) => {
                     Self::apply_module_symbol_status(
                         symbols,
-                        &mut report,
+                        report,
                         dtb,
                         &module,
                         ModuleSymbolStatus::Failed(e.to_string()),
@@ -2425,22 +2645,21 @@ impl Guest {
             }
         }
 
-        let download_results =
-            download_jobs_parallel(jobs_with_info.iter().map(|load| load.job.clone()).collect());
-
-        // Modules whose remembered PDB no longer resolves: forget the record
-        // and rediscover them from the target below.
+        let download_results = download_jobs_parallel(
+            downloads.iter().map(|load| load.job.clone()).collect(),
+            quiet,
+        );
         let mut stale_identities: Vec<ModuleInfo> = Vec::new();
-        for (load, result) in jobs_with_info.into_iter().zip(download_results) {
+        for (load, result) in downloads.into_iter().zip(download_results) {
             match result {
-                Ok(_) => ready_to_load.push(load),
+                Ok(_) => ready.push(load),
                 Err(_) if matches!(load.source, ModuleSymbolSource::Identity) => {
                     stale_identities.push(load.module);
                 }
                 Err(e) => {
                     Self::apply_module_symbol_status(
                         symbols,
-                        &mut report,
+                        report,
                         dtb,
                         &load.module,
                         ModuleSymbolStatus::Failed(e.to_string()),
@@ -2449,8 +2668,12 @@ impl Guest {
             }
         }
 
-        if !ready_to_load.is_empty() {
-            let pb = ProgressBar::new(ready_to_load.len() as u64);
+        if !ready.is_empty() {
+            let pb = if quiet {
+                ProgressBar::hidden()
+            } else {
+                ProgressBar::new(ready.len() as u64)
+            };
             pb.set_style(
                 ProgressStyle::with_template("Indexing [{bar:40}] {pos}/{len}")
                     .unwrap()
@@ -2466,7 +2689,7 @@ impl Guest {
             // pass one module per guid and run any duplicates afterwards, where
             // they take the already-indexed fast path.
             let (first_per_guid, duplicate_guids) =
-                partition_first_occurrence(ready_to_load, |load| load.guid);
+                partition_first_occurrence(ready, |load| load.guid);
 
             let mut results = first_per_guid
                 .into_par_iter()
@@ -2502,7 +2725,7 @@ impl Guest {
                     Err(e) => {
                         Self::apply_module_symbol_status(
                             symbols,
-                            &mut report,
+                            report,
                             dtb,
                             &load.module,
                             ModuleSymbolStatus::Failed(e.to_string()),
@@ -2512,21 +2735,7 @@ impl Guest {
             }
         }
 
-        if !stale_identities.is_empty() {
-            for module in &stale_identities {
-                symbols.forget_module_identity(module);
-            }
-            report.absorb(Self::load_module_symbols(
-                phys,
-                symbols,
-                stale_identities,
-                dtb,
-                skip_session_space,
-                arch,
-            )?);
-        }
-
-        Ok(report)
+        stale_identities
     }
 
     pub fn load_all_kernel_module_symbols(

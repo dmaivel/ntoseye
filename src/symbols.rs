@@ -9,7 +9,7 @@ use crate::{
 };
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use memmap2::Mmap;
 use pdb2::{FallibleIterator, PrimitiveKind, TypeData, TypeFinder, TypeIndex};
 use pelite::{
@@ -196,6 +196,15 @@ pub struct SymbolStore {
     /// PDBs of modules identified in earlier sessions; opened on first use so
     /// building a store touches no files.
     identities: OnceLock<ModuleIdentities>,
+
+    /// Bumped whenever a module's symbols become available, so a session can
+    /// notice a load it did not perform itself (a background fetch, a lazy
+    /// frame load) and re-resolve deferred breakpoints.
+    load_generation: AtomicU64,
+    /// Lines the store wants the host to see at its next output boundary:
+    /// background fetch start/finish. Drained by
+    /// [`crate::session::Session::take_notices`].
+    notices: Mutex<Vec<String>>,
 }
 
 fn guid_to_u128(guid: GUID) -> u128 {
@@ -621,6 +630,10 @@ pub enum ModuleSymbolStatus {
     MissingDebugInfo,
     Skipped,
     Failed(#[allow(dead_code)] String),
+    /// Handed to the background fetcher (see
+    /// [`crate::guest::Guest::load_module_symbols_or_fetch_later`]); becomes
+    /// `Loaded` or `Failed` when it finishes.
+    Fetching,
 }
 
 impl ModuleSymbolStatus {
@@ -630,6 +643,7 @@ impl ModuleSymbolStatus {
             Self::MissingDebugInfo => "no-pdb",
             Self::Skipped => "skipped",
             Self::Failed(_) => "failed",
+            Self::Fetching => "fetching",
         }
     }
 }
@@ -711,6 +725,17 @@ impl DownloadJob {
         self.pdb.as_ref().is_some_and(|request| {
             ages.get(&request.identity.guid)
                 .is_some_and(|age| *age >= request.identity.age)
+        })
+    }
+
+    /// Whether the managed cache already holds this job's PDB with the right
+    /// identity, so acquiring it needs no source at all (only indexing).
+    pub fn cached_pdb_matches(&self) -> bool {
+        if *FORCE_DOWNLOADS.get_or_init(|| false) {
+            return false;
+        }
+        self.pdb.as_ref().is_some_and(|request| {
+            self.path.is_file() && validate_pdb_identity(&self.path, request.identity).is_ok()
         })
     }
 
@@ -920,8 +945,14 @@ fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> 
     )))
 }
 
-pub fn download_jobs_parallel(jobs: Vec<DownloadJob>) -> Vec<Result<PathBuf>> {
-    let mp = Arc::new(MultiProgress::new());
+/// `quiet` hides the progress bars: a background fetch must not draw over
+/// the prompt of the thread that spawned it.
+pub fn download_jobs_parallel(jobs: Vec<DownloadJob>, quiet: bool) -> Vec<Result<PathBuf>> {
+    let mp = Arc::new(if quiet {
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    });
 
     jobs.into_par_iter()
         .map(|job| {
@@ -1444,7 +1475,22 @@ impl SymbolStore {
             kernel_guid: Mutex::new(None),
             kernel_dtb: Mutex::new(None),
             identities: OnceLock::new(),
+            load_generation: AtomicU64::new(0),
+            notices: Mutex::new(Vec::new()),
         }
+    }
+
+    /// See [`SymbolStore::load_generation`] field docs.
+    pub fn load_generation(&self) -> u64 {
+        self.load_generation.load(Ordering::Acquire)
+    }
+
+    pub fn push_notice(&self, notice: String) {
+        self.notices.lock().push(notice);
+    }
+
+    pub fn take_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notices.lock())
     }
 
     pub fn index_diagnostics(&self, guid: u128) -> Vec<SymbolIndexDiagnostic> {
@@ -1532,6 +1578,9 @@ impl SymbolStore {
                 })
                 .collect(),
         );
+        // Symbols became available: what a real load reports through the
+        // generation counter.
+        self.load_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Register a module with `short_name` in `dtb` so `short_name!` lookups
@@ -2147,6 +2196,7 @@ impl SymbolStore {
             ModuleSymbolStatus::Loaded,
         );
         self.set_module_symbol_source(load.dtb, load.module.base_address, load.source.clone());
+        self.load_generation.fetch_add(1, Ordering::AcqRel);
 
         Ok(())
     }

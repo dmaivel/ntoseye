@@ -2362,7 +2362,11 @@ impl Debugger {
     /// reads/searches/`read_struct` target that process's address space. Returns
     /// the process name.
     fn attach_process(&mut self, pid: u64) -> PyResult<String> {
-        self.inner.target.attach(pid).map(|r| r.name).map_err(err)
+        let name = self.inner.target.attach(pid).map(|r| r.name).map_err(err)?;
+        // The attach loaded the process's modules; a `bu /p` that was waiting
+        // on one of them can resolve now.
+        self.inner.reconcile_breakpoints_if_symbols_changed();
+        Ok(name)
     }
 
     /// Return to the default (kernel) inspection context.

@@ -17,6 +17,7 @@ use crate::target::decimal_pid_literal;
 use crate::ui;
 
 use crate::repl::*;
+use crate::types::VirtAddr;
 
 repl_command! {
     cmd_bp;
@@ -706,6 +707,30 @@ impl ReplState<'_> {
         Ok(())
     }
 
+    /// `bp /p <pid> mod!sym` names the address space the symbol lives in, but
+    /// the expression evaluator only knows the inspection scope. When the
+    /// evaluation fails and the spec is a plain `mod!sym`, resolve it under
+    /// the `/p` process instead, loading that module's symbols on demand.
+    fn resolve_symbol_in_scope(
+        &self,
+        spec: &str,
+        scope: Option<&BreakpointScope>,
+    ) -> Option<VirtAddr> {
+        let Some(BreakpointScope::Process { pid, dtb, .. }) = scope else {
+            return None;
+        };
+        let (module, _) = spec.split_once('!')?;
+        let symbols = &self.ctx.target.symbols;
+        if let Ok(Some(address)) = symbols.find_symbol_across_modules(*dtb, spec) {
+            return Some(address);
+        }
+        self.ctx
+            .target
+            .load_process_module_symbols(*pid, *dtb, Some(module.trim()))
+            .ok()?;
+        symbols.find_symbol_across_modules(*dtb, spec).ok()?
+    }
+
     fn cmd_bp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let args = match self.code_breakpoint_args(&invocation, "bp") {
             Ok(args) => args,
@@ -717,15 +742,24 @@ impl ReplState<'_> {
         let address = match Expr::eval_with_radix(&args.spec, &self.ctx.target, self.radix) {
             Ok(address) => address,
             Err(error) => {
-                error!("{error}");
-                return Ok(());
+                match self.resolve_symbol_in_scope(&args.spec, args.config.scope.as_ref()) {
+                    Some(address) => address,
+                    None => {
+                        error!("{error}");
+                        return Ok(());
+                    }
+                }
             }
+        };
+        let label_dtb = match args.config.scope.as_ref() {
+            Some(BreakpointScope::Process { dtb, .. }) => *dtb,
+            _ => self.ctx.target.current_dtb(),
         };
         let symbol = self
             .ctx
             .target
             .symbols
-            .format_closest_symbol_for_address(self.ctx.target.current_dtb(), address);
+            .format_closest_symbol_for_address(label_dtb, address);
         match self.ctx.breakpoints.add_configured(
             &mut *self.ctx.backend,
             &self.ctx.target,

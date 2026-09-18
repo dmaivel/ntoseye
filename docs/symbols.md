@@ -54,3 +54,13 @@ The stack and disassembly include mapped source locations. `dv` displays the cur
 Keep a `bu` breakpoint installed if the driver will be cycled. Once ntoseye observes the unload, `bl` changes it from `enabled` to `deferred` without losing its ID, source specification, conditions, pass count, hit count, or action. After the module reload is observed at a later stop, the same breakpoint becomes `enabled` at the new address.
 
 `.reload` is reserved for Rust-owned symbol reload behavior; `reload-scripts` reloads custom commands and aliases.
+
+## When symbols are loaded
+
+Kernel modules load at each stop. Everything else is on demand:
+
+- **A backtrace** loads symbols for the modules its frames touch, once per session. PDBs already in the cache are indexed immediately; anything that must be downloaded is fetched on a background thread, because a stack walk runs inside a stop render that a client may be waiting on. Those frames read `module+offset` until the fetch lands, and `lmv` shows `fetching`. The debugger says which modules it is fetching and says so again when it finishes; re-run `k` for the named frames. Unwinding itself uses the image's unwind data, not the PDB, so the frames are correct either way.
+- **A process-scoped breakpoint** resolves in the process it names: `bu /p <pid> user32!PeekMessageW` reads that process's loader list and loads `user32`'s symbols itself, with no prior `.process /p <pid>`. A `file:line` specification loads every module in the process, since the line can be in any of them. Only a symbol that really is absent from the process stays deferred.
+- **`.process /p <pid>`** still loads the whole process up front, which is what you want before browsing it.
+
+A deferred breakpoint is re-resolved whenever symbols become available, whoever loaded them: a background fetch finishing, a backtrace, a process attach, or a module load observed at a stop. Installing the site needs the target halted, so a breakpoint that becomes resolvable while the guest runs is installed at the next stop.

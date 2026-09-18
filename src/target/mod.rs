@@ -1177,6 +1177,43 @@ impl Target {
         self.current_process_info = None;
     }
 
+    /// Load symbols for one module (by short name, e.g. `user32`) or, with
+    /// `None`, every module of process `pid`, without changing the inspection
+    /// scope. A process-scoped breakpoint names the address space it wants;
+    /// the debugger can read that process's loader list and its PDBs itself
+    /// rather than defer until someone runs `.process /p`. Modules already
+    /// attempted are left alone. Returns whether any load was attempted.
+    pub fn load_process_module_symbols(
+        &self,
+        pid: u64,
+        dtb: Dtb,
+        module_short: Option<&str>,
+    ) -> Result<bool> {
+        let guest = self.guest()?;
+        let info = guest
+            .enumerate_processes()?
+            .into_iter()
+            .find(|p| p.pid == pid)
+            .ok_or(Error::ProcessNotFound(pid))?;
+        let modules: Vec<ModuleInfo> = guest
+            .process_modules(&info)?
+            .into_iter()
+            .filter(|module| {
+                module_short.is_none_or(|short| module.short_name.eq_ignore_ascii_case(short))
+            })
+            .filter(|module| {
+                self.symbols
+                    .module_symbol_status(dtb, module.base_address)
+                    .is_none()
+            })
+            .collect();
+        if modules.is_empty() {
+            return Ok(false);
+        }
+        guest.load_symbols_for_modules(&self.phys, &self.symbols, modules, dtb)?;
+        Ok(true)
+    }
+
     pub fn set_context_dtb_override(&mut self, dtb: Dtb) {
         self.context_dtb_override = Some(Self::normalize_cr3(dtb));
     }

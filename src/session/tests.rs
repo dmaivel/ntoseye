@@ -369,6 +369,90 @@ fn breakpoint_rewind_realigns_the_reporting_thread_without_thread_enumeration() 
     assert_eq!(backend.get("rip"), 0x1000);
 }
 
+fn deferred_symbol_breakpoint(session: &mut Session) -> u32 {
+    let id = session
+        .add_symbol_breakpoint("driver!DeferredFn".into(), BreakpointConfig::default())
+        .unwrap();
+    assert!(!breakpoint_by_id(session, id).resolved, "precondition");
+    id
+}
+
+fn breakpoint_by_id(session: &Session, id: u32) -> Breakpoint {
+    session
+        .breakpoints
+        .list()
+        .into_iter()
+        .find(|breakpoint| breakpoint.id == id)
+        .unwrap()
+        .clone()
+}
+
+/// Make `driver!DeferredFn` resolvable the way a symbol load that the session
+/// did not perform itself would (background fetch, lazy frame load, attach).
+fn publish_driver_symbols(session: &Session) {
+    let dtb = session.target.current_dtb();
+    session.target.symbols.inject_source_lines_for_test(
+        1,
+        dtb,
+        VirtAddr(0x1000),
+        0x100,
+        "driver.c",
+        &[],
+    );
+    session
+        .target
+        .symbols
+        .inject_module_for_test(1, Vec::new(), &[("DeferredFn", 0x10)]);
+}
+
+#[test]
+fn symbols_loaded_outside_a_stop_resolve_a_deferred_breakpoint_when_halted() {
+    let backend = MockBackend {
+        allow_breakpoints: true,
+        ..Default::default()
+    };
+    let mut session = session_with_mock(backend);
+    let id = deferred_symbol_breakpoint(&mut session);
+
+    session.reconcile_breakpoints_if_symbols_changed();
+    assert!(
+        !breakpoint_by_id(&session, id).resolved,
+        "resolved with nothing loaded"
+    );
+
+    publish_driver_symbols(&session);
+    session.reconcile_breakpoints_if_symbols_changed();
+
+    let breakpoint = breakpoint_by_id(&session, id);
+    assert!(breakpoint.resolved);
+    assert_eq!(breakpoint.address, VirtAddr(0x1010));
+}
+
+#[test]
+fn symbols_loaded_while_running_resolve_a_deferred_breakpoint_at_the_next_stop() {
+    let mut backend = MockBackend::default().running();
+    backend.allow_breakpoints = true;
+    backend.queue_interrupt(breakpoint_event(0x5000));
+    let mut session = session_with_mock(backend);
+    let id = deferred_symbol_breakpoint(&mut session);
+
+    publish_driver_symbols(&session);
+    session.reconcile_breakpoints_if_symbols_changed();
+    assert!(
+        !breakpoint_by_id(&session, id).resolved,
+        "a site was installed into a running target"
+    );
+
+    // A plain break-in, not a module-change event.
+    session.interrupt().unwrap();
+    assert!(!session.backend.is_running());
+    session.refresh_modules_on_stop();
+
+    let breakpoint = breakpoint_by_id(&session, id);
+    assert!(breakpoint.resolved);
+    assert_eq!(breakpoint.address, VirtAddr(0x1010));
+}
+
 #[test]
 fn breakpoint_rewind_leaves_an_unrelated_program_counter_alone() {
     let mut backend = MockBackend::default();

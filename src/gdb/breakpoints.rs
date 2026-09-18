@@ -492,7 +492,13 @@ impl BreakpointManager {
             skip_prologue: config.skip_prologue,
         };
         let dtb = Self::resolution_dtb(debugger, config.scope.as_ref());
-        let address = spec.resolve(debugger, dtb)?;
+        let mut address = spec.resolve(debugger, dtb)?;
+        if address.is_none() {
+            let module = symbol.split_once('!').map(|(module, _)| module.trim());
+            if Self::load_scope_symbols(debugger, config.scope.as_ref(), module)? {
+                address = spec.resolve(debugger, dtb)?;
+            }
+        }
         self.add_code_configured(
             client,
             debugger,
@@ -522,12 +528,18 @@ impl BreakpointManager {
             )));
         };
         let dtb = Self::resolution_dtb(debugger, config.scope.as_ref());
-        let address_count = match &first_spec {
+        let source_address_count = |first_spec: &BreakpointSpec| match first_spec {
             BreakpointSpec::Source { file, line, .. } => {
                 debugger.symbols.source_addresses(dtb, file, *line).len()
             }
             BreakpointSpec::Symbol { .. } => unreachable!(),
         };
+        let mut address_count = source_address_count(&first_spec);
+        // A file:line can live in any of the process's modules, so a miss
+        // loads them all (what `.process /p` would have done).
+        if address_count == 0 && Self::load_scope_symbols(debugger, config.scope.as_ref(), None)? {
+            address_count = source_address_count(&first_spec);
+        }
         let count = address_count.max(1);
         let mut ids = Vec::with_capacity(count);
         for index in 0..count {
@@ -570,6 +582,23 @@ impl BreakpointManager {
             Some(BreakpointScope::Kernel) => debugger.kernel_dtb(),
             None => debugger.current_dtb(),
         }
+    }
+
+    /// A process-scoped specification that did not resolve: read that
+    /// process's loader list and load the named module's symbols (or all of
+    /// them for a source line), so `bu /p <pid> user32!X` works without a
+    /// prior `.process /p`. Returns whether anything new was loaded. Kernel
+    /// and unscoped specifications resolve against what is loaded; a miss
+    /// there really is deferred until the module appears.
+    fn load_scope_symbols(
+        debugger: &Target,
+        scope: Option<&BreakpointScope>,
+        module_short: Option<&str>,
+    ) -> Result<bool> {
+        let Some(BreakpointScope::Process { pid, dtb, .. }) = scope else {
+            return Ok(false);
+        };
+        debugger.load_process_module_symbols(*pid, *dtb, module_short)
     }
 
     pub fn add_temporary_code(

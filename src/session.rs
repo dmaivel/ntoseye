@@ -389,6 +389,11 @@ pub struct Session {
     /// matching the guest after a reload). Core never prints; the host drains
     /// these at its next output boundary via [`Self::take_notices`].
     notices: Vec<String>,
+    /// The symbol store's load generation as of the last deferred-breakpoint
+    /// reconcile, so a load this session did not perform itself (a background
+    /// fetch, a lazy frame load, a process attach) still re-resolves `bu`
+    /// specifications at the next opportunity.
+    symbols_reconciled_at: u64,
     /// Most recently observed backend stop and the disposition used when it was
     /// subsequently continued.
     pub last_event: Option<LastEvent>,
@@ -628,6 +633,7 @@ impl Session {
             parked_stop: None,
             module_refresh_report: None,
             notices: Vec::new(),
+            symbols_reconciled_at: 0,
             last_event: None,
             _instance_guard: None,
         };
@@ -2054,16 +2060,41 @@ impl Session {
             }
         };
         let modules_changed = event_changed || symbols_changed;
-        if modules_changed
-            && let Err(error) = self
-                .breakpoints
-                .reconcile_symbolic_after_module_refresh(self.backend.as_mut(), &self.target)
+        if modules_changed {
+            self.reconcile_deferred_breakpoints();
+        } else {
+            self.reconcile_breakpoints_if_symbols_changed();
+        }
+        modules_changed
+    }
+
+    /// Re-resolve deferred (`bu`/source) breakpoints if any module's symbols
+    /// became available since the last reconcile, whoever loaded them: a
+    /// background fetch started by a stop render, a lazy frame load, or a
+    /// process attach. Installing a site needs the target halted, so a running
+    /// target waits for its next stop. Hosts call this after a command that
+    /// may have loaded symbols; the stop path calls it on every stop.
+    pub fn reconcile_breakpoints_if_symbols_changed(&mut self) {
+        if self.target.symbols.load_generation() == self.symbols_reconciled_at
+            || self.backend.is_running()
+        {
+            return;
+        }
+        self.reconcile_deferred_breakpoints();
+    }
+
+    fn reconcile_deferred_breakpoints(&mut self) {
+        // Read before reconciling: a fetch landing mid-reconcile is caught
+        // next time rather than missed.
+        self.symbols_reconciled_at = self.target.symbols.load_generation();
+        if let Err(error) = self
+            .breakpoints
+            .reconcile_symbolic_after_module_refresh(self.backend.as_mut(), &self.target)
         {
             self.notices.push(format!(
                 "failed to reconcile breakpoints after module refresh: {error}"
             ));
         }
-        modules_changed
     }
 
     /// Take the latest module-symbol report for the REPL's existing summary.
@@ -2076,6 +2107,7 @@ impl Session {
     /// the order they happened. Hosts call this at each output boundary.
     pub fn take_notices(&mut self) -> Vec<String> {
         let mut notices = std::mem::take(&mut self.target.notices);
+        notices.extend(self.target.symbols.take_notices());
         notices.append(&mut self.notices);
         notices.extend(self.backend.take_notices());
         notices

@@ -968,8 +968,12 @@ fn build_recovered_stacktrace_seeded(
 }
 
 /// Lazily load symbols for the modules a backtrace touches. Only modules with no
-/// prior load attempt are fetched (so kernel modules, loaded on stop, and an
-/// attached process's modules are skipped), and each is loaded once per session.
+/// prior load attempt are considered (so kernel modules, loaded on stop, and an
+/// attached process's modules are skipped), and each is attempted once per
+/// session. PDBs already on disk are indexed now; anything that needs the
+/// network is fetched in the background, because this runs inside a stop
+/// render that a host may be waiting on with a client timeout, and a frame
+/// shown as `module+offset` is worth more than a stalled stop.
 fn ensure_frame_module_symbols(
     debugger: &Target,
     trace: &ThreadTraceContext,
@@ -993,18 +997,13 @@ fn ensure_frame_module_symbols(
     }
 
     for (dtb, modules) in by_dtb {
-        let _ = if let Some(g) = debugger.guest.as_ref() {
-            g.load_symbols_for_modules(&debugger.phys, &debugger.symbols, modules, dtb)
-        } else {
-            Guest::load_module_symbols(
-                &debugger.phys,
-                &debugger.symbols,
-                modules,
-                dtb,
-                false,
-                debugger.arch(),
-            )
-        };
+        Guest::load_module_symbols_or_fetch_later(
+            &debugger.phys,
+            &debugger.symbols,
+            modules,
+            dtb,
+            debugger.arch(),
+        );
     }
 }
 
