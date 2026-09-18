@@ -657,9 +657,30 @@ impl Link {
         }
     }
 
-    /// Move to `running` (true) or halted (false) while the foreground keeps
-    /// the framing; a pumped or lost link is left alone.
-    fn set_inline_running(&mut self, running: bool) {
+    /// Move to halted while the foreground keeps the framing; a pumped or
+    /// lost link is left alone.
+    fn halt(&mut self) {
+        self.hold_framing(false);
+    }
+
+    /// Move to running while the foreground keeps the framing.
+    ///
+    /// Taking the halt's registers is the point of the signature: nothing
+    /// read while the target was halted describes it once it runs. Asking
+    /// for them here is what spares every caller from remembering, and a new
+    /// way to resume cannot be written without being handed them.
+    fn resume(&mut self, registers: &mut HaltRegisters) {
+        registers.running();
+        self.hold_framing(true);
+    }
+
+    /// Hand the framing to a background pump, which runs the target.
+    fn run_pumped(&mut self, pump: PumpHandle, registers: &mut HaltRegisters) {
+        registers.running();
+        *self = Self::RunningPumped(pump);
+    }
+
+    fn hold_framing(&mut self, running: bool) {
         let framing = match std::mem::replace(self, Self::Lost) {
             Self::Halted(framing) | Self::RunningInline(framing) => framing,
             other => {
@@ -1097,13 +1118,16 @@ impl KdBackend {
             )
         });
         kd_trace!("kd: pump: spawned background servicing thread");
-        self.link = Link::RunningPumped(PumpHandle {
-            join,
-            stop_rx,
-            shutdown,
-            reported_stop,
-            breakin_requested,
-        });
+        self.link.run_pumped(
+            PumpHandle {
+                join,
+                stop_rx,
+                shutdown,
+                reported_stop,
+                breakin_requested,
+            },
+            &mut self.registers,
+        );
         Ok(())
     }
 
@@ -1325,12 +1349,11 @@ impl KdBackend {
         if stop.target_reloaded {
             self.efer_cache.clear();
         }
-        self.link.set_inline_running(false);
+        self.link.halt();
     }
 
     fn record_running(&mut self) {
-        self.link.set_inline_running(true);
-        self.registers.running();
+        self.link.resume(&mut self.registers);
         self.stop_was_managed_breakpoint = false;
         self.virtual_lines.clear();
         self.table_lines.clear();

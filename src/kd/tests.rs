@@ -42,7 +42,7 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = context_arm64::build_register_map();
-    backend.link.set_inline_running(false);
+    backend.link.halt();
     backend.exit_prepared = true;
     let kernel_base = 0xffff_f802_4e80_0000u64;
     let module_list = 0xffff_f802_4f4d_aed0u64;
@@ -1023,7 +1023,7 @@ fn physical_memory_reply_payload(processor: u16, addr: u64, data: &[u8]) -> Vec<
 fn kd_memory_reads_physical_bytes_through_shared_backend() {
     let (mut kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
-    backend.link.set_inline_running(false);
+    backend.link.halt();
     backend.exit_prepared = true;
     let inner = Arc::new(Mutex::new(backend));
     let memory = KdMemory {
@@ -1242,7 +1242,7 @@ fn serve_breakpoints(
 fn breakpoint_install_reclaims_slots_stranded_by_a_dead_session() {
     let (kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
-    backend.link.set_inline_running(false);
+    backend.link.halt();
     backend.exit_prepared = true;
     backend.bp_handles.insert(0xfffff80000001000, 3);
 
@@ -1319,7 +1319,7 @@ fn a_refused_restore_keeps_a_site_that_still_holds_a_breakpoint() {
 fn exit_restores_breakpoints_the_host_left_installed() {
     let (kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
-    backend.link.set_inline_running(false);
+    backend.link.halt();
     backend.bp_handles.insert(0xfffff80000003000, 4);
     backend.managed_bp_addresses.insert(0xfffff80000003000);
 
@@ -1391,7 +1391,7 @@ fn arm64_registers_survive_refused_control_space() {
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = context_arm64::build_register_map();
-    backend.link.set_inline_running(false);
+    backend.link.halt();
     backend.exit_prepared = true;
 
     let mut ctx = vec![0u8; context_arm64::CONTEXT_SIZE];
@@ -1466,7 +1466,7 @@ fn synthetic_guest(
 ) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
     let (kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
-    backend.link.set_inline_running(false);
+    backend.link.halt();
     backend.exit_prepared = true;
     backend.kernel_dtb_override = FAKE_KERNEL_DTB;
     let translations = Arc::clone(&backend.translations);
@@ -1496,7 +1496,7 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
 fn resume_and_halt(backend: &Arc<Mutex<KdBackend>>) {
     let mut backend = backend.lock().unwrap();
     backend.record_running();
-    backend.link.set_inline_running(false);
+    backend.link.halt();
 }
 
 #[test]
@@ -1783,7 +1783,7 @@ fn page_table_lines_serve_a_halt_and_drop_on_write_and_resume() {
 fn truncated_fills_keep_whole_lines_and_finish_the_read() {
     let (kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
-    backend.link.set_inline_running(false);
+    backend.link.halt();
     backend.exit_prepared = true;
     let bytes: Vec<u8> = (0..0x1000u32).map(|i| i as u8 ^ (i >> 8) as u8).collect();
     let worker =
@@ -2160,11 +2160,11 @@ fn exit_resume_consumes_pump_stop_before_final_continue() {
 fn explicit_halted_exit_suppresses_drop_resume() {
     let (host, _kernel) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
-    backend.link.set_inline_running(false);
+    backend.link.halt();
 
     backend.prepare_for_exit(false).unwrap();
     let needs_drop_cleanup = backend.needs_drop_cleanup();
-    backend.link.set_inline_running(true);
+    backend.link.resume(&mut backend.registers);
 
     assert!(backend.exit_prepared);
     assert!(!needs_drop_cleanup);
@@ -2174,7 +2174,7 @@ fn explicit_halted_exit_suppresses_drop_resume() {
 fn pump_shutdown_without_a_pump_keeps_the_framing() {
     let (_kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
-    backend.link.set_inline_running(false);
+    backend.link.halt();
 
     assert!(backend.shutdown_pump_with_stop().unwrap().is_none());
     assert!(matches!(backend.link, Link::Halted(_)));
@@ -2182,7 +2182,7 @@ fn pump_shutdown_without_a_pump_keeps_the_framing() {
     assert!(matches!(backend.link, Link::Halted(_)));
     assert!(backend.framing().is_ok());
 
-    backend.link.set_inline_running(true);
+    backend.link.resume(&mut backend.registers);
 }
 
 #[test]
