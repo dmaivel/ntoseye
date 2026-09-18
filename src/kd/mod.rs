@@ -1204,16 +1204,19 @@ impl KdBackend {
             breakin_requested: _,
         } = pump;
         shutdown.store(true, Ordering::SeqCst);
-        let stop = Self::try_recv_pump_stop(&stop_rx)?;
+        // A reported error still leaves framing in the join value. Reclaim it
+        // before propagating that error, just as we do for a successful stop.
+        let stop = Self::try_recv_pump_stop(&stop_rx);
         match join.join() {
             Ok(framing) => self.link = Link::RunningInline(framing),
             Err(_) => {
                 kd_trace!("kd: pump: thread panicked during shutdown, framing lost");
-                if stop.is_none() {
+                if matches!(stop, Ok(None)) {
                     return Err(Error::Kd("KD pump thread panicked during shutdown".into()));
                 }
             }
         }
+        let stop = stop?;
         if stop.is_some() {
             return Ok(stop);
         }

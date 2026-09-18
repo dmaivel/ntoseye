@@ -2186,6 +2186,43 @@ fn pump_shutdown_without_a_pump_keeps_the_framing() {
 }
 
 #[test]
+fn pump_shutdown_reclaims_framing_after_reported_error() {
+    let (mut kernel, host) = UnixStream::pair().unwrap();
+    kernel
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let breakin_clone = host.try_clone().unwrap();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    // Queue the failure before shutdown so the early receive must see it.
+    stop_tx.send(Err("injected pump failure".into())).unwrap();
+    let pump = PumpHandle {
+        join: spawn(move || KdFraming::new(host.into())),
+        stop_rx,
+        shutdown: Arc::new(AtomicBool::new(false)),
+        reported_stop: Arc::new(AtomicBool::new(true)),
+        breakin_requested: Arc::new(AtomicBool::new(false)),
+    };
+    let mut backend = kd_backend_with_pump(pump, breakin_clone);
+    backend.exit_prepared = true;
+
+    assert!(matches!(
+        backend.shutdown_pump_with_stop(),
+        Err(Error::Kd(_))
+    ));
+    // The error must not strand the socket: the foreground can still use it.
+    backend
+        .link
+        .framing("test")
+        .unwrap()
+        .transport_mut()
+        .write_all(&[BREAKIN_BYTE])
+        .unwrap();
+    let mut received = [0];
+    kernel.read_exact(&mut received).unwrap();
+    assert_eq!(received, [BREAKIN_BYTE]);
+}
+
+#[test]
 fn exit_classifies_stray_single_step_but_spares_real_stops() {
     let pc = 0xfffff800_deadbeef;
     let mut managed = HashSet::new();
