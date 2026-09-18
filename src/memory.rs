@@ -87,6 +87,9 @@ pub struct Translation {
     /// Effective AArch64 UXN, including ancestor UXNTable restrictions.
     /// Always `false` on AMD64.
     pub uxn: bool,
+    /// The leaf entry was a transition PTE, so the frame is on the standby or
+    /// modified list rather than mapped. Readable; never written.
+    pub transition: bool,
 }
 
 impl Translation {
@@ -104,6 +107,7 @@ impl Translation {
             user: pml4e.is_user() && pdpte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx(),
             uxn: false,
+            transition: false,
         }
     }
 
@@ -120,6 +124,7 @@ impl Translation {
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx(),
             uxn: false,
+            transition: false,
         }
     }
 
@@ -140,6 +145,22 @@ impl Translation {
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user() && pte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx() || pte.is_nx(),
             uxn: false,
+            transition: false,
+        }
+    }
+
+    /// A leaf whose page is resident but not mapped. The protection bits of a
+    /// software PTE describe the *future* mapping, not a current one, so none
+    /// are claimed: the frame is readable and nothing else.
+    pub const fn new_transition(pte: PageTableEntry, va: VirtAddr) -> Self {
+        Self {
+            address: pte.page_frame() + va.page_offset(),
+            large: false,
+            writable: false,
+            user: false,
+            nx: false,
+            uxn: false,
+            transition: true,
         }
     }
 
@@ -154,6 +175,7 @@ impl Translation {
             user: l0.arm64_table_allows_user() && l1.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
             uxn,
+            transition: false,
         }
     }
 
@@ -177,6 +199,7 @@ impl Translation {
                 && l2.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
             uxn,
+            transition: false,
         }
     }
 
@@ -209,6 +232,7 @@ impl Translation {
                 && l3.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
             uxn,
+            transition: false,
         }
     }
 }
@@ -265,6 +289,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 user: false,
                 nx: false,
                 uxn: false,
+                transition: false,
             }));
         }
 
@@ -337,6 +362,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 user: false,
                 nx: false,
                 uxn: false,
+                transition: false,
             }));
         }
 
@@ -377,6 +403,13 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         };
 
         if !pte.is_present() {
+            // A working-set trim leaves the frame in memory with the valid
+            // bit clear. The kernel's own debug-memory path reads those, so
+            // refusing them here would report memory as gone that the target
+            // can still show.
+            if pte.is_transition() {
+                return Ok(Some(Translation::new_transition(pte, va)));
+            }
             return Ok(None);
         }
 
@@ -440,6 +473,18 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
                     }
                 }
             };
+            // The frame is on the standby or modified list, not mapped here,
+            // so the kernel may repurpose it or re-read it from disk and the
+            // edit would vanish or land somewhere unrelated.
+            if translation.transition {
+                if offset > 0 {
+                    return Err(Error::PartialWrite(offset));
+                }
+                return Err(Error::DebugInfo(format!(
+                    "{curr_vaddr} is resident but not mapped (transition PTE); \
+                     it cannot be written until the target faults it back in"
+                )));
+            }
 
             let bytes_available = PAGE_SIZE - curr_vaddr.page_offset() as usize;
             let chunk_size = (buf.len() - offset).min(bytes_available);
@@ -475,6 +520,66 @@ mod tests {
 
         fn write_bytes(&self, _addr: PhysAddr, _buf: &[u8]) -> Result<()> {
             Err(Error::BadPhysicalAddress(0))
+        }
+    }
+
+    /// AMD64 page tables mapping one VA, with `leaf` as the final PTE.
+    fn amd64_space(leaf: u64) -> (FakePhysMem, VirtAddr) {
+        let va = VirtAddr(0x1_0000);
+        let mut data = vec![0u8; 0x7000];
+        for (table, next, index) in [
+            (0x1000u64, 0x2000u64, va.pml4_index()),
+            (0x2000, 0x3000, va.pdpt_index()),
+            (0x3000, 0x4000, va.pd_index()),
+        ] {
+            let at = table as usize + index * 8;
+            data[at..at + 8].copy_from_slice(&(next | 0b111).to_le_bytes());
+        }
+        let at = 0x4000 + va.pt_index() * 8;
+        data[at..at + 8].copy_from_slice(&leaf.to_le_bytes());
+        data[0x5000..0x5008].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        (FakePhysMem { data }, va)
+    }
+
+    /// A trimmed page keeps its frame on the standby list with the valid bit
+    /// clear. Refusing to read it would report memory as gone that the target
+    /// can still show; writing it would edit a frame the kernel may reclaim.
+    #[test]
+    fn transition_pte_reads_the_frame_it_still_owns() {
+        // PFN 0x5, valid clear, transition (bit 11) set.
+        let (mem, va) = amd64_space(0x5000 | (1 << 11));
+        let space = AddressSpace::new(&mem, 0x1000);
+
+        let mut buf = [0u8; 8];
+        space.read_bytes(va, &mut buf).unwrap();
+        assert_eq!(u64::from_le_bytes(buf), 0x1122_3344_5566_7788);
+
+        let error = space.write_bytes(va, &[0xcc]).unwrap_err();
+        // The walk refuses it; a write that got as far as the frame would
+        // come back as this backend's `BadPhysicalAddress` instead.
+        assert!(
+            matches!(error, Error::DebugInfo(_)),
+            "a standby frame is not mapped here and must not be written"
+        );
+    }
+
+    /// The other invalid forms store a prototype-PTE pointer or a page-file
+    /// offset where a transition PTE stores a frame. Reading those bits as a
+    /// frame would hand back unrelated physical memory as if it were the
+    /// caller's page.
+    #[test]
+    fn prototype_and_pagefile_ptes_are_not_read_as_frames() {
+        for (name, leaf) in [
+            ("prototype", 0x5000 | (1 << 11) | (1 << 10)),
+            ("page file", 0x5000u64),
+        ] {
+            let (mem, va) = amd64_space(leaf);
+            let space = AddressSpace::new(&mem, 0x1000);
+            let mut buf = [0u8; 8];
+            assert!(
+                space.read_bytes(va, &mut buf).is_err(),
+                "{name} PTE was followed as if its bits were a page frame"
+            );
         }
     }
 

@@ -80,6 +80,10 @@ Use KDNET for breakpoint-heavy work. Each absorb is a handful of KD request/repl
 
 Three other ways to cut the cost: scope to a symbol the rest of the system does not call, since a breakpoint in the target's own image traps only that image's processes; use `ba e1`, which needs no byte in the page and so writes nothing to a shared frame, though AMD64 debug registers are per-processor here so it still traps for every process and there are only four slots; or prefer a cheap condition over a pass count, since both absorb but a false condition stops sooner.
 
+## Paged-out memory
+
+A page the guest has trimmed out of a working set is usually still in RAM on the standby or modified list, with its PTE left in the *transition* state. Both the host page walk and the target read those, so trimmed memory keeps reading normally. Writes to such a page are refused: the kernel is free to repurpose the frame or re-read it from disk, so the edit would be lost or land somewhere unrelated.
+
 ## Memory introspection
 
 The `memory` backend requires no guest or VM debug transport configuration:

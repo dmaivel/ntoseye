@@ -233,6 +233,19 @@ impl PageTableEntry {
         self.0 & 0x80 != 0
     }
 
+    /// A Windows transition PTE: the page is still in physical memory, on the
+    /// standby or modified list, but the hardware valid bit is clear so the
+    /// next access faults and the kernel can re-attach it.
+    ///
+    /// The PFN field is a real page frame, which is what separates this from
+    /// the other invalid `MMPTE_SOFTWARE` forms: a prototype PTE (bit 10)
+    /// stores a pointer to a prototype entry, and a page-file PTE stores an
+    /// offset. Reading either as a frame would return unrelated memory, so
+    /// both must be excluded.
+    pub const fn is_transition(self) -> bool {
+        !self.is_present() && self.0 & (1 << 11) != 0 && self.0 & (1 << 10) == 0
+    }
+
     pub const fn page_frame(self) -> u64 {
         self.0 & PFN_MASK
     }
