@@ -443,6 +443,21 @@ impl BackendCapability {
     }
 }
 
+/// Single-step residue a resume has to clear: RFLAGS.TF and the DR6 B0-B3
+/// breakpoint-status bits.
+#[derive(Debug, Clone, Copy)]
+pub struct TrapState {
+    pub eflags: u64,
+    pub dr6: u64,
+}
+
+impl TrapState {
+    /// Nothing for [`crate::session::clear_trap_flag`] to write.
+    pub fn is_clean(&self) -> bool {
+        self.eflags & (1 << 8) == 0 && self.dr6 & 0b1111 == 0
+    }
+}
+
 /// Debug transport abstraction; guest memory access is provided separately by
 /// [`crate::phys::PhysMem`].
 pub trait DebugBackend {
@@ -461,6 +476,18 @@ pub trait DebugBackend {
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;
 
+    /// TF and DR6 as the current stop reported them, where the transport can
+    /// say without a register fetch.
+    ///
+    /// KD carries both in every state change, which lets an absorbed
+    /// breakpoint hit skip a 1.7 KB `CONTEXT` reply it would read two fields
+    /// from. `None` means ask the registers: no report, a report for another
+    /// architecture, or a host register write that outdated it.
+    fn stop_trap_state(&mut self) -> Option<TrapState> {
+        None
+    }
+
+    ///
     fn set_breakpoint(&mut self, addr: u64) -> Result<()>;
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()>;
 

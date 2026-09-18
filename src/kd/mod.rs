@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
+    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent, TrapState,
 };
 use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
@@ -91,6 +91,52 @@ pub struct StateChange {
     bugcheck: Option<BugcheckInfo>,
     target_reloaded: bool,
     assisted_breakin: bool,
+    /// `DBGKD_ANY_CONTROL_REPORT`, verbatim. Every stop carries it, so the
+    /// fields it holds cost nothing: see [`ControlReport`].
+    control_report: Option<ControlReport>,
+}
+
+/// The control report a 64-bit KD state change carries after its exception
+/// union, at [`CONTROL_REPORT_OFFSET`].
+///
+/// The bytes are kept verbatim because their meaning is per-architecture and
+/// [`parse_state_change`] does not know the target's. Accessors interpret the
+/// AMD64 layout; ARM64 callers ask for nothing yet.
+///
+/// Reading these instead of fetching registers is what keeps an absorbed
+/// wrong-process breakpoint hit off the wire: a `CONTEXT` fetch is a 1.7 KB
+/// reply, while this arrived with the stop.
+#[derive(Debug, Clone)]
+struct ControlReport(Vec<u8>);
+
+/// `DBGKD_ANY_WAIT_STATE_CHANGE` header (32) plus its exception union
+/// (`EXCEPTION_RECORD64` 0x98 + `FirstChance` ULONG, padded to 0xa0).
+const CONTROL_REPORT_OFFSET: usize = 192;
+/// `AMD64_DBGKD_CONTROL_REPORT`: Dr6, Dr7, EFlags, InstructionCount,
+/// ReportFlags, InstructionStream[16], SegCs, SegDs, SegEs, SegFs.
+const AMD64_CONTROL_REPORT_SIZE: usize = 48;
+const AMD64_CONTROL_DR6_OFFSET: usize = 0;
+const AMD64_CONTROL_DR7_OFFSET: usize = 8;
+const AMD64_CONTROL_EFLAGS_OFFSET: usize = 16;
+
+impl ControlReport {
+    fn amd64(&self) -> Option<&[u8]> {
+        self.0.get(..AMD64_CONTROL_REPORT_SIZE)
+    }
+
+    /// AMD64 DR6 and RFLAGS as the target reported them at the stop.
+    fn amd64_trap_state(&self) -> Option<TrapState> {
+        let report = self.amd64()?;
+        Some(TrapState {
+            eflags: u64::from(wire::read_u32(report, AMD64_CONTROL_EFLAGS_OFFSET)),
+            dr6: wire::read_u64(report, AMD64_CONTROL_DR6_OFFSET),
+        })
+    }
+
+    /// AMD64 DR7, which a continue must preserve.
+    fn amd64_dr7(&self) -> Option<u64> {
+        Some(wire::read_u64(self.amd64()?, AMD64_CONTROL_DR7_OFFSET))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -685,6 +731,13 @@ pub struct KdBackend {
     special_register_cache: HashMap<u16, Vec<u8>>,
     /// Per-processor `CONTEXT` for the current halt. See [`Self::read_registers`].
     context_cache: HashMap<u16, Vec<u8>>,
+    /// The current stop's control report, dropped as soon as a host register
+    /// write can have outdated it. See [`ControlReport`].
+    stop_control_report: Option<ControlReport>,
+    /// Whether the current stop was an `int3` at one of our own installed
+    /// sites. Recorded at the stop because the host disables that site before
+    /// resuming, which erases the evidence from `managed_bp_addresses`.
+    stop_was_managed_breakpoint: bool,
     /// Avoid repeated round trips or timeouts after an ARM64 control-space read fails.
     special_registers_unsupported: bool,
     efer_cache: HashMap<u16, u64>,
@@ -961,6 +1014,8 @@ impl KdBackend {
             reconnect_assist_after_continue: None,
             special_register_cache: HashMap::new(),
             context_cache: HashMap::new(),
+            stop_control_report: None,
+            stop_was_managed_breakpoint: false,
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             virtual_lines: LineCache::default(),
@@ -1254,7 +1309,15 @@ impl KdBackend {
         self.last_rip = stop.program_counter;
         self.special_register_cache.clear();
         self.context_cache.clear();
-        self.efer_cache.clear();
+        self.stop_control_report = stop.control_report.clone();
+        self.stop_was_managed_breakpoint = managed_breakpoint_stop;
+        // EFER survives: the guest sets it once entering long mode and a
+        // reload is the only way a processor's value can differ from the one
+        // we read. Re-reading it per stop costs an MSR round trip in every
+        // absorbed breakpoint hit.
+        if stop.target_reloaded {
+            self.efer_cache.clear();
+        }
         self.link.set_inline_running(false);
     }
 
@@ -1262,7 +1325,8 @@ impl KdBackend {
         self.link.set_inline_running(true);
         self.special_register_cache.clear();
         self.context_cache.clear();
-        self.efer_cache.clear();
+        self.stop_control_report = None;
+        self.stop_was_managed_breakpoint = false;
         self.virtual_lines.clear();
         self.table_lines.clear();
         self.translations.resume();
@@ -1296,9 +1360,11 @@ impl KdBackend {
     /// * A PC that cannot be read resumes in place. Failing that way costs a
     ///   repeated stop; failing the other way corrupts the guest.
     ///
-    /// The PC is read from the target rather than from the recorded stop: hosts
-    /// rewind and rewrite it between a stop and the resume, so only the target
-    /// knows what is about to execute.
+    /// The PC comes from the register cache rather than the recorded stop:
+    /// hosts rewind and rewrite it between a stop and the resume, and a write
+    /// invalidates that cache, so the cached value is always what is about to
+    /// execute. It is already warm whenever the host classified the stop,
+    /// which makes the common path free.
     fn skip_hardcoded_breakpoint(&mut self, processor: u16) -> Result<()> {
         if self.last_exception_code != STATUS_BREAKPOINT {
             return Ok(());
@@ -1306,12 +1372,13 @@ impl KdBackend {
         self.require_no_pending_write_breakpoint()?;
         let arch = self.arch;
         let register_map = self.register_map.clone();
-        let pc = read_program_counter(
-            self.link.framing(self.running_reason)?,
-            &register_map,
-            arch,
-            processor,
-        )?;
+        let pc = self.resume_program_counter(processor, &register_map)?;
+        // Our own site, disabled by the host's step-over between the stop and
+        // this resume. Reading memory here would find the restored original
+        // byte and prove only what the stop already said.
+        if self.stop_was_managed_breakpoint && pc == self.last_rip {
+            return Ok(());
+        }
         if self.managed_bp_addresses.contains(&pc) {
             return Ok(());
         }
@@ -1350,12 +1417,38 @@ impl KdBackend {
         // The PC goes straight through the context API, behind
         // `write_registers` and its cache invalidation.
         self.context_cache.remove(&processor);
+        self.stop_control_report = None;
         advance_pc_past_breakpoint(
             self.link.framing(self.running_reason)?,
             &register_map,
             arch,
             processor,
             pc,
+        )
+    }
+
+    /// The program counter `processor` resumes from, served from the halt's
+    /// register cache when it already holds that processor.
+    ///
+    /// Only a warm cache is consulted. Filling it would fetch the control
+    /// registers and EFER alongside the context, which costs more than the
+    /// bare context request this replaces.
+    fn resume_program_counter(
+        &mut self,
+        processor: u16,
+        register_map: &RegisterMap,
+    ) -> Result<u64> {
+        if let Some(context) = self.context_cache.get(&processor)
+            && let Ok(pc) = register_map.read_u64("rip", context)
+        {
+            return Ok(pc);
+        }
+        let arch = self.arch;
+        read_program_counter(
+            self.link.framing(self.running_reason)?,
+            register_map,
+            arch,
+            processor,
         )
     }
 
@@ -1677,15 +1770,22 @@ impl KdBackend {
     fn continue_preserving_dr7(&mut self, processor: u16, status: u32, trace: bool) -> Result<()> {
         match self.arch {
             Arch::Amd64 => {
-                if !self.special_register_cache.contains_key(&processor) {
+                // The stop reported DR7, so a resume that read no special
+                // registers needs none: only a host write can have changed
+                // it, and that drops the report along with the cache.
+                let reported_dr7 = (processor == self.last_stop_processor)
+                    .then(|| self.stop_control_report.as_ref()?.amd64_dr7())
+                    .flatten();
+                if reported_dr7.is_none() && !self.special_register_cache.contains_key(&processor) {
                     let special = self.read_special_registers_uncached(processor)?;
                     self.special_register_cache.insert(processor, special);
                 }
-                let special = self
-                    .special_register_cache
-                    .get(&processor)
-                    .expect("cache holds processor; we just inserted it on miss");
-                let dr7 = wire::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET);
+                let dr7 = match self.special_register_cache.get(&processor) {
+                    // A `ba` installed during this halt wrote the cache; it
+                    // is newer than the report.
+                    Some(special) => wire::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET),
+                    None => reported_dr7.expect("read the registers when no report offered DR7"),
+                };
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
                     api::continue_api2(framing, processor, status, trace, dr7)
                 })
@@ -2333,10 +2433,23 @@ impl DebugBackend for KdBackend {
         Ok(ctx)
     }
 
+    /// KD reports TF and DR6 in every AMD64 state change, so an absorbed
+    /// breakpoint hit can decide it has no single-step residue to clear
+    /// without fetching a `CONTEXT` it would read two fields from.
+    fn stop_trap_state(&mut self) -> Option<TrapState> {
+        if self.arch != Arch::Amd64 {
+            return None;
+        }
+        self.stop_control_report.as_ref()?.amd64_trap_state()
+    }
+
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
         let processor = self.current_processor;
         // The written values become the truth only once the target has them.
         self.context_cache.remove(&processor);
+        // The stop reported TF and DR6 before this write; they are the host's
+        // now.
+        self.stop_control_report = None;
         match self.arch {
             Arch::Amd64 => {
                 let context = context_payload(data)?;
@@ -2942,6 +3055,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         self.lock().read_registers()
+    }
+
+    fn stop_trap_state(&mut self) -> Option<TrapState> {
+        self.lock().stop_trap_state()
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {

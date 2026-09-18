@@ -65,6 +65,21 @@ The `kd` source needs no hypervisor or VM-process access, so AMD64 and ARM64 Win
 
 Process, kernel-module, and driver-object lists are walked only when something needs them (a listing command, a tab completion, a break context in a user-mode process) and the first walk per halt serves every later use until the target runs again. The process walk reads one span per `_EPROCESS` and consults the PEB only for names the kernel's 15-byte `ImageFileName` may have truncated, so the prompt after attach and each stop no longer waits on a full process walk.
 
+## User-mode breakpoints in shared pages
+
+A software breakpoint is an `int3` written into a physical frame, and an image page is shared by every process mapping it. `bu /p <pid> user32!PeekMessageW` puts the byte in the single frame backing `user32.dll` for the whole machine, so every process calling that function traps. Scoping is a host-side filter: `ntoseye` compares the trapping process against the breakpoint's scope and *absorbs* a hit belonging to anyone else, removing the byte, single-stepping the instruction, writing the byte back and resuming without reporting anything.
+
+An absorb halts every vCPU, so a breakpoint on a busy shared symbol costs the absorb rate times the absorb cost whether or not the scoped process ever runs. Measured on a 4-vCPU Windows 11 guest, breakpoint on `nt!NtCreateFile`, file-enumeration loop running:
+
+| Transport | Host service per absorb | Absorbs/s sustained | Guest speed |
+| --- | --- | --- | --- |
+| KDCOM (emulated UART) | ~30 ms | 16 | ~5% |
+| KDNET | ~1 ms | 125 | ~50% |
+
+Use KDNET for breakpoint-heavy work. Each absorb is a handful of KD request/reply round trips, and KDCOM's ~2 ms per request over an emulated UART dominates everything else. Over KDNET what remains is the guest freezing and thawing its own processors, which no debugger-side change can remove.
+
+Three other ways to cut the cost: scope to a symbol the rest of the system does not call, since a breakpoint in the target's own image traps only that image's processes; use `ba e1`, which needs no byte in the page and so writes nothing to a shared frame, though AMD64 debug registers are per-processor here so it still traps for every process and there are only four slots; or prefer a cheap condition over a pass count, since both absorb but a false condition stops sooner.
+
 ## Memory introspection
 
 The `memory` backend requires no guest or VM debug transport configuration:

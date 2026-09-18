@@ -126,6 +126,7 @@ fn transparent_arm64_state_change_uses_arm64_continue_layout() {
         bugcheck: None,
         target_reloaded: false,
         assisted_breakin: false,
+        control_report: None,
     };
     let handle = spawn(move || {
         let mut framing = KdFraming::new(host.into());
@@ -266,6 +267,56 @@ fn parse_load_symbols_state_change_extracts_base_hint() {
     assert_eq!(s.kernel_base_hint, Some(VirtAddr(0xfffff80000000000)));
 }
 
+/// A real 240-byte AMD64 exception state change, captured from a Windows 11
+/// target stopping on an `int3` we had written into `user32!PeekMessageW`.
+///
+/// The control report's offsets are the reason an absorbed hit can skip a
+/// register fetch, and nothing else validates them: a wrong offset would
+/// read some neighbouring field as RFLAGS, conclude a single step left no
+/// trap flag behind, and resume a thread that then single-steps forever.
+const CAPTURED_BREAKPOINT_STATE_CHANGE: &str = "\
+     30300000060000000400000000000000\
+     8010af5985aaffffe017c57cfa7f0000\
+     03000080000000000000000000000000\
+     e017c57cfa7f000001000000fa010000\
+     00000000000000008010af5985aaffff\
+     46020000000000008010af5985aaffff\
+     201dc632fa01000020fbfcc58bd8ffff\
+     dc0100000000000000000000fa7f0000\
+     03000000fa7f0000f1d61ac709000000\
+     0000000000000000db34b6d782de1b43\
+     00000000000000000000000000000000\
+     015f1032fa0100000100000000000000\
+     f00fffff000000000004000000000000\
+     4602000010000300cc895c240848896c\
+     241048897424185733002b002b005300";
+
+#[test]
+fn state_change_carries_the_amd64_control_report() {
+    let payload: Vec<u8> = CAPTURED_BREAKPOINT_STATE_CHANGE
+        .split_whitespace()
+        .collect::<String>()
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    assert_eq!(payload.len(), 240, "captured AMD64 state change");
+
+    let stop = parse_state_change(&payload).unwrap();
+    assert_eq!(stop.program_counter, 0x7ffa_7cc5_17e0);
+    assert_eq!(stop.exception_code, STATUS_BREAKPOINT);
+
+    let report = stop.control_report.expect("240 bytes carry a report");
+    let trap = report.amd64_trap_state().expect("AMD64 report");
+    assert_eq!(trap.eflags, 0x246, "RFLAGS: IF | PF | reserved");
+    assert_eq!(trap.dr6, 0xffff_0ff0, "DR6 with no breakpoint status set");
+    assert_eq!(report.amd64_dr7(), Some(0x400));
+    assert!(
+        trap.is_clean(),
+        "an int3 stop has neither a trap flag nor DR6 status to clear"
+    );
+}
+
 #[test]
 fn stop_event_flags_surfaced_load_symbols_as_bugcheck() {
     let stop = StateChange {
@@ -281,6 +332,7 @@ fn stop_event_flags_surfaced_load_symbols_as_bugcheck() {
         bugcheck: None,
         target_reloaded: false,
         assisted_breakin: false,
+        control_report: None,
     };
 
     let event = stop_event(stop);
@@ -742,6 +794,8 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         breakin_addresses: HashSet::new(),
         pending_write_breakpoint: None,
         special_register_cache: HashMap::new(),
+        stop_control_report: None,
+        stop_was_managed_breakpoint: false,
         context_cache: HashMap::new(),
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
@@ -863,6 +917,8 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         breakin_addresses: HashSet::new(),
         pending_write_breakpoint: None,
         special_register_cache: HashMap::new(),
+        stop_control_report: None,
+        stop_was_managed_breakpoint: false,
         context_cache: HashMap::new(),
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
@@ -1752,6 +1808,7 @@ fn known_breakin_stop_is_marked_assisted_unless_managed() {
         bugcheck: None,
         target_reloaded: false,
         assisted_breakin: false,
+        control_report: None,
     };
 
     assert!(
@@ -1789,6 +1846,7 @@ fn continue_drains_in_place_rebreak_and_stale_breakin() {
         bugcheck: None,
         target_reloaded: false,
         assisted_breakin: false,
+        control_report: None,
     };
 
     assert!(drain(&[]).is_spurious(&stop_at(STATUS_BREAKPOINT, resumed_from)));

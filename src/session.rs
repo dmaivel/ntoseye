@@ -3096,7 +3096,15 @@ pub fn step_one_and_clear_tf(
 /// currently selected thread, best-effort, so an absorbed single-step leaves
 /// no residue for the next resume. ARM64 has neither x86 field, so its
 /// single-step state is acknowledged by KD's ARM64 continue request instead.
+/// A transport that reports TF and DR6 with the stop answers this without a
+/// register fetch, which is what keeps an absorbed breakpoint hit cheap.
 pub fn clear_trap_flag(backend: &mut dyn DebugBackend, register_map: &RegisterMap) -> Result<()> {
+    if backend
+        .stop_trap_state()
+        .is_some_and(|state| state.is_clean())
+    {
+        return Ok(());
+    }
     if let Ok(mut regs) = backend.read_registers() {
         let mut dirty = false;
         if let Ok(eflags) = register_map.read_u64("eflags", &regs) {

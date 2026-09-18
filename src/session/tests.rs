@@ -1,5 +1,6 @@
 use super::*;
-use crate::gdb::breakpoints::HardwareBreakpoint;
+use crate::dbg_backend::TrapState;
+use crate::gdb::breakpoints::{Breakpoint, HardwareBreakpoint};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
@@ -42,6 +43,10 @@ pub struct MockBackend {
     dropped_sites: Vec<u64>,
     /// `set_breakpoint` (true) / `remove_breakpoint` (false) calls in order.
     site_writes: Vec<(u64, bool)>,
+    /// Register fetches, so a test can prove a path avoided one.
+    reads: usize,
+    /// TF and DR6 as a transport would report them with the stop.
+    reported_trap_state: Option<TrapState>,
 }
 
 impl Default for MockBackend {
@@ -64,6 +69,8 @@ impl Default for MockBackend {
             pending_stop: false,
             dropped_sites: Vec::new(),
             site_writes: Vec::new(),
+            reads: 0,
+            reported_trap_state: None,
         }
     }
 }
@@ -71,6 +78,13 @@ impl Default for MockBackend {
 impl MockBackend {
     pub fn running(mut self) -> Self {
         self.running = true;
+        self
+    }
+
+    /// Model a transport that reports TF and DR6 with the stop, as KD's
+    /// state-change control report does.
+    fn reporting_trap_state(mut self, eflags: u64, dr6: u64) -> Self {
+        self.reported_trap_state = Some(TrapState { eflags, dr6 });
         self
     }
 
@@ -111,7 +125,11 @@ impl DebugBackend for MockBackend {
         &self.register_map
     }
     fn read_registers(&mut self) -> Result<Vec<u8>> {
+        self.reads += 1;
         Ok(self.regs.clone())
+    }
+    fn stop_trap_state(&mut self) -> Option<TrapState> {
+        self.reported_trap_state
     }
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
         self.writes += 1;
@@ -745,6 +763,34 @@ fn clear_trap_flag_clears_tf_and_dr6_status_in_one_write() {
     assert_eq!(backend.get("eflags"), EFLAGS_BASE);
     assert_eq!(backend.get("dr6"), DR6_BS);
     assert_eq!(backend.writes, 1);
+}
+
+#[test]
+fn clear_trap_flag_trusts_a_stop_that_reports_no_residue() {
+    let mut backend = MockBackend::default().reporting_trap_state(EFLAGS_BASE, DR6_BS);
+    backend.set("eflags", TF | EFLAGS_BASE);
+    backend.set("dr6", 0b1011 | DR6_BS);
+    let map = build_register_map();
+
+    clear_trap_flag(&mut backend, &map).unwrap();
+
+    // The registers still hold residue, so a fetch would have rewritten
+    // them: proving none happened proves the report was believed.
+    assert_eq!(backend.reads, 0);
+    assert_eq!(backend.writes, 0);
+}
+
+#[test]
+fn clear_trap_flag_still_writes_when_the_stop_reports_residue() {
+    let mut backend = MockBackend::default().reporting_trap_state(TF | EFLAGS_BASE, DR6_BS);
+    backend.set("eflags", TF | EFLAGS_BASE);
+    backend.set("dr6", 0b1011 | DR6_BS);
+    let map = build_register_map();
+
+    clear_trap_flag(&mut backend, &map).unwrap();
+
+    assert_eq!(backend.get("eflags"), EFLAGS_BASE);
+    assert_eq!(backend.get("dr6"), DR6_BS);
 }
 
 #[test]

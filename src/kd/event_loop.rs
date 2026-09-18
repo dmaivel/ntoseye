@@ -20,13 +20,13 @@ use crate::kd::wire::{read_u16, read_u32, read_u64};
 use crate::types::{Arch, VirtAddr};
 
 use super::{
-    AMD64_DEBUG_CONTROL_SPACE_KSPECIAL, BugcheckCapture, DBG_KD_COMMAND_STRING_STATE_CHANGE,
-    DBG_KD_EXCEPTION_STATE_CHANGE, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT,
-    KD_INITIAL_PROGRESS_INTERVAL, KD_INITIAL_TIMEOUT_DEFAULT, KD_INITIAL_TIMEOUT_ENV,
-    KD_RECONNECT_BREAKIN_INTERVAL, KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT,
-    KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE, PUMP_POLL, STATUS_BREAKPOINT,
-    StateChange, breakpoint_instruction_at, context, context_arm64, handle_debug_io_with_output,
-    handle_file_io,
+    AMD64_DEBUG_CONTROL_SPACE_KSPECIAL, BugcheckCapture, CONTROL_REPORT_OFFSET, ControlReport,
+    DBG_KD_COMMAND_STRING_STATE_CHANGE, DBG_KD_EXCEPTION_STATE_CHANGE,
+    DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT, KD_INITIAL_PROGRESS_INTERVAL,
+    KD_INITIAL_TIMEOUT_DEFAULT, KD_INITIAL_TIMEOUT_ENV, KD_RECONNECT_BREAKIN_INTERVAL,
+    KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT, KSPECIAL_REGISTERS_DR7_OFFSET,
+    KSPECIAL_REGISTERS_MIN_SIZE, PUMP_POLL, STATUS_BREAKPOINT, StateChange,
+    breakpoint_instruction_at, context, context_arm64, handle_debug_io_with_output, handle_file_io,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,10 +60,12 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
     //     DBGKM_EXCEPTION64.ExceptionRecord.ExceptionCode    @ 32
     //     DBGKM_EXCEPTION64.ExceptionRecord.ExceptionAddress @ 48
     //     DBGKM_EXCEPTION64.FirstChance                       @ 184
+    //   DBGKD_ANY_CONTROL_REPORT ControlReport @ 192
     //
     // EXCEPTION_RECORD64 is 0x98 bytes: its 15 ULONG64 information
     // parameters end at offset 0x98. DBGKM_EXCEPTION64 then stores the ULONG
-    // FirstChance field immediately after it. These are the windbgkd.h wire
+    // FirstChance field immediately after it, and the union pads to 0xa0,
+    // which is where the control report begins. These are the windbgkd.h wire
     // structure offsets, not host Rust layout.
     if payload.len() < 32 {
         return Err(Error::Kd(format!(
@@ -122,7 +124,18 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         bugcheck: None,
         target_reloaded: false,
         assisted_breakin: false,
+        control_report: control_report(payload),
     })
+}
+
+/// The control report trailing a state change, when the target sent a whole
+/// one. A short payload is not an error: only opportunistic readers want
+/// these fields, and every one of them has a register fetch to fall back on.
+fn control_report(payload: &[u8]) -> Option<ControlReport> {
+    payload
+        .get(CONTROL_REPORT_OFFSET..)
+        .filter(|report| !report.is_empty())
+        .map(|report| ControlReport(report.to_vec()))
 }
 
 pub fn kd_socket_connect_error(socket_path: &str, err: std::io::Error) -> Error {
