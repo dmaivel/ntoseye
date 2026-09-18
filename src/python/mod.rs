@@ -1434,6 +1434,26 @@ impl Debugger {
         self.inner.interrupt().map(|_| ()).map_err(err)
     }
 
+    /// Make `addr` resident by asking the guest's debugger worker to fault it
+    /// in (`.pagein`). `process` is an `EPROCESS` the worker attaches to
+    /// first, which user-space addresses need.
+    ///
+    /// The worker is a guest thread, so this resumes the target and returns
+    /// with it halted at `nt!DbgBreakPointWithStatus` rather than wherever it
+    /// was. Returns whether `addr` reads back afterwards; a page that was
+    /// never backed stays unreadable.
+    #[pyo3(signature = (addr, process=None))]
+    fn page_in(&mut self, addr: u64, process: Option<u64>) -> PyResult<bool> {
+        self.require_halted("page_in")?;
+        let report = self.inner.page_in(VirtAddr(addr), process).map_err(err)?;
+        if !report.from_worker {
+            return Err(err(Error::DebugInfo(
+                "the target stopped for another reason before the worker reported".into(),
+            )));
+        }
+        Ok(report.resident)
+    }
+
     /// Select the current inspection thread (a vCPU id) so
     /// `read_register`/`registers`/`backtrace`/`step` operate on it.
     fn set_current_thread(&mut self, thread: &str) -> PyResult<()> {
