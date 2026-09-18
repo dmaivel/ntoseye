@@ -458,6 +458,35 @@ fn install_termination_handler() {
 #[cfg(all(not(unix), feature = "cli"))]
 fn install_termination_handler() {}
 
+/// How often the bridge below looks for a termination signal.
+#[cfg(all(unix, feature = "cli"))]
+const TERMINATION_POLL: Duration = Duration::from_millis(100);
+
+/// Make a termination signal stop a wait on the guest.
+///
+/// The prompt loops poll [`termination_requested`], but a resuming command is
+/// not at the prompt: it is inside the stop wait, which polls the target's
+/// interrupt flag instead. Without this bridge a signal that arrives while the
+/// guest runs is not seen until the guest stops on its own, so a supervisor
+/// escalates to `SIGKILL` and the teardown this handler exists for never runs.
+///
+/// Raising the interrupt is exactly what Ctrl+C does, so the wait ends through
+/// the path that is already there, and the prompt then leaves through the same
+/// teardown as `q`.
+#[cfg(all(unix, feature = "cli"))]
+fn bridge_termination_to_interrupt(interrupt: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        loop {
+            // Re-raised every tick: a wait that takes the flag with `swap`
+            // must not be the only one to see it.
+            if termination_requested() {
+                interrupt.store(true, Ordering::SeqCst);
+            }
+            std::thread::sleep(TERMINATION_POLL);
+        }
+    });
+}
+
 #[cfg(feature = "cli")]
 fn termination_requested() -> bool {
     TERMINATION_REQUESTED.load(Ordering::SeqCst)
@@ -524,6 +553,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         interrupt.store(true, Ordering::SeqCst);
     })?;
     install_termination_handler();
+    #[cfg(unix)]
+    bridge_termination_to_interrupt(Arc::clone(&debugger.interrupt));
 
     let backend_label = client.name();
 
