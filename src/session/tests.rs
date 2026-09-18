@@ -412,6 +412,55 @@ fn breakpoint_rewind_realigns_the_reporting_thread_without_thread_enumeration() 
     assert_eq!(backend.get("rip"), 0x1000);
 }
 
+#[test]
+fn absorbed_software_breakpoint_invalidates_stopped_inspection() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1001);
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session.breakpoints.set_pass_count(1, 2).unwrap();
+    session.target.set_context_dtb_override(0x9000);
+    let expected_dtb = session.target.kernel_dtb();
+
+    assert!(matches!(
+        session
+            .classify_stop_event(breakpoint_event(0x1000))
+            .unwrap(),
+        StopResolution::Resumed
+    ));
+    assert!(session.backend.is_running());
+    assert!(
+        session.target.registers.is_none(),
+        "running target must not expose stopped registers"
+    );
+    assert_eq!(session.target.current_dtb(), expected_dtb);
+}
+
+#[test]
+fn absorbed_watchpoint_invalidates_stopped_inspection() {
+    let mut backend = MockBackend::default();
+    backend.set("dr6", 1);
+    backend.set("rip", 0x1010);
+    let mut session = session_with_mock(backend);
+    session.breakpoints = manager_with_hw(0, HwBreakpointAccess::Write, true);
+    session.breakpoints.set_pass_count(7, 2).unwrap();
+
+    assert!(matches!(
+        session.classify_stop_event(single_step_event()).unwrap(),
+        StopResolution::Resumed
+    ));
+    assert!(session.backend.is_running());
+    assert!(
+        session.target.registers.is_none(),
+        "running target must not expose stopped registers"
+    );
+}
+
 fn deferred_symbol_breakpoint(session: &mut Session) -> u32 {
     let id = session
         .add_symbol_breakpoint("driver!DeferredFn".into(), BreakpointConfig::default())

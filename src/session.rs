@@ -2061,15 +2061,29 @@ impl Session {
 
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
-        self.backend
-            .continue_execution_with_disposition(disposition)?;
+        self.continue_backend(disposition)?;
         self.record_continuation_disposition(disposition);
 
+        Ok(())
+    }
+
+    /// Continue without user-command preparation (breakpoint refresh/step-over),
+    /// but with the same inspection lifetime as an explicit resume.
+    fn continue_backend(&mut self, disposition: ContinueDisposition) -> Result<()> {
+        self.backend
+            .continue_execution_with_disposition(disposition)?;
+        self.invalidate_running_context();
+        Ok(())
+    }
+
+    /// No stopped inspection view survives a successful continuation, including
+    /// one performed internally while absorbing a breakpoint or notification.
+    fn invalidate_running_context(&mut self) {
+        self.target.selected_frame = None;
         self.target.registers = None;
         self.target.clear_context_dtb_override();
         self.target.clear_current_windows_thread_context();
         self.parked_windows_thread = None;
-        Ok(())
     }
 
     /// Classify a freshly observed stop at (`rip`, `cr3`) against our breakpoints,
@@ -2145,7 +2159,7 @@ impl Session {
         )?;
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
-        self.backend.continue_execution()
+        self.continue_backend(ContinueDisposition::Handled)
     }
 
     /// Consult and clear the module-change signals, reconciling symbolic
@@ -2253,7 +2267,7 @@ impl Session {
                 return Ok(resolution);
             }
             ReloadDisposition::PendingRediscovery | ReloadDisposition::ResumePastAssist => {
-                self.backend.continue_execution()?;
+                self.continue_backend(ContinueDisposition::Handled)?;
                 return Ok(StopResolution::Resumed);
             }
             ReloadDisposition::Ordinary => {}
@@ -2261,7 +2275,7 @@ impl Session {
 
         if event.modules_changed {
             self.refresh_modules_on_stop();
-            self.backend.continue_execution()?;
+            self.continue_backend(ContinueDisposition::Handled)?;
             return Ok(StopResolution::ModulesChanged);
         }
 
@@ -2292,13 +2306,16 @@ impl Session {
                 self.record_visible_stop(&resolution);
                 return Ok(resolution);
             }
-            WatchpointStopAction::Resumed => return Ok(StopResolution::Resumed),
+            WatchpointStopAction::Resumed => {
+                self.invalidate_running_context();
+                return Ok(StopResolution::Resumed);
+            }
             WatchpointStopAction::NotBreakpoint => {}
         }
 
         if stop_is_stray_single_step(&event, &self.breakpoints) {
             let _ = clear_trap_flag(self.backend.as_mut(), &self.register_map);
-            self.backend.continue_execution()?;
+            self.continue_backend(ContinueDisposition::Handled)?;
             return Ok(StopResolution::Resumed);
         }
 
@@ -2441,9 +2458,7 @@ impl Session {
                 {
                     // A policy with a command needs the REPL to run it, so it
                     // surfaces here; the command-free ones are pure run control.
-                    self.target.selected_frame = None;
-                    self.backend
-                        .continue_execution_with_disposition(disposition)?;
+                    self.continue_backend(disposition)?;
                     self.record_continuation_disposition(disposition);
                     continue;
                 }
