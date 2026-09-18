@@ -2073,25 +2073,40 @@ impl KdBackend {
     /// Whether `DbgKd{Read,Write}VirtualMemoryApi` resolves `addr` in the
     /// `root` address space. Kernel space is the same under every root, save
     /// session space, which the API resolves in the halted processor's
-    /// session (as WinDbg does); user space only under the root the current
+    /// session (as WinDbg does); user space only under the root the serving
     /// processor is running on.
     fn virtual_api_serves(&mut self, addr: VirtAddr, root: Dtb) -> bool {
         let kernel_space = match self.arch {
             Arch::Amd64 => addr.0 >> 63 != 0,
             Arch::Arm64 => addr.0 & (1 << 55) != 0,
         };
-        kernel_space || self.current_processor_runs_on(root)
+        kernel_space || self.serving_processor_runs_on(root)
     }
 
-    /// Whether `root` is the page-table root the current processor is
-    /// running on. AMD64 only: its CR3 sits in the special registers cached
-    /// per halt, while the ARM64 user root (TTBR0) would cost a request of
-    /// its own to learn.
-    fn current_processor_runs_on(&mut self, root: Dtb) -> bool {
+    /// Whether `root` is the page-table root the *serving* processor is
+    /// running on.
+    ///
+    /// The serving processor is the one that broke in, not the one the user
+    /// selected with `~Ns`: KD services every request on the processor that
+    /// entered the debugger, and the packet's `Processor` field selects a
+    /// register file, not an address space. Comparing the selected
+    /// processor's CR3 would authorize a user-space request that the target
+    /// then resolves in a different process.
+    ///
+    /// AMD64 only: CR3 sits in the special registers cached per halt, while
+    /// the ARM64 user root (TTBR0) would cost a request of its own to learn.
+    fn serving_processor_runs_on(&mut self, root: Dtb) -> bool {
         if self.arch != Arch::Amd64 || self.require_remote_memory_stopped().is_err() {
             return false;
         }
-        let Ok(special) = self.read_special_registers() else {
+        let processor = self.last_stop_processor;
+        if !self.special_register_cache.contains_key(&processor) {
+            let Ok(special) = self.read_special_registers_uncached(processor) else {
+                return false;
+            };
+            self.special_register_cache.insert(processor, special);
+        }
+        let Some(special) = self.special_register_cache.get(&processor) else {
             return false;
         };
         let cr3 = wire::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
