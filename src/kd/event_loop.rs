@@ -674,6 +674,9 @@ pub struct ContinueDrain {
     deadline: Instant,
     remaining: u32,
     interrupt_requested: Arc<AtomicBool>,
+    /// A break here was asked for and must be reported. See
+    /// [`crate::dbg_backend::DebugBackend::surface_next_break_at`].
+    surface_address: Option<u64>,
 }
 
 impl ContinueDrain {
@@ -687,6 +690,7 @@ impl ContinueDrain {
         managed_bp_addresses: HashSet<u64>,
         breakin_addresses: HashSet<u64>,
         register_map: RegisterMap,
+        surface_address: Option<u64>,
     ) -> Self {
         Self {
             resumed_from_rip,
@@ -696,6 +700,7 @@ impl ContinueDrain {
             deadline: Instant::now() + Self::WINDOW,
             remaining: Self::MAX_ABSORBED,
             interrupt_requested: Arc::new(AtomicBool::new(false)),
+            surface_address,
         }
     }
 
@@ -707,6 +712,7 @@ impl ContinueDrain {
 
     pub fn is_spurious(&self, stop: &StateChange) -> bool {
         if self.remaining == 0
+            || self.surface_address == Some(stop.program_counter)
             || Instant::now() >= self.deadline
             || self.interrupt_requested.load(Ordering::SeqCst)
             || stop.target_reloaded

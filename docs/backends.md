@@ -84,6 +84,14 @@ Three other ways to cut the cost: scope to a symbol the rest of the system does 
 
 A page the guest has trimmed out of a working set is usually still in RAM on the standby or modified list, with its PTE left in the *transition* state. Both the host page walk and the target read those, so trimmed memory keeps reading normally. Writes to such a page are refused: the kernel is free to repurpose the frame or re-read it from disk, so the edit would be lost or land somewhere unrelated.
 
+A page that has genuinely gone to disk reads as unavailable, and `.pagein` asks the guest to fetch it:
+
+```
+.pagein /p 5280 0x1048000
+```
+
+The guest's own debugger worker thread does the work, so the target is resumed and comes back halted at `nt!DbgBreakPointWithStatus` rather than wherever it was. Nothing can fault a page in while every processor is frozen, so that resume is inherent rather than an implementation choice. `/p` attaches the worker to a process first, which user-space addresses need.
+
 ## Memory introspection
 
 The `memory` backend requires no guest or VM debug transport configuration:

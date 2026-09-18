@@ -329,6 +329,25 @@ const SERVICE_IDLE_BUDGET: Duration = Duration::from_millis(5);
 /// `STATUS_BREAKPOINT`, the NTSTATUS an `int3` raises (e.g. `nt!DbgBreakPoint`).
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 
+/// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
+/// `DbgBreakPointWithStatus` when it has finished a [`Session::page_in`].
+const DBG_STATUS_WORKER: u64 = 7;
+
+/// How long [`Session::page_in`] lets the target run before giving up on the
+/// worker. The work is a DPC and a work item behind one resume; a second is
+/// already generous, and the guest may be busy.
+const PAGE_IN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What [`Session::page_in`] observed once the target came back.
+#[derive(Debug, Clone, Copy)]
+pub struct PageInReport {
+    /// The stop was the worker's completion break, not something else the
+    /// target hit while running.
+    pub from_worker: bool,
+    /// The requested address reads back in the current context.
+    pub resident: bool,
+}
+
 /// `STATUS_SINGLE_STEP`, the NTSTATUS a trap-flag single-step raises. During a
 /// run-control loop (continue / run-to) nobody is intentionally single-stepping;
 /// `si` steps via [`step_one_and_clear_tf`] directly, not the loop, so a
@@ -1900,6 +1919,94 @@ impl Session {
     /// REPL's continue loop does; those remain REPL concerns.
     pub fn resume(&mut self) -> Result<()> {
         self.resume_with_disposition(ContinueDisposition::Handled)
+    }
+
+    /// Ask the guest's own debugger worker to fault a page in, and wait for it
+    /// to report back.
+    ///
+    /// The kernel exposes this as three globals plus a flag. `KdExitDebugger`
+    /// runs on our own resume and calls `ExQueueDebuggerWorker`, which
+    /// compare-exchanges `ExpDebuggerWork` from 1 to 2 and queues a DPC; the
+    /// resulting work item runs `ExpDebuggerWorker`, which attaches to
+    /// `ExpDebuggerProcessAttach`, calls `MmPrefetchVirtualMemory` on
+    /// `ExpDebuggerPageIn`, and breaks in with `DbgBreakPointWithStatus(7)`
+    /// (`DBG_STATUS_WORKER`).
+    ///
+    /// Two consequences the caller cannot be shielded from: the target has to
+    /// **run** for the worker thread to be scheduled, and it comes back halted
+    /// at the worker rather than wherever it was. The worker zeroes all three
+    /// globals before doing any of the work, so an abandoned request leaves
+    /// nothing armed.
+    pub fn page_in(&mut self, address: VirtAddr, process: Option<u64>) -> Result<PageInReport> {
+        let worker_break = self.page_in_globals(address, process)?;
+        // The worker signals completion at the same address KD break-ins land
+        // on, which the transport would otherwise dismiss as its own noise.
+        self.backend.surface_next_break_at(Some(worker_break.0));
+        self.resume()?;
+        let cancel = AtomicBool::new(false);
+        let outcome = self.wait_for_stop_bounded(Some(PAGE_IN_TIMEOUT), &cancel);
+        self.backend.surface_next_break_at(None);
+        match outcome? {
+            ContinueOutcome::Running => Err(Error::DebugInfo(format!(
+                "the debugger worker did not report within {}s; the target is still running",
+                PAGE_IN_TIMEOUT.as_secs()
+            ))),
+            _ => Ok(self.page_in_result(address, worker_break)),
+        }
+    }
+
+    /// Arm the worker request. Every global is kernel data, so a mediated
+    /// virtual write reaches it under any process context.
+    fn page_in_globals(&mut self, address: VirtAddr, process: Option<u64>) -> Result<VirtAddr> {
+        let dtb = self.target.kernel_dtb();
+        let symbol = |name: &str| -> Result<VirtAddr> {
+            self.target
+                .symbols
+                .find_symbol_with_module(dtb, name)?
+                .map(|(address, _)| address)
+                .ok_or_else(|| {
+                    Error::DebugInfo(format!(
+                        "{name} is not in the kernel's symbols; .pagein needs ntoskrnl symbols"
+                    ))
+                })
+        };
+        let attach_global = symbol("nt!ExpDebuggerProcessAttach")?;
+        let page_in_global = symbol("nt!ExpDebuggerPageIn")?;
+        let work_global = symbol("nt!ExpDebuggerWork")?;
+        let worker_break = symbol("nt!DbgBreakPointWithStatus")?;
+
+        let memory = self.target.kernel_address_space();
+        memory.write_bytes(attach_global, &process.unwrap_or(0).to_le_bytes())?;
+        memory.write_bytes(page_in_global, &address.0.to_le_bytes())?;
+        // Exactly 1: `ExQueueDebuggerWorker` compare-exchanges 1 to 2, so any
+        // other non-zero value is ignored and the worker never runs.
+        memory.write_bytes(work_global, &1u32.to_le_bytes())?;
+        Ok(worker_break)
+    }
+
+    /// Classify the stop the wait produced and probe the requested page.
+    fn page_in_result(&mut self, address: VirtAddr, worker_break: VirtAddr) -> PageInReport {
+        let registers = self.backend.read_registers().ok();
+        let pc = registers
+            .as_ref()
+            .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
+        let status = registers
+            .as_ref()
+            .and_then(|regs| self.register_map.read_u64("rcx", regs).ok());
+        // `DbgBreakPointWithStatus` takes its status in the first argument
+        // register, so a worker break is distinguishable from any other
+        // hard-coded break at the same address.
+        let from_worker = pc == Some(worker_break.0) && status == Some(DBG_STATUS_WORKER);
+        let mut probe = [0u8; 1];
+        let resident = self
+            .target
+            .address_space(self.target.current_dtb())
+            .read_bytes(address, &mut probe)
+            .is_ok();
+        PageInReport {
+            from_worker,
+            resident,
+        }
     }
 
     /// Clear every inspection cache that cannot survive a crash/reboot command

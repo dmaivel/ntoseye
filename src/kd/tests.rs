@@ -796,6 +796,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         special_register_cache: HashMap::new(),
         stop_control_report: None,
         stop_was_managed_breakpoint: false,
+        surface_break_at: None,
         context_cache: HashMap::new(),
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
@@ -919,6 +920,7 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         special_register_cache: HashMap::new(),
         stop_control_report: None,
         stop_was_managed_breakpoint: false,
+        surface_break_at: None,
         context_cache: HashMap::new(),
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
@@ -1830,6 +1832,7 @@ fn continue_drains_in_place_rebreak_and_stale_breakin() {
             managed.iter().copied().collect(),
             HashSet::from([breakin]),
             context::build_register_map(),
+            None,
         )
     };
 
@@ -2271,6 +2274,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         HashSet::new(),
         HashSet::new(),
         context::build_register_map(),
+        None,
     );
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));

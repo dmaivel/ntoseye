@@ -23,6 +23,16 @@ const FILETIME_UNIX_MIN_SECONDS: i64 = -62_135_596_800;
 const FILETIME_UNIX_MAX_SECONDS: i64 = 253_402_300_799;
 
 repl_command! {
+    cmd_pagein;
+    names: [".pagein"],
+    usage: ".pagein [/p <pid|eprocess>] <address>",
+    summary: "Make a paged-out address resident, using the guest's debugger worker.",
+    details: "The guest does the work, so the target is resumed and comes back halted at nt!DbgBreakPointWithStatus rather than where it was. `/p` attaches the worker to a process first, which user-space addresses need.",
+    completion: [None, Expression],
+    run_state: Halted,
+}
+
+repl_command! {
     cmd_db;
     names: ["db"],
     usage: "db <address> [L<count>|length|end]",
@@ -472,6 +482,91 @@ impl ReplState<'_> {
 
     fn cmd_db(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         self.display_memory_command(&invocation, 128, 1, MemoryDisplayMode::bytes())
+    }
+
+    fn cmd_pagein(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let mut address_text = None;
+        let mut process_text = None;
+        let mut argv = invocation.argv.iter();
+        while let Some(arg) = argv.next() {
+            let arg = arg.as_ref();
+            match arg {
+                "/p" => {
+                    let Some(selector) = argv.next() else {
+                        error!("/p needs a PID or EPROCESS");
+                        return Ok(());
+                    };
+                    process_text = Some(selector.as_ref());
+                }
+                _ if arg.starts_with('/') => {
+                    error!("unknown .pagein switch '{arg}'; expected /p");
+                    return Ok(());
+                }
+                _ if address_text.replace(arg).is_some() => {
+                    error!(".pagein accepts one address");
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        let Some(address_text) = address_text else {
+            error!("usage: .pagein [/p <pid|eprocess>] <address>");
+            return Ok(());
+        };
+        let address = match Expr::eval_with_radix(address_text, &self.ctx.target, self.radix) {
+            Ok(value) => value,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+
+        let process = match process_text {
+            Some(selector) => {
+                let processes = match self.ctx.target.matching_processes(None) {
+                    Ok(processes) => processes,
+                    Err(error) => {
+                        error!("failed to enumerate processes: {error}");
+                        return Ok(());
+                    }
+                };
+                let Some(process) = self.process_for_selector(selector, &processes) else {
+                    error!("no process matches '{selector}'");
+                    return Ok(());
+                };
+                Some(process.eprocess_va.0)
+            }
+            None => None,
+        };
+
+        outln!("resuming the target so its debugger worker can run");
+        self.clear_selected_frame();
+        let report = match self.ctx.page_in(address, process) {
+            Ok(report) => report,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        if !report.from_worker {
+            error!(
+                "the target stopped for another reason before the worker reported; \
+                 {} may still be paged in",
+                ui::addr(address.0)
+            );
+            return Ok(());
+        }
+        if report.resident {
+            outln!("{} is resident", ui::addr(address.0));
+        } else {
+            // MmPrefetchVirtualMemory declines addresses that are not backed
+            // at all, and the worker reports completion either way.
+            error!(
+                "{} is still unreadable; it may be unmapped rather than paged out",
+                ui::addr(address.0)
+            );
+        }
+        Ok(())
     }
 
     fn cmd_dw(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

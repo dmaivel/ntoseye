@@ -1318,7 +1318,7 @@ impl ReplState<'_> {
             .process_for_cr3(self.ctx.target.current_dtb())
     }
 
-    fn process_for_selector(
+    pub fn process_for_selector(
         &self,
         selector: &str,
         processes: &[ProcessInfo],

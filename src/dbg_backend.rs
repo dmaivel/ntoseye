@@ -487,7 +487,14 @@ pub trait DebugBackend {
         None
     }
 
+    /// Report, rather than absorb, the next stop at `address` after a resume.
     ///
+    /// KD discards re-breaks at the address its own break-ins land on, which
+    /// is also where the guest's debugger worker signals completion with
+    /// `DbgBreakPointWithStatus`. This says one such break was asked for.
+    /// One-shot, consumed by the next resume.
+    fn surface_next_break_at(&mut self, _address: Option<u64>) {}
+
     fn set_breakpoint(&mut self, addr: u64) -> Result<()>;
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()>;
 

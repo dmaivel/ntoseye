@@ -738,6 +738,9 @@ pub struct KdBackend {
     /// sites. Recorded at the stop because the host disables that site before
     /// resuming, which erases the evidence from `managed_bp_addresses`.
     stop_was_managed_breakpoint: bool,
+    /// A break the host asked for and the pump must not absorb, consumed by
+    /// the next resume. See [`DebugBackend::surface_next_break_at`].
+    surface_break_at: Option<u64>,
     /// Avoid repeated round trips or timeouts after an ARM64 control-space read fails.
     special_registers_unsupported: bool,
     efer_cache: HashMap<u16, u64>,
@@ -1016,6 +1019,7 @@ impl KdBackend {
             context_cache: HashMap::new(),
             stop_control_report: None,
             stop_was_managed_breakpoint: false,
+            surface_break_at: None,
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
             virtual_lines: LineCache::default(),
@@ -1207,6 +1211,9 @@ impl KdBackend {
             && stop.exception_code == STATUS_BREAKPOINT
             && self.breakin_addresses.contains(&stop.program_counter)
             && !self.managed_bp_addresses.contains(&stop.program_counter)
+            // A break the host asked for is not assist noise, even though the
+            // guest signals it from the same address our break-ins land on.
+            && self.surface_break_at != Some(stop.program_counter)
     }
 
     fn mark_known_breakin_stop(&self, mut stop: StateChange) -> StateChange {
@@ -1311,6 +1318,9 @@ impl KdBackend {
         self.context_cache.clear();
         self.stop_control_report = stop.control_report.clone();
         self.stop_was_managed_breakpoint = managed_breakpoint_stop;
+        if self.surface_break_at == Some(stop.program_counter) {
+            self.surface_break_at = None;
+        }
         // EFER survives: the guest sets it once entering long mode and a
         // reload is the only way a processor's value can differ from the one
         // we read. Re-reading it per stop costs an MSR round trip in every
@@ -2443,6 +2453,10 @@ impl DebugBackend for KdBackend {
         self.stop_control_report.as_ref()?.amd64_trap_state()
     }
 
+    fn surface_next_break_at(&mut self, address: Option<u64>) {
+        self.surface_break_at = address;
+    }
+
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
         let processor = self.current_processor;
         // The written values become the truth only once the target has them.
@@ -2848,6 +2862,7 @@ impl DebugBackend for KdBackend {
             self.managed_bp_addresses.clone(),
             self.breakin_addresses.clone(),
             self.register_map.clone(),
+            self.surface_break_at,
         );
         let reconnect_assist_after_continue = self.reconnect_assist_after_continue;
         kd_trace!(
@@ -3059,6 +3074,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn stop_trap_state(&mut self) -> Option<TrapState> {
         self.lock().stop_trap_state()
+    }
+
+    fn surface_next_break_at(&mut self, address: Option<u64>) {
+        self.lock().surface_next_break_at(address);
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
