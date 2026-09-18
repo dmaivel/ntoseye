@@ -318,6 +318,52 @@ fn state_change_carries_the_amd64_control_report() {
 }
 
 #[test]
+fn a_stop_report_answers_for_the_trap_state_until_the_target_runs() {
+    const TF: u64 = 1 << 8;
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+
+    let mut report = vec![0u8; AMD64_CONTROL_REPORT_SIZE];
+    wire::write_u64(&mut report, AMD64_CONTROL_DR6_OFFSET, 0xffff_0ff0 | 0x4000);
+    wire::write_u32(
+        &mut report,
+        AMD64_CONTROL_EFLAGS_OFFSET,
+        (TF | 0x246) as u32,
+    );
+    let stop = StateChange {
+        processor: 0,
+        number_processors: 1,
+        new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
+        exception_code: STATUS_SINGLE_STEP,
+        exception_first_chance: Some(true),
+        exception_address: None,
+        program_counter: 0xffff_f800_0011_2233,
+        kernel_base_hint: None,
+        is_bugcheck: false,
+        bugcheck: None,
+        target_reloaded: false,
+        assisted_breakin: false,
+        control_report: Some(ControlReport(report)),
+    };
+
+    // The socket has no reader, so anything that reached for a CONTEXT here
+    // would block rather than answer.
+    backend.record_stop(&stop);
+    let trap = backend
+        .stop_trap_state()
+        .expect("the stop reported TF and DR6");
+    assert_eq!(trap.eflags, TF | 0x246);
+    assert_eq!(trap.dr6, 0xffff_0ff0 | 0x4000);
+    assert!(!trap.is_clean(), "a single-step stop has residue to clear");
+
+    backend.record_running();
+    assert!(
+        backend.stop_trap_state().is_none(),
+        "a running target has no reported state to serve"
+    );
+}
+
+#[test]
 fn stop_event_flags_surfaced_load_symbols_as_bugcheck() {
     let stop = StateChange {
         processor: 0,
@@ -793,11 +839,9 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         managed_bp_addresses: HashSet::new(),
         breakin_addresses: HashSet::new(),
         pending_write_breakpoint: None,
-        special_register_cache: HashMap::new(),
-        stop_control_report: None,
+        registers: HaltRegisters::default(),
         stop_was_managed_breakpoint: false,
         surface_break_at: None,
-        context_cache: HashMap::new(),
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
         virtual_lines: LineCache::default(),
@@ -917,11 +961,9 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         managed_bp_addresses: HashSet::new(),
         breakin_addresses: HashSet::new(),
         pending_write_breakpoint: None,
-        special_register_cache: HashMap::new(),
-        stop_control_report: None,
+        registers: HaltRegisters::default(),
         stop_was_managed_breakpoint: false,
         surface_break_at: None,
-        context_cache: HashMap::new(),
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
         virtual_lines: LineCache::default(),
@@ -1553,7 +1595,7 @@ fn user_space_of_the_current_process_is_read_in_one_request() {
             CURRENT_CR3 | 0x1,
         );
         let processor = backend.current_processor;
-        backend.special_register_cache.insert(processor, special);
+        backend.registers.set_special(processor, special);
 
         let mut out = [0u8; 4];
         // Another process's user space still needs the host walk.

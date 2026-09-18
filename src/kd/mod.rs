@@ -63,9 +63,11 @@ pub mod api;
 pub mod context;
 pub mod context_arm64;
 pub mod framing;
+mod halt;
 pub mod hwbp;
 mod kdnet;
 mod transport;
+use halt::HaltRegisters;
 use kdnet::KdNetStream;
 use transport::KdTransport;
 
@@ -728,12 +730,10 @@ pub struct KdBackend {
     managed_bp_addresses: HashSet<u64>,
     breakin_addresses: HashSet<u64>,
     pending_write_breakpoint: Option<PendingWriteBreakpoint>,
-    special_register_cache: HashMap<u16, Vec<u8>>,
-    /// Per-processor `CONTEXT` for the current halt. See [`Self::read_registers`].
-    context_cache: HashMap<u16, Vec<u8>>,
-    /// The current stop's control report, dropped as soon as a host register
-    /// write can have outdated it. See [`ControlReport`].
-    stop_control_report: Option<ControlReport>,
+    /// Per-processor register state for the current halt: the fetched
+    /// `CONTEXT` and `KSPECIAL_REGISTERS`, and what the stop reported without
+    /// a fetch. See [`HaltRegisters`].
+    registers: HaltRegisters,
     /// Whether the current stop was an `int3` at one of our own installed
     /// sites. Recorded at the stop because the host disables that site before
     /// resuming, which erases the evidence from `managed_bp_addresses`.
@@ -1015,9 +1015,7 @@ impl KdBackend {
             breakin_addresses,
             pending_write_breakpoint: None,
             reconnect_assist_after_continue: None,
-            special_register_cache: HashMap::new(),
-            context_cache: HashMap::new(),
-            stop_control_report: None,
+            registers: HaltRegisters::default(),
             stop_was_managed_breakpoint: false,
             surface_break_at: None,
             special_registers_unsupported: false,
@@ -1314,9 +1312,8 @@ impl KdBackend {
         self.last_stop_processor = stop.processor;
         self.last_exception_code = stop.exception_code;
         self.last_rip = stop.program_counter;
-        self.special_register_cache.clear();
-        self.context_cache.clear();
-        self.stop_control_report = stop.control_report.clone();
+        self.registers
+            .stopped(stop.processor, stop.control_report.clone());
         self.stop_was_managed_breakpoint = managed_breakpoint_stop;
         if self.surface_break_at == Some(stop.program_counter) {
             self.surface_break_at = None;
@@ -1333,9 +1330,7 @@ impl KdBackend {
 
     fn record_running(&mut self) {
         self.link.set_inline_running(true);
-        self.special_register_cache.clear();
-        self.context_cache.clear();
-        self.stop_control_report = None;
+        self.registers.running();
         self.stop_was_managed_breakpoint = false;
         self.virtual_lines.clear();
         self.table_lines.clear();
@@ -1426,8 +1421,7 @@ impl KdBackend {
         );
         // The PC goes straight through the context API, behind
         // `write_registers` and its cache invalidation.
-        self.context_cache.remove(&processor);
-        self.stop_control_report = None;
+        self.registers.invalidate(processor);
         advance_pc_past_breakpoint(
             self.link.framing(self.running_reason)?,
             &register_map,
@@ -1448,7 +1442,7 @@ impl KdBackend {
         processor: u16,
         register_map: &RegisterMap,
     ) -> Result<u64> {
-        if let Some(context) = self.context_cache.get(&processor)
+        if let Some(context) = self.registers.context(processor)
             && let Ok(pc) = register_map.read_u64("rip", context)
         {
             return Ok(pc);
@@ -1678,23 +1672,18 @@ impl KdBackend {
                 expected_size,
             )));
         }
-        self.special_register_cache.insert(processor, special);
+        self.registers.set_special(processor, special);
         Ok(())
     }
 
     fn read_special_registers(&mut self) -> Result<&[u8]> {
-        if !self
-            .special_register_cache
-            .contains_key(&self.current_processor)
-        {
-            let processor = self.current_processor;
+        let processor = self.current_processor;
+        if self.registers.special(processor).is_none() {
             let data = self.read_special_registers_uncached(processor)?;
-            self.special_register_cache.insert(processor, data);
+            self.registers.set_special(processor, data);
         }
-
-        self.special_register_cache
-            .get(&self.current_processor)
-            .map(Vec::as_slice)
+        self.registers
+            .special(processor)
             .ok_or_else(|| Error::Kd("special-register cache lookup failed".into()))
     }
 
@@ -1708,9 +1697,8 @@ impl KdBackend {
             self.special_registers_unsupported = true;
             return None;
         }
-        self.special_register_cache
-            .get(&self.current_processor)
-            .map(Vec::as_slice)
+        self.registers
+            .special(self.current_processor)
             .filter(|special| special.len() >= ARM64_KSPECIAL_REGISTERS_MIN_SIZE)
     }
 
@@ -1782,15 +1770,17 @@ impl KdBackend {
             Arch::Amd64 => {
                 // The stop reported DR7, so a resume that read no special
                 // registers needs none: only a host write can have changed
-                // it, and that drops the report along with the cache.
-                let reported_dr7 = (processor == self.last_stop_processor)
-                    .then(|| self.stop_control_report.as_ref()?.amd64_dr7())
-                    .flatten();
-                if reported_dr7.is_none() && !self.special_register_cache.contains_key(&processor) {
+                // it, and that drops the report along with the rest of the
+                // processor's halt state.
+                let reported_dr7 = self
+                    .registers
+                    .report(processor)
+                    .and_then(ControlReport::amd64_dr7);
+                if reported_dr7.is_none() && self.registers.special(processor).is_none() {
                     let special = self.read_special_registers_uncached(processor)?;
-                    self.special_register_cache.insert(processor, special);
+                    self.registers.set_special(processor, special);
                 }
-                let dr7 = match self.special_register_cache.get(&processor) {
+                let dr7 = match self.registers.special(processor) {
                     // A `ba` installed during this halt wrote the cache; it
                     // is newer than the report.
                     Some(special) => wire::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET),
@@ -2210,13 +2200,13 @@ impl KdBackend {
             return false;
         }
         let processor = self.last_stop_processor;
-        if !self.special_register_cache.contains_key(&processor) {
+        if self.registers.special(processor).is_none() {
             let Ok(special) = self.read_special_registers_uncached(processor) else {
                 return false;
             };
-            self.special_register_cache.insert(processor, special);
+            self.registers.set_special(processor, special);
         }
-        let Some(special) = self.special_register_cache.get(&processor) else {
+        let Some(special) = self.registers.special(processor) else {
             return false;
         };
         let cr3 = wire::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
@@ -2398,11 +2388,11 @@ impl DebugBackend for KdBackend {
     /// `int3` rewind, the stop classification, the step-over and the trap-flag
     /// cleanup all want the same bytes. Nothing but this debugger can change
     /// them while the target is halted, so the fetch happens once and is
-    /// invalidated on resume and after a write, the same contract as
-    /// `special_register_cache`.
+    /// invalidated on resume and after a write, along with the rest of the
+    /// processor's halt state. See [`HaltRegisters`].
     fn read_registers(&mut self) -> Result<Vec<u8>> {
-        if let Some(cached) = self.context_cache.get(&self.current_processor) {
-            return Ok(cached.clone());
+        if let Some(cached) = self.registers.context(self.current_processor) {
+            return Ok(cached.to_vec());
         }
         kd_trace!(
             "kd: read_registers: GetContext on p{}",
@@ -2439,7 +2429,7 @@ impl DebugBackend for KdBackend {
             let sp = self.register_map.read_u64("sp", &ctx).unwrap_or(0);
             kd_trace!("kd: read_registers: cr3={cr3:#x} pc={pc:#x} sp={sp:#x}");
         }
-        self.context_cache.insert(processor, ctx.clone());
+        self.registers.set_context(processor, ctx.clone());
         Ok(ctx)
     }
 
@@ -2450,7 +2440,9 @@ impl DebugBackend for KdBackend {
         if self.arch != Arch::Amd64 {
             return None;
         }
-        self.stop_control_report.as_ref()?.amd64_trap_state()
+        self.registers
+            .report(self.current_processor)?
+            .amd64_trap_state()
     }
 
     fn surface_next_break_at(&mut self, address: Option<u64>) {
@@ -2459,11 +2451,9 @@ impl DebugBackend for KdBackend {
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
         let processor = self.current_processor;
-        // The written values become the truth only once the target has them.
-        self.context_cache.remove(&processor);
-        // The stop reported TF and DR6 before this write; they are the host's
-        // now.
-        self.stop_control_report = None;
+        // Everything the host holds about this processor described the state
+        // before the write, the stop's report of TF and DR6 included.
+        self.registers.invalidate(processor);
         match self.arch {
             Arch::Amd64 => {
                 let context = context_payload(data)?;
