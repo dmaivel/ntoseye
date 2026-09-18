@@ -151,6 +151,9 @@ pub struct VtopDetail {
     pub levels: Vec<VtopLevel>,
     pub physical: Option<u64>,
     pub large: bool,
+    /// The leaf was a transition PTE: `physical` is a real frame the guest
+    /// still holds, but nothing maps it here and it cannot be written.
+    pub transition: bool,
 }
 
 /// One reverse page-table mapping found by `!ptov`.
@@ -928,6 +931,10 @@ impl Target {
                 .address_space(dtb)
                 .virt_to_phys(address)?
                 .map(|translation| translation.address);
+            let walk_transition = walk
+                .pte
+                .as_ref()
+                .is_some_and(|level| level.value.is_transition());
             let large_entry = walk
                 .pde
                 .as_ref()
@@ -949,6 +956,7 @@ impl Target {
                 levels,
                 physical,
                 large,
+                transition: physical.is_some() && walk_transition,
             });
         }
         if self.arch() != Arch::Amd64 {
@@ -959,6 +967,7 @@ impl Target {
                 levels: Vec::new(),
                 physical: translation.map(|value| value.address),
                 large: translation.is_some_and(|value| value.large),
+                transition: translation.is_some_and(|value| value.transition),
             });
         }
         explicit_amd64_walk(self, dtb, address)
@@ -1561,6 +1570,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             levels: Vec::new(),
             physical: Some(va.0),
             large: false,
+            transition: false,
         });
     }
     let root = dtb & PFN_MASK;
@@ -1582,6 +1592,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             levels,
             physical: None,
             large: false,
+            transition: false,
         });
     }
     let pdpt_address = pml4e
@@ -1601,6 +1612,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             levels,
             physical: None,
             large: false,
+            transition: false,
         });
     }
     if pdpte.is_large_page() {
@@ -1611,6 +1623,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             levels,
             physical: frame.checked_add(va.huge_page_offset()),
             large: true,
+            transition: false,
         });
     }
     let pde_address = pdpte
@@ -1630,6 +1643,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             levels,
             physical: None,
             large: false,
+            transition: false,
         });
     }
     if pde.is_large_page() {
@@ -1639,6 +1653,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             dtb,
             levels,
             physical: frame.checked_add(va.large_page_offset()),
+            transition: false,
             large: true,
         });
     }
@@ -1652,14 +1667,16 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         address: VirtAddr(pte_address),
         value: pte.0,
     });
+    // A transition leaf still names the frame the guest holds, and reads go
+    // through it, so reporting it unmapped here would contradict them.
+    let transition = pte.is_transition();
     Ok(VtopDetail {
         address: va,
         dtb,
         levels,
-        physical: pte
-            .is_present()
-            .then(|| pte.page_frame() + va.page_offset()),
+        physical: (pte.is_present() || transition).then(|| pte.page_frame() + va.page_offset()),
         large: false,
+        transition,
     })
 }
 

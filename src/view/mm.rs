@@ -220,6 +220,7 @@ pub fn vtop(detail: &VtopDetail) -> View {
         ),
         ("physical", View::OptHex(detail.physical)),
         ("large", View::Bool(detail.large)),
+        ("transition", View::Bool(detail.transition)),
     ])
 }
 

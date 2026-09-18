@@ -336,6 +336,9 @@ fn print_vtop(detail: &VtopDetail) {
         Some(physical) => outln!("  physical             : {}", ui::addr(physical)),
         None => outln!("  physical             : <not mapped>"),
     }
+    if detail.transition {
+        outln!("  mapping              : transition (resident, not mapped; read-only)");
+    }
     if detail.large {
         outln!("  mapping              : large page");
     }
