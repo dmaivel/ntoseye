@@ -55,13 +55,8 @@ struct Args {
     kd_instructions: bool,
 
     /// debugger backend: 'kd' (Windows KD over serial, default), 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub), or 'memory' (passive live-VM introspection)
-    #[argh(
-        option,
-        short = 'b',
-        long = "backend",
-        default = "BackendArg(Backend::Kd)"
-    )]
-    backend: BackendArg,
+    #[argh(option, short = 'b', long = "backend")]
+    backend: Option<BackendArg>,
 
     /// backend target: GDB address, KD socket path, or KDNET listen address; unused by memory
     #[argh(option, long = "connect")]
@@ -277,7 +272,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let backend = args.backend.0;
+    let backend = args.backend.map_or(Backend::Kd, |arg| arg.0);
     if backend != Backend::KdNet && args.kdnet_key.is_some() {
         return Err(Error::DebugInfo(
             "--kdnet-key is only valid with --backend kdnet".to_string(),
@@ -401,21 +396,24 @@ fn server_startup_spec(
     if let Some(dump) = args.dump.clone() {
         return Some(TargetSpec::Dump(dump));
     }
+    // Naming a backend is the operator saying what to attach to, so it
+    // attaches, at the same default endpoint the REPL would use. KDNET is the
+    // exception: its key is not guessable. Without `--backend` the default is
+    // KD, which must not grab a socket nobody asked about.
     if args.connect.is_some()
-        || backend == Backend::Memory
+        || (args.backend.is_some() && backend != Backend::KdNet)
         || (backend == Backend::KdNet && args.kdnet_key.is_some())
     {
         return Some(live_spec(args, backend));
     }
-    if backend == Backend::Kd {
+    if backend == Backend::KdNet {
         eprintln!(
-            "{tool}: note: pass --connect {DEFAULT_KD_SOCKET} to auto-attach at startup, \
-             or {client_attach_hint}"
+            "{tool}: note: --backend kdnet needs --kdnet-key to auto-attach at startup; {client_attach_hint}"
         );
     } else {
         eprintln!(
-            "{tool}: note: --backend {backend} has no effect without --connect; \
-             {client_attach_hint}, or pass --connect to auto-attach at startup"
+            "{tool}: note: pass --connect {DEFAULT_KD_SOCKET} to auto-attach at startup, \
+             or {client_attach_hint}"
         );
     }
     None
