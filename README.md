@@ -7,7 +7,7 @@
 [![crates.io](https://img.shields.io/crates/v/ntoseye?style=flat-square&labelColor=1c1c1c&logo=rust&logoColor=white)](https://crates.io/crates/ntoseye)
 [![docs.rs](https://img.shields.io/docsrs/ntoseye?style=flat-square&labelColor=1c1c1c&logo=docsdotrs&logoColor=white)](https://docs.rs/ntoseye)
 
-A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode and user-mode debugging in virtual machines and offline crash-dump analysis.
+A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode and user-mode debugging of virtual and physical machines, and offline crash-dump analysis.
 
 ## Showcase
 
