@@ -66,7 +66,10 @@ pub struct BugcheckAnalysis {
     pub fault: Option<BugcheckFault>,
     /// Trap frames named by the bugcheck parameters, decoded from the guest.
     pub trap_frames: Vec<BugcheckTrapFrame>,
-    /// Where the data came from (e.g. an indirection through `nt!KiBugCheckData`).
+    /// Set only when the data was not where it should have been, naming
+    /// where it was instead: `nt!KiBugCheckData` holding a pointer to the
+    /// real slots rather than the slots themselves. `None` is the normal
+    /// case, including every bugcheck the target reported itself.
     pub source: Option<String>,
 }
 
