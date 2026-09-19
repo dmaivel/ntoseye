@@ -25,10 +25,26 @@ mod platform {
         Vmware,
     }
 
+    /// How guest RAM sits in the guest-physical address space. This follows
+    /// the guest architecture, not the hypervisor: x86 machines map RAM from
+    /// 0 around a 32-bit MMIO hole, while QEMU's aarch64 `virt` machine puts
+    /// one contiguous block at 1 GiB with firmware and MMIO below it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RamLayout {
+        X86 { hole_start: u64 },
+        Aarch64Virt,
+    }
+
+    /// Base of the `virt` machine's RAM. Everything below is flash and MMIO.
+    const AARCH64_VIRT_RAM_BASE: u64 = 0x4000_0000;
+
+    /// Top of the 32-bit MMIO hole on x86 machines; RAM resumes at 4 GiB.
+    const X86_MMIO_HOLE_END: u64 = 0x1_0000_0000;
+
     pub struct VmHandle {
         memory: MemoryRegion,
         pid: Pid,
-        hv: HvKind,
+        layout: RamLayout,
     }
 
     fn read_comm(pid: i32) -> Option<String> {
@@ -77,6 +93,33 @@ mod platform {
             }
         }
         None
+    }
+
+    /// Whether the VM process is an AArch64 QEMU. The guest architecture is
+    /// not discoverable from the mapping itself, and reading guest RAM is
+    /// what discovery needs first, so the emulator binary's name decides it.
+    fn is_aarch64_qemu(pid: i32) -> bool {
+        let named_aarch64 = |name: &str| name.contains("aarch64");
+        if let Ok(exe) = fs::read_link(format!("/proc/{}/exe", pid))
+            && let Some(name) = exe.file_name().and_then(|name| name.to_str())
+        {
+            return named_aarch64(name);
+        }
+        // `comm` is truncated to 15 bytes ("qemu-system-aar"), which still
+        // carries enough of the name to tell the emulators apart.
+        read_comm(pid).is_some_and(|comm| named_aarch64(&comm))
+    }
+
+    fn ram_layout(pid: i32, hv: HvKind) -> RamLayout {
+        match hv {
+            HvKind::Kvm if is_aarch64_qemu(pid) => RamLayout::Aarch64Virt,
+            HvKind::Kvm => RamLayout::X86 {
+                hole_start: 0x8000_0000,
+            },
+            HvKind::Vmware => RamLayout::X86 {
+                hole_start: 0xC000_0000,
+            },
+        }
     }
 
     fn find_vm_pid() -> Result<(i32, HvKind)> {
@@ -129,26 +172,29 @@ mod platform {
     }
 
     /// Offset of a guest-physical address into the VM's RAM mapping, or
-    /// `None` inside the 32-bit MMIO hole, which no RAM backs (mapping it
-    /// anywhere would alias real pages).
-    fn mmio_hole(hv: HvKind) -> (u64, u64) {
-        let start = match hv {
-            HvKind::Kvm => 0x8000_0000,
-            HvKind::Vmware => 0xC000_0000,
-        };
-        (start, 0x1_0000_0000)
-    }
-
-    fn gpa_to_offset(hv: HvKind, gpa: PhysAddr) -> Option<u64> {
-        // Low RAM is identity-mapped up to the hole; RAM above 4 GiB follows
-        // it in the mapping, so the hole's size is subtracted.
-        let (hole_start, hole_end) = mmio_hole(hv);
-        if gpa < hole_start {
-            Some(gpa)
-        } else if gpa < hole_end {
-            None
-        } else {
-            Some(gpa - (hole_end - hole_start))
+    /// `None` where no RAM backs it: the x86 32-bit MMIO hole, or anything
+    /// below an AArch64 guest's RAM base. Mapping either one anywhere would
+    /// alias real pages.
+    fn gpa_to_offset(layout: RamLayout, gpa: PhysAddr) -> Option<u64> {
+        match layout {
+            // Low RAM is identity-mapped up to the hole; RAM above 4 GiB
+            // follows it in the mapping, so the hole's size is subtracted.
+            RamLayout::X86 { hole_start } => {
+                if gpa < hole_start {
+                    Some(gpa)
+                } else if gpa < X86_MMIO_HOLE_END {
+                    None
+                } else {
+                    Some(gpa - (X86_MMIO_HOLE_END - hole_start))
+                }
+            }
+            RamLayout::Aarch64Virt => {
+                if gpa < AARCH64_VIRT_RAM_BASE {
+                    None
+                } else {
+                    Some(gpa - AARCH64_VIRT_RAM_BASE)
+                }
+            }
         }
     }
 
@@ -182,33 +228,37 @@ mod platform {
             Ok(Self {
                 memory,
                 pid: nix_pid,
-                hv,
+                layout: ram_layout(pid, hv),
             })
         }
 
         pub fn ram_base(&self) -> u64 {
-            // x86 QEMU/VMware guests map RAM from GPA 0.
-            0
+            match self.layout {
+                RamLayout::X86 { .. } => 0,
+                RamLayout::Aarch64Virt => AARCH64_VIRT_RAM_BASE,
+            }
         }
 
         pub fn ram_size(&self) -> u64 {
             self.memory.length
         }
 
-        /// Guest-physical RAM as `(base, len)` runs: low RAM up to the
-        /// hypervisor's 32-bit MMIO hole, then the remainder from 4 GiB.
-        /// Inverse of [`gpa_to_offset`].
+        /// Guest-physical RAM as `(base, len)` runs: on x86, low RAM up to
+        /// the hypervisor's 32-bit MMIO hole and the remainder from 4 GiB;
+        /// on AArch64, one run from the RAM base. Inverse of
+        /// [`gpa_to_offset`].
         pub fn ram_runs(&self) -> Vec<(u64, u64)> {
-            let (hole_start, hole_end) = mmio_hole(self.hv);
             let size = self.memory.length;
-            if size <= hole_start {
-                vec![(0, size)]
-            } else {
-                vec![(0, hole_start), (hole_end, size - hole_start)]
+            match self.layout {
+                RamLayout::X86 { hole_start } if size > hole_start => {
+                    vec![(0, hole_start), (X86_MMIO_HOLE_END, size - hole_start)]
+                }
+                RamLayout::X86 { .. } => vec![(0, size)],
+                RamLayout::Aarch64Virt => vec![(AARCH64_VIRT_RAM_BASE, size)],
             }
         }
         fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
-            let hva = gpa_to_offset(self.hv, addr)
+            let hva = gpa_to_offset(self.layout, addr)
                 .and_then(|offset| self.memory.start.checked_add(offset))
                 .ok_or(Error::BadPhysicalAddress(addr))?;
             let end = hva
@@ -260,6 +310,59 @@ mod platform {
             assert_eq!(parse_pid(OsStr::new("fb")), None);
             assert_eq!(parse_pid(OsStr::new("self")), None);
             assert_eq!(parse_pid(OsStr::new("thread-self")), None);
+        }
+
+        #[test]
+        fn x86_guest_ram_skips_the_32_bit_mmio_hole() {
+            let layout = RamLayout::X86 {
+                hole_start: 0x8000_0000,
+            };
+
+            assert_eq!(gpa_to_offset(layout, 0), Some(0));
+            assert_eq!(gpa_to_offset(layout, 0x7FFF_FFFF), Some(0x7FFF_FFFF));
+            // No RAM backs the hole; mapping it would alias real pages.
+            assert_eq!(gpa_to_offset(layout, 0x8000_0000), None);
+            assert_eq!(gpa_to_offset(layout, 0xFFFF_FFFF), None);
+            // RAM resumes at 4 GiB, packed against the low RAM before it.
+            assert_eq!(gpa_to_offset(layout, 0x1_0000_0000), Some(0x8000_0000));
+        }
+
+        #[test]
+        fn aarch64_guest_ram_starts_at_the_virt_machine_base() {
+            let layout = RamLayout::Aarch64Virt;
+
+            // Flash and MMIO live below the base, not RAM.
+            assert_eq!(gpa_to_offset(layout, 0x3FFF_FFFF), None);
+            assert_eq!(gpa_to_offset(layout, 0x4000_0000), Some(0));
+            assert_eq!(gpa_to_offset(layout, 0x4000_1000), Some(0x1000));
+        }
+
+        #[test]
+        fn ram_runs_report_where_each_layout_puts_its_memory() {
+            let handle = |layout, length| VmHandle {
+                memory: MemoryRegion {
+                    start: 0x7F00_0000_0000,
+                    end: 0x7F00_0000_0000 + length,
+                    length,
+                },
+                pid: Pid::from_raw(1),
+                layout,
+            };
+            let x86 = RamLayout::X86 {
+                hole_start: 0x8000_0000,
+            };
+
+            // 1 GiB fits below the hole, so it is one run from 0.
+            assert_eq!(handle(x86, 0x4000_0000).ram_runs(), vec![(0, 0x4000_0000)]);
+            // 4 GiB does not, so the top 2 GiB moves above the hole.
+            assert_eq!(
+                handle(x86, 0x1_0000_0000).ram_runs(),
+                vec![(0, 0x8000_0000), (0x1_0000_0000, 0x8000_0000)]
+            );
+            assert_eq!(
+                handle(RamLayout::Aarch64Virt, 0x1_0000_0000).ram_runs(),
+                vec![(0x4000_0000, 0x1_0000_0000)]
+            );
         }
     }
 }
