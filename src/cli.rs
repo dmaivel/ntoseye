@@ -155,7 +155,9 @@ struct StatusCommand {}
 
 static GDBSTUB_INSTRUCTIONS: &str = "The gdb backend talks to QEMU's gdbstub instead of Windows KD.
 It does not require Windows debug mode, but it loses Windows-native
-KD behavior such as bugcheck debug text and KD reboot signaling.
+KD behavior such as debug output and KD reboot signaling. A bugcheck is
+still caught: the debugger breaks on nt!KeBugCheckEx and reads the code
+from the call itself.
 
 To enable it, pass the following arguments to QEMU:
 

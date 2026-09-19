@@ -1,7 +1,9 @@
 //! Presentation-free crash triage aggregation shared by debugger frontends.
 
 use crate::backend::MemoryOps;
-use crate::bugchecks::{BugcheckAnalysis, bugcheck_from_dump_info, current_bugcheck};
+use crate::bugchecks::{
+    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
+};
 use crate::dmp::{
     DmpBlackboxStream, DmpException, DmpInfo, DmpSystemInfo, TriageCrashInfo, UnloadedDriver,
 };
@@ -200,8 +202,18 @@ impl TriageReport {
     /// still produces the directly available crash/status data.
     pub fn build(session: &mut Session) -> Self {
         let status = session.run_status();
-        let bugcheck =
-            current_bugcheck(&session.target).or_else(|| bugcheck_from_dump_info(&session.target));
+        // The stop's own bugcheck comes first. A target that reports the
+        // crash itself (KD) and one trapped at `nt!KeBugCheckEx` both carry
+        // it on the event, and in the trapped case nothing has written
+        // `nt!KiBugCheckData` yet: the call that fills it has not run.
+        let reported = session
+            .last_event
+            .as_ref()
+            .and_then(|event| event.stop.bugcheck.clone());
+        let bugcheck = reported
+            .map(|info| analyze_bugcheck(&session.target, &info))
+            .or_else(|| current_bugcheck(&session.target))
+            .or_else(|| bugcheck_from_dump_info(&session.target));
         let mut warnings = Vec::new();
         let backtrace = if status.running {
             None

@@ -1546,6 +1546,7 @@ dependencies = [
  "nu-ansi-term",
  "nucleo-matcher",
  "owo-colors",
+ "parking_lot",
  "pdb2",
  "pelite",
  "pyo3",

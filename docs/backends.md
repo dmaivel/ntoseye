@@ -15,6 +15,9 @@
 | Hardware watchpoints | Yes | Yes | No | No | No |
 | Model-specific registers | Yes | Yes | No | No | No |
 | Reboot / forced crash | Yes | Yes | No | No | No |
+| Bugcheck stops | Reported by the target | Reported by the target | Trapped at `nt!KeBugCheckEx` | No | Read from the dump |
+
+A bugcheck reaches KD as a fatal-error report from the target itself. A hypervisor GDB stub reports nothing, so a crash would otherwise pass unnoticed while the guest blue-screens and reboots. On a backend that cannot report a bugcheck, `ntoseye` breaks on `nt!KeBugCheckEx` instead and reads the code and its four parameters from the call's arguments. The stop therefore lands on the first instruction of `KeBugCheckEx`, with the faulting driver still on the stack. `nt!KiBugCheckData` is not used there: the code that fills it has not run yet.
 
 ## Hypervisor setup
 

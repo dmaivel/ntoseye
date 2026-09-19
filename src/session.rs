@@ -386,6 +386,10 @@ pub struct Session {
     /// stops the backend's reconnect-assist poking. The single owner of that
     /// state; hosts read it rather than reimplement it.
     pub reload_module_list_pending: bool,
+    /// Address of the automatic `nt!KeBugCheckEx` breakpoint, once armed.
+    /// Only backends that cannot report a bugcheck themselves get one; see
+    /// [`Self::arm_bugcheck_trap`].
+    bugcheck_trap: Option<VirtAddr>,
     /// Whether a detected reload has not yet been surfaced to the host: the
     /// guest-state rebuild failed at the detection stop, so no
     /// [`ContinueOutcome::TargetReloaded`] went out. While set, the eventual
@@ -648,6 +652,7 @@ impl Session {
             exception_policies: ExceptionPolicyTable::default(),
             parked_windows_thread: None,
             reload_module_list_pending: false,
+            bugcheck_trap: None,
             reload_surface_pending: false,
             parked_stop: None,
             module_refresh_report: None,
@@ -1563,6 +1568,82 @@ impl Session {
         Ok(BreakpointScope::process(&process))
     }
 
+    /// Arm an automatic breakpoint on `nt!KeBugCheckEx` when the backend
+    /// cannot recognize a bugcheck on its own.
+    ///
+    /// KD learns of a crash from the target itself; a hypervisor stub never
+    /// does, so the crash is only observable by stopping the guest as it
+    /// enters the bugcheck. Retried on every resume: the site needs kernel
+    /// symbols, which land after attach and move across a reboot.
+    fn arm_bugcheck_trap(&mut self) {
+        let detects_bugchecks =
+            self.backend.capabilities().iter().any(|entry| {
+                entry.capability == DebugCapability::BugcheckDetection && entry.supported
+            });
+        if self.bugcheck_trap.is_some() || detects_bugchecks {
+            return;
+        }
+        let Some(guest) = self.target.guest.as_ref() else {
+            return;
+        };
+        let kernel_dtb = guest.ntoskrnl.dtb();
+        let Ok(Some(address)) = self
+            .target
+            .symbols
+            .find_symbol_across_modules(kernel_dtb, "nt!KeBugCheckEx")
+        else {
+            return;
+        };
+        match self.backend.set_breakpoint(address.0) {
+            Ok(()) => {
+                self.bugcheck_trap = Some(address);
+                self.notices.push(format!(
+                    "armed a bugcheck trap at nt!KeBugCheckEx ({:#x}); the {} backend cannot detect a bugcheck by itself",
+                    address.0,
+                    self.backend.name()
+                ));
+            }
+            Err(error) => self.notices.push(format!(
+                "failed to arm a bugcheck trap at nt!KeBugCheckEx: {error}"
+            )),
+        }
+    }
+
+    /// The bugcheck a [`Self::arm_bugcheck_trap`] stop is reporting, read
+    /// from the arguments of the `KeBugCheckEx` call we stopped at.
+    ///
+    /// `nt!KiBugCheckData` is empty at the function's first instruction: the
+    /// code that fills it has not run. The arguments have not been spilled
+    /// yet either, so they are still in registers, the fifth on the stack
+    /// above the shadow space.
+    fn bugcheck_from_trap(&mut self) -> Option<BugcheckInfo> {
+        let registers = self.backend.read_registers().ok()?;
+        let read = |name: &str| self.register_map.read_u64(name, &registers).ok();
+        let (code, p1, p2, p3, p4) = match self.target.arch() {
+            Arch::Amd64 => {
+                let stack = read("rsp")?;
+                let fourth = self
+                    .target
+                    .address_space(self.target.current_dtb())
+                    .read::<u64>(VirtAddr(stack.wrapping_add(0x28)))
+                    .ok();
+                (read("rcx")?, read("rdx")?, read("r8")?, read("r9")?, fourth)
+            }
+            Arch::Arm64 => (
+                read("x0")?,
+                read("x1")?,
+                read("x2")?,
+                read("x3")?,
+                read("x4"),
+            ),
+        };
+        Some(BugcheckInfo {
+            code: code as u32,
+            parameters: [p1, p2, p3, p4.unwrap_or(0)],
+            driver: None,
+        })
+    }
+
     /// The `/t` filter for an `ETHREAD`, for hosts that name a thread by
     /// address rather than by the REPL's selector grammar.
     pub fn breakpoint_thread_for_ethread(&self, ethread: u64) -> Result<ThreadScope> {
@@ -1901,6 +1982,28 @@ impl Session {
             .remove_all(self.backend.as_mut(), &self.target)
     }
 
+    /// Whether any debugger-owned site is installed in the guest. The
+    /// bugcheck trap is not one of the manager's breakpoints, so a caller
+    /// asking whether there is anything to restore has to ask for both.
+    pub fn has_installed_sites(&self) -> bool {
+        !self.breakpoints.list().is_empty() || self.bugcheck_trap.is_some()
+    }
+
+    /// Take the automatic bugcheck trap back out of the guest.
+    ///
+    /// Nothing else does: it is not one of the manager's breakpoints, and a
+    /// GDB stub leaves the `int3` it wrote in guest memory when the
+    /// connection closes. Left behind, it is executed by the next thread to
+    /// reach `nt!KeBugCheckEx` with no debugger attached.
+    pub fn disarm_bugcheck_trap(&mut self) -> Result<()> {
+        let Some(address) = self.bugcheck_trap else {
+            return Ok(());
+        };
+        self.backend.remove_breakpoint(address.0)?;
+        self.bugcheck_trap = None;
+        Ok(())
+    }
+
     /// Leave the target in a usable state when a frontend exits: halt first if
     /// needed, restore every debugger-owned breakpoint site, and resume only
     /// when both operations succeed. Any failure explicitly prepares the
@@ -1908,7 +2011,7 @@ impl Session {
     pub fn cleanup_for_exit(&mut self) -> Result<()> {
         // Halting is only for restoring sites; with none to restore a passive
         // backend (which cannot interrupt) exits cleanly too.
-        let halted = if self.backend.is_running() && !self.breakpoints.list().is_empty() {
+        let halted = if self.backend.is_running() && self.has_installed_sites() {
             self.interrupt().map(|_| ())
         } else {
             Ok(())
@@ -1917,7 +2020,9 @@ impl Session {
             return prepare_backend_after_cleanup(self.backend.as_mut(), halted);
         }
 
-        let cleanup = self.remove_all_breakpoints();
+        let cleanup = self
+            .remove_all_breakpoints()
+            .and_then(|()| self.disarm_bugcheck_trap());
         prepare_backend_after_cleanup(self.backend.as_mut(), cleanup)
     }
 
@@ -2038,6 +2143,10 @@ impl Session {
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
         self.target.selected_frame = None;
         self.module_refresh_report = None;
+        // A bugcheck can only happen while the guest runs, so the trap has to
+        // be in place before it does. Arming on stop alone would miss a crash
+        // provoked immediately after attach.
+        self.arm_bugcheck_trap();
         if self.parked_windows_thread().is_some() {
             self.parked_windows_thread = None;
             self.target.clear_current_windows_thread_context();
@@ -2367,6 +2476,17 @@ impl Session {
             .unwrap_or(0);
         update_target_context_from_registers(&mut self.target, &self.register_map, Ok(registers));
 
+        if self.bugcheck_trap == Some(VirtAddr(rip)) {
+            event.is_bugcheck = true;
+            event.bugcheck = self.bugcheck_from_trap();
+            // Re-record: the event was stored before the trap enriched it,
+            // and `.lastevent` and `!analyze` both read it back.
+            self.record_stop_event(&event);
+            let resolution = StopResolution::Bugcheck { event };
+            self.record_visible_stop(&resolution);
+            return Ok(resolution);
+        }
+
         let resolution = match self.resolve_breakpoint_stop(rip, cr3)? {
             BreakpointStopAction::Hit {
                 breakpoint,
@@ -2606,6 +2726,9 @@ impl Session {
 
         if stop_event_requires_target_reload(&self.target, event) {
             event.target_reloaded = true;
+            // The reboot invalidates the site: the kernel is re-based and
+            // the target's breakpoint is gone. The next resume re-arms it.
+            self.bugcheck_trap = None;
             let TargetReloadOutcome {
                 report,
                 hint,

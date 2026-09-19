@@ -89,6 +89,9 @@ python = ["repl", "dep:pyo3"]
 python-embed = ["python", "pyo3/auto-initialize"]
 python-extension = ["python", "pyo3/extension-module"]
 
+[dev-dependencies]
+parking_lot = "0.12"
+
 [profile.dev.package.pdb2]
 debug-assertions = false
 

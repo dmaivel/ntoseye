@@ -843,7 +843,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 
     let was_running_on_exit = state.ctx.backend.is_running();
     let mut resume_on_exit = !was_running_on_exit;
-    if was_running_on_exit && !state.ctx.breakpoints.list().is_empty() {
+    if was_running_on_exit && state.ctx.has_installed_sites() {
         match state.ctx.halt_for_exit() {
             Ok(()) => resume_on_exit = true,
             Err(error) => {
@@ -861,6 +861,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         .ctx
         .breakpoints
         .remove_all(&mut *state.ctx.backend, &state.ctx.target)
+        .and_then(|()| state.ctx.disarm_bugcheck_trap())
     {
         Ok(()) => true,
         Err(error) => {

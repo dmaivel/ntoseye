@@ -2,6 +2,7 @@ use super::*;
 use crate::dbg_backend::TrapState;
 use crate::gdb::breakpoints::{Breakpoint, HardwareBreakpoint};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 
@@ -42,7 +43,9 @@ pub struct MockBackend {
     /// Sites the target reports as dropped by its last stop.
     dropped_sites: Vec<u64>,
     /// `set_breakpoint` (true) / `remove_breakpoint` (false) calls in order.
-    site_writes: Vec<(u64, bool)>,
+    /// Shared so a test can read it back after the backend moves into a
+    /// session.
+    site_writes: Arc<Mutex<Vec<(u64, bool)>>>,
     /// Register fetches, so a test can prove a path avoided one.
     reads: usize,
     /// TF and DR6 as a transport would report them with the stop.
@@ -68,7 +71,7 @@ impl Default for MockBackend {
             halts_only_on_interrupt: false,
             pending_stop: false,
             dropped_sites: Vec::new(),
-            site_writes: Vec::new(),
+            site_writes: Arc::new(Mutex::new(Vec::new())),
             reads: 0,
             reported_trap_state: None,
         }
@@ -141,7 +144,7 @@ impl DebugBackend for MockBackend {
     }
     fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
         if self.allow_breakpoints {
-            self.site_writes.push((addr, true));
+            self.site_writes.lock().push((addr, true));
             Ok(())
         } else {
             Err(Error::NotSupported)
@@ -149,7 +152,7 @@ impl DebugBackend for MockBackend {
     }
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
         if self.allow_breakpoints {
-            self.site_writes.push((addr, false));
+            self.site_writes.lock().push((addr, false));
             Ok(())
         } else {
             Err(Error::NotSupported)
@@ -578,7 +581,10 @@ fn a_target_owned_breakpoint_is_stepped_over_and_written_back() {
     assert!(manager.list()[0].enabled);
     // The target dropped the entry when it reported the hit; the step
     // executes the displaced instruction and the site is written again.
-    assert_eq!(backend.site_writes, [(0x1000, false), (0x1000, true)]);
+    assert_eq!(
+        *backend.site_writes.lock(),
+        [(0x1000, false), (0x1000, true)]
+    );
 }
 
 #[test]
@@ -596,7 +602,10 @@ fn refresh_rewrites_only_the_sites_the_stop_dropped() {
         .refresh_enabled(&mut backend, &session.target)
         .unwrap();
 
-    assert_eq!(backend.site_writes, [(0x1008, false), (0x1008, true)]);
+    assert_eq!(
+        *backend.site_writes.lock(),
+        [(0x1008, false), (0x1008, true)]
+    );
 }
 
 fn manager_with_hw(slot: u8, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {
@@ -621,6 +630,26 @@ fn backend_default_rejects_not_handled_continuation() {
         backend.continue_execution_with_disposition(ContinueDisposition::NotHandled),
         Err(Error::ExceptionDispositionUnsupported)
     ));
+}
+
+#[test]
+fn exiting_takes_the_bugcheck_trap_back_out_of_the_guest() {
+    // The trap is not one of the manager's breakpoints, so it is the only
+    // reason to halt here, and the only site left to restore. A guest that
+    // keeps it executes an int3 at nt!KeBugCheckEx with nothing attached.
+    let mut backend = MockBackend::default().running();
+    backend.allow_breakpoints = true;
+    backend.queue_interrupt(breakpoint_event(0x2000));
+    let sites = Arc::clone(&backend.site_writes);
+    let interrupts = Arc::clone(&backend.interrupts);
+    let mut session = session_with_mock(backend);
+    session.bugcheck_trap = Some(VirtAddr(0x1_4000));
+
+    session.cleanup_for_exit().unwrap();
+
+    assert_eq!(*sites.lock(), [(0x1_4000, false)]);
+    assert_eq!(interrupts.load(Ordering::Relaxed), 1);
+    assert!(!session.has_installed_sites());
 }
 
 #[test]
