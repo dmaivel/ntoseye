@@ -76,6 +76,15 @@ impl PhysMem {
         }
     }
 
+    /// The host mapping guest reads come from, for diagnostics. `None` for
+    /// sources that are not a live VM process.
+    pub fn host_mapping(&self) -> Option<String> {
+        match self {
+            Self::Live { host, .. } => Some(host.describe()),
+            Self::Dmp(_) | Self::Remote(_) => None,
+        }
+    }
+
     /// Total mapped guest RAM size.
     pub fn ram_size(&self) -> u64 {
         match self {

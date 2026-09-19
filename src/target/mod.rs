@@ -787,10 +787,12 @@ fn no_kernel_in_live_memory(phys: &PhysMem) -> Error {
         return Error::NtoskrnlNotFound;
     }
     Error::DebugInfo(format!(
-        "no Windows kernel in the {} MiB of guest memory mapped at guest-physical {:#x}.\n\
+        "no Windows kernel in the {} MiB of guest memory mapped at guest-physical {:#x} ({}).\n\
          Either the guest has not reached its kernel yet, or that mapping is not its RAM.",
         size / (1024 * 1024),
-        phys.ram_base()
+        phys.ram_base(),
+        phys.host_mapping()
+            .unwrap_or_else(|| "unknown mapping".into())
     ))
 }
 

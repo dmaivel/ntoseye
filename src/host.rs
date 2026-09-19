@@ -232,6 +232,14 @@ mod platform {
             })
         }
 
+        /// The host mapping guest reads are served from, for diagnostics.
+        pub fn describe(&self) -> String {
+            format!(
+                "pid {}, host mapping {:#x}-{:#x}",
+                self.pid, self.memory.start, self.memory.end
+            )
+        }
+
         pub fn ram_base(&self) -> u64 {
             match self.layout {
                 RamLayout::X86 { .. } => 0,
@@ -380,12 +388,18 @@ mod platform {
     pub struct VmHandle {
         task: u32,
         memory: MemoryRegion,
+        pid: i32,
     }
 
     /// QEMU aarch64 `virt` machine memory map: RAM is one contiguous region
     /// starting at GPA 0x4000_0000 (1 GiB), sized by `-m`. Below that is
     /// flash/MMIO, not RAM.
     const AARCH64_RAM_BASE: u64 = 0x4000_0000;
+
+    /// Smallest mapping that may begin a guest-RAM span. HVF's blocks are
+    /// 128 MiB and TCG's single block is the whole guest, so this only ever
+    /// rejects an incidental neighbour as a starting point.
+    const MIN_RAM_BLOCK: u64 = 64 * 1024 * 1024;
 
     /// `struct vm_region_submap_info_64` (v2) from xnu
     /// `osfmk/mach/vm_region.h`. Layout is fixed by the MIG boundary; the
@@ -527,6 +541,14 @@ mod platform {
             }
             // Merge adjacent read-write regions into a span (the walk is
             // ascending, so the candidate span is always the last one).
+            //
+            // Only a large mapping may *begin* one. QEMU allocates guest RAM
+            // in one big block under TCG and in 128 MiB blocks under HVF,
+            // while the heap and JIT allocations that can abut it are far
+            // smaller; letting one of those open the span moves its start,
+            // which silently shifts every guest-physical address. Anything
+            // adjacent still extends a span already under way, so no block
+            // of guest RAM is ever dropped.
             if info.protection & 0b11 == 0b11 {
                 let start = address;
                 let Some(end) = address.checked_add(size) else {
@@ -537,11 +559,12 @@ mod platform {
                         span.end = end;
                         span.length = end - span.start;
                     }
-                    _ => spans.push(MemoryRegion {
+                    _ if size >= MIN_RAM_BLOCK => spans.push(MemoryRegion {
                         start,
                         end,
                         length: end - start,
                     }),
+                    _ => {}
                 }
             }
             let Some(next) = address.checked_add(size) else {
@@ -573,7 +596,15 @@ mod platform {
                     detail: format!("VM process memory is not readable (mach error {kr})"),
                 });
             }
-            Ok(Self { task, memory })
+            Ok(Self { task, memory, pid })
+        }
+
+        /// The host mapping guest reads are served from, for diagnostics.
+        pub fn describe(&self) -> String {
+            format!(
+                "pid {}, host mapping {:#x}-{:#x}",
+                self.pid, self.memory.start, self.memory.end
+            )
         }
 
         pub fn ram_base(&self) -> u64 {
