@@ -256,14 +256,19 @@ impl BreakpointScope {
         }
     }
 
-    pub fn matches_cr3(&self, cr3: u64) -> bool {
-        // Mask out the PCID (bits 0..11) and reserved/canonical bits
-        // (52..63), leaving only the page-directory base physical frame.
+    /// Whether `dtb` names the address space this scope is bound to.
+    ///
+    /// A dtb register carries more than the page-table base: a PCID in CR3's
+    /// low bits, an ASID in TTBR0_EL1's bits 48..63. Both sides are masked
+    /// down to the base frame, and the mask differs per architecture: AMD64's
+    /// leaves ARM64 ASID bits 48..51 in the comparison, so a process-scoped
+    /// breakpoint would stop matching its own process when the ASID rolls.
+    pub fn matches_dtb(&self, dtb: u64, arch: Arch) -> bool {
         match self {
             Self::Kernel => true,
-            Self::Process { dtb, .. } => {
-                let mask = Arch::Amd64.dtb_page_mask();
-                (cr3 & mask) == (*dtb & mask)
+            Self::Process { dtb: scope, .. } => {
+                let mask = arch.dtb_page_mask();
+                (dtb & mask) == (*scope & mask)
             }
         }
     }
@@ -1441,14 +1446,14 @@ impl BreakpointManager {
         Ok(resolved_count)
     }
 
-    pub fn check_breakpoint_hit(&self, rip: u64, cr3: u64) -> BreakpointHitResult {
+    pub fn check_breakpoint_hit(&self, rip: u64, dtb: u64, arch: Arch) -> BreakpointHitResult {
         for bp in self.breakpoints.values() {
             if !self.one_shot_hits.contains(&bp.id)
                 && bp.resolved
                 && bp.hardware.is_none()
                 && bp.address.0 == rip
                 && bp.enabled
-                && bp.scope.matches_cr3(cr3)
+                && bp.scope.matches_dtb(dtb, arch)
             {
                 return BreakpointHitResult::Hit(bp.clone());
             }
@@ -1470,7 +1475,7 @@ impl BreakpointManager {
                     && bp.enabled
                     && bp.hardware.is_none()
                     && bp.address == address
-                    && bp.scope.matches_cr3(cr3)
+                    && bp.scope.matches_dtb(cr3, debugger.arch())
             })
             .map(|bp| bp.id)
             .min()
@@ -1553,7 +1558,7 @@ impl BreakpointManager {
         };
         match (frame(owner), frame(cr3)) {
             (Some(patched), Some(viewed)) => patched == viewed,
-            _ => bp.scope.matches_cr3(cr3),
+            _ => bp.scope.matches_dtb(cr3, debugger.arch()),
         }
     }
 
@@ -1982,14 +1987,14 @@ mod tests {
             },
         );
 
-        match manager.check_breakpoint_hit(0x1000, 0) {
+        match manager.check_breakpoint_hit(0x1000, 0, Arch::Amd64) {
             BreakpointHitResult::Hit(bp) => assert_eq!(bp.id, 0),
             other => panic!("unexpected result: {:?}", other),
         }
     }
 
     #[test]
-    fn process_breakpoint_hit_requires_matching_cr3() {
+    fn process_breakpoint_hit_requires_matching_dtb() {
         let mut manager = BreakpointManager::new();
         manager.breakpoints.insert(
             0,
@@ -2020,22 +2025,29 @@ mod tests {
                 },
             },
         );
+        assert!(matches!(
+            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x1234_5000, Arch::Amd64),
+            BreakpointHitResult::Hit(_)
+        ));
+        assert!(matches!(
+            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x1234_5fff, Arch::Amd64),
+            BreakpointHitResult::Hit(_)
+        ));
+        assert!(matches!(
+            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x9999_9000, Arch::Amd64),
+            BreakpointHitResult::NotBreakpoint
+        ));
+        assert!(matches!(
+            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x1234_4000, Arch::Amd64),
+            BreakpointHitResult::NotBreakpoint
+        ));
 
+        // TTBR0_EL1 carries the ASID in bits 48..63, outside the ARM64
+        // page-table base field. A process-scoped breakpoint must keep
+        // matching its own address space across an ASID change.
         assert!(matches!(
-            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x1234_5000),
+            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x000a_0000_1234_5000, Arch::Arm64),
             BreakpointHitResult::Hit(_)
-        ));
-        assert!(matches!(
-            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x1234_5fff),
-            BreakpointHitResult::Hit(_)
-        ));
-        assert!(matches!(
-            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x9999_9000),
-            BreakpointHitResult::NotBreakpoint
-        ));
-        assert!(matches!(
-            manager.check_breakpoint_hit(0x7ff7_1234_1000, 0x1234_4000),
-            BreakpointHitResult::NotBreakpoint
         ));
     }
 
@@ -2054,7 +2066,7 @@ mod tests {
         );
 
         assert!(matches!(
-            manager.check_breakpoint_hit(0x2000, 0),
+            manager.check_breakpoint_hit(0x2000, 0, Arch::Amd64),
             BreakpointHitResult::NotBreakpoint
         ));
         assert_eq!(manager.breakpoint_id_at_address(0x2000), None);
@@ -2135,7 +2147,7 @@ mod tests {
             }),
         );
 
-        match manager.check_breakpoint_hit(addr, 0) {
+        match manager.check_breakpoint_hit(addr, 0, Arch::Amd64) {
             BreakpointHitResult::Hit(bp) => {
                 assert_eq!(bp.id, 0);
                 assert!(bp.hardware.is_none());
@@ -2464,7 +2476,7 @@ mod tests {
         assert!(matches!(deferred.backend, BreakpointBackend::Deferred));
         assert!(manager.breakpoints.get(&4).unwrap().resolved);
         assert!(matches!(
-            manager.check_breakpoint_hit(0x3000, 0),
+            manager.check_breakpoint_hit(0x3000, 0, Arch::Amd64),
             BreakpointHitResult::NotBreakpoint
         ));
     }

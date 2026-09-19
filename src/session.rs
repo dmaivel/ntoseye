@@ -2097,7 +2097,10 @@ impl Session {
     /// Shared by [`Self::continue_until_break`] and the REPL's continue loop so
     /// they can't drift on which int3 hits surface and which are silently resumed.
     pub fn resolve_breakpoint_stop(&mut self, rip: u64, cr3: u64) -> Result<BreakpointStopAction> {
-        match self.breakpoints.check_breakpoint_hit(rip, cr3) {
+        match self
+            .breakpoints
+            .check_breakpoint_hit(rip, cr3, self.target.arch())
+        {
             BreakpointHitResult::Hit(bp) => {
                 // Count every scoped physical hit before pass-count and
                 // condition evaluation. A pass skip uses the same canonical
@@ -3104,7 +3107,7 @@ pub fn resolve_watchpoint_stop(
         .read_u64(target.arch().dtb_register(), &registers)
         .unwrap_or(0);
     update_target_context_from_registers(target, register_map, Ok(registers));
-    if !breakpoint.scope.matches_cr3(scope_dtb) {
+    if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }
@@ -3164,7 +3167,7 @@ pub fn rewind_thread_off_breakpoint(
         return;
     };
     if !matches!(
-        breakpoints.check_breakpoint_hit(prev, cr3),
+        breakpoints.check_breakpoint_hit(prev, cr3, arch),
         BreakpointHitResult::Hit(_)
     ) {
         return;

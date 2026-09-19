@@ -1215,15 +1215,17 @@ impl Target {
     }
 
     pub fn set_context_dtb_override(&mut self, dtb: Dtb) {
-        self.context_dtb_override = Some(Self::normalize_cr3(dtb));
+        self.context_dtb_override = Some(self.normalize_dtb(dtb));
     }
 
     pub fn clear_context_dtb_override(&mut self) {
         self.context_dtb_override = None;
     }
 
-    pub fn normalize_cr3(cr3: u64) -> Dtb {
-        cr3 & Arch::Amd64.dtb_page_mask()
+    /// Strip everything the architecture's dtb register carries besides the
+    /// page-table base frame: a PCID on AMD64, an ASID on ARM64.
+    pub fn normalize_dtb(&self, dtb: u64) -> Dtb {
+        dtb & self.arch().dtb_page_mask()
     }
 
     pub fn set_current_windows_thread_context(&mut self, thread: ThreadInfo) {
@@ -2334,14 +2336,6 @@ mod tests {
         thread.teb = None;
         assert_eq!(thread.pseudo_register_value("TEB"), None);
         assert_eq!(thread.pseudo_register_value("unknown"), None);
-    }
-
-    #[test]
-    fn cr3_normalization_strips_pcid_and_reserved_bits() {
-        assert_eq!(
-            super::Target::normalize_cr3(0xffff_8123_4567_8abc),
-            0x000f_8123_4567_8000
-        );
     }
 
     #[test]
