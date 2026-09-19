@@ -446,6 +446,15 @@ class Debugger:
     def interrupt(self) -> None:
         """Pause the VM (adopts the stopped thread as the current one)."""
         ...
+    def page_in(self, addr: int, process: int | None = None) -> bool:
+        """Fault `addr` in through the guest's debugger worker (`.pagein`),
+        returning whether it reads back afterwards. `process` is an `EPROCESS`
+        to attach the worker to, which user-space addresses need.
+
+        The worker is a guest thread, so this resumes the target and leaves it
+        halted at `nt!DbgBreakPointWithStatus`, not where it was. Requires the
+        VM halted."""
+        ...
     def set_current_thread(self, thread: str) -> None:
         """Select the current inspection thread (a vCPU id) so
         registers/backtrace/step operate on it."""

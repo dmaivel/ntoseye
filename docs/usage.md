@@ -197,6 +197,7 @@ Disassembly and virtual memory writes:
 - `.formats <expression>` - Display an expression in common numeric formats.
 - `f <address> <hex bytes> [L<count>|length|end]` - Fill memory with a repeated byte pattern.
 - `s <address> <hex bytes> [length]` - Search memory for a byte pattern.
+- `.pagein [/p <pid|eprocess>] <address>` - Make a paged-out address resident through the guest's debugger worker; `/p` attaches the worker to a process first, which user-space addresses need. The guest does the work, so the target resumes and comes back halted at `nt!DbgBreakPointWithStatus` rather than where it was.
 
 Physical memory commands use guest-physical addresses:
 
@@ -389,6 +390,7 @@ Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); 
 - `.logappend <file>` - Start a debugger transcript, appending to the file.
 - `.logclose` - Close the debugger transcript.
 - `n [8|10|16]` - Display or set the default numeric radix for REPL expressions.
+- `.effmach [x86|amd64|auto|.]` - Display or set the effective code machine. `x86` and `amd64` override automatic code-bitness detection; `auto` or `.` clears the override.
 - `aliases` - List command aliases.
 - `alias <name> <expansion>` - Define a command alias.
 - `unalias <name>` - Remove a command alias.
