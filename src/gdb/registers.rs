@@ -128,6 +128,11 @@ impl RegisterMap {
         self.ordered.iter().map(|reg| reg.name.clone()).collect()
     }
 
+    /// Every register in wire order.
+    pub fn registers(&self) -> &[RegisterInfo] {
+        &self.ordered
+    }
+
     /// Whether the target description carries this register. Callers use it
     /// to tell "the transport exposes no such state" from "the register read
     /// zero".
@@ -135,23 +140,13 @@ impl RegisterMap {
         self.by_name.contains_key(name)
     }
 
-    pub fn require_amd64_target(&self) -> Result<()> {
-        let amd64 = ["rax", "rip", "rsp"].iter().all(|name| {
-            self.by_name
-                .get(*name)
-                .is_some_and(|register| register.size == 8)
-        });
-        if amd64 {
-            return Ok(());
-        }
-        let detected = if self.by_name.contains_key("eip") {
-            "I386 register description"
-        } else if self.by_name.contains_key("pc") && self.by_name.contains_key("x0") {
-            "ARM64 register description"
-        } else {
-            "unrecognized GDB target register description"
-        };
-        Err(Error::UnsupportedArchitecture(detected.to_string()))
+    /// The `<architecture>` a target description declares, such as
+    /// `i386:x86-64` or `aarch64`. This is the stub's own statement of what
+    /// it is, which beats guessing from register names.
+    pub fn target_architecture(xml: &str) -> Option<&str> {
+        let start = xml.find("<architecture>")? + "<architecture>".len();
+        let rest = &xml[start..];
+        Some(rest[..rest.find("</architecture>")?].trim())
     }
 
     pub fn parse_target_xml(xml: &str) -> Self {
@@ -302,22 +297,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_amd64_register_descriptions() {
-        let amd64 = RegisterMap::parse_target_xml(
-            r#"<reg name="rax" bitsize="64"/>
-               <reg name="rip" bitsize="64"/>
-               <reg name="rsp" bitsize="64"/>"#,
+    fn reads_the_declared_architecture_from_a_target_description() {
+        assert_eq!(
+            RegisterMap::target_architecture(
+                "<target><architecture>aarch64</architecture>\
+                 <xi:include href=\"aarch64-core.xml\"/></target>"
+            ),
+            Some("aarch64")
         );
-        assert!(amd64.require_amd64_target().is_ok());
-
-        let arm64 = RegisterMap::parse_target_xml(
-            r#"<reg name="x0" bitsize="64"/>
-               <reg name="pc" bitsize="64"/>
-               <reg name="sp" bitsize="64"/>"#,
+        assert_eq!(
+            RegisterMap::target_architecture(
+                "<target><architecture>i386:x86-64</architecture></target>"
+            ),
+            Some("i386:x86-64")
         );
-        let error = arm64.require_amd64_target().unwrap_err();
-        assert!(matches!(error, Error::UnsupportedArchitecture(_)));
-        assert!(error.to_string().contains("ARM64 register description"));
+        assert_eq!(RegisterMap::target_architecture("<target></target>"), None);
     }
 
     #[test]

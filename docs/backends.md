@@ -37,9 +37,11 @@ Any Windows 10/11 target reachable over the network is debuggable with `kdnet` (
 | --- | --- | --- | --- | --- | --- | --- |
 | Linux | KVM/QEMU | AMD64 | Yes | Yes | Yes | Yes |
 | Linux | VMware Workstation | AMD64 | Yes | Yes | Yes | Yes |
-| macOS | UTM (QEMU/HVF) | ARM64 | Yes | Yes | No | Yes |
+| macOS | UTM (QEMU/HVF) | ARM64 | Yes | Yes | Yes (see below) | Yes |
 
 Other hypervisors are untested with these integrations. Crash-dump analysis supports AMD64 and ARM64 dumps.
+
+Under UTM the `gdb` backend needs "Use Hypervisor" turned off, because QEMU aborts the VM when a debugger enables guest debugging on HVF; the [UTM guide](utm.md) has the details. The other backends are unaffected, since none of them asks the hypervisor for debug traps.
 
 The initial KD handshake timeout is 8 seconds by default. For unusually slow guests, override it with `NTOSEYE_KD_TIMEOUT=<seconds>`.
 

@@ -106,6 +106,67 @@ impl StopReply {
     }
 }
 
+/// What the target description says the stub is debugging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetArch {
+    Amd64,
+    Arm64,
+}
+
+impl TargetArch {
+    fn from_description(xml: &str) -> Result<Self> {
+        let Some(architecture) = RegisterMap::target_architecture(xml) else {
+            return Err(Error::UnsupportedArchitecture(
+                "the stub's target description declares no architecture".into(),
+            ));
+        };
+        match architecture {
+            "i386:x86-64" => Ok(Self::Amd64),
+            "aarch64" => Ok(Self::Arm64),
+            other => Err(Error::UnsupportedArchitecture(format!(
+                "{other}; ntoseye debugs AMD64 and ARM64 Windows"
+            ))),
+        }
+    }
+
+    /// How far the program counter moves when the arch's breakpoint
+    /// instruction executes, which is also the `Z0` packet's kind.
+    fn breakpoint_step_size(self) -> u8 {
+        match self {
+            Self::Amd64 => 1,
+            Self::Arm64 => 4,
+        }
+    }
+}
+
+/// Names the rest of the debugger reads, mapped onto what an AArch64 target
+/// description calls them. KD's ARM64 register map carries the same aliases.
+const ARM64_ALIASES: [(&str, &str); 5] = [
+    ("rip", "pc"),
+    ("rsp", "sp"),
+    ("fp", "x29"),
+    ("lr", "x30"),
+    ("pstate", "cpsr"),
+];
+
+/// System registers ntoseye needs, spelled the way it spells them elsewhere.
+/// `cr3` is the kernel page-table root on both architectures, so the ARM64
+/// map answers it with TTBR1_EL1 exactly as KD's does.
+const ARM64_SYSTEM_REGISTERS: [(&str, &str); 4] = [
+    ("cr3", "TTBR1_EL1"),
+    ("ttbr0", "TTBR0_EL1"),
+    ("esr", "ESR_EL1"),
+    ("far", "FAR_EL1"),
+];
+
+/// A register the stub keeps out of its `g` packet. A target description
+/// splits into features, and a stub answers `g` with the core one alone, so
+/// everything past it has to be asked for one register at a time.
+#[derive(Debug, Clone, Copy)]
+struct ExtraRegister {
+    regnum: usize,
+}
+
 /// A hardware breakpoint as the stub knows it. RSP addresses one by type,
 /// address, and length rather than by slot, so removing it means replaying
 /// exactly what installed it.
@@ -151,6 +212,7 @@ pub struct GdbClient {
     register_map: RegisterMap,
     is_running: bool,
     hardware_sites: [Option<HardwareSite>; HW_BREAKPOINT_SLOTS as usize],
+    extra_registers: Vec<ExtraRegister>,
 }
 
 fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
@@ -189,6 +251,7 @@ impl GdbClient {
             register_map: RegisterMap::default(),
             is_running: false, // NOTE if the user toys with VM via GUI, this value goes bad
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
+            extra_registers: Vec::new(),
         };
 
         client.force_stop_and_resync()?;
@@ -203,8 +266,10 @@ impl GdbClient {
 
         let _ = client.send_packet("?")?;
 
-        client.register_map = client.fetch_register_map()?;
-        client.register_map.require_amd64_target()?;
+        let description = client.fetch_target_description()?;
+        let arch = TargetArch::from_description(&description)?;
+        client.register_map =
+            client.build_register_map(&RegisterMap::parse_target_xml(&description), arch)?;
 
         Ok(client)
     }
@@ -420,7 +485,8 @@ impl GdbClient {
     }
 
     fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let response = self.send_packet(&format!("Z0,{:x},1", addr))?;
+        let kind = self.register_map.breakpoint_step_size();
+        let response = self.send_packet(&format!("Z0,{:x},{}", addr, kind))?;
         if response == "OK" {
             Ok(())
         } else if response.starts_with('E') {
@@ -434,7 +500,8 @@ impl GdbClient {
     }
 
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let response = self.send_packet(&format!("z0,{:x},1", addr))?;
+        let kind = self.register_map.breakpoint_step_size();
+        let response = self.send_packet(&format!("z0,{:x},{}", addr, kind))?;
         if response == "OK" {
             Ok(())
         } else if response.starts_with('E') {
@@ -507,11 +574,20 @@ impl GdbClient {
             )));
         }
 
-        let bytes = hex::decode(&response)?;
+        let mut bytes = hex::decode(&response)?;
+        for index in 0..self.extra_registers.len() {
+            let regnum = self.extra_registers[index].regnum;
+            let value = self.read_one_register(regnum)?;
+            bytes.extend_from_slice(&value);
+        }
         Ok(bytes)
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
+        // `G` takes back exactly what `g` gave. The system registers appended
+        // behind it are not part of that reply, and the stub serves them
+        // read-only anyway.
+        let data = &data[..data.len().saturating_sub(self.extra_registers.len() * 8)];
         let response = self.send_packet(&format!("G{}", hex::encode(data)))?;
 
         if response == "OK" {
@@ -682,7 +758,9 @@ impl GdbClient {
         ))
     }
 
-    fn fetch_register_map(&mut self) -> Result<RegisterMap> {
+    /// The stub's full target description, with every `<xi:include>`
+    /// resolved.
+    fn fetch_target_description(&mut self) -> Result<String> {
         if !self.features.qxfer_features_read {
             return Err(Error::NotSupported);
         }
@@ -714,9 +792,83 @@ impl GdbClient {
             }
         }
 
-        let full_xml = self.resolve_xml_includes(&xml)?;
+        self.resolve_xml_includes(&xml)
+    }
 
-        Ok(RegisterMap::parse_target_xml(&full_xml))
+    /// Turn a target description into the register map the debugger reads.
+    ///
+    /// Only the registers the `g` packet actually carries can be addressed by
+    /// offset into its reply, so the description is cut to that length and
+    /// the few system registers ntoseye needs are appended behind it, read
+    /// individually. ARM64 also gets the x64 spellings the shared code uses.
+    fn build_register_map(
+        &mut self,
+        description: &RegisterMap,
+        arch: TargetArch,
+    ) -> Result<RegisterMap> {
+        let g_bytes = GdbClient::read_registers(self)?.len();
+        let mut registers: Vec<RegisterInfo> = description
+            .registers()
+            .iter()
+            .filter(|reg| reg.offset + reg.size <= g_bytes)
+            .cloned()
+            .collect();
+
+        if arch == TargetArch::Arm64 {
+            for (alias, source) in ARM64_ALIASES {
+                let Some(register) = registers.iter().find(|reg| reg.name == source) else {
+                    return Err(Error::UnsupportedArchitecture(format!(
+                        "the stub's AArch64 description has no `{source}` register"
+                    )));
+                };
+                let mut register = register.clone();
+                register.name = alias.to_string();
+                registers.push(register);
+            }
+
+            let mut offset = g_bytes;
+            for (name, system_register) in ARM64_SYSTEM_REGISTERS {
+                let Some(source) = description
+                    .registers()
+                    .iter()
+                    .find(|reg| reg.name == system_register)
+                else {
+                    return Err(Error::UnsupportedArchitecture(format!(
+                        "the stub's AArch64 description has no `{system_register}`, \
+                         which ntoseye needs to follow the guest's page tables"
+                    )));
+                };
+                self.extra_registers.push(ExtraRegister {
+                    regnum: source.regnum,
+                });
+                registers.push(RegisterInfo {
+                    name: name.to_string(),
+                    offset,
+                    size: 8,
+                    regnum: source.regnum,
+                });
+                offset += 8;
+            }
+        }
+
+        let mut map = RegisterMap::from_registers(registers);
+        map.set_breakpoint_step_size(arch.breakpoint_step_size());
+        Ok(map)
+    }
+
+    /// Read one register by its target-description number.
+    fn read_one_register(&mut self, regnum: usize) -> Result<[u8; 8]> {
+        let response = self.send_packet(&format!("p{regnum:x}"))?;
+        if response.is_empty() || response.starts_with('E') {
+            return Err(Error::Rsp(format!(
+                "failed to read register {regnum}: {response}"
+            )));
+        }
+        let bytes = hex::decode(&response)?;
+        let mut value = [0u8; 8];
+        let len = bytes.len().min(value.len());
+        value[..len].copy_from_slice(&bytes[..len]);
+        Ok(value)
     }
 
     fn resolve_xml_includes(&mut self, xml: &str) -> Result<String> {
@@ -867,7 +1019,21 @@ impl DebugBackend for GdbClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{GdbClient, StopReply, StubFeatures};
+    use super::{GdbClient, StopReply, StubFeatures, TargetArch};
+
+    #[test]
+    fn accepts_the_architectures_ntoseye_debugs() {
+        let describe = |arch: &str| {
+            TargetArch::from_description(&format!(
+                "<target><architecture>{arch}</architecture></target>"
+            ))
+        };
+        assert_eq!(describe("i386:x86-64").unwrap(), TargetArch::Amd64);
+        assert_eq!(describe("aarch64").unwrap(), TargetArch::Arm64);
+        // A 32-bit stub has no Windows kernel ntoseye can read.
+        assert!(describe("i386").is_err());
+        assert!(TargetArch::from_description("<target></target>").is_err());
+    }
 
     #[test]
     fn decodes_escaped_and_run_length_packet_data() {
