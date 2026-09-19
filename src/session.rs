@@ -2908,13 +2908,18 @@ fn kd_memory_source_notice(backend_name: &str) -> String {
     }
 }
 
-/// Parse a backend vCPU/thread id (`p1.<one-based-hex>`) into a zero-based
-/// processor index. Returns `None` for ids that aren't processor contexts.
-/// Shared by the REPL (re-exported from `repl::stop`) and `Session`.
+/// Parse a backend vCPU/thread id into a zero-based processor index. Returns
+/// `None` for ids that aren't processor contexts. Shared by the REPL
+/// (re-exported from `repl::stop`) and `Session`.
+///
+/// KD synthesizes its ids as `p1.<one-based-hex>`. A GDB stub prints its own,
+/// and QEMU pads both fields: its first vCPU is `p01.01`. Both are the same
+/// `p<pid>.<tid>` syntax, so the process field is skipped rather than matched
+/// against a literal. The qualifier is still required: an unqualified id is
+/// bare hex, which would make any hex-shaped string name a processor.
 pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
-    let stripped = thread_id.strip_prefix("p1.")?;
-    let one_based = u16::from_str_radix(stripped, 16).ok()?;
-    one_based.checked_sub(1)
+    let (_pid, tid) = thread_id.strip_prefix('p')?.split_once('.')?;
+    u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
 }
 
 /// Adopt the Windows thread a backend vCPU is running as the inspection

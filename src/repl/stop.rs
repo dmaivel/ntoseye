@@ -624,6 +624,9 @@ mod tests {
     fn backend_thread_ids_parse_as_zero_based_processors() {
         assert_eq!(processor_index_from_backend_thread_id("p1.1"), Some(0));
         assert_eq!(processor_index_from_backend_thread_id("p1.a"), Some(9));
+        // QEMU pads both fields: `p01.01` is its first vCPU.
+        assert_eq!(processor_index_from_backend_thread_id("p01.01"), Some(0));
+        assert_eq!(processor_index_from_backend_thread_id("p01.0a"), Some(9));
         assert_eq!(processor_index_from_backend_thread_id("p1.0"), None);
         assert_eq!(processor_index_from_backend_thread_id("bad"), None);
     }
