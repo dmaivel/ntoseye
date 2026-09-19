@@ -131,6 +131,8 @@ jobs:
         include:
           - runner: ubuntu-22.04
             label: manylinux-x86_64
+          - runner: ubuntu-24.04-arm
+            label: manylinux-aarch64
           - runner: macos-14
             label: macos-arm64
     runs-on: ${{ matrix.runner }}

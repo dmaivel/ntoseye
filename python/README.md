@@ -30,9 +30,7 @@ pip install dist/ntoseye-*.whl
 
 Release wheels are built by `.github/workflows/release.yml` on native GitHub runners:
 
-- Linux x86-64 uses Zig and targets `manylinux_2_17`.
+- Linux x86-64 and ARM64 build natively on `ubuntu-22.04` and `ubuntu-24.04-arm`, using Zig to target `manylinux_2_17` rather than the runner's glibc.
 - Apple Silicon uses the native ARM64 `macos-14` runner.
-
-Both wheels are smoke-tested, attached to the GitHub Release, and published to PyPI with Trusted Publishing.
 
 For local reproduction, `./build-wheel.sh` provisions a local `.venv`, builds into `dist/`, runs `twine check`, and installs/import-tests the wheel in a throwaway virtual environment. It does not publish.

@@ -19,9 +19,14 @@ features = ["cli", "mcp", "dap"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = [
     "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
 ]
 # Path that installers should place binaries in
 install-path = "~/.local/bin/"
 # Whether to install an updater program
 install-updater = false
+
+# Build Linux ARM64 on GitHub's native ARM64 runner instead of cross-compiling.
+[dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"

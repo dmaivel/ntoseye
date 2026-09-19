@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Produces a portable manylinux_2_17 wheel on Linux or a native ARM64 wheel on
-# Apple Silicon macOS, then runs `twine check` and an import test in a throwaway
-# virtualenv. If no virtualenv is active, the script provisions a local .venv
-# with the platform-specific build tools.
+# Produces a portable manylinux_2_17 wheel for the host architecture on Linux
+# (x86_64 or aarch64) or a native ARM64 wheel on Apple Silicon macOS, then runs
+# `twine check` and an import test in a throwaway virtualenv. If no virtualenv
+# is active, the script provisions a local .venv with the platform-specific
+# build tools.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -25,12 +26,25 @@ build_args=(--release --out dist)
 
 case "$host_os" in
     Linux)
-        if [[ "$host_arch" != "x86_64" ]]; then
-            echo "error: Linux wheels are supported only on x86_64 (found $host_arch)" >&2
-            exit 1
-        fi
+        # Wheels are built natively; zig only supplies the older glibc the
+        # manylinux tag promises. `zig_arch` is zig's own arch directory name
+        # under its bundled libc headers, which is not the Rust triple's.
+        case "$host_arch" in
+            x86_64)
+                rust_target="x86_64-unknown-linux-gnu"
+                zig_arch="x86"
+                ;;
+            aarch64 | arm64)
+                rust_target="aarch64-unknown-linux-gnu"
+                zig_arch="aarch64"
+                ;;
+            *)
+                echo "error: Linux wheels are supported only on x86_64 and aarch64 (found $host_arch)" >&2
+                exit 1
+                ;;
+        esac
         tools+=(ziglang)
-        build_label="manylinux_2_17"
+        build_label="manylinux_2_17 $host_arch"
         build_args+=(--zig --compatibility manylinux_2_17)
         ;;
     Darwin)
@@ -52,7 +66,7 @@ python -m pip install --quiet "${tools[@]}"
 if [[ "$host_os" == "Linux" ]]; then
     zig_lib_dir="$(python -c "from pathlib import Path; import ziglang; print(Path(ziglang.__file__).parent / 'lib')")"
     zig_include_dir="$zig_lib_dir/libc/include"
-    zig_bindgen_args="--target=x86_64-unknown-linux-gnu -isystem $zig_lib_dir/include -isystem $zig_include_dir/x86-linux-gnu -isystem $zig_include_dir/generic-glibc -isystem $zig_include_dir/x86-linux-any -isystem $zig_include_dir/any-linux-any"
+    zig_bindgen_args="--target=$rust_target -isystem $zig_lib_dir/include -isystem $zig_include_dir/$zig_arch-linux-gnu -isystem $zig_include_dir/generic-glibc -isystem $zig_include_dir/$zig_arch-linux-any -isystem $zig_include_dir/any-linux-any"
     bindgen_args="${BINDGEN_EXTRA_CLANG_ARGS:-}"
     export BINDGEN_EXTRA_CLANG_ARGS="${bindgen_args:+$bindgen_args }$zig_bindgen_args"
 fi
