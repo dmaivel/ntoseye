@@ -243,7 +243,7 @@ Symbol queries also support `^` prefix, `$` suffix, `'` exact, `!` negation, and
 
 ## Breakpoints and watchpoints
 
-The shared breakpoint grammar follows WinDbg. Code breakpoints use `/1` (one-shot), `/p <pid>` (process scope), `/t <ethread>` (thread scope), and `/w "<expr>"` (conditional shorthand), followed by a target, optional pass count, `if <expr>`, and `do "<commands>"`; `ba` uses the same options except `/w` and adds `<access><size>`. `/t` is parsed as a thread scope, but current backends report thread-scoped breakpoints as unsupported.
+The shared breakpoint grammar follows WinDbg. Code breakpoints use `/1` (one-shot), `/p <pid>` (process scope), `/t <ethread>` (thread scope), `/c <processor>` (processor scope), and `/w "<expr>"` (conditional shorthand), followed by a target, optional pass count, `if <expr>`, and `do "<commands>"`; `ba` uses the same options except `/w` and adds `<access><size>`. `/c` has no WinDbg equivalent.
 
 Conditions use the normal expression grammar. Comparisons, bitwise operations, and short-circuiting `!`, `&&`, and `||` can be combined with parentheses. Write ranges explicitly (`0 < @rax && @rax < 0n10`) rather than as chained comparisons; chained equality (`a == b == c`) is refused for the same reason and names `&&` as the fix. Multi-command actions must be quoted, like WinDbg, and a trailing `gc` continues after the action.
 
@@ -255,10 +255,10 @@ bm mydriver!Dispatch*
 ba w8 nt!KiBalanceSetManagerLastCheckTick
 ```
 
-- `bp [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a breakpoint.
-- `bu [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <symbol> [<passes>] [if <expr>] [do "<commands>"]` - Set a deferred symbolic breakpoint.
-- `bm [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <symbol-pattern> [<passes>] [if <expr>] [do "<commands>"]` - Set deferred symbolic breakpoints for matching symbols.
-- `ba [/1] [/p <pid>] [/t <tid|ethread>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (not available on a dump or the `memory` backend); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
+- `bp [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w "<expr>"] <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a breakpoint.
+- `bu [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w "<expr>"] <symbol> [<passes>] [if <expr>] [do "<commands>"]` - Set a deferred symbolic breakpoint.
+- `bm [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w "<expr>"] <symbol-pattern> [<passes>] [if <expr>] [do "<commands>"]` - Set deferred symbolic breakpoints for matching symbols.
+- `ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (not available on a dump or the `memory` backend); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
 - `bl` - List all breakpoints. The status column reads `e` enabled, `d` disabled, `o` owed.
 - `bc <id|id-id|*>` - Clear one or more breakpoints by ID.
 - `bd <id|id-id|*>` - Disable one or more breakpoints by ID.
@@ -277,6 +277,8 @@ A `ba e1` stop can precede the instruction page fault, leaving no bytes to disas
 `/p` filters reported hits; it does not change how a breakpoint is installed. Kernel sites are always target-managed. User-space sites are patched through the selected process’s page tables. Shared physical pages can therefore trap other processes too; those hits are discarded but still incur debugger round trips.
 
 `/t` filters the same way, against the Windows thread the stop belongs to. It takes what `!thread` takes: a thread id, an ETHREAD, or a KTHREAD. No target programs a breakpoint per thread. A software site is a byte in a page every thread shares, and a debug register belongs to a processor that any thread may be scheduled on, so every thread executing the site still traps and the debugger discards the hits belonging to other threads. Discarding costs a step-over and a resume per hit, so a filter on a site the whole system calls slows the session down. A hit whose thread cannot be resolved is reported rather than discarded, so a filter never loses a stop silently.
+
+`/c` filters by processor instead, taking the number `~` lists. It is checked against the vCPU the stop was reported on, which costs nothing to know, so unlike `/t` it adds no walk. A processor the guest does not have is rejected when the breakpoint is set, because a filter that can never match is a breakpoint that silently never fires.
 
 KD has a fixed 32-entry software-breakpoint table. A session killed with `SIGKILL` leaves its entries installed and can prevent later breakpoints at those addresses.
 

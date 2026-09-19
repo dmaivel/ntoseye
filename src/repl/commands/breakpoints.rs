@@ -23,7 +23,7 @@ use crate::types::VirtAddr;
 repl_command! {
     cmd_bp;
     names: ["bp"],
-    usage: "bp [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <address> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bp [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint.",
     completion: Expression,
     run_state: Halted,
@@ -31,7 +31,7 @@ repl_command! {
 repl_command! {
     cmd_bu;
     names: ["bu"],
-    usage: "bu [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <symbol> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bu [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a deferred symbolic breakpoint.",
     completion: Expression,
     run_state: Halted,
@@ -40,7 +40,7 @@ repl_command! {
 repl_command! {
     cmd_bm;
     names: ["bm"],
-    usage: "bm [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bm [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set deferred symbolic breakpoints for matching symbols.",
     completion: Expression,
     run_state: Halted,
@@ -49,7 +49,7 @@ repl_command! {
 repl_command! {
     cmd_ba;
     names: ["ba"],
-    usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
+    usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a hardware (debug-register) breakpoint.",
     details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). e.g. ba w4 nt!MyGlobal",
     completion: [None, Expression],
@@ -133,6 +133,7 @@ struct ParsedBreakpointArgs {
     one_shot: bool,
     pid: Option<u64>,
     thread: Option<u64>,
+    processor: Option<u16>,
     pass_count: u64,
     condition: Option<String>,
     action: Option<String>,
@@ -173,6 +174,7 @@ fn parse_breakpoint_arguments(
     let mut one_shot = false;
     let mut pid = None;
     let mut thread = None;
+    let mut processor = None;
     let mut shorthand_condition = None;
 
     while let Some(arg) = argv.get(index) {
@@ -193,6 +195,16 @@ fn parse_breakpoint_arguments(
                     Error::InvalidArgument(format!("{command}: /t requires a thread id or ETHREAD"))
                 })?;
                 thread = Some(parse_radix_u64_text(thread_text.as_ref(), radix, "thread")?);
+                index += 2;
+            }
+            "/c" => {
+                let processor_text = argv.get(index + 1).ok_or_else(|| {
+                    Error::InvalidArgument(format!("{command}: /c requires a processor number"))
+                })?;
+                let value = parse_radix_u64_text(processor_text.as_ref(), radix, "processor")?;
+                processor = Some(u16::try_from(value).map_err(|_| {
+                    Error::InvalidArgument(format!("{command}: processor {value} is out of range"))
+                })?);
                 index += 2;
             }
             "/w" => {
@@ -300,6 +312,7 @@ fn parse_breakpoint_arguments(
         one_shot,
         pid,
         thread,
+        processor,
         pass_count,
         condition,
         action,
@@ -474,10 +487,27 @@ impl ReplState<'_> {
         }
     }
 
+    /// The processor `/c` names, rejected here if the guest has no such
+    /// processor: a filter on one that never reports is a breakpoint that
+    /// silently never fires.
+    fn breakpoint_processor_scope(&mut self, processor: Option<u16>) -> Result<Option<u16>> {
+        let Some(processor) = processor else {
+            return Ok(None);
+        };
+        let count = crate::cpu_state::processor_count(&self.ctx.target)?;
+        if processor >= count {
+            return Err(Error::InvalidArgument(format!(
+                "processor {processor} does not exist; the guest reports {count}"
+            )));
+        }
+        Ok(Some(processor))
+    }
+
     fn breakpoint_config(&mut self, parsed: ParsedBreakpointArgs) -> Result<BreakpointConfig> {
         let condition_expr = compile_repl_condition(parsed.condition.as_deref(), self.radix)?;
         let scope = self.breakpoint_scope(parsed.pid)?;
         let thread = self.breakpoint_thread_scope(parsed.thread)?;
+        let processor = self.breakpoint_processor_scope(parsed.processor)?;
         Ok(BreakpointConfig {
             condition: parsed.condition,
             condition_expr,
@@ -486,6 +516,7 @@ impl ReplState<'_> {
             action: parsed.action,
             scope,
             thread,
+            processor,
             // `bu <symbol>` breaks at the symbol, as WinDbg does. Only a host
             // whose client expects arguments to be live (DAP) skips ahead.
             skip_prologue: false,

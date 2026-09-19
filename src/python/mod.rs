@@ -154,7 +154,7 @@ fn breakpoint_target_arg(
 
 /// The breakpoint options every `breakpoint()`/`watchpoint()` form shares,
 /// mapped onto the core [`BreakpointConfig`] (`bp /1 /p <pid> /t <ethread>
-/// <target> <passes> if <cond> do <action>`).
+/// /c <processor> <target> <passes> if <cond> do <action>`).
 fn breakpoint_config_arg(
     dbg: &Debugger,
     condition: Option<String>,
@@ -162,6 +162,7 @@ fn breakpoint_config_arg(
     one_shot: bool,
     process: Option<u64>,
     thread: Option<u64>,
+    processor: Option<u16>,
     action: Option<String>,
 ) -> PyResult<BreakpointConfig> {
     let scope = process
@@ -180,6 +181,7 @@ fn breakpoint_config_arg(
         action,
         scope,
         thread,
+        processor,
         skip_prologue: false,
     })
 }
@@ -297,6 +299,7 @@ struct BreakpointSnapshot {
     symbol: Option<String>,
     scope: String,
     thread: Option<String>,
+    processor: Option<u16>,
     condition: Option<String>,
     pass_count: u64,
     hit_count: u64,
@@ -320,6 +323,7 @@ impl BreakpointSnapshot {
             symbol: bp.symbol.clone(),
             scope: bp.scope.label(),
             thread: bp.thread.as_ref().map(|thread| thread.label()),
+            processor: bp.processor,
             condition: bp.condition.clone(),
             pass_count: bp.pass_count,
             hit_count: bp.hit_count,
@@ -345,6 +349,7 @@ impl BreakpointSnapshot {
             symbol,
             scope: "unknown".to_string(),
             thread: None,
+            processor: None,
             condition: None,
             pass_count: 0,
             hit_count: 0,
@@ -429,6 +434,12 @@ impl Breakpoint {
     #[getter]
     fn thread(&self, py: Python<'_>) -> Option<String> {
         self.with_current(py, |bp| bp.thread.clone())
+    }
+
+    /// The `/c` processor filter, or `None` when the breakpoint is unfiltered.
+    #[getter]
+    fn processor(&self, py: Python<'_>) -> Option<u16> {
+        self.with_current(py, |bp| bp.processor)
     }
 
     #[getter]
@@ -2559,7 +2570,7 @@ impl Debugger {
     /// optional break `condition` (normal expression grammar, re-evaluated each
     /// hit; the run loop steps over and keeps going when it is false). Returns
     /// a live breakpoint handle.
-    #[pyo3(signature = (target, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, action=None))]
+    #[pyo3(signature = (target, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn breakpoint(
         slf: Bound<'_, Self>,
         target: &Bound<'_, PyAny>,
@@ -2568,6 +2579,7 @@ impl Debugger {
         one_shot: bool,
         process: Option<u64>,
         thread: Option<u64>,
+        processor: Option<u16>,
         action: Option<String>,
     ) -> PyResult<Breakpoint> {
         let id = {
@@ -2575,7 +2587,7 @@ impl Debugger {
             dbg.require_halted("breakpoint")?;
             let (addr, symbol) = breakpoint_target_arg(&dbg, target)?;
             let config = breakpoint_config_arg(
-                &dbg, condition, pass_count, one_shot, process, thread, action,
+                &dbg, condition, pass_count, one_shot, process, thread, processor, action,
             )?;
             dbg.inner
                 .add_breakpoint(VirtAddr(addr), symbol, config)
@@ -2586,7 +2598,7 @@ impl Debugger {
 
     /// Set a symbol-identity breakpoint that survives module unload/reload and
     /// may remain deferred until matching symbols are loaded.
-    #[pyo3(signature = (symbol, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, action=None))]
+    #[pyo3(signature = (symbol, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn set_symbol_breakpoint(
         slf: Bound<'_, Self>,
         symbol: String,
@@ -2595,13 +2607,14 @@ impl Debugger {
         one_shot: bool,
         process: Option<u64>,
         thread: Option<u64>,
+        processor: Option<u16>,
         action: Option<String>,
     ) -> PyResult<Breakpoint> {
         let id = {
             let mut dbg = slf.borrow_mut();
             dbg.require_halted("set_symbol_breakpoint")?;
             let config = breakpoint_config_arg(
-                &dbg, condition, pass_count, one_shot, process, thread, action,
+                &dbg, condition, pass_count, one_shot, process, thread, processor, action,
             )?;
             dbg.inner
                 .add_symbol_breakpoint(symbol, config)
@@ -2613,7 +2626,7 @@ impl Debugger {
     /// Set one symbol-identity breakpoint per symbol matching a `*`/`?`
     /// glob, optionally `module!`-qualified (`bm`). Returns the handles
     /// created; symbols that failed to install raise after the rest are set.
-    #[pyo3(signature = (pattern, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, action=None, limit=256))]
+    #[pyo3(signature = (pattern, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None, limit=256))]
     fn set_pattern_breakpoints(
         slf: Bound<'_, Self>,
         pattern: &str,
@@ -2622,6 +2635,7 @@ impl Debugger {
         one_shot: bool,
         process: Option<u64>,
         thread: Option<u64>,
+        processor: Option<u16>,
         action: Option<String>,
         limit: usize,
     ) -> PyResult<Vec<Breakpoint>> {
@@ -2629,7 +2643,7 @@ impl Debugger {
             let mut dbg = slf.borrow_mut();
             dbg.require_halted("set_pattern_breakpoints")?;
             let config = breakpoint_config_arg(
-                &dbg, condition, pass_count, one_shot, process, thread, action,
+                &dbg, condition, pass_count, one_shot, process, thread, processor, action,
             )?;
             dbg.inner
                 .add_pattern_breakpoints(pattern, config, limit.clamp(1, 4096))
@@ -2654,7 +2668,7 @@ impl Debugger {
 
     /// Set source-identity breakpoints for every loaded address matching
     /// `file:line`, or one deferred breakpoint when no module currently matches.
-    #[pyo3(signature = (file, line, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, action=None))]
+    #[pyo3(signature = (file, line, condition=None, *, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn set_source_breakpoint(
         slf: Bound<'_, Self>,
         file: &str,
@@ -2664,13 +2678,14 @@ impl Debugger {
         one_shot: bool,
         process: Option<u64>,
         thread: Option<u64>,
+        processor: Option<u16>,
         action: Option<String>,
     ) -> PyResult<Vec<Breakpoint>> {
         let ids = {
             let mut dbg = slf.borrow_mut();
             dbg.require_halted("set_source_breakpoint")?;
             let config = breakpoint_config_arg(
-                &dbg, condition, pass_count, one_shot, process, thread, action,
+                &dbg, condition, pass_count, one_shot, process, thread, processor, action,
             )?;
             dbg.inner
                 .add_source_breakpoint(format!("{file}:{line}"), config)
@@ -2686,7 +2701,7 @@ impl Debugger {
     /// trapping writes. `length` is 1, 2, 4, or 8 and requires natural
     /// alignment. Watches are global across guest address spaces and currently
     /// require KD. Returns a live stop-point handle.
-    #[pyo3(signature = (target, *, access="write", length=1, condition=None, pass_count=0, one_shot=false, process=None, thread=None, action=None))]
+    #[pyo3(signature = (target, *, access="write", length=1, condition=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn watchpoint(
         slf: Bound<'_, Self>,
         target: &Bound<'_, PyAny>,
@@ -2697,6 +2712,7 @@ impl Debugger {
         one_shot: bool,
         process: Option<u64>,
         thread: Option<u64>,
+        processor: Option<u16>,
         action: Option<String>,
     ) -> PyResult<Breakpoint> {
         let id = {
@@ -2705,7 +2721,7 @@ impl Debugger {
             let access = access.parse::<WatchpointAccess>().map_err(err)?;
             let (addr, symbol) = breakpoint_target_arg(&dbg, target)?;
             let config = breakpoint_config_arg(
-                &dbg, condition, pass_count, one_shot, process, thread, action,
+                &dbg, condition, pass_count, one_shot, process, thread, processor, action,
             )?;
             dbg.inner
                 .add_watchpoint(VirtAddr(addr), access, length, symbol, config)
@@ -4333,6 +4349,7 @@ mod tests {
                         symbol: None,
                         scope: "global".to_string(),
                         thread: None,
+                        processor: None,
                         condition: None,
                         pass_count: 0,
                         hit_count: 0,

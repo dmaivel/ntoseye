@@ -2222,7 +2222,9 @@ impl Session {
                 // predicate: the predicate matches on the address space,
                 // which is known from the registers, while the Windows thread
                 // costs a KPRCB walk that only a filtered breakpoint owes.
-                if !self.stopped_thread_matches(bp.thread.as_ref()) {
+                if !self.stopped_thread_matches(bp.thread.as_ref())
+                    || !stopped_processor_matches(bp.processor, &self.current_thread)
+                {
                     self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
                 }
@@ -2917,6 +2919,21 @@ fn kd_memory_source_notice(backend_name: &str) -> String {
 /// `p<pid>.<tid>` syntax, so the process field is skipped rather than matched
 /// against a literal. The qualifier is still required: an unqualified id is
 /// bare hex, which would make any hex-shaped string name a processor.
+/// Whether a hit reported on `stopped` belongs to the processor a `/c`
+/// breakpoint names.
+///
+/// Like the thread filter, this cannot be programmed into the target: a
+/// breakpoint site is memory or a per-processor debug register that any
+/// thread can reach, so every processor executing it traps and the filter is
+/// applied to the one that reported. A stop whose processor cannot be
+/// resolved matches, so a filter never loses a hit silently.
+pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool {
+    let Some(processor) = processor else {
+        return true;
+    };
+    processor_index_from_backend_thread_id(stopped).is_none_or(|stopped| stopped == processor)
+}
+
 pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
     let (_pid, tid) = thread_id.strip_prefix('p')?.split_once('.')?;
     u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
@@ -3366,6 +3383,10 @@ pub fn resolve_watchpoint_stop(
             backend.continue_execution()?;
             return Ok(WatchpointStopAction::Resumed);
         }
+    }
+    if !stopped_processor_matches(breakpoint.processor, current_thread) {
+        backend.continue_execution()?;
+        return Ok(WatchpointStopAction::Resumed);
     }
     if breakpoints.record_hit(breakpoint.id)? == BreakpointHitDisposition::SkipPass {
         backend.continue_execution()?;

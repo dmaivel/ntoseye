@@ -686,6 +686,7 @@ pub fn breakpoint(bp: &Breakpoint) -> View {
             "thread",
             View::OptStr(bp.thread.as_ref().map(|thread| thread.label())),
         ),
+        ("processor", View::OptNum(bp.processor.map(u64::from))),
         ("condition", View::OptStr(bp.condition.clone())),
         ("pass_count", View::Num(bp.pass_count)),
         ("hit_count", View::Num(bp.hit_count)),

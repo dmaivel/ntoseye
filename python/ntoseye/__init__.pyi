@@ -124,6 +124,10 @@ class Breakpoint:
         """The `/t` thread filter, or None when the breakpoint is unfiltered."""
         ...
     @property
+    def processor(self) -> int | None:
+        """The `/c` processor filter, or None when the breakpoint is unfiltered."""
+        ...
+    @property
     def condition(self) -> str | None: ...
     @condition.setter
     def condition(self, value: str | None) -> None:
@@ -611,6 +615,7 @@ class Debugger:
         one_shot: bool = False,
         process: int | None = None,
         thread: int | None = None,
+        processor: int | None = None,
         action: str | None = None,
     ) -> Breakpoint:
         """Set a code breakpoint from an address or expression; returns a live
@@ -634,6 +639,7 @@ class Debugger:
         one_shot: bool = False,
         process: int | None = None,
         thread: int | None = None,
+        processor: int | None = None,
         action: str | None = None,
     ) -> Breakpoint:
         """Set a reload-stable symbol breakpoint (`bu`), retaining it while deferred.
@@ -648,6 +654,7 @@ class Debugger:
         one_shot: bool = False,
         process: int | None = None,
         thread: int | None = None,
+        processor: int | None = None,
         action: str | None = None,
         limit: int = 256,
     ) -> list[Breakpoint]:
@@ -664,6 +671,7 @@ class Debugger:
         one_shot: bool = False,
         process: int | None = None,
         thread: int | None = None,
+        processor: int | None = None,
         action: str | None = None,
     ) -> list[Breakpoint]:
         """Set all matching `file:line` identities, or one deferred identity.
@@ -680,6 +688,7 @@ class Debugger:
         one_shot: bool = False,
         process: int | None = None,
         thread: int | None = None,
+        processor: int | None = None,
         action: str | None = None,
     ) -> Breakpoint:
         """Watch data access at an address or expression; returns a live handle.

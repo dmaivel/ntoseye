@@ -161,6 +161,8 @@ pub struct Breakpoint {
     pub scope: BreakpointScope,
     /// Which Windows thread may surface a hit (`/t`), if restricted.
     pub thread: Option<ThreadScope>,
+    /// Which processor may surface a hit (`/c`), if restricted.
+    pub processor: Option<u16>,
     /// Whether `scope` was inferred from the resolved address and the process
     /// selected when this breakpoint was created. Explicit `/p` scopes remain
     /// fixed across symbol re-resolution.
@@ -201,13 +203,17 @@ impl Breakpoint {
         matches!(self.backend, BreakpointBackend::Kernel { original: None })
     }
 
-    /// What this breakpoint is restricted to: its address space, plus the
-    /// thread when `/t` narrowed it further.
+    /// What this breakpoint is restricted to: its address space, plus
+    /// whichever of `/t` and `/c` narrowed it further.
     pub fn scope_label(&self) -> String {
-        match &self.thread {
-            Some(thread) => format!("{}, {}", self.scope.label(), thread.label()),
-            None => self.scope.label(),
+        let mut label = self.scope.label();
+        if let Some(thread) = &self.thread {
+            label.push_str(&format!(", {}", thread.label()));
         }
+        if let Some(processor) = self.processor {
+            label.push_str(&format!(", cpu {processor}"));
+        }
+        label
     }
 
     pub fn specification(&self) -> Option<&str> {
@@ -443,6 +449,9 @@ pub struct BreakpointConfig {
     /// the address space decides where a site is written, the thread only
     /// decides which hits are surfaced.
     pub thread: Option<ThreadScope>,
+    /// Restrict hits to the processor a stop is reported on (`/c`). Filtered
+    /// the same way and for the same reason as `thread`.
+    pub processor: Option<u16>,
     /// Resolve a symbol breakpoint past the function's prologue. See
     /// [`BreakpointSpec::Symbol`].
     pub skip_prologue: bool,
@@ -493,6 +502,7 @@ impl BreakpointManager {
                 scope: BreakpointScope::Kernel,
                 automatic_scope: false,
                 thread: None,
+                processor: None,
                 condition: None,
                 condition_expr: None,
                 pass_count: 0,
@@ -734,6 +744,7 @@ impl BreakpointManager {
                 action: config.action,
                 temporary,
                 thread: config.thread,
+                processor: config.processor,
                 hardware: None,
                 backend,
             },
@@ -860,6 +871,7 @@ impl BreakpointManager {
                 temporary: false,
                 hardware: Some(HardwareBreakpoint { access, len, slot }),
                 thread: config.thread,
+                processor: config.processor,
                 backend: BreakpointBackend::Hardware,
             },
         );
@@ -2029,6 +2041,7 @@ mod tests {
                 scope: BreakpointScope::Kernel,
                 automatic_scope: false,
                 thread: None,
+                processor: None,
                 condition: None,
                 condition_expr: None,
                 pass_count: 0,
@@ -2069,6 +2082,7 @@ mod tests {
                 },
                 automatic_scope: false,
                 thread: None,
+                processor: None,
                 condition: None,
                 condition_expr: None,
                 pass_count: 0,

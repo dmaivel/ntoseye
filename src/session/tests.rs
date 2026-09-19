@@ -965,3 +965,15 @@ fn clear_trap_flag_skips_the_write_when_nothing_is_set() {
     assert_eq!(backend.writes, 0);
     assert_eq!(backend.regs, before);
 }
+
+#[test]
+fn a_processor_filter_only_matches_the_vcpu_that_reported() {
+    assert!(stopped_processor_matches(Some(1), "p01.02"));
+    assert!(!stopped_processor_matches(Some(1), "p01.01"));
+    assert!(!stopped_processor_matches(Some(1), "p01.04"));
+    // No filter takes every stop.
+    assert!(stopped_processor_matches(None, "p01.04"));
+    // An unresolvable id is reported rather than dropped: a filter must
+    // never lose a hit silently.
+    assert!(stopped_processor_matches(Some(1), ""));
+}
