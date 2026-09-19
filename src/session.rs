@@ -386,10 +386,14 @@ pub struct Session {
     /// stops the backend's reconnect-assist poking. The single owner of that
     /// state; hosts read it rather than reimplement it.
     pub reload_module_list_pending: bool,
-    /// Address of the automatic `nt!KeBugCheckEx` breakpoint, once armed.
-    /// Only backends that cannot report a bugcheck themselves get one; see
-    /// [`Self::arm_bugcheck_trap`].
+    /// Address of the automatic `nt!KeBugCheckEx` breakpoint, once armed,
+    /// and the instruction bytes it displaced. Only backends that cannot
+    /// report a bugcheck themselves get one; see [`Self::arm_bugcheck_trap`].
+    /// The bytes are kept for the same reason the breakpoint manager keeps
+    /// its own: a read of that address must show the guest's code, not our
+    /// trap.
     bugcheck_trap: Option<VirtAddr>,
+    bugcheck_trap_original: Vec<u8>,
     /// Whether a detected reload has not yet been surfaced to the host: the
     /// guest-state rebuild failed at the detection stop, so no
     /// [`ContinueOutcome::TargetReloaded`] went out. While set, the eventual
@@ -653,6 +657,7 @@ impl Session {
             parked_windows_thread: None,
             reload_module_list_pending: false,
             bugcheck_trap: None,
+            bugcheck_trap_original: Vec::new(),
             reload_surface_pending: false,
             parked_stop: None,
             module_refresh_report: None,
@@ -1163,6 +1168,7 @@ impl Session {
             &mut bytes,
             trace.active_dtb,
         );
+        self.mask_bugcheck_trap(VirtAddr(pc), &mut bytes);
 
         if self.target.arch() == Arch::Arm64 {
             let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -1607,9 +1613,24 @@ impl Session {
         else {
             return;
         };
+        // Read the code before the trap displaces it: the stub writes the
+        // breakpoint into guest memory, and memory here is read out of band
+        // through the host mapping, so nothing else would ever see the
+        // original instruction again.
+        let mut original = vec![0u8; usize::from(self.register_map.breakpoint_step_size())];
+        if self
+            .target
+            .address_space(kernel_dtb)
+            .read_bytes(address, &mut original)
+            .is_err()
+        {
+            original.clear();
+        }
+
         match self.backend.set_breakpoint(address.0) {
             Ok(()) => {
                 self.bugcheck_trap = Some(address);
+                self.bugcheck_trap_original = original;
                 self.notices.push(format!(
                     "armed a bugcheck trap at nt!KeBugCheckEx ({:#x}); the {} backend cannot detect a bugcheck by itself",
                     address.0,
@@ -1896,7 +1917,26 @@ impl Session {
         process.memory().read_bytes(addr, buf)?;
         self.breakpoints
             .mask_breakpoint_bytes(&self.target, addr, buf, process.dtb());
+        self.mask_bugcheck_trap(addr, buf);
         Ok(())
+    }
+
+    /// Put the bugcheck trap's displaced instruction back into a read that
+    /// covers it. The trap is not one of the manager's breakpoints, so the
+    /// manager cannot mask it, and without this `u nt!KeBugCheckEx` shows the
+    /// debugger's own trap instead of the guest's code.
+    fn mask_bugcheck_trap(&self, start: VirtAddr, buf: &mut [u8]) {
+        let Some(address) = self.bugcheck_trap else {
+            return;
+        };
+        if self.bugcheck_trap_original.is_empty() || address.0 < start.0 {
+            return;
+        }
+        let offset = (address.0 - start.0) as usize;
+        let end = offset + self.bugcheck_trap_original.len();
+        if end <= buf.len() {
+            buf[offset..end].copy_from_slice(&self.bugcheck_trap_original);
+        }
     }
 
     /// Disassemble `count` instructions starting at `addr` in the current
@@ -2014,6 +2054,7 @@ impl Session {
         };
         self.backend.remove_breakpoint(address.0)?;
         self.bugcheck_trap = None;
+        self.bugcheck_trap_original.clear();
         Ok(())
     }
 
