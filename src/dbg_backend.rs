@@ -443,6 +443,18 @@ impl BackendCapability {
     }
 }
 
+/// The refusal a halted-only operation owes a backend that can never halt.
+///
+/// Without execution control a backend reports `is_running()` forever, so
+/// "the VM is running, break in first" names a state the user cannot reach.
+pub fn halt_unreachable_reason(backend: &dyn DebugBackend) -> Option<String> {
+    let controllable = backend
+        .capabilities()
+        .iter()
+        .any(|entry| entry.capability == DebugCapability::ExecutionControl && entry.supported);
+    (!controllable).then(|| format!("the {} backend cannot halt the target", backend.name()))
+}
+
 /// Single-step residue a resume has to clear: RFLAGS.TF and the DR6 B0-B3
 /// breakpoint-status bits.
 #[derive(Debug, Clone, Copy)]

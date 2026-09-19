@@ -15,7 +15,7 @@ use record::{Diagnostic, Record};
 
 use crate::backend::MemoryOps;
 use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck};
-use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
+use crate::dbg_backend::{ContinueDisposition, WatchpointAccess, halt_unreachable_reason};
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::error::Error;
 use crate::exception_policy::{
@@ -3468,9 +3468,14 @@ impl Debugger {
         // (a caught-but-undrained stop); settle it first, mirroring the MCP guard.
         self.inner.settle_pending_stop().map_err(err)?;
         if self.inner.backend.is_running() {
-            Err(raise(format!(
-                "{operation} requires the VM to be halted; call interrupt() first"
-            )))
+            match halt_unreachable_reason(&*self.inner.backend) {
+                Some(reason) => Err(raise(format!(
+                    "{operation} needs a halted target; {reason}"
+                ))),
+                None => Err(raise(format!(
+                    "{operation} requires the VM to be halted; call interrupt() first"
+                ))),
+            }
         } else {
             Ok(())
         }

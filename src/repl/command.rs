@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use linkme::distributed_slice;
 
+use crate::dbg_backend::halt_unreachable_reason;
 use crate::error::Result;
 use crate::repl::{CompletionStrategy, Flow, ReplState, error};
 
@@ -380,7 +381,10 @@ pub fn report_command_parse_error(line: &str, err: CommandParseError) {
 pub fn check_run_state(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
     match spec.run_state {
         Some(RunState::Halted) if state.ctx.backend.is_running() => {
-            error!("VM is running");
+            match halt_unreachable_reason(&*state.ctx.backend) {
+                Some(reason) => error!("this command needs a halted target; {reason}"),
+                None => error!("VM is running"),
+            }
             return false;
         }
         Some(RunState::Running) if !state.ctx.backend.is_running() => {
