@@ -3,7 +3,7 @@ use std::mem;
 use std::net::TcpStream;
 use std::time::Duration;
 
-use crate::dbg_backend::{DebugBackend, StopEvent};
+use crate::dbg_backend::{DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent};
 use crate::error::{Error, Result};
 
 pub mod breakpoints;
@@ -46,6 +46,87 @@ struct RawPacket {
     checksum: [u8; 2],
 }
 
+/// The fields of an RSP stop reply this client acts on.
+///
+/// The signal byte is deliberately not turned into an exception code. A stub
+/// reports `SIGTRAP` for a breakpoint, a watchpoint, and a completed step
+/// alike, so inventing `STATUS_BREAKPOINT` from it would drive the shared
+/// `int3` rewind over stops that never executed one.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StopReply {
+    thread_id: Option<String>,
+    /// Address from `watch:`/`rwatch:`/`awatch:`: the data address that made
+    /// a hardware watchpoint fire.
+    watch_address: Option<u64>,
+}
+
+impl StopReply {
+    /// Parse `T<sig>[<name>:<value>;]...`. `S<sig>` carries no fields, and
+    /// `W`/`X`/`N` do not describe a stopped thread, so all of them parse
+    /// empty.
+    fn parse(response: &str) -> Self {
+        let mut reply = StopReply::default();
+        let Some(fields) = response.strip_prefix('T').and_then(|body| body.get(2..)) else {
+            return reply;
+        };
+
+        for field in fields.split(';') {
+            let Some((name, value)) = field.split_once(':') else {
+                continue;
+            };
+            match name {
+                "thread" => reply.thread_id = Some(value.to_string()),
+                // The three watch kinds differ only in which access trapped,
+                // which the breakpoint already records.
+                "watch" | "rwatch" | "awatch" => {
+                    reply.watch_address = u64::from_str_radix(value, 16).ok();
+                }
+                _ => {}
+            }
+        }
+
+        reply
+    }
+
+    fn into_event(self) -> StopEvent {
+        StopEvent {
+            thread_id: self.thread_id,
+            watchpoint_address: self.watch_address,
+            exception_code: None,
+            first_chance: None,
+            exception_address: None,
+            program_counter: None,
+            is_bugcheck: false,
+            bugcheck: None,
+            target_reloaded: false,
+            target_kernel_base_hint: None,
+            modules_changed: false,
+            assisted_breakin: false,
+        }
+    }
+}
+
+/// A hardware breakpoint as the stub knows it. RSP addresses one by type,
+/// address, and length rather than by slot, so removing it means replaying
+/// exactly what installed it.
+#[derive(Debug, Clone, Copy)]
+struct HardwareSite {
+    kind: u8,
+    addr: u64,
+    len: u8,
+}
+
+/// The `Z`/`z` packet type for an access mode. `Z3` (read-only watch) is
+/// never used: the x86 debug registers cannot express one, so a read watch is
+/// the read/write `Z4`.
+fn hardware_packet_kind(access: HwBreakpointAccess) -> u8 {
+    match access {
+        HwBreakpointAccess::Execute => 1,
+        HwBreakpointAccess::Write => 2,
+        HwBreakpointAccess::ReadWrite => 4,
+    }
+}
+
 impl StubFeatures {
     fn parse(response: &str) -> Self {
         let mut features = StubFeatures::default();
@@ -69,6 +150,7 @@ pub struct GdbClient {
     no_ack_mode: bool,
     register_map: RegisterMap,
     is_running: bool,
+    hardware_sites: [Option<HardwareSite>; HW_BREAKPOINT_SLOTS as usize],
 }
 
 fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
@@ -106,6 +188,7 @@ impl GdbClient {
             no_ack_mode: false,
             register_map: RegisterMap::default(),
             is_running: false, // NOTE if the user toys with VM via GUI, this value goes bad
+            hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
         };
 
         client.force_stop_and_resync()?;
@@ -364,6 +447,56 @@ impl GdbClient {
         }
     }
 
+    /// The slot's record, or an error naming the slot a caller invented.
+    /// Indexing would panic, and a debugger has no business dying over one.
+    fn hardware_slot(&mut self, slot: u8) -> Result<&mut Option<HardwareSite>> {
+        let count = self.hardware_sites.len();
+        self.hardware_sites
+            .get_mut(usize::from(slot))
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "hardware breakpoint slot {slot} does not exist; the stub has {count}"
+                ))
+            })
+    }
+
+    fn set_hardware_site(&mut self, slot: u8, site: HardwareSite) -> Result<()> {
+        self.clear_hardware_site(slot)?;
+
+        let response = self.send_packet(&format!("Z{},{:x},{}", site.kind, site.addr, site.len))?;
+        if response == "OK" {
+            *self.hardware_slot(slot)? = Some(site);
+            return Ok(());
+        }
+        // An empty reply is RSP for "I do not implement this packet".
+        if response.is_empty() {
+            return Err(Error::NotSupported);
+        }
+        Err(Error::Rsp(format!(
+            "stub refused a hardware breakpoint at {:#x}: {}.\n\
+             The hypervisor programs these with the processor's debug registers and may have none left.",
+            site.addr, response
+        )))
+    }
+
+    fn clear_hardware_site(&mut self, slot: u8) -> Result<()> {
+        let Some(site) = *self.hardware_slot(slot)? else {
+            return Ok(());
+        };
+
+        let response = self.send_packet(&format!("z{},{:x},{}", site.kind, site.addr, site.len))?;
+        if response != "OK" {
+            // Leave the slot recorded: the stub still holds it, and naming it
+            // again needs the same three values.
+            return Err(Error::Rsp(format!(
+                "failed to remove the hardware breakpoint at {:#x}: {}",
+                site.addr, response
+            )));
+        }
+        *self.hardware_slot(slot)? = None;
+        Ok(())
+    }
+
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         let response = self.send_packet("g")?;
 
@@ -535,7 +668,7 @@ impl GdbClient {
 
     fn stopped_thread_id(&mut self) -> Result<String> {
         let response = self.send_packet("?")?;
-        if let Some(thread_id) = Self::parse_stop_reply_thread_id(&response) {
+        if let Some(thread_id) = StopReply::parse(&response).thread_id {
             return Ok(thread_id);
         }
 
@@ -547,17 +680,6 @@ impl GdbClient {
         Err(Error::Rsp(
             "could not determine thread from stop reply".into(),
         ))
-    }
-
-    fn parse_stop_reply_thread_id(response: &str) -> Option<String> {
-        if !response.starts_with('T') {
-            return None;
-        }
-
-        let start = response.find("thread:")?;
-        let remainder = &response[start + 7..];
-        let end = remainder.find(';').unwrap_or(remainder.len());
-        Some(remainder[..end].to_string())
     }
 
     fn fetch_register_map(&mut self) -> Result<RegisterMap> {
@@ -676,6 +798,31 @@ impl DebugBackend for GdbClient {
         GdbClient::remove_breakpoint(self, addr)
     }
 
+    /// A stub programs these with the processor's debug registers, so they
+    /// trap on every processor and leave guest memory untouched.
+    fn supports_watchpoints(&self) -> bool {
+        true
+    }
+
+    fn set_hardware_breakpoint(
+        &mut self,
+        slot: u8,
+        addr: u64,
+        access: HwBreakpointAccess,
+        len: u8,
+    ) -> Result<()> {
+        let site = HardwareSite {
+            kind: hardware_packet_kind(access),
+            addr,
+            len,
+        };
+        GdbClient::set_hardware_site(self, slot, site)
+    }
+
+    fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+        GdbClient::clear_hardware_site(self, slot)
+    }
+
     fn continue_execution(&mut self) -> Result<()> {
         GdbClient::continue_execution(self)
     }
@@ -686,55 +833,19 @@ impl DebugBackend for GdbClient {
 
     fn interrupt(&mut self) -> Result<StopEvent> {
         let response = GdbClient::interrupt(self)?;
-        Ok(StopEvent {
-            thread_id: Self::parse_stop_reply_thread_id(&response),
-            exception_code: None,
-            first_chance: None,
-            exception_address: None,
-            program_counter: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            target_kernel_base_hint: None,
-            modules_changed: false,
-            assisted_breakin: false,
-        })
+        Ok(StopReply::parse(&response).into_event())
     }
 
     fn wait_for_stop(&mut self) -> Result<StopEvent> {
         let response = GdbClient::wait_for_stop(self)?;
-        Ok(StopEvent {
-            thread_id: Self::parse_stop_reply_thread_id(&response),
-            exception_code: None,
-            first_chance: None,
-            exception_address: None,
-            program_counter: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            target_kernel_base_hint: None,
-            modules_changed: false,
-            assisted_breakin: false,
-        })
+        Ok(StopReply::parse(&response).into_event())
     }
 
     fn try_wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>> {
         self.stream.set_read_timeout(Some(timeout))?;
         let result = GdbClient::try_wait_for_stop(self);
         let _ = self.stream.set_read_timeout(None);
-        Ok(result?.map(|response| StopEvent {
-            thread_id: Self::parse_stop_reply_thread_id(&response),
-            exception_code: None,
-            first_chance: None,
-            exception_address: None,
-            program_counter: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            target_kernel_base_hint: None,
-            modules_changed: false,
-            assisted_breakin: false,
-        }))
+        Ok(result?.map(|response| StopReply::parse(&response).into_event()))
     }
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
@@ -756,7 +867,7 @@ impl DebugBackend for GdbClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{GdbClient, StubFeatures};
+    use super::{GdbClient, StopReply, StubFeatures};
 
     #[test]
     fn decodes_escaped_and_run_length_packet_data() {
@@ -780,13 +891,37 @@ mod tests {
     }
 
     #[test]
-    fn parses_thread_id_from_stop_reply() {
-        let thread_id = GdbClient::parse_stop_reply_thread_id("T05thread:p1.2;core:1;");
-        assert_eq!(thread_id.as_deref(), Some("p1.2"));
+    fn parses_thread_and_watch_fields_from_a_stop_reply() {
+        // QEMU's own shape: padded thread id, then the trapping address.
+        let reply = StopReply::parse("T05thread:p01.02;watch:fffff80012345678;");
+        assert_eq!(reply.thread_id.as_deref(), Some("p01.02"));
+        assert_eq!(reply.watch_address, Some(0xffff_f800_1234_5678));
     }
 
     #[test]
-    fn ignores_non_stop_reply_when_parsing_thread_id() {
-        assert!(GdbClient::parse_stop_reply_thread_id("S05").is_none());
+    fn parses_read_and_access_watch_fields() {
+        assert_eq!(
+            StopReply::parse("T05thread:p01.01;rwatch:1000;").watch_address,
+            Some(0x1000)
+        );
+        assert_eq!(
+            StopReply::parse("T05thread:p01.01;awatch:1000;").watch_address,
+            Some(0x1000)
+        );
+    }
+
+    #[test]
+    fn ignores_fields_that_are_not_a_thread_or_a_watch() {
+        // The initial `?` reply names a core and no thread; register fields
+        // are `<hex regnum>:<value>` and must not be mistaken for either.
+        let reply = StopReply::parse("T05core:01;10:0000000000000000;");
+        assert_eq!(reply, StopReply::default());
+    }
+
+    #[test]
+    fn parses_stop_replies_that_describe_no_stopped_thread_as_empty() {
+        // `S` carries no fields at all, and `W`/`X` report an exit.
+        assert_eq!(StopReply::parse("S05"), StopReply::default());
+        assert_eq!(StopReply::parse("W00"), StopReply::default());
     }
 }

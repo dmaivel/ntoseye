@@ -231,6 +231,7 @@ mod tests {
             first_chance,
             exception_address: Some(0xffff_f800_1234_5678),
             program_counter: Some(0xffff_f800_1234_5678),
+            watchpoint_address: None,
             is_bugcheck: false,
             bugcheck: None,
             target_reloaded: false,

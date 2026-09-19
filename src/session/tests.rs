@@ -98,6 +98,20 @@ impl MockBackend {
         self
     }
 
+    /// Model a stub that owns the processor's debug registers and exposes
+    /// none of them, as a GDB target description does.
+    fn without_debug_registers(mut self) -> Self {
+        self.register_map = RegisterMap::parse_target_xml(
+            r#"<target><feature name="org.gnu.gdb.i386.core">
+                 <reg name="rsp" bitsize="64"/>
+                 <reg name="rip" bitsize="64"/>
+                 <reg name="eflags" bitsize="32"/>
+               </feature></target>"#,
+        );
+        self.regs = vec![0u8; 20];
+        self
+    }
+
     pub fn queue_interrupt(&mut self, event: StopEvent) {
         self.interrupt_events.push_back(event);
     }
@@ -240,6 +254,7 @@ fn single_step_event() -> StopEvent {
         first_chance: Some(true),
         exception_address: None,
         program_counter: None,
+        watchpoint_address: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -256,6 +271,7 @@ pub fn breakpoint_event(pc: u64) -> StopEvent {
         first_chance: Some(true),
         exception_address: Some(pc),
         program_counter: Some(pc),
+        watchpoint_address: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -272,6 +288,7 @@ fn module_change_event() -> StopEvent {
         first_chance: None,
         exception_address: None,
         program_counter: None,
+        watchpoint_address: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -785,6 +802,70 @@ fn hardware_breakpoint_hit_ignores_non_single_step_stops() {
 
     assert_eq!(backend.writes, 0);
     assert_eq!(backend.regs, before);
+}
+
+/// A stop from a stub: no exception code, no debug registers to read, and
+/// the trapping data address reported with the stop instead.
+fn stub_watch_event(address: u64) -> StopEvent {
+    StopEvent {
+        exception_code: None,
+        first_chance: None,
+        watchpoint_address: Some(address),
+        ..single_step_event()
+    }
+}
+
+#[test]
+fn a_reported_watch_address_attributes_the_watchpoint_whose_range_covers_it() {
+    // The watchpoint covers 0x1000..0x1004; the stub names the byte touched.
+    let manager = manager_with_hw(0, HwBreakpointAccess::Write, true);
+    let mut backend = MockBackend::default().without_debug_registers();
+    let map = backend.register_map.clone();
+
+    let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &stub_watch_event(0x1002))
+        .unwrap()
+        .expect("a byte inside the watched range belongs to the watchpoint");
+
+    assert_eq!(hit.id, 7);
+    // The address settled it, so nothing had to be fetched to decide.
+    assert_eq!(backend.reads, 0);
+}
+
+#[test]
+fn a_reported_watch_address_past_the_watched_range_is_not_a_hit() {
+    let manager = manager_with_hw(0, HwBreakpointAccess::Write, true);
+    let mut backend = MockBackend::default().without_debug_registers();
+    let map = backend.register_map.clone();
+
+    let hit =
+        hardware_breakpoint_hit(&mut backend, &map, &manager, &stub_watch_event(0x1004)).unwrap();
+
+    assert!(hit.is_none());
+}
+
+#[test]
+fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stopped_pc() {
+    let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);
+    let mut backend = MockBackend::default().without_debug_registers();
+    let map = backend.register_map.clone();
+    let event = StopEvent {
+        exception_code: None,
+        first_chance: None,
+        ..single_step_event()
+    };
+
+    backend.set("rip", 0x1000);
+    let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &event).unwrap();
+    assert_eq!(hit.map(|bp| bp.id), Some(7));
+    // Without RF the resume re-enters the same faulting instruction.
+    assert_eq!(backend.get("eflags") & (1 << 16), 1 << 16);
+
+    // The breakpoint fires at its own address, so a stop elsewhere is not it.
+    backend.set("rip", 0x2000);
+    backend.set("eflags", 0);
+    let elsewhere = hardware_breakpoint_hit(&mut backend, &map, &manager, &event).unwrap();
+    assert!(elsewhere.is_none());
+    assert_eq!(backend.get("eflags"), 0);
 }
 
 #[test]

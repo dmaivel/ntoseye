@@ -50,7 +50,7 @@ repl_command! {
     cmd_ba;
     names: ["ba"],
     usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
-    summary: "Set a hardware (debug-register) breakpoint (KD and KDNET only).",
+    summary: "Set a hardware (debug-register) breakpoint.",
     details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). e.g. ba w4 nt!MyGlobal",
     completion: [None, Expression],
     run_state: Halted,

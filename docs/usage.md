@@ -258,7 +258,7 @@ ba w8 nt!KiBalanceSetManagerLastCheckTick
 - `bp [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a breakpoint.
 - `bu [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <symbol> [<passes>] [if <expr>] [do "<commands>"]` - Set a deferred symbolic breakpoint.
 - `bm [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <symbol-pattern> [<passes>] [if <expr>] [do "<commands>"]` - Set deferred symbolic breakpoints for matching symbols.
-- `ba [/1] [/p <pid>] [/t <tid|ethread>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (KD and KDNET only); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
+- `ba [/1] [/p <pid>] [/t <tid|ethread>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (not available on a dump or the `memory` backend); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
 - `bl` - List all breakpoints. The status column reads `e` enabled, `d` disabled, `o` owed.
 - `bc <id|id-id|*>` - Clear one or more breakpoints by ID.
 - `bd <id|id-id|*>` - Disable one or more breakpoints by ID.

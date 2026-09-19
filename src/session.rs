@@ -3109,9 +3109,16 @@ pub fn stop_is_stray_single_step(event: &StopEvent, breakpoints: &BreakpointMana
 }
 
 /// If `event` is a hardware-debug stop, return the breakpoint that fired.
-/// AMD64 maps DR6 status bits and clears them; ARM64 uses the stopped PC/FAR
-/// together with BCR/WCR enable and address-select fields. `None` means a
-/// plain single-step or a backend without hardware-stop state. Must run before
+///
+/// Which evidence says so depends on what the transport exposes. A stop that
+/// names the trapping data address answers directly. Otherwise AMD64 maps DR6
+/// status bits and clears them, and ARM64 uses the stopped PC/FAR together
+/// with BCR/WCR enable and address-select fields. A transport with neither
+/// (a GDB stub owns the debug registers and does not show them) is left with
+/// the PC, which is an execute breakpoint's address because x86 and ARM64
+/// both fault before the instruction runs.
+///
+/// `None` means a plain single-step or no hardware stop. Must run before
 /// [`stop_is_stray_single_step`].
 pub fn hardware_breakpoint_hit(
     backend: &mut dyn DebugBackend,
@@ -3119,15 +3126,36 @@ pub fn hardware_breakpoint_hit(
     breakpoints: &BreakpointManager,
     event: &StopEvent,
 ) -> Result<Option<Breakpoint>> {
-    if event.exception_code != Some(STATUS_SINGLE_STEP)
-        || event.is_bugcheck
-        || !breakpoints.has_enabled_hardware_breakpoints()
-    {
+    if event.is_bugcheck || !breakpoints.has_enabled_hardware_breakpoints() {
+        return Ok(None);
+    }
+    let slots = backend.hardware_breakpoint_slots();
+
+    if let Some(address) = event.watchpoint_address {
+        return Ok(watchpoint_covering(breakpoints, slots, address));
+    }
+
+    // Debug-register evidence only means anything on the debug exception, and
+    // checking that here is what keeps an ordinary stop from fetching
+    // registers. A transport that exposes no debug registers reports no
+    // exception code either, so it has no such gate to pass.
+    let debug_registers = register_map.contains("dr6") || register_map.contains("bcr0");
+    if debug_registers && event.exception_code != Some(STATUS_SINGLE_STEP) {
         return Ok(None);
     }
 
     let mut regs = backend.read_registers()?;
     let Ok(dr6) = register_map.read_u64("dr6", &regs) else {
+        if !debug_registers {
+            return execute_breakpoint_at_pc(
+                backend,
+                register_map,
+                breakpoints,
+                slots,
+                event,
+                &mut regs,
+            );
+        }
         return arm64_hardware_breakpoint_hit(register_map, breakpoints, event, &regs);
     };
 
@@ -3158,6 +3186,73 @@ pub fn hardware_breakpoint_hit(
 
     if dirty {
         backend.write_registers(&regs)?;
+    }
+
+    Ok(hit)
+}
+
+/// The data watchpoint covering `address`, which is what a transport-reported
+/// trap address names: the byte touched, not the watchpoint's base.
+fn watchpoint_covering(
+    breakpoints: &BreakpointManager,
+    slots: u8,
+    address: u64,
+) -> Option<Breakpoint> {
+    (0..slots)
+        .filter_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
+        .find(|bp| {
+            bp.hardware.is_some_and(|hw| {
+                hw.access != HwBreakpointAccess::Execute
+                    && bp
+                        .address
+                        .0
+                        .checked_add(u64::from(hw.len))
+                        .is_some_and(|end| address >= bp.address.0 && address < end)
+            })
+        })
+}
+
+/// The hardware execute breakpoint parked at the stopped PC, with `RF` set so
+/// the resume gets past it.
+///
+/// An x86 execute breakpoint is a fault, not a trap: it fires before the
+/// instruction runs, so resuming re-enters the same instruction and faults
+/// again. `RF` suppresses it for exactly one instruction. A stub programs the
+/// debug registers rather than exposing them, but the flag still lives in the
+/// guest's `RFLAGS`, so writing it there is what breaks the loop.
+fn execute_breakpoint_at_pc(
+    backend: &mut dyn DebugBackend,
+    register_map: &RegisterMap,
+    breakpoints: &BreakpointManager,
+    slots: u8,
+    event: &StopEvent,
+    regs: &mut [u8],
+) -> Result<Option<Breakpoint>> {
+    let Some(pc) = register_map
+        .read_u64("rip", regs)
+        .or_else(|_| register_map.read_u64("pc", regs))
+        .ok()
+        .or(event.program_counter)
+    else {
+        return Ok(None);
+    };
+    let hit = (0..slots)
+        .filter_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
+        .find(|bp| {
+            bp.address.0 == pc
+                && bp
+                    .hardware
+                    .is_some_and(|hw| hw.access == HwBreakpointAccess::Execute)
+        });
+
+    if hit.is_some()
+        && let Ok(eflags) = register_map.read_u64("eflags", regs)
+    {
+        const RF: u64 = 1 << 16;
+        if eflags & RF == 0 {
+            register_map.write_u64("eflags", regs, eflags | RF)?;
+            backend.write_registers(regs)?;
+        }
     }
 
     Ok(hit)

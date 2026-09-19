@@ -221,6 +221,9 @@ pub struct StopEvent {
     pub exception_address: Option<u64>,
     /// Program counter reported by the stop packet, when available
     pub program_counter: Option<u64>,
+    /// Data address a hardware watchpoint trapped on, when the transport
+    /// reports it with the stop instead of leaving it in debug registers.
+    pub watchpoint_address: Option<u64>,
     /// Set when the stop was surfaced because the guest is processing a
     /// bugcheck (KD load-symbols teardown caught by the backend)
     pub is_bugcheck: bool,

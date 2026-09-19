@@ -128,6 +128,13 @@ impl RegisterMap {
         self.ordered.iter().map(|reg| reg.name.clone()).collect()
     }
 
+    /// Whether the target description carries this register. Callers use it
+    /// to tell "the transport exposes no such state" from "the register read
+    /// zero".
+    pub fn contains(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
     pub fn require_amd64_target(&self) -> Result<()> {
         let amd64 = ["rax", "rip", "rsp"].iter().all(|name| {
             self.by_name

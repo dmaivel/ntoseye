@@ -2232,6 +2232,7 @@ fn exit_classifies_stray_single_step_but_spares_real_stops() {
         first_chance: code.map(|_| true),
         exception_address: pc,
         program_counter: pc,
+        watchpoint_address: None,
         is_bugcheck,
         bugcheck: None,
         target_reloaded: false,

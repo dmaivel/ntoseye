@@ -592,6 +592,7 @@ fn stop_event(stop: StateChange) -> StopEvent {
         first_chance: stop.exception_first_chance,
         exception_address: stop.exception_address,
         program_counter: Some(stop.program_counter),
+        watchpoint_address: None,
         is_bugcheck: stop.is_bugcheck,
         bugcheck: stop.bugcheck,
         target_reloaded: stop.target_reloaded,
