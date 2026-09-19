@@ -774,6 +774,26 @@ pub struct AttachReport {
     pub symbol_report: ModuleSymbolLoadReport,
 }
 
+/// Kernel discovery found nothing in a live target's memory. Name what was
+/// searched: the two causes look identical otherwise, and the numbers tell
+/// them apart. A host mapping the size of the guest's configured RAM means
+/// the memory is right and the guest simply has not reached its kernel; any
+/// other size means the mapped region is not the guest's RAM.
+///
+/// A target-mediated source reports no size, so it keeps the bare error.
+fn no_kernel_in_live_memory(phys: &PhysMem) -> Error {
+    let size = phys.ram_size();
+    if size == 0 {
+        return Error::NtoskrnlNotFound;
+    }
+    Error::DebugInfo(format!(
+        "no Windows kernel in the {} MiB of guest memory mapped at guest-physical {:#x}.\n\
+         Either the guest has not reached its kernel yet, or that mapping is not its RAM.",
+        size / (1024 * 1024),
+        phys.ram_base()
+    ))
+}
+
 impl Target {
     /// Access the guest, returning `Err(NtoskrnlNotFound)` when no kernel was
     /// discovered (e.g. triage dumps that don't contain the kernel PE header).
@@ -834,7 +854,11 @@ impl Target {
                 Err(e) => return Err(e),
             }
         } else {
-            Some(Guest::new(phys.clone(), symbols.clone())?)
+            match Guest::new(phys.clone(), symbols.clone()) {
+                Ok(guest) => Some(guest),
+                Err(Error::NtoskrnlNotFound) => return Err(no_kernel_in_live_memory(&phys)),
+                Err(e) => return Err(e),
+            }
         };
 
         // Pre-compute the triage module list once for both symbol loading and
