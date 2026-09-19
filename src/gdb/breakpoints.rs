@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::guest::{ModuleInfo, ProcessInfo, read_pe_header_page};
 use crate::memory::PAGE_SIZE;
-use crate::target::Target;
+use crate::target::{Target, ThreadInfo};
 use crate::types::{Arch, Dtb, VirtAddr};
 
 /// A hardware (debug-register) breakpoint's parameters: the access it traps on,
@@ -159,6 +159,8 @@ pub struct Breakpoint {
     pub spec: Option<BreakpointSpec>,
     pub resolved: bool,
     pub scope: BreakpointScope,
+    /// Which Windows thread may surface a hit (`/t`), if restricted.
+    pub thread: Option<ThreadScope>,
     /// Whether `scope` was inferred from the resolved address and the process
     /// selected when this breakpoint was created. Explicit `/p` scopes remain
     /// fixed across symbol re-resolution.
@@ -197,6 +199,15 @@ impl Breakpoint {
     /// the target has agreed to.
     pub fn awaiting_page_in(&self) -> bool {
         matches!(self.backend, BreakpointBackend::Kernel { original: None })
+    }
+
+    /// What this breakpoint is restricted to: its address space, plus the
+    /// thread when `/t` narrowed it further.
+    pub fn scope_label(&self) -> String {
+        match &self.thread {
+            Some(thread) => format!("{}, {}", self.scope.label(), thread.label()),
+            None => self.scope.label(),
+        }
     }
 
     pub fn specification(&self) -> Option<&str> {
@@ -277,6 +288,44 @@ impl BreakpointScope {
         match self {
             Self::Kernel => "global".to_string(),
             Self::Process { pid, name, .. } => format!("{name} ({pid})"),
+        }
+    }
+}
+
+/// A breakpoint's thread filter (`/t`).
+///
+/// No target can program this: a software site is one byte in a page every
+/// thread executing that code shares, and a debug register belongs to a
+/// processor that any thread may be scheduled on. The trap fires for
+/// whoever runs it, so the filter is applied to the stopped thread when the
+/// hit arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadScope {
+    pub ethread: VirtAddr,
+    pub tid: Option<u64>,
+}
+
+impl ThreadScope {
+    pub fn new(thread: &ThreadInfo) -> Self {
+        Self {
+            ethread: thread.ethread,
+            tid: thread.tid,
+        }
+    }
+
+    /// Whether a hit reported by `stopped` belongs to this thread.
+    ///
+    /// An unresolved stopped thread matches: discarding a hit that cannot be
+    /// attributed would lose it silently, and the stop banner names the
+    /// thread either way.
+    pub fn matches(&self, stopped: Option<&ThreadInfo>) -> bool {
+        stopped.is_none_or(|thread| thread.ethread == self.ethread)
+    }
+
+    pub fn label(&self) -> String {
+        match self.tid {
+            Some(tid) => format!("tid {tid}"),
+            None => format!("ethread {:#x}", self.ethread.0),
         }
     }
 }
@@ -390,6 +439,10 @@ pub struct BreakpointConfig {
     pub one_shot: bool,
     pub action: Option<String>,
     pub scope: Option<BreakpointScope>,
+    /// Restrict hits to one Windows thread (`/t`). Independent of `scope`:
+    /// the address space decides where a site is written, the thread only
+    /// decides which hits are surfaced.
+    pub thread: Option<ThreadScope>,
     /// Resolve a symbol breakpoint past the function's prologue. See
     /// [`BreakpointSpec::Symbol`].
     pub skip_prologue: bool,
@@ -439,6 +492,7 @@ impl BreakpointManager {
                 resolved: true,
                 scope: BreakpointScope::Kernel,
                 automatic_scope: false,
+                thread: None,
                 condition: None,
                 condition_expr: None,
                 pass_count: 0,
@@ -679,6 +733,7 @@ impl BreakpointManager {
                 one_shot: config.one_shot,
                 action: config.action,
                 temporary,
+                thread: config.thread,
                 hardware: None,
                 backend,
             },
@@ -804,6 +859,7 @@ impl BreakpointManager {
                 action: config.action,
                 temporary: false,
                 hardware: Some(HardwareBreakpoint { access, len, slot }),
+                thread: config.thread,
                 backend: BreakpointBackend::Hardware,
             },
         );
@@ -1972,6 +2028,7 @@ mod tests {
                 resolved: true,
                 scope: BreakpointScope::Kernel,
                 automatic_scope: false,
+                thread: None,
                 condition: None,
                 condition_expr: None,
                 pass_count: 0,
@@ -2011,6 +2068,7 @@ mod tests {
                     name: "user.exe".to_string(),
                 },
                 automatic_scope: false,
+                thread: None,
                 condition: None,
                 condition_expr: None,
                 pass_count: 0,

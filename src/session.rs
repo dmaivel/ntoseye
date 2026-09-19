@@ -27,7 +27,7 @@ use crate::dmp::DmpBackend;
 use crate::error::{Error, Result};
 use crate::exception_policy::{ExceptionPolicyAction, ExceptionPolicyTable};
 use crate::expr::Expr;
-use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig, BreakpointScope};
+use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig, BreakpointScope, ThreadScope};
 use crate::gdb::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
 };
@@ -1563,6 +1563,13 @@ impl Session {
         Ok(BreakpointScope::process(&process))
     }
 
+    /// The `/t` filter for an `ETHREAD`, for hosts that name a thread by
+    /// address rather than by the REPL's selector grammar.
+    pub fn breakpoint_thread_for_ethread(&self, ethread: u64) -> Result<ThreadScope> {
+        let thread = self.target.thread_info_from_ethread(VirtAddr(ethread))?;
+        Ok(ThreadScope::new(&thread))
+    }
+
     /// Replace (or clear) a breakpoint's condition, compiling it with the
     /// default expression grammar.
     pub fn set_breakpoint_condition(&mut self, id: u32, condition: Option<String>) -> Result<()> {
@@ -2102,6 +2109,14 @@ impl Session {
             .check_breakpoint_hit(rip, cr3, self.target.arch())
         {
             BreakpointHitResult::Hit(bp) => {
+                // A thread filter is resolved here rather than in the hit
+                // predicate: the predicate matches on the address space,
+                // which is known from the registers, while the Windows thread
+                // costs a KPRCB walk that only a filtered breakpoint owes.
+                if !self.stopped_thread_matches(bp.thread.as_ref()) {
+                    self.step_over_and_resume()?;
+                    return Ok(BreakpointStopAction::Resumed);
+                }
                 // Count every scoped physical hit before pass-count and
                 // condition evaluation. A pass skip uses the same canonical
                 // step-over/resume path as a false condition.
@@ -2149,6 +2164,17 @@ impl Session {
                 Ok(BreakpointStopAction::NotBreakpoint)
             }
         }
+    }
+
+    /// Whether the thread this stop belongs to is the one a `/t` breakpoint
+    /// was restricted to. Unfiltered breakpoints always match.
+    fn stopped_thread_matches(&mut self, thread: Option<&ThreadScope>) -> bool {
+        let Some(scope) = thread else {
+            return true;
+        };
+        let current = self.current_thread.clone();
+        let stopped = refresh_windows_thread_context_for_backend_thread(&mut self.target, &current);
+        scope.matches(stopped.as_ref())
     }
 
     /// Silently continue past the breakpoint at the PC: step over it, rewrite
@@ -3110,6 +3136,13 @@ pub fn resolve_watchpoint_stop(
     if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
+    }
+    if let Some(thread) = breakpoint.thread.as_ref() {
+        let stopped = refresh_windows_thread_context_for_backend_thread(target, current_thread);
+        if !thread.matches(stopped.as_ref()) {
+            backend.continue_execution()?;
+            return Ok(WatchpointStopAction::Resumed);
+        }
     }
     if breakpoints.record_hit(breakpoint.id)? == BreakpointHitDisposition::SkipPass {
         backend.continue_execution()?;

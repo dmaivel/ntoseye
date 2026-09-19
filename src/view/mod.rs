@@ -682,6 +682,10 @@ pub fn breakpoint(bp: &Breakpoint) -> View {
         ),
         ("symbol", View::OptStr(bp.symbol.clone())),
         ("scope", View::Str(bp.scope.label())),
+        (
+            "thread",
+            View::OptStr(bp.thread.as_ref().map(|thread| thread.label())),
+        ),
         ("condition", View::OptStr(bp.condition.clone())),
         ("pass_count", View::Num(bp.pass_count)),
         ("hit_count", View::Num(bp.hit_count)),

@@ -255,10 +255,10 @@ bm mydriver!Dispatch*
 ba w8 nt!KiBalanceSetManagerLastCheckTick
 ```
 
-- `bp [/1] [/p <pid>] [/t <ethread>] [/w "<expr>"] <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a breakpoint.
-- `bu [/1] [/p <pid>] [/t <ethread>] [/w "<expr>"] <symbol> [<passes>] [if <expr>] [do "<commands>"]` - Set a deferred symbolic breakpoint.
-- `bm [/1] [/p <pid>] [/t <ethread>] [/w "<expr>"] <symbol-pattern> [<passes>] [if <expr>] [do "<commands>"]` - Set deferred symbolic breakpoints for matching symbols.
-- `ba [/1] [/p <pid>] [/t <ethread>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (KD and KDNET only); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
+- `bp [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a breakpoint.
+- `bu [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <symbol> [<passes>] [if <expr>] [do "<commands>"]` - Set a deferred symbolic breakpoint.
+- `bm [/1] [/p <pid>] [/t <tid|ethread>] [/w "<expr>"] <symbol-pattern> [<passes>] [if <expr>] [do "<commands>"]` - Set deferred symbolic breakpoints for matching symbols.
+- `ba [/1] [/p <pid>] [/t <tid|ethread>] <access><size> <address> [<passes>] [if <expr>] [do "<commands>"]` - Set a hardware debug-register breakpoint (KD and KDNET only); `e` is execute, `r` is read/write, `w` is write, and sizes are 1, 2, 4, or 8 bytes (execute is 1).
 - `bl` - List all breakpoints. The status column reads `e` enabled, `d` disabled, `o` owed.
 - `bc <id|id-id|*>` - Clear one or more breakpoints by ID.
 - `bd <id|id-id|*>` - Disable one or more breakpoints by ID.
@@ -275,6 +275,8 @@ User-space code breakpoints require resident memory. If the page is absent, set 
 A `ba e1` stop can precede the instruction page fault, leaving no bytes to disassemble. Registers and the stack remain available. Use `t` to execute the fetch and bring the page in; `p` needs to decode the instruction first.
 
 `/p` filters reported hits; it does not change how a breakpoint is installed. Kernel sites are always target-managed. User-space sites are patched through the selected process’s page tables. Shared physical pages can therefore trap other processes too; those hits are discarded but still incur debugger round trips.
+
+`/t` filters the same way, against the Windows thread the stop belongs to. It takes what `!thread` takes: a thread id, an ETHREAD, or a KTHREAD. No target programs a breakpoint per thread. A software site is a byte in a page every thread shares, and a debug register belongs to a processor that any thread may be scheduled on, so every thread executing the site still traps and the debugger discards the hits belonging to other threads. Discarding costs a step-over and a resume per hit, so a filter on a site the whole system calls slows the session down. A hit whose thread cannot be resolved is reported rather than discarded, so a filter never loses a stop silently.
 
 KD has a fixed 32-entry software-breakpoint table. A session killed with `SIGKILL` leaves its entries installed and can prevent later breakpoints at those addresses.
 

@@ -27,7 +27,7 @@ use crate::repl::*;
 const MAX_PROCESSOR_SELECTION: usize = 256;
 const MAX_PROCESS_THREADS: usize = 512;
 
-enum ThreadResolution {
+pub enum ThreadResolution {
     Found(ThreadInfo),
     Missing,
     Ambiguous(usize),
@@ -856,7 +856,7 @@ impl ReplState<'_> {
     /// The thread `value` names. A running thread and an ETHREAD (or
     /// KTHREAD, which shares its base) of a listed process are read
     /// directly; only a thread id pays for the walk over every process.
-    fn resolve_windows_thread(
+    pub fn resolve_windows_thread(
         &mut self,
         value: Option<u64>,
         active: &HashMap<u64, (String, ThreadInfo)>,

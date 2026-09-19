@@ -11,18 +11,19 @@ use crate::dbg_backend::HwBreakpointAccess;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
 use crate::gdb::breakpoints::{
-    BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec,
+    BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec, ThreadScope,
 };
 use crate::target::decimal_pid_literal;
 use crate::ui;
 
+use crate::repl::commands::process::ThreadResolution;
 use crate::repl::*;
 use crate::types::VirtAddr;
 
 repl_command! {
     cmd_bp;
     names: ["bp"],
-    usage: "bp [/1] [/p <pid>] [/w \"<expr>\"] <address> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bp [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint.",
     completion: Expression,
     run_state: Halted,
@@ -30,7 +31,7 @@ repl_command! {
 repl_command! {
     cmd_bu;
     names: ["bu"],
-    usage: "bu [/1] [/p <pid>] [/w \"<expr>\"] <symbol> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bu [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <symbol> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a deferred symbolic breakpoint.",
     completion: Expression,
     run_state: Halted,
@@ -39,7 +40,7 @@ repl_command! {
 repl_command! {
     cmd_bm;
     names: ["bm"],
-    usage: "bm [/1] [/p <pid>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bm [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set deferred symbolic breakpoints for matching symbols.",
     completion: Expression,
     run_state: Halted,
@@ -48,7 +49,7 @@ repl_command! {
 repl_command! {
     cmd_ba;
     names: ["ba"],
-    usage: "ba [/1] [/p <pid>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
+    usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a hardware (debug-register) breakpoint (KD and KDNET only).",
     details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). e.g. ba w4 nt!MyGlobal",
     completion: [None, Expression],
@@ -131,6 +132,7 @@ struct ParsedBreakpointArgs {
     access_spec: Option<String>,
     one_shot: bool,
     pid: Option<u64>,
+    thread: Option<u64>,
     pass_count: u64,
     condition: Option<String>,
     action: Option<String>,
@@ -170,6 +172,7 @@ fn parse_breakpoint_arguments(
     let mut index = 0;
     let mut one_shot = false;
     let mut pid = None;
+    let mut thread = None;
     let mut shorthand_condition = None;
 
     while let Some(arg) = argv.get(index) {
@@ -186,9 +189,11 @@ fn parse_breakpoint_arguments(
                 index += 2;
             }
             "/t" => {
-                return Err(Error::InvalidArgument(
-                    "thread-scoped breakpoints are not supported by the current backends".into(),
-                ));
+                let thread_text = argv.get(index + 1).ok_or_else(|| {
+                    Error::InvalidArgument(format!("{command}: /t requires a thread id or ETHREAD"))
+                })?;
+                thread = Some(parse_radix_u64_text(thread_text.as_ref(), radix, "thread")?);
+                index += 2;
             }
             "/w" => {
                 let condition = argv.get(index + 1).ok_or_else(|| {
@@ -294,6 +299,7 @@ fn parse_breakpoint_arguments(
         access_spec,
         one_shot,
         pid,
+        thread,
         pass_count,
         condition,
         action,
@@ -450,9 +456,28 @@ impl ReplState<'_> {
         Ok(Some(BreakpointScope::process(&process)))
     }
 
-    fn breakpoint_config(&self, parsed: ParsedBreakpointArgs) -> Result<BreakpointConfig> {
+    /// The thread `/t` names, as a filter. Accepts what `.thread` accepts: a
+    /// thread id, an ETHREAD, or a KTHREAD.
+    fn breakpoint_thread_scope(&mut self, thread: Option<u64>) -> Result<Option<ThreadScope>> {
+        let Some(value) = thread else {
+            return Ok(None);
+        };
+        let active = self.ctx.active_thread_map();
+        match self.resolve_windows_thread(Some(value), &active)? {
+            ThreadResolution::Found(thread) => Ok(Some(ThreadScope::new(&thread))),
+            ThreadResolution::Missing => Err(Error::InvalidArgument(format!(
+                "no thread matches {value:#x}"
+            ))),
+            ThreadResolution::Ambiguous(count) => Err(Error::InvalidArgument(format!(
+                "{count} threads match {value:#x}; name one by its ETHREAD"
+            ))),
+        }
+    }
+
+    fn breakpoint_config(&mut self, parsed: ParsedBreakpointArgs) -> Result<BreakpointConfig> {
         let condition_expr = compile_repl_condition(parsed.condition.as_deref(), self.radix)?;
         let scope = self.breakpoint_scope(parsed.pid)?;
+        let thread = self.breakpoint_thread_scope(parsed.thread)?;
         Ok(BreakpointConfig {
             condition: parsed.condition,
             condition_expr,
@@ -460,6 +485,7 @@ impl ReplState<'_> {
             one_shot: parsed.one_shot,
             action: parsed.action,
             scope,
+            thread,
             // `bu <symbol>` breaks at the symbol, as WinDbg does. Only a host
             // whose client expects arguments to be live (DAP) skips ahead.
             skip_prologue: false,
@@ -467,7 +493,7 @@ impl ReplState<'_> {
     }
 
     fn code_breakpoint_args(
-        &self,
+        &mut self,
         invocation: &CommandInvocation<'_>,
         command: &str,
     ) -> Result<CodeBreakpointArgs> {
@@ -784,7 +810,7 @@ impl ReplState<'_> {
                         .unwrap_or_default(),
                     breakpoint
                         .as_ref()
-                        .map(|bp| format!(" ({})", bp.scope.label()))
+                        .map(|bp| format!(" ({})", bp.scope_label()))
                         .unwrap_or_default()
                         .bright_black(),
                 );
@@ -891,7 +917,7 @@ impl ReplState<'_> {
                     .map(|address| ui::addr(address.0))
                     .unwrap_or_else(|| "-".to_string()),
                 pass_count,
-                bp.scope.label(),
+                bp.scope_label(),
                 symbol,
                 bp.condition.as_deref().unwrap_or("-").to_string(),
                 bp.action.as_deref().unwrap_or("-").to_string(),
