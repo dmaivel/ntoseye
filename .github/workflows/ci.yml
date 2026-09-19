@@ -10,29 +10,77 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The feature set the release archives are built with (dist-workspace.toml):
-  # no embedded Python, so the runner needs no Python toolchain.
-  FEATURES: --no-default-features --features cli,mcp,dap
 
 jobs:
-  check:
-    name: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  fmt:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  check:
+    name: ${{ matrix.os }} (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The feature set the release archives are built with
+          # (dist-workspace.toml): no embedded Python, so the runner needs no
+          # Python toolchain. One entry per target we ship a binary for.
+          - os: ubuntu-latest
+            label: dist
+            features: --no-default-features --features cli,mcp,dap
+          - os: ubuntu-24.04-arm
+            label: dist
+            features: --no-default-features --features cli,mcp,dap
+          - os: macos-latest
+            label: dist
+            features: --no-default-features --features cli,mcp,dap
+          # What `cargo install ntoseye` and a plain `cargo build` produce:
+          # embedded Python linked against the local interpreter. Nothing else
+          # here compiles the `python` feature.
+          - os: ubuntu-latest
+            label: default
+            features: ""
+          - os: macos-latest
+            label: default
+            features: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: matrix.label == 'default'
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked -p ntoseye $FEATURES --all-targets
+        run: cargo clippy --locked -p ntoseye ${{ matrix.features }} --all-targets
       - name: Test
-        run: cargo test --locked -p ntoseye $FEATURES
+        run: cargo test --locked -p ntoseye ${{ matrix.features }}
+
+  # The wheel's cdylib, and the only build of the `python-extension` feature:
+  # it links against the interpreter differently than the embedded one above.
+  extension:
+    name: python extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --locked -p ntoseye-py --all-targets
