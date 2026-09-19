@@ -215,6 +215,9 @@ pub struct GdbClient {
     extra_registers: Vec<ExtraRegister>,
 }
 
+/// Why a request cannot be served right now, for [`Error::TargetRunning`].
+const GDB_STUB_NEEDS_HALT: &str = "the GDB stub serves no requests while the target runs.";
+
 fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
     let message = match err.kind() {
         io::ErrorKind::ConnectionRefused => format!(
@@ -292,7 +295,17 @@ impl GdbClient {
         Ok(())
     }
 
+    /// Send a request and read its reply.
+    ///
+    /// A stub in all-stop mode services nothing but an interrupt while the
+    /// target runs, so a request sent then would block on a reply that is
+    /// never coming. Refusing it keeps a running target from wedging the
+    /// debugger; [`Self::interrupt`] is the way through, and it writes the
+    /// break byte directly rather than through here.
     pub fn send_packet(&mut self, data: &str) -> Result<String> {
+        if self.is_running {
+            return Err(Error::TargetRunning(GDB_STUB_NEEDS_HALT));
+        }
         let packet = Self::encode_packet(data);
         self.send_raw_command(&packet)?;
         self.read_response_packet()

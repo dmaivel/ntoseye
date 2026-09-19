@@ -19,7 +19,6 @@ use rmcp::{
     transport::stdio,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -95,8 +94,11 @@ fn cleanup_session(ctx: &mut Session) {
 /// flag.
 fn spawn_session(
     spec: TargetSpec,
-) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Arc<AtomicBool>)> {
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Arc<AtomicBool>, usize)> {
+    // The processor count rides back with the ready signal because it can
+    // only be asked for while the target is halted, which it stops being at
+    // the end of this function.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<usize, String>>();
     let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
 
     // Coalesces the background `Service` nudges: the ticker only enqueues one
@@ -108,8 +110,9 @@ fn spawn_session(
     std::thread::spawn(move || {
         let is_dump = matches!(spec, TargetSpec::Dump(_));
         let mut actor = match Session::open_with_progress(&spec, &mut |line| eprintln!("{line}")) {
-            Ok(ctx) => {
-                let _ = ready_tx.send(Ok(()));
+            Ok(mut ctx) => {
+                let processors = ctx.backend.thread_list().map(|t| t.len()).unwrap_or(1);
+                let _ = ready_tx.send(Ok(processors));
                 Actor {
                     ctx,
                     repl: None,
@@ -156,7 +159,7 @@ fn spawn_session(
     });
 
     match ready_rx.recv() {
-        Ok(Ok(())) => Ok((tx, service_pending)),
+        Ok(Ok(processors)) => Ok((tx, service_pending, processors)),
         Ok(Err(e)) => Err(anyhow::anyhow!("failed to attach: {e}")),
         Err(_) => Err(anyhow::anyhow!("session thread exited before attaching")),
     }
@@ -350,13 +353,6 @@ fn optional_timeout_ms(value: Option<u64>) -> Result<u64, McpError> {
     } else {
         Ok(ms)
     }
-}
-
-/// Structured tool result. rmcp's `structured()` also embeds a compact-text
-/// copy in `content`, so clients that ignore `structuredContent` still get
-/// the JSON.
-fn json(v: Value) -> Result<CallToolResult, ToolError> {
-    Ok(CallToolResult::structured(v))
 }
 
 /// One line of run state appended to every text result so a client always
@@ -666,33 +662,25 @@ impl NtoseyeMcp {
         );
 
         let opening = OpeningGuard::claim(&self.session)?;
-        let (tx, service_pending) = tokio::task::spawn_blocking(move || spawn_session(spec))
-            .await
-            .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
-            .map_err(|e| {
-                McpError::internal_error(format!("failed to open ({label}): {e}"), None)
-            })?;
+        let (tx, service_pending, processors) =
+            tokio::task::spawn_blocking(move || spawn_session(spec))
+                .await
+                .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
+                .map_err(|e| {
+                    McpError::internal_error(format!("failed to open ({label}): {e}"), None)
+                })?;
         let tx_for_ticker = tx.clone();
         opening.promote(tx)?;
         if needs_ticker {
             spawn_service_ticker(tx_for_ticker, service_pending);
         }
 
-        self.run(move |actor| {
-            let processors = actor
-                .ctx
-                .backend
-                .thread_list()
-                .map(|t| t.len())
-                .unwrap_or(1);
-            json(serde_json::json!({
-                "status": "connected",
-                "backend": label,
-                "connect": connect,
-                "processors": processors,
-            }))
-        })
-        .await
+        Ok(CallToolResult::structured(serde_json::json!({
+            "status": "connected",
+            "backend": label,
+            "connect": connect,
+            "processors": processors,
+        })))
     }
 
     #[tool(
@@ -872,7 +860,7 @@ pub fn run(
                 }
             };
             eprintln!("ntoseye-mcp: attaching ({label})...");
-            let (tx, service_pending) = spawn_session(spec)?;
+            let (tx, service_pending, _processors) = spawn_session(spec)?;
             *session.lock().unwrap() = SessionSlot::Active(tx.clone());
             if needs_ticker {
                 spawn_service_ticker(tx, service_pending);
