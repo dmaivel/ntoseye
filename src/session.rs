@@ -668,6 +668,11 @@ impl Session {
             session.refresh_context_for_current_thread();
         }
 
+        // Arm here rather than at the first resume, so the operator reads
+        // about it in the attach output alongside the capability warning that
+        // explains why it is needed, instead of beside an unrelated stop.
+        session.arm_bugcheck_trap();
+
         Ok(session)
     }
 
@@ -1573,14 +1578,22 @@ impl Session {
     ///
     /// KD learns of a crash from the target itself; a hypervisor stub never
     /// does, so the crash is only observable by stopping the guest as it
-    /// enters the bugcheck. Retried on every resume: the site needs kernel
-    /// symbols, which land after attach and move across a reboot.
+    /// enters the bugcheck. Armed at attach, where the operator can see it
+    /// reported, and retried on every resume: the site needs kernel symbols,
+    /// which can arrive late and move across a reboot.
     fn arm_bugcheck_trap(&mut self) {
-        let detects_bugchecks =
-            self.backend.capabilities().iter().any(|entry| {
-                entry.capability == DebugCapability::BugcheckDetection && entry.supported
-            });
-        if self.bugcheck_trap.is_some() || detects_bugchecks {
+        let capabilities = self.backend.capabilities();
+        let supports = |capability| {
+            capabilities
+                .iter()
+                .any(|entry| entry.capability == capability && entry.supported)
+        };
+        // A target that reports its own bugchecks needs no trap, and one that
+        // cannot hold a breakpoint cannot be given one.
+        if self.bugcheck_trap.is_some()
+            || supports(DebugCapability::BugcheckDetection)
+            || !supports(DebugCapability::KernelBreakpoints)
+        {
             return;
         }
         let Some(guest) = self.target.guest.as_ref() else {
