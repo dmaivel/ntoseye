@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1024,6 +1025,58 @@ impl Target {
         self.triage_modules_cache
             .clone()
             .ok_or(Error::NtoskrnlNotFound)
+    }
+
+    /// A loaded module's PE file in the symbol cache, downloaded when absent.
+    /// Blocks for the download; see [`Self::module_image_key`] for the lookup.
+    pub fn fetch_module_image(&self, name: &str) -> Result<PathBuf> {
+        let (module, time_date_stamp, size_of_image) = self.module_image_key(name)?;
+        self.symbols
+            .ensure_module_image_on_disk(&module.name, time_date_stamp, size_of_image)
+            .map_err(|error| {
+                Error::DebugInfo(format!(
+                    "{} (timestamp {time_date_stamp:#010x}, size {size_of_image:#x}) could not \
+                     be downloaded: {error}; if no symbol server has it, copy the file from the \
+                     guest and check that its timestamp matches",
+                    module.name
+                ))
+            })
+    }
+
+    /// The loaded module named `name` (module name or `module!` qualifier,
+    /// case-insensitively, searched in the current scope and then the
+    /// kernel's) and its symbol-server image key: the TimeDateStamp and
+    /// SizeOfImage in the mapped PE header, so the file is the build that is
+    /// running, or the loader entry's copy when the header page is not
+    /// resident. Reads guest memory only.
+    fn module_image_key(&self, name: &str) -> Result<(ModuleInfo, u32, u32)> {
+        let named = |module: &ModuleInfo| {
+            module.short_name.eq_ignore_ascii_case(name) || module.name.eq_ignore_ascii_case(name)
+        };
+        let module = self
+            .modules()
+            .ok()
+            .and_then(|modules| modules.into_iter().find(named))
+            .or_else(|| {
+                self.kernel_modules()
+                    .ok()
+                    .and_then(|modules| modules.into_iter().find(named))
+            })
+            .ok_or_else(|| Error::InvalidArgument(format!("no loaded module named '{name}'")))?;
+        let (time_date_stamp, size_of_image) = self
+            .current_process()
+            .and_then(|process| {
+                SymbolStore::read_image_lookup_info(&process.memory(), module.base_address)
+            })
+            .ok()
+            .or_else(|| module.time_date_stamp.map(|stamp| (stamp, module.size)))
+            .ok_or_else(|| {
+                Error::DebugInfo(format!(
+                    "{}: neither its PE header nor its loader entry gives a timestamp to look it up by",
+                    module.name
+                ))
+            })?;
+        Ok((module, time_date_stamp, size_of_image))
     }
 
     /// Search `length` bytes from `start` in the current address space for the

@@ -2292,7 +2292,9 @@ impl SymbolStore {
         self.download_job_from_debug(&debug)
     }
 
-    fn read_image_lookup_info<B: MemoryOps<PhysAddr>>(
+    /// The symbol-server image key of a mapped module: TimeDateStamp and
+    /// SizeOfImage from its in-memory PE header.
+    pub fn read_image_lookup_info<B: MemoryOps<PhysAddr>>(
         memory: &memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
     ) -> Result<(u32, u32)> {

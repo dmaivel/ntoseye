@@ -138,6 +138,15 @@ repl_command! {
 }
 
 repl_command! {
+    cmd_fetchimage;
+    names: [".fetchimage"],
+    usage: ".fetchimage <module>",
+    summary: "Download a loaded module's PE file into the symbol cache and print its path.",
+    details: "The file is looked up by the TimeDateStamp and SizeOfImage in the module's mapped PE header, the symbol-server key, so it is the exact build that is running. A disassembler database made from it rebases onto the live module.",
+    completion: Symbol,
+}
+
+repl_command! {
     cmd_lmv;
     names: ["lmv"],
     usage: "lmv [module]",
@@ -728,6 +737,18 @@ impl ReplState<'_> {
             return Ok(());
         };
         self.reload_symbols(Some(module));
+        Ok(())
+    }
+
+    fn cmd_fetchimage(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(name) = invocation.arg(0) else {
+            outln!("{}\n", command_help(".fetchimage"));
+            return Ok(());
+        };
+        match self.ctx.target.fetch_module_image(name) {
+            Ok(path) => outln!("{}\n", path.display()),
+            Err(err) => error!("{}", err),
+        }
         Ok(())
     }
 

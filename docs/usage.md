@@ -238,6 +238,7 @@ For `dt`, `-r` expands nested structures, `-a` expands bounded arrays, `-v` show
 - `.reload [module]` - Reload symbols for one module or every module in the current scope.
 - `ld <module>` - Force symbol source selection and indexing for one module.
 - `lmv [module]` - Display detailed per-module symbol status and PDB identity.
+- `.fetchimage <module>` - Download a loaded module's PE file into the symbol cache and print its path. The file is looked up by the TimeDateStamp and SizeOfImage in the module's mapped header, so it is the build that is running; open it in a disassembler to get a database that rebases onto the live module.
 
 Symbol queries also support `^` prefix, `$` suffix, `'` exact, `!` negation, and space-separated AND operators.
 
