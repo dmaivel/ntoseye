@@ -97,12 +97,6 @@ pub fn looks_like_kernel_pointer(value: u64) -> bool {
     value >= 0xffff_8000_0000_0000
 }
 
-/// How close to the current kernel base a stop PC must be to be treated as the
-/// *same* kernel image (rather than a reboot into a relocated one). Shared by
-/// the reload heuristic ([`crate::session::stop_event_requires_target_reload`])
-/// and the REPL's pending-reload rebasing.
-pub const CURRENT_KERNEL_RELOAD_WINDOW: u64 = 0x1000_0000;
-
 pub fn read_bugcheck_data<M: MemoryOps<VirtAddr>>(
     mem: &M,
     addr: VirtAddr,

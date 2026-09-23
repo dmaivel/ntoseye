@@ -17,7 +17,7 @@ use single_instance::SingleInstance;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
-use crate::bugchecks::{CURRENT_KERNEL_RELOAD_WINDOW, looks_like_kernel_pointer};
+use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, LastEvent, StopEvent,
@@ -151,12 +151,11 @@ pub struct RunStatus {
 }
 
 /// How [`Session::classify_reload_stop`] classified a freshly observed stop:
-/// real stop, reboot artifact, or transport noise. A host decides whether to
-/// surface or absorb each case (the REPL prints boot phases inline;
-/// `continue_until_break` surfaces reload detection and completion as
-/// [`ContinueOutcome::TargetReloaded`] and absorbs the noise in between).
+/// real stop, reboot artifact, or transport noise.
+/// [`Session::classify_stop_event`] turns the reboot cases into
+/// [`StopResolution::TargetReloaded`] and resumes past the noise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReloadDisposition {
+enum ReloadDisposition {
     /// Not reboot/assist related; handle it as an ordinary stop (breakpoint,
     /// exception, manual pause).
     Ordinary,
@@ -402,9 +401,9 @@ pub struct Session {
     /// available (very early boot). Carried across `continue_until_break` calls
     /// so the post-reboot KD-reconnect dance runs to completion; when the list
     /// appears, [`Self::try_complete_pending_reload`] finishes rediscovery and
-    /// stops the backend's reconnect-assist poking. The single owner of that
-    /// state; hosts read it rather than reimplement it.
-    pub reload_module_list_pending: bool,
+    /// stops the backend's reconnect-assist poking. Seeded at attach, which
+    /// may land mid-boot; hosts read it through [`Self::kernel_coherent`].
+    reload_module_list_pending: bool,
     /// Address of the automatic `nt!KeBugCheckEx` breakpoint, once armed,
     /// and the instruction bytes it displaced. Only backends that cannot
     /// report a bugcheck themselves get one; see [`Self::arm_bugcheck_trap`].
@@ -665,6 +664,11 @@ impl Session {
 
         static NEXT_SESSION_ID: AtomicUsize = AtomicUsize::new(1);
 
+        // An empty module list means the attach landed mid-boot, before
+        // rediscovery could complete.
+        let reload_module_list_pending = target
+            .startup_message_data()
+            .is_ok_and(|startup| startup.loaded_module_list.is_zero());
         let mut session = Self {
             id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             target,
@@ -674,7 +678,7 @@ impl Session {
             current_thread,
             exception_policies: ExceptionPolicyTable::default(),
             parked_windows_thread: None,
-            reload_module_list_pending: false,
+            reload_module_list_pending,
             bugcheck_trap: None,
             bugcheck_trap_original: Vec::new(),
             reload_surface_pending: false,
@@ -2751,34 +2755,22 @@ impl Session {
         }
     }
 
-    /// Rebuild guest state using an optional kernel-base hint through the shared
-    /// [`perform_target_reload`] action.
-    pub fn reload_with_hint(&mut self, hint: Option<VirtAddr>) -> Result<()> {
+    /// Rebuild guest state, auto-discovering the kernel base.
+    pub fn reload(&mut self) -> Result<()> {
         self.target.last_exception_code = None;
         self.module_refresh_report = None;
-        let outcome = self.perform_target_reload(hint);
-        self.reload_module_list_pending = !outcome
-            .report
-            .as_ref()
-            .map(reload_report_has_loaded_module_list)
-            .unwrap_or(false);
+        let outcome = self.perform_target_reload(None);
         if let Some(error) = outcome.breakpoint_error {
             return Err(error);
         }
         outcome.report.map(|_| ())
     }
 
-    /// Rebuild guest state, auto-discovering the kernel base.
-    pub fn reload(&mut self) -> Result<()> {
-        self.reload_with_hint(None)
-    }
-
     /// If a module-list reload is pending and the loaded-module list has now
     /// appeared, finish rediscovery: reload the kernel module symbols, tell the
     /// backend rediscovery completed (stopping its reconnect-assist poking), and
-    /// clear the pending flag. Returns whether it completed on this call. The
-    /// REPL layers cache refresh and progress printing on the same condition.
-    pub fn try_complete_pending_reload(&mut self) -> Result<bool> {
+    /// clear the pending flag. Returns whether it completed on this call.
+    fn try_complete_pending_reload(&mut self) -> Result<bool> {
         if !self.reload_module_list_pending {
             return Ok(false);
         }
@@ -2805,7 +2797,7 @@ impl Session {
     /// guest memory instead of forcing a stop. Skips while a reload notification
     /// is still owed, so completion cannot silently swallow the one
     /// `TargetReloaded` event.
-    pub fn try_finish_rediscovery_from_memory(&mut self) {
+    fn try_finish_rediscovery_from_memory(&mut self) {
         if !self.reload_surface_pending {
             let _ = self.try_complete_pending_reload();
         }
@@ -2814,7 +2806,7 @@ impl Session {
     /// Clear a deferred reboot notification once the host has already observed
     /// or acted on the rebuilt target. Leave it pending if the current kernel
     /// mapping still looks stale, so a later wait can surface the real reload.
-    pub fn clear_deferred_reload_surface(&mut self) {
+    fn clear_deferred_reload_surface(&mut self) {
         if self.target.current_kernel_mapping_is_valid() {
             self.reload_surface_pending = false;
         }
@@ -2826,9 +2818,9 @@ impl Session {
     /// records whether the module list is available yet (setting
     /// [`Self::reload_module_list_pending`]); on a later stop it tries to complete
     /// a pending rediscovery; otherwise it recognizes transport assist break-ins.
-    /// Mutates `event.target_reloaded` to match. `continue_until_break` consumes
-    /// it; the REPL shares its predicates so they can't drift.
-    pub fn classify_reload_stop(&mut self, event: &mut StopEvent) -> Result<ReloadDisposition> {
+    /// Mutates `event.target_reloaded` to match. Called only from
+    /// [`Self::classify_stop_event`].
+    fn classify_reload_stop(&mut self, event: &mut StopEvent) -> Result<ReloadDisposition> {
         reload_trace!(
             "classify: pc={} exc={} assisted={} reloaded={} bugcheck={} pending={}",
             event
@@ -2859,7 +2851,6 @@ impl Session {
             return Ok(match report {
                 Ok(report) => {
                     let coherent = reload_report_has_loaded_module_list(&report);
-                    self.reload_module_list_pending = !coherent;
                     // The host surfaces this verdict, so the reboot has been
                     // reported; the eventual completion stays silent.
                     self.reload_surface_pending = false;
@@ -2879,7 +2870,6 @@ impl Session {
                     ReloadDisposition::Reloaded { coherent }
                 }
                 Err(error) => {
-                    self.reload_module_list_pending = true;
                     self.reload_surface_pending = true;
                     reload_trace!("classify: reload err={error} -> pending_rediscovery");
                     ReloadDisposition::PendingRediscovery
@@ -3110,7 +3100,7 @@ impl Session {
     /// else the backend's), reload the guest image, and tell the backend
     /// whether rediscovery completed so it stops (or keeps) its
     /// reconnect-assist poking. The reload *action* behind
-    /// [`Self::classify_reload_stop`] and [`Self::reload_with_hint`]; callers
+    /// [`Self::classify_reload_stop`] and [`Self::reload`]; callers
     /// layer their own state on top of the returned outcome.
     fn perform_target_reload(&mut self, event_hint: Option<VirtAddr>) -> TargetReloadOutcome {
         let backend = self.backend.as_mut();
@@ -3123,6 +3113,9 @@ impl Session {
         kd_files().reset_handles();
         let hint = event_hint.or_else(|| backend.target_kernel_base_hint().ok().flatten());
         let report = target.reload_guest_with_kernel_base_hint(hint);
+        self.reload_module_list_pending = !report
+            .as_ref()
+            .is_ok_and(reload_report_has_loaded_module_list);
         // The attach-time identity check only proved the host mapping matched the
         // kernel that was running then. Re-check it against the rebuilt target
         // before anything reads through it again.
@@ -3157,6 +3150,10 @@ impl Session {
         }
     }
 }
+
+/// How close to the current kernel base a stop PC must be to be treated as the
+/// *same* kernel image rather than a reboot into a relocated one.
+const CURRENT_KERNEL_RELOAD_WINDOW: u64 = 0x1000_0000;
 
 /// Whether `event` reflects a guest reboot into a new kernel image (so debugger
 /// state must be rebuilt), rather than an ordinary stop in the current one.

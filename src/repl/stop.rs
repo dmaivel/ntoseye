@@ -2,77 +2,16 @@ use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
-use crate::dbg_backend::{BugcheckInfo, DebugBackend, StopEvent};
+use crate::dbg_backend::{BugcheckInfo, DebugBackend};
 use crate::error::Result;
 use crate::gdb::{BreakpointManager, RegisterMap};
 use crate::session::{ContinueOutcome, Session, StopResolution};
-use crate::target::{ReloadReport, Target, ThreadInfo, kthread_state_name};
+use crate::target::{Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{format_symbol, resolve_thread_trace_context};
 
 use crate::repl::*;
-
-pub fn print_target_reload_report(report: &ReloadReport) {
-    if let Some(startup) = &report.startup {
-        outln!(
-            "{} kernel reloaded: {} -> {}, psmods {}",
-            "target:".bright_black(),
-            ui::addr(report.previous_base_address.0),
-            ui::addr(startup.base_address.0),
-            ui::addr_opt(startup.loaded_module_list)
-        );
-    } else {
-        outln!(
-            "{} kernel reloaded: previous base {}",
-            "target:".bright_black(),
-            ui::addr(report.previous_base_address.0)
-        );
-    }
-
-    if let Some(symbol_report) = &report.symbol_report {
-        print_module_symbol_report(symbol_report);
-    }
-    if let Some(err) = &report.symbol_error {
-        error!(
-            "failed to refresh kernel module symbols after reload: {}",
-            err
-        );
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TargetReloadStatus {
-    Unchanged,
-    Reloaded { loaded_module_list_available: bool },
-    PendingRediscovery { kernel_base_hint: Option<VirtAddr> },
-}
-
-impl TargetReloadStatus {
-    pub fn target_reloaded(self) -> bool {
-        matches!(self, Self::Reloaded { .. })
-    }
-
-    pub fn pending_rediscovery(self) -> bool {
-        matches!(self, Self::PendingRediscovery { .. })
-    }
-
-    fn loaded_module_list_available(self) -> bool {
-        match self {
-            Self::Reloaded {
-                loaded_module_list_available,
-            } => loaded_module_list_available,
-            Self::Unchanged | Self::PendingRediscovery { .. } => false,
-        }
-    }
-
-    fn kernel_base_hint(self) -> Option<VirtAddr> {
-        match self {
-            Self::PendingRediscovery { kernel_base_hint } => kernel_base_hint,
-            _ => None,
-        }
-    }
-}
 
 pub const REPL_STOP_POLL: Duration = Duration::from_millis(100);
 
@@ -208,13 +147,11 @@ pub fn print_async_stop_resolution(
         }
         StopResolution::TargetReloaded { event, coherent } => {
             caches.clear_threads();
-            print_target_reload_notification_context(
+            print_target_reload(
                 &session.target,
                 &session.current_thread,
-                &event,
-                TargetReloadStatus::Reloaded {
-                    loaded_module_list_available: coherent,
-                },
+                event.program_counter,
+                coherent,
             );
         }
         StopResolution::Stopped { event, .. } => {
@@ -230,15 +167,6 @@ pub fn print_async_stop_resolution(
             );
         }
     }
-}
-
-pub fn is_target_reload_load_symbols_stop(
-    event: &StopEvent,
-    reload_status: TargetReloadStatus,
-) -> bool {
-    reload_status.target_reloaded()
-        && event.exception_code.is_none()
-        && event.target_kernel_base_hint.is_some()
 }
 
 /// Render a stop the session already classified and parked (see
@@ -303,25 +231,15 @@ pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome:
         ContinueOutcome::TargetReloaded { coherent, .. } => {
             print_stop_separator();
             caches.clear_threads();
-            match session.last_event.as_ref().map(|last| last.stop.clone()) {
-                Some(event) => print_target_reload_notification_context(
-                    &session.target,
-                    &session.current_thread,
-                    &event,
-                    TargetReloadStatus::Reloaded {
-                        loaded_module_list_available: coherent,
-                    },
-                ),
-                None => outln!(
-                    "{} kernel reloaded{}",
-                    "target:".bright_black(),
-                    if coherent {
-                        ""
-                    } else {
-                        "; module list is not available yet"
-                    }
-                ),
-            }
+            print_target_reload(
+                &session.target,
+                &session.current_thread,
+                session
+                    .last_event
+                    .as_ref()
+                    .and_then(|last| last.stop.program_counter),
+                coherent,
+            );
         }
         ContinueOutcome::Stopped {
             rip,
@@ -353,83 +271,40 @@ pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome:
     }
 }
 
-pub fn print_target_reload_notification_context(
+/// Announce a reboot the session has already rebuilt debugger state for, so
+/// `pc` symbolizes against the new kernel. Only the kernel is trusted here:
+/// the stop may be in early boot, before threads or processes exist to walk.
+pub fn print_target_reload(
     debugger: &Target,
     current_thread: &str,
-    event: &StopEvent,
-    reload_status: TargetReloadStatus,
+    pc: Option<u64>,
+    coherent: bool,
 ) {
-    let pending_status = TargetReloadStatus::PendingRediscovery {
-        kernel_base_hint: event.target_kernel_base_hint,
-    };
+    let location = pc.map_or_else(
+        || "unknown".bright_black().to_string(),
+        |pc| {
+            debugger
+                .symbols
+                .format_closest_symbol_for_address(debugger.kernel_dtb(), VirtAddr(pc))
+                .map_or_else(|| ui::addr(pc), |symbol| ui::symbol(&symbol))
+        },
+    );
     outln!(
         "{}{}",
         ui::badge("BREAK"),
         ui::plate(&format!(
-            " {} early boot at {} ",
+            " {} kernel at {} ",
             ui::thread_id(current_thread),
-            pending_reload_location(debugger, event, pending_status, None)
+            location
         ))
     );
-    let message = if reload_status.loaded_module_list_available() {
-        "kernel reloaded; context is limited, continue to resume boot"
+    let message = if coherent {
+        "guest rebooted; kernel reloaded"
     } else {
-        "kernel reloaded; module list is not available yet, continue to retry full reload"
+        "guest rebooted; kernel reloaded, module list not available yet (continue to finish)"
     };
     print_event_children(" ", &[ui::muted(message)]);
     outln!();
-}
-
-pub fn rebase_kernel_symbol_for_pending_reload(
-    debugger: &Target,
-    pc: u64,
-    kernel_base_hint: Option<VirtAddr>,
-) -> Option<String> {
-    let new_base = kernel_base_hint?;
-    let rva = pc.checked_sub(new_base.0)?;
-    let guest = debugger.guest.as_ref()?;
-    let old_addr = guest.ntoskrnl.base_address.0.checked_add(rva)?;
-    let (module, symbol, offset) = debugger
-        .symbols
-        .find_closest_symbol_for_address(guest.ntoskrnl.dtb(), VirtAddr(old_addr))?;
-    if offset > 0x1000 {
-        return None;
-    }
-    Some(if offset == 0 {
-        format!("{module}!{symbol}")
-    } else {
-        format!("{module}!{symbol}+{offset:#x}")
-    })
-}
-
-pub fn pending_reload_location(
-    debugger: &Target,
-    event: &StopEvent,
-    reload_status: TargetReloadStatus,
-    register_kernel_base_hint: Option<VirtAddr>,
-) -> String {
-    let Some(pc) = event.program_counter else {
-        return "unknown".bright_black().to_string();
-    };
-    let kernel_base_hint = reload_status
-        .kernel_base_hint()
-        .or(register_kernel_base_hint);
-    rebase_kernel_symbol_for_pending_reload(debugger, pc, kernel_base_hint)
-        .map(|symbol| ui::symbol(&symbol))
-        .unwrap_or_else(|| ui::addr(pc))
-}
-
-pub fn pending_reload_register_kernel_base_hint(
-    register_map: &RegisterMap,
-    regs: &[u8],
-    pc: u64,
-) -> Option<VirtAddr> {
-    let base = register_map.read_u64("r9", regs).ok()?;
-    if !looks_like_kernel_pointer(base) {
-        return None;
-    }
-    let rva = pc.checked_sub(base)?;
-    (rva < CURRENT_KERNEL_RELOAD_WINDOW).then_some(VirtAddr(base))
 }
 
 /// Drain one stop the running target has already reported. Returns whether a

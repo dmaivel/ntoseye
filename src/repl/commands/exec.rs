@@ -510,13 +510,11 @@ impl ReplState<'_> {
                         StopResolution::TargetReloaded { event, coherent } => {
                             print_stop_separator();
                             self.caches.clear_threads();
-                            print_target_reload_notification_context(
+                            print_target_reload(
                                 &self.ctx.target,
                                 &self.ctx.current_thread,
-                                &event,
-                                TargetReloadStatus::Reloaded {
-                                    loaded_module_list_available: coherent,
-                                },
+                                event.program_counter,
+                                coherent,
                             );
                             break;
                         }

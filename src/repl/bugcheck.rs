@@ -10,9 +10,8 @@ use crate::trapframe::KtrapFrameData;
 use crate::ui;
 
 pub use crate::bugchecks::{
-    BugcheckAnalysis, BugcheckTrapFrame, CURRENT_KERNEL_RELOAD_WINDOW, analyze_bugcheck,
-    bugcheck_fault_ip, bugcheck_site, current_bugcheck, looks_like_kernel_pointer,
-    plausible_bugcheck_code,
+    BugcheckAnalysis, BugcheckTrapFrame, analyze_bugcheck, bugcheck_fault_ip, bugcheck_site,
+    current_bugcheck, looks_like_kernel_pointer, plausible_bugcheck_code,
 };
 pub use crate::trapframe::KtrapFrame;
 

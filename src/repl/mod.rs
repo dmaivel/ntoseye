@@ -595,7 +595,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // Triage dumps may lack the ntoskrnl PE header needed for full kernel
     // discovery; a missing kernel is non-fatal and commands that need it
     // fail individually.
-    let reload_module_list_pending = match debugger.startup_message_data() {
+    match debugger.startup_message_data() {
         Ok(message_data) => {
             outln!("\n{}", ui::label("target"));
             outln!(
@@ -614,7 +614,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 ui::addr_opt(message_data.loaded_module_list)
             );
             outln!();
-            message_data.loaded_module_list.is_zero()
         }
         Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => {
             outln!("\n{}", ui::label("target"));
@@ -628,10 +627,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 );
             }
             outln!();
-            false
         }
         Err(e) => return Err(e),
-    };
+    }
     let capabilities = client.capabilities();
     print_backend_capability_warning(&capabilities);
 
@@ -760,9 +758,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         stop_wait: None,
         unseen_stop_rendered: false,
     };
-    // An empty module list at startup means we attached before rediscovery completed.
-    state.ctx.reload_module_list_pending = reload_module_list_pending;
-
     if plain {
         let stdin = io::stdin();
         let mut input = stdin.lock();
