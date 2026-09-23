@@ -416,6 +416,11 @@ fn load_symbols_stop_reconciles_and_resumes_as_modules_changed() {
         .unwrap();
     assert!(breakpoint.resolved);
     assert_eq!(breakpoint.address, VirtAddr(0x1010));
+
+    // The load was absorbed without halting; the host's next stop still
+    // learns of it, once.
+    assert!(session.refresh_modules_on_stop());
+    assert!(!session.refresh_modules_on_stop());
 }
 
 #[test]

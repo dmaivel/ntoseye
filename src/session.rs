@@ -439,6 +439,11 @@ pub struct Session {
     /// fetch, a lazy frame load, a process attach) still re-resolves `bu`
     /// specifications at the next opportunity.
     symbols_reconciled_at: u64,
+    /// A module load/unload was absorbed while running (breakpoints already
+    /// reconciled, target resumed). Reported by the next
+    /// [`Self::refresh_modules_on_stop`] so hosts refresh module-derived state
+    /// without halting the target on every load.
+    unreported_module_change: bool,
     /// Most recently observed backend stop and the disposition used when it was
     /// subsequently continued.
     pub last_event: Option<LastEvent>,
@@ -686,6 +691,7 @@ impl Session {
             module_refresh_report: None,
             notices: Vec::new(),
             symbols_reconciled_at: 0,
+            unreported_module_change: false,
             last_event: None,
             _instance_guard: None,
         };
@@ -2419,7 +2425,8 @@ impl Session {
     /// hosts share the same deferred-breakpoint behavior; refresh and
     /// reconciliation failures are logged and do not discard the stop.
     pub fn refresh_modules_on_stop(&mut self) -> bool {
-        let event_changed = self.backend.take_modules_changed();
+        let event_changed = self.backend.take_modules_changed()
+            | std::mem::take(&mut self.unreported_module_change);
         let symbols_changed = match self.target.refresh_kernel_module_symbols() {
             Ok(report) => {
                 let changed = report.loaded != 0 || report.unloaded != 0;
@@ -2535,7 +2542,7 @@ impl Session {
         }
 
         if event.modules_changed {
-            self.refresh_modules_on_stop();
+            self.unreported_module_change = self.refresh_modules_on_stop();
             self.continue_backend(ContinueDisposition::Handled)?;
             return Ok(StopResolution::ModulesChanged);
         }

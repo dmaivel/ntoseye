@@ -426,11 +426,7 @@ impl ReplState<'_> {
             match stop_result {
                 Ok(Some(event)) => {
                     let resolution = match self.ctx.classify_stop_event(event) {
-                        Ok(StopResolution::Resumed) => continue,
-                        Ok(StopResolution::ModulesChanged) => {
-                            self.ctx.target.interrupt.store(true, Ordering::SeqCst);
-                            continue;
-                        }
+                        Ok(StopResolution::Resumed | StopResolution::ModulesChanged) => continue,
                         Ok(resolution) => resolution,
                         Err(error) => {
                             error!("failed to classify stop: {error}");
