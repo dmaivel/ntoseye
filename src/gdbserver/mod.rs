@@ -957,6 +957,7 @@ impl<'a> GdbTarget<'a> {
             ContinueOutcome::TargetReloaded {
                 kernel_base,
                 coherent,
+                ..
             } => {
                 let base = kernel_base
                     .map(|base| format!("{base:#x}"))

@@ -102,9 +102,10 @@ pub enum ContinueOutcome {
     /// enumeration unavailable, and the later rediscovery completion is silent).
     /// If the rebuild failed at that detection stop, the notification falls back
     /// to the completion instead (`coherent: true`, system already up).
-    /// `kernel_base` is the rediscovered `nt` base. All prior addresses are
-    /// stale and must be re-queried either way.
+    /// `kernel_base` is the rediscovered `nt` base and `rip` where the stop
+    /// landed. All prior addresses are stale and must be re-queried either way.
     TargetReloaded {
+        rip: Option<u64>,
         kernel_base: Option<u64>,
         coherent: bool,
     },
@@ -121,9 +122,10 @@ pub enum ContinueOutcome {
 
 /// A "where am I" snapshot for the read-only status surface: whether the guest
 /// is running, and if halted, the current stop site and inspection scope.
-/// `coherent` is false after a reboot until kernel rediscovery finishes (the
-/// loaded-module list is up), so a host knows process/module enumeration is not
-/// yet meaningful and it should keep waiting rather than read stale state.
+/// `coherent` is false after a reboot until the kernel's loaded-module list
+/// exists, so a host knows process/module enumeration is not yet meaningful.
+/// Halted there, kernel symbols work and resuming lets boot build the list;
+/// running, the host waits rather than reading stale state.
 #[derive(Debug, Clone)]
 pub struct RunStatus {
     pub running: bool,
@@ -1004,7 +1006,8 @@ impl Session {
                 rip: event.program_counter,
                 info: event.bugcheck,
             },
-            StopResolution::TargetReloaded { coherent, .. } => ContinueOutcome::TargetReloaded {
+            StopResolution::TargetReloaded { event, coherent } => ContinueOutcome::TargetReloaded {
+                rip: event.program_counter,
                 kernel_base: self.target.kernel_base().map(|address| address.0),
                 coherent,
             },
@@ -2697,6 +2700,10 @@ impl Session {
                         if self.reload_surface_pending {
                             self.reload_surface_pending = false;
                             return Ok(ContinueOutcome::TargetReloaded {
+                                rip: self
+                                    .last_event
+                                    .as_ref()
+                                    .and_then(|last| last.stop.program_counter),
                                 kernel_base: self.target.kernel_base().map(|a| a.0),
                                 coherent: self.kernel_coherent(),
                             });

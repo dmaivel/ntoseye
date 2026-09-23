@@ -228,18 +228,10 @@ pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome:
                 info.as_ref(),
             );
         }
-        ContinueOutcome::TargetReloaded { coherent, .. } => {
+        ContinueOutcome::TargetReloaded { rip, coherent, .. } => {
             print_stop_separator();
             caches.clear_threads();
-            print_target_reload(
-                &session.target,
-                &session.current_thread,
-                session
-                    .last_event
-                    .as_ref()
-                    .and_then(|last| last.stop.program_counter),
-                coherent,
-            );
+            print_target_reload(&session.target, &session.current_thread, rip, coherent);
         }
         ContinueOutcome::Stopped {
             rip,

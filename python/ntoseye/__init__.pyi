@@ -535,11 +535,12 @@ class Debugger:
         (`.process`), which persists across resumes; `stopped_process` owns the
         page tables the stopped vCPU has loaded and `stopped_thread` is the
         Windows thread it is running.
-        `rip`/`symbol` are None while running. `coherent` is False when the guest
-        rebooted and rediscovery
-        is still pending, so enumeration is not yet meaningful; wait for it
-        instead. `kernel_base` changes across a reboot; cache it to invalidate
-        stale addresses."""
+        `rip`/`symbol` are None while running. `coherent` is False after a reboot
+        until the kernel's module list exists, so process/module enumeration is
+        not yet meaningful. Halted there (the reboot stop), kernel symbols and
+        breakpoints work and `run()` lets boot continue; running, wait for it
+        rather than reading stale state. `kernel_base` changes across a reboot;
+        cache it to invalidate stale addresses."""
         ...
     def wait_for_stop(self, timeout_ms: int | None = None) -> StopOutcome:
         """Wait for the next stop WITHOUT resuming, up to `timeout_ms` (None blocks,

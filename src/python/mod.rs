@@ -1751,9 +1751,11 @@ impl Debugger {
     /// `attached_process` is the inspection scope (`.process`), which persists
     /// across resumes; `stopped_process` owns the page tables the stopped vCPU has
     /// loaded and `stopped_thread` is the Windows thread it is running.
-    /// `rip`/`symbol` are None while running. `coherent` is False when the guest
-    /// rebooted and rediscovery is still pending, so process/module enumeration
-    /// is not yet meaningful; wait for it rather than reading stale state.
+    /// `rip`/`symbol` are None while running. `coherent` is False after a reboot
+    /// until the kernel's module list exists, so process/module enumeration is
+    /// not yet meaningful. Halted there (the reboot stop), kernel symbols and
+    /// breakpoints work and `run()` lets boot continue; running, wait for it
+    /// rather than reading stale state.
     fn status<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         view_record(py, &view::run_status(&self.inner.run_status()))
     }
@@ -3652,10 +3654,13 @@ impl Debugger {
                 ..Default::default()
             },
             ContinueOutcome::TargetReloaded {
+                rip,
                 kernel_base,
                 coherent,
             } => StopOutcomeData {
                 kind: StopKind::TargetReloaded,
+                rip,
+                symbol: rip.and_then(symbol_at),
                 kernel_base,
                 coherent: Some(coherent),
                 ..Default::default()
