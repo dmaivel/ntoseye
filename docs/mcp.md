@@ -31,7 +31,7 @@ A backtrace through a module whose PDB is not cached yet renders those frames as
 
 `format: "json"` returns `{ok, output, result, target, debug_output}` as structured content: `output` is the text the command printed, `target` is the run-state snapshot (`{running, current_thread, rip, symbol, attached_process, stopped_process, stopped_thread, coherent, kernel_base}`), `debug_output` the captured `DbgPrint` lines, and `result` the typed decoding for commands that have one, else `null`. The decodings are the same ones the [Python SDK](sdk.md) exposes as methods (the `!` inspectors, `lm`, `!process`, `k`, `bl`, `dt`, `?`, `r`, `!analyze`, ...); see the SDK surface table for the set.
 
-The server reads the top-level `--backend`/`--connect`/`--kdnet-key`/`--dump` flags to attach at launch, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Without those flags it starts empty and the client attaches with `open`. The guest runs freely between calls; wrong-process hits on shared-page breakpoints are absorbed in the background so it is never left frozen.
+The server reads `--backend`/`--connect`/`--kdnet-key`/`--dump` to attach at launch, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](backends.md)). Without those flags it starts empty and the client attaches with `open`. The guest runs freely between calls; wrong-process hits on shared-page breakpoints are absorbed in the background so it is never left frozen.
 
 ## stdio (default)
 
@@ -48,20 +48,20 @@ The MCP client launches `ntoseye mcp` as a subprocess and talks to it over stdin
 }
 ```
 
-Top-level flags go before the `mcp` subcommand, e.g. to pin the backend and socket:
+Target options follow the subcommand, e.g. to pin the backend and socket:
 
 ```json
 {
   "mcpServers": {
     "ntoseye": {
       "command": "ntoseye",
-      "args": ["--backend", "kd", "--connect", "/tmp/ntoseye-kd.sock", "mcp"]
+      "args": ["mcp", "--backend", "kd", "--connect", "/tmp/ntoseye-kd.sock"]
     }
   }
 }
 ```
 
-For KDNET, use `["--backend", "kdnet", "--kdnet-key", "1.2.3.4", "mcp"]`; add `["--memory-source", "kd"]` to force target-mediated memory and add `--connect` before `mcp` only when changing the default `0.0.0.0:50000` listener. The `open` tool takes the same backend/connect/key choices; when the server starts without a target the agent is instructed to ask the user how the VM is exposed rather than guess.
+For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`; add `["--memory-source", "kd"]` to force target-mediated memory and add `--connect` only when changing the default `0.0.0.0:50000` listener. The `open` tool takes the same backend/connect/key choices; when the server starts without a target the agent is instructed to ask the user how the VM is exposed rather than guess.
 
 Use an absolute path for `command` (e.g. `../target/release/ntoseye`) if `ntoseye` isn't within `PATH`.
 

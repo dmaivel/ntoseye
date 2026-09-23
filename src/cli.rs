@@ -1,5 +1,4 @@
-use argh::from_env;
-use argh::{FromArgValue, FromArgs};
+use clap::{Args, Parser, Subcommand};
 use owo_colors::OwoColorize;
 use std::mem::take;
 
@@ -12,7 +11,7 @@ use crate::gdbserver;
 #[cfg(feature = "mcp")]
 use crate::mcp;
 use crate::{
-    Backend, DEFAULT_KD_SOCKET, TargetSpec, configure, diagnostics,
+    Backend, TargetSpec, configure, diagnostics,
     error::{Error, Result},
     kd::KdMemorySource,
     repl::{start_plain_repl, start_repl},
@@ -20,155 +19,140 @@ use crate::{
     symbols,
 };
 
-/// argh needs a local type for `FromArgValue`; the parse itself is the crate's.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct BackendArg(Backend);
-
-impl FromArgValue for BackendArg {
-    fn from_arg_value(value: &str) -> std::result::Result<Self, String> {
-        value.parse().map(Self)
-    }
-}
-
-#[derive(FromArgs)]
 /// Windows kernel debugger for Linux (KVM/QEMU, VMware) and macOS (UTM) hosts
 /// running Windows. WinDbg for Linux and macOS.
-struct Args {
-    /// print version information
-    #[argh(switch, short = 'v', long = "version")]
+#[derive(Parser)]
+#[command(name = "ntoseye")]
+struct Cli {
+    /// Print version information
+    #[arg(short = 'v', long)]
     version: bool,
 
-    /// force redownloading of symbols
-    #[argh(switch, long = "force-download-symbols")]
-    redownload_symbols: bool,
-
-    /// additional PDB symbol server URL (repeatable; tried before the Microsoft
-    /// default). Uses the standard symbol-server path convention:
-    /// {server}/{filename}/{guid}{age}/{filename}
-    #[argh(option, long = "pdb-server")]
-    pdb_server: Vec<String>,
-
-    /// help instructions with enabling gdbstub in qemu
-    #[argh(switch, long = "gdbstub-instructions")]
+    /// Print how to enable QEMU's gdbstub for the gdb backend
+    #[arg(long)]
     gdbstub_instructions: bool,
 
-    /// help instructions with enabling kd-over-serial in qemu/windows
-    #[argh(switch, long = "kd-instructions")]
+    /// Print how to enable KD over serial in QEMU and Windows
+    #[arg(long)]
     kd_instructions: bool,
 
-    /// debugger backend: 'kd' (Windows KD over serial, default), 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub), or 'memory' (passive live-VM introspection)
-    #[argh(option, short = 'b', long = "backend")]
-    backend: Option<BackendArg>,
-
-    /// backend target: GDB address, KD socket path, or KDNET listen address; unused by memory
-    #[argh(option, long = "connect")]
-    connect: Option<String>,
-
-    /// KDNET encryption key (four base-36 components); required by the kdnet backend
-    #[argh(option, long = "kdnet-key")]
-    kdnet_key: Option<String>,
-
-    /// KD/KDNET memory source: auto (validated host memory, then KD fallback), host, or kd
-    #[argh(option, long = "memory-source")]
-    memory_source: Option<KdMemorySource>,
-
-    /// use a line-oriented REPL without terminal cursor queries, completion, or history
-    #[argh(switch, long = "plain-repl")]
+    /// Use a line-oriented REPL without terminal cursor queries, completion,
+    /// or history
+    #[arg(long)]
     plain_repl: bool,
-    /// open a Windows kernel crash dump (.dmp) for offline analysis instead of attaching to a live VM
-    #[argh(option, long = "dump")]
-    dump: Option<PathBuf>,
 
-    #[argh(subcommand)]
+    #[command(flatten)]
+    target: TargetOptions,
+
+    #[command(subcommand)]
     command: Option<Command>,
 }
 
-#[derive(FromArgs)]
-#[argh(subcommand)]
+/// What to attach to and where symbols come from. Global, so they go before
+/// or after a subcommand: `ntoseye gdbserver --backend gdb` and
+/// `ntoseye --backend gdb gdbserver` are the same.
+#[derive(Args)]
+struct TargetOptions {
+    /// Debugger backend: 'kd' (Windows KD over serial, default), 'kdnet'
+    /// (Windows KD over UDP), 'gdb' (QEMU GDB stub), or 'memory' (passive
+    /// live-VM introspection)
+    #[arg(short = 'b', long, global = true)]
+    backend: Option<Backend>,
+
+    /// Backend target: GDB address, KD socket path, or KDNET listen address;
+    /// unused by memory
+    #[arg(long, global = true)]
+    connect: Option<String>,
+
+    /// KDNET encryption key (four base-36 components); required by the kdnet
+    /// backend
+    #[arg(long, global = true)]
+    kdnet_key: Option<String>,
+
+    /// KD/KDNET memory source: auto (validated host memory, then KD
+    /// fallback), host, or kd
+    #[arg(long, global = true)]
+    memory_source: Option<KdMemorySource>,
+
+    /// Open a Windows kernel crash dump (.dmp) for offline analysis instead of
+    /// attaching to a live VM
+    #[arg(long, global = true)]
+    dump: Option<PathBuf>,
+
+    /// Additional PDB symbol server URL (repeatable; tried before the
+    /// Microsoft default), using the standard symbol-server path convention:
+    /// {server}/{filename}/{guid}{age}/{filename}
+    #[arg(long, global = true)]
+    pdb_server: Vec<String>,
+
+    /// Force redownloading of symbols
+    #[arg(long = "force-download-symbols", global = true)]
+    redownload_symbols: bool,
+}
+
+#[derive(Subcommand)]
 enum Command {
-    Configure(ConfigureCommand),
-    Status(StatusCommand),
+    /// Interactively configure a supported hypervisor for ntoseye
+    Configure,
+    /// Inspect configured hypervisor transports and recover launch commands
+    Status,
+    /// Run as an MCP server, exposing the debugger as tools
+    ///
+    /// Attaches at launch when --backend/--connect/--dump name a target;
+    /// otherwise the client attaches with the 'open' tool. Defaults to the
+    /// stdio transport (the client launches this binary); pass --http to serve
+    /// over the network.
     #[cfg(feature = "mcp")]
     Mcp(McpCommand),
+    /// Run as a Debug Adapter Protocol server for editor integration
+    ///
+    /// Attaches at launch when --backend/--connect/--dump name a target;
+    /// otherwise the client's launch/attach arguments do. Defaults to stdio;
+    /// pass --port to serve one client over loopback TCP instead.
     #[cfg(feature = "dap")]
     Dap(DapCommand),
+    /// Serve the session over the GDB remote protocol, for IDA, Binary Ninja,
+    /// Ghidra, gdb, and lldb
+    ///
+    /// Attaches to the target --backend/--connect/--dump name, then serves one
+    /// client at a time until interrupted.
     #[cfg(feature = "gdbserver")]
     Gdbserver(GdbserverCommand),
 }
 
 #[cfg(feature = "mcp")]
-#[derive(FromArgs)]
-#[argh(subcommand, name = "mcp")]
-/// run as an MCP server, exposing the debugger as tools (reads the top-level
-/// --backend/--connect/--dump to choose how to attach). Defaults to the stdio
-/// transport (the client launches this binary); pass --http to serve over the
-/// network.
+#[derive(Args)]
 struct McpCommand {
-    /// serve the Streamable HTTP transport on this address (e.g. 127.0.0.1:8080)
-    /// instead of stdio, for web MCP clients that connect over the network
-    #[argh(option, long = "http")]
+    /// Serve the Streamable HTTP transport on this address (e.g.
+    /// 127.0.0.1:8080) instead of stdio, for web MCP clients that connect over
+    /// the network
+    #[arg(long)]
     http: Option<String>,
 
-    /// allow Streamable HTTP to bind to a non-loopback address and accept any
-    /// browser origin (CORS); exposes debugger control tools to the network, so
-    /// only use on trusted hosts/networks. Without it, HTTP is loopback-only and
-    /// cross-origin requests are restricted to loopback origins.
-    #[argh(switch, long = "unsafe-http")]
+    /// Allow Streamable HTTP to bind to a non-loopback address and accept any
+    /// browser origin (CORS); exposes debugger control tools to the network,
+    /// so only use on trusted hosts/networks. Without it, HTTP is
+    /// loopback-only and cross-origin requests are restricted to loopback
+    /// origins.
+    #[arg(long)]
     unsafe_http: bool,
-
-    /// additional PDB symbol server URL (repeatable; tried before the Microsoft
-    /// default). Same as the top-level --pdb-server; can be placed before or
-    /// after the 'mcp' subcommand.
-    #[argh(option, long = "pdb-server")]
-    pdb_server: Vec<String>,
 }
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "configure")]
-/// interactively configure a supported hypervisor for ntoseye
-struct ConfigureCommand {}
 
 #[cfg(feature = "dap")]
-#[derive(FromArgs)]
-#[argh(subcommand, name = "dap")]
-/// run as a Debug Adapter Protocol server for editor integration. Reads the
-/// top-level --backend/--connect/--dump to choose how to attach. Defaults to
-/// stdio; pass --port to serve one client over loopback TCP instead.
+#[derive(Args)]
 struct DapCommand {
-    /// serve one DAP client on 127.0.0.1:<port> instead of stdio, for clients
+    /// Serve one DAP client on 127.0.0.1:<port> instead of stdio, for clients
     /// configured with a debugServer port
-    #[argh(option, long = "port")]
+    #[arg(long)]
     port: Option<u16>,
-
-    /// additional PDB symbol server URL (repeatable; tried before the
-    /// Microsoft default). Same as the top-level --pdb-server; can be placed
-    /// before or after the 'dap' subcommand.
-    #[argh(option, long = "pdb-server")]
-    pdb_server: Vec<String>,
 }
 
-#[derive(FromArgs)]
-#[argh(subcommand, name = "status")]
-/// inspect configured hypervisor transports and recover launch commands
-struct StatusCommand {}
-
 #[cfg(feature = "gdbserver")]
-#[derive(FromArgs)]
-#[argh(subcommand, name = "gdbserver")]
-/// serve the session over the GDB remote protocol, for IDA, Binary Ninja,
-/// Ghidra, gdb, and lldb. Attaches with the top-level
-/// --backend/--connect/--dump, then serves one client at a time until
-/// interrupted.
+#[derive(Args)]
 struct GdbserverCommand {
-    /// address to listen on (default 127.0.0.1:2345)
-    #[argh(option, long = "listen")]
-    listen: Option<String>,
-
-    /// additional PDB symbol server URL (repeatable; tried before the
-    /// Microsoft default). Same as the top-level --pdb-server; can be placed
-    /// before or after the 'gdbserver' subcommand.
-    #[argh(option, long = "pdb-server")]
-    pdb_server: Vec<String>,
+    /// Address to listen on
+    #[arg(long, default_value = gdbserver::DEFAULT_LISTEN)]
+    listen: String,
 }
 
 static GDBSTUB_INSTRUCTIONS: &str = "The gdb backend talks to QEMU's gdbstub instead of Windows KD.
@@ -280,22 +264,29 @@ pub fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut args: Args = from_env();
-    if args.version {
+    let Cli {
+        version,
+        gdbstub_instructions,
+        kd_instructions,
+        plain_repl,
+        target: mut args,
+        command,
+    } = Cli::parse();
+    if version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if args.gdbstub_instructions {
+    if gdbstub_instructions {
         println!("{}", GDBSTUB_INSTRUCTIONS);
         return Ok(());
     }
 
-    if args.kd_instructions {
+    if kd_instructions {
         println!("{}", KD_INSTRUCTIONS);
         return Ok(());
     }
 
-    let backend = args.backend.map_or(Backend::Kd, |arg| arg.0);
+    let backend = args.backend.unwrap_or(Backend::Kd);
     if backend != Backend::KdNet && args.kdnet_key.is_some() {
         return Err(Error::DebugInfo(
             "--kdnet-key is only valid with --backend kdnet".to_string(),
@@ -308,7 +299,7 @@ fn run() -> Result<()> {
     }
     // A protocol server may start without a target and be pointed at one by
     // its client, which is where the KDNET key arrives instead.
-    let may_defer_kdnet_key = match &args.command {
+    let may_defer_kdnet_key = match &command {
         #[cfg(feature = "mcp")]
         Some(Command::Mcp(_)) => true,
         #[cfg(feature = "dap")]
@@ -327,21 +318,7 @@ fn run() -> Result<()> {
             Error::DebugInfo("symbol download flag was initialized before startup".into())
         })?;
 
-    // Merge top-level and subcommand --pdb-server lists (the subcommand may
-    // carry its own, e.g. `ntoseye mcp --pdb-server URL`).
-    let mut pdb_servers = take(&mut args.pdb_server);
-    #[cfg(feature = "mcp")]
-    if let Some(Command::Mcp(ref mcp_args)) = args.command {
-        pdb_servers.extend(mcp_args.pdb_server.clone());
-    }
-    #[cfg(feature = "dap")]
-    if let Some(Command::Dap(ref dap_args)) = args.command {
-        pdb_servers.extend(dap_args.pdb_server.clone());
-    }
-    #[cfg(feature = "gdbserver")]
-    if let Some(Command::Gdbserver(gdbserver_args)) = &args.command {
-        pdb_servers.extend(gdbserver_args.pdb_server.clone());
-    }
+    let pdb_servers = take(&mut args.pdb_server);
     if !pdb_servers.is_empty() {
         symbols::PDB_SERVERS.set(pdb_servers).map_err(|_| {
             Error::DebugInfo("PDB server list was initialized before startup".into())
@@ -359,10 +336,10 @@ fn run() -> Result<()> {
         ));
     }
 
-    if let Some(command) = args.command.take() {
+    if let Some(command) = command {
         return match command {
-            Command::Configure(_) => configure::run_interactive(),
-            Command::Status(_) => configure::print_status(),
+            Command::Configure => configure::run_interactive(),
+            Command::Status => configure::print_status(),
             #[cfg(feature = "mcp")]
             Command::Mcp(mcp_args) => {
                 let spec = server_startup_spec(
@@ -392,11 +369,7 @@ fn run() -> Result<()> {
                     Some(dump) => TargetSpec::Dump(dump.clone()),
                     None => live_spec(&args, backend),
                 };
-                let listen = gdbserver_args
-                    .listen
-                    .as_deref()
-                    .unwrap_or(gdbserver::DEFAULT_LISTEN);
-                gdbserver::run(spec, listen)
+                gdbserver::run(spec, &gdbserver_args.listen)
             }
         };
     }
@@ -408,14 +381,14 @@ fn run() -> Result<()> {
     let mut ctx = Session::open_with_progress(&spec, &mut |line| {
         eprintln!("{}", line.bright_black());
     })?;
-    if args.plain_repl {
+    if plain_repl {
         start_plain_repl(&mut ctx)
     } else {
         start_repl(&mut ctx)
     }
 }
 
-fn live_spec(args: &Args, backend: Backend) -> TargetSpec {
+fn live_spec(args: &TargetOptions, backend: Backend) -> TargetSpec {
     TargetSpec::Live {
         backend,
         connect: args.connect.clone(),
@@ -431,7 +404,7 @@ fn live_spec(args: &Args, backend: Backend) -> TargetSpec {
 fn server_startup_spec(
     tool: &str,
     client_attach_hint: &str,
-    args: &Args,
+    args: &TargetOptions,
     backend: Backend,
 ) -> Option<TargetSpec> {
     if let Some(dump) = args.dump.clone() {
@@ -454,8 +427,58 @@ fn server_startup_spec(
     } else {
         eprintln!(
             "{tool}: note: pass --connect {DEFAULT_KD_SOCKET} to auto-attach at startup, \
-             or {client_attach_hint}"
+             or {client_attach_hint}",
+            DEFAULT_KD_SOCKET = crate::DEFAULT_KD_SOCKET
         );
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn command_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    /// Target options name the target whichever side of a server subcommand
+    /// they are on.
+    #[cfg(feature = "gdbserver")]
+    #[test]
+    fn target_options_parse_before_and_after_the_subcommand() {
+        use clap::Parser;
+
+        let options = [
+            "--backend",
+            "kdnet",
+            "--connect",
+            "0.0.0.0:50000",
+            "--kdnet-key",
+            "1.2.3.4",
+            "--memory-source",
+            "kd",
+            "--pdb-server",
+            "https://symbols.example",
+            "--force-download-symbols",
+        ];
+        let after = Cli::try_parse_from(["ntoseye", "gdbserver"].into_iter().chain(options))
+            .unwrap()
+            .target;
+        let before =
+            Cli::try_parse_from(["ntoseye"].into_iter().chain(options).chain(["gdbserver"]))
+                .unwrap()
+                .target;
+        for target in [after, before] {
+            assert_eq!(target.backend, Some(crate::Backend::KdNet));
+            assert_eq!(target.connect.as_deref(), Some("0.0.0.0:50000"));
+            assert_eq!(target.kdnet_key.as_deref(), Some("1.2.3.4"));
+            assert_eq!(target.memory_source, Some(crate::kd::KdMemorySource::Kd));
+            assert_eq!(target.pdb_server, ["https://symbols.example"]);
+            assert!(target.redownload_symbols);
+        }
+    }
 }

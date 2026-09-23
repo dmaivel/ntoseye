@@ -137,7 +137,7 @@ Kernel debugging has no process to start, so `launch` and `attach` behave identi
 
 `sourcePath` takes `<prefix-recorded-in-the-pdb>=<local-root>` or a bare local root, in the same `;`-separated or JSON array forms. A source view needs it whenever the driver was not built on this host.
 
-When the top-level flags already pinned a target (`ntoseye --dump crash.dmp dap`), the attach request adopts that session and ignores its own target arguments. `symbolPath` and `sourcePath` still apply.
+When the command line already pinned a target (`ntoseye dap --dump crash.dmp`), the attach request adopts that session and ignores its own target arguments. `symbolPath` and `sourcePath` still apply.
 
 ## Feature mapping
 

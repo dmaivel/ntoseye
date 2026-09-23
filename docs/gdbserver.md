@@ -15,12 +15,12 @@ Best-effort clients work as described below, but their remaining limits are in t
 
 ## Quickstart
 
-Configure the VM as described in [Choosing a backend](backends.md). The protocol has no attach request, so the top-level flags name the target:
+Configure the VM as described in [Choosing a backend](backends.md). The protocol has no attach request, so the command line names the target:
 
 ```bash
-ntoseye --connect /tmp/ntoseye-kd.sock gdbserver
-ntoseye --backend kdnet --kdnet-key 1.2.3.4 gdbserver --listen 127.0.0.1:2345
-ntoseye --dump crash.dmp gdbserver
+ntoseye gdbserver --connect /tmp/ntoseye-kd.sock
+ntoseye gdbserver --backend kdnet --kdnet-key 1.2.3.4 --listen 127.0.0.1:2345
+ntoseye gdbserver --dump crash.dmp
 ```
 
 The server listens on `127.0.0.1:2345` by default. QEMU's own stub usually holds `:1234`, and the `gdb` backend may be connected to it.
