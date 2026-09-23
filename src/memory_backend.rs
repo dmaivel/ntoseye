@@ -3,7 +3,6 @@ use std::time::Duration;
 use crate::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
-use crate::types::VirtAddr;
 
 #[derive(Default)]
 pub struct MemoryBackend {
@@ -101,10 +100,6 @@ impl DebugBackend for MemoryBackend {
 
     fn stopped_thread_id(&mut self) -> Result<String> {
         Err(Self::unsupported("stopped-context queries"))
-    }
-
-    fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {
-        Ok(None)
     }
 
     fn is_running(&self) -> bool {

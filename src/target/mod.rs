@@ -35,7 +35,7 @@ use crate::{
         LocalVariableLocation, ParsedType, ProcedureLocal, SourceLineExtent, SourceLocation,
         SymbolCandidate, SymbolIndex, SymbolStore, TypeInfo, format_symbol_with_offset,
     },
-    types::{Arch, Dtb, Value, VirtAddr},
+    types::{Arch, Dtb, KernelLocation, Value, VirtAddr},
 };
 
 pub struct Target {
@@ -936,11 +936,15 @@ impl Target {
         arch: Arch,
     ) -> Result<Self> {
         let symbols = Arc::new(SymbolStore::new());
-        let ntoskrnl =
-            WinObject::new_with_arch(phys.clone(), symbols.clone(), kernel_dtb, kernel_base, arch)
-                .load_symbols()?;
-        ntoskrnl.register_as_kernel();
-        let guest = Guest::from_kernel(ntoskrnl);
+        let guest = Guest::at(
+            phys.clone(),
+            symbols.clone(),
+            KernelLocation {
+                dtb: kernel_dtb,
+                base: kernel_base,
+                arch,
+            },
+        )?;
         let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
 
         Ok(Self {
@@ -1754,8 +1758,11 @@ impl Target {
         self.debugger_data = debugger_data;
     }
 
-    pub fn reload_guest_with_kernel_base_hint(
+    /// Rebuild the guest after a reboot: at `location` when the transport
+    /// knows it, else by scanning RAM (seeded with `kernel_base_hint`).
+    pub fn reload_guest(
         &mut self,
+        location: Option<KernelLocation>,
         kernel_base_hint: Option<VirtAddr>,
     ) -> Result<ReloadReport> {
         self.debugger_data = None;
@@ -1765,11 +1772,11 @@ impl Target {
             .map(|g| g.ntoskrnl.base_address)
             .unwrap_or(VirtAddr(0));
         let previous_dtb = self.guest.as_ref().map(|g| g.ntoskrnl.dtb());
-        let guest = Guest::new_with_kernel_base_hint(
-            self.phys.clone(),
-            self.symbols.clone(),
-            kernel_base_hint,
-        )?;
+        let (phys, symbols) = (self.phys.clone(), self.symbols.clone());
+        let guest = match location {
+            Some(location) => Guest::at(phys, symbols, location)?,
+            None => Guest::new_with_kernel_base_hint(phys, symbols, kernel_base_hint)?,
+        };
         let new_dtb = guest.ntoskrnl.dtb();
 
         if let Some(prev_dtb) = previous_dtb {

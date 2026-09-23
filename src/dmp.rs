@@ -1128,10 +1128,6 @@ impl DebugBackend for DmpBackend {
         Ok(format!("p1.{:x}", self.current_processor as u16 + 1))
     }
 
-    fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {
-        Ok(None)
-    }
-
     fn is_running(&self) -> bool {
         false
     }

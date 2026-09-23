@@ -1906,19 +1906,34 @@ impl Guest {
         symbols: Arc<SymbolStore>,
         kernel_base_hint: Option<VirtAddr>,
     ) -> Result<Self> {
-        let ntoskrnl = if let Some(kernel_base) = kernel_base_hint {
-            let (kernel_dtb, arch) = find_kernel(&phys)?.ok_or(Error::NtoskrnlNotFound)?;
-            WinObject::new_with_arch(phys, symbols, kernel_dtb, kernel_base, arch)
-        } else {
-            find_ntoskrnl(phys, symbols)?.ok_or(Error::NtoskrnlNotFound)?
+        if let Some(base) = kernel_base_hint {
+            let (dtb, arch) = find_kernel(&phys)?.ok_or(Error::NtoskrnlNotFound)?;
+            return Self::at(phys, symbols, KernelLocation { dtb, base, arch });
         }
-        .load_symbols()?;
+        Self::with_kernel(find_ntoskrnl(phys, symbols)?.ok_or(Error::NtoskrnlNotFound)?)
+    }
 
+    /// The guest whose kernel is at `location`, with no memory scan.
+    pub fn at(
+        phys: Arc<PhysMem>,
+        symbols: Arc<SymbolStore>,
+        location: KernelLocation,
+    ) -> Result<Self> {
+        Self::with_kernel(WinObject::new_with_arch(
+            phys,
+            symbols,
+            location.dtb,
+            location.base,
+            location.arch,
+        ))
+    }
+
+    fn with_kernel(ntoskrnl: WinObject) -> Result<Self> {
+        let ntoskrnl = ntoskrnl.load_symbols()?;
         // Type/enum layout lookups prefer the kernel's definitions over
         // same-named user-mode types once attached to a process; tell the
         // symbol store which guid is the kernel's.
         ntoskrnl.register_as_kernel();
-
         Ok(Self::from_kernel(ntoskrnl))
     }
 

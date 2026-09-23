@@ -3118,8 +3118,11 @@ impl Session {
         breakpoints.prepare_target_reload(backend);
         // Release file handles owned by the previous target.
         kd_files().reset_handles();
-        let hint = event_hint.or_else(|| backend.target_kernel_base_hint().ok().flatten());
-        let report = target.reload_guest_with_kernel_base_hint(hint);
+        // A load-symbols stop's hint is the loading image's base, which is the
+        // kernel only for the first; the transport's own answer wins.
+        let location = backend.target_kernel_location().ok().flatten();
+        let hint = location.map(|location| location.base).or(event_hint);
+        let report = target.reload_guest(location, event_hint);
         self.reload_module_list_pending = !report
             .as_ref()
             .is_ok_and(reload_report_has_loaded_module_list);

@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::phys::PhysMem;
 use crate::target::Target;
-use crate::types::VirtAddr;
+use crate::types::{KernelLocation, VirtAddr};
 
 /// One captured line of guest debug output (DbgPrint / kernel printf), with the
 /// host wall-clock time it completed and a monotonic sequence number used as the
@@ -638,10 +638,11 @@ pub trait DebugBackend {
     fn note_target_rediscovery_pending(&mut self) {}
     fn note_target_rediscovery_complete(&mut self) {}
 
-    /// Best-effort kernel base reported by the transport after a target reload.
-    /// KD provides this via GetVersion; transports without a native answer return
-    /// None and let the KVM-side guest scanner discover the kernel normally.
-    fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {
+    /// Where the transport says the kernel is after a target reload. KD reads
+    /// it from GetVersion and the page-table root, so the rebuild needs no RAM
+    /// scan (which cannot succeed early in boot). Transports without a native
+    /// answer return None and the guest scanner discovers the kernel.
+    fn target_kernel_location(&mut self) -> Result<Option<KernelLocation>> {
         Ok(None)
     }
 

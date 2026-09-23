@@ -24,7 +24,7 @@ use crate::kd::framing::{BREAKIN_BYTE, KdFraming};
 use crate::memory::{AddressSpace, PAGE_SIZE, TranslationCache};
 use crate::phys::PhysMem;
 use crate::session::clear_trap_flag;
-use crate::types::{Arch, Dtb, PhysAddr, VirtAddr};
+use crate::types::{Arch, Dtb, KernelLocation, PhysAddr, VirtAddr};
 
 macro_rules! kd_trace {
     ($($arg:tt)*) => {
@@ -2841,11 +2841,13 @@ impl DebugBackend for KdBackend {
         self.reconnect_assist_after_continue = None;
     }
 
-    fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {
-        let processor = self.current_processor;
-        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::get_version(framing, processor).map(|version| Some(VirtAddr(version.kern_base)))
-        })
+    fn target_kernel_location(&mut self) -> Result<Option<KernelLocation>> {
+        let hints = self.target_hints()?;
+        Ok(Some(KernelLocation {
+            dtb: hints.kernel_dtb,
+            base: hints.kernel_base,
+            arch: hints.arch,
+        }))
     }
 
     fn target_debugger_data_hint(&mut self) -> Result<Option<DebuggerDataCandidate>> {
@@ -3203,8 +3205,8 @@ impl DebugBackend for KdBackendHandle {
         self.lock().sites_dropped_by_stop()
     }
 
-    fn target_kernel_base_hint(&mut self) -> Result<Option<VirtAddr>> {
-        self.lock().target_kernel_base_hint()
+    fn target_kernel_location(&mut self) -> Result<Option<KernelLocation>> {
+        self.lock().target_kernel_location()
     }
 
     fn target_debugger_data_hint(&mut self) -> Result<Option<DebuggerDataCandidate>> {

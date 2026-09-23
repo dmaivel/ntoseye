@@ -1979,7 +1979,7 @@ fn pending_write_breakpoint_blocks_unrelated_kd_requests() {
     assert!(message.contains("retry the same bp command"));
 
     let err = backend
-        .target_kernel_base_hint()
+        .target_kernel_location()
         .expect_err("other KD requests should be rejected while install is pending");
     assert!(err.to_string().contains("retry the same bp command"));
 }

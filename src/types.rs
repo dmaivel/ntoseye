@@ -113,6 +113,14 @@ pub type PhysAddr = u64;
 
 pub type Dtb = PhysAddr;
 
+/// Where a kernel image is: its page-table root, base, and architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelLocation {
+    pub dtb: Dtb,
+    pub base: VirtAddr,
+    pub arch: Arch,
+}
+
 /// Guest CPU architecture. Determines page-table descriptor interpretation and
 /// register-file layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
