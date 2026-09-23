@@ -2336,7 +2336,17 @@ impl Guest {
     }
 
     fn walk_kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
-        let head = self.ntoskrnl.symbol("PsLoadedModuleList")?.address();
+        let head = self.ntoskrnl.symbol("PsLoadedModuleList")?;
+        // At a reboot's first boot notification the list is not built yet,
+        // but the kernel itself is loaded; stacks unwind through it.
+        if head.read::<VirtAddr>()?.is_zero() {
+            return Ok(vec![ModuleInfo::new(
+                "ntoskrnl.exe".to_string(),
+                self.ntoskrnl.base_address,
+                self.ntoskrnl.binary_size() as u32,
+            )]);
+        }
+        let head = head.address();
 
         // The kernel uses the _KLDR variant; fall back to _LDR if it's absent
         let record_type = if self
