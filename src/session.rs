@@ -1439,8 +1439,8 @@ impl Session {
     /// Service the guest while the host is otherwise idle: absorb a stop the
     /// background servicer caught but no tool call has drained (chiefly a
     /// wrong-process hit on a shared-page breakpoint), so the guest is not left
-    /// frozen between tool calls. Noise is resumed; a real stop is parked for
-    /// the next `wait_for_stop`.
+    /// frozen between tool calls. Noise is resumed; a real stop, a reboot
+    /// included, is parked for the next `wait_for_stop`.
     pub fn service_idle(&mut self) {
         if self.parked_stop.is_some() || !self.backend.has_pending_stop() {
             return;
@@ -1448,9 +1448,6 @@ impl Session {
         let never_cancel = AtomicBool::new(false);
         match self.wait_for_stop_bounded(Some(SERVICE_IDLE_BUDGET), &never_cancel) {
             Ok(ContinueOutcome::Running) | Err(_) => {}
-            Ok(ContinueOutcome::TargetReloaded { .. }) => {
-                self.reload_surface_pending = true;
-            }
             Ok(outcome) => {
                 self.parked_stop = Some(outcome);
             }

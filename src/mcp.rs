@@ -374,7 +374,7 @@ fn status_trailer(status: &RunStatus) -> String {
         line.push_str(&format!(" | scope {} ({})", scope.name, scope.pid));
     }
     if !status.coherent {
-        line.push_str(" | rediscovery pending");
+        line.push_str(" | boot in progress");
     }
     line.push(']');
     line
@@ -767,9 +767,12 @@ impl rmcp::ServerHandler for NtoseyeMcp {
                  process without a prior `.process /p`. A backtrace through a module \
                  whose PDB is not cached shows `module+offset` and fetches it in the \
                  background; run `k` again for the names. After a \
-                 reboot the trailer says \
-                 rediscovery pending until the kernel is rediscovered; wait rather than \
-                 enumerating stale state. Use format=json when you need typed values \
+                 reboot the target stops (over KD, at the new kernel's first boot \
+                 notification) and the trailer says boot in progress until its module \
+                 list exists: kernel \
+                 symbols and `bp nt!...` work there, process and module lists do not yet. \
+                 `g` lets boot continue; while running, wait rather than enumerating \
+                 stale state. Use format=json when you need typed values \
                  instead of parsing text. If no session is open and the user has not said \
                  how the VM is exposed (kd socket path, kdnet key, gdb address, or a dump \
                  file), ask them before calling `open` rather than guessing; the defaults \
