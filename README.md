@@ -35,7 +35,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 
 `ntoseye` supports any hypervisor, cloud VM, or physical machine reachable over [KDNET](docs/kdnet.md). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](docs/backends.md).
 
-### Disclaimer
+### Files and network access
 
 `ntoseye` downloads symbols and images from Microsoft's official symbol server when required. Config, cache, and REPL state live under `~/.ntoseye`:
 
