@@ -213,7 +213,19 @@ pub struct GdbClient {
     is_running: bool,
     hardware_sites: [Option<HardwareSite>; HW_BREAKPOINT_SLOTS as usize],
     extra_registers: Vec<ExtraRegister>,
+    /// The stop reply that left the target halted: the one to the initial
+    /// `?`, then each stop read since, for the stopped thread. Asking again
+    /// is not an option: QEMU treats `?` as a debugger's initial connect and
+    /// removes every breakpoint, including ones this client still counts as
+    /// installed.
+    last_stop: String,
 }
+
+/// What a wait on an already halted target reports: a stop with no fields,
+/// which is what the stub's `?` answered before this client stopped asking
+/// (see [`GdbClient::last_stop`]). No fields, so a stop the caller already
+/// handled is not handled again.
+const HALTED_NO_NEW_STOP: &str = "S05";
 
 /// Why a request cannot be served right now, for [`Error::TargetRunning`].
 const GDB_STUB_NEEDS_HALT: &str = "the GDB stub serves no requests while the target runs.";
@@ -255,6 +267,7 @@ impl GdbClient {
             is_running: false, // NOTE if the user toys with VM via GUI, this value goes bad
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
             extra_registers: Vec::new(),
+            last_stop: String::new(),
         };
 
         client.force_stop_and_resync()?;
@@ -267,7 +280,9 @@ impl GdbClient {
             let _ = client.enable_no_ack_mode();
         }
 
-        let _ = client.send_packet("?")?;
+        // The one `?` this client sends: nothing is planted yet for QEMU to
+        // clear, and the reply is the halt reason until the next stop.
+        client.last_stop = client.send_packet("?")?;
 
         let description = client.fetch_target_description()?;
         let arch = TargetArch::from_description(&description)?;
@@ -319,10 +334,6 @@ impl GdbClient {
         } else {
             Err(Error::NotSupported)
         }
-    }
-
-    pub fn query_halt_reason(&mut self) -> Result<String> {
-        self.send_packet("?")
     }
 
     fn encode_packet(data: &str) -> Vec<u8> {
@@ -633,7 +644,7 @@ impl GdbClient {
 
     fn wait_for_stop(&mut self) -> Result<String> {
         if !self.is_running {
-            return self.query_halt_reason();
+            return Ok(HALTED_NO_NEW_STOP.to_string());
         }
 
         let response = self.read_stop_reply()?;
@@ -643,7 +654,7 @@ impl GdbClient {
 
     fn try_wait_for_stop(&mut self) -> Result<Option<String>> {
         if !self.is_running {
-            return Ok(Some(self.query_halt_reason()?));
+            return Ok(Some(HALTED_NO_NEW_STOP.to_string()));
         }
 
         match self.read_stop_reply() {
@@ -664,7 +675,10 @@ impl GdbClient {
         loop {
             let response = self.read_response_packet()?;
             match response.as_bytes().first().copied() {
-                Some(b'S' | b'T' | b'W' | b'X' | b'N') => return Ok(response),
+                Some(b'S' | b'T' | b'W' | b'X' | b'N') => {
+                    self.last_stop.clone_from(&response);
+                    return Ok(response);
+                }
                 Some(b'O') => continue,
                 Some(b'F') => {
                     return Err(Error::Rsp(
@@ -756,11 +770,11 @@ impl GdbClient {
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
-        let response = self.send_packet("?")?;
-        if let Some(thread_id) = StopReply::parse(&response).thread_id {
+        if let Some(thread_id) = StopReply::parse(&self.last_stop).thread_id {
             return Ok(thread_id);
         }
 
+        // QEMU's initial stop reply names a core, not a thread.
         let response = self.send_packet("qC")?;
         if let Some(thread_id) = response.strip_prefix("QC") {
             return Ok(thread_id.to_string());
@@ -1032,7 +1046,92 @@ impl DebugBackend for GdbClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{GdbClient, StopReply, StubFeatures, TargetArch};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{
+        GdbClient, HW_BREAKPOINT_SLOTS, PacketReadState, RegisterMap, StopReply, StubFeatures,
+        TargetArch,
+    };
+    use crate::dbg_backend::DebugBackend;
+
+    /// A running target behind a stub that answers the break byte with a stop
+    /// on `p01.02` and records every packet it is sent.
+    fn running_client_over_recording_stub() -> (GdbClient, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&received);
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reply = |stream: &mut TcpStream, body: &str| {
+                let sum = body.bytes().fold(0u8, |a, b| a.wrapping_add(b));
+                stream
+                    .write_all(format!("${body}#{sum:02x}").as_bytes())
+                    .unwrap();
+            };
+            let mut packet = Vec::new();
+            let mut byte = [0u8];
+            while stream.read_exact(&mut byte).is_ok() {
+                match byte[0] {
+                    0x03 => reply(&mut stream, "T02thread:p01.02;"),
+                    b'$' => packet.clear(),
+                    b'#' => {
+                        let mut checksum = [0u8; 2];
+                        stream.read_exact(&mut checksum).unwrap();
+                        let body = String::from_utf8(packet.clone()).unwrap();
+                        log.lock().unwrap().push(body.clone());
+                        let answer = match body.as_str() {
+                            "?" => "T05core:01;",
+                            "qC" => "QCp01.01",
+                            _ => "",
+                        };
+                        reply(&mut stream, answer);
+                    }
+                    other => packet.push(other),
+                }
+            }
+        });
+        let client = GdbClient {
+            stream: TcpStream::connect(addr).unwrap(),
+            features: StubFeatures::default(),
+            rx_state: PacketReadState::default(),
+            no_ack_mode: true,
+            register_map: RegisterMap::default(),
+            is_running: true,
+            hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
+            extra_registers: Vec::new(),
+            last_stop: String::new(),
+        };
+        (client, received)
+    }
+
+    /// QEMU answers `?` by removing every breakpoint, as for a debugger's
+    /// first connect. Asked mid-session (listing vCPUs, a halted wait), it
+    /// silently dropped the bugcheck trap and any user breakpoint, which
+    /// then failed to come out at exit with the guest left halted. The
+    /// stopped thread and a halted wait must come from what the client
+    /// already read.
+    #[test]
+    fn stopped_thread_and_halted_waits_never_ask_the_stub_again() {
+        let (mut client, received) = running_client_over_recording_stub();
+
+        DebugBackend::interrupt(&mut client).unwrap();
+        assert_eq!(
+            DebugBackend::stopped_thread_id(&mut client).unwrap(),
+            "p01.02"
+        );
+        let halted = DebugBackend::try_wait_for_stop(&mut client, Duration::from_millis(10))
+            .unwrap()
+            .unwrap();
+        assert!(halted.thread_id.is_none() && halted.watchpoint_address.is_none());
+        DebugBackend::wait_for_stop(&mut client).unwrap();
+
+        assert!(!received.lock().unwrap().iter().any(|packet| packet == "?"));
+    }
 
     #[test]
     fn accepts_the_architectures_ntoseye_debugs() {
