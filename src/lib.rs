@@ -163,6 +163,8 @@ pub mod session;
 pub mod structured;
 pub mod symbols;
 pub mod target;
+#[cfg(feature = "dap")]
+mod termination;
 pub mod trapframe;
 pub mod triage;
 pub mod triage_report;

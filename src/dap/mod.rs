@@ -6,8 +6,6 @@
 
 mod wire;
 
-#[cfg(unix)]
-use libc::{SIGHUP, SIGINT, SIGTERM, c_int, sighandler_t, signal as install_signal};
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,7 +21,6 @@ use std::result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
@@ -48,6 +45,7 @@ use crate::symbols::{
     parse_source_paths, parse_symbol_sources,
 };
 use crate::target::{SelectedFrame, Target};
+use crate::termination;
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 use crate::typeview::{Expand, FieldView, TypeView, find_field};
@@ -63,43 +61,6 @@ const STACK_FRAME_LIMIT: usize = 256;
 const STEP_LINE_BUDGET: usize = 4096;
 /// Largest source-line range eligible for a temporary endpoint breakpoint.
 const MAX_LINE_SPAN: usize = 4096;
-/// Raised by a termination signal, so the loop can release the target before
-/// the process dies. The handler only stores into it, and
-/// [`install_termination_handler`] forces initialization before installing
-/// the handler, so the store never allocates.
-static TERMINATION: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(false)));
-
-/// Raise the shared flags from a signal handler. Signal-handler safe: two
-/// atomic stores through already-initialized statics, no allocation, no locks.
-#[cfg(unix)]
-extern "C" fn note_termination(_signal: c_int) {
-    TERMINATION.store(true, Ordering::SeqCst);
-    // Also cancel any run control the loop is blocked inside, so it reaches
-    // the flag instead of waiting for the target to stop on its own.
-    if let Some(cancel) = RUN_CANCEL.get() {
-        cancel.store(true, Ordering::SeqCst);
-    }
-}
-
-/// The run-control cancel flag, published for [`note_termination`]. Its value
-/// only exists once a session is being served, so it cannot be a `LazyLock`.
-static RUN_CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-
-/// Install detach handlers and return the flag polled by the server loop.
-fn install_termination_handler(cancel: &Arc<AtomicBool>) -> Arc<AtomicBool> {
-    // Initialize before the handler can run: a store into an initialized
-    // `LazyLock` is a plain atomic write.
-    let flag = Arc::clone(&TERMINATION);
-    let _ = RUN_CANCEL.set(Arc::clone(cancel));
-    #[cfg(unix)]
-    for signal in [SIGTERM, SIGHUP, SIGINT] {
-        // SAFETY: the handler only performs atomic stores.
-        unsafe {
-            install_signal(signal, note_termination as *const () as sighandler_t);
-        }
-    }
-    flag
-}
 
 /// `variablesReference` values start here so they can never collide with a
 /// frame id (both are plain integers in the protocol).
@@ -282,7 +243,7 @@ pub fn run(spec: Option<TargetSpec>, port: Option<u16>) -> Result<()> {
     };
 
     let mut server = Server::new(session, out, rx, Arc::clone(&cancel));
-    server.terminating = install_termination_handler(&cancel);
+    server.terminating = termination::install(&cancel);
     server.serve();
     if let Some(session) = server.session.as_mut()
         && let Err(error) = session.cleanup_for_exit()
@@ -1238,19 +1199,7 @@ impl Server {
         let threads = vcpus
             .iter()
             .enumerate()
-            .map(|(index, vcpu)| {
-                let mut name = vcpu.id.clone();
-                if !vcpu.context.is_empty() {
-                    name.push_str(&format!(" [{}]", vcpu.context));
-                }
-                match (&vcpu.symbol, vcpu.rip, &vcpu.error) {
-                    (Some(symbol), _, _) => name.push_str(&format!(" {symbol}")),
-                    (None, Some(rip), _) => name.push_str(&format!(" {rip:#x}")),
-                    (None, None, Some(error)) => name.push_str(&format!(" <{error}>")),
-                    _ => {}
-                }
-                json!({"id": index as i64 + 1, "name": name})
-            })
+            .map(|(index, vcpu)| json!({"id": index as i64 + 1, "name": vcpu.label()}))
             .collect::<Vec<_>>();
         Ok(Some(json!({"threads": threads})))
     }
@@ -2543,10 +2492,7 @@ impl Server {
 
         let session = self.session()?;
         let mut buffer = vec![0u8; count];
-        let read = match session.read_masked(VirtAddr(address), &mut buffer) {
-            Ok(()) => count,
-            Err(_) => partial_read(session, address, &mut buffer),
-        };
+        let read = session.read_masked_partial(VirtAddr(address), &mut buffer);
         buffer.truncate(read);
         let mut body = json!({
             "address": format!("{address:#x}"),
@@ -3121,27 +3067,6 @@ fn file_stem_of(path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(path)
         .to_string()
-}
-
-/// Read as much of `buffer` as the guest will give us, one page-sized chunk at
-/// a time, and report how many leading bytes are valid. Chunks are relative to
-/// `address`, so an unmapped page truncates the read at the request's own
-/// granularity rather than at a page boundary.
-fn partial_read(session: &Session, address: u64, buffer: &mut [u8]) -> usize {
-    const CHUNK: usize = 0x1000;
-    let mut read = 0;
-    while read < buffer.len() {
-        let end = (read + CHUNK).min(buffer.len());
-        let chunk_address = VirtAddr(address.wrapping_add(read as u64));
-        if session
-            .read_masked(chunk_address, &mut buffer[read..end])
-            .is_err()
-        {
-            break;
-        }
-        read = end;
-    }
-    read
 }
 
 /// Round a variable's size down to a legal debug-register watch width.

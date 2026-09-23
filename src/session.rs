@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 #[cfg(test)]
 use std::env::temp_dir;
+use std::fmt::Write as _;
 #[cfg(test)]
 use std::fs::{remove_file, write};
 #[cfg(test)]
@@ -304,6 +305,24 @@ pub struct VcpuInfo {
     pub symbol: Option<String>,
     /// Why the vCPU context was unavailable, if it was.
     pub error: Option<String>,
+}
+
+impl VcpuInfo {
+    /// One line naming the vCPU and what it runs: `p1.1 [notepad.exe]
+    /// ntdll!NtWaitForSingleObject+0x14`, as client thread lists show it.
+    pub fn label(&self) -> String {
+        let mut label = self.id.clone();
+        if !self.context.is_empty() {
+            let _ = write!(label, " [{}]", self.context);
+        }
+        let _ = match (&self.symbol, self.rip, &self.error) {
+            (Some(symbol), _, _) => write!(label, " {symbol}"),
+            (None, Some(rip), _) => write!(label, " {rip:#x}"),
+            (None, None, Some(error)) => write!(label, " <{error}>"),
+            _ => Ok(()),
+        };
+        label
+    }
 }
 
 /// The low bits of a CR3/DTB that select the page-directory base physical
@@ -1919,6 +1938,30 @@ impl Session {
             .mask_breakpoint_bytes(&self.target, addr, buf, process.dtb());
         self.mask_bugcheck_trap(addr, buf);
         Ok(())
+    }
+
+    /// Read as much of `buf` as the guest will give with [`Self::read_masked`],
+    /// one page-sized chunk at a time, returning how many leading bytes are
+    /// valid. Chunks are relative to `addr`, so an unmapped page truncates the
+    /// read at the request's own granularity rather than at a page boundary.
+    pub fn read_masked_partial(&self, addr: VirtAddr, buf: &mut [u8]) -> usize {
+        if self.read_masked(addr, buf).is_ok() {
+            return buf.len();
+        }
+        const CHUNK: usize = 0x1000;
+        let mut read = 0;
+        while read < buf.len() {
+            let end = (read + CHUNK).min(buf.len());
+            let chunk_address = VirtAddr(addr.0.wrapping_add(read as u64));
+            if self
+                .read_masked(chunk_address, &mut buf[read..end])
+                .is_err()
+            {
+                break;
+            }
+            read = end;
+        }
+        read
     }
 
     /// Put the bugcheck trap's displaced instruction back into a read that
