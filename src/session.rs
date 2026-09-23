@@ -2493,8 +2493,18 @@ impl Session {
     /// `int3` rewind, conditions, and auto-resume behavior cannot drift.
     pub fn classify_stop_event(&mut self, mut event: StopEvent) -> Result<StopResolution> {
         self.target.selected_frame = None;
-        self.record_stop_event(&event);
         set_current_thread_from_stop(self.backend.as_mut(), &event, &mut self.current_thread);
+        // A GDB stop reply names the thread but not its PC. Without one the
+        // reboot heuristic cannot tell a stop in a relocated kernel from an
+        // ordinary one, so read it from the thread the stop selected.
+        if event.program_counter.is_none() {
+            event.program_counter = self
+                .backend
+                .read_registers()
+                .ok()
+                .and_then(|regs| self.register_map.read_u64("rip", &regs).ok());
+        }
+        self.record_stop_event(&event);
 
         if event.is_bugcheck && !event.target_reloaded {
             self.target.registers = None;
@@ -3150,13 +3160,18 @@ impl Session {
 
 /// Whether `event` reflects a guest reboot into a new kernel image (so debugger
 /// state must be rebuilt), rather than an ordinary stop in the current one.
-/// Trusts the transport's explicit reload flag, then falls back to heuristics: a
-/// kernel-space PC that lands in no known module, an invalidated current-kernel
-/// mapping, or a rediscovered kernel whose identity changed, while treating a
-/// near-base bugcheck as the *same* image. Used by
-/// [`Session::classify_reload_stop`] and re-exported for the REPL.
-pub fn stop_event_requires_target_reload(debugger: &Target, event: &StopEvent) -> bool {
+/// Trusts the transport's explicit reload flag, then falls back to heuristics:
+/// an invalidated current-kernel mapping (whatever the PC), a kernel-space PC
+/// that lands in no known module, or a rediscovered kernel whose identity
+/// changed, while treating a near-base non-bugcheck stop as the *same* image.
+fn stop_event_requires_target_reload(debugger: &Target, event: &StopEvent) -> bool {
     if event.target_reloaded {
+        return true;
+    }
+
+    // Wherever the stop landed, a kernel image that no longer reads back
+    // through its own page tables means the guest rebooted.
+    if !debugger.current_kernel_mapping_is_valid() {
         return true;
     }
 
@@ -3165,10 +3180,6 @@ pub fn stop_event_requires_target_reload(debugger: &Target, event: &StopEvent) -
     };
     if !looks_like_kernel_pointer(pc) {
         return false;
-    }
-
-    if !debugger.current_kernel_mapping_is_valid() {
-        return true;
     }
 
     let current_dtb = debugger.kernel_dtb();
