@@ -30,7 +30,7 @@ memmap2 = "0.9.9"
 owo-colors = "4.2.3"
 pelite = "0.10.0"
 reqwest = { version = "0.13.4", default-features = false, features = [ "blocking", "rustls", "charset", "http2" ] }
-tabled = { version = "0.21.0", features = [ "ansi" ] }
+tabled = { version = "0.21.0", default-features = false, features = [ "std", "ansi" ] }
 zerocopy = { version = "0.8.31", features = [ "derive" ] }
 rayon = "1.11.0"
 thiserror = "2.0.18"
