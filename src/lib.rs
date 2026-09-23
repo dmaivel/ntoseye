@@ -144,6 +144,8 @@ pub mod error;
 pub mod exception_policy;
 pub mod expr;
 pub mod gdb;
+#[cfg(feature = "gdbserver")]
+pub mod gdbserver;
 pub mod guest;
 pub mod host;
 pub mod kd;
@@ -163,7 +165,7 @@ pub mod session;
 pub mod structured;
 pub mod symbols;
 pub mod target;
-#[cfg(feature = "dap")]
+#[cfg(any(feature = "dap", feature = "gdbserver"))]
 mod termination;
 pub mod trapframe;
 pub mod triage;

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 #[cfg(feature = "dap")]
 use crate::dap;
+#[cfg(feature = "gdbserver")]
+use crate::gdbserver;
 #[cfg(feature = "mcp")]
 use crate::mcp;
 use crate::{
@@ -90,6 +92,8 @@ enum Command {
     Mcp(McpCommand),
     #[cfg(feature = "dap")]
     Dap(DapCommand),
+    #[cfg(feature = "gdbserver")]
+    Gdbserver(GdbserverCommand),
 }
 
 #[cfg(feature = "mcp")]
@@ -147,6 +151,25 @@ struct DapCommand {
 #[argh(subcommand, name = "status")]
 /// inspect configured hypervisor transports and recover launch commands
 struct StatusCommand {}
+
+#[cfg(feature = "gdbserver")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "gdbserver")]
+/// serve the session over the GDB remote protocol, for IDA, Binary Ninja,
+/// Ghidra, gdb, and lldb. Attaches with the top-level
+/// --backend/--connect/--dump, then serves one client at a time until
+/// interrupted.
+struct GdbserverCommand {
+    /// address to listen on (default 127.0.0.1:2345)
+    #[argh(option, long = "listen")]
+    listen: Option<String>,
+
+    /// additional PDB symbol server URL (repeatable; tried before the
+    /// Microsoft default). Same as the top-level --pdb-server; can be placed
+    /// before or after the 'gdbserver' subcommand.
+    #[argh(option, long = "pdb-server")]
+    pdb_server: Vec<String>,
+}
 
 static GDBSTUB_INSTRUCTIONS: &str = "The gdb backend talks to QEMU's gdbstub instead of Windows KD.
 It does not require Windows debug mode, but it loses Windows-native
@@ -315,6 +338,10 @@ fn run() -> Result<()> {
     if let Some(Command::Dap(ref dap_args)) = args.command {
         pdb_servers.extend(dap_args.pdb_server.clone());
     }
+    #[cfg(feature = "gdbserver")]
+    if let Some(Command::Gdbserver(gdbserver_args)) = &args.command {
+        pdb_servers.extend(gdbserver_args.pdb_server.clone());
+    }
     if !pdb_servers.is_empty() {
         symbols::PDB_SERVERS.set(pdb_servers).map_err(|_| {
             Error::DebugInfo("PDB server list was initialized before startup".into())
@@ -356,6 +383,20 @@ fn run() -> Result<()> {
                     backend,
                 );
                 dap::run(spec, dap_args.port)
+            }
+            // The protocol has no attach request, so the command line names
+            // the target, at the same default endpoint the REPL would use.
+            #[cfg(feature = "gdbserver")]
+            Command::Gdbserver(gdbserver_args) => {
+                let spec = match args.dump.as_ref() {
+                    Some(dump) => TargetSpec::Dump(dump.clone()),
+                    None => live_spec(&args, backend),
+                };
+                let listen = gdbserver_args
+                    .listen
+                    .as_deref()
+                    .unwrap_or(gdbserver::DEFAULT_LISTEN);
+                gdbserver::run(spec, listen)
             }
         };
     }

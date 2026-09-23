@@ -24,6 +24,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 - [Host-served driver images for driver development](docs/kdfiles.md)
 - [Python SDK and custom commands](docs/sdk.md)
 - [Editor integration over DAP](docs/dap.md)
+- [IDA, Binja, Ghidra over the GDB remote protocol](docs/gdbserver.md)
 - [Agent integration over MCP](docs/mcp.md)
 
 ### Supported Windows
@@ -82,7 +83,7 @@ cargo build --release
 To build without embedded Python:
 
 ```bash
-cargo build --release --no-default-features --features cli,mcp
+cargo build --release --no-default-features --features cli,mcp,dap,gdbserver
 ```
 
 # Usage
@@ -126,6 +127,7 @@ The debugger is self-documented: run `ntoseye --help` for command-line arguments
 - [Python SDK and custom commands](docs/sdk.md)
 - [MCP integration](docs/mcp.md)
 - [Editor integration (DAP)](docs/dap.md): source-level debugging from VS Code, Emacs (dape), or nvim-dap
+- [Disassembler integration (GDB remote protocol)](docs/gdbserver.md): debugging from IDA, Binary Ninja, Ghidra, gdb, or lldb
 
 # Credits
 

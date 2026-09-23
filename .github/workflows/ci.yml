@@ -34,13 +34,13 @@ jobs:
           # Python toolchain. One entry per target we ship a binary for.
           - os: ubuntu-latest
             label: dist
-            features: --no-default-features --features cli,mcp,dap
+            features: --no-default-features --features cli,mcp,dap,gdbserver
           - os: ubuntu-24.04-arm
             label: dist
-            features: --no-default-features --features cli,mcp,dap
+            features: --no-default-features --features cli,mcp,dap,gdbserver
           - os: macos-latest
             label: dist
-            features: --no-default-features --features cli,mcp,dap
+            features: --no-default-features --features cli,mcp,dap,gdbserver
           # What `cargo install ntoseye` and a plain `cargo build` produce:
           # embedded Python linked against the local interpreter. Nothing else
           # here compiles the `python` feature.

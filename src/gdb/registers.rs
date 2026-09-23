@@ -140,6 +140,11 @@ impl RegisterMap {
         self.by_name.contains_key(name)
     }
 
+    /// Where `name` lives in the register file, if the transport carries it.
+    pub fn info(&self, name: &str) -> Option<&RegisterInfo> {
+        self.by_name.get(name)
+    }
+
     /// The `<architecture>` a target description declares, such as
     /// `i386:x86-64` or `aarch64`. This is the stub's own statement of what
     /// it is, which beats guessing from register names.

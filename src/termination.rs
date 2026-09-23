@@ -1,6 +1,6 @@
-//! Termination signals for the DAP server.
+//! Termination signals for the protocol servers (DAP, GDB).
 //!
-//! The server owns a live target when a signal arrives: it must remove its
+//! A server owns a live target when a signal arrives: it must remove its
 //! breakpoints and resume the guest before the process dies. The handler only
 //! raises flags; the server loop notices them and detaches.
 

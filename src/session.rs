@@ -1341,6 +1341,16 @@ impl Session {
     /// Set a single register on the current thread by name, as a read-modify-
     /// write of the register file (read all, patch the one, write back).
     pub fn write_register(&mut self, name: &str, value: u64) -> Result<()> {
+        self.patch_registers(|map, regs| map.write_u64(name, regs, value))
+    }
+
+    /// Read-modify-write the current thread's register file: `patch` edits the
+    /// raw file laid out by [`Self::register_map`], which is written back and
+    /// becomes the live frame's register view.
+    pub fn patch_registers(
+        &mut self,
+        patch: impl FnOnce(&RegisterMap, &mut [u8]) -> Result<()>,
+    ) -> Result<()> {
         self.require_live_register_context()?;
         if self.backend.is_running() {
             return Err(Error::TargetRunning(REGISTERS_NEED_HALT));
@@ -1354,7 +1364,7 @@ impl Session {
             return Err(Error::RegisterWriteUnsupported);
         }
         let mut regs = self.read_registers()?;
-        self.register_map.write_u64(name, &mut regs, value)?;
+        patch(&self.register_map, &mut regs)?;
         self.backend.write_registers(&regs)?;
         let values = self.register_map.to_hashmap(&regs);
         // A live frame 0 selection is this register file; keep it, and the

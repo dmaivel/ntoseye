@@ -1,7 +1,8 @@
 use std::io::{self, Read, Write};
 use std::mem;
 use std::net::TcpStream;
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use crate::dbg_backend::{DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent};
 use crate::error::{Error, Result};
@@ -14,6 +15,37 @@ pub use breakpoints::{
     BreakpointSpec,
 };
 pub use registers::{RegisterInfo, RegisterMap};
+
+/// Bytes of a packet shown per trace line.
+const TRACE_BYTES: usize = 200;
+
+/// Packet trace on stderr, gated on `NTOSEYE_GDB_TRACE`: every RSP packet on
+/// both of ntoseye's GDB connections, timestamped on one clock. `stub` lines
+/// are the `gdb` backend's conversation with the hypervisor's stub; `client`
+/// lines are the GDB server's with its client. One capture lines a client's
+/// request up against what the backend did to answer it.
+static TRACE: LazyLock<bool> = LazyLock::new(|| std::env::var_os("NTOSEYE_GDB_TRACE").is_some());
+static TRACE_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Trace one packet. `direction` is `->` for bytes ntoseye sends to `peer`
+/// and `<-` for bytes it receives.
+pub fn trace_packet(peer: &str, direction: &str, bytes: &[u8]) {
+    if !*TRACE {
+        return;
+    }
+    let mut shown = String::new();
+    for &byte in bytes.iter().take(TRACE_BYTES) {
+        match byte {
+            b' '..=b'~' => shown.push(byte as char),
+            _ => shown.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    if bytes.len() > TRACE_BYTES {
+        shown.push_str(&format!("... ({} bytes)", bytes.len()));
+    }
+    let elapsed = TRACE_START.elapsed().as_secs_f64();
+    eprintln!("gdb {elapsed:9.3} {peer:<6} {direction} {shown}");
+}
 
 #[derive(Debug, Default, Clone)]
 struct StubFeatures {
@@ -297,6 +329,7 @@ impl GdbClient {
             .set_read_timeout(Some(Duration::from_millis(100)))?;
         self.rx_state = PacketReadState::default();
 
+        trace_packet("stub", "->", &[0x03]);
         self.stream.write_all(&[0x03])?;
         self.stream.flush()?;
 
@@ -342,6 +375,7 @@ impl GdbClient {
     }
 
     fn send_raw_command(&mut self, packet: &[u8]) -> Result<()> {
+        trace_packet("stub", "->", packet);
         loop {
             self.stream.write_all(packet)?;
             self.stream.flush()?;
@@ -403,6 +437,7 @@ impl GdbClient {
             }
 
             let decoded = Self::decode_packet_data(&packet.data)?;
+            trace_packet("stub", "<-", &decoded);
             let response = String::from_utf8(decoded)
                 .map_err(|e| Error::Rsp(format!("non-utf8 packet payload: {}", e)))?;
             return Ok(response);
@@ -706,6 +741,7 @@ impl GdbClient {
             return Ok(String::new());
         }
 
+        trace_packet("stub", "->", &[0x03]);
         self.stream.write_all(&[0x03])?;
         self.stream.flush()?;
 

@@ -310,6 +310,8 @@ pub enum RemoteClient {
     Mcp,
     /// The DAP Debug Console, alongside the client's own run-control buttons.
     Dap,
+    /// `monitor` commands from a GDB remote client, which owns run control.
+    Gdb,
 }
 
 /// Everything a [`ReplState`] owns besides its session borrow. A host that

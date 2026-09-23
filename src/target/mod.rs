@@ -1043,6 +1043,15 @@ impl Target {
             })
     }
 
+    /// A loaded module's PE file when it is already in the symbol cache;
+    /// otherwise `None`, with the download started in the background. For
+    /// callers that must not wait on the network.
+    pub fn module_image_or_fetch_later(&self, name: &str) -> Result<Option<PathBuf>> {
+        let (module, time_date_stamp, size_of_image) = self.module_image_key(name)?;
+        self.symbols
+            .image_or_fetch_later(&module.name, time_date_stamp, size_of_image)
+    }
+
     /// The loaded module named `name` (module name or `module!` qualifier,
     /// case-insensitively, searched in the current scope and then the
     /// kernel's) and its symbol-server image key: the TimeDateStamp and

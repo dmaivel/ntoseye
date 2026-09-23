@@ -70,6 +70,7 @@ tokio-util = { version = "0.7", default-features = false, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
 tower-http = { version = "0.7", default-features = false, features = ["cors"], optional = true }
 anyhow = { version = "1", optional = true }
+gdbstub = { version = "0.7.10", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31.3", features = [ "process", "uio" ] }
@@ -78,13 +79,14 @@ nix = { version = "0.31.3", features = [ "process", "uio" ] }
 libc = "0.2"
 
 [features]
-default = ["cli", "mcp", "dap", "python-embed"]
+default = ["cli", "mcp", "dap", "gdbserver", "python-embed"]
 # The command engine (parser, dispatcher, renderers) every host drives; the
 # interactive prompt itself needs `cli`. Off, the crate is the debugger core.
 repl = []
 cli = ["repl", "dep:ctrlc", "dep:argh", "dep:dialoguer", "dep:nu-ansi-term", "dep:reedline"]
 mcp = ["repl", "dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:tower-http", "dep:anyhow"]
 dap = ["repl", "dep:serde_json", "dep:base64"]
+gdbserver = ["repl", "dep:gdbstub"]
 python = ["repl", "dep:pyo3"]
 python-embed = ["python", "pyo3/auto-initialize"]
 python-extension = ["python", "pyo3/extension-module"]

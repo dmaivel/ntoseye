@@ -32,6 +32,7 @@ use std::{
     sync::{
         Arc, LazyLock, OnceLock, PoisonError,
         atomic::{AtomicU64, Ordering},
+        mpsc,
     },
 };
 use std::{
@@ -205,6 +206,13 @@ pub struct SymbolStore {
     /// background fetch start/finish. Drained by
     /// [`crate::session::Session::take_notices`].
     notices: Mutex<Vec<String>>,
+    /// Module images being downloaded by [`SymbolStore::image_or_fetch_later`],
+    /// so a repeated request does not start a second download.
+    image_fetches: Mutex<HashSet<PathBuf>>,
+    /// The background image fetch worker's queue, started with the first
+    /// fetch. One download at a time: a gdb connecting asks for every loaded
+    /// module's image at once.
+    image_queue: Mutex<Option<mpsc::Sender<DownloadJob>>>,
 }
 
 fn guid_to_u128(guid: GUID) -> u128 {
@@ -1477,6 +1485,8 @@ impl SymbolStore {
             identities: OnceLock::new(),
             load_generation: AtomicU64::new(0),
             notices: Mutex::new(Vec::new()),
+            image_fetches: Mutex::new(HashSet::new()),
+            image_queue: Mutex::new(None),
         }
     }
 
@@ -1961,6 +1971,71 @@ impl SymbolStore {
         let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         download_job(&job, ProgressBar::new(0))?;
         Ok(job.path)
+    }
+
+    /// The module image's path when it is already in the cache; otherwise
+    /// `None`, with the download queued for a background thread (once, however
+    /// often this is asked) and its outcome reported through the store's
+    /// notices. For callers that must answer at once, such as a protocol
+    /// request with a client-side timeout.
+    pub fn image_or_fetch_later(
+        self: &Arc<Self>,
+        image_file_name: &str,
+        time_date_stamp: u32,
+        size_of_image: u32,
+    ) -> Result<Option<PathBuf>> {
+        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        if !job.needs_download() {
+            return Ok(Some(job.path));
+        }
+        if !self.image_fetches.lock().insert(job.path.clone()) {
+            return Ok(None);
+        }
+        let path = job.path.clone();
+        let name = job.filename.clone();
+        if let Err(error) = self.queue_image_fetch(job) {
+            self.image_fetches.lock().remove(&path);
+            return Err(Error::DebugInfo(format!(
+                "could not start the background fetch of {image_file_name}: {error}"
+            )));
+        }
+        self.push_notice(format!("fetching {name} in the background"));
+        Ok(None)
+    }
+
+    /// Hand `job` to the background fetch worker, starting it on first use.
+    /// The worker holds the store weakly, so it ends once the store is gone.
+    fn queue_image_fetch(self: &Arc<Self>, job: DownloadJob) -> io::Result<()> {
+        let mut queue = self.image_queue.lock();
+        let sender = match &mut *queue {
+            Some(sender) => sender,
+            None => {
+                let (sender, jobs) = mpsc::channel::<DownloadJob>();
+                let store = Arc::downgrade(self);
+                std::thread::Builder::new()
+                    .name("ntoseye-image-fetch".to_string())
+                    .spawn(move || {
+                        for job in jobs {
+                            let outcome = download_job(&job, ProgressBar::hidden());
+                            let Some(store) = store.upgrade() else {
+                                return;
+                            };
+                            store.image_fetches.lock().remove(&job.path);
+                            let name = &job.filename;
+                            store.push_notice(match outcome {
+                                Ok(()) => format!("background fetch finished for {name}"),
+                                Err(error) => {
+                                    format!("background fetch failed for {name}: {error}")
+                                }
+                            });
+                        }
+                    })?;
+                queue.insert(sender)
+            }
+        };
+        sender
+            .send(job)
+            .map_err(|_| io::Error::other("the background fetch worker has stopped"))
     }
 
     /// The module's complete on-disk PE image from the image cache, expanded

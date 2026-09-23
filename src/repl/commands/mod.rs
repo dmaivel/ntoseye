@@ -169,6 +169,18 @@ impl ReplState<'_> {
                 "'{name}' ends the interactive REPL; disconnect from the client to end the \
                  debug session"
             )),
+            // The client caches registers and memory for the stop it was last
+            // told about; only its own resume packets may move the target.
+            DispatchContext::Remote(RemoteClient::Gdb) if spec.run != RunEffect::None => {
+                Some(format!(
+                    "'{name}' would move the target behind the GDB client; use the client's \
+                     continue or step controls instead"
+                ))
+            }
+            DispatchContext::Remote(RemoteClient::Gdb) if spec.flow == Flow::Quit => Some(format!(
+                "'{name}' ends the interactive REPL; detach from the GDB client to end the \
+                 debug session"
+            )),
             _ => None,
         }
     }
