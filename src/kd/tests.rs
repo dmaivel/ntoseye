@@ -1,16 +1,28 @@
 use super::*;
 const ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET: usize = 0x10;
+use super::breakpoints::{KD_BREAKPOINT_TABLE_SIZE, PendingWriteBreakpoint};
+use super::connect::{MEMORY_OVER_KD_CHOSEN, detect_arch, normalize_kernel_dtb};
+use super::exit::exit_stop_is_stray_single_step;
+use super::memory::{KD_REMOTE_MEMORY_CHUNK, KD_VIRTUAL_LINE, LineCache};
+use super::registers::*;
+use super::run::stop_event;
+use crate::backend::MemoryOps;
 use crate::guest::{Guest, Image};
 use crate::kd::framing::{
-    CONTROL_PACKET_LEADER, DATA_PACKET_LEADER, HEADER_SIZE, Header, INITIAL_PACKET_ID,
-    PACKET_TRAILING_BYTE, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO,
+    BREAKIN_BYTE, CONTROL_PACKET_LEADER, DATA_PACKET_LEADER, HEADER_SIZE, Header,
+    INITIAL_PACKET_ID, PACKET_TRAILING_BYTE, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO,
     PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_RESET, PACKET_TYPE_KD_STATE_CHANGE64,
     PACKET_TYPE_KD_STATE_MANIPULATE, control_packet, data_packet,
 };
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
+use crate::memory::PAGE_SIZE;
 use crate::phys::PhysMem;
 use crate::symbols::SymbolStore;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, ErrorKind, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
+use std::thread::{JoinHandle, spawn};
 use std::time::Instant;
 
 #[test]
