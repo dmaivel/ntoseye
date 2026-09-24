@@ -38,7 +38,7 @@ repl_command! {
     names: [".effmach"],
     usage: ".effmach [x86|amd64|auto|.]",
     summary: "Display or set the effective code machine.",
-    details: "With no argument, display the selected machine; x86 and amd64 override automatic code-bitness detection, while auto or . clears the override.",
+    details: "With no argument, display the selected machine; x86 and amd64 override automatic code-bitness detection, while auto or . clears the override. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
 }
 
 repl_command! {

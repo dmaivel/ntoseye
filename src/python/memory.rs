@@ -6,10 +6,12 @@ use pyo3::types::{PyBytes, PyDict};
 use super::context::Space;
 use super::handle::{Owner, require_halted};
 use super::record::{PlainDict, Record};
+use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, MAX_SEARCH_LEN, err, raise, view_dict, view_record, view_records};
 use crate::backend::MemoryOps;
 use crate::target::MemorySearchMatch as CoreMemorySearchMatch;
 use crate::target::mm::{AddressModule as CoreAddressModule, MemoryRegionInfo};
+use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
 use crate::view;
 
@@ -64,6 +66,32 @@ impl Memory {
                     .write_bytes(VirtAddr(addr), data)
                     .map_err(err)
             }
+        })
+    }
+
+    /// Decode the `kind` descriptor at `addr` in the `bits`-wide layout, or
+    /// the one `.effmach` selects.
+    fn read_descriptor(
+        &self,
+        py: Python<'_>,
+        addr: u64,
+        kind: StringDescriptor,
+        bits: Option<u32>,
+    ) -> PyResult<String> {
+        self.space.require_virtual()?;
+        self.owner.with_in(py, &self.space.context(), |session| {
+            let target = &session.target;
+            let bits = bits.unwrap_or_else(|| target.data_bitness());
+            if bits == CODE_BITNESS_X86 {
+                // The 32-bit layout is WOW64 ntdll's (`ntdll32!`), a
+                // process module whose symbols a scope does not load up front.
+                load_scope_symbols(session, &self.space)?;
+            }
+            let text = match kind {
+                StringDescriptor::Unicode => target.read_unicode_string(VirtAddr(addr), bits),
+                StringDescriptor::Ansi => target.read_ansi_string(VirtAddr(addr), bits),
+            };
+            text.map_err(err)
         })
     }
 }
@@ -195,29 +223,24 @@ impl Memory {
         Ok(String::from_utf16_lossy(&units))
     }
 
-    /// Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`).
-    fn read_unicode_string(&self, py: Python<'_>, addr: u64) -> PyResult<String> {
-        self.space.require_virtual()?;
-        let context = self.space.context();
-        self.owner.with_in(py, &context, |session| {
-            session
-                .target
-                .read_unicode_string(VirtAddr(addr))
-                .map_err(err)
-        })
+    /// Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits`
+    /// selects the layout: 32 for a WOW64 process's x86 descriptors, 64 for
+    /// native ones; by default the `.effmach` setting decides.
+    #[pyo3(signature = (addr, bits = None))]
+    fn read_unicode_string(
+        &self,
+        py: Python<'_>,
+        addr: u64,
+        bits: Option<u32>,
+    ) -> PyResult<String> {
+        self.read_descriptor(py, addr, StringDescriptor::Unicode, bits)
     }
 
-    /// Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`).
-    fn read_ansi_string(&self, py: Python<'_>, addr: u64) -> PyResult<String> {
-        self.space.require_virtual()?;
-        let descriptor = self.read_bytes(py, addr, 16)?;
-        let length = u16::from_le_bytes([descriptor[0], descriptor[1]]) as usize;
-        let buffer = u64::from_le_bytes(descriptor[8..16].try_into().unwrap());
-        if length == 0 || buffer == 0 {
-            return Ok(String::new());
-        }
-        let bytes = self.read_bytes(py, buffer, length)?;
-        Ok(bytes.into_iter().map(char::from).collect())
+    /// Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`). `bits`
+    /// selects the layout as for `read_unicode_string`.
+    #[pyo3(signature = (addr, bits = None))]
+    fn read_ansi_string(&self, py: Python<'_>, addr: u64, bits: Option<u32>) -> PyResult<String> {
+        self.read_descriptor(py, addr, StringDescriptor::Ansi, bits)
     }
 
     /// Find overlapping matches and include symbol/module/VAD context.

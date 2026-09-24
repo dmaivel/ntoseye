@@ -19,6 +19,7 @@ use super::{err, raise};
 use crate::backend::MemoryOps;
 use crate::error::Result as CoreResult;
 use crate::symbols::{EnumDef, FieldInfo, FieldValue, ParsedType, SymbolStore, TypeInfo, le_uint};
+use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
 use crate::typeview::{named_type, unqualified_type_name};
 
@@ -355,8 +356,15 @@ impl Struct {
         let addr = self.field_address(field);
 
         if named_type(&field.type_data, "_UNICODE_STRING") {
+            // The enclosing layout's width is the field's: an `ntdll32!`
+            // struct embeds the 32-bit descriptor.
+            let bits = if self.info.pointer_size == 4 {
+                CODE_BITNESS_X86
+            } else {
+                CODE_BITNESS_AMD64
+            };
             let result = self.owner.with_in(py, &self.space.context(), |session| {
-                Ok(session.target.read_unicode_string(VirtAddr(addr)))
+                Ok(session.target.read_unicode_string(VirtAddr(addr), bits))
             })?;
             return result
                 .map_err(err)?

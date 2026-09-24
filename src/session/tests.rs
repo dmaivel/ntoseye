@@ -335,6 +335,92 @@ fn memory_reads_follow_the_halted_context_root() {
     assert_eq!(hits, [USER_VA + 1]);
 }
 
+/// A WOW64 process's x86 code builds 32-bit string descriptors: `Buffer` is a
+/// 4-byte pointer at offset 4. `.effmach x86` (or an explicit width) reads
+/// them with WOW64 ntdll's layout instead of the kernel's 64-bit one.
+#[test]
+fn string_descriptors_follow_the_requested_width() {
+    use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
+    use crate::target::CODE_BITNESS_X86;
+
+    let mut memory = [0u8; 0x40];
+    memory[0..2].copy_from_slice(&4u16.to_le_bytes());
+    memory[4..8].copy_from_slice(&0x1020u32.to_le_bytes());
+    memory[8..12].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+    memory[0x10..0x12].copy_from_slice(&2u16.to_le_bytes());
+    memory[0x14..0x18].copy_from_slice(&0x1030u32.to_le_bytes());
+    memory[0x20..0x24].copy_from_slice(&[b'o', 0, b'k', 0]);
+    memory[0x30..0x32].copy_from_slice(b"hi");
+    let mut session = session_over_memory(0x1000, &memory);
+    let dtb = session.target.current_dtb();
+    let descriptor = |name: &str, pointer_size: u8| TypeInfo {
+        name: name.to_string(),
+        pointer_size,
+        size: 2 * usize::from(pointer_size),
+        fields: [
+            ("Length", 0, 2, ParsedType::Primitive("USHORT".into())),
+            (
+                "MaximumLength",
+                2,
+                2,
+                ParsedType::Primitive("USHORT".into()),
+            ),
+            (
+                "Buffer",
+                u32::from(pointer_size),
+                u64::from(pointer_size),
+                ParsedType::Pointer(Box::new(ParsedType::Primitive("CHAR".into()))),
+            ),
+        ]
+        .into_iter()
+        .map(|(field, offset, size, type_data)| {
+            (
+                field.to_string(),
+                FieldInfo {
+                    offset,
+                    size,
+                    type_data,
+                },
+            )
+        })
+        .collect(),
+    };
+    let symbols = &session.target.symbols;
+    symbols.set_kernel(Some(1), dtb);
+    symbols.inject_module_for_test(
+        1,
+        vec![descriptor("_UNICODE_STRING", 8), descriptor("_STRING", 8)],
+        &[],
+    );
+    symbols.inject_module_for_test(
+        2,
+        vec![descriptor("_UNICODE_STRING", 4), descriptor("_STRING", 4)],
+        &[],
+    );
+    symbols.register_module_for_test(2, "ntdll32", dtb);
+    let unicode = VirtAddr(0x1000);
+
+    let native = session.target.read_unicode_string(unicode, 64);
+    session.target.effmach = Some(CODE_BITNESS_X86);
+    let bits = session.target.data_bitness();
+
+    assert!(
+        native.is_err(),
+        "the 64-bit layout reads 0xdeadbeef as Buffer"
+    );
+    assert_eq!(
+        session.target.read_unicode_string(unicode, bits).unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        session
+            .target
+            .read_ansi_string(VirtAddr(0x1010), bits)
+            .unwrap(),
+        "hi"
+    );
+}
+
 #[test]
 fn terminated_reads_join_utf16_page_chunks_and_keep_readable_prefixes() {
     let base = 0x1000;

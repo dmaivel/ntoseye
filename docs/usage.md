@@ -176,8 +176,8 @@ Virtual memory display commands:
 - `dpp <address> [L<count>|length|end]` - Display pointers, dereference them, and annotate symbols.
 - `da <address> [max-chars]` - Display a NUL-terminated ASCII string.
 - `du <address> [max-chars]` - Display a NUL-terminated UTF-16 string.
-- `ds <address>` - Display an ANSI_STRING descriptor and its buffer.
-- `dS <address>` - Display a UNICODE_STRING descriptor and its buffer.
+- `ds <address>` - Display an ANSI_STRING descriptor and its buffer (32-bit layout under `.effmach x86`).
+- `dS <address>` - Display a UNICODE_STRING descriptor and its buffer (32-bit layout under `.effmach x86`).
 
 Disassembly and virtual memory writes:
 
@@ -358,7 +358,7 @@ A 32-bit process on an x64 kernel (`_EPROCESS.WoW64Process` set) is marked `WOW6
 
 Types follow the same rule: a bare name resolves the kernel's layout, `ntdll32!_PEB` the 32-bit one, and the nested types of a 32-bit layout stay 32-bit (`dt ntdll32!_LDR_DATA_TABLE_ENTRY <address>` reads 4-byte pointers and `_UNICODE_STRING`s). `!peb` adds the `PEB32` block and its process parameters, `!teb` the `TEB32` behind `WowTebOffset`, `!gle` the 32-bit TEB's last error, and `!heap` walks the 32-bit heaps.
 
-Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); `.effmach x86|amd64|.` overrides the choice. Not supported: walking the x86 user stack. `k` on a WOW64 thread ends at the `wow64cpu` transition frame; the 32-bit frames beyond it are not unwound.
+Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); `.effmach x86|amd64|.` overrides the choice. `.effmach x86` also makes `ds`/`dS` decode 32-bit string descriptors with the `ntdll32` layout; the SDK's `read_unicode_string`/`read_ansi_string` take `bits=32` for the same. Not supported: walking the x86 user stack. `k` on a WOW64 thread ends at the `wow64cpu` transition frame; the 32-bit frames beyond it are not unwound.
 
 ## Security
 
@@ -395,7 +395,7 @@ Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); 
 - `.logappend <file>` - Start a debugger transcript, appending to the file.
 - `.logclose` - Close the debugger transcript.
 - `n [8|10|16]` - Display or set the default numeric radix for REPL expressions.
-- `.effmach [x86|amd64|auto|.]` - Display or set the effective code machine. `x86` and `amd64` override automatic code-bitness detection; `auto` or `.` clears the override.
+- `.effmach [x86|amd64|auto|.]` - Display or set the effective code machine. `x86` and `amd64` override automatic code-bitness detection; `auto` or `.` clears the override. `x86` also makes `ds`/`dS` read 32-bit (WOW64) string descriptors.
 - `aliases` - List command aliases.
 - `alias <name> <expansion>` - Define a command alias.
 - `unalias <name>` - Remove a command alias.

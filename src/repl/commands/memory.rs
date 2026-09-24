@@ -8,6 +8,7 @@ use crate::backend::MemoryOps;
 use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
 use crate::memory::{PAGE_SIZE, for_each_page_chunk, read_page_chunks};
+use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::{Arch, VirtAddr};
 use crate::ui;
 use crate::unwind::{
@@ -698,38 +699,39 @@ impl ReplState<'_> {
         address: VirtAddr,
         unicode: bool,
     ) -> Result<StringDescriptorFields> {
-        let types = self.ctx.target.context_types();
-        let type_names: &[&str] = if unicode {
-            &["_UNICODE_STRING"]
+        let target = &self.ctx.target;
+        // `.effmach x86` reads a WOW64 process's 32-bit descriptors.
+        let bits = target.data_bitness();
+        let kind = if unicode {
+            StringDescriptor::Unicode
         } else {
-            // `_STRING` is the canonical Windows name; older PDBs sometimes
-            // expose only its `_ANSI_STRING` spelling.
-            &["_STRING", "_ANSI_STRING"]
+            StringDescriptor::Ansi
         };
-        for type_name in type_names {
-            if let Ok(cursor) = types.struct_at(type_name, address) {
-                let fields = StringDescriptorFields {
-                    length: best_effort(cursor.read_field::<u16>("Length"))?,
-                    maximum_length: best_effort(cursor.read_field::<u16>("MaximumLength"))?,
-                    buffer: best_effort(cursor.read_field::<VirtAddr>("Buffer"))?,
-                };
-                if fields.length.is_some()
-                    || fields.maximum_length.is_some()
-                    || fields.buffer.is_some()
-                {
-                    return Ok(fields);
-                }
+        if let Ok(cursor) = target.string_descriptor(address, kind, bits) {
+            let fields = StringDescriptorFields {
+                length: best_effort(cursor.read_field::<u16>("Length"))?,
+                maximum_length: best_effort(cursor.read_field::<u16>("MaximumLength"))?,
+                buffer: best_effort(cursor.read_pointer("Buffer"))?,
+            };
+            if fields.length.is_some() || fields.maximum_length.is_some() || fields.buffer.is_some()
+            {
+                return Ok(fields);
             }
         }
 
-        // These descriptors have a stable 64-bit Windows layout.  Retaining a
-        // layout fallback keeps ds/dS useful in a dump whose PDB omits the
-        // otherwise tiny string type.
-        let mem = self.ctx.target.context_memory();
+        // These descriptors have a stable Windows layout at each width:
+        // `Buffer` follows the two lengths at pointer alignment. Retaining it
+        // keeps ds/dS useful in a dump whose PDB omits the tiny string type.
+        let mem = target.context_memory();
+        let buffer = if bits == CODE_BITNESS_X86 {
+            best_effort(mem.read::<u32>(address + 4u64))?.map(VirtAddr::from)
+        } else {
+            best_effort(mem.read::<VirtAddr>(address + 8u64))?
+        };
         Ok(StringDescriptorFields {
             length: best_effort(mem.read(address))?,
             maximum_length: best_effort(mem.read(address + 2u64))?,
-            buffer: best_effort(mem.read(address + 8u64))?,
+            buffer,
         })
     }
 

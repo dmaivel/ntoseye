@@ -30,7 +30,7 @@ use crate::{
     dmp::DmpInfo,
     error::{Error, Result},
     guest::{
-        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, Types,
+        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, StructRef, Types,
         read_pe_exports, read_pe_image,
     },
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
@@ -218,6 +218,26 @@ pub struct BuiltinVar {
 
 pub const CODE_BITNESS_X86: u32 = 32;
 pub const CODE_BITNESS_AMD64: u32 = 64;
+
+/// A counted string descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StringDescriptor {
+    /// `_UNICODE_STRING` (`dS`).
+    Unicode,
+    /// `_STRING` / `ANSI_STRING` (`ds`).
+    Ansi,
+}
+
+impl StringDescriptor {
+    /// The PDB name, then older spellings to try: some PDBs spell `_STRING`
+    /// only as `_ANSI_STRING`.
+    fn type_names(self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Self::Unicode => ("_UNICODE_STRING", &[]),
+            Self::Ansi => ("_STRING", &["_ANSI_STRING"]),
+        }
+    }
+}
 
 const COMPATIBILITY_MODE_CS: u64 = 0x23;
 const WOW64_ADDRESS_LIMIT: u64 = 1 << 32;
@@ -1230,24 +1250,64 @@ impl Target {
         Ok(out)
     }
 
-    /// Decode the `_UNICODE_STRING` at `addr` in the current address space to a
-    /// Rust `String` (empty when null/zero-length). `Length`/`Buffer` come from
-    /// the PDB layout, not hardcoded offsets. Shared by the SDK and MCP.
-    pub fn read_unicode_string(&self, addr: VirtAddr) -> Result<String> {
+    /// Pointer width of data layouts in the current scope: 32 under
+    /// `.effmach x86` (a WOW64 process's x86 structures), else 64.
+    pub fn data_bitness(&self) -> u32 {
+        match self.effmach {
+            Some(CODE_BITNESS_X86 | 0x14c) => CODE_BITNESS_X86,
+            _ => CODE_BITNESS_AMD64,
+        }
+    }
+
+    /// A cursor over the `kind` descriptor at `addr` in the inspection space,
+    /// in the layout `bits` selects: the kernel's 64-bit one, or the 32-bit
+    /// one from a WOW64 process's x86 ntdll (`ntdll32!`).
+    pub fn string_descriptor(
+        &self,
+        addr: VirtAddr,
+        kind: StringDescriptor,
+        bits: u32,
+    ) -> Result<StructRef<'_>> {
+        if !matches!(bits, CODE_BITNESS_X86 | CODE_BITNESS_AMD64) {
+            return Err(Error::InvalidArgument(format!(
+                "string descriptor width must be 32 or 64 bits, not {bits}"
+            )));
+        }
         let types = self.context_types();
-        let descriptor = match types.struct_at("_UNICODE_STRING", addr) {
-            // No kernel namespace (a triage dump without ntoskrnl): take the
-            // layout from whichever loaded module defines it.
-            Err(Error::ExpectedSymbols) => {
-                let layout = self
-                    .symbols
-                    .find_type_across_modules(self.kernel_dtb(), "_UNICODE_STRING")
-                    .ok_or(Error::ExpectedSymbols)?;
-                types.struct_with_layout(layout, addr)
+        let resolve = |name: &str| {
+            if bits == CODE_BITNESS_X86 {
+                return types.struct_at(&format!("ntdll32!{name}"), addr);
             }
-            descriptor => descriptor?,
+            match types.struct_at(name, addr) {
+                // No kernel namespace (a triage dump without ntoskrnl): take
+                // the layout from whichever module defines it.
+                Err(Error::ExpectedSymbols) => self
+                    .symbols
+                    .find_type_across_modules(self.kernel_dtb(), name)
+                    .map(|layout| types.struct_with_layout(layout, addr))
+                    .ok_or(Error::ExpectedSymbols),
+                descriptor => descriptor,
+            }
         };
-        descriptor.read_unicode_string()
+        let (name, older_names) = kind.type_names();
+        older_names.iter().fold(resolve(name), |found, older| {
+            found.or_else(|error| resolve(older).map_err(|_| error))
+        })
+    }
+
+    /// Decode the `_UNICODE_STRING` at `addr` in the inspection space, in the
+    /// `bits`-wide layout (see [`Self::string_descriptor`]). Empty when
+    /// null/zero-length. Shared by the SDK and MCP.
+    pub fn read_unicode_string(&self, addr: VirtAddr, bits: u32) -> Result<String> {
+        self.string_descriptor(addr, StringDescriptor::Unicode, bits)?
+            .read_unicode_string()
+    }
+
+    /// Decode the `_STRING` at `addr`, one character per byte; the ANSI
+    /// counterpart of [`Self::read_unicode_string`].
+    pub fn read_ansi_string(&self, addr: VirtAddr, bits: u32) -> Result<String> {
+        self.string_descriptor(addr, StringDescriptor::Ansi, bits)?
+            .read_ansi_string()
     }
 
     /// Read a NUL-terminated byte string (`CHAR*`) at `addr` in the current

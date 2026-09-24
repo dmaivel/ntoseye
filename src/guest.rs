@@ -1374,6 +1374,21 @@ impl<'a> StructRef<'a> {
         Ok(String::from_utf16_lossy(&u16s))
     }
 
+    /// Decode the `_STRING` (`ANSI_STRING`) this cursor points at, one
+    /// character per byte (empty when null/zero-length). Like
+    /// [`read_unicode_string`](Self::read_unicode_string), the layout comes
+    /// from the PDB.
+    pub fn read_ansi_string(&self) -> Result<String> {
+        let length: u16 = self.read_field("Length")?;
+        let buffer = self.read_pointer("Buffer")?;
+        if length == 0 || buffer.is_zero() {
+            return Ok(String::new());
+        }
+        let mut buf = vec![0u8; length as usize];
+        self.memory().read_bytes(buffer, &mut buf)?;
+        Ok(buf.into_iter().map(char::from).collect())
+    }
+
     /// Decode a `_UNICODE_STRING` field of this struct to a Rust `String`.
     pub fn unicode_string(&self, name: &str) -> Result<String> {
         self.embedded(name)?.read_unicode_string()

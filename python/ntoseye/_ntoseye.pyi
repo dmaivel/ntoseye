@@ -1019,9 +1019,10 @@ class Memory:
         """
         Read `n` bytes; virtual reads mask this debugger's breakpoint opcodes.
         """
-    def read_ansi_string(self, /, addr: int) -> str:
+    def read_ansi_string(self, /, addr: int, bits: int |None = None) -> str:
         """
-        Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`).
+        Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`). `bits`
+        selects the layout as for `read_unicode_string`.
         """
     def read_pointer(self, /, addr: int) -> int:
         """
@@ -1047,9 +1048,11 @@ class Memory:
         """
         Read one little-endian byte.
         """
-    def read_unicode_string(self, /, addr: int) -> str:
+    def read_unicode_string(self, /, addr: int, bits: int |None = None) -> str:
         """
-        Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`).
+        Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits`
+        selects the layout: 32 for a WOW64 process's x86 descriptors, 64 for
+        native ones; by default the `.effmach` setting decides.
         """
     def read_wstring(self, /, addr: int, max_len: int = 256) -> str:
         """
