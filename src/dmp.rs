@@ -678,7 +678,9 @@ impl MemoryOps<PhysAddr> for DmpMem {
     fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
         let mut offset = 0usize;
         while offset < buf.len() {
-            let cur_addr = addr + offset as u64;
+            let cur_addr = addr
+                .checked_add(offset as u64)
+                .ok_or_else(|| self.bad_address_error(addr))?;
             let (file_offset, available) = self
                 .lookup(cur_addr)
                 .ok_or_else(|| self.bad_address_error(cur_addr))?;
@@ -1327,6 +1329,27 @@ mod tests {
         assert_eq!(mem.lookup(0x3000), None);
         assert_eq!(mem.lookup(0x4000), None);
         assert_eq!(mem.lookup(0x8000), None);
+    }
+
+    #[test]
+    fn physical_read_overflow_returns_bad_address() {
+        use memmap2::MmapMut;
+
+        let mut mmap = MmapMut::map_anon(PAGE_SIZE).unwrap();
+        mmap.fill(0x5a);
+        let mmap = mmap.make_read_only().unwrap();
+        let page = u64::MAX - (PAGE_SIZE as u64 - 1);
+        let mem = DmpMem {
+            mmap,
+            storage: DmpStorage::Pages(vec![(page, 0)]),
+            info: make_test_info(),
+        };
+
+        let mut bytes = [0; 4];
+        assert!(matches!(
+            mem.read_bytes(u64::MAX - 1, &mut bytes),
+            Err(Error::BadPhysicalAddress(_))
+        ));
     }
 
     #[test]
