@@ -16,6 +16,7 @@ use crate::bugchecks::current_bugcheck;
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::dmp::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::error::{Error, Result};
+use crate::gdb::registers::RegisterMap;
 use crate::kd::context;
 use crate::kd::context_arm64;
 use crate::kd::wire::{write_u32, write_u64};
@@ -37,6 +38,39 @@ fn machine_image_type(arch: Arch) -> u32 {
         Arch::Amd64 => IMAGE_FILE_MACHINE_AMD64,
         Arch::Arm64 => IMAGE_FILE_MACHINE_ARM64,
     }
+}
+
+/// Rebuild a `CONTEXT` from a register file in another layout (a GDB stub's),
+/// register by register. Registers the source lacks stay zero, and
+/// `ContextFlags` claims the control and integer state (and segments on
+/// AMD64) that every stub reports.
+fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]) -> Vec<u8> {
+    let (layout, flags_offset, flags) = match arch {
+        Arch::Amd64 => (
+            context::build_register_map(),
+            context::OFFSET_CONTEXT_FLAGS,
+            context::CONTEXT_CONTROL | context::CONTEXT_INTEGER | context::CONTEXT_SEGMENTS,
+        ),
+        Arch::Arm64 => (
+            context_arm64::build_register_map(),
+            context_arm64::OFFSET_CONTEXT_FLAGS,
+            context_arm64::CONTEXT_CONTROL | context_arm64::CONTEXT_INTEGER,
+        ),
+    };
+    let mut context = vec![0u8; context_size(arch)];
+    for register in layout.registers() {
+        let end = register.offset + register.size;
+        // The layout's synthetic slots (control registers, descriptor
+        // tables) sit past the CONTEXT proper.
+        if end > context.len() {
+            continue;
+        }
+        if let Ok(value) = source.read_u128(&register.name, registers) {
+            context[register.offset..end].copy_from_slice(&value.to_le_bytes()[..register.size]);
+        }
+    }
+    write_u32(&mut context, flags_offset, flags);
+    context
 }
 
 fn context_size(arch: Arch) -> usize {
@@ -636,7 +670,12 @@ fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
 /// the current CONTEXT, processor count, physical runs, kernel globals, and
 /// the bugcheck/exception of the last stop when there is one.
 pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
-    let context = session.read_registers()?;
+    let registers = session.read_registers()?;
+    let context = if session.backend.registers_are_context() {
+        registers
+    } else {
+        context_from_registers(session.target.arch(), &session.register_map, &registers)
+    };
     let processor_count = session
         .backend
         .thread_list()
@@ -709,10 +748,68 @@ pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
 mod tests {
     use super::*;
     use crate::dmp::DmpMem;
+    use crate::gdb::registers::RegisterInfo;
     use crate::kd::wire::write_u64;
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_stub_register_file_becomes_a_context_by_register_name() {
+        // A GDB-style layout: packed, in its own order, and without the
+        // debug registers a CONTEXT has room for.
+        let register = |name: &str, offset, size| RegisterInfo {
+            name: name.to_string(),
+            offset,
+            size,
+            regnum: offset,
+        };
+        let stub = RegisterMap::from_registers(vec![
+            register("rip", 0, 8),
+            register("rsp", 8, 8),
+            register("eflags", 16, 4),
+            register("cs", 20, 4),
+            register("xmm1", 24, 16),
+        ]);
+        let mut registers = vec![0u8; 40];
+        stub.write_u64("rip", &mut registers, 0xffff_f805_aed1_950f)
+            .unwrap();
+        stub.write_u64("rsp", &mut registers, 0xffff_f805_40ea_0968)
+            .unwrap();
+        stub.write_u64("eflags", &mut registers, 0x40282).unwrap();
+        stub.write_u64("cs", &mut registers, 0x10).unwrap();
+        registers[24..40]
+            .copy_from_slice(&0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128.to_le_bytes());
+
+        let converted = context_from_registers(Arch::Amd64, &stub, &registers);
+
+        assert_eq!(converted.len(), context::CONTEXT_SIZE);
+        let layout = context::build_register_map();
+        assert_eq!(
+            layout.read_u64("rip", &converted).unwrap(),
+            0xffff_f805_aed1_950f
+        );
+        assert_eq!(
+            layout.read_u64("rsp", &converted).unwrap(),
+            0xffff_f805_40ea_0968
+        );
+        assert_eq!(layout.read_u64("eflags", &converted).unwrap(), 0x40282);
+        assert_eq!(layout.read_u64("cs", &converted).unwrap(), 0x10);
+        assert_eq!(
+            layout.read_u128("xmm1", &converted).unwrap(),
+            0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00
+        );
+        assert_eq!(layout.read_u64("dr7", &converted).unwrap(), 0);
+        let flags = u32::from_le_bytes(
+            converted[context::OFFSET_CONTEXT_FLAGS..context::OFFSET_CONTEXT_FLAGS + 4]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            flags,
+            context::CONTEXT_CONTROL | context::CONTEXT_INTEGER | context::CONTEXT_SEGMENTS
+        );
+    }
 
     struct SyntheticMemory {
         bytes: Vec<u8>,

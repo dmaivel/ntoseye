@@ -2399,6 +2399,9 @@ impl DebugBackend for KdBackend {
     fn register_map(&self) -> &RegisterMap {
         &self.register_map
     }
+    fn registers_are_context(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         self.backend_name
     }
@@ -3071,6 +3074,9 @@ impl DebugBackend for KdBackend {
 impl DebugBackend for KdBackendHandle {
     fn register_map(&self) -> &RegisterMap {
         &self.register_map
+    }
+    fn registers_are_context(&self) -> bool {
+        true
     }
 
     fn revalidate_host_memory(&mut self, phys: &PhysMem) -> Result<()> {

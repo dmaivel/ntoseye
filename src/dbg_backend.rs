@@ -491,6 +491,13 @@ pub trait DebugBackend {
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;
 
+    /// Whether [`Self::read_registers`] starts with a Windows `CONTEXT` for
+    /// the target's architecture, as KD's register file and a crash dump's
+    /// are. Other backends' layouts are translated by register name.
+    fn registers_are_context(&self) -> bool {
+        false
+    }
+
     /// TF and DR6 as the current stop reported them, where the transport can
     /// say without a register fetch.
     ///

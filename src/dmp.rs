@@ -1004,6 +1004,9 @@ impl DebugBackend for DmpBackend {
     fn name(&self) -> &'static str {
         "dmp"
     }
+    fn registers_are_context(&self) -> bool {
+        true
+    }
     fn take_notices(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notices)
     }
