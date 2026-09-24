@@ -46,6 +46,7 @@ pub mod inspection;
 pub mod lifecycle;
 pub mod reload;
 pub mod run_control;
+pub mod scheduler;
 pub mod stepping;
 pub mod stops;
 
