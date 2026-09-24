@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout::FieldInfo;
 use crate::session::session_over_memory;
 use std::collections::HashMap;
 
@@ -60,6 +61,52 @@ fn test_typed_pointer_indirection_loads_each_pointer_slot() {
             .0,
         0xdeadbeef
     );
+}
+
+#[test]
+fn test_pointer_fields_use_the_pdb_declared_width() {
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&0x12345678u32.to_le_bytes());
+    bytes[4..].copy_from_slice(&0xdeadbeefu32.to_le_bytes());
+    let session = session_over_memory(0x1000, &bytes);
+    let dtb = session.target.current_dtb();
+    session.target.symbols.set_kernel(Some(1), dtb);
+    session.target.symbols.inject_module_for_test(
+        2,
+        vec![TypeInfo {
+            name: "_WOW64_POINTER_TEST".to_string(),
+            size: 4,
+            pointer_size: 4,
+            fields: [(
+                "Pointer".to_string(),
+                FieldInfo {
+                    offset: 0,
+                    size: 4,
+                    type_data: ParsedType::Pointer(Box::new(ParsedType::Primitive(
+                        "UCHAR".to_string(),
+                    ))),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }],
+        &[],
+    );
+    session
+        .target
+        .symbols
+        .register_module_for_test(2, "ntdll32", dtb);
+    let expression = Expr::FieldAccess(
+        Box::new(Expr::Cast(
+            Box::new(Expr::Literal(VirtAddr(0x1000))),
+            ExprType::Pointer(Box::new(ExprType::Struct(
+                "_WOW64_POINTER_TEST".to_string(),
+            ))),
+        )),
+        "Pointer".to_string(),
+    );
+
+    assert_eq!(expression.resolve(&session.target).unwrap().0, 0x12345678);
 }
 
 #[test]

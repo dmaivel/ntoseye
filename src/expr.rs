@@ -984,7 +984,7 @@ impl Expr {
                 declared_size.or_else(|| primitive_size(name))
             }
             ParsedType::Enum(name) => declared_size.or_else(|| primitive_size(name)),
-            ParsedType::Pointer(_) => Some(8),
+            ParsedType::Pointer(_) => Some(declared_size.filter(|size| *size != 0).unwrap_or(8)),
             ParsedType::Bitfield { underlying, .. } => {
                 Some(Self::scalar_width(underlying, declared_size)?)
             }
@@ -1052,7 +1052,7 @@ impl Expr {
             ParsedType::Enum(name) => declared_size
                 .filter(|size| *size != 0)
                 .ok_or_else(|| Error::InvalidExpression(format!("unknown enum width: {name}"))),
-            ParsedType::Pointer(_) => Ok(8),
+            ParsedType::Pointer(_) => Ok(declared_size.filter(|size| *size != 0).unwrap_or(8)),
             ParsedType::Array(inner, count) => {
                 let element = Self::parsed_type_size(inner, None, context)?;
                 element

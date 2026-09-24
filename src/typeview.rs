@@ -93,13 +93,24 @@ impl<'a> TypeView<'a> {
     /// Compute a parsed type's byte size using the target's PDB layouts, as
     /// shared by scalar decoding and array-child stride calculation.
     pub fn parsed_type_size(&self, type_data: &ParsedType) -> usize {
+        self.parsed_type_size_with_width(type_data, None)
+    }
+
+    fn parsed_type_size_with_width(
+        &self,
+        type_data: &ParsedType,
+        declared_size: Option<usize>,
+    ) -> usize {
         match type_data {
             ParsedType::Primitive(name) => primitive_size(name).map_or(0, |size| size as usize),
-            ParsedType::Pointer(_) | ParsedType::Function(_, _) => 8,
+            ParsedType::Pointer(_) => declared_size.filter(|size| *size != 0).unwrap_or(8),
+            ParsedType::Function(_, _) => 8,
             ParsedType::Array(inner, count) => {
                 self.parsed_type_size(inner).saturating_mul(*count as usize)
             }
-            ParsedType::Bitfield { underlying, .. } => self.parsed_type_size(underlying),
+            ParsedType::Bitfield { underlying, .. } => {
+                self.parsed_type_size_with_width(underlying, declared_size)
+            }
             ParsedType::Struct(name) | ParsedType::Union(name) => self
                 .lookup_type(name)
                 .map(|type_info| type_info.size)
@@ -208,8 +219,14 @@ impl<'a> TypeView<'a> {
                     Some(value) => value,
                     None => {
                         let address = address?;
-                        self.read_display_uint(address, self.parsed_type_size(type_data))
-                            .ok()?
+                        let declared_size = byte_size
+                            .and_then(|size| usize::try_from(size).ok())
+                            .filter(|size| *size != 0);
+                        self.read_display_uint(
+                            address,
+                            self.parsed_type_size_with_width(type_data, declared_size),
+                        )
+                        .ok()?
                     }
                 };
                 if pointee == 0 {
@@ -601,6 +618,40 @@ mod tests {
             view.value_text(VirtAddr(0x1000), &field("_UNICODE_STRING"))
                 .starts_with("<unavailable")
         );
+    }
+
+    #[test]
+    fn pointer_expansion_uses_its_declared_storage_width() {
+        let mut memory = [0u8; 8];
+        memory[..4].copy_from_slice(&0x1020u32.to_le_bytes());
+        memory[4..].copy_from_slice(&0xdeadbeefu32.to_le_bytes());
+        let session = session_over_memory(0x1000, &memory);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![TypeInfo {
+                name: "_NODE".to_string(),
+                pointer_size: 4,
+                size: 4,
+                fields: HashMap::new(),
+            }],
+            &[],
+        );
+        session
+            .target
+            .symbols
+            .register_module_for_test(1, "ntdll32", dtb);
+        let pointer = ParsedType::Pointer(Box::new(ParsedType::Struct("_NODE".to_string())));
+
+        assert!(matches!(
+            TypeView::new(&session).expand_for_with_size(
+                &pointer,
+                Some(VirtAddr(0x1000)),
+                None,
+                Some(4),
+            ),
+            Some(Expand::Fields { address, .. }) if address == VirtAddr(0x1020)
+        ));
     }
 
     #[test]
