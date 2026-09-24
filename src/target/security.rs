@@ -847,6 +847,7 @@ mod tests {
     use super::{DiagnosticValue, decode_acl, read_sid_bounded};
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
+    use crate::session::session_over_memory;
     use crate::types::VirtAddr;
 
     struct TestMemory(Vec<u8>);
@@ -882,6 +883,18 @@ mod tests {
         assert_eq!(sid.well_known.as_deref(), Some("LOCAL SYSTEM"));
         let unannotated = read_sid_bounded(&memory, VirtAddr(0), usize::MAX, false).unwrap();
         assert_eq!(unannotated.well_known, None);
+    }
+
+    #[test]
+    fn token_sids_are_validated_like_descriptor_sids() {
+        let sid = |revision| [revision, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+        let session = session_over_memory(0x1000, &sid(1));
+        assert_eq!(
+            session.target.read_sid(VirtAddr(0x1000)).unwrap(),
+            "S-1-5-18"
+        );
+        let session = session_over_memory(0x1000, &sid(2));
+        assert!(session.target.read_sid(VirtAddr(0x1000)).is_err());
     }
 
     #[test]
@@ -977,24 +990,7 @@ impl Target {
             return Err(Error::DebugInfo("SID pointer is null".to_string()));
         }
         let memory = self.context_memory();
-        let revision: u8 = memory.read(address)?;
-        let count: u8 = memory.read(address + 1u64)?;
-        if count > 15 {
-            return Err(Error::DebugInfo(format!(
-                "SID subauthority count {count} exceeds 15"
-            )));
-        }
-        let mut authority = [0u8; 6];
-        memory.read_bytes(address + 2u64, &mut authority)?;
-        let authority = authority
-            .into_iter()
-            .fold(0u64, |value, byte| (value << 8) | u64::from(byte));
-        let mut sid = format!("S-{revision}-{authority}");
-        for index in 0..count {
-            let sub: u32 = memory.read(address + 8u64 + u64::from(index) * 4)?;
-            sid.push_str(&format!("-{sub}"));
-        }
-        Ok(sid)
+        read_sid_bounded(&memory, address, usize::MAX, false).map(|sid| sid.sid)
     }
 
     fn read_token_id_field(
