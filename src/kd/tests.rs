@@ -2795,7 +2795,7 @@ fn await_refresh_sets_flag_without_breakin() {
             AwaitStateOptions {
                 arch: Arch::Amd64,
                 saw_kd_refresh: Some(&mut saw_refresh),
-                surface_all: false,
+                filter: StateChangeFilter::Runtime,
                 bugcheck: None,
                 bugcheck_capture: None,
                 deadline: None,
@@ -2885,7 +2885,7 @@ fn await_bugcheck_aware(prints: &[&[u8]], pc: u64) -> StateChange {
             AwaitStateOptions {
                 arch: Arch::Amd64,
                 saw_kd_refresh: None,
-                surface_all: false,
+                filter: StateChangeFilter::Runtime,
                 bugcheck: Some(&mut bugcheck),
                 bugcheck_capture: Some(&mut capture),
                 deadline: None,

@@ -225,14 +225,14 @@ pub fn poll_for_initial_break(
         attempts += 1;
 
         // Initial handshake: surface whatever state-change arrives first
-        // The architecture is not known yet; `surface_all` guarantees this
-        // path never sends an architecture-specific continue request.
+        // The architecture is not known yet; the handshake filter guarantees
+        // this path never sends an architecture-specific continue request.
         match await_state_change(
             framing,
             AwaitStateOptions {
                 arch: Arch::Amd64,
                 saw_kd_refresh: None,
-                surface_all: true,
+                filter: StateChangeFilter::Handshake,
                 bugcheck: None,
                 bugcheck_capture: None,
                 deadline: None,
@@ -301,7 +301,7 @@ pub fn breakin_and_wait(
         AwaitStateOptions {
             arch,
             saw_kd_refresh: None,
-            surface_all: false,
+            filter: StateChangeFilter::Runtime,
             bugcheck: None,
             bugcheck_capture: None,
             deadline: None,
@@ -428,10 +428,21 @@ fn continue_preserving_dr7(
     api::continue_api2(framing, processor, continue_status, trace, dr7)
 }
 
+/// Which state-changes [`await_state_change`] hands back to its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChangeFilter {
+    /// The initial handshake: surface the first state-change of any kind.
+    Handshake,
+    /// A live session: continue command-string notifications transparently
+    /// (like WinDbg), surface load/unload notifications for internal
+    /// reconciliation, and surface exception breaks.
+    Runtime,
+}
+
 pub struct AwaitStateOptions<'a> {
     pub arch: Arch,
     pub saw_kd_refresh: Option<&'a mut bool>,
-    pub surface_all: bool,
+    pub filter: StateChangeFilter,
     pub bugcheck: Option<&'a mut bool>,
     pub bugcheck_capture: Option<&'a mut BugcheckCapture>,
     pub deadline: Option<Instant>,
@@ -440,7 +451,7 @@ pub struct AwaitStateOptions<'a> {
 
 /// Receive packets until a state-change we should surface arrives.
 ///
-/// - `surface_all`: return the first state-change of any kind (initial handshake)
+/// - `filter`: which state-changes surface outside a bugcheck
 /// - `bugcheck`: when `Some`, run in bugcheck-aware mode; the kernel's
 ///   `*** Fatal System Error` print sets the flag, after which the next
 ///   state-change is surfaced with the captured bugcheck data. The flag is the
@@ -449,9 +460,6 @@ pub struct AwaitStateOptions<'a> {
 ///   marker: the kernel prints it at boot and whenever it re-probes the
 ///   debugger, and `.crash` (MANUALLY_INITIATED_CRASH) skips the fatal print
 ///   and the first break entirely, writing its dump and rebooting.
-/// - otherwise: continue command-string notifications transparently (like
-///   WinDbg), surface load/unload notifications for internal reconciliation,
-///   and surface exception breaks
 ///
 /// `deadline` bounds the *total* time servicing transparent traffic: when it is
 /// reached between packets, the call returns a [`ErrorKind::TimedOut`] error so
@@ -464,7 +472,7 @@ pub fn await_state_change(
     let AwaitStateOptions {
         arch,
         mut saw_kd_refresh,
-        surface_all,
+        filter,
         mut bugcheck,
         mut bugcheck_capture,
         deadline,
@@ -501,7 +509,7 @@ pub fn await_state_change(
                 // bugcheck, surface even the notification kinds. Otherwise the
                 // load-symbols notification is surfaced for reconciliation while
                 // command-string notifications remain transparent.
-                if surface_all
+                if filter == StateChangeFilter::Handshake
                     || target_reloaded
                     || in_bugcheck
                     || !is_transparent_state_change(stop.new_state)
@@ -829,7 +837,7 @@ pub fn run_pump(
             AwaitStateOptions {
                 arch,
                 saw_kd_refresh: None,
-                surface_all: false,
+                filter: StateChangeFilter::Runtime,
                 bugcheck: Some(&mut bugcheck),
                 bugcheck_capture: Some(&mut bugcheck_capture),
                 deadline: Some(Instant::now() + PUMP_POLL),

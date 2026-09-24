@@ -2991,7 +2991,7 @@ impl DebugBackend for KdBackend {
             AwaitStateOptions {
                 arch,
                 saw_kd_refresh: None,
-                surface_all: false,
+                filter: StateChangeFilter::Runtime,
                 bugcheck: None,
                 bugcheck_capture: None,
                 deadline: None,
@@ -3033,7 +3033,7 @@ impl DebugBackend for KdBackend {
             AwaitStateOptions {
                 arch,
                 saw_kd_refresh: Some(&mut saw_kd_refresh),
-                surface_all: false,
+                filter: StateChangeFilter::Runtime,
                 bugcheck: None,
                 bugcheck_capture: None,
                 deadline: Some(Instant::now() + timeout),
