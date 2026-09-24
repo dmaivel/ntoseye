@@ -1,5 +1,5 @@
 use super::*;
-use crate::layout::FieldInfo;
+use crate::layout::{FieldInfo, TypeInfo};
 use crate::session::session_over_memory;
 use std::collections::HashMap;
 
