@@ -1,7 +1,6 @@
 use crate::memory::{
     PAGE_SHIFT, PDE_SHIFT, PDPTE_SHIFT, PFN_MASK, PML4E_SHIFT, PT_INDEX_MASK, PTE_SHIFT,
 };
-use owo_colors::OwoColorize;
 use std::fmt;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
@@ -388,33 +387,6 @@ impl PageTableEntry {
     }
 }
 
-pub struct Value<T>(pub T);
-
-/// Macro to implement formatting traits with a specific color
-macro_rules! impl_colored_fmt {
-    (impl<$g:ident> $t:ty, $color:ident, $($trait:path),+) => {
-        $(
-            impl<$g> $trait for $t
-            where $g: $trait
-            {
-                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    <_ as $trait>::fmt(&self.0.$color(), f)
-                }
-            }
-        )*
-    };
-
-    ($t:ty, $color:ident, $($trait:path),+) => {
-        $(
-            impl $trait for $t {
-                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    <_ as $trait>::fmt(&self.0.$color(), f)
-                }
-            }
-        )*
-    };
-}
-
 /// Plain forwarding to the inner value's formatting; no styling. Domain types
 /// stay presentation-free; all address coloring lives in the `ui` module
 /// (`ui::addr`), so a `VirtAddr` formatted with `{:#x}` is just plain hex
@@ -436,10 +408,4 @@ impl_plain_fmt!(
     fmt::LowerHex,
     fmt::UpperHex,
     fmt::Binary
-);
-
-impl_colored_fmt!(
-    impl<T> Value<T>,
-    cyan,
-    fmt::Display, fmt::LowerHex, fmt::UpperHex, fmt::Binary
 );

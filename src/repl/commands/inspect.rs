@@ -6,6 +6,7 @@ use owo_colors::OwoColorize;
 
 use crate::error::{Error, Result};
 use crate::expr::Expr;
+use crate::target::mm::PteLevel;
 use crate::target::{
     irp_major_function_name, kthread_state_name, lookup_register, wait_reason_name,
 };
@@ -144,6 +145,19 @@ repl_command! {
     completion: Expression,
 }
 
+/// One `!pte` column: where the level's entry lives, its raw value, and the
+/// decoded PFN and flags.
+fn pte_level_cell(level: &PteLevel) -> String {
+    format!(
+        "{} at {:X}\ncontains {:016X}\npfn {:<5x} {:>11}",
+        level.name,
+        level.address,
+        ui::Value(level.value.0),
+        level.value.pfn(),
+        level.value.flags()
+    )
+}
+
 impl ReplState<'_> {
     fn cmd_pte(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let expr = require_arg!(invocation, 0, "pte");
@@ -173,7 +187,7 @@ impl ReplState<'_> {
                 );
                 let mut builder = Builder::default();
 
-                let row_strings: Vec<String> = levels.iter().map(|l| l.to_string()).collect();
+                let row_strings: Vec<String> = levels.iter().map(pte_level_cell).collect();
                 builder.push_record(row_strings);
 
                 let mut table = builder.build();

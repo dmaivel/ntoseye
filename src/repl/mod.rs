@@ -649,7 +649,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
             outln!(
                 "  {} Windows {}",
                 ui::muted("kernel"),
-                message_data.build_number.0
+                message_data.build_number
             );
             outln!(
                 "  {} {}",

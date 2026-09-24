@@ -20,7 +20,7 @@ use crate::target::{
     wait_reason_name,
 };
 use crate::triage_report::filetime_to_iso;
-use crate::types::{Value, VirtAddr};
+use crate::types::VirtAddr;
 use crate::ui;
 
 use crate::repl::*;
@@ -289,12 +289,12 @@ fn print_thread_detail(thread: &ThreadInfo) {
         ui::addr(thread.ethread.0),
         thread
             .tid
-            .map(Value)
+            .map(ui::Value)
             .map(|tid| tid.to_string())
             .unwrap_or_else(|| "-".to_string()),
         thread
             .pid
-            .map(Value)
+            .map(ui::Value)
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "-".to_string()),
         thread.process_name.as_deref().unwrap_or("unknown")
@@ -820,12 +820,12 @@ impl ReplState<'_> {
                 ui::addr(thread.ethread.0).to_string(),
                 thread
                     .pid
-                    .map(Value)
+                    .map(ui::Value)
                     .map(|pid| pid.to_string())
                     .unwrap_or_else(|| "-".to_string()),
                 thread
                     .tid
-                    .map(Value)
+                    .map(ui::Value)
                     .map(|tid| tid.to_string())
                     .unwrap_or_else(|| "-".to_string()),
                 thread
@@ -1241,7 +1241,7 @@ impl ReplState<'_> {
                     "{} {} ({})",
                     ui::label("process"),
                     process.name,
-                    Value(process.pid)
+                    ui::Value(process.pid)
                 );
                 print_padded_table(builder);
             }
@@ -1519,7 +1519,7 @@ impl ReplState<'_> {
             count += 1;
             builder.push_record(vec![
                 process.name.to_string(),
-                format!("{}", Value(process.pid)),
+                format!("{}", ui::Value(process.pid)),
                 ui::addr(process.eprocess_va.0).to_string(),
                 ui::addr(process.dtb),
                 if process.is_wow64() { "x86" } else { "-" }.to_string(),

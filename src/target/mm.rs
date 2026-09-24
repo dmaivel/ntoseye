@@ -1,7 +1,6 @@
 //! Structured memory-manager inspectors shared by the REPL, Python SDK, and MCP.
 
 use std::collections::HashSet;
-use std::fmt;
 
 use crate::backend::MemoryOps;
 use crate::debugger_data::{
@@ -18,7 +17,7 @@ use crate::target::pool::{
     pool_block_state, pool_field_from_buf, pool_layout, read_kernel_global_u64, read_pool_field,
     scan_big_pool_entries, scan_pool_page_lax, tag_string,
 };
-use crate::types::{Arch, Dtb, PageTableEntry, Value, VirtAddr};
+use crate::types::{Arch, Dtb, PageTableEntry, VirtAddr};
 
 use super::{DiagnosticMetric, DiagnosticValue, Target};
 use crate::guest::ProcessInfo;
@@ -2569,19 +2568,5 @@ impl Target {
             pde: Some(pde),
             pte: Some(pte),
         })
-    }
-}
-
-impl fmt::Display for PteLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let flags = format!("pfn {:<5x} {:>11}", self.value.pfn(), self.value.flags());
-        write!(
-            f,
-            "{} at {:X}\ncontains {:016X}\n{}",
-            self.name,
-            self.address,
-            Value(self.value.0),
-            flags
-        )
     }
 }

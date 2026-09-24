@@ -40,7 +40,7 @@ use crate::{
         LocalVariableLocation, ProcedureLocal, SourceLineExtent, SourceLocation, SymbolCandidate,
         SymbolIndex, SymbolStore, format_symbol_with_offset,
     },
-    types::{Arch, Dtb, KernelLocation, Value, VirtAddr},
+    types::{Arch, Dtb, KernelLocation, VirtAddr},
 };
 
 pub struct Target {
@@ -900,7 +900,7 @@ where
 }
 
 pub struct StartupMessage {
-    pub build_number: Value<u16>,
+    pub build_number: u16,
     pub base_address: VirtAddr,
     pub loaded_module_list: VirtAddr,
 }
@@ -2496,7 +2496,7 @@ impl Target {
         };
 
         Ok(StartupMessage {
-            build_number: Value(build_number),
+            build_number,
             base_address,
             loaded_module_list,
         })

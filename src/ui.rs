@@ -3,7 +3,7 @@
 //! palette lives in one place and stays consistent.
 
 use owo_colors::OwoColorize;
-use std::fmt::Display;
+use std::fmt::{self, Display};
 
 use crate::disasm::{AsmKind, AsmToken};
 use crate::types::VirtAddr;
@@ -53,6 +53,24 @@ pub fn muted(text: &str) -> String {
 pub fn label(text: &str) -> String {
     text.bold().to_string()
 }
+
+/// A numeric value in content color, styled under `{}`, `{:x}`, `{:X}` and
+/// `{:b}` alike so width and padding flags still apply to the digits.
+pub struct Value<T>(pub T);
+
+macro_rules! impl_value_fmt {
+    ($($trait:path),+) => {
+        $(
+            impl<T: $trait> $trait for Value<T> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    <_ as $trait>::fmt(&self.0.cyan(), f)
+                }
+            }
+        )+
+    };
+}
+
+impl_value_fmt!(fmt::Display, fmt::LowerHex, fmt::UpperHex, fmt::Binary);
 
 /// Style a disassembled instruction's [`AsmToken`](crate::disasm::AsmToken)s
 /// for the listing: mnemonic as the anchor, registers and immediates in content
