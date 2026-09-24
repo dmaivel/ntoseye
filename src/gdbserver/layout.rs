@@ -324,3 +324,129 @@ fn arm64() -> Vec<WireRegister> {
     push(&mut registers, FPU, "int32", 32, named(&["fpsr", "fpcr"]));
     registers
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Layout;
+    use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
+    use crate::types::Arch;
+
+    /// Byte offset of a register on the wire: its position in the AMD64
+    /// description (rax..r15, rip, eflags, six segments, eight x87 stack
+    /// registers, eight x87 control registers, sixteen xmm, mxcsr, ...).
+    fn wire_offset(name: &str) -> usize {
+        let widths: &[(&str, usize)] = &[
+            ("rax", 8),
+            ("rbx", 8),
+            ("rcx", 8),
+            ("rdx", 8),
+            ("rsi", 8),
+            ("rdi", 8),
+            ("rbp", 8),
+            ("rsp", 8),
+            ("r8", 8),
+            ("r9", 8),
+            ("r10", 8),
+            ("r11", 8),
+            ("r12", 8),
+            ("r13", 8),
+            ("r14", 8),
+            ("r15", 8),
+            ("rip", 8),
+            ("eflags", 4),
+            ("cs", 4),
+            ("ss", 4),
+            ("ds", 4),
+            ("es", 4),
+            ("fs", 4),
+            ("gs", 4),
+        ];
+        let mut offset = 0;
+        for (register, width) in widths {
+            if *register == name {
+                return offset;
+            }
+            offset += width;
+        }
+        panic!("{name} is not in the core feature prefix");
+    }
+
+    /// KD carries no x87 state and 2-byte selectors. The wire must still put
+    /// every register at gdb's fixed offset, widen the selectors, and mark the
+    /// x87 registers unavailable rather than zero, or a client reads garbage
+    /// into every register after the first mismatch.
+    #[test]
+    fn kd_register_file_encodes_at_gdb_offsets() {
+        let map = build_register_map();
+        let mut file = vec![0u8; REGISTER_BUFFER_SIZE];
+        map.write_u64("rip", &mut file, 0xffff_f800_1234_5678)
+            .unwrap();
+        map.write_u64("cs", &mut file, 0x10).unwrap();
+        map.write_u64("xmm0l", &mut file, 0x1122_3344_5566_7788)
+            .unwrap();
+
+        let layout = Layout::new(Arch::Amd64, &map);
+        let wire = layout.encode(&map, &file);
+
+        let rip = wire_offset("rip");
+        let rip_bytes: Vec<u8> = wire[rip..rip + 8].iter().map(|b| b.unwrap()).collect();
+        assert_eq!(
+            u64::from_le_bytes(rip_bytes.try_into().unwrap()),
+            0xffff_f800_1234_5678
+        );
+
+        let cs = wire_offset("cs");
+        assert_eq!(&wire[cs..cs + 4], &[Some(0x10), Some(0), Some(0), Some(0)]);
+
+        let st0 = wire_offset("gs") + 4;
+        assert!(
+            wire[st0..st0 + 10].iter().all(Option::is_none),
+            "st0 is unavailable over KD"
+        );
+
+        // Eight 10-byte x87 stack registers and eight 4-byte control registers.
+        let xmm0 = st0 + 8 * 10 + 8 * 4;
+        assert_eq!(wire[xmm0], Some(0x88));
+    }
+
+    /// A `G` write must land in the transport's register file at the transport's
+    /// offsets and widths, skipping what the transport lacks.
+    #[test]
+    fn register_payload_round_trips_through_the_kd_file() {
+        let map = build_register_map();
+        let mut file = vec![0u8; REGISTER_BUFFER_SIZE];
+        map.write_u64("rsp", &mut file, 0xffff_8000_0000_1000)
+            .unwrap();
+        let layout = Layout::new(Arch::Amd64, &map);
+
+        let mut wire: Vec<u8> = layout
+            .encode(&map, &file)
+            .into_iter()
+            .map(|byte| byte.unwrap_or(0xAA))
+            .collect();
+        let rip = wire_offset("rip");
+        wire[rip..rip + 8].copy_from_slice(&0xffff_f800_0000_4000u64.to_le_bytes());
+        layout.decode(&map, &mut file, &wire).unwrap();
+
+        assert_eq!(map.read_u64("rip", &file).unwrap(), 0xffff_f800_0000_4000);
+        assert_eq!(map.read_u64("rsp", &file).unwrap(), 0xffff_8000_0000_1000);
+        assert!(layout.decode(&map, &mut file, &wire[1..]).is_err());
+    }
+
+    /// gdb files the segment bases and system registers under `general`, which
+    /// clients read on every stop; Ghidra's gdb agent gives up at the first
+    /// unavailable one. So an optional register the transport lacks (KD has no
+    /// segment bases) must not be described at all, while a required one (x87)
+    /// stays and reads as unavailable.
+    #[test]
+    fn optional_registers_the_transport_lacks_are_not_described() {
+        let map = build_register_map();
+        let xml = Layout::new(Arch::Amd64, &map).target_xml().to_string();
+        for absent in ["\"fs_base\"", "\"gs_base\"", "\"k_gs_base\""] {
+            assert!(!xml.contains(absent), "{absent} described");
+        }
+        for present in ["\"dr7\"", "\"cr3\"", "\"st0\"", "\"rip\""] {
+            assert!(xml.contains(present), "{present} missing");
+        }
+    }
+}
