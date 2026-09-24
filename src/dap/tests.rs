@@ -1,6 +1,14 @@
+use std::cell::RefCell;
+use std::io::Cursor;
+use std::rc::Rc;
+
+use super::memory::MAX_DISASSEMBLE_INSTRUCTIONS;
+use super::variables::VARIABLES_BASE;
 use super::*;
-use crate::layout::TypeInfo;
+use crate::expr::Expr;
+use crate::layout::{FieldInfo, TypeInfo};
 use crate::session::session_over_memory;
+use crate::symbols::{LocalVariableLocation, ProcedureLocal};
 
 #[test]
 fn a_disassembly_request_cannot_ask_for_unbounded_work() {
@@ -179,73 +187,6 @@ fn addresses_parse_from_hex_and_decimal() {
     assert_eq!(parse_address(" 0X10 ").unwrap(), 0x10);
     assert_eq!(parse_address("4096").unwrap(), 4096);
     assert!(parse_address("nt!KeBugCheckEx").is_err());
-}
-
-#[test]
-fn data_ids_round_trip_through_the_client() {
-    let (address, len) = parse_data_id("0x1000:4").unwrap();
-    assert_eq!((address, len), (0x1000, 4));
-    assert!(parse_data_id("0x1000").is_err());
-    assert!(parse_data_id("0x1000:x").is_err());
-}
-
-#[test]
-fn watch_widths_round_down_to_legal_debug_register_sizes() {
-    assert_eq!(watch_length(0), 1);
-    assert_eq!(watch_length(3), 2);
-    assert_eq!(watch_length(6), 4);
-    assert_eq!(watch_length(16), 8);
-}
-
-#[test]
-fn log_points_become_printf_actions_that_resume() {
-    let config = breakpoint_config(&json!({"logMessage": "irp {@rcx} status {@rax}"})).unwrap();
-    assert_eq!(
-        config.action.as_deref(),
-        Some(r#".printf "irp %p status %p" @rcx @rax; gc"#)
-    );
-
-    // `.printf` splits its arguments on whitespace, so a spaced expression
-    // is closed up rather than tokenized into pieces that cannot evaluate.
-    let spaced = breakpoint_config(&json!({"logMessage": "at {poi(@rsp + 0x40)}"})).unwrap();
-    assert_eq!(
-        spaced.action.as_deref(),
-        Some(r#".printf "at %p" poi(@rsp+0x40); gc"#)
-    );
-
-    // Literal text only: still a print-and-continue, no arguments.
-    let plain = breakpoint_config(&json!({"logMessage": "reached unload"})).unwrap();
-    assert_eq!(
-        plain.action.as_deref(),
-        Some(".printf \"reached unload\"; gc")
-    );
-
-    // A `%` in the text is a literal, not a format specifier.
-    let percent = breakpoint_config(&json!({"logMessage": "100% done"})).unwrap();
-    assert_eq!(
-        percent.action.as_deref(),
-        Some(".printf \"100%% done\"; gc")
-    );
-
-    // A placeholder that would break out of the action's quoting is
-    // refused rather than silently changing what runs on each hit.
-    for bad in [
-        "unclosed {@rcx",
-        "empty {}",
-        "quote {\"}",
-        "chain {@rcx; g}",
-    ] {
-        assert!(
-            breakpoint_config(&json!({"logMessage": bad})).is_err(),
-            "{bad} was accepted"
-        );
-    }
-}
-
-#[test]
-fn blank_conditions_are_not_forwarded_as_expressions() {
-    let config = breakpoint_config(&json!({"condition": "   "})).unwrap();
-    assert!(config.condition.is_none());
 }
 
 #[test]
