@@ -641,7 +641,7 @@ impl Target {
         address: VirtAddr,
         annotate_well_known: bool,
     ) -> Result<SecurityDescriptorDetail> {
-        let memory = self.process_memory();
+        let memory = self.context_memory();
         self.inspect_security_descriptor_in(&memory, address, annotate_well_known)
     }
 
@@ -649,14 +649,14 @@ impl Target {
     /// header or ACE size is fatal; each ACE's access mask and SID are
     /// independent diagnostics when their individual reads are unavailable.
     pub fn inspect_acl(&self, address: VirtAddr) -> Result<AclDetail> {
-        let memory = self.process_memory();
+        let memory = self.context_memory();
         decode_acl(&memory, address, false)
     }
 
     /// Decode a SID, including its revision, identifier authority,
     /// sub-authorities, canonical string, and recognized well-known name.
     pub fn inspect_sid(&self, address: VirtAddr) -> Result<SidDetail> {
-        let memory = self.process_memory();
+        let memory = self.context_memory();
         read_sid_bounded(&memory, address, usize::MAX, true)
     }
 

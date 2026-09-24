@@ -1006,24 +1006,27 @@ impl Target {
         self.process.as_ref()
     }
 
-    /// Root of the selected process scope: the attached process's, else the
-    /// kernel's (identity mapping when no kernel was found). Unlike
-    /// [`Self::current_dtb`], it ignores the halted thread's CR3.
+    /// Root of the module-list scope: the attached process's, else the
+    /// kernel's (identity mapping when no kernel was found). It decides whose
+    /// loader list [`Self::modules`] walks and whose symbols load; reads the
+    /// user points at go through [`Self::current_dtb`] instead.
     pub fn process_dtb(&self) -> Dtb {
         self.process
             .as_ref()
             .map_or_else(|| self.kernel_dtb(), |process| process.dtb)
     }
 
-    /// Memory of the selected process scope (see [`Self::process_dtb`]).
+    /// Memory of the module-list scope (see [`Self::process_dtb`]), for
+    /// reading the modules that scope lists.
     pub fn process_memory(&self) -> AddressSpace<'_, PhysMem> {
         self.address_space(self.process_dtb())
     }
 
-    /// Kernel types read in the selected process scope. Without a discovered
-    /// kernel only `module!`-qualified names resolve.
-    pub fn process_types(&self) -> Types<'_> {
-        self.types_in(self.process_dtb())
+    /// Kernel types read in the inspection address space
+    /// ([`Self::current_dtb`]). Without a discovered kernel only
+    /// `module!`-qualified names resolve.
+    pub fn context_types(&self) -> Types<'_> {
+        self.types_in(self.current_dtb())
     }
 
     /// Kernel types read through `dtb`'s page tables.
@@ -1160,7 +1163,7 @@ impl Target {
             return Ok(Vec::new());
         }
         let mut buf = vec![0u8; length];
-        self.process_memory().read_bytes(start, &mut buf)?;
+        self.context_memory().read_bytes(start, &mut buf)?;
         Ok((0..=buf.len() - pattern.len())
             .filter(|&i| &buf[i..i + pattern.len()] == pattern)
             .map(|i| start.0.wrapping_add(i as u64))
@@ -1209,7 +1212,7 @@ impl Target {
     /// richer form.
     pub fn walk_list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<u64>> {
         const MAX: usize = 1000;
-        let mem = self.process_memory();
+        let mem = self.context_memory();
         let mut cursor = ListCursor::new(head, MAX);
         cursor.advance(Ok(mem.read::<VirtAddr>(head)?));
         let mut out = Vec::new();
@@ -1227,7 +1230,7 @@ impl Target {
     /// Rust `String` (empty when null/zero-length). `Length`/`Buffer` come from
     /// the PDB layout, not hardcoded offsets. Shared by the SDK and MCP.
     pub fn read_unicode_string(&self, addr: VirtAddr) -> Result<String> {
-        let types = self.process_types();
+        let types = self.context_types();
         let descriptor = match types.struct_at("_UNICODE_STRING", addr) {
             // No kernel namespace (a triage dump without ntoskrnl): take the
             // layout from whichever loaded module defines it.
@@ -1250,7 +1253,7 @@ impl Target {
     /// completely unmapped start address errors. The `CHAR*` counterpart to
     /// [`read_unicode_string`](Self::read_unicode_string).
     pub fn read_c_string(&self, addr: VirtAddr, max_len: usize) -> Result<String> {
-        let mem = self.process_memory();
+        let mem = self.context_memory();
         let mut bytes = Vec::new();
         while bytes.len() < max_len {
             let cur = addr + bytes.len() as u64;
@@ -1622,7 +1625,7 @@ impl Target {
     fn current_process_image_base(&self) -> Option<u64> {
         let peb = VirtAddr(self.current_process_peb()?);
         let base: VirtAddr = self
-            .process_types()
+            .types_in(self.process_dtb())
             .struct_at("_PEB", peb)
             .ok()?
             .read_field("ImageBaseAddress")
@@ -1978,10 +1981,10 @@ impl Target {
         }
     }
 
+    /// Root of the inspection address space every read the user points at
+    /// goes through: the attached process's, else the halted thread's (or
+    /// selected context's) process, else the kernel's.
     pub fn current_dtb(&self) -> Dtb {
-        // An explicit process attach is authoritative for the live inspection
-        // address space. `context_dtb_override` follows the halted vCPU's CR3
-        // only in the unattached case.
         match &self.process {
             Some(process) => process.dtb,
             None => self
@@ -1990,8 +1993,7 @@ impl Target {
         }
     }
 
-    /// Memory view for the active inspection address space. An explicit process
-    /// attach wins; otherwise this follows the halted thread's CR3.
+    /// Memory view for the inspection address space ([`Self::current_dtb`]).
     pub fn context_memory(&self) -> AddressSpace<'_, PhysMem> {
         self.address_space(self.current_dtb())
     }

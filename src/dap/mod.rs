@@ -1708,7 +1708,7 @@ impl Server {
                         let bytes = value.to_le_bytes();
                         session
                             .target
-                            .process_memory()
+                            .context_memory()
                             .write_bytes(VirtAddr(address), &bytes[..size])
                             .map_err(|error| error.to_string())?;
                     }
@@ -1829,7 +1829,7 @@ impl Server {
         let bytes = value.to_le_bytes();
         self.session()?
             .target
-            .process_memory()
+            .context_memory()
             .write_bytes(address, &bytes[..size])
             .map_err(|error| error.to_string())
     }
@@ -2516,7 +2516,7 @@ impl Server {
         let session = self.session()?;
         let written = session
             .target
-            .process_memory()
+            .context_memory()
             .write_bytes(VirtAddr(address), &bytes);
         let written = match written {
             Ok(()) => bytes.len(),

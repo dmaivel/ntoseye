@@ -1478,7 +1478,7 @@ impl MultiThreadBase for GdbTarget<'_> {
         let written = self
             .session
             .target
-            .process_memory()
+            .context_memory()
             .write_bytes(VirtAddr(start_addr), data);
         written.map_err(|_| TargetError::Errno(EFAULT as u8))
     }

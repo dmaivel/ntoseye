@@ -747,7 +747,7 @@ pub fn parse_pool_header(
     layout: &PoolLayout,
     header: VirtAddr,
 ) -> Option<PoolHeader> {
-    let mem = debugger.process_memory();
+    let mem = debugger.context_memory();
     let (previous_size, block_units, pool_type, tag) = if layout.pool_header_uses_struct {
         let previous_size =
             read_pool_field(&layout.pool_header, &mem, header, "PreviousSize")? as u8;
@@ -810,7 +810,7 @@ pub fn gap_free_pool_block(
     size: u64,
 ) -> PoolHeader {
     let tag: u32 = debugger
-        .process_memory()
+        .context_memory()
         .read(header + layout.pool_tag_offset)
         .unwrap_or(0);
     PoolHeader {
@@ -990,7 +990,7 @@ pub fn classify_pool_region(
     addr: VirtAddr,
 ) -> Option<(&'static str, VirtAddr, VirtAddr)> {
     let dtb = debugger.current_dtb();
-    let mem = debugger.process_memory();
+    let mem = debugger.context_memory();
     let bound = |symbol: &str| {
         let address = debugger
             .symbols

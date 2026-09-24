@@ -516,7 +516,7 @@ impl Struct {
             let len = u32::from(*len);
             let size = ((pos + len).div_ceil(8).clamp(1, 8)) as usize;
             let write = self.owner.with_in(py, &self.space.context(), |session| {
-                let memory = session.target.process_memory();
+                let memory = session.target.context_memory();
                 let mut bytes = vec![0; size];
                 Ok(memory
                     .read_bytes(VirtAddr(addr), &mut bytes)
@@ -541,7 +541,7 @@ impl Struct {
             let write = self.owner.with_in(py, &self.space.context(), |session| {
                 Ok(session
                     .target
-                    .process_memory()
+                    .context_memory()
                     .write_bytes(VirtAddr(addr), &bytes[..size]))
             })?;
             return write.map_err(err);
@@ -570,7 +570,7 @@ impl Struct {
         let write = self.owner.with_in(py, &self.space.context(), |session| {
             Ok(session
                 .target
-                .process_memory()
+                .context_memory()
                 .write_bytes(VirtAddr(addr), &bytes))
         })?;
         write.map_err(err)

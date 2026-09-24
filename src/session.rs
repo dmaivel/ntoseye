@@ -2465,12 +2465,12 @@ impl Session {
         Ok((threads, active_vcpus))
     }
 
-    /// Read guest virtual memory in the selected process scope
-    /// ([`Target::process_dtb`]) with our own breakpoint patch bytes masked
+    /// Read guest virtual memory in the inspection address space
+    /// ([`Target::current_dtb`]) with our own breakpoint patch bytes masked
     /// back to the original code, so every host (REPL, MCP, SDK) sees the same
     /// bytes the guest would run.
     pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        let dtb = self.target.process_dtb();
+        let dtb = self.target.current_dtb();
         self.target.address_space(dtb).read_bytes(addr, buf)?;
         self.breakpoints
             .mask_breakpoint_bytes(&self.target, addr, buf, dtb);
@@ -2582,7 +2582,7 @@ impl Session {
     /// address space. Our own breakpoint `int3` bytes are masked back to the
     /// original opcode, and branch / rip-relative targets get symbol comments.
     pub fn disassemble(&self, addr: VirtAddr, count: usize) -> Result<Vec<DisasmRow>> {
-        let dtb = self.target.process_dtb();
+        let dtb = self.target.current_dtb();
 
         // x86-64 instructions are at most 15 bytes; ARM64 is fixed 4 bytes.
         // Over-read so `count` decode.
@@ -2619,7 +2619,7 @@ impl Session {
     /// Disassemble the runtime function containing `addr`. Returns its start
     /// symbol, byte length, and decoded rows.
     pub fn disassemble_function(&self, addr: VirtAddr) -> Result<(String, usize, Vec<DisasmRow>)> {
-        let dtb = self.target.process_dtb();
+        let dtb = self.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.target, dtb);
         let Some((start, end)) = function_range(&self.target, &trace, addr.0) else {
             return Err(Error::DebugInfo(format!(
@@ -2686,7 +2686,7 @@ impl Session {
             )));
         }
 
-        let dtb = self.target.process_dtb();
+        let dtb = self.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.target, dtb);
         let bitness = self.target.code_bitness(addr);
         decode_preceding(arch, bytes, read_start, addr.0, count, bitness, |target| {

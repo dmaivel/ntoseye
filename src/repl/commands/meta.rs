@@ -739,7 +739,7 @@ fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Opt
     let count = max_chars.checked_mul(2)?;
     let mut bytes = vec![0u8; count];
     target
-        .process_memory()
+        .context_memory()
         .read_bytes(address, &mut bytes)
         .ok()?;
     let mut text = String::new();

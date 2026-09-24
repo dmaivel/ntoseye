@@ -60,7 +60,7 @@ impl Memory {
             } else {
                 session
                     .target
-                    .process_memory()
+                    .context_memory()
                     .write_bytes(VirtAddr(addr), data)
                     .map_err(err)
             }

@@ -402,7 +402,7 @@ impl ReplState<'_> {
             })
             .collect::<Vec<_>>();
 
-        let mem = self.ctx.target.process_memory();
+        let mem = self.ctx.target.context_memory();
         if let Err(e) = mem.write_bytes(address, &bytes) {
             error!("failed to write {}: {}", noun, e);
         } else {
@@ -563,7 +563,7 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let dtb = self.ctx.target.process_dtb();
+        let dtb = self.ctx.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         for (index, chunk) in data.chunks(item_size).enumerate() {
             let offset = index * item_size;
@@ -698,7 +698,7 @@ impl ReplState<'_> {
         address: VirtAddr,
         unicode: bool,
     ) -> Result<StringDescriptorFields> {
-        let types = self.ctx.target.process_types();
+        let types = self.ctx.target.context_types();
         let type_names: &[&str] = if unicode {
             &["_UNICODE_STRING"]
         } else {
@@ -725,7 +725,7 @@ impl ReplState<'_> {
         // These descriptors have a stable 64-bit Windows layout.  Retaining a
         // layout fallback keeps ds/dS useful in a dump whose PDB omits the
         // otherwise tiny string type.
-        let mem = self.ctx.target.process_memory();
+        let mem = self.ctx.target.context_memory();
         Ok(StringDescriptorFields {
             length: best_effort(mem.read(address))?,
             maximum_length: best_effort(mem.read(address + 2u64))?,
@@ -998,7 +998,7 @@ impl ReplState<'_> {
             }
         }
 
-        let dtb = self.ctx.target.process_dtb();
+        let dtb = self.ctx.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
         let bitness = self.ctx.target.code_bitness(start_addr);
@@ -1160,7 +1160,7 @@ impl ReplState<'_> {
                 bytes.push(0);
             }
         }
-        let mem = self.ctx.target.process_memory();
+        let mem = self.ctx.target.context_memory();
         match mem.write_bytes(address, &bytes) {
             Ok(()) => outln!(
                 "{} {} bytes -> {}\n",
@@ -1273,7 +1273,7 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let memory = self.ctx.target.process_memory();
+        let memory = self.ctx.target.context_memory();
         let mut unwritten = 0usize;
         let mut read_error = None;
         for_each_page_chunk(range.start, range.len(), |offset, address, len| {
@@ -1408,7 +1408,7 @@ impl ReplState<'_> {
         };
 
         let data = repeat_pattern(&pattern, length);
-        let mem = self.ctx.target.process_memory();
+        let mem = self.ctx.target.context_memory();
 
         if let Err(e) = mem.write_bytes(address, &data) {
             error!("failed to fill memory: {}", e);

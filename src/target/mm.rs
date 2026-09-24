@@ -2224,7 +2224,7 @@ impl Target {
                 address.0 >= m.base_address.0 && address.0 < m.base_address.0 + m.size as u64
             })
         {
-            let memory = self.process_memory();
+            let memory = self.context_memory();
             let section = section_name_at(&memory, m.base_address, address);
             return Ok(AddressDescription {
                 address,
@@ -2510,7 +2510,7 @@ impl Target {
         // Walk through the current inspection address space so user VAs resolve
         // through the attached process's tables (not the kernel's). MmPteBase is
         // a kernel VA valid in any process context (the recursive PML4 slot).
-        let memory = self.process_memory();
+        let memory = self.context_memory();
         let dtb = self.current_dtb();
 
         let pte_base: VirtAddr = self.guest()?.ntoskrnl.symbol("MmPteBase")?.read()?;

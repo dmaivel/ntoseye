@@ -307,6 +307,34 @@ pub fn session_with_mock(backend: MockBackend) -> Session {
     session
 }
 
+/// With nothing attached, the bytes `db` and `s` show are the halted
+/// context's, the same space an expression like `poi(addr)` reads.
+#[test]
+fn memory_reads_follow_the_halted_context_root() {
+    const BASE: u64 = 0x10000;
+    const USER_VA: u64 = 0x7ff6_1234_5000;
+    let va = VirtAddr(USER_VA);
+    let mut memory = vec![0u8; 5 * PAGE_SIZE];
+    let mut link = |table: u64, index: usize, next: u64| {
+        let at = (table - BASE) as usize + index * 8;
+        memory[at..at + 8].copy_from_slice(&(next | 0b111).to_le_bytes());
+    };
+    link(BASE, va.pml4_index(), BASE + 0x1000);
+    link(BASE + 0x1000, va.pdpt_index(), BASE + 0x2000);
+    link(BASE + 0x2000, va.pd_index(), BASE + 0x3000);
+    link(BASE + 0x3000, va.pt_index(), BASE + 0x4000);
+    memory[0x4000..0x4004].copy_from_slice(b"USER");
+    let mut session = session_over_memory(BASE, &memory);
+    session.target.set_context_dtb_override(BASE);
+
+    let mut bytes = [0u8; 4];
+    session.read_masked(va, &mut bytes).unwrap();
+    let hits = session.target.search(va, b"SE", 4).unwrap();
+
+    assert_eq!(&bytes, b"USER");
+    assert_eq!(hits, [USER_VA + 1]);
+}
+
 #[test]
 fn terminated_reads_join_utf16_page_chunks_and_keep_readable_prefixes() {
     let base = 0x1000;
