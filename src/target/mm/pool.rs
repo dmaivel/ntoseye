@@ -7,12 +7,13 @@ use super::{
 };
 use crate::error::Result;
 use crate::memory::PAGE_SIZE;
-use crate::symbols::{format_symbol_with_offset, glob_matches};
+use crate::symbols::glob_matches;
 use crate::target::Target;
 use crate::target::pool::{
-    BigPoolEntry, PoolHeader, big_pool_layout, classify_pool_region, collect_pool_usage,
-    find_big_pool, locate_pool_block_in_page, pool_block_state, pool_layout,
-    read_kernel_global_u64, scan_big_pool_entries, scan_pool_page_lax, tag_string,
+    BigPoolEntry, POOL_PAGE_SIZE, PoolHeader, annotate_near_symbol, big_pool_layout,
+    classify_pool_region, collect_pool_usage, find_big_pool, locate_pool_block_in_page,
+    pool_block_state, pool_layout, read_kernel_global_u64, scan_big_pool_entries,
+    scan_pool_page_lax, segment_heap_hint, tag_string,
 };
 use crate::types::VirtAddr;
 
@@ -420,23 +421,3 @@ fn mi_state_pool_range(
     })
     .filter(|range| range.start < range.end)
 }
-
-fn segment_heap_hint(target: &Target) -> Option<&'static str> {
-    target
-        .symbols
-        .find_symbol_across_modules(target.current_dtb(), "nt!RtlpHpHeapGlobals")
-        .ok()
-        .flatten()?;
-    Some(
-        "kernel has RtlpHpHeapGlobals (segment heap is enabled); address may be a _HEAP_VS_CHUNK_HEADER / LFH chunk instead of a _POOL_HEADER",
-    )
-}
-
-fn annotate_near_symbol(target: &Target, address: VirtAddr) -> Option<String> {
-    let (module, name, offset) = target
-        .symbols
-        .find_closest_symbol_for_address(target.current_dtb(), address)?;
-    (offset <= 0x1000).then(|| format_symbol_with_offset(&module, &name, offset))
-}
-
-const POOL_PAGE_SIZE: u64 = PAGE_SIZE as u64;
