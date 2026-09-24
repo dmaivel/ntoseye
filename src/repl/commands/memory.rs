@@ -861,7 +861,13 @@ impl ReplState<'_> {
         };
         let max_chars = match invocation.arg(1) {
             Some(arg) => match Expr::eval_with_radix(arg, &self.ctx.target, self.radix) {
-                Ok(v) if v.0 > 0 => v.0 as usize,
+                Ok(v) if v.0 > 0 => match checked_display_string_count(v.0, char_size) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        error!("{error}");
+                        return Ok(());
+                    }
+                },
                 Ok(_) => {
                     error!("invalid max-chars: {}", arg);
                     return Ok(());
@@ -1499,6 +1505,17 @@ impl ReplState<'_> {
     }
 }
 
+fn checked_display_string_count(max_chars: u64, char_size: usize) -> Result<usize> {
+    let max_chars_by_bytes = u64::try_from(MAX_DISPLAY_BYTES / char_size).unwrap_or(u64::MAX);
+    if max_chars > max_chars_by_bytes {
+        return Err(Error::InvalidArgument(format!(
+            "display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes"
+        )));
+    }
+    usize::try_from(max_chars)
+        .map_err(|_| Error::InvalidArgument("string length exceeds the platform limit".into()))
+}
+
 fn format_characters(value: u64) -> String {
     value
         .to_le_bytes()
@@ -1550,5 +1567,30 @@ fn format_unix_timestamp(seconds: i64, nanos: u32) -> String {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}")
     } else {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_display_counts_are_limited_by_requested_bytes() {
+        assert_eq!(
+            checked_display_string_count(MAX_DISPLAY_BYTES as u64, 1).unwrap(),
+            MAX_DISPLAY_BYTES
+        );
+        assert!(matches!(
+            checked_display_string_count(MAX_DISPLAY_BYTES as u64 + 1, 1),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert_eq!(
+            checked_display_string_count((MAX_DISPLAY_BYTES / 2) as u64, 2).unwrap(),
+            MAX_DISPLAY_BYTES / 2
+        );
+        assert!(matches!(
+            checked_display_string_count((MAX_DISPLAY_BYTES / 2) as u64 + 1, 2),
+            Err(Error::InvalidArgument(_))
+        ));
     }
 }
