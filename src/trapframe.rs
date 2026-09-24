@@ -7,7 +7,7 @@
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::layout::{TypeInfo, le_uint};
+use crate::layout::{FieldInfo, TypeInfo, le_uint};
 use crate::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use std::sync::Arc;
@@ -117,15 +117,7 @@ impl KtrapFrame {
     /// Decode a frame at `address` out of `buf` (which must cover the whole
     /// struct) using the PDB-described `layout`.
     pub fn decode(layout: &TypeInfo, address: u64, buf: &[u8]) -> Result<Self> {
-        let field = |name: &str| -> Result<u64> {
-            let f = layout.field(name)?;
-            let off = f.offset as usize;
-            let size = (f.size as usize).min(8);
-            if size == 0 || off + size > buf.len() {
-                return Err(Error::FieldNotFound(name.to_string()));
-            }
-            Ok(le_uint(&buf[off..off + size]))
-        };
+        let field = |name: &str| field_uint(buf, name, layout.field(name)?);
         if layout.fields.contains_key("Pc") && !layout.fields.contains_key("Rip") {
             return Self::decode_arm64(layout, address, buf);
         }
@@ -157,27 +149,17 @@ impl KtrapFrame {
 
     fn decode_arm64(layout: &TypeInfo, address: u64, buf: &[u8]) -> Result<Self> {
         let field = |names: &[&str]| -> Result<u64> {
-            for &name in names {
-                if let Some(info) = layout.fields.get(name) {
-                    let offset = info.offset as usize;
-                    let size = (info.size as usize).min(8);
-                    if size == 0 || offset + size > buf.len() {
-                        return Err(Error::FieldNotFound(name.to_string()));
-                    }
-                    return Ok(le_uint(&buf[offset..offset + size]));
-                }
-            }
-            Err(Error::FieldNotFound(names[0].to_string()))
+            let (name, info) = names
+                .iter()
+                .find_map(|&name| Some((name, layout.fields.get(name)?)))
+                .ok_or_else(|| Error::FieldNotFound(names[0].to_string()))?;
+            field_uint(buf, name, info)
         };
         let array_field = |name: &str, index: usize, element_size: usize| -> Result<u64> {
-            let info = layout.field(name)?;
-            let offset = (info.offset as usize)
+            let offset = (layout.field(name)?.offset as usize)
                 .checked_add(index.saturating_mul(element_size))
                 .ok_or_else(|| Error::FieldNotFound(name.to_string()))?;
-            if offset + element_size > buf.len() {
-                return Err(Error::FieldNotFound(name.to_string()));
-            }
-            Ok(le_uint(&buf[offset..offset + element_size]))
+            buffer_uint(buf, name, offset, element_size)
         };
         let mut x = [0u64; 19];
         for (index, value) in x.iter_mut().enumerate() {
@@ -229,6 +211,29 @@ impl KtrapFrame {
         })
     }
 }
+
+/// The little-endian integer `field` occupies in `buf`, read at no more than
+/// eight bytes of its PDB width.
+fn field_uint(buf: &[u8], name: &str, field: &FieldInfo) -> Result<u64> {
+    buffer_uint(
+        buf,
+        name,
+        field.offset as usize,
+        (field.size as usize).min(8),
+    )
+}
+
+/// The little-endian integer at `buf[offset..offset + size]`; an empty or
+/// out-of-bounds span means the frame does not hold field `name`.
+fn buffer_uint(buf: &[u8], name: &str, offset: usize, size: usize) -> Result<u64> {
+    offset
+        .checked_add(size)
+        .filter(|_| size != 0)
+        .and_then(|end| buf.get(offset..end))
+        .map(le_uint)
+        .ok_or_else(|| Error::FieldNotFound(name.to_string()))
+}
+
 impl From<&KtrapFrame> for SavedThreadRegisters {
     fn from(frame: &KtrapFrame) -> Self {
         match &frame.data {
@@ -309,12 +314,7 @@ fn decode_kswitch_frame(
 ) -> Result<SavedThreadRegisters> {
     let field = |name: &str| -> Result<(u64, u32)> {
         let field = layout.field(name)?;
-        let offset = field.offset as usize;
-        let size = (field.size as usize).min(8);
-        if size == 0 || offset + size > buf.len() {
-            return Err(Error::FieldNotFound(name.to_string()));
-        }
-        Ok((le_uint(&buf[offset..offset + size]), field.offset))
+        Ok((field_uint(buf, name, field)?, field.offset))
     };
     let optional = |name: &str| field(name).ok().map(|(value, _)| value);
     let (rip, return_offset) = field("Return")?;
