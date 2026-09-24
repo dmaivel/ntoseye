@@ -64,7 +64,7 @@ use crate::TargetSpec;
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{DebugCapability, HwBreakpointAccess, WatchpointAccess};
 use crate::error::{Error, Result};
-use crate::gdb::{BreakpointConfig, trace_packet};
+use crate::gdb::{BreakpointConfig, append_packet, packet_checksum, trace_packet};
 use crate::guest::{ModuleInfo, image_base};
 use crate::output;
 use crate::repl::{
@@ -212,7 +212,7 @@ fn drive(target: &mut GdbTarget<'_>, client: Client) -> Result<&'static str> {
                             let packet = match current_thread_step(&body) {
                                 Some(step) => {
                                     let mut packet = Vec::new();
-                                    frame(&mut packet, step);
+                                    append_packet(&mut packet, step);
                                     packet
                                 }
                                 None => raw,
@@ -372,7 +372,7 @@ impl Client {
         if !self.no_ack {
             self.out.push(b'+');
         }
-        frame(&mut self.out, body);
+        append_packet(&mut self.out, body);
         Connection::flush(self)
     }
 
@@ -438,18 +438,10 @@ impl Client {
             for byte in chunk {
                 let _ = write!(body, "{byte:02x}");
             }
-            frame(&mut self.out, body.as_bytes());
+            append_packet(&mut self.out, body.as_bytes());
         }
         Connection::flush(self)
     }
-}
-
-/// Append `body` as a `$body#checksum` packet.
-fn frame(out: &mut Vec<u8>, body: &[u8]) {
-    let checksum = body.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
-    out.push(b'$');
-    out.extend_from_slice(body);
-    out.extend_from_slice(format!("#{checksum:02x}").as_bytes());
 }
 
 /// Append `feature` to the `qSupported` reply packet in `out`, fixing its
@@ -461,9 +453,7 @@ fn advertise(out: &[u8], feature: &[u8]) -> Option<Vec<u8>> {
     let hash = start + out[start..].iter().position(|byte| *byte == b'#')?;
     let digits = std::str::from_utf8(out.get(hash + 1..hash + 3)?).ok()?;
     let checksum = u8::from_str_radix(digits, 16).ok()?;
-    let checksum = feature
-        .iter()
-        .fold(checksum, |sum, byte| sum.wrapping_add(*byte));
+    let checksum = checksum.wrapping_add(packet_checksum(feature));
     let mut rewritten = out[..hash].to_vec();
     rewritten.extend_from_slice(feature);
     rewritten.extend_from_slice(format!("#{checksum:02x}").as_bytes());

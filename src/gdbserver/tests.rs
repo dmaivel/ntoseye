@@ -1,8 +1,9 @@
 use super::layout::Layout;
 use super::{
-    address_layout, advertise, current_thread_step, frame, library_list_xml, memory_map_xml,
-    proc_maps, xfer_reply,
+    address_layout, advertise, current_thread_step, library_list_xml, memory_map_xml, proc_maps,
+    xfer_reply,
 };
+use crate::gdb::{append_packet, packet_checksum};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
 use crate::types::Arch;
 
@@ -183,9 +184,7 @@ fn memory_map_covers_the_halves_with_each_image_its_own_region() {
 fn checksum_valid(packet: &[u8]) -> bool {
     let start = packet.iter().position(|byte| *byte == b'$').unwrap();
     let hash = packet.iter().rposition(|byte| *byte == b'#').unwrap();
-    let sum = packet[start + 1..hash]
-        .iter()
-        .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    let sum = packet_checksum(&packet[start + 1..hash]);
     let digits = std::str::from_utf8(&packet[hash + 1..hash + 3]).unwrap();
     u8::from_str_radix(digits, 16).unwrap() == sum
 }
@@ -196,14 +195,14 @@ fn checksum_valid(packet: &[u8]) -> bool {
 #[test]
 fn advertised_feature_keeps_the_qsupported_reply_valid() {
     let mut out = vec![b'+'];
-    frame(&mut out, b"PacketSize=4000;vContSupported+");
+    append_packet(&mut out, b"PacketSize=4000;vContSupported+");
     let rewritten = advertise(&out, b";qXfer:threads:read+").unwrap();
 
     assert!(rewritten.starts_with(b"+$PacketSize=4000;vContSupported+;qXfer:threads:read+#"));
     assert!(checksum_valid(&rewritten));
 
     let mut other = Vec::new();
-    frame(&mut other, b"OK");
+    append_packet(&mut other, b"OK");
     assert_eq!(advertise(&other, b";qXfer:threads:read+"), None);
 }
 

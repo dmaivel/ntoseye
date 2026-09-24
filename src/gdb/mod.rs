@@ -28,6 +28,25 @@ const TRACE_BYTES: usize = 200;
 static TRACE: LazyLock<bool> = LazyLock::new(|| std::env::var_os("NTOSEYE_GDB_TRACE").is_some());
 static TRACE_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
+/// The RSP checksum of a packet body: its bytes summed modulo 256.
+pub fn packet_checksum(body: &[u8]) -> u8 {
+    body.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
+}
+
+/// Append `body` to `out` as a `$body#checksum` packet.
+pub fn append_packet(out: &mut Vec<u8>, body: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let checksum = packet_checksum(body);
+    out.reserve(body.len() + 4);
+    out.push(b'$');
+    out.extend_from_slice(body);
+    out.extend_from_slice(&[
+        b'#',
+        HEX[usize::from(checksum >> 4)],
+        HEX[usize::from(checksum & 0xf)],
+    ]);
+}
+
 /// Trace one packet. `direction` is `->` for bytes ntoseye sends to `peer`
 /// and `<-` for bytes it receives.
 pub fn trace_packet(peer: &str, direction: &str, bytes: &[u8]) {
@@ -340,8 +359,7 @@ impl GdbClient {
         if self.is_running {
             return Err(Error::TargetRunning(GDB_STUB_NEEDS_HALT));
         }
-        let packet = Self::encode_packet(data);
-        self.send_raw_command(&packet)?;
+        self.send_raw_command(data)?;
         self.read_response_packet()
     }
 
@@ -355,15 +373,14 @@ impl GdbClient {
         }
     }
 
-    fn encode_packet(data: &str) -> Vec<u8> {
-        let checksum: u8 = data.bytes().fold(0u8, |acc, b| acc.wrapping_add(b));
-        format!("${}#{:02x}", data, checksum).into_bytes()
-    }
-
-    fn send_raw_command(&mut self, packet: &[u8]) -> Result<()> {
-        trace_packet("stub", "->", packet);
+    /// Send `data` as one packet, resending it until the stub acknowledges
+    /// it unless no-ack mode is on.
+    fn send_raw_command(&mut self, data: &str) -> Result<()> {
+        let mut packet = Vec::new();
+        append_packet(&mut packet, data.as_bytes());
+        trace_packet("stub", "->", &packet);
         loop {
-            self.stream.write_all(packet)?;
+            self.stream.write_all(&packet)?;
             self.stream.flush()?;
 
             if self.no_ack_mode {
@@ -399,10 +416,7 @@ impl GdbClient {
         loop {
             let packet = self.read_raw_packet()?;
             let expected = Self::parse_checksum(packet.checksum)?;
-            let actual = packet
-                .data
-                .iter()
-                .fold(0u8, |acc, byte| acc.wrapping_add(*byte));
+            let actual = packet_checksum(&packet.data);
 
             if actual != expected {
                 if self.no_ack_mode {
@@ -646,8 +660,7 @@ impl GdbClient {
     }
 
     fn send_command_no_reply(&mut self, data: &str) -> Result<()> {
-        let packet = Self::encode_packet(data);
-        self.send_raw_command(&packet)
+        self.send_raw_command(data)
     }
 
     fn continue_execution(&mut self) -> Result<()> {
@@ -1076,7 +1089,7 @@ mod tests {
 
     use super::{
         GdbClient, HW_BREAKPOINT_SLOTS, PacketReadState, RegisterMap, StopReply, StubFeatures,
-        description_arch,
+        append_packet, description_arch,
     };
     use crate::dbg_backend::DebugBackend;
     use crate::types::Arch;
@@ -1091,10 +1104,9 @@ mod tests {
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let reply = |stream: &mut TcpStream, body: &str| {
-                let sum = body.bytes().fold(0u8, |a, b| a.wrapping_add(b));
-                stream
-                    .write_all(format!("${body}#{sum:02x}").as_bytes())
-                    .unwrap();
+                let mut packet = Vec::new();
+                append_packet(&mut packet, body.as_bytes());
+                stream.write_all(&packet).unwrap();
             };
             let mut packet = Vec::new();
             let mut byte = [0u8];
