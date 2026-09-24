@@ -113,14 +113,16 @@ impl RegisterMap {
             .by_name
             .get(name.as_ref())
             .ok_or(Error::RegisterNotFound(name.into()))?;
+        if info.size > 16 {
+            return Err(Error::RegisterTooWide(info.name.clone()));
+        }
         if info.offset + info.size > data.len() {
             return Err(Error::BufferNotEnough);
         }
         let slice = &data[info.offset..info.offset + info.size];
 
         let mut buf = [0u8; 16];
-        let copy_len = slice.len().min(buf.len());
-        buf[..copy_len].copy_from_slice(&slice[..copy_len]);
+        buf[..slice.len()].copy_from_slice(slice);
         Ok(u128::from_le_bytes(buf))
     }
 
@@ -434,6 +436,19 @@ mod tests {
         let map = RegisterMap::parse_target_xml(xml).unwrap();
         let value = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeffu128;
         assert_eq!(map.read_u128("xmm0", &value.to_le_bytes()).unwrap(), value);
+    }
+
+    #[test]
+    fn read_u128_rejects_a_256_bit_register() {
+        let xml = r#"<target><feature name="core">
+            <reg name="ymm0" bitsize="256"/>
+        </feature></target>"#;
+        let map = RegisterMap::parse_target_xml(xml).unwrap();
+
+        assert!(matches!(
+            map.read_u128("ymm0", &[0x5a; 32]),
+            Err(Error::RegisterTooWide(name)) if name == "ymm0"
+        ));
     }
 
     /// A 128-bit register never reaches the 64-bit views truncated: they see
