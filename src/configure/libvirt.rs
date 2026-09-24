@@ -12,9 +12,9 @@ use crate::{
 };
 
 use super::{
-    Action, ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
-    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, backup_file,
-    kdnet_instructions, shell_quote,
+    ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
+    ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
+    backup_file, kdnet_instructions, shell_quote,
 };
 
 const QEMU_NS: &str = "http://libvirt.org/schemas/domain/qemu/1.0";
@@ -81,11 +81,12 @@ impl Configurator for Libvirt {
 
     fn plan(&self, guest: &Guest, request: ConfigureRequest) -> Result<Box<dyn ConfigurationPlan>> {
         let original = dump_xml(&guest.id)?;
-        let xml_plan = match request.action {
-            Action::Configure => {
-                let backend = request.backend.ok_or_else(|| {
-                    Error::DebugInfo("configure request is missing a backend".to_string())
-                })?;
+        let xml_plan = match request {
+            ConfigureRequest::Configure {
+                backend,
+                vmcoreinfo,
+            } => {
+                let backend = backend.selection();
                 let mut transports = Vec::with_capacity(2);
                 if backend.kd() {
                     transports.push(DebugTransport::Kd);
@@ -96,9 +97,9 @@ impl Configurator for Libvirt {
                 if backend.gdb() {
                     transports.push(DebugTransport::Gdb);
                 }
-                apply_transport_config(&original, &transports, KD_SOCKET, request.vmcoreinfo)?
+                apply_transport_config(&original, &transports, KD_SOCKET, vmcoreinfo)?
             }
-            Action::Remove => remove_debug_transports(&original),
+            ConfigureRequest::Remove => remove_debug_transports(&original),
         };
         let instructions = libvirt_instructions(&xml_plan.xml, request, &guest.id);
         Ok(Box::new(LibvirtPlan {
@@ -220,15 +221,19 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 fn libvirt_instructions(xml: &str, request: ConfigureRequest, domain: &str) -> Instructions {
-    if request.action == Action::Remove {
+    let ConfigureRequest::Configure {
+        backend,
+        vmcoreinfo,
+    } = request
+    else {
         return Instructions::default();
-    }
-    let backend = request.backend.expect("configure requests have a backend");
+    };
+    let selected = backend.selection();
     let mut instructions = Instructions::default();
-    if backend == BackendSelection::KdNet {
-        instructions = kdnet_instructions(request, false);
+    if let ConfigureBackend::KdNet { host } = backend {
+        instructions = kdnet_instructions(host, false);
     }
-    if backend.kd() {
+    if selected.kd() {
         let debug_port = debug_port_for_socket(xml, KD_SOCKET).unwrap_or(1);
         instructions.guest = vec![
             "bcdedit /debug on".to_string(),
@@ -239,12 +244,12 @@ fn libvirt_instructions(xml: &str, request: ConfigureRequest, domain: &str) -> I
             .run
             .push(ConfiguredTarget::kd(KD_SOCKET, debug_port, false).run_command());
     }
-    if backend.gdb() {
+    if selected.gdb() {
         instructions
             .run
             .push(ConfiguredTarget::gdb(DEFAULT_GDB_ADDR).run_command());
     }
-    if request.vmcoreinfo {
+    if vmcoreinfo {
         instructions.notes.push(
             "Install the virtio-win 'fwcfg' driver in the guest for crash dumps.".to_string(),
         );
@@ -262,13 +267,16 @@ fn libvirt_instructions(xml: &str, request: ConfigureRequest, domain: &str) -> I
 fn verify_applied_config(xml: &str, request: ConfigureRequest) -> Result<()> {
     let has_kd = debug_port_for_socket(xml, KD_SOCKET).is_some();
     let has_gdb = has_qemu_arg(xml, "-s") && has_qemu_arg(xml, "-S");
-    match request.action {
-        Action::Remove if has_kd || has_gdb => Err(Error::DebugInfo(
+    match request {
+        ConfigureRequest::Remove if has_kd || has_gdb => Err(Error::DebugInfo(
             "libvirt did not remove every ntoseye transport".to_string(),
         )),
-        Action::Remove => Ok(()),
-        Action::Configure => {
-            let backend = request.backend.expect("configure requests have a backend");
+        ConfigureRequest::Remove => Ok(()),
+        ConfigureRequest::Configure {
+            backend,
+            vmcoreinfo,
+        } => {
+            let backend = backend.selection();
             if has_kd != backend.kd() || has_gdb != backend.gdb() {
                 return Err(Error::DebugInfo(
                     "libvirt did not retain the requested debug transports".to_string(),
@@ -279,7 +287,7 @@ fn verify_applied_config(xml: &str, request: ConfigureRequest) -> Result<()> {
                     "libvirt did not retain the KDNET Hyper-V vendor override".to_string(),
                 ));
             }
-            if request.vmcoreinfo && !xml.contains("<vmcoreinfo state=\"on\"") {
+            if vmcoreinfo && !xml.contains("<vmcoreinfo state=\"on\"") {
                 return Err(Error::DebugInfo(
                     "libvirt did not retain vmcoreinfo".to_string(),
                 ));
@@ -789,10 +797,10 @@ mod tests {
                 .contains("      <vendor_id state=\"on\" value=\"KVMKVMKVM\"/>\n    </hyperv>")
         );
         assert!(kdnet_vendor_ready(&once.xml));
-        let request = ConfigureRequest {
-            action: Action::Configure,
-            backend: Some(BackendSelection::KdNet),
-            kdnet_host: Some("192.168.122.1".parse().unwrap()),
+        let request = ConfigureRequest::Configure {
+            backend: ConfigureBackend::KdNet {
+                host: "192.168.122.1".parse().unwrap(),
+            },
             vmcoreinfo: false,
         };
         verify_applied_config(&once.xml, request).unwrap();
@@ -844,10 +852,8 @@ mod tests {
     fn launch_commands_omit_default_backend_and_endpoints() {
         let instructions = libvirt_instructions(
             BASE_XML,
-            ConfigureRequest {
-                action: Action::Configure,
-                backend: Some(BackendSelection::KdAndGdb),
-                kdnet_host: None,
+            ConfigureRequest::Configure {
+                backend: ConfigureBackend::KdAndGdb,
                 vmcoreinfo: false,
             },
             "windows",

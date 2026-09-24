@@ -12,9 +12,9 @@ use crate::{
 };
 
 use super::{
-    Action, ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
-    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, atomic_replace,
-    backup_file, kdnet_instructions,
+    ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
+    ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
+    atomic_replace, backup_file, kdnet_instructions,
 };
 
 const BACKENDS: &[BackendSelection] = &[
@@ -172,8 +172,8 @@ fn plan_vmx(
     let mut changes = Vec::new();
     let mut debug_port = None;
 
-    match request.action {
-        Action::Remove => {
+    match request {
+        ConfigureRequest::Remove => {
             for index in managed {
                 editor.remove_serial(index);
                 changes.push(format!("remove ntoseye KD serial device serial{index}"));
@@ -182,10 +182,8 @@ fn plan_vmx(
                 changes.push("remove VMware GDB stub configuration".to_string());
             }
         }
-        Action::Configure => {
-            let backend = request.backend.ok_or_else(|| {
-                Error::DebugInfo("configure request is missing a backend".to_string())
-            })?;
+        ConfigureRequest::Configure { backend, .. } => {
+            let backend = backend.selection();
             if backend.kd() {
                 let index = managed
                     .first()
@@ -226,15 +224,15 @@ fn plan_vmx(
 }
 
 fn vmware_instructions(request: ConfigureRequest, debug_port: Option<usize>) -> Instructions {
-    if request.action == Action::Remove {
+    let ConfigureRequest::Configure { backend, .. } = request else {
         return Instructions::default();
-    }
-    let backend = request.backend.expect("configure requests have a backend");
+    };
+    let selected = backend.selection();
     let mut instructions = Instructions::default();
-    if backend == BackendSelection::KdNet {
-        instructions = kdnet_instructions(request, false);
+    if let ConfigureBackend::KdNet { host } = backend {
+        instructions = kdnet_instructions(host, false);
     }
-    if backend.kd() {
+    if selected.kd() {
         let debug_port = debug_port.expect("KD configuration has a serial port");
         instructions.guest = vec![
             "bcdedit /debug on".to_string(),
@@ -245,7 +243,7 @@ fn vmware_instructions(request: ConfigureRequest, debug_port: Option<usize>) -> 
             .run
             .push(ConfiguredTarget::kd(KD_SOCKET, debug_port, false).run_command());
     }
-    if backend.gdb() {
+    if selected.gdb() {
         instructions
             .run
             .push(ConfiguredTarget::gdb(DEFAULT_GDB_ADDR).run_command());
@@ -446,6 +444,7 @@ fn first_free_serial(editor: &VmxEditor) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::configure::Action;
 
     const BASE_VMX: &str = r#".encoding = "UTF-8"
 displayName = "Windows 11"
@@ -455,19 +454,21 @@ serial0.fileName = "/tmp/console.log"
 "#;
 
     fn request(action: Action, backend: Option<BackendSelection>) -> ConfigureRequest {
-        ConfigureRequest {
-            action,
-            backend,
-            kdnet_host: None,
-            vmcoreinfo: false,
+        match (action, backend) {
+            (Action::Configure, Some(selection)) => ConfigureRequest::Configure {
+                backend: ConfigureBackend::from_selection(selection, None).unwrap(),
+                vmcoreinfo: false,
+            },
+            (Action::Remove, None) => ConfigureRequest::Remove,
+            _ => panic!("invalid configure test request"),
         }
     }
 
     fn kdnet_request() -> ConfigureRequest {
-        ConfigureRequest {
-            action: Action::Configure,
-            backend: Some(BackendSelection::KdNet),
-            kdnet_host: Some("192.168.56.1".parse().unwrap()),
+        ConfigureRequest::Configure {
+            backend: ConfigureBackend::KdNet {
+                host: "192.168.56.1".parse().unwrap(),
+            },
             vmcoreinfo: false,
         }
     }

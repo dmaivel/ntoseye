@@ -75,12 +75,64 @@ pub enum ProbeStatus {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ConfigureRequest {
-    pub action: Action,
-    pub backend: Option<BackendSelection>,
-    pub kdnet_host: Option<Ipv4Addr>,
+pub enum ConfigureRequest {
+    Configure {
+        backend: ConfigureBackend,
+        #[cfg(any(target_os = "linux", test))]
+        vmcoreinfo: bool,
+    },
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigureBackend {
+    Kd,
+    KdNet {
+        host: Ipv4Addr,
+    },
     #[cfg(any(target_os = "linux", test))]
-    pub vmcoreinfo: bool,
+    Gdb,
+    #[cfg(any(target_os = "linux", test))]
+    KdAndGdb,
+}
+
+impl ConfigureBackend {
+    pub fn from_selection(
+        selection: BackendSelection,
+        kdnet_host: Option<Ipv4Addr>,
+    ) -> Result<Self> {
+        match (selection, kdnet_host) {
+            (BackendSelection::Kd, None) => Ok(Self::Kd),
+            (BackendSelection::KdNet, Some(host)) => Ok(Self::KdNet { host }),
+            #[cfg(any(target_os = "linux", test))]
+            (BackendSelection::Gdb, None) => Ok(Self::Gdb),
+            #[cfg(any(target_os = "linux", test))]
+            (BackendSelection::KdAndGdb, None) => Ok(Self::KdAndGdb),
+            (BackendSelection::KdNet, None) => Err(Error::InvalidArgument(
+                "KDNET configuration requires a host IPv4 address".into(),
+            )),
+            (BackendSelection::Memory, None) => Err(Error::InvalidArgument(
+                "memory does not require host configuration".into(),
+            )),
+            (BackendSelection::Memory, Some(_)) => Err(Error::InvalidArgument(
+                "backend is not supported for host configuration".into(),
+            )),
+            (_, Some(_)) => Err(Error::InvalidArgument(
+                "a KDNET host is only valid with the KDNET backend".into(),
+            )),
+        }
+    }
+
+    pub fn selection(self) -> BackendSelection {
+        match self {
+            Self::Kd => BackendSelection::Kd,
+            Self::KdNet { .. } => BackendSelection::KdNet,
+            #[cfg(any(target_os = "linux", test))]
+            Self::Gdb => BackendSelection::Gdb,
+            #[cfg(any(target_os = "linux", test))]
+            Self::KdAndGdb => BackendSelection::KdAndGdb,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -198,10 +250,7 @@ pub trait Configurator {
     fn plan(&self, guest: &Guest, request: ConfigureRequest) -> Result<Box<dyn ConfigurationPlan>>;
 }
 
-pub fn kdnet_instructions(request: ConfigureRequest, elevated: bool) -> Instructions {
-    let host = request
-        .kdnet_host
-        .expect("KDNET configure requests have a host IP");
+pub fn kdnet_instructions(host: Ipv4Addr, elevated: bool) -> Instructions {
     let executable = if elevated { "sudo ntoseye" } else { "ntoseye" };
     Instructions {
         guest: vec![
@@ -304,15 +353,15 @@ pub fn run_interactive() -> Result<()> {
             println!("  ntoseye --backend memory");
             return Ok(());
         }
-        Some(backend)
-    } else {
-        None
-    };
-    let kdnet_host = if backend == Some(BackendSelection::KdNet) {
-        Some(prompt_ipv4(
-            "Host IPv4 address reachable from the guest",
-            default_host_ipv4(),
-        )?)
+        let kdnet_host = if backend == BackendSelection::KdNet {
+            Some(prompt_ipv4(
+                "Host IPv4 address reachable from the guest",
+                default_host_ipv4(),
+            )?)
+        } else {
+            None
+        };
+        Some(ConfigureBackend::from_selection(backend, kdnet_host)?)
     } else {
         None
     };
@@ -323,16 +372,20 @@ pub fn run_interactive() -> Result<()> {
         && prompt_confirm(
             "Enable crash-dump generation (vmcoreinfo, used by 'virsh dump --format=win-dmp')?",
         )?;
-    let plan = configurator.plan(
-        guest,
-        ConfigureRequest {
-            action,
+    let request = match (action, backend) {
+        (Action::Configure, Some(backend)) => ConfigureRequest::Configure {
             backend,
-            kdnet_host,
             #[cfg(any(target_os = "linux", test))]
             vmcoreinfo,
         },
-    )?;
+        (Action::Remove, None) => ConfigureRequest::Remove,
+        _ => {
+            return Err(Error::InvalidArgument(
+                "configure action and backend selection do not match".into(),
+            ));
+        }
+    };
+    let plan = configurator.plan(guest, request)?;
 
     if plan.changes().is_empty() {
         println!();
@@ -674,15 +727,7 @@ mod tests {
 
     #[test]
     fn kdnet_setup_uses_selected_host_and_runtime_key_placeholder() {
-        let instructions = kdnet_instructions(
-            ConfigureRequest {
-                action: Action::Configure,
-                backend: Some(BackendSelection::KdNet),
-                kdnet_host: Some(Ipv4Addr::new(192, 168, 122, 1)),
-                vmcoreinfo: false,
-            },
-            false,
-        );
+        let instructions = kdnet_instructions(Ipv4Addr::new(192, 168, 122, 1), false);
         assert_eq!(
             instructions.guest,
             [
@@ -701,6 +746,14 @@ mod tests {
                 .iter()
                 .any(|note| note.contains("kdnet.exe 192.168.122.1 50000"))
         );
+    }
+
+    #[test]
+    fn kdnet_configuration_requires_a_host_address() {
+        assert!(matches!(
+            ConfigureBackend::from_selection(BackendSelection::KdNet, None),
+            Err(Error::InvalidArgument(_))
+        ));
     }
 
     #[test]

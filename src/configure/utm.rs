@@ -9,9 +9,9 @@ use std::{
 use crate::error::{Error, Result};
 
 use super::{
-    Action, ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
-    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, backup_file,
-    kdnet_instructions,
+    ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
+    ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
+    backup_file, kdnet_instructions,
 };
 
 const BACKENDS: &[BackendSelection] = &[
@@ -121,16 +121,22 @@ impl Configurator for Utm {
         let changes = if configured == original {
             Vec::new()
         } else {
-            match (request.action, request.backend) {
-                (Action::Configure, Some(BackendSelection::Kd)) => vec![format!(
+            match request {
+                ConfigureRequest::Configure {
+                    backend: ConfigureBackend::Kd,
+                    ..
+                } => vec![format!(
                     "configure UTM KD serial socket {} as guest COM1",
                     socket.display()
                 )],
-                (Action::Configure, Some(BackendSelection::KdNet)) => {
+                ConfigureRequest::Configure {
+                    backend: ConfigureBackend::KdNet { .. },
+                    ..
+                } => {
                     vec!["remove UTM KD serial socket; KDNET uses the virtual NIC".to_string()]
                 }
-                (Action::Configure, _) => Vec::new(),
-                (Action::Remove, _) => {
+                ConfigureRequest::Configure { .. } => Vec::new(),
+                ConfigureRequest::Remove => {
                     vec!["remove ntoseye KD arguments from UTM".to_string()]
                 }
             }
@@ -228,11 +234,8 @@ fn plan_arguments(
     socket: &Path,
 ) -> Result<Vec<String>> {
     let mut arguments = remove_managed_arguments(original);
-    if request.action == Action::Configure {
-        let backend = request.backend.ok_or_else(|| {
-            Error::DebugInfo("configure request is missing a backend".to_string())
-        })?;
-        if backend.kd() {
+    if let ConfigureRequest::Configure { backend, .. } = request {
+        if backend.selection().kd() {
             arguments.extend([
                 "-chardev".to_string(),
                 format!(
@@ -242,7 +245,7 @@ fn plan_arguments(
                 "-serial".to_string(),
                 "chardev:kd".to_string(),
             ]);
-        } else if backend != BackendSelection::KdNet {
+        } else if !matches!(backend, ConfigureBackend::KdNet { .. }) {
             return Err(Error::DebugInfo(
                 "UTM only supports automatic configuration for KD and KDNET".to_string(),
             ));
@@ -305,12 +308,11 @@ fn utm_socket_path() -> Result<PathBuf> {
 }
 
 fn utm_instructions(request: ConfigureRequest, socket: &Path) -> Instructions {
-    if request.action == Action::Remove {
+    let ConfigureRequest::Configure { backend, .. } = request else {
         return Instructions::default();
-    }
-    let backend = request.backend.expect("configure requests have a backend");
-    if backend == BackendSelection::KdNet {
-        let mut instructions = kdnet_instructions(request, false);
+    };
+    if let ConfigureBackend::KdNet { host } = backend {
+        let mut instructions = kdnet_instructions(host, false);
         instructions.run[0].push_str(" --memory-source kd");
         instructions.notes.push(
             "Secure Boot must be disabled in UTM before Windows allows kernel debugging."
@@ -385,21 +387,23 @@ fn command_detail(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::configure::Action;
 
     fn request(action: Action) -> ConfigureRequest {
-        ConfigureRequest {
-            action,
-            backend: (action == Action::Configure).then_some(BackendSelection::Kd),
-            kdnet_host: None,
-            vmcoreinfo: false,
+        match action {
+            Action::Configure => ConfigureRequest::Configure {
+                backend: ConfigureBackend::Kd,
+                vmcoreinfo: false,
+            },
+            Action::Remove => ConfigureRequest::Remove,
         }
     }
 
     fn kdnet_request() -> ConfigureRequest {
-        ConfigureRequest {
-            action: Action::Configure,
-            backend: Some(BackendSelection::KdNet),
-            kdnet_host: Some("192.168.64.1".parse().unwrap()),
+        ConfigureRequest::Configure {
+            backend: ConfigureBackend::KdNet {
+                host: "192.168.64.1".parse().unwrap(),
+            },
             vmcoreinfo: false,
         }
     }
