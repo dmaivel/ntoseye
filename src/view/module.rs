@@ -1,4 +1,4 @@
-//! Loaded-module [`View`](super::View) builders: module identity and symbol
+//! Loaded-module [`View`] builders: module identity and symbol
 //! load status.
 
 use super::View;

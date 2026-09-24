@@ -1,4 +1,4 @@
-//! cpu: [`View`](super::View) builders for the structured inspectors.
+//! cpu: [`View`] builders for the structured inspectors.
 
 use super::{View, diagnostic};
 use crate::target::cpu::{

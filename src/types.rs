@@ -345,7 +345,7 @@ impl PageTableEntry {
     // bits[1:0]: 0b00 invalid, 0b01 block (L0-L2), 0b11 table (L0-L2) /
     // page (L3). Leaf descriptors carry AP[2:1], PXN, and UXN; table
     // descriptors carry the hierarchical APTable, PXNTable, and UXNTable
-    // restrictions. Output address bits [47:12] support a 48-bit PA space.
+    // restrictions. Output address bits \[47:12\] support a 48-bit PA space.
     pub const fn arm64_is_valid(self) -> bool {
         // 0b01 block, 0b11 table/page; 0b00 invalid, 0b10 reserved.
         self.0 & 0b01 != 0
@@ -355,7 +355,7 @@ impl PageTableEntry {
         self.0 & 0b11 == 0b01
     }
 
-    /// Output address bits [47:12] (48-bit PA space), kept in place.
+    /// Output address bits \[47:12\] (48-bit PA space), kept in place.
     pub const fn arm64_page_frame(self) -> u64 {
         self.0 & 0x0000_FFFF_FFFF_F000
     }
@@ -390,12 +390,12 @@ impl PageTableEntry {
         self.0 & (1 << 6) == 0
     }
 
-    /// APTable[0] (bit 61) forbids EL0 access through a child table.
+    /// APTable\[0\] (bit 61) forbids EL0 access through a child table.
     pub const fn arm64_table_allows_user(self) -> bool {
         self.0 & (1 << 61) == 0
     }
 
-    /// APTable[1] (bit 62) makes child mappings read-only.
+    /// APTable\[1\] (bit 62) makes child mappings read-only.
     pub const fn arm64_table_allows_write(self) -> bool {
         self.0 & (1 << 62) == 0
     }

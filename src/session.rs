@@ -103,7 +103,7 @@ pub enum ContinueOutcome {
     Running,
     /// A non-resuming wait found the VM already halted with nothing pending: it
     /// is parked at `rip` and no new stop can arrive without a resume. Returned
-    /// only by [`Self::wait_for_stop_bounded`] (the run-and-wait helpers resume
+    /// only by [`Session::wait_for_stop_bounded`] (the run-and-wait helpers resume
     /// first, so they never see it); lets a caller distinguish "still stopped
     /// where you left it" from "running" instead of spinning the whole timeout.
     Halted { rip: u64 },
@@ -508,7 +508,7 @@ impl Session {
     }
 }
 
-/// The result of [`perform_target_reload`]: the guest-reload outcome plus the
+/// The result of `Session::perform_target_reload`: the guest-reload outcome plus the
 /// resolved kernel-base hint the reload was guided by. `report` is `Ok` when the
 /// new kernel image was rediscovered (possibly before its module list is up;
 /// check [`reload::reload_report_has_loaded_module_list`]) and `Err` when it

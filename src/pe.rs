@@ -25,7 +25,7 @@ pub struct ModuleExportInfo {
 }
 
 /// A module image addressed by RVA. An on-disk image is complete; an image
-/// read from guest memory is demand-read in [`IMAGE_BLOCK`]-sized blocks and
+/// read from guest memory is demand-read in `IMAGE_BLOCK`-sized blocks and
 /// keeps every block it has read, so a stack walk costs the blocks its
 /// lookups touch rather than the whole `.pdata`/`.rdata` of the module,
 /// which for a kernel over a KD serial link is megabytes.

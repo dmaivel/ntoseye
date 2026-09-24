@@ -1,4 +1,4 @@
-//! usermode: [`View`](super::View) builders for the structured inspectors.
+//! usermode: [`View`] builders for the structured inspectors.
 
 use super::{View, diagnostic, list_termination};
 use crate::target::DiagnosticValue;

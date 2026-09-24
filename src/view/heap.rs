@@ -1,4 +1,4 @@
-//! Heap [`View`](super::View) builders for the structured inspectors.
+//! Heap [`View`] builders for the structured inspectors.
 
 use super::{View, diagnostic};
 use crate::target::heap::{

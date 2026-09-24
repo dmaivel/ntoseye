@@ -47,7 +47,7 @@ impl Session {
     ///
     /// Bounded: while the guest is rebooting (reconnect assist) or hammering a
     /// wrong-process breakpoint, every break-in can classify as noise and be
-    /// resumed; after [`INTERRUPT_MAX_RESUMES`] of those the last stop is
+    /// resumed; after `INTERRUPT_MAX_RESUMES` of those the last stop is
     /// surfaced as-is rather than spinning forever (the ^D exit path lives on
     /// this).
     pub fn interrupt(&mut self) -> Result<StopEvent> {

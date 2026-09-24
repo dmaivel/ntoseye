@@ -474,7 +474,7 @@ impl ModuleSymbolStatus {
 pub enum ModuleSymbolSource {
     Memory,
     Image,
-    /// Remembered from an earlier session (see [`ModuleIdentities`]).
+    /// Remembered from an earlier session (see `ModuleIdentities`).
     Identity,
 }
 

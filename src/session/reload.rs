@@ -334,7 +334,7 @@ fn stop_event_requires_target_reload(debugger: &Target, event: &StopEvent) -> bo
 /// past, not surface. KD marks reconnect-assist break-ins explicitly via the
 /// `assisted_breakin` flag; user-initiated break-ins (e.g. via Ctrl+C) always
 /// surface as real stops regardless of where the kernel hits. Used by
-/// [`Session::classify_reload_stop`].
+/// `Session::classify_reload_stop`.
 pub fn stop_is_assisted_refresh_breakin(
     breakpoints: &BreakpointManager,
     event: &StopEvent,

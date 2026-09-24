@@ -268,7 +268,7 @@ mod platform {
         /// Guest-physical RAM as `(base, len)` runs: on x86, low RAM up to
         /// the hypervisor's 32-bit MMIO hole and the remainder from 4 GiB;
         /// on AArch64, one run from the RAM base. Inverse of
-        /// [`gpa_to_offset`].
+        /// `gpa_to_offset`.
         pub fn ram_runs(&self) -> Vec<(u64, u64)> {
             let size = self.memory.length;
             match self.layout {

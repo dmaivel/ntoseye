@@ -1148,7 +1148,7 @@ pub struct ApcLayout {
 }
 
 impl Target {
-    /// The process's parent PID; see [`parent_pid`] for the field fallback.
+    /// The process's parent PID; see `parent_pid` for the field fallback.
     pub fn process_parent_pid(&self, process: &ProcessInfo) -> Result<u64> {
         let eprocess = self
             .guest()?

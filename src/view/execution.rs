@@ -1,4 +1,4 @@
-//! Debugger execution-state [`View`](super::View) builders: run status,
+//! Debugger execution-state [`View`] builders: run status,
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 

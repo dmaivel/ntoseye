@@ -118,7 +118,7 @@ impl RegisterMap {
 
     /// Read a register whose wire representation is at most 128 bits.
     /// Smaller registers are zero-extended in the same little-endian order as
-    /// [`read_u64`]. This is used for the AMD64 XMM/FltSave and ARM64 V
+    /// [`Self::read_u64`]. This is used for the AMD64 XMM/FltSave and ARM64 V
     /// registers exposed by KD's CONTEXT packet.
     pub fn read_u128<S>(&self, name: S, data: &[u8]) -> Result<u128>
     where

@@ -1,4 +1,4 @@
-//! Debug-backend [`View`](super::View) builders: the capability matrix and
+//! Debug-backend [`View`] builders: the capability matrix and
 //! captured guest debug output.
 
 use super::View;

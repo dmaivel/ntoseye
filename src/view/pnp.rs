@@ -1,4 +1,4 @@
-//! PnP [`View`](super::View) builders for the structured inspectors.
+//! PnP [`View`] builders for the structured inspectors.
 
 use crate::target::pnp::{
     DevNodeDetail, DevNodeSummary, DeviceStackDetail, DeviceStackEntry, PnpTriageDetail,

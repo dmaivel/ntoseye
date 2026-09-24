@@ -76,7 +76,7 @@ macro_rules! impl_value_fmt {
 
 impl_value_fmt!(fmt::Display, fmt::LowerHex, fmt::UpperHex, fmt::Binary);
 
-/// Style a disassembled instruction's [`AsmToken`](crate::disasm::AsmToken)s
+/// Style a disassembled instruction's [`AsmToken`]s
 /// for the listing: mnemonic as the anchor, registers and immediates in content
 /// color, punctuation muted.
 pub fn disasm_asm(tokens: &[AsmToken]) -> String {

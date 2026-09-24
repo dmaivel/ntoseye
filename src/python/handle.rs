@@ -121,7 +121,7 @@ type Job = Box<dyn FnOnce(&mut Session) + Send + 'static>;
 
 /// The owner thread of an attached session. The `Session` is opened on that
 /// thread and never leaves it (it is not `Send`); callers ship closures over
-/// a channel. Between jobs it services the guest every [`SERVICE_TICK`], so a
+/// a channel. Between jobs it services the guest every `SERVICE_TICK`, so a
 /// wrong-process or false-condition breakpoint hit is resumed (and a real stop
 /// parked for the next wait) even while no Python code is calling in.
 pub struct Actor {

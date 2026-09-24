@@ -73,7 +73,7 @@ impl Target {
     }
 
     /// A loaded module's PE file in the symbol cache, downloaded when absent.
-    /// Blocks for the download; see [`Self::module_image_key`] for the lookup.
+    /// Blocks for the download; see `Self::module_image_key` for the lookup.
     pub fn fetch_module_image(&self, name: &str) -> Result<PathBuf> {
         let (module, time_date_stamp, size_of_image) = self.module_image_key(name)?;
         self.symbols

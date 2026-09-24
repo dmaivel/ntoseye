@@ -1,4 +1,4 @@
-//! sched: [`View`](super::View) builders for the structured inspectors.
+//! sched: [`View`] builders for the structured inspectors.
 
 use super::{View, diagnostic, list_termination};
 use crate::target::sched::{

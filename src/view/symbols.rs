@@ -1,4 +1,4 @@
-//! Symbol, source-line, local-variable, and type-layout [`View`](super::View)
+//! Symbol, source-line, local-variable, and type-layout [`View`]
 //! builders.
 
 use super::View;

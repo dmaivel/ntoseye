@@ -1,4 +1,4 @@
-//! Process and thread [`View`](super::View) builders.
+//! Process and thread [`View`] builders.
 
 use super::View;
 use crate::guest::ProcessInfo;

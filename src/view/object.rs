@@ -1,4 +1,4 @@
-//! Object- and I/O-manager [`View`](super::View) builders: IRPs, driver and
+//! Object- and I/O-manager [`View`] builders: IRPs, driver and
 //! device objects, object headers, handles, file objects, executive
 //! resources, notification callbacks, and service tables.
 

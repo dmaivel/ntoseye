@@ -1,5 +1,5 @@
-//! The REPL's stdout seam. Command rendering writes through [`out!`] /
-//! [`outln!`] instead of `print!`/`println!`, so a host that owns stdout for
+//! The REPL's stdout seam. Command rendering writes through `out!` /
+//! `outln!` instead of `print!`/`println!`, so a host that owns stdout for
 //! something else (the stdio MCP transport, which speaks JSON-RPC on it) can
 //! run a command and take its text with [`capture`]. With no capture active
 //! the macros are plain stdout, so the interactive REPL is unchanged.
@@ -22,7 +22,7 @@ thread_local! {
 
 static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
 
-/// Open the command transcript sink. Every subsequent [`out!`], [`outln!`],
+/// Open the command transcript sink. Every subsequent `out!`, `outln!`,
 /// and diagnostic emission is copied here with terminal escape sequences
 /// removed. Opening a new sink replaces the previous one.
 pub fn open_log(path: impl AsRef<Path>, append: bool) -> io::Result<()> {
@@ -89,7 +89,7 @@ pub fn log_input_line(line: &str) {
     log_text(&clean);
 }
 
-/// Backing call for [`out!`]/[`outln!`]: append to the active capture, else
+/// Backing call for `out!`/`outln!`: append to the active capture, else
 /// print to stdout.
 pub fn write_fmt(args: fmt::Arguments<'_>) {
     log_args(args);

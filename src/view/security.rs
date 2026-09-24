@@ -1,4 +1,4 @@
-//! security: [`View`](super::View) builders for the structured inspectors.
+//! security: [`View`] builders for the structured inspectors.
 
 use super::process::process;
 use super::{View, diagnostic};

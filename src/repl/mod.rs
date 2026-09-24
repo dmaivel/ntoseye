@@ -300,7 +300,7 @@ impl StopWaitBudget {
 }
 
 /// Where a command line comes from. It determines which run-control commands
-/// are allowed; see [`ReplState::run_control_denial`].
+/// are allowed; see `ReplState::run_control_denial`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispatchContext {
     /// The user's prompt: anything goes.

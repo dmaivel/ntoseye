@@ -1,4 +1,4 @@
-//! Bugcheck [`View`](super::View) builders and the fault context they carry:
+//! Bugcheck [`View`] builders and the fault context they carry:
 //! decoded trap frames and exception records.
 
 use super::View;

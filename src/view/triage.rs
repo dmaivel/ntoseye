@@ -1,4 +1,4 @@
-//! Crash-triage [`View`](super::View) builders: the triage report and the
+//! Crash-triage [`View`] builders: the triage report and the
 //! dump metadata, failure signature, and findings it aggregates.
 
 use super::View;

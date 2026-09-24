@@ -353,7 +353,7 @@ impl GdbClient {
     /// A stub in all-stop mode services nothing but an interrupt while the
     /// target runs, so a request sent then would block on a reply that is
     /// never coming. Refusing it keeps a running target from wedging the
-    /// debugger; [`Self::interrupt`] is the way through, and it writes the
+    /// debugger; `Self::interrupt` is the way through, and it writes the
     /// break byte directly rather than through here.
     pub fn send_packet(&mut self, data: &str) -> Result<String> {
         if self.is_running {
