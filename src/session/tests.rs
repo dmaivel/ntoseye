@@ -1,14 +1,22 @@
+use super::hits::{
+    hardware_breakpoint_hit, rewind_thread_off_breakpoint, stopped_processor_matches,
+};
+use super::inspection::DBG_STATUS_WORKER;
+use super::lifecycle::prepare_backend_after_cleanup;
+use super::stepping::step_over_current_breakpoint;
 use super::*;
-use crate::dbg_backend::TrapState;
+use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
-use crate::gdb::breakpoints::{Breakpoint, HardwareBreakpoint};
+use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig, HardwareBreakpoint};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
 use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::time::Duration;
 
 /// DR6.BS (bit 14): a status bit outside B0-B3 that the functions under
 /// test must leave untouched.

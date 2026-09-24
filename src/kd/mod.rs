@@ -453,7 +453,7 @@ fn reclaimed_breakpoints_notice(reclaimed: usize) -> Option<String> {
 
 /// Whether a stop seen during exit is a stray single-step: `STATUS_SINGLE_STEP`
 /// away from any int3 we installed (and not a bugcheck). The backend-layer twin
-/// of [`crate::session::stop_is_stray_single_step`]; `managed_bp_addresses` is
+/// of [`crate::session::stops::stop_is_stray_single_step`]; `managed_bp_addresses` is
 /// our installed-int3 set, standing in for the session's breakpoint manager.
 fn exit_stop_is_stray_single_step(stop: &StopEvent, managed_bp_addresses: &HashSet<u64>) -> bool {
     stop.exception_code == Some(STATUS_SINGLE_STEP)

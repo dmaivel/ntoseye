@@ -17,7 +17,7 @@ pub const REPL_STOP_POLL: Duration = Duration::from_millis(100);
 
 pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 
-pub use crate::session::refresh_windows_thread_context_for_backend_thread;
+pub use crate::session::context::refresh_windows_thread_context_for_backend_thread;
 
 /// One-line summary: `thread Idle  state Running  ethread <addr>  pid 0  tid 0`.
 /// The leading `thread` label distinguishes it from the break line above,
@@ -353,8 +353,8 @@ pub fn continue_exception_policy(session: &mut Session, event: &StopEvent) -> Re
     Ok(true)
 }
 
-pub use crate::session::step_one_and_clear_tf;
-pub use crate::session::step_over_current_breakpoint;
+pub use crate::session::stepping::step_one_and_clear_tf;
+pub use crate::session::stepping::step_over_current_breakpoint;
 
 pub fn print_break_context(
     client: &mut dyn DebugBackend,
