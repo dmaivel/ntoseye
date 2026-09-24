@@ -424,10 +424,12 @@ impl HeapReader<'_> {
         }
         let encode_mask = heap.read(&image, 0, "EncodeFlagMask")? as u32;
         let granule = self.layout("_HEAP_ENTRY")?.size() as u64;
-        let encoding = (encode_mask & NT_HEAP_ENCODING_ACTIVE != 0).then(|| {
-            let at = heap.offset("Encoding").unwrap_or(0) + granule as usize - 8;
-            le_uint(&image[at..at + 8])
-        });
+        let encoding = decode_nt_heap_encoding(
+            &image,
+            encode_mask & NT_HEAP_ENCODING_ACTIVE != 0,
+            heap.offset("Encoding"),
+            granule,
+        )?;
         let segment_layout = self.layout("_HEAP_SEGMENT")?;
         let segment_link = segment_layout.offset("SegmentListEntry")? as u64;
         let mut segments = Vec::new();
@@ -607,6 +609,31 @@ impl HeapReader<'_> {
             busy,
         }))
     }
+}
+
+fn decode_nt_heap_encoding(
+    image: &[u8],
+    active: bool,
+    encoding_offset: Result<usize>,
+    granule: u64,
+) -> Result<Option<u64>> {
+    if !active {
+        return Ok(None);
+    }
+    let encoding_offset = encoding_offset?;
+    let granule = usize::try_from(granule)
+        .map_err(|_| Error::DebugInfo("NT heap granule does not fit host address size".into()))?;
+    let at = encoding_offset
+        .checked_add(granule)
+        .and_then(|offset| offset.checked_sub(8))
+        .ok_or_else(|| Error::DebugInfo("invalid NT heap encoding offset".into()))?;
+    let end = at
+        .checked_add(8)
+        .ok_or_else(|| Error::DebugInfo("NT heap encoding offset overflow".into()))?;
+    let bytes = image
+        .get(at..end)
+        .ok_or_else(|| Error::DebugInfo("NT heap encoding extends beyond heap image".into()))?;
+    Ok(Some(le_uint(bytes)))
 }
 
 fn decode_nt_entry(address: VirtAddr, raw: u64, encoding: Option<u64>, granule: u64) -> NtEntry {
@@ -1827,6 +1854,24 @@ impl Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_nt_heap_encoding_requires_its_layout_field() {
+        assert!(
+            decode_nt_heap_encoding(
+                &[0; 16],
+                true,
+                Err(Error::DebugInfo("missing Encoding".to_string())),
+                16,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn active_nt_heap_encoding_rejects_truncated_metadata() {
+        assert!(decode_nt_heap_encoding(&[0; 16], true, Ok(0x100), 16).is_err());
+    }
 
     #[test]
     fn nt_entry_headers_decode_through_the_heap_encoding() {
