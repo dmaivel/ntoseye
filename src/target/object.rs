@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
-use crate::guest::{Guest, ProcessInfo, StructRef};
+use crate::guest::{Guest, ProcessInfo};
+use crate::layout::{StructRef, TypeInfo};
 use crate::memory::PAGE_SIZE;
-use crate::symbols::TypeInfo;
 use crate::types::VirtAddr;
 
 use super::{DiagnosticValue, ListTermination, Target, bounded_list_walk};

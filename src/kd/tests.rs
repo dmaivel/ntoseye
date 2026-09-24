@@ -5,8 +5,9 @@ use crate::kd::framing::{
     PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
     PACKET_TYPE_KD_RESET, PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
 };
+use crate::layout::{FieldInfo, ParsedType, TypeInfo};
 use crate::phys::PhysMem;
-use crate::symbols::{FieldInfo, ParsedType, SymbolStore, TypeInfo};
+use crate::symbols::SymbolStore;
 use std::io::{Cursor, Read, Write};
 use std::time::Instant;
 

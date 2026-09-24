@@ -30,14 +30,15 @@ use crate::{
     dmp::DmpInfo,
     error::{Error, Result},
     guest::{
-        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, StructRef, Types,
-        read_pe_exports, read_pe_image,
+        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, read_pe_exports,
+        read_pe_image,
     },
+    layout::{ParsedType, StructRef, TypeInfo, Types},
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{
-        LocalVariableLocation, ParsedType, ProcedureLocal, SourceLineExtent, SourceLocation,
-        SymbolCandidate, SymbolIndex, SymbolStore, TypeInfo, format_symbol_with_offset,
+        LocalVariableLocation, ProcedureLocal, SourceLineExtent, SourceLocation, SymbolCandidate,
+        SymbolIndex, SymbolStore, format_symbol_with_offset,
     },
     types::{Arch, Dtb, KernelLocation, Value, VirtAddr},
 };

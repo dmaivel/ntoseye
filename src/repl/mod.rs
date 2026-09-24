@@ -927,11 +927,11 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::dbg_backend::BugcheckInfo;
+    use crate::layout::{FieldInfo, ParsedType, TypeInfo};
     use crate::output::capture;
     use crate::repl::{Flow, ReplState};
     use crate::session::tests::{MockBackend, breakpoint_event, session_with_mock};
     use crate::session::{Session, session_over_memory};
-    use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
     use crate::types::VirtAddr;
 
     use super::{

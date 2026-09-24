@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::expr::Expr;
-use crate::symbols::{FieldInfo, ParsedType, TypeInfo, glob_matches, le_uint};
+use crate::layout::{
+    FieldInfo, ParsedType, TypeInfo, field_sort_key, find_field, le_uint, named_type,
+    nested_layout_name, unqualified_type_name,
+};
+use crate::symbols::glob_matches;
 use crate::target::{ListCursor, ListTermination, UserVar};
 use crate::types::VirtAddr;
-use crate::typeview::{
-    MAX_ARRAY_ELEMENTS, TypeView, field_sort_key, find_field, named_type, nested_layout_name,
-    unqualified_type_name,
-};
+use crate::typeview::{MAX_ARRAY_ELEMENTS, TypeView};
 use crate::ui;
 
 use crate::repl::*;

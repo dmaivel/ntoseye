@@ -5,11 +5,12 @@ use std::collections::HashSet;
 use crate::backend::MemoryOps;
 use crate::cpu_state::processor_count;
 use crate::error::{Error, Result};
-use crate::guest::{Guest, ModuleInfo, StructRef, Types};
+use crate::guest::{Guest, ModuleInfo};
 use crate::kuser_shared::{
     read_interrupt_time, read_nt_build_number, read_nt_major_version, read_nt_minor_version,
     read_nt_product_type, read_system_time,
 };
+use crate::layout::{StructRef, Types};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::session::Session;
 use crate::symbols::ModuleSymbolStatus;

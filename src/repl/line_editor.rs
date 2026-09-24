@@ -11,7 +11,7 @@ use owo_colors::OwoColorize;
 use std::borrow::Cow;
 
 use crate::expr::Expr;
-use crate::symbols::ParsedType;
+use crate::layout::ParsedType;
 use crate::types::VirtAddr;
 use crate::ui;
 

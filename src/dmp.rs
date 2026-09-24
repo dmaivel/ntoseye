@@ -18,9 +18,9 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::context;
 use crate::kd::context_arm64;
+use crate::layout::{ParsedType, TypeInfo};
 use crate::memory::PAGE_SIZE;
 use crate::session::processor_index_from_backend_thread_id;
-use crate::symbols::{ParsedType, TypeInfo};
 use crate::target::Target;
 use crate::triage::{
     TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,

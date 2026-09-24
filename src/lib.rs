@@ -150,6 +150,7 @@ pub mod guest;
 pub mod host;
 pub mod kd;
 pub mod kuser_shared;
+pub mod layout;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod memory;

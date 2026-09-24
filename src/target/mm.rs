@@ -9,8 +9,9 @@ use crate::debugger_data::{
 };
 use crate::error::{Error, Result};
 use crate::guest::{ModuleInfo, section_name_at};
+use crate::layout::{ParsedType, TypeInfo, le_uint};
 use crate::memory::{DTB_IDENTITY, PAGE_SIZE, PFN_MASK};
-use crate::symbols::{ParsedType, TypeInfo, format_symbol_with_offset, glob_matches, le_uint};
+use crate::symbols::{format_symbol_with_offset, glob_matches};
 use crate::target::pool::{
     BigPoolEntry, PoolHeader, PoolUsageRow, big_pool_layout, classify_pool_region,
     collect_pool_usage, find_big_pool, kernel_symbol_address, locate_pool_block_in_page,

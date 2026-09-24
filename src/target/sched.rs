@@ -9,8 +9,8 @@ use crate::cpu_state::{MAX_PROCESSORS, kpcr_for_processor, kprcb_for_processor, 
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared;
+use crate::layout::{ParsedType, TypeInfo};
 use crate::session::{Session, processor_index_from_backend_thread_id};
-use crate::symbols::{ParsedType, TypeInfo};
 use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{StackFrame, ThreadTraceContext, format_symbol, resolve_thread_trace_context};

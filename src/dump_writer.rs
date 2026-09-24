@@ -20,9 +20,9 @@ use crate::gdb::registers::RegisterMap;
 use crate::kd::context;
 use crate::kd::context_arm64;
 use crate::kd::wire::{write_u32, write_u64};
+use crate::layout::{FieldInfo, ParsedType};
 use crate::memory::PAGE_SIZE;
 use crate::session::Session;
-use crate::symbols::{FieldInfo, ParsedType};
 use crate::target::Target;
 use crate::types::{Arch, PhysAddr, VirtAddr};
 

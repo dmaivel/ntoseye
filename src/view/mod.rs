@@ -14,12 +14,13 @@ use crate::dmp::{DmpException, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
 use crate::exception_policy::{ExceptionPolicy, ExceptionPolicyFinalAction, exception_alias};
 use crate::gdb::breakpoints::Breakpoint;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
+use crate::layout::TypeInfo;
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ExceptionRecord, RunStatus, VcpuInfo,
 };
 use crate::symbols::{
     LocalVariableLocation, ModuleSymbolStatus, ProcedureLocal, SourceLocation, SymbolCandidate,
-    SymbolVisibility, TypeInfo, format_symbol_with_offset,
+    SymbolVisibility, format_symbol_with_offset,
 };
 use crate::target::mm::{
     AddressDescription, AddressModule, MemoryRegionInfo, ProcessMemoryUsage, PteLevel, PteWalk,

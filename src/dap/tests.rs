@@ -1,6 +1,6 @@
 use super::*;
+use crate::layout::TypeInfo;
 use crate::session::session_over_memory;
-use crate::symbols::TypeInfo;
 
 #[test]
 fn a_disassembly_request_cannot_ask_for_unbounded_work() {

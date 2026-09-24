@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::guest::{ProcessInfo, StructRef};
-use crate::symbols::{TypeInfo, glob_matches};
+use crate::guest::ProcessInfo;
+use crate::layout::{StructRef, TypeInfo};
+use crate::symbols::glob_matches;
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;
 

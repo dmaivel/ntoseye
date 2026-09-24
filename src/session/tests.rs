@@ -340,7 +340,7 @@ fn memory_reads_follow_the_halted_context_root() {
 /// them with WOW64 ntdll's layout instead of the kernel's 64-bit one.
 #[test]
 fn string_descriptors_follow_the_requested_width() {
-    use crate::symbols::{FieldInfo, ParsedType, TypeInfo};
+    use crate::layout::{FieldInfo, ParsedType, TypeInfo};
     use crate::target::CODE_BITNESS_X86;
 
     let mut memory = [0u8; 0x40];

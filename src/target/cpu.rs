@@ -7,8 +7,8 @@ use crate::cpu_state;
 use crate::dbg_backend::DebugCapability;
 use crate::error::{Error, Result};
 use crate::guest::Image;
+use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::session::{Session, processor_index_from_backend_thread_id};
-use crate::symbols::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, VirtAddr};
 

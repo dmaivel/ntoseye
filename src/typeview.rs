@@ -5,8 +5,11 @@ use std::iter::repeat_n;
 use std::result;
 use std::sync::Arc;
 
+use crate::layout::{
+    FieldInfo, ParsedType, TypeInfo, field_sort_key, find_field, le_uint, named_type,
+    nested_layout_name,
+};
 use crate::session::Session;
-use crate::symbols::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::types::VirtAddr;
 
 /// Default console array limit; protocol clients request bounded windows.
@@ -529,76 +532,6 @@ fn quote_bounded(text: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// Remove a module qualifier before a cross-module type or enum lookup.
-pub fn unqualified_type_name(type_name: &str) -> &str {
-    type_name
-        .rsplit_once('!')
-        .map(|(_, name)| name)
-        .unwrap_or(type_name)
-}
-
-/// Return the layout name nested inside a parsed type, including the two
-/// Windows ABI aggregates whose PDB representation may be primitive.
-pub fn nested_layout_name(type_data: &ParsedType) -> Option<String> {
-    match type_data {
-        ParsedType::Struct(name) | ParsedType::Union(name) => Some(name.clone()),
-        ParsedType::Primitive(name)
-            if name
-                .trim_start_matches('_')
-                .eq_ignore_ascii_case("LIST_ENTRY") =>
-        {
-            Some("_LIST_ENTRY".to_string())
-        }
-        ParsedType::Primitive(name)
-            if name
-                .trim_start_matches('_')
-                .eq_ignore_ascii_case("UNICODE_STRING") =>
-        {
-            Some("_UNICODE_STRING".to_string())
-        }
-        ParsedType::Pointer(inner) | ParsedType::Array(inner, _) => nested_layout_name(inner),
-        ParsedType::Bitfield { underlying, .. } => nested_layout_name(underlying),
-        _ => None,
-    }
-}
-
-/// Test whether a parsed type names a requested Windows layout, ignoring the
-/// conventional leading underscore and case used by different PDB producers.
-pub fn named_type(type_data: &ParsedType, wanted: &str) -> bool {
-    match type_data {
-        ParsedType::Primitive(name) | ParsedType::Struct(name) | ParsedType::Union(name) => {
-            unqualified_type_name(name)
-                .trim_start_matches('_')
-                .eq_ignore_ascii_case(wanted.trim_start_matches('_'))
-        }
-        _ => false,
-    }
-}
-
-/// Sort fields by byte offset and then by bitfield position, matching `dt`'s
-/// stable layout order across hosts.
-pub fn field_sort_key(info: &FieldInfo) -> (u32, u8) {
-    let bitfield_position = match &info.type_data {
-        ParsedType::Bitfield { pos, .. } => *pos,
-        _ => 0,
-    };
-    (info.offset, bitfield_position)
-}
-
-/// Find a field by exact name first, then by case-insensitive name, for PDBs
-/// whose spelling differs only in case from a host request.
-pub fn find_field<'a>(
-    type_info: &'a TypeInfo,
-    requested: &str,
-) -> Option<(&'a String, &'a FieldInfo)> {
-    type_info.fields.get_key_value(requested).or_else(|| {
-        type_info
-            .fields
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(requested))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -636,46 +569,6 @@ mod tests {
         assert_eq!(
             quote_bounded("\\Driver\\PdbProbe"),
             "\"\\\\Driver\\\\PdbProbe\""
-        );
-    }
-
-    #[test]
-    fn bitfields_sort_by_position_and_fields_resolve_case_insensitively() {
-        assert_eq!(unqualified_type_name("nt!_EPROCESS"), "_EPROCESS");
-
-        // PDB reports both bitfields at offset 0, so only the bit position
-        // orders them; `dt` prints the low bit first.
-        let low = FieldInfo {
-            offset: 0,
-            size: 1,
-            type_data: ParsedType::Bitfield {
-                underlying: Box::new(ParsedType::Primitive("UCHAR".to_string())),
-                pos: 7,
-                len: 1,
-            },
-        };
-        let high = FieldInfo {
-            offset: 0,
-            size: 1,
-            type_data: ParsedType::Bitfield {
-                underlying: Box::new(ParsedType::Primitive("UCHAR".to_string())),
-                pos: 0,
-                len: 1,
-            },
-        };
-        assert!(field_sort_key(&high) < field_sort_key(&low));
-
-        let mut fields = HashMap::new();
-        fields.insert("Value".to_string(), low);
-        let info = TypeInfo {
-            name: "_NODE".to_string(),
-            pointer_size: 8,
-            size: 1,
-            fields,
-        };
-        assert_eq!(
-            find_field(&info, "value").map(|(name, _)| name.as_str()),
-            Some("Value")
         );
     }
 

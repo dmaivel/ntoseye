@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::expr::{Expr, ExprValue};
+use crate::layout::{FieldInfo, nested_layout_name};
 use crate::symbols::{
-    FieldInfo, ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, parse_source_paths,
+    ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, parse_source_paths,
     parse_symbol_sources,
 };
 use crate::target::UserVar;
 use crate::types::VirtAddr;
-use crate::typeview::{TypeView, nested_layout_name};
+use crate::typeview::TypeView;
 use crate::ui;
 
 use crate::repl::*;
@@ -915,10 +916,11 @@ fn parse_lsa_args<S: AsRef<str>>(argv: &[S]) -> Option<LsaArgs> {
 #[cfg(test)]
 mod tests {
     use super::{LsArgs, LsaArgs, parse_ls_args, parse_lsa_args};
+    use crate::layout::{FieldInfo, ParsedType, TypeInfo};
     use crate::output::capture;
     use crate::repl::{CommandStyle, ReplState, parse_command};
     use crate::session::session_over_memory;
-    use crate::symbols::{FieldInfo, ParsedType, TypeInfo, parse_source_paths};
+    use crate::symbols::parse_source_paths;
     use crate::types::VirtAddr;
 
     #[test]

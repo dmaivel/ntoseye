@@ -1,8 +1,7 @@
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::symbols::{
-    LocalVariableLocation, ParsedType, ProcedureLocal, SymbolStore, TypeInfo, glob_matches,
-};
+use crate::layout::{ParsedType, TypeInfo};
+use crate::symbols::{LocalVariableLocation, ProcedureLocal, SymbolStore, glob_matches};
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
 use std::borrow::Cow;

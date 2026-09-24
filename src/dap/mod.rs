@@ -37,18 +37,18 @@ use crate::expr::{Expr, ExprType, ExprValue, NumberRadix};
 use crate::gdb::BreakpointConfig;
 use crate::gdb::breakpoints::Breakpoint;
 use crate::kd::KdMemorySource;
+use crate::layout::{FieldInfo, ParsedType, find_field};
 use crate::output;
 use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore, supports_capability};
 use crate::session::{ContinueOutcome, Session};
 use crate::symbols::{
-    FieldInfo, LocalVariableLocation, ParsedType, ProcedureLocal, SourceLocation,
-    parse_source_paths, parse_symbol_sources,
+    LocalVariableLocation, ProcedureLocal, SourceLocation, parse_source_paths, parse_symbol_sources,
 };
 use crate::target::{SelectedFrame, Target};
 use crate::termination;
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
-use crate::typeview::{Expand, FieldView, TypeView, find_field};
+use crate::typeview::{Expand, FieldView, TypeView};
 use crate::{Backend, TargetSpec};
 
 use wire::{ClientMessage, Request};

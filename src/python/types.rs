@@ -18,10 +18,13 @@ use super::symbols::load_scope_symbols;
 use super::{err, raise};
 use crate::backend::MemoryOps;
 use crate::error::Result as CoreResult;
-use crate::symbols::{EnumDef, FieldInfo, FieldValue, ParsedType, SymbolStore, TypeInfo, le_uint};
+use crate::layout::{
+    EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, le_uint, named_type,
+    unqualified_type_name,
+};
+use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
-use crate::typeview::{named_type, unqualified_type_name};
 
 fn lookup_field<'a>(
     info: &'a TypeInfo,

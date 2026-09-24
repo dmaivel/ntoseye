@@ -2,7 +2,8 @@ use std::fs;
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::guest::{ModuleInfo, StructRef, image_base, read_pe_header_page, size_of_image};
+use crate::guest::{ModuleInfo, image_base, read_pe_header_page, size_of_image};
+use crate::layout::StructRef;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::target::{DiagnosticValue, ListTermination, Target};
 use crate::types::{Arch, VirtAddr};

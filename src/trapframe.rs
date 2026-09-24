@@ -7,7 +7,7 @@
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::symbols::{TypeInfo, le_uint};
+use crate::layout::{TypeInfo, le_uint};
 use crate::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use std::sync::Arc;
@@ -399,7 +399,7 @@ pub fn read_ktrap_frame_at_or_current(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbols::{FieldInfo, ParsedType};
+    use crate::layout::{FieldInfo, ParsedType};
     use std::collections::HashMap;
 
     /// A miniature `_KTRAP_FRAME` layout: enough fields, PDB-shaped, with the
