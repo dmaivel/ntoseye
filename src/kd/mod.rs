@@ -236,6 +236,8 @@ const KD_RECONNECT_BREAKIN_TRACE_EVERY: u32 = 8;
 const POST_BUGCHECK_RECONNECT_ASSIST_DELAY: Duration = Duration::from_secs(20);
 const KD_EXIT_STOP_POLL: Duration = Duration::from_secs(1);
 const KD_EXIT_MAX_CONTINUES: u32 = 8;
+/// Module loads to continue through at exit; a full boot loads a few hundred.
+const KD_EXIT_MAX_NOTIFICATIONS: u32 = 4096;
 /// How long the background pump blocks on a socket read before looping back to
 /// check its shutdown flag. Incoming packets are still serviced immediately
 /// (this only bounds shutdown latency); the kernel writes each packet as one
@@ -1954,23 +1956,35 @@ impl KdBackend {
             return Ok(());
         }
 
-        for _ in 0..KD_EXIT_MAX_CONTINUES {
-            if self.link.is_running() {
-                match self.try_wait_for_stop(KD_EXIT_STOP_POLL)? {
-                    None => return Ok(()),
-                    Some(stop) => self.absorb_stray_single_step_for_exit(&stop),
-                }
+        // A booting target stops on every image it loads, one after another,
+        // so module-load notifications are progress and only other stops
+        // count toward giving up. The notification cap only bounds the loop.
+        let mut stops = 0;
+        for _ in 0..KD_EXIT_MAX_NOTIFICATIONS {
+            if !self.link.is_running() {
+                self.continue_stopped_for_exit()?;
             }
-            self.continue_stopped_for_exit()?;
-            match self.try_wait_for_stop(KD_EXIT_STOP_POLL)? {
-                None => return Ok(()),
-                Some(stop) => self.absorb_stray_single_step_for_exit(&stop),
+            let Some(stop) = self.try_wait_for_stop(KD_EXIT_STOP_POLL)? else {
+                return Ok(());
+            };
+            if stop.modules_changed {
+                continue;
+            }
+            self.absorb_stray_single_step_for_exit(&stop);
+            stops += 1;
+            if stops == KD_EXIT_MAX_CONTINUES {
+                break;
             }
         }
 
-        Err(Error::Kd(format!(
-            "target kept stopping during debugger exit after {KD_EXIT_MAX_CONTINUES} continues"
-        )))
+        Err(Error::Kd(if stops == KD_EXIT_MAX_CONTINUES {
+            format!("target kept stopping during debugger exit after {stops} continues")
+        } else {
+            format!(
+                "target was still loading modules during debugger exit after \
+                 {KD_EXIT_MAX_NOTIFICATIONS} notifications"
+            )
+        }))
     }
 
     /// Query the target identity needed by both host-memory validation and
