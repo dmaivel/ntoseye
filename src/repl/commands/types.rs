@@ -693,8 +693,8 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let requested = match Expr::eval_with_radix(positional[1], &self.ctx.target, self.radix) {
-            Ok(count) => count.0 as usize,
+        let limit = match Expr::eval_with_radix(positional[1], &self.ctx.target, self.radix) {
+            Ok(count) => count.0.min(MAX_LIST_ENTRIES as u64) as usize,
             Err(error) => {
                 error!("{}", error);
                 return Ok(());
@@ -702,7 +702,7 @@ impl ReplState<'_> {
         };
         let display_words = match positional.get(2) {
             Some(size) => match Expr::eval_with_radix(size, &self.ctx.target, self.radix) {
-                Ok(size) if size.0 > 0 => (size.0 as usize).min(MAX_DL_WORDS),
+                Ok(size) if size.0 > 0 => size.0.min(MAX_DL_WORDS as u64) as usize,
                 Ok(_) => {
                     error!("dl size must be greater than zero");
                     return Ok(());
@@ -714,7 +714,6 @@ impl ReplState<'_> {
             },
             None => 2,
         };
-        let limit = requested.min(MAX_LIST_ENTRIES);
         let mut cursor = ListCursor::from_first(address, limit);
         let mut bytes = [0u8; MAX_DL_WORDS * 8];
         while let Some(current) = cursor.take_current() {
