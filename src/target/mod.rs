@@ -30,8 +30,8 @@ use crate::{
     dmp::DmpInfo,
     error::{Error, Result},
     guest::{
-        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, read_pe_exports,
-        read_pe_image,
+        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, SessionSpace,
+        read_pe_exports, read_pe_image,
     },
     layout::{StructRef, TypeInfo, Types},
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE, pattern_offsets},
@@ -1036,7 +1036,7 @@ impl Target {
                 &symbols,
                 modules.clone(),
                 DTB_IDENTITY,
-                false,
+                SessionSpace::Load,
                 arch,
             );
         }
@@ -2103,7 +2103,7 @@ impl Target {
                 &self.symbols,
                 modules,
                 dtb,
-                false,
+                SessionSpace::Load,
                 self.arch(),
             ),
         }

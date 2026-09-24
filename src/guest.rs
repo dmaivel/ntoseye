@@ -145,6 +145,14 @@ pub struct ModuleSymbolDiagnostic {
     pub message: String,
 }
 
+/// Whether a symbol load covers modules in session space (win32k and
+/// friends), which only a process attached to a session maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSpace {
+    Load,
+    Skip,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ModuleSymbolLoadReport {
     pub total: usize,
@@ -2225,7 +2233,7 @@ impl Guest {
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
-        skip_session_space: bool,
+        session_space: SessionSpace,
         arch: Arch,
     ) -> Result<ModuleSymbolLoadReport> {
         let mut report = ModuleSymbolLoadReport::new(modules.len());
@@ -2234,7 +2242,7 @@ impl Guest {
             symbols,
             modules,
             dtb,
-            skip_session_space,
+            session_space,
             arch,
             &mut report,
         );
@@ -2252,7 +2260,7 @@ impl Guest {
                 symbols,
                 stale_identities,
                 dtb,
-                skip_session_space,
+                session_space,
                 arch,
             )?);
         }
@@ -2280,16 +2288,30 @@ impl Guest {
         arch: Arch,
     ) -> ModuleSymbolLoadReport {
         let mut report = ModuleSymbolLoadReport::new(modules.len());
-        let mut plan =
-            Self::plan_module_symbol_loads(phys, symbols, modules, dtb, false, arch, &mut report);
+        let mut plan = Self::plan_module_symbol_loads(
+            phys,
+            symbols,
+            modules,
+            dtb,
+            SessionSpace::Load,
+            arch,
+            &mut report,
+        );
         let mut deferred = plan.take_fetches();
         let stale = Self::complete_module_symbol_loads(symbols, plan, dtb, &mut report, false);
         if !stale.is_empty() {
             for module in &stale {
                 symbols.forget_module_identity(module);
             }
-            let mut replan =
-                Self::plan_module_symbol_loads(phys, symbols, stale, dtb, false, arch, &mut report);
+            let mut replan = Self::plan_module_symbol_loads(
+                phys,
+                symbols,
+                stale,
+                dtb,
+                SessionSpace::Load,
+                arch,
+                &mut report,
+            );
             deferred.absorb(replan.take_fetches());
             for module in
                 Self::complete_module_symbol_loads(symbols, replan, dtb, &mut report, false)
@@ -2381,14 +2403,14 @@ impl Guest {
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
-        skip_session_space: bool,
+        session_space: SessionSpace,
         arch: Arch,
         report: &mut ModuleSymbolLoadReport,
     ) -> ModuleSymbolPlan {
         let mut plan = ModuleSymbolPlan::default();
 
         for module in modules {
-            if skip_session_space && Self::is_session_space(module.base_address) {
+            if session_space == SessionSpace::Skip && Self::is_session_space(module.base_address) {
                 Self::apply_module_symbol_status(
                     symbols,
                     report,
@@ -2618,7 +2640,14 @@ impl Guest {
             }
         }
         let dtb = self.ntoskrnl.dtb();
-        Self::load_module_symbols(phys, symbols, modules, dtb, true, self.ntoskrnl.arch())
+        Self::load_module_symbols(
+            phys,
+            symbols,
+            modules,
+            dtb,
+            SessionSpace::Skip,
+            self.ntoskrnl.arch(),
+        )
     }
 
     pub fn load_missing_kernel_module_symbols(
@@ -2642,8 +2671,14 @@ impl Guest {
             })
             .collect::<Vec<_>>();
 
-        let mut report =
-            Self::load_module_symbols(phys, symbols, missing, dtb, true, self.ntoskrnl.arch())?;
+        let mut report = Self::load_module_symbols(
+            phys,
+            symbols,
+            missing,
+            dtb,
+            SessionSpace::Skip,
+            self.ntoskrnl.arch(),
+        )?;
         report.unloaded = unloaded;
         Ok(report)
     }
@@ -2656,7 +2691,14 @@ impl Guest {
     ) -> Result<ModuleSymbolLoadReport> {
         let modules = self.process_modules(info)?;
         let dtb = info.dtb;
-        Self::load_module_symbols(phys, symbols, modules, dtb, false, self.ntoskrnl.arch())
+        Self::load_module_symbols(
+            phys,
+            symbols,
+            modules,
+            dtb,
+            SessionSpace::Load,
+            self.ntoskrnl.arch(),
+        )
     }
 
     /// Load symbols for an explicit set of modules under `dtb`. Used to lazily
@@ -2670,7 +2712,14 @@ impl Guest {
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
     ) -> Result<ModuleSymbolLoadReport> {
-        Self::load_module_symbols(phys, symbols, modules, dtb, false, self.ntoskrnl.arch())
+        Self::load_module_symbols(
+            phys,
+            symbols,
+            modules,
+            dtb,
+            SessionSpace::Load,
+            self.ntoskrnl.arch(),
+        )
     }
 }
 

@@ -619,6 +619,13 @@ impl ModuleIdentities {
     }
 }
 
+/// Whether a lookup in the image cache may download a missing image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFetch {
+    CacheOnly,
+    Download,
+}
+
 /// A file acquisition planned by symbol discovery. PDB jobs carry the RSDS
 /// identity and ordered source snapshot needed to validate every candidate.
 #[derive(Debug, Clone)]
@@ -1874,7 +1881,7 @@ impl SymbolStore {
     }
 
     /// The module's complete on-disk PE image from the image cache, expanded
-    /// once per session, downloaded first when `download` and absent. Lets
+    /// once per session, downloaded first when absent if `fetch` allows. Lets
     /// the unwinder read unwind tables without the target, or recover them
     /// when the in-memory `.pdata` is paged out.
     pub fn module_image_on_disk(
@@ -1882,13 +1889,13 @@ impl SymbolStore {
         image_file_name: &str,
         time_date_stamp: u32,
         size_of_image: u32,
-        download: bool,
+        fetch: ImageFetch,
     ) -> Result<Arc<PeImage>> {
         let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         if let Some(image) = self.on_disk_images.get(&job.path) {
             return Ok(Arc::clone(&image));
         }
-        if download {
+        if fetch == ImageFetch::Download {
             download_job(&job, ProgressBar::new(0))?;
         }
         let image = Arc::new(read_pe_image_from_file(&job.path)?);

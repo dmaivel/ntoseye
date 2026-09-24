@@ -40,7 +40,7 @@ use crate::{
     kd::{context, context_arm64},
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
-    symbols::{SourceLocation, SymbolStore},
+    symbols::{ImageFetch, SourceLocation, SymbolStore},
     target::{KTHREAD_STATE_TERMINATED, SavedThreadRegisters, Target, ThreadInfo, lookup_register},
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
     types::{Arch, Dtb, VirtAddr},
@@ -1526,7 +1526,7 @@ impl<'a> StackTracer<'a> {
             if cached.image.is_complete() {
                 return false;
             }
-            self.on_disk_image(&cached.image, &module.info, true)
+            self.on_disk_image(&cached.image, &module.info, ImageFetch::Download)
         };
         let Some(disk) = disk else {
             return false;
@@ -1577,7 +1577,12 @@ impl<'a> StackTracer<'a> {
                             module.info.short_name
                         );
                         self.symbols
-                            .module_image_on_disk(&module.info.name, tds, module.info.size, true)
+                            .module_image_on_disk(
+                                &module.info.name,
+                                tds,
+                                module.info.size,
+                                ImageFetch::Download,
+                            )
                             .ok()?
                     }
                 }
@@ -1612,7 +1617,7 @@ impl<'a> StackTracer<'a> {
     /// from the target. The file must open with the headers the guest
     /// mapped; a mismatch keeps the guest image. Nothing is downloaded here.
     fn cached_on_disk_image(&self, image: &PeImage, info: &ModuleInfo) -> Option<Arc<PeImage>> {
-        let disk = self.on_disk_image(image, info, false)?;
+        let disk = self.on_disk_image(image, info, ImageFetch::CacheOnly)?;
         let headers_end = pe_headers_end(image.headers())?;
         headers_match_relocated(
             disk.headers().get(..headers_end)?,
@@ -1623,13 +1628,13 @@ impl<'a> StackTracer<'a> {
 
     /// The module's complete on-disk PE image, matched by the in-memory
     /// header's TimeDateStamp + SizeOfImage and downloaded if needed when
-    /// `download`. A recovering caller re-resolves against it to decide
+    /// `fetch` allows. A recovering caller re-resolves against it to decide
     /// whether it actually recovered anything.
     fn on_disk_image(
         &self,
         image: &PeImage,
         info: &ModuleInfo,
-        download: bool,
+        fetch: ImageFetch,
     ) -> Option<Arc<PeImage>> {
         let view = PeView::from_bytes(image.headers()).ok()?;
         self.symbols
@@ -1637,7 +1642,7 @@ impl<'a> StackTracer<'a> {
                 &info.name,
                 view.file_header().TimeDateStamp,
                 view.optional_header().SizeOfImage,
-                download,
+                fetch,
             )
             .ok()
     }
