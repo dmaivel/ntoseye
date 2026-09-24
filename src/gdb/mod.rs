@@ -51,6 +51,8 @@ pub fn trace_packet(peer: &str, direction: &str, bytes: &[u8]) {
 struct StubFeatures {
     no_ack_mode: bool,
     qxfer_features_read: bool,
+    /// `vCont;s:<thread>` is supported (`vCont?` lists `s`).
+    thread_step: bool,
 }
 
 #[derive(Debug, Default)]
@@ -251,6 +253,9 @@ pub struct GdbClient {
     /// removes every breakpoint, including ones this client still counts as
     /// installed.
     last_stop: String,
+    /// The thread the last `Hc` selected; `None` after a continue reset it
+    /// to all threads.
+    control_thread: Option<String>,
 }
 
 /// What a wait on an already halted target reports: a stop with no fields,
@@ -300,6 +305,7 @@ impl GdbClient {
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
             extra_registers: Vec::new(),
             last_stop: String::new(),
+            control_thread: None,
         };
 
         client.force_stop_and_resync()?;
@@ -307,6 +313,10 @@ impl GdbClient {
         let supported =
             client.send_packet("qSupported:multiprocess+;swbreak+;qRelocInsn+;vContSupported+")?;
         client.features = StubFeatures::parse(&supported);
+        client.features.thread_step = client
+            .send_packet("vCont?")?
+            .split(';')
+            .any(|action| action == "s");
 
         if client.features.no_ack_mode {
             let _ = client.enable_no_ack_mode();
@@ -666,13 +676,23 @@ impl GdbClient {
 
     fn continue_execution(&mut self) -> Result<()> {
         let _ = self.send_packet("Hc-1")?;
+        self.control_thread = None;
         self.send_command_no_reply("c")?;
         self.is_running = true;
         Ok(())
     }
 
+    /// Single-step the selected thread with every other one held. A plain
+    /// `s` resumes all of QEMU's vCPUs (only the selected one steps), so
+    /// another vCPU's breakpoint hit could be reported as the step.
     fn step(&mut self) -> Result<()> {
-        self.send_command_no_reply("s")?;
+        match &self.control_thread {
+            Some(thread) if self.features.thread_step => {
+                let packet = format!("vCont;s:{thread}");
+                self.send_command_no_reply(&packet)?;
+            }
+            _ => self.send_command_no_reply("s")?,
+        }
         self.is_running = true;
         Ok(())
     }
@@ -801,6 +821,7 @@ impl GdbClient {
                 resp_c
             )));
         }
+        self.control_thread = Some(thread_id.to_string());
 
         Ok(())
     }
@@ -1141,6 +1162,7 @@ mod tests {
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
             extra_registers: Vec::new(),
             last_stop: String::new(),
+            control_thread: None,
         };
         (client, received)
     }
