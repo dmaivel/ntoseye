@@ -67,6 +67,11 @@ jobs:
         run: cargo clippy --locked -p ntoseye ${{ matrix.features }} --all-targets
       - name: Test
         run: cargo test --locked -p ntoseye ${{ matrix.features }}
+      # What `cargo install ntoseye` builds: the packaged crate alone, which
+      # the release publishes only after the GitHub release and wheels.
+      - name: Package
+        if: matrix.os == 'ubuntu-latest' && matrix.label == 'default'
+        run: cargo package --locked
 
   # The wheel's cdylib, and the only build of the `python-extension` feature:
   # it links against the interpreter differently than the embedded one above.

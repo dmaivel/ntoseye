@@ -23,10 +23,12 @@ use super::Debugger;
 
 /// The package's own Python, run in the embedded interpreter as `ntoseye`
 /// and `ntoseye.repl`, so REPL command scripts and the wheel share one copy.
+/// `package/` holds symlinks to `python/ntoseye/`: `cargo package` leaves out
+/// `python/`, a crate of its own, but copies symlinked files into the crate.
 #[cfg(feature = "python-embed")]
-const PACKAGE_INIT: &str = include_str!("../../python/ntoseye/__init__.py");
+const PACKAGE_INIT: &str = include_str!("package/__init__.py");
 #[cfg(feature = "python-embed")]
-const PACKAGE_REPL: &str = include_str!("../../python/ntoseye/repl.py");
+const PACKAGE_REPL: &str = include_str!("package/repl.py");
 
 /// Outcome of loading the python commands dir: names registered, and per-file
 /// load failures.
