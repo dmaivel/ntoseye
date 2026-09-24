@@ -1514,11 +1514,17 @@ impl Session {
             bytes.len()
         };
         self.read_masked(VirtAddr(ip), &mut bytes[..length])?;
+        let arch = self.target.arch();
+        let bitness = if arch == Arch::Amd64 {
+            self.target.code_bitness(VirtAddr(ip))
+        } else {
+            64
+        };
         Ok(ControlState {
             ip,
             sp,
             dtb,
-            flow: classify(&bytes[..length], self.target.arch()),
+            flow: classify(&bytes[..length], arch, bitness),
         })
     }
 

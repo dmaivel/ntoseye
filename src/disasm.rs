@@ -15,10 +15,10 @@ pub enum ControlFlow {
     Other,
 }
 
-fn decode_first(bytes: &[u8], arch: Arch) -> Option<(usize, ControlFlow)> {
+fn decode_first(bytes: &[u8], arch: Arch, bitness: u32) -> Option<(usize, ControlFlow)> {
     match arch {
         Arch::Amd64 => {
-            let mut decoder = Decoder::with_ip(64, bytes, 0, DecoderOptions::NONE);
+            let mut decoder = Decoder::with_ip(bitness, bytes, 0, DecoderOptions::NONE);
             if !decoder.can_decode() {
                 return None;
             }
@@ -71,7 +71,7 @@ fn decode_first(bytes: &[u8], arch: Arch) -> Option<(usize, ControlFlow)> {
 
 /// Encoded length of the first instruction, or `None` for invalid or incomplete bytes.
 pub fn instruction_length(bytes: &[u8], arch: Arch) -> Option<usize> {
-    decode_first(bytes, arch).map(|(length, _)| length)
+    decode_first(bytes, arch, 64).map(|(length, _)| length)
 }
 
 /// End of a branch-free instruction range starting at `start`.
@@ -90,7 +90,7 @@ pub fn fallthrough_run_end(bytes: &[u8], start: u64, end: u64, arch: Arch) -> Op
     let mut offset = 0;
     while offset < window_len {
         let boundary = start + offset as u64;
-        let Some((length, flow)) = decode_first(&bytes[offset..], arch) else {
+        let Some((length, flow)) = decode_first(&bytes[offset..], arch, 64) else {
             return (offset != 0).then_some(boundary);
         };
         if length == 0 || length > window_len - offset {
@@ -104,13 +104,14 @@ pub fn fallthrough_run_end(bytes: &[u8], start: u64, end: u64, arch: Arch) -> Op
     Some(end)
 }
 
-/// Classify the first instruction in `bytes` for the target architecture.
+/// Classify the first instruction in `bytes` for the target architecture and
+/// effective code bitness.
 /// Invalid or incomplete instructions are treated as [`ControlFlow::Other`].
-pub fn classify(bytes: &[u8], arch: Arch) -> ControlFlow {
+pub fn classify(bytes: &[u8], arch: Arch, bitness: u32) -> ControlFlow {
     if bytes.is_empty() {
         return ControlFlow::Other;
     }
-    decode_first(bytes, arch).map_or(ControlFlow::Other, |(_, flow)| flow)
+    decode_first(bytes, arch, bitness).map_or(ControlFlow::Other, |(_, flow)| flow)
 }
 
 /// NASM formatter configured for ntoseye's disassembly, so every call site
@@ -704,29 +705,35 @@ mod tests {
     #[test]
     fn classify_control_flow_instructions() {
         assert_eq!(
-            classify(&[0xe8, 0, 0, 0, 0], Arch::Amd64),
+            classify(&[0xe8, 0, 0, 0, 0], Arch::Amd64, 64),
             ControlFlow::Call
         );
-        assert_eq!(classify(&[0xc3], Arch::Amd64), ControlFlow::Ret);
-        assert_eq!(classify(&[0xeb, 0], Arch::Amd64), ControlFlow::Branch);
-        assert_eq!(classify(&[0x90], Arch::Amd64), ControlFlow::Other);
+        assert_eq!(classify(&[0xc3], Arch::Amd64, 64), ControlFlow::Ret);
+        assert_eq!(classify(&[0xeb, 0], Arch::Amd64, 64), ControlFlow::Branch);
+        assert_eq!(classify(&[0x90], Arch::Amd64, 64), ControlFlow::Other);
 
         assert_eq!(
-            classify(&0x94000000u32.to_le_bytes(), Arch::Arm64),
+            classify(&0x94000000u32.to_le_bytes(), Arch::Arm64, 64),
             ControlFlow::Call
         );
         assert_eq!(
-            classify(&0xd65f03c0u32.to_le_bytes(), Arch::Arm64),
+            classify(&0xd65f03c0u32.to_le_bytes(), Arch::Arm64, 64),
             ControlFlow::Ret
         );
         assert_eq!(
-            classify(&0x14000000u32.to_le_bytes(), Arch::Arm64),
+            classify(&0x14000000u32.to_le_bytes(), Arch::Arm64, 64),
             ControlFlow::Branch
         );
         assert_eq!(
-            classify(&0xd503201fu32.to_le_bytes(), Arch::Arm64),
+            classify(&0xd503201fu32.to_le_bytes(), Arch::Arm64, 64),
             ControlFlow::Other
         );
+    }
+
+    #[test]
+    fn amd64_flow_classification_respects_effective_code_bitness() {
+        assert_eq!(classify(&[0x48, 0xc3], Arch::Amd64, 32), ControlFlow::Other);
+        assert_eq!(classify(&[0x48, 0xc3], Arch::Amd64, 64), ControlFlow::Ret);
     }
 
     #[test]
