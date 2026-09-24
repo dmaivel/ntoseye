@@ -1,9 +1,8 @@
 use crate::cpu_state;
-use crate::dbg_backend::DebugCapability;
+use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::repl::*;
-use crate::session::processor_index_from_backend_thread_id;
 use crate::target::cpu::{
     CpuInfoDetail, CpuTriageInfo, DescriptorDetail, GdtDetail, GdtEntryDetail, IdtDetail,
     IdtEntryDetail, IrqlDetail, PcrDetail, PrcbDetail, ProcessorStateDetail,

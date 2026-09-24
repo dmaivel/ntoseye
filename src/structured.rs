@@ -5,10 +5,10 @@
 //! surfaces cannot drift. Commands without a structured decoding return
 //! `None` and the caller falls back to the text renderer.
 
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::repl::{CommandStyle, ReplState, parse_command};
-use crate::session::processor_index_from_backend_thread_id;
 use crate::target::Target;
 use crate::target::heap::HeapSelector;
 use crate::target::meta::decode_error_code;

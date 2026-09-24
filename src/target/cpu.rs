@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::cpu_state;
-use crate::dbg_backend::DebugCapability;
+use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::error::{Error, Result};
 use crate::guest::Image;
 use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
-use crate::session::{Session, processor_index_from_backend_thread_id};
+use crate::session::Session;
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, VirtAddr};
 

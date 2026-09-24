@@ -7,12 +7,12 @@ use tabled::builder::Builder;
 use owo_colors::OwoColorize;
 
 use crate::bugchecks::looks_like_kernel_pointer;
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::layout::StructRef;
 use crate::memory::PAGE_SIZE;
-use crate::session::processor_index_from_backend_thread_id;
 use crate::symbols::{ModuleSymbolStatus, glob_matches};
 use crate::target::mm::MemoryRegionInfo;
 use crate::target::{

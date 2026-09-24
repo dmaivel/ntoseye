@@ -21,7 +21,7 @@ use crate::bugchecks::{looks_like_kernel_pointer, plausible_bugcheck_code};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, LastEvent, StopEvent,
-    WatchpointAccess,
+    WatchpointAccess, clear_trap_flag, processor_index_from_backend_thread_id,
 };
 use crate::disasm::{
     ControlFlow, DisasmRow, classify, decode_preceding, decode_rows, decode_rows_arm64,
@@ -3734,11 +3734,6 @@ pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool 
     processor_index_from_backend_thread_id(stopped).is_none_or(|stopped| stopped == processor)
 }
 
-pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
-    let (_pid, tid) = thread_id.strip_prefix('p')?.split_once('.')?;
-    u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
-}
-
 /// Adopt the Windows thread a backend vCPU is running as the inspection
 /// context, walked from that processor's KPRCB. Returns it, or `None` when the
 /// id is not a processor context or the walk fails, clearing the stale
@@ -4306,41 +4301,6 @@ pub fn step_one_and_clear_tf(
             "target raised exception {code:#x} while single-stepping"
         )));
     }
-    Ok(())
-}
-
-/// Clear the trap flag (`TF`, RFLAGS bit 8) and DR6's B0-B3 status bits on the
-/// currently selected thread, best-effort, so an absorbed single-step leaves
-/// no residue for the next resume. ARM64 has neither x86 field, so its
-/// single-step state is acknowledged by KD's ARM64 continue request instead.
-/// A transport that reports TF and DR6 with the stop answers this without a
-/// register fetch, which is what keeps an absorbed breakpoint hit cheap.
-pub fn clear_trap_flag(backend: &mut dyn DebugBackend, register_map: &RegisterMap) -> Result<()> {
-    if backend
-        .stop_trap_state()
-        .is_some_and(|state| state.is_clean())
-    {
-        return Ok(());
-    }
-    if let Ok(mut regs) = backend.read_registers() {
-        let mut dirty = false;
-        if let Ok(eflags) = register_map.read_u64("eflags", &regs) {
-            let cleared = eflags & !(1u64 << 8);
-            if cleared != eflags && register_map.write_u64("eflags", &mut regs, cleared).is_ok() {
-                dirty = true;
-            }
-        }
-        if let Ok(dr6) = register_map.read_u64("dr6", &regs) {
-            let cleared = dr6 & !0b1111u64;
-            if cleared != dr6 && register_map.write_u64("dr6", &mut regs, cleared).is_ok() {
-                dirty = true;
-            }
-        }
-        if dirty {
-            backend.write_registers(&regs)?;
-        }
-    }
-
     Ok(())
 }
 

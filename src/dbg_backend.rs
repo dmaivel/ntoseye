@@ -467,10 +467,52 @@ pub struct TrapState {
 }
 
 impl TrapState {
-    /// Nothing for [`crate::session::clear_trap_flag`] to write.
+    /// Nothing for [`clear_trap_flag`] to write.
     pub fn is_clean(&self) -> bool {
         self.eflags & (1 << 8) == 0 && self.dr6 & 0b1111 == 0
     }
+}
+
+/// Clear the trap flag (`TF`, RFLAGS bit 8) and DR6's B0-B3 status bits on the
+/// currently selected thread, best-effort, so an absorbed single-step leaves
+/// no residue for the next resume. ARM64 has neither x86 field, so its
+/// single-step state is acknowledged by KD's ARM64 continue request instead.
+/// A transport that reports TF and DR6 with the stop answers this without a
+/// register fetch, which is what keeps an absorbed breakpoint hit cheap.
+pub fn clear_trap_flag(backend: &mut dyn DebugBackend, register_map: &RegisterMap) -> Result<()> {
+    if backend
+        .stop_trap_state()
+        .is_some_and(|state| state.is_clean())
+    {
+        return Ok(());
+    }
+    if let Ok(mut regs) = backend.read_registers() {
+        let mut dirty = false;
+        if let Ok(eflags) = register_map.read_u64("eflags", &regs) {
+            let cleared = eflags & !(1u64 << 8);
+            if cleared != eflags && register_map.write_u64("eflags", &mut regs, cleared).is_ok() {
+                dirty = true;
+            }
+        }
+        if let Ok(dr6) = register_map.read_u64("dr6", &regs) {
+            let cleared = dr6 & !0b1111u64;
+            if cleared != dr6 && register_map.write_u64("dr6", &mut regs, cleared).is_ok() {
+                dirty = true;
+            }
+        }
+        if dirty {
+            backend.write_registers(&regs)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The zero-based processor a backend thread id names. Backends report one
+/// thread per processor as `p<pid>.<tid>` with a one-based hex `tid`.
+pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
+    let (_pid, tid) = thread_id.strip_prefix('p')?.split_once('.')?;
+    u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
 }
 
 /// Debug transport abstraction; guest memory access is provided separately by
@@ -783,6 +825,17 @@ pub trait DebugBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_thread_ids_parse_as_zero_based_processors() {
+        assert_eq!(processor_index_from_backend_thread_id("p1.1"), Some(0));
+        assert_eq!(processor_index_from_backend_thread_id("p1.a"), Some(9));
+        // QEMU pads both fields: `p01.01` is its first vCPU.
+        assert_eq!(processor_index_from_backend_thread_id("p01.01"), Some(0));
+        assert_eq!(processor_index_from_backend_thread_id("p01.0a"), Some(9));
+        assert_eq!(processor_index_from_backend_thread_id("p1.0"), None);
+        assert_eq!(processor_index_from_backend_thread_id("bad"), None);
+    }
 
     #[test]
     fn debug_log_splits_lines_and_strips_crlf() {

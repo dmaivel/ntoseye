@@ -16,6 +16,7 @@ use crate::backend::MemoryOps;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent, TrapState,
+    clear_trap_flag,
 };
 use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
@@ -23,7 +24,6 @@ use crate::gdb::RegisterMap;
 use crate::kd::framing::{BREAKIN_BYTE, KdFraming};
 use crate::memory::{AddressSpace, PAGE_SIZE, TranslationCache};
 use crate::phys::PhysMem;
-use crate::session::clear_trap_flag;
 use crate::types::{Arch, Dtb, KernelLocation, PhysAddr, VirtAddr};
 
 macro_rules! kd_trace {

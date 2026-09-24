@@ -17,7 +17,6 @@ pub const REPL_STOP_POLL: Duration = Duration::from_millis(100);
 
 pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 
-pub use crate::session::processor_index_from_backend_thread_id;
 pub use crate::session::refresh_windows_thread_context_for_backend_thread;
 
 /// One-line summary: `thread Idle  state Running  ethread <addr>  pid 0  tid 0`.
@@ -477,20 +476,4 @@ pub fn print_break_context_at(
         true,
     );
     outln!();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::processor_index_from_backend_thread_id;
-
-    #[test]
-    fn backend_thread_ids_parse_as_zero_based_processors() {
-        assert_eq!(processor_index_from_backend_thread_id("p1.1"), Some(0));
-        assert_eq!(processor_index_from_backend_thread_id("p1.a"), Some(9));
-        // QEMU pads both fields: `p01.01` is its first vCPU.
-        assert_eq!(processor_index_from_backend_thread_id("p01.01"), Some(0));
-        assert_eq!(processor_index_from_backend_thread_id("p01.0a"), Some(9));
-        assert_eq!(processor_index_from_backend_thread_id("p1.0"), None);
-        assert_eq!(processor_index_from_backend_thread_id("bad"), None);
-    }
 }

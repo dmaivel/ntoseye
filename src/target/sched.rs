@@ -6,11 +6,12 @@ use std::sync::atomic::Ordering;
 
 use crate::backend::MemoryOps;
 use crate::cpu_state::{MAX_PROCESSORS, kpcr_for_processor, kprcb_for_processor, processor_count};
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared;
 use crate::layout::{ParsedType, TypeInfo};
-use crate::session::{Session, processor_index_from_backend_thread_id};
+use crate::session::Session;
 use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk};
 use crate::types::VirtAddr;
 use crate::unwind::{StackFrame, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
