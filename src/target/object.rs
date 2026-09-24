@@ -1,5 +1,6 @@
 //! Object-manager inspectors: names, directories, driver/device objects, IRPs, handles, file objects, resources, object headers, notify callbacks, SSDT.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
@@ -403,11 +404,8 @@ impl Target {
         let memory = self.guest()?.ntoskrnl.memory();
         let mut out = Vec::new();
         for bucket in 0..dir.bucket_count {
-            let mut entry: VirtAddr = memory.read(directory + dir.buckets_offset + bucket * 8)?;
-            for _ in 0..4096 {
-                if entry.is_zero() {
-                    break;
-                }
+            let entry: VirtAddr = memory.read(directory + dir.buckets_offset + bucket * 8)?;
+            Self::walk_object_directory_bucket(entry, |entry| {
                 let object: VirtAddr = memory.read(entry + dir.object_offset)?;
                 if !object.is_zero() {
                     let name = match dir.name_offset {
@@ -420,11 +418,25 @@ impl Target {
                         out.push((name, object));
                     }
                 }
-                entry = memory.read(entry + dir.chain_offset)?;
-            }
+                memory.read(entry + dir.chain_offset)
+            })?;
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
+    }
+
+    fn walk_object_directory_bucket(
+        mut entry: VirtAddr,
+        mut visit: impl FnMut(VirtAddr) -> Result<VirtAddr>,
+    ) -> Result<()> {
+        let mut visited = HashSet::new();
+        for _ in 0..4096 {
+            if entry.is_zero() || !visited.insert(entry.0) {
+                break;
+            }
+            entry = visit(entry)?;
+        }
+        Ok(())
     }
 
     pub fn enumerate_driver_objects(&self) -> Result<Vec<DriverObjectInfo>> {
@@ -1522,6 +1534,22 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::types::VirtAddr;
+
+    #[test]
+    fn object_directory_two_entry_cycle_emits_each_entry_once() {
+        let mut entries = Vec::new();
+        Target::walk_object_directory_bucket(VirtAddr(1), |entry| {
+            entries.push(entry);
+            Ok(if entry == VirtAddr(1) {
+                VirtAddr(2)
+            } else {
+                VirtAddr(1)
+            })
+        })
+        .unwrap();
+
+        assert_eq!(entries, [VirtAddr(1), VirtAddr(2)]);
+    }
 
     #[test]
     fn direct_object_header_wins_when_only_it_has_a_valid_type() {
