@@ -258,6 +258,18 @@ impl PageTableEntry {
         self.0 & PFN_MASK
     }
 
+    /// Base of the 1 GiB page a large PDPTE maps. In a large-page entry bit 12
+    /// is PAT and the bits below the page size are reserved, not address.
+    pub const fn huge_page_frame(self) -> u64 {
+        self.0 & PFN_MASK & !((1u64 << PDPTE_SHIFT) - 1)
+    }
+
+    /// Base of the 2 MiB page a large PDE maps (see
+    /// [`huge_page_frame`](Self::huge_page_frame)).
+    pub const fn large_page_frame(self) -> u64 {
+        self.0 & PFN_MASK & !((1u64 << PDE_SHIFT) - 1)
+    }
+
     pub const fn is_user(self) -> bool {
         self.0 & 0x4 != 0
     }
@@ -325,6 +337,18 @@ impl PageTableEntry {
     /// Output address bits [47:12] (48-bit PA space), kept in place.
     pub const fn arm64_page_frame(self) -> u64 {
         self.0 & 0x0000_FFFF_FFFF_F000
+    }
+
+    /// Output address of an L1 (1 GiB) block descriptor. The bits below the
+    /// block size are not address: bit 16 is `nT`, the rest are RES0.
+    pub const fn arm64_huge_block_frame(self) -> u64 {
+        self.arm64_page_frame() & !((1u64 << PDPTE_SHIFT) - 1)
+    }
+
+    /// Output address of an L2 (2 MiB) block descriptor (see
+    /// [`arm64_huge_block_frame`](Self::arm64_huge_block_frame)).
+    pub const fn arm64_large_block_frame(self) -> u64 {
+        self.arm64_page_frame() & !((1u64 << PDE_SHIFT) - 1)
     }
 
     pub const fn arm64_is_user(self) -> bool {

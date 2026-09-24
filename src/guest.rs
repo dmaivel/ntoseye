@@ -1722,12 +1722,14 @@ fn is_ntoskrnl_header(header: &[u8]) -> bool {
         && header.as_chunks::<8>().0.iter().any(|c| c == b"POOLCODE")
 }
 
-fn is_ntoskrnl_pte(phys: &PhysMem, pte: PageTableEntry) -> Result<bool> {
-    if pte.is_user() || !pte.is_nx() {
+/// Whether the kernel-only, no-execute page at `frame` (mapped by `entry`)
+/// starts with the ntoskrnl image header.
+fn is_ntoskrnl_page(phys: &PhysMem, entry: PageTableEntry, frame: PhysAddr) -> Result<bool> {
+    if entry.is_user() || !entry.is_nx() {
         return Ok(false);
     }
 
-    let Ok(header) = phys.read::<[u8; 0x1000]>(pte.page_frame()) else {
+    let Ok(header) = phys.read::<[u8; 0x1000]>(frame) else {
         return Ok(false);
     };
     Ok(is_ntoskrnl_header(&header))
@@ -1769,7 +1771,7 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
             }
 
             if pdpte.is_large_page() {
-                if let Ok(true) = is_ntoskrnl_pte(phys, pdpte) {
+                if let Ok(true) = is_ntoskrnl_page(phys, pdpte, pdpte.huge_page_frame()) {
                     return Ok(Some(VirtAddr::construct(pml4_index, pdpt_index, 0, 0)));
                 }
 
@@ -1792,7 +1794,7 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
                 }
 
                 if pde.is_large_page() {
-                    if let Ok(true) = is_ntoskrnl_pte(phys, pde) {
+                    if let Ok(true) = is_ntoskrnl_page(phys, pde, pde.large_page_frame()) {
                         return Ok(Some(VirtAddr::construct(
                             pml4_index, pdpt_index, pd_index, 0,
                         )));
@@ -1816,7 +1818,7 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
                         continue;
                     }
 
-                    if let Ok(true) = is_ntoskrnl_pte(phys, pte) {
+                    if let Ok(true) = is_ntoskrnl_page(phys, pte, pte.page_frame()) {
                         return Ok(Some(VirtAddr::construct(
                             pml4_index, pdpt_index, pd_index, pt_index,
                         )));
@@ -1893,7 +1895,7 @@ fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<Virt
             if l1.arm64_is_block() {
                 // A 1 GiB block is unlikely for ntoskrnl. Probe each 2 MiB
                 // boundary and reconstruct the matching VA at the L2 index.
-                let block = l1.arm64_page_frame();
+                let block = l1.arm64_huge_block_frame();
                 for l2_index in 0..512u64 {
                     if is_ntoskrnl_header_at(phys, block + l2_index * (2 << 20))? {
                         return Ok(Some(VirtAddr::construct(
@@ -1926,7 +1928,7 @@ fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<Virt
                 if l2.arm64_is_block() {
                     // Probe every 4 KiB page in the 2 MiB block; the PE image
                     // need not begin at the block's first page.
-                    let block = l2.arm64_page_frame();
+                    let block = l2.arm64_large_block_frame();
                     for pt_index in 0..512u64 {
                         if is_ntoskrnl_header_at(phys, block + pt_index * 0x1000)? {
                             return Ok(Some(VirtAddr::construct(

@@ -141,7 +141,7 @@ impl Translation {
 
     pub const fn new_huge(pml4e: PageTableEntry, pdpte: PageTableEntry, va: VirtAddr) -> Self {
         Self {
-            address: pdpte.page_frame() + va.huge_page_offset(),
+            address: pdpte.huge_page_frame() + va.huge_page_offset(),
             large: true,
             writable: pml4e.is_writable() && pdpte.is_writable(),
             user: pml4e.is_user() && pdpte.is_user(),
@@ -158,7 +158,7 @@ impl Translation {
         va: VirtAddr,
     ) -> Self {
         Self {
-            address: pde.page_frame() + va.large_page_offset(),
+            address: pde.large_page_frame() + va.large_page_offset(),
             large: true,
             writable: pml4e.is_writable() && pdpte.is_writable() && pde.is_writable(),
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user(),
@@ -209,7 +209,7 @@ impl Translation {
         let pxn = l0.arm64_table_is_pxn() || l1.arm64_is_pxn();
         let uxn = l0.arm64_table_is_uxn() || l1.arm64_is_uxn();
         Self {
-            address: l1.arm64_page_frame() + va.huge_page_offset(),
+            address: l1.arm64_huge_block_frame() + va.huge_page_offset(),
             large: true,
             writable: l0.arm64_table_allows_write() && l1.arm64_is_writable(),
             user: l0.arm64_table_allows_user() && l1.arm64_is_user(),
@@ -229,7 +229,7 @@ impl Translation {
         let pxn = l0.arm64_table_is_pxn() || l1.arm64_table_is_pxn() || l2.arm64_is_pxn();
         let uxn = l0.arm64_table_is_uxn() || l1.arm64_table_is_uxn() || l2.arm64_is_uxn();
         Self {
-            address: l2.arm64_page_frame() + va.large_page_offset(),
+            address: l2.arm64_large_block_frame() + va.large_page_offset(),
             large: true,
             writable: l0.arm64_table_allows_write()
                 && l1.arm64_table_allows_write()
@@ -630,6 +630,60 @@ mod tests {
                 "{name} PTE was followed as if its bits were a page frame"
             );
         }
+    }
+
+    /// A large-page entry's bit 12 is PAT, not address. Read as a frame bit,
+    /// every PAT-typed large mapping resolves one page off.
+    #[test]
+    fn large_page_walk_ignores_pat_bit() {
+        const PAT: u64 = 1 << 12;
+        let (mem, _) = amd64_space(0);
+        let mut data = mem.data;
+        let va = VirtAddr(0x0020_0000 + 0x1008);
+        let pde_at = 0x3000 + va.pd_index() * 8;
+        data[pde_at..pde_at + 8]
+            .copy_from_slice(&(0x0040_0000 | PAT | 0x80 | 0b111u64).to_le_bytes());
+        data.resize(0x0060_0000, 0);
+        data[0x0040_1008..0x0040_1010].copy_from_slice(&0xfeed_faceu64.to_le_bytes());
+        data[0x0040_2008..0x0040_2010].copy_from_slice(&0xbad_f00du64.to_le_bytes());
+        let mem = FakePhysMem { data };
+
+        let value: u64 = AddressSpace::new(&mem, 0x1000).read(va).unwrap();
+
+        assert_eq!(value, 0xfeed_face);
+    }
+
+    #[test]
+    fn huge_page_translation_ignores_pat_bit() {
+        let pml4e = PageTableEntry(0x2000 | 0b111);
+        let pdpte = PageTableEntry(0x4000_0000 | (1 << 12) | 0x80 | 0b111);
+
+        let huge = Translation::new_huge(pml4e, pdpte, VirtAddr(0x1234_5678));
+
+        assert_eq!(huge.address, 0x4000_0000 + 0x1234_5678);
+    }
+
+    /// An AArch64 block descriptor's bits below the block size are `nT`
+    /// (bit 16) or RES0, not output address.
+    #[test]
+    fn arm64_block_translation_ignores_non_address_bits() {
+        const NT: u64 = 1 << 16;
+        let table = PageTableEntry(0b11);
+
+        let huge = Translation::arm64_huge(
+            table,
+            PageTableEntry(0x4000_0000 | NT | 0b01),
+            VirtAddr(0x1234_5678),
+        );
+        let large = Translation::arm64_large(
+            table,
+            table,
+            PageTableEntry(0x0060_0000 | NT | 0b01),
+            VirtAddr(0x0012_3456),
+        );
+
+        assert_eq!(huge.address, 0x4000_0000 + 0x1234_5678);
+        assert_eq!(large.address, 0x0060_0000 + 0x12_3456);
     }
 
     #[test]

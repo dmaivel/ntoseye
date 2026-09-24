@@ -1616,7 +1616,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         });
     }
     if pdpte.is_large_page() {
-        let frame = pdpte.page_frame() & !(LARGE_PAGE_1G - 1);
+        let frame = pdpte.huge_page_frame();
         return Ok(VtopDetail {
             address: va,
             dtb,
@@ -1647,7 +1647,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         });
     }
     if pde.is_large_page() {
-        let frame = pde.page_frame() & !(LARGE_PAGE_2M - 1);
+        let frame = pde.large_page_frame();
         return Ok(VtopDetail {
             address: va,
             dtb,
@@ -1715,7 +1715,7 @@ fn scan_ptov_table(
         let mut current = prefix;
         current[level as usize] = index;
         if level == 1 && entry.is_large_page() {
-            let frame = entry.page_frame() & !(LARGE_PAGE_1G - 1);
+            let frame = entry.huge_page_frame();
             if (frame..frame.saturating_add(LARGE_PAGE_1G)).contains(&wanted_page) {
                 let va = VirtAddr::construct(current[0], current[1], 0, 0) + (wanted_page - frame);
                 results.push((va, true));
@@ -1723,7 +1723,7 @@ fn scan_ptov_table(
             continue;
         }
         if level == 2 && entry.is_large_page() {
-            let frame = entry.page_frame() & !(LARGE_PAGE_2M - 1);
+            let frame = entry.large_page_frame();
             if (frame..frame.saturating_add(LARGE_PAGE_2M)).contains(&wanted_page) {
                 let va = VirtAddr::construct(current[0], current[1], current[2], 0)
                     + (wanted_page - frame);
