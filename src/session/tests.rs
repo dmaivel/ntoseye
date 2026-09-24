@@ -1,7 +1,9 @@
 use super::*;
 use crate::dbg_backend::TrapState;
+use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
 use crate::gdb::breakpoints::{Breakpoint, HardwareBreakpoint};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
+use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
 use crate::types::VirtAddr;
 use parking_lot::Mutex;
@@ -323,6 +325,46 @@ fn bugcheck_exception_record_uses_bugcheck_code() {
         session.current_exception_record().unwrap().code,
         0xdead_beef
     );
+}
+
+fn session_over_arm64_memory(base: u64, memory: &[u8]) -> Session {
+    let block = TriageBlock {
+        address: base,
+        offset: 0,
+        size: memory.len() as u32,
+    };
+    let mut dump = make_triage_dump(&[block], &[(base, memory)]);
+    let machine_offset = std::mem::offset_of!(Header64, machine_image_type);
+    dump[machine_offset..machine_offset + 4]
+        .copy_from_slice(&IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = temp_dir().join(format!("ntoseye-session-arm64-{sequence}-{}.dmp", id()));
+    write(&path, dump).unwrap();
+    let session = Session::open(&TargetSpec::Dump(path.clone())).unwrap();
+    remove_file(path).unwrap();
+    session
+}
+
+#[test]
+fn page_in_result_reads_arm64_pc_alias_and_first_argument() {
+    let mut session = session_over_arm64_memory(0x1000, &[0; 0x100]);
+    assert_eq!(session.target.arch(), Arch::Arm64);
+
+    let mut backend = MockBackend {
+        register_map: context_arm64::build_register_map(),
+        regs: vec![0; context_arm64::REGISTER_BUFFER_SIZE],
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x2000);
+    backend.set("x0", DBG_STATUS_WORKER);
+    session.register_map = backend.register_map.clone();
+    session.backend = Box::new(backend);
+
+    let report = session.page_in_result(VirtAddr(0x1000), VirtAddr(0x2000));
+
+    assert!(report.from_worker);
 }
 
 /// With nothing attached, the bytes `db` and `s` show are the halted

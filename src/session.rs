@@ -2882,9 +2882,13 @@ impl Session {
         let pc = registers
             .as_ref()
             .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
+        let first_argument = match self.target.arch() {
+            Arch::Amd64 => "rcx",
+            Arch::Arm64 => "x0",
+        };
         let status = registers
             .as_ref()
-            .and_then(|regs| self.register_map.read_u64("rcx", regs).ok());
+            .and_then(|regs| self.register_map.read_u64(first_argument, regs).ok());
         // `DbgBreakPointWithStatus` takes its status in the first argument
         // register, so a worker break is distinguishable from any other
         // hard-coded break at the same address.
