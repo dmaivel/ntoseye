@@ -793,12 +793,13 @@ impl Server {
             return Ok(None);
         }
         let arch = session.target.arch();
-        let Some(run_end) = fallthrough_run_end(&bytes, rip, end.0, arch) else {
+        let bitness = session.target.code_bitness(VirtAddr(rip));
+        let Some(run_end) = fallthrough_run_end(&bytes, rip, end.0, arch, bitness) else {
             return Ok(None);
         };
         // One instruction: a single-step reaches it in one round trip, a run
         // needs a breakpoint write, a resume and a removal.
-        if instruction_length(&bytes, arch) == Some(run_end.saturating_sub(rip) as usize) {
+        if instruction_length(&bytes, arch, bitness) == Some(run_end.saturating_sub(rip) as usize) {
             return Ok(None);
         }
         Ok(Some(VirtAddr(run_end)))

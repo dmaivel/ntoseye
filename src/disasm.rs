@@ -70,13 +70,20 @@ fn decode_first(bytes: &[u8], arch: Arch, bitness: u32) -> Option<(usize, Contro
 }
 
 /// Encoded length of the first instruction, or `None` for invalid or incomplete bytes.
-pub fn instruction_length(bytes: &[u8], arch: Arch) -> Option<usize> {
-    decode_first(bytes, arch, 64).map(|(length, _)| length)
+/// `bitness` selects 32- or 64-bit AMD64 decoding and is ignored for ARM64.
+pub fn instruction_length(bytes: &[u8], arch: Arch, bitness: u32) -> Option<usize> {
+    decode_first(bytes, arch, bitness).map(|(length, _)| length)
 }
 
 /// End of a branch-free instruction range starting at `start`.
 /// Input bytes must have debugger breakpoint opcodes masked out.
-pub fn fallthrough_run_end(bytes: &[u8], start: u64, end: u64, arch: Arch) -> Option<u64> {
+pub fn fallthrough_run_end(
+    bytes: &[u8],
+    start: u64,
+    end: u64,
+    arch: Arch,
+    bitness: u32,
+) -> Option<u64> {
     if end <= start {
         return None;
     }
@@ -90,7 +97,7 @@ pub fn fallthrough_run_end(bytes: &[u8], start: u64, end: u64, arch: Arch) -> Op
     let mut offset = 0;
     while offset < window_len {
         let boundary = start + offset as u64;
-        let Some((length, flow)) = decode_first(&bytes[offset..], arch, 64) else {
+        let Some((length, flow)) = decode_first(&bytes[offset..], arch, bitness) else {
             return (offset != 0).then_some(boundary);
         };
         if length == 0 || length > window_len - offset {
@@ -105,7 +112,7 @@ pub fn fallthrough_run_end(bytes: &[u8], start: u64, end: u64, arch: Arch) -> Op
 }
 
 /// Classify the first instruction in `bytes` for the target architecture and
-/// effective code bitness.
+/// effective code bitness (ignored for ARM64).
 /// Invalid or incomplete instructions are treated as [`ControlFlow::Other`].
 pub fn classify(bytes: &[u8], arch: Arch, bitness: u32) -> ControlFlow {
     if bytes.is_empty() {
@@ -780,7 +787,8 @@ mod tests {
                 &straight_line,
                 0x1000,
                 0x1000 + straight_line.len() as u64,
-                Arch::Amd64
+                Arch::Amd64,
+                64,
             ),
             Some(0x1000 + straight_line.len() as u64)
         );
@@ -794,7 +802,13 @@ mod tests {
             window.extend_from_slice(&control_flow);
             window.extend_from_slice(&[0x90]);
             assert_eq!(
-                fallthrough_run_end(&window, 0x1000, 0x1000 + window.len() as u64, Arch::Amd64),
+                fallthrough_run_end(
+                    &window,
+                    0x1000,
+                    0x1000 + window.len() as u64,
+                    Arch::Amd64,
+                    64
+                ),
                 Some(0x1003)
             );
         }
@@ -803,7 +817,7 @@ mod tests {
     #[test]
     fn amd64_fallthrough_run_end_returns_none_for_leading_control_flow() {
         assert_eq!(
-            fallthrough_run_end(&[0xc3, 0x90], 0x1000, 0x1002, Arch::Amd64),
+            fallthrough_run_end(&[0xc3, 0x90], 0x1000, 0x1002, Arch::Amd64, 64),
             None
         );
     }
@@ -811,8 +825,16 @@ mod tests {
     #[test]
     fn fallthrough_run_end_stops_at_last_boundary_before_end() {
         let bytes = [0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01];
-        assert_eq!(fallthrough_run_end(&bytes, 0, 6, Arch::Amd64), Some(3));
-        assert_eq!(fallthrough_run_end(&bytes, 0, 2, Arch::Amd64), None);
+        assert_eq!(fallthrough_run_end(&bytes, 0, 6, Arch::Amd64, 64), Some(3));
+        assert_eq!(fallthrough_run_end(&bytes, 0, 2, Arch::Amd64, 64), None);
+    }
+
+    #[test]
+    fn x86_fallthrough_run_end_decodes_32_bit_code() {
+        // `dec eax; ret` in 32-bit code, one `ret` with a REX prefix in 64-bit.
+        let bytes = [0x48, 0xc3];
+        assert_eq!(fallthrough_run_end(&bytes, 0, 2, Arch::Amd64, 32), Some(1));
+        assert_eq!(fallthrough_run_end(&bytes, 0, 2, Arch::Amd64, 64), None);
     }
 
     #[test]
@@ -822,21 +844,21 @@ mod tests {
         nops.extend_from_slice(&nop);
         nops.extend_from_slice(&nop);
         assert_eq!(
-            fallthrough_run_end(&nops, 0x2000, 0x2008, Arch::Arm64),
+            fallthrough_run_end(&nops, 0x2000, 0x2008, Arch::Arm64, 64),
             Some(0x2008)
         );
 
         let branch = 0x14000000u32.to_le_bytes();
         assert_eq!(
-            fallthrough_run_end(&branch, 0x2000, 0x2004, Arch::Arm64),
+            fallthrough_run_end(&branch, 0x2000, 0x2004, Arch::Arm64, 64),
             None
         );
     }
 
     #[test]
     fn instruction_length_rejects_truncated_encodings() {
-        assert_eq!(instruction_length(&[0xe8, 0, 0, 0], Arch::Amd64), None);
-        assert_eq!(instruction_length(&[0, 0, 0], Arch::Arm64), None);
+        assert_eq!(instruction_length(&[0xe8, 0, 0, 0], Arch::Amd64, 64), None);
+        assert_eq!(instruction_length(&[0, 0, 0], Arch::Arm64, 64), None);
     }
 
     #[test]
