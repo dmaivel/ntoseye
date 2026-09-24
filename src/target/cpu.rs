@@ -63,6 +63,7 @@ pub struct ProcessorStateDetail {
     pub address: VirtAddr,
     pub size: u64,
     pub name: String,
+    /// Address of the `_CONTEXT` embedded in the processor state.
     pub context_frame: DiagnosticValue<VirtAddr>,
     pub special_registers: DiagnosticValue<SpecialRegistersDetail>,
 }
@@ -591,12 +592,11 @@ impl Target {
                     address: state_base,
                     size: state_layout.size as u64,
                     name: state_layout.name.clone(),
-                    context_frame: addr_value(field_u64(
-                        self,
-                        &state_layout,
-                        state_base,
-                        &["ContextFrame"],
-                    )),
+                    context_frame: DiagnosticValue::from_result(
+                        state_layout
+                            .field_offset("ContextFrame")
+                            .map(|offset| state_base + offset),
+                    ),
                     special_registers,
                 })
             }
