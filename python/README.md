@@ -46,13 +46,36 @@ For read-only inspection of a paused VM, select `backend="memory"`. Processes
 are handles keyed by PID (`dbg.processes[pid]`); memory and modules for a
 specific process are available through `proc.memory` and `proc.modules`.
 
+## Type stubs
+
+`ntoseye/_ntoseye.pyi` is generated from the extension by PyO3's
+introspection: signatures come from the Rust types and docstrings from the
+doc comments. After changing the Rust surface, regenerate it and commit the
+result (CI fails when the checked-in stub differs from a fresh one):
+
+```sh
+maturin develop --release --generate-stubs
+```
+
+## Tests
+
+```sh
+pip install pytest mypy
+pytest tests                        # target-free surface tests
+mypy --strict -p ntoseye            # the stub and package type-check
+NTOSEYE_TEST_BACKEND=kd NTOSEYE_TEST_CONNECT=/tmp/ntoseye-kd.sock pytest tests
+```
+
+The last line also runs `tests/test_live.py` against a guest: it breaks in,
+steps, sets breakpoints on hot kernel functions, and resumes the guest.
+
 ## Releasing portable wheels
 Release wheels are built by `.github/workflows/release.yml` with `PyO3/maturin-action` on native GitHub runners:
 
 - Linux x86-64 and ARM64 build on `ubuntu-22.04` and `ubuntu-24.04-arm` inside the `quay.io/pypa/manylinux_2_28_*` images, producing `manylinux_2_28` wheels.
 - Apple Silicon uses the native ARM64 `macos-14` runner.
 
-Each wheel then passes `twine check` and an import test in a clean virtual environment before upload.
+Each wheel then passes `twine check` and the target-free tests (`tests/test_surface.py`) in a clean virtual environment before upload.
 
 To reproduce a Linux release wheel locally (from the repository root, Docker required):
 

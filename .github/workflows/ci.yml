@@ -70,8 +70,14 @@ jobs:
 
   # The wheel's cdylib, and the only build of the `python-extension` feature:
   # it links against the interpreter differently than the embedded one above.
+  # The stub is regenerated from the build and must match the checked-in one
+  # the wheel ships; the oldest and newest supported Pythons run the tests.
   extension:
-    name: python extension
+    name: python extension (${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,8 +85,25 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check
         run: cargo check --locked -p ntoseye-py --all-targets
+      - name: Build, regenerating the stub
+        working-directory: python
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet maturin mypy pytest
+          VIRTUAL_ENV="$RUNNER_TEMP/venv" "$RUNNER_TEMP/venv/bin/maturin" develop --locked --generate-stubs
+      - name: Stub is current
+        run: git diff --exit-code -- python/ntoseye/_ntoseye.pyi
+      - name: Type-check the package and examples
+        working-directory: python
+        run: |
+          "$RUNNER_TEMP/venv/bin/mypy" --strict -p ntoseye
+          "$RUNNER_TEMP/venv/bin/mypy" --strict ../examples/standalone
+      - name: Test
+        working-directory: python
+        run: |
+          "$RUNNER_TEMP/venv/bin/pytest" -q tests

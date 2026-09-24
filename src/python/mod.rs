@@ -36,6 +36,8 @@ pub mod runcontrol;
 pub mod runner;
 pub mod stop;
 pub mod symbols;
+#[cfg(test)]
+mod tests;
 pub mod thread;
 pub mod types;
 

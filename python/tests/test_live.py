@@ -1,0 +1,115 @@
+"""Run control, `when=` predicates, handle staleness, and Ctrl+C against a
+live guest (see `conftest.py`)."""
+
+from __future__ import annotations
+
+import os
+import signal
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+import pytest
+
+import ntoseye
+from ntoseye import Debugger, Stop
+
+# Called on every context switch, so a running guest hits it at once.
+HOT = "nt!KiSwapContext"
+
+
+@contextmanager
+def ctrl_c_after(seconds: float) -> Iterator[None]:
+    timer = threading.Timer(seconds, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+
+
+def test_current_stop_is_read_not_consumed(halted: Debugger) -> None:
+    stop = halted.step()
+    assert isinstance(stop, Stop.Step)
+    # Every read of a halted target reports the stop it is halted at.
+    for current in (halted.stop, halted.stop, halted.wait(0), halted.interrupt()):
+        assert isinstance(current, Stop.Step)
+        assert current.rip == stop.rip
+
+
+def test_false_predicate_never_surfaces(halted: Debugger) -> None:
+    seen: list[Stop] = []
+    halted.breakpoints.add(HOT, when=lambda stop: seen.append(stop))
+    assert halted.run(timeout=1.0) is None
+    assert seen, "the predicate never ran"
+    assert all(isinstance(stop, Stop.Breakpoint) for stop in seen)
+
+
+def test_true_predicate_surfaces_its_breakpoint(halted: Debugger) -> None:
+    bp = halted.breakpoints.add(HOT, when=lambda stop: True)
+    stop = halted.run(timeout=5.0)
+    assert isinstance(stop, Stop.Breakpoint)
+    assert bp in stop.breakpoints
+    assert stop.rip == bp.address
+
+
+def test_failing_predicate_surfaces_with_its_error(halted: Debugger) -> None:
+    halted.breakpoints.add(HOT, when=lambda stop: 1 // 0)
+    stop = halted.run(timeout=5.0)
+    assert isinstance(stop, Stop.Breakpoint)
+    assert stop.condition_error is not None
+    assert "ZeroDivisionError" in stop.condition_error
+
+
+def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
+    halted.breakpoints.add(HOT, when=lambda stop: False)
+    # A hit en route is resumed like under run(); the step still completes.
+    assert isinstance(halted.step_over(until="call"), Stop.Step)
+    assert isinstance(halted.step_out(), Stop.Step)
+
+
+def test_run_to_symbol_stops_there(halted: Debugger) -> None:
+    stop = halted.run_to("nt!NtClose", timeout=10.0)
+    assert isinstance(stop, Stop.Step)
+    assert stop.rip == halted.symbols["nt!NtClose"]
+
+
+def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
+    # gdb single-steps at a few hundred instructions a second.
+    trace = halted.trace_calls(limit=2_000)
+    assert trace.end in ("returned", "limit")
+    assert trace.instructions > 0
+
+
+def test_enum_fields_are_int_enum_members(halted: Debugger) -> None:
+    states = halted.types["_KTHREAD_STATE"].values
+    assert states["Running"] == 2
+    thread = next(iter(halted.processes[4].threads))
+    assert thread.state is not None
+    assert thread.state in states.values()
+    assert thread.state.name in states  # type: ignore[attr-defined]
+
+
+def test_reload_makes_old_handles_stale(halted: Debugger) -> None:
+    system = halted.processes[4]
+    generation = halted.generation
+    halted.reload()
+    assert halted.generation == generation + 1
+    with pytest.raises(ntoseye.StaleHandleError):
+        system.name
+    assert halted.processes[4].name == "System"
+
+
+def test_ctrl_c_ends_run(halted: Debugger) -> None:
+    start = time.monotonic()
+    with ctrl_c_after(0.5), pytest.raises(KeyboardInterrupt):
+        halted.run()
+    assert time.monotonic() - start < 5.0
+
+
+def test_ctrl_c_breaks_into_a_resuming_command(halted: Debugger) -> None:
+    with ctrl_c_after(0.5), pytest.raises(KeyboardInterrupt):
+        halted.command("g")
+    # As in the REPL, Ctrl+C during `g` breaks in: the target is halted.
+    assert halted.stop is not None

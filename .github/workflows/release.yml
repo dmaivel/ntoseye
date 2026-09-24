@@ -157,21 +157,17 @@ jobs:
           container: ${{ matrix.container }}
           rust-toolchain: stable
           before-script-linux: dnf install -y clang
-      # twine check validates metadata only; the import test in a clean venv
-      # proves the wheel installs and exposes its API surface.
+      # twine check validates metadata only; the target-free tests in a clean
+      # venv prove the wheel installs, imports, and ships a stub matching its
+      # extension. `-I` keeps the source tree off `sys.path`.
       - name: Check and import-test wheel
         working-directory: python
         run: |
           python -m pip install --quiet twine
           python -m twine check dist/*
           python -m venv "$RUNNER_TEMP/smoke"
-          "$RUNNER_TEMP/smoke/bin/python" -m pip install --quiet dist/*.whl
-          "$RUNNER_TEMP/smoke/bin/python" -I - <<'PY'
-          import ntoseye
-          print("version:", ntoseye.__version__)
-          assert hasattr(ntoseye, "attach"), "attach missing"
-          assert hasattr(ntoseye, "Debugger"), "Debugger missing"
-          PY
+          "$RUNNER_TEMP/smoke/bin/python" -m pip install --quiet dist/*.whl pytest
+          "$RUNNER_TEMP/smoke/bin/python" -I -m pytest -q -p no:cacheprovider tests/test_surface.py
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
