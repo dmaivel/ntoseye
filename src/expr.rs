@@ -1,6 +1,6 @@
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::layout::{ParsedType, TypeInfo};
+use crate::layout::{ParsedType, TypeInfo, bitfield_value, primitive_size};
 use crate::symbols::{LocalVariableLocation, ProcedureLocal, SymbolStore, glob_matches};
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
@@ -855,10 +855,7 @@ impl Expr {
         };
         let type_info = Self::find_type(context, type_name)
             .ok_or_else(|| Error::StructNotFound(type_name.clone()))?;
-        let field = type_info
-            .fields
-            .get(field_name)
-            .ok_or_else(|| Error::FieldNotFound(field_name.to_string()))?;
+        let field = type_info.field(field_name)?;
         let byte_size = if field.size == 0 {
             Self::parsed_type_size(&field.type_data, None, context).ok()
         } else {
@@ -979,14 +976,14 @@ impl Expr {
     fn scalar_width(type_data: &ParsedType, declared_size: Option<u64>) -> Result<u64> {
         let width = match type_data {
             ParsedType::Primitive(name) => {
-                if Self::primitive_size(name).is_none() {
+                if primitive_size(name).is_none() {
                     return Err(Error::InvalidExpression(format!(
                         "unsupported or unknown scalar type: {name}"
                     )));
                 }
-                declared_size.or_else(|| Self::primitive_size(name))
+                declared_size.or_else(|| primitive_size(name))
             }
-            ParsedType::Enum(name) => declared_size.or_else(|| Self::primitive_size(name)),
+            ParsedType::Enum(name) => declared_size.or_else(|| primitive_size(name)),
             ParsedType::Pointer(_) => Some(8),
             ParsedType::Bitfield { underlying, .. } => {
                 Some(Self::scalar_width(underlying, declared_size)?)
@@ -1043,7 +1040,7 @@ impl Expr {
     ) -> Result<u64> {
         match type_data {
             ParsedType::Primitive(name) => declared_size
-                .or_else(|| Self::primitive_size(name))
+                .or_else(|| primitive_size(name))
                 .ok_or_else(|| {
                     Error::InvalidExpression(format!("unsupported or unknown type width: {name}"))
                 }),
@@ -1091,20 +1088,6 @@ impl Expr {
         Self::parsed_type_size(inner, None, context)
     }
 
-    fn primitive_size(name: &str) -> Option<u64> {
-        match name.to_ascii_lowercase().as_str() {
-            "char" | "schar" | "uchar" | "u8" | "i8" | "int8_t" | "uint8_t" | "bool" | "bool8"
-            | "boolean" => Some(1),
-            "wchar" | "wchar_t" | "char16_t" | "short" | "ushort" | "short int"
-            | "unsigned short" | "i16" | "u16" | "int16_t" | "uint16_t" => Some(2),
-            "long" | "ulong" | "int" | "uint" | "i32" | "u32" | "int32_t" | "uint32_t"
-            | "bool32" => Some(4),
-            "longlong" | "ulonglong" | "long long" | "unsigned long long" | "i64" | "u64"
-            | "int64_t" | "uint64_t" | "qword" | "size_t" | "usize" => Some(8),
-            _ => None,
-        }
-    }
-
     fn mask_value(value: u64, byte_size: u64) -> u64 {
         if byte_size >= 8 {
             value
@@ -1126,12 +1109,7 @@ impl Expr {
                 "invalid bitfield position or width".into(),
             ));
         }
-        let mask = if *len >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << *len) - 1
-        };
-        Ok((value >> *pos) & mask)
+        Ok(bitfield_value(value, *pos, *len))
     }
 
     /// The numeric entry point every address-oriented consumer reaches (REPL
@@ -1274,7 +1252,7 @@ impl ExprValue {
                     ));
                 }
                 if matches!(type_data, ParsedType::Unknown | ParsedType::Function(_, _))
-                    || matches!(type_data, ParsedType::Primitive(name) if Expr::primitive_size(name).is_none())
+                    || matches!(type_data, ParsedType::Primitive(name) if primitive_size(name).is_none())
                 {
                     return Err(Error::InvalidExpression(
                         "unsupported or unknown typed value has no usable storage address".into(),

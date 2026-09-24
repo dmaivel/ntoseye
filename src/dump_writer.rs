@@ -487,14 +487,8 @@ fn physical_runs_from_symbol(target: &Target) -> Result<Option<Vec<(u64, u64)>>>
 
     let types = guest.ntoskrnl.types();
     let layout = types.layout("_PHYSICAL_MEMORY_DESCRIPTOR")?;
-    let number_of_runs = layout
-        .fields
-        .get("NumberOfRuns")
-        .ok_or_else(|| Error::FieldNotFound("NumberOfRuns".into()))?;
-    let run = layout
-        .fields
-        .get("Run")
-        .ok_or_else(|| Error::FieldNotFound("Run".into()))?;
+    let number_of_runs = layout.field("NumberOfRuns")?;
+    let run = layout.field("Run")?;
 
     let element_type = match &run.type_data {
         ParsedType::Array(inner, _) => inner.as_ref(),
@@ -509,14 +503,8 @@ fn physical_runs_from_symbol(target: &Target) -> Result<Option<Vec<(u64, u64)>>>
         }
     };
     let run_layout = types.layout(element_name)?;
-    let base_page = run_layout
-        .fields
-        .get("BasePage")
-        .ok_or_else(|| Error::FieldNotFound("BasePage".into()))?;
-    let page_count = run_layout
-        .fields
-        .get("PageCount")
-        .ok_or_else(|| Error::FieldNotFound("PageCount".into()))?;
+    let base_page = run_layout.field("BasePage")?;
+    let page_count = run_layout.field("PageCount")?;
     let run_stride = run_layout.size;
     if run_stride == 0 {
         return Err(Error::DebugInfo(

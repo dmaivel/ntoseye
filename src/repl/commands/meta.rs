@@ -4,6 +4,7 @@ use std::io::IsTerminal;
 use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::expr::{Expr, NumberRadix};
+use crate::layout::utf16le_nul_terminated;
 use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;
@@ -742,15 +743,7 @@ fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Opt
         .context_memory()
         .read_bytes(address, &mut bytes)
         .ok()?;
-    let mut text = String::new();
-    for chunk in bytes.as_chunks::<2>().0 {
-        let value = u16::from_le_bytes(*chunk);
-        if value == 0 {
-            break;
-        }
-        text.push(char::from_u32(value as u32).unwrap_or('\u{fffd}'));
-    }
-    Some(text)
+    Some(utf16le_nul_terminated(&bytes))
 }
 
 fn format_printf(

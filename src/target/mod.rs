@@ -33,7 +33,7 @@ use crate::{
         Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, read_pe_exports,
         read_pe_image,
     },
-    layout::{ParsedType, StructRef, TypeInfo, Types},
+    layout::{StructRef, TypeInfo, Types},
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{
@@ -2423,21 +2423,9 @@ impl Target {
         base: VirtAddr,
         name: &str,
     ) -> Result<u64> {
-        let field = layout
-            .fields
-            .get(name)
-            .ok_or_else(|| Error::FieldNotFound(name.to_string()))?;
+        let field = layout.field(name)?;
         let raw: u64 = self.context_memory().read(base + field.offset as u64)?;
-        if let ParsedType::Bitfield { pos, len, .. } = &field.type_data {
-            let mask = if *len == 64 {
-                u64::MAX
-            } else {
-                (1u64 << *len) - 1
-            };
-            Ok((raw >> *pos) & mask)
-        } else {
-            Ok(raw)
-        }
+        Ok(field.decode(raw))
     }
 
     pub fn current_symbol_index(&self) -> SymbolIndex {

@@ -384,10 +384,7 @@ impl Target {
             .symbols
             .find_type_across_modules(dtb, "_OBJECT_DIRECTORY_ENTRY")
             .ok_or_else(|| Error::StructNotFound("_OBJECT_DIRECTORY_ENTRY".to_string()))?;
-        let buckets = dir_type
-            .fields
-            .get("HashBuckets")
-            .ok_or_else(|| Error::FieldNotFound("HashBuckets".to_string()))?;
+        let buckets = dir_type.field("HashBuckets")?;
         Ok(ObjectDirectoryLayout {
             buckets_offset: buckets.offset as u64,
             bucket_count: (buckets.size / 8).max(1),

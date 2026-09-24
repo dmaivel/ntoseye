@@ -2,7 +2,7 @@ use crate::{
     backend::MemoryOps,
     dmp::DmpInfo,
     error::{Error, Result},
-    layout::{StructRef, Types},
+    layout::{StructRef, Types, utf16le_lossy},
     memory::{self, AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{
@@ -1099,13 +1099,7 @@ fn read_unicode32(memory: &impl MemoryOps<VirtAddr>, length: usize, buffer: u32)
     memory
         .read_bytes(VirtAddr(u64::from(buffer)), &mut bytes)
         .ok()?;
-    let utf16: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|chunk| u16::from_le_bytes(*chunk))
-        .collect();
-    Some(String::from_utf16_lossy(&utf16))
+    Some(utf16le_lossy(&bytes))
 }
 
 pub struct Guest {
@@ -1290,10 +1284,7 @@ fn kernel_machine_at(dtb: Dtb, phys: &PhysMem, arch: Arch) -> Result<Option<u16>
     let Some(base) = base else {
         return Ok(None);
     };
-    let space = match arch {
-        Arch::Amd64 => AddressSpace::new(phys, dtb),
-        Arch::Arm64 => AddressSpace::new_arm64(phys, dtb, dtb),
-    };
+    let space = AddressSpace::for_arch(phys, dtb, dtb, arch);
     // The base must read as a real DOS header ("MZ" + 0x90) through this
     // walker — a page-table false positive cannot satisfy this plus a valid
     // PE signature and matching machine type.

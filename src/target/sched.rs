@@ -11,7 +11,7 @@ use crate::guest::ProcessInfo;
 use crate::kuser_shared;
 use crate::layout::{ParsedType, TypeInfo};
 use crate::session::{Session, processor_index_from_backend_thread_id};
-use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target, ThreadInfo};
+use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk};
 use crate::types::VirtAddr;
 use crate::unwind::{StackFrame, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
 
@@ -308,7 +308,7 @@ fn link_offset(target: &Target, record_type: &str, candidates: &[&str]) -> Optio
     let layout = layout_for(target, record_type).ok()?;
     candidates
         .iter()
-        .find_map(|candidate| layout.field_offset(*candidate).ok())
+        .find_map(|candidate| layout.field_offset(candidate).ok())
 }
 
 fn read_list_next(target: &Target, address: VirtAddr) -> Result<VirtAddr> {
@@ -325,14 +325,9 @@ fn walk_list_nodes(
     head: VirtAddr,
     limit: usize,
 ) -> (Vec<VirtAddr>, ListTermination) {
-    let mut cursor = ListCursor::new(head, limit.min(MAX_LIST_ENTRIES));
-    cursor.advance(read_list_next(target, head).map_err(|error| error.to_string()));
-    let mut nodes = Vec::new();
-    while let Some(current) = cursor.take_current() {
-        nodes.push(current);
-        cursor.advance(read_list_next(target, current).map_err(|error| error.to_string()));
-    }
-    (nodes, cursor.finish())
+    bounded_list_walk(head, limit.min(MAX_LIST_ENTRIES), |address| {
+        read_list_next(target, address)
+    })
 }
 
 fn processor_indices(target: &Target) -> Result<Vec<u16>> {
@@ -470,10 +465,7 @@ impl Target {
                 "_KPRCB.DispatcherReadyListHead".to_string(),
             ));
         };
-        let ready_field = prcb_layout
-            .fields
-            .get(ready_name)
-            .ok_or_else(|| Error::FieldNotFound(ready_name.to_string()))?;
+        let ready_field = prcb_layout.field(ready_name)?;
         let stride = array_stride(self, &ready_field.type_data, ready_field.size, 16).max(1);
         let count = array_count(&ready_field.type_data, READY_PRIORITY_COUNT)
             .clamp(1, READY_PRIORITY_COUNT);
@@ -1020,17 +1012,11 @@ impl Target {
 
     fn apc_layout(&self) -> Result<ApcLayout> {
         let kthread = layout_for(self, "_KTHREAD")?;
-        let state = kthread
-            .fields
-            .get("ApcState")
-            .ok_or_else(|| Error::FieldNotFound("ApcState".to_string()))?;
+        let state = kthread.field("ApcState")?;
         let state_name = aggregate_type_name(&state.type_data)
             .ok_or_else(|| Error::DebugInfo("ApcState type unavailable".to_string()))?;
         let state_layout = layout_for(self, state_name)?;
-        let heads = state_layout
-            .fields
-            .get("ApcListHead")
-            .ok_or_else(|| Error::FieldNotFound("ApcListHead".to_string()))?;
+        let heads = state_layout.field("ApcListHead")?;
         let apc_layout = layout_for(self, "_KAPC").ok();
         let link_offset = link_offset(self, "_KAPC", &["ApcListEntry", "ListEntry"]);
         let head_stride = array_stride(self, &heads.type_data, heads.size, 16).max(1);

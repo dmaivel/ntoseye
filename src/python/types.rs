@@ -19,8 +19,8 @@ use super::{err, raise};
 use crate::backend::MemoryOps;
 use crate::error::Result as CoreResult;
 use crate::layout::{
-    EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, le_uint, named_type,
-    unqualified_type_name,
+    EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, bitfield_mask, bitfield_value, le_uint,
+    named_type, unqualified_type_name,
 };
 use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
@@ -45,14 +45,6 @@ fn pointer_width(name: &str, width: u64) -> PyResult<usize> {
         )));
     }
     Ok(width)
-}
-
-fn bitfield_mask(length: u32) -> u64 {
-    if length >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << length) - 1
-    }
 }
 
 /// PDB types scoped to an address space: `dbg.types`, `proc.types`.
@@ -206,9 +198,7 @@ impl Type {
         let Definition::Layout(info) = &self.definition else {
             return IndexMap::new();
         };
-        let mut fields: Vec<_> = info.fields.iter().collect();
-        fields.sort_by(|(an, a), (bn, b)| a.offset.cmp(&b.offset).then_with(|| an.cmp(bn)));
-        fields
+        info.fields_in_order()
             .into_iter()
             .map(|(name, field)| (name.clone(), Field::new(name.clone(), field)))
             .collect()
@@ -405,9 +395,7 @@ impl Struct {
 
         let result = match &field.type_data {
             ParsedType::Bitfield { pos, len, .. } => {
-                let raw = le_uint(&bytes);
-                let mask = bitfield_mask(u32::from(*len));
-                ((raw >> pos) & mask).into_bound_py_any(py)?
+                bitfield_value(le_uint(&bytes), *pos, *len).into_bound_py_any(py)?
             }
             ParsedType::Pointer(_) => le_uint(&bytes).into_bound_py_any(py)?,
             ParsedType::Enum(enum_name) if matches!(size, 1 | 2 | 4 | 8) => {
@@ -523,20 +511,17 @@ impl Struct {
             let integer = value
                 .extract::<u64>()
                 .map_err(|_| raise(format!("field '{name}' is a bitfield; expected int")))?;
+            let mask = bitfield_mask(*len);
             let pos = u32::from(*pos);
-            let len = u32::from(*len);
-            let size = ((pos + len).div_ceil(8).clamp(1, 8)) as usize;
+            let size = ((pos + u32::from(*len)).div_ceil(8).clamp(1, 8)) as usize;
             let write = self.owner.with_in(py, &self.space.context(), |session| {
                 let memory = session.target.context_memory();
                 let mut bytes = vec![0; size];
                 Ok(memory
                     .read_bytes(VirtAddr(addr), &mut bytes)
                     .and_then(|()| {
-                        let mask = bitfield_mask(len);
                         let raw = (le_uint(&bytes) & !(mask << pos)) | ((integer & mask) << pos);
-                        for (index, byte) in bytes.iter_mut().enumerate() {
-                            *byte = (raw >> (8 * index)) as u8;
-                        }
+                        bytes.copy_from_slice(&raw.to_le_bytes()[..size]);
                         memory.write_bytes(VirtAddr(addr), &bytes)
                     }))
             })?;

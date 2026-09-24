@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::backend::MemoryOps;
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::error::{Error, Result};
-use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
+use crate::layout::{FieldInfo, TypeInfo, le_uint};
 use crate::memory::PAGE_SIZE;
 use crate::symbols::format_symbol_with_offset;
 use crate::target::Target;
@@ -680,36 +680,29 @@ pub fn read_pool_field(
     let size = usize::try_from(f.size).ok()?.clamp(1, 8);
     let mut buf = [0u8; 8];
     mem.read_bytes(field_addr, &mut buf[..size]).ok()?;
-    pool_field_from_storage(f, &buf[..size])
+    Some(f.decode(le_uint(&buf[..size])))
 }
 
 /// `read_pool_field` against an already-read entry buffer
 pub fn pool_field_from_buf(ti: &TypeInfo, buf: &[u8], field: &str) -> Option<u64> {
-    let f = ti.fields.get(field)?;
-    let offset = f.offset as usize;
-    let size = usize::try_from(f.size).ok()?.clamp(1, 8);
-    pool_field_from_storage(f, buf.get(offset..offset.checked_add(size)?)?)
+    let (f, raw) = pool_storage_from_buf(ti, buf, field)?;
+    Some(f.decode(raw))
 }
 
 fn pool_raw_from_buf(ti: &TypeInfo, buf: &[u8], field: &str) -> Option<u64> {
+    pool_storage_from_buf(ti, buf, field).map(|(_, raw)| raw)
+}
+
+/// A field and the integer its storage holds in `buf`, up to 8 bytes.
+fn pool_storage_from_buf<'a>(
+    ti: &'a TypeInfo,
+    buf: &[u8],
+    field: &str,
+) -> Option<(&'a FieldInfo, u64)> {
     let f = ti.fields.get(field)?;
     let offset = f.offset as usize;
     let size = usize::try_from(f.size).ok()?.clamp(1, 8);
-    Some(le_uint(buf.get(offset..offset.checked_add(size)?)?))
-}
-
-fn pool_field_from_storage(f: &FieldInfo, buf: &[u8]) -> Option<u64> {
-    let raw = le_uint(buf);
-    if let ParsedType::Bitfield { pos, len, .. } = &f.type_data {
-        let mask = if *len >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << *len) - 1
-        };
-        Some((raw >> *pos) & mask)
-    } else {
-        Some(raw)
-    }
+    Some((f, le_uint(buf.get(offset..offset.checked_add(size)?)?)))
 }
 
 pub fn tag_string(tag: u32) -> String {

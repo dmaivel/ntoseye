@@ -2053,10 +2053,7 @@ impl KdBackend {
         phys: &P,
         hints: KdTargetHints,
     ) -> Result<()> {
-        let local = match hints.arch {
-            Arch::Amd64 => AddressSpace::new(phys, hints.kernel_dtb),
-            Arch::Arm64 => AddressSpace::new_arm64(phys, hints.kernel_dtb, hints.kernel_dtb),
-        };
+        let local = AddressSpace::for_arch(phys, hints.kernel_dtb, hints.kernel_dtb, hints.arch);
         for (address, len, label) in [
             (hints.kernel_base, 64usize, "kernel PE header"),
             (hints.ps_loaded_module_list, 16usize, "loaded-module list"),

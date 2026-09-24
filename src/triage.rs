@@ -10,6 +10,7 @@ use crate::guest::ModuleInfo;
 use crate::kd::context;
 use crate::kd::context_arm64;
 use crate::kd::wire::{read_u16, read_u32, read_u64};
+use crate::layout::utf16le_nul_terminated;
 use crate::types::VirtAddr;
 use std::mem::{offset_of, size_of};
 
@@ -428,17 +429,7 @@ fn read_string_pool_entry(
         return None;
     }
     let wchar_buf = &data[pos + 4..pos + 4 + char_count * 2];
-    let code_units: Vec<u16> = wchar_buf
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
-        .take_while(|&c| c != 0)
-        .collect();
-    if code_units.is_empty() {
-        return None;
-    }
-    Some(String::from_utf16_lossy(&code_units))
+    Some(utf16le_nul_terminated(wchar_buf)).filter(|name| !name.is_empty())
 }
 
 /// Whether the DGRT ('TRGD' LE) integrity signature at the offset stored in
@@ -678,17 +669,15 @@ fn parse_unloaded_drivers(mmap: &[u8], triage_hdr: &[u8]) -> Vec<UnloadedDriver>
             break;
         }
 
-        let name_buf = &mmap[entry + UNLOADED_DRIVER_OFF_NAME..];
-        let code_units: Vec<u16> = (0..UNLOADED_DRIVER_NAME_LEN)
-            .map(|j| read_u16(name_buf, j * 2))
-            .take_while(|&c| c != 0)
-            .collect();
-        if code_units.is_empty() {
+        let name_start = entry + UNLOADED_DRIVER_OFF_NAME;
+        let name =
+            utf16le_nul_terminated(&mmap[name_start..name_start + UNLOADED_DRIVER_NAME_LEN * 2]);
+        if name.is_empty() {
             break;
         }
 
         drivers.push(UnloadedDriver {
-            name: String::from_utf16_lossy(&code_units),
+            name,
             start_address: start,
             end_address: end,
         });

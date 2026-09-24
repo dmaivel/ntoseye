@@ -42,6 +42,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use crate::error::{Error, Result};
 use crate::kd::framing::{KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_FILE_IO};
 use crate::kd::wire::{read_u32, read_u64, write_u32, write_u64};
+use crate::layout::utf16le_nul_terminated;
 
 use super::{
     DBGKD_CLOSE_FILE_API, DBGKD_CREATE_FILE_API, DBGKD_FILE_IO_HEADER_SIZE, DBGKD_READ_FILE_API,
@@ -410,7 +411,7 @@ pub fn parse_file_io(payload: &[u8]) -> Result<FileIoRequest> {
                 tail
             };
             FileIoRequest::Create {
-                name: decode_utf16le(name_bytes),
+                name: utf16le_nul_terminated(name_bytes),
                 desired_access: read_u32(payload, 8),
                 create_disposition: read_u32(payload, 20),
             }
@@ -430,17 +431,6 @@ pub fn parse_file_io(payload: &[u8]) -> Result<FileIoRequest> {
         },
         api => FileIoRequest::Unknown { api },
     })
-}
-
-fn decode_utf16le(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
-        .take_while(|unit| *unit != 0)
-        .collect();
-    String::from_utf16_lossy(&units)
 }
 
 /// Answer one file I/O request from the map.

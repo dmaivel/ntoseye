@@ -92,37 +92,18 @@ impl Layout {
 
     /// Read a scalar or bitfield out of a buffer holding the struct at `at`.
     fn read(&self, buf: &[u8], at: usize, field: &str) -> Result<u64> {
-        let info = self
-            .0
-            .fields
-            .get(field)
-            .ok_or_else(|| Error::FieldNotFound(field.to_string()))?;
+        let info = self.0.field(field)?;
         let start = at + info.offset as usize;
         let size = info.size.clamp(1, 8) as usize;
         let slice = buf.get(start..start + size).ok_or_else(|| {
             Error::DebugInfo(format!("{}.{field} is outside the read", self.0.name))
         })?;
-        let raw = le_uint(slice);
-        Ok(match &info.type_data {
-            ParsedType::Bitfield { pos, len, .. } => {
-                let mask = if *len >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << len) - 1
-                };
-                (raw >> pos) & mask
-            }
-            _ => raw,
-        })
+        Ok(info.decode(le_uint(slice)))
     }
 
     /// Element count of an array field, from its byte size and the element layout.
     fn array_len(&self, field: &str, element: &Layout) -> Result<usize> {
-        let info = self
-            .0
-            .fields
-            .get(field)
-            .ok_or_else(|| Error::FieldNotFound(field.to_string()))?;
+        let info = self.0.field(field)?;
         match &info.type_data {
             ParsedType::Array(_, count) => Ok(*count as usize),
             _ if element.size() != 0 => Ok(info.size as usize / element.size()),
@@ -173,11 +154,7 @@ impl<'a> HeapReader<'a> {
     /// The layout a struct-typed field of `layout` has (`BusyBitmap` is an
     /// `_RTL_BITMAP_EX` on x64 and an `_RTL_BITMAP` on x86).
     fn field_layout(&self, layout: &Layout, field: &str) -> Result<Layout> {
-        let info = layout
-            .0
-            .fields
-            .get(field)
-            .ok_or_else(|| Error::FieldNotFound(field.to_string()))?;
+        let info = layout.0.field(field)?;
         let name = match &info.type_data {
             ParsedType::Struct(name) | ParsedType::Union(name) => name,
             _ => return Err(Error::FieldTypeMismatch(field.to_string(), "struct".into())),

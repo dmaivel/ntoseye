@@ -840,10 +840,7 @@ impl DmpBackend {
         let prcb = symbols
             .find_type_across_modules(target.kernel_dtb(), "_KPRCB")
             .ok_or_else(|| Error::StructNotFound("_KPRCB".into()))?;
-        let processor_state = prcb
-            .fields
-            .get("ProcessorState")
-            .ok_or_else(|| Error::FieldNotFound("ProcessorState".into()))?;
+        let processor_state = prcb.field("ProcessorState")?;
         let state_name = match &processor_state.type_data {
             ParsedType::Struct(name) | ParsedType::Union(name) => name,
             other => {
@@ -856,10 +853,7 @@ impl DmpBackend {
         let state = symbols
             .find_type_across_modules(target.kernel_dtb(), state_name)
             .ok_or_else(|| Error::StructNotFound(state_name.clone()))?;
-        let context_frame = state
-            .fields
-            .get("ContextFrame")
-            .ok_or_else(|| Error::FieldNotFound("ContextFrame".into()))?;
+        let context_frame = state.field("ContextFrame")?;
         let offset = processor_state.offset as u64 + context_frame.offset as u64;
         let context_end = offset
             .checked_add(context_arm64::CONTEXT_SIZE as u64)

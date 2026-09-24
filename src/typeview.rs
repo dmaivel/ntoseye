@@ -6,8 +6,8 @@ use std::result;
 use std::sync::Arc;
 
 use crate::layout::{
-    FieldInfo, ParsedType, TypeInfo, field_sort_key, find_field, le_uint, named_type,
-    nested_layout_name,
+    FieldInfo, ParsedType, TypeInfo, abi_layout, bitfield_value, find_field, le_uint, named_type,
+    nested_layout_name, primitive_size, utf16le_lossy,
 };
 use crate::session::Session;
 use crate::types::VirtAddr;
@@ -94,17 +94,7 @@ impl<'a> TypeView<'a> {
     /// shared by scalar decoding and array-child stride calculation.
     pub fn parsed_type_size(&self, type_data: &ParsedType) -> usize {
         match type_data {
-            ParsedType::Primitive(name) => match name.to_ascii_lowercase().as_str() {
-                "char" | "uchar" | "int8" | "uint8" | "int8_t" | "uint8_t" | "boolean" | "bool" => {
-                    1
-                }
-                "wchar" | "ushort" | "short" | "uint16" | "int16" | "int16_t" | "uint16_t" => 2,
-                "ulong" | "long" | "uint" | "int" | "uint32" | "int32" | "int32_t" | "uint32_t"
-                | "float" => 4,
-                "__int64" | "unsigned __int64" | "longlong" | "ulonglong" | "uint64" | "int64"
-                | "int64_t" | "uint64_t" | "double" => 8,
-                _ => 0,
-            },
+            ParsedType::Primitive(name) => primitive_size(name).map_or(0, |size| size as usize),
             ParsedType::Pointer(_) | ParsedType::Function(_, _) => 8,
             ParsedType::Array(inner, count) => {
                 self.parsed_type_size(inner).saturating_mul(*count as usize)
@@ -288,9 +278,8 @@ impl<'a> TypeView<'a> {
 
     /// Decode fields in layout order.
     pub fn fields(&self, type_info: &TypeInfo, base: VirtAddr) -> Vec<FieldView> {
-        let mut fields: Vec<_> = type_info.fields.iter().collect();
-        fields.sort_by_key(|(_, field)| field_sort_key(field));
-        fields
+        type_info
+            .fields_in_order()
             .into_iter()
             .map(|(name, field)| {
                 let address = base + field.offset as u64;
@@ -402,14 +391,7 @@ impl<'a> TypeView<'a> {
                 pos,
                 len,
             } => {
-                let mask = if *len == 0 {
-                    0
-                } else if *len >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << len) - 1
-                };
-                let value = if *pos >= 64 { 0 } else { (raw >> pos) & mask };
+                let value = bitfield_value(raw, *pos, *len);
                 if *len == 1 {
                     if value == 1 {
                         "Y".to_string()
@@ -443,32 +425,12 @@ impl<'a> TypeView<'a> {
     /// name picks the layout, so a 32-bit module's 4-byte `Buffer` is read as
     /// such.
     fn format_unicode_string(&self, address: VirtAddr, type_data: &ParsedType) -> String {
-        let type_info = nested_layout_name(type_data).and_then(|name| self.lookup_type(&name));
-        let (length_offset, length_size, buffer_offset, buffer_size) =
-            if let Some(type_info) = type_info {
-                let Some((_, length_field)) = find_field(type_info.as_ref(), "Length") else {
-                    return "<unavailable: Length field not found>".to_string();
-                };
-                let Some((_, buffer_field)) = find_field(type_info.as_ref(), "Buffer") else {
-                    return "<unavailable: Buffer field not found>".to_string();
-                };
-                (
-                    length_field.offset as u64,
-                    self.field_size(length_field),
-                    buffer_field.offset as u64,
-                    self.field_size(buffer_field),
-                )
-            } else {
-                // These offsets are stable for the Windows ABI and let a PDB
-                // represent a string field as a primitive aggregate.
-                (0, 2, 8, 8)
-            };
-        let length = match self.read_display_uint(address + length_offset, length_size) {
-            Ok(length) => (length as usize).min(MAX_UNICODE_BYTES) & !1,
-            Err(error) => return format!("<unavailable: {error}>"),
-        };
-        let buffer = match self.read_display_uint(address + buffer_offset, buffer_size) {
-            Ok(buffer) => VirtAddr(buffer),
+        let (length, buffer) = match self.read_field_pair(address, type_data, ["Length", "Buffer"])
+        {
+            Ok([length, buffer]) => (
+                (length as usize).min(MAX_UNICODE_BYTES) & !1,
+                VirtAddr(buffer),
+            ),
             Err(error) => return format!("<unavailable: {error}>"),
         };
         if length == 0 || buffer.is_zero() {
@@ -478,43 +440,38 @@ impl<'a> TypeView<'a> {
             Ok(bytes) => bytes,
             Err(error) => return format!("<unavailable: {error}>"),
         };
-        let utf16: Vec<u16> = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|chunk| u16::from_le_bytes(*chunk))
-            .collect();
-        quote_bounded(&String::from_utf16_lossy(&utf16))
+        quote_bounded(&utf16le_lossy(&bytes))
     }
 
     fn format_list_entry(&self, address: VirtAddr, type_data: &ParsedType) -> String {
-        let (flink_offset, flink_size, blink_offset, blink_size) = if let Some(type_info) =
-            nested_layout_name(type_data).and_then(|name| self.lookup_type(&name))
-        {
-            let Some((_, flink)) = find_field(type_info.as_ref(), "Flink") else {
-                return "<unavailable: Flink field not found>".to_string();
-            };
-            let Some((_, blink)) = find_field(type_info.as_ref(), "Blink") else {
-                return "<unavailable: Blink field not found>".to_string();
-            };
-            (
-                flink.offset as u64,
-                self.field_size(flink),
-                blink.offset as u64,
-                self.field_size(blink),
-            )
-        } else {
-            (0, 8, 8, 8)
-        };
-        let flink = match self.read_display_uint(address + flink_offset, flink_size) {
-            Ok(value) => value,
-            Err(error) => return format!("<unavailable: {error}>"),
-        };
-        let blink = match self.read_display_uint(address + blink_offset, blink_size) {
-            Ok(value) => value,
-            Err(error) => return format!("<unavailable: {error}>"),
-        };
-        format!("[ {flink:#x} - {blink:#x} ]")
+        match self.read_field_pair(address, type_data, ["Flink", "Blink"]) {
+            Ok([flink, blink]) => format!("[ {flink:#x} - {blink:#x} ]"),
+            Err(error) => format!("<unavailable: {error}>"),
+        }
+    }
+
+    /// Read the scalar fields `names` of the aggregate typed `type_data` at
+    /// `address`, in the ABI layout ([`abi_layout`]) when no PDB describes it.
+    fn read_field_pair(
+        &self,
+        address: VirtAddr,
+        type_data: &ParsedType,
+        names: [&str; 2],
+    ) -> result::Result<[u64; 2], String> {
+        let type_name = nested_layout_name(type_data)
+            .ok_or_else(|| format!("`{type_data}` names no layout"))?;
+        let layout = self
+            .lookup_type(&type_name)
+            .or_else(|| abi_layout(&type_name).map(Arc::new))
+            .ok_or_else(|| format!("type `{type_name}` not found"))?;
+        let mut fields = [(0, 0); 2];
+        for (slot, name) in fields.iter_mut().zip(names) {
+            let (_, field) =
+                find_field(&layout, name).ok_or_else(|| format!("{name} field not found"))?;
+            *slot = (u64::from(field.offset), self.field_size(field));
+        }
+        let read = |(offset, size)| self.read_display_uint(address + offset, size);
+        Ok([read(fields[0])?, read(fields[1])?])
     }
 }
 

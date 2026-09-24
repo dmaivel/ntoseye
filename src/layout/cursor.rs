@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use zerocopy::{FromBytes, IntoBytes};
 
-use super::{FieldInfo, ParsedType, TypeInfo, le_uint};
+use super::{ParsedType, TypeInfo, le_uint, utf16le_lossy};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::memory::AddressSpace;
@@ -28,9 +28,10 @@ pub struct Types<'a> {
 }
 
 impl<'a> Types<'a> {
-    /// The namespace of module `guid` (see [`Image::types_in`](crate::guest::Image::types_in)) without an
-    /// image object: how a target with no discovered kernel still reaches
-    /// qualified types in its identity-mapped memory.
+    /// The namespace of module `guid` without an image object (see
+    /// [`Image::types_in`](crate::guest::Image::types_in)): how a target with
+    /// no discovered kernel still reaches qualified types in its
+    /// identity-mapped memory.
     pub fn new(
         symbols: &'a SymbolStore,
         guid: Option<u128>,
@@ -145,8 +146,9 @@ impl<'a> Types<'a> {
 /// A fluent cursor over a struct instance in guest memory: a resolved layout
 /// (`ti`) sitting at `base` in the `dtb` address space, plus the symbol context
 /// to resolve the types of fields you walk into. This is to structs what
-/// [`SymbolRef`](crate::guest::SymbolRef) is to symbols: `follow`/`read_field`/`list` chain off it, and
-/// the type cache makes each step's layout lookup cheap.
+/// [`SymbolRef`](crate::guest::SymbolRef) is to symbols:
+/// `follow`/`read_field`/`list` chain off it, and the type cache makes each
+/// step's layout lookup cheap.
 pub struct StructRef<'a> {
     /// Namespace for the types of fields walked into, and the space read.
     types: Types<'a>,
@@ -194,7 +196,7 @@ impl<'a> StructRef<'a> {
 
     /// Read an integer field at its PDB-declared width (1..=8 bytes).
     pub fn read_uint(&self, name: &str) -> Result<u64> {
-        let field = self.field(name)?;
+        let field = self.ti.field(name)?;
         self.read_uint_at(name, field.offset as u64, field.size)
     }
 
@@ -220,7 +222,7 @@ impl<'a> StructRef<'a> {
     /// Read a field's raw bytes at its PDB-declared size, rejecting a zero
     /// size or one past the caller's bound.
     pub fn read_field_bytes(&self, name: &str, max_len: usize) -> Result<Vec<u8>> {
-        let field = self.field(name)?;
+        let field = self.ti.field(name)?;
         let size = usize::try_from(field.size)
             .map_err(|_| Error::DebugInfo(format!("field '{name}' has invalid byte width")))?;
         if size == 0 {
@@ -251,13 +253,6 @@ impl<'a> StructRef<'a> {
         self.base
     }
 
-    fn field(&self, name: &str) -> Result<&FieldInfo> {
-        self.ti
-            .fields
-            .get(name)
-            .ok_or_else(|| Error::FieldNotFound(name.to_string()))
-    }
-
     /// Wrap a freshly resolved layout at `base`, carrying this cursor's context.
     fn with(&self, ti: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
         self.types.struct_with_layout(ti, base)
@@ -269,7 +264,7 @@ impl<'a> StructRef<'a> {
         &self,
         name: &str,
     ) -> Result<T> {
-        let offset = self.field(name)?.offset as u64;
+        let offset = self.ti.field(name)?.offset as u64;
         self.read_field_at(offset)
     }
 
@@ -277,7 +272,7 @@ impl<'a> StructRef<'a> {
     /// is taken from the field's own PDB metadata, so the caller never restates
     /// it.
     pub fn follow(&self, name: &str) -> Result<StructRef<'a>> {
-        let field = self.field(name)?;
+        let field = self.ti.field(name)?;
         let ParsedType::Pointer(inner) = &field.type_data else {
             return Err(Error::FieldTypeMismatch(name.to_string(), "pointer".into()));
         };
@@ -296,7 +291,7 @@ impl<'a> StructRef<'a> {
     /// View an embedded sub-struct field as a cursor (no pointer deref). Type
     /// derived from the field's PDB metadata.
     pub fn embedded(&self, name: &str) -> Result<StructRef<'a>> {
-        let field = self.field(name)?;
+        let field = self.ti.field(name)?;
         // Embedded structs and unions both resolve by layout name; nested
         // anonymous unions (e.g. `_IRP.Tail`) are unions, so accept both.
         let type_name = match &field.type_data {
@@ -325,20 +320,7 @@ impl<'a> StructRef<'a> {
     /// (empty when null/zero-length). Resolves `Length`/`Buffer` from the PDB
     /// rather than hardcoding them.
     pub fn read_unicode_string(&self) -> Result<String> {
-        let length: u16 = self.read_field("Length")?;
-        let buffer = self.read_pointer("Buffer")?;
-        if length == 0 || buffer.is_zero() {
-            return Ok(String::new());
-        }
-        let mut buf = vec![0u8; length as usize];
-        self.memory().read_bytes(buffer, &mut buf)?;
-        let u16s: Vec<u16> = buf
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| u16::from_le_bytes(*c))
-            .collect();
-        Ok(String::from_utf16_lossy(&u16s))
+        Ok(utf16le_lossy(&self.read_string_buffer()?))
     }
 
     /// Decode the `_STRING` (`ANSI_STRING`) this cursor points at, one
@@ -346,14 +328,24 @@ impl<'a> StructRef<'a> {
     /// [`read_unicode_string`](Self::read_unicode_string), the layout comes
     /// from the PDB.
     pub fn read_ansi_string(&self) -> Result<String> {
+        Ok(self
+            .read_string_buffer()?
+            .into_iter()
+            .map(char::from)
+            .collect())
+    }
+
+    /// The `Length` bytes at `Buffer` of the counted string this cursor points
+    /// at; empty when either is zero.
+    fn read_string_buffer(&self) -> Result<Vec<u8>> {
         let length: u16 = self.read_field("Length")?;
         let buffer = self.read_pointer("Buffer")?;
         if length == 0 || buffer.is_zero() {
-            return Ok(String::new());
+            return Ok(Vec::new());
         }
         let mut buf = vec![0u8; length as usize];
         self.memory().read_bytes(buffer, &mut buf)?;
-        Ok(buf.into_iter().map(char::from).collect())
+        Ok(buf)
     }
 
     /// Decode a `_UNICODE_STRING` field of this struct to a Rust `String`.
@@ -371,7 +363,7 @@ impl<'a> StructRef<'a> {
         record_type: &str,
         link_field: &str,
     ) -> Result<impl Iterator<Item = Result<StructRef<'a>>> + 'a> {
-        let head = self.base + self.field(head_field)?.offset as u64;
+        let head = self.base + self.ti.field(head_field)?.offset as u64;
         self.types.list_at(head, record_type, link_field)
     }
 }

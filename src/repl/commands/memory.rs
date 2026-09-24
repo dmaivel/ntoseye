@@ -7,6 +7,7 @@ use owo_colors::OwoColorize;
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
+use crate::layout::utf16le_lossy;
 use crate::memory::{PAGE_SIZE, for_each_page_chunk, read_page_chunks};
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::{Arch, VirtAddr};
@@ -809,12 +810,7 @@ impl ReplState<'_> {
             }
         };
         let text = if unicode {
-            let units = data
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|chunk| u16::from_le_bytes(*chunk));
-            String::from_utf16_lossy(&units.collect::<Vec<_>>())
+            utf16le_lossy(&data)
         } else {
             String::from_utf8_lossy(&data).into_owned()
         };
@@ -888,14 +884,7 @@ impl ReplState<'_> {
         let text: String = if char_size == 1 {
             read.bytes.iter().map(|&byte| char::from(byte)).collect()
         } else {
-            let units: Vec<u16> = read
-                .bytes
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|unit| u16::from_le_bytes(*unit))
-                .collect();
-            String::from_utf16_lossy(&units)
+            utf16le_lossy(&read.bytes)
         };
         let suffix = if read.unreadable {
             " <unreadable>".red().to_string()

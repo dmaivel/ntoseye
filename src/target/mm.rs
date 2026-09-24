@@ -9,7 +9,7 @@ use crate::debugger_data::{
 };
 use crate::error::{Error, Result};
 use crate::guest::{ModuleInfo, section_name_at};
-use crate::layout::{ParsedType, TypeInfo, le_uint};
+use crate::layout::{ParsedType, TypeInfo, bitfield_value, le_uint};
 use crate::memory::{DTB_IDENTITY, PAGE_SIZE, PFN_MASK};
 use crate::symbols::{format_symbol_with_offset, glob_matches};
 use crate::target::pool::{
@@ -403,9 +403,7 @@ fn nested_mi_state_fields(
         return;
     }
     let memory = target.kernel_address_space();
-    let mut fields: Vec<_> = ti.fields.iter().collect();
-    fields.sort_by_key(|(_, field)| field.offset);
-    for (name, field) in fields {
+    for (name, field) in ti.fields_in_order() {
         if output.len() >= MAX_MI_FIELDS {
             break;
         }
@@ -513,10 +511,7 @@ fn vm_processes(target: &Target, include: bool) -> Result<(Vec<ProcessMemoryUsag
         let guest = target.guest()?;
         let types = guest.ntoskrnl.types();
         let eprocess_layout = types.layout("_EPROCESS")?;
-        let vm_field = eprocess_layout
-            .fields
-            .get("Vm")
-            .ok_or_else(|| Error::FieldNotFound("Vm".to_string()))?;
+        let vm_field = eprocess_layout.field("Vm")?;
         let vm_name = match &vm_field.type_data {
             ParsedType::Struct(name) | ParsedType::Union(name) => name.clone(),
             _ => {
@@ -2097,10 +2092,7 @@ impl Target {
         let guest = self.guest()?;
         let types = guest.ntoskrnl.types();
         let eprocess_layout = types.layout("_EPROCESS")?;
-        let vm_field = eprocess_layout
-            .fields
-            .get("Vm")
-            .ok_or_else(|| Error::FieldNotFound("Vm".to_string()))?;
+        let vm_field = eprocess_layout.field("Vm")?;
         let vm_name = match &vm_field.type_data {
             ParsedType::Struct(name) | ParsedType::Union(name) => name,
             _ => {
@@ -2435,12 +2427,7 @@ impl Target {
         let ParsedType::Bitfield { pos, len, .. } = info.type_data else {
             return None;
         };
-        let mask = if len >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << len) - 1
-        };
-        Some((raw >> pos) & mask)
+        Some(bitfield_value(raw, pos, len))
     }
 
     fn vad_flags_base_offset(vad_layout: &TypeInfo) -> Option<u64> {

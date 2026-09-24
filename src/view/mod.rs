@@ -843,9 +843,8 @@ pub fn disasm_row(row: &DisasmRow) -> View {
 
 /// A struct's field layout, sorted by offset.
 pub fn type_layout(name: &str, info: &TypeInfo) -> View {
-    let mut fields: Vec<_> = info.fields.iter().collect();
-    fields.sort_by_key(|(_, field)| field.offset);
-    let fields = fields
+    let fields = info
+        .fields_in_order()
         .into_iter()
         .map(|(field_name, field)| {
             View::Object(vec![

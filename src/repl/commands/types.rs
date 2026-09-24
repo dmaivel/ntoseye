@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::layout::{
-    FieldInfo, ParsedType, TypeInfo, field_sort_key, find_field, le_uint, named_type,
+    FieldInfo, ParsedType, TypeInfo, abi_layout, find_field, le_uint, named_type,
     nested_layout_name, unqualified_type_name,
 };
 use crate::symbols::glob_matches;
@@ -193,53 +193,6 @@ fn field_matches(name: &str, patterns: &[String], prefix_match: bool) -> bool {
     })
 }
 
-fn standard_layout_field(type_name: &str, requested: &str) -> Option<(String, FieldInfo)> {
-    let normalized = type_name.trim_start_matches('_');
-    let requested = requested.to_ascii_lowercase();
-    if normalized.eq_ignore_ascii_case("LIST_ENTRY") {
-        let (name, offset) = match requested.as_str() {
-            "flink" => ("Flink", 0),
-            "blink" => ("Blink", 8),
-            _ => return None,
-        };
-        return Some((
-            name.to_string(),
-            FieldInfo {
-                offset,
-                size: 8,
-                type_data: ParsedType::Pointer(Box::new(ParsedType::Unknown)),
-            },
-        ));
-    }
-    if normalized.eq_ignore_ascii_case("UNICODE_STRING") {
-        let (name, offset, size, type_data) = match requested.as_str() {
-            "length" => ("Length", 0, 2, ParsedType::Primitive("USHORT".to_string())),
-            "maximumlength" => (
-                "MaximumLength",
-                2,
-                2,
-                ParsedType::Primitive("USHORT".to_string()),
-            ),
-            "buffer" => (
-                "Buffer",
-                8,
-                8,
-                ParsedType::Pointer(Box::new(ParsedType::Primitive("WCHAR".to_string()))),
-            ),
-            _ => return None,
-        };
-        return Some((
-            name.to_string(),
-            FieldInfo {
-                offset,
-                size,
-                type_data,
-            },
-        ));
-    }
-    None
-}
-
 impl ReplState<'_> {
     fn type_view(&self) -> TypeView<'_> {
         TypeView::new(self.ctx)
@@ -404,9 +357,7 @@ impl ReplState<'_> {
         depth: usize,
         indent: usize,
     ) {
-        let mut fields: Vec<_> = type_info.fields.iter().collect();
-        fields.sort_by_key(|(_, field)| field_sort_key(field));
-        for (name, field) in fields {
+        for (name, field) in type_info.fields_in_order() {
             if !field_matches(name, patterns, options.prefix_match) {
                 continue;
             }
@@ -424,24 +375,14 @@ impl ReplState<'_> {
         if path.is_empty() {
             return Err("field path is empty".to_string());
         }
-        let mut current_type = None;
-        let mut current_type_name = None;
+        let mut current_type: Option<Arc<TypeInfo>> = None;
         let mut components = Vec::with_capacity(path.len());
         for (index, requested_name) in path.iter().enumerate() {
-            let (name, info) = {
-                let found = if let Some(type_info) = current_type.as_deref() {
-                    find_field(type_info, requested_name)
-                        .map(|(name, info)| (name.to_string(), info.clone()))
-                } else if let Some(type_name) = current_type_name.as_deref() {
-                    standard_layout_field(type_name, requested_name)
-                } else {
-                    find_field(root, requested_name)
-                        .map(|(name, info)| (name.to_string(), info.clone()))
-                };
-                let Some((name, info)) = found else {
-                    return Err(format!("field `{requested_name}` not found"));
-                };
-                (name, info)
+            let Some((name, info)) =
+                find_field(current_type.as_deref().unwrap_or(root), requested_name)
+                    .map(|(name, info)| (name.to_string(), info.clone()))
+            else {
+                return Err(format!("field `{requested_name}` not found"));
             };
             let next_type_name = nested_layout_name(&info.type_data);
             components.push(PathComponent { name, info });
@@ -451,17 +392,13 @@ impl ReplState<'_> {
                         "field `{requested_name}` is not a nested structure"
                     ));
                 };
-                if let Some(next_type) = self.lookup_type(&next_type_name) {
-                    current_type = Some(next_type);
-                    current_type_name = None;
-                } else if standard_layout_field(&next_type_name, "Flink").is_some()
-                    || standard_layout_field(&next_type_name, "Length").is_some()
-                {
-                    current_type = None;
-                    current_type_name = Some(next_type_name);
-                } else {
+                let next_type = self
+                    .lookup_type(&next_type_name)
+                    .or_else(|| abi_layout(&next_type_name).map(Arc::new));
+                let Some(next_type) = next_type else {
                     return Err(format!("nested type `{next_type_name}` not found"));
-                }
+                };
+                current_type = Some(next_type);
             }
         }
         Ok(ResolvedFieldPath { components })
@@ -1030,6 +967,12 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
+
+        // No PDB describes `_LIST_ENTRY` here, so the path resolves through
+        // its ABI layout.
+        let (result, text) = capture(|| state.dispatch_line("dt _NODE 1000 Links.blink"));
+        result.unwrap();
+        assert!(text.contains("Links.blink : <?>* = 0x1000"), "{text}");
     }
 
     #[test]

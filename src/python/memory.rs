@@ -9,6 +9,7 @@ use super::record::{PlainDict, Record};
 use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, MAX_SEARCH_LEN, err, raise, view_dict, view_record, view_records};
 use crate::backend::MemoryOps;
+use crate::layout::utf16le_lossy;
 use crate::target::MemorySearchMatch as CoreMemorySearchMatch;
 use crate::target::mm::{AddressModule as CoreAddressModule, MemoryRegionInfo};
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
@@ -214,13 +215,7 @@ impl Memory {
                 .map(|read| read.bytes)
                 .map_err(err)
         })?;
-        let units: Vec<u16> = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|unit| u16::from_le_bytes(*unit))
-            .collect();
-        Ok(String::from_utf16_lossy(&units))
+        Ok(utf16le_lossy(&bytes))
     }
 
     /// Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits`

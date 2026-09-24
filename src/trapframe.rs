@@ -118,10 +118,7 @@ impl KtrapFrame {
     /// struct) using the PDB-described `layout`.
     pub fn decode(layout: &TypeInfo, address: u64, buf: &[u8]) -> Result<Self> {
         let field = |name: &str| -> Result<u64> {
-            let f = layout
-                .fields
-                .get(name)
-                .ok_or_else(|| Error::FieldNotFound(name.to_string()))?;
+            let f = layout.field(name)?;
             let off = f.offset as usize;
             let size = (f.size as usize).min(8);
             if size == 0 || off + size > buf.len() {
@@ -173,10 +170,7 @@ impl KtrapFrame {
             Err(Error::FieldNotFound(names[0].to_string()))
         };
         let array_field = |name: &str, index: usize, element_size: usize| -> Result<u64> {
-            let info = layout
-                .fields
-                .get(name)
-                .ok_or_else(|| Error::FieldNotFound(name.to_string()))?;
+            let info = layout.field(name)?;
             let offset = (info.offset as usize)
                 .checked_add(index.saturating_mul(element_size))
                 .ok_or_else(|| Error::FieldNotFound(name.to_string()))?;
@@ -314,10 +308,7 @@ fn decode_kswitch_frame(
     buf: &[u8],
 ) -> Result<SavedThreadRegisters> {
     let field = |name: &str| -> Result<(u64, u32)> {
-        let field = layout
-            .fields
-            .get(name)
-            .ok_or_else(|| Error::FieldNotFound(name.to_string()))?;
+        let field = layout.field(name)?;
         let offset = field.offset as usize;
         let size = (field.size as usize).min(8);
         if size == 0 || offset + size > buf.len() {

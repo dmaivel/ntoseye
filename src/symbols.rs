@@ -2016,10 +2016,7 @@ impl SymbolStore {
         let (module_name, base_address) = (module.name.as_str(), module.base_address);
         // `dtb` is the root for the module's own VA half: the kernel root for
         // kernel modules and the process root for user modules.
-        let addr_space = match arch {
-            Arch::Amd64 => memory::AddressSpace::new(backend, dtb),
-            Arch::Arm64 => memory::AddressSpace::new_arm64(backend, dtb, dtb),
-        };
+        let addr_space = memory::AddressSpace::for_arch(backend, dtb, dtb, arch);
         match self.extract_download_job_from_memory(&addr_space, base_address) {
             Ok(Some((job, guid))) => Ok(ModuleSymbolDiscovery::Ready {
                 job,
