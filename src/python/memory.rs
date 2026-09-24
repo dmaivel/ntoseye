@@ -11,7 +11,9 @@ use super::{MAX_READ_LEN, MAX_SEARCH_LEN, err, raise, view_dict, view_record, vi
 use crate::backend::MemoryOps;
 use crate::layout::utf16le_lossy;
 use crate::target::MemorySearchMatch as CoreMemorySearchMatch;
-use crate::target::mm::{AddressModule as CoreAddressModule, MemoryRegionInfo};
+use crate::target::mm::{
+    AddressModule as CoreAddressModule, MemoryRegionInfo, VadProtection, VadType,
+};
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
 use crate::view;
@@ -448,8 +450,8 @@ impl From<MemoryRegionInfo> for MemoryRegion {
         Self {
             start: region.start.0,
             end: region.end.0,
-            protection: region.protection,
-            vad_type: region.vad_type,
+            protection: region.protection.map(VadProtection::raw),
+            vad_type: region.vad_type.map(VadType::raw),
             private_memory: region.private_memory,
             commit_charge: region.commit_charge,
             details: region.details,

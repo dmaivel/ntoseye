@@ -1193,10 +1193,10 @@ impl ReplState<'_> {
                 ui::addr(r.end.0)
             );
             if let Some(p) = r.protection {
-                outln!("    protection : {:#x}", p);
+                outln!("    protection : {:#x}", p.raw());
             }
             if let Some(t) = r.vad_type {
-                outln!("    vad type   : {:#x}", t);
+                outln!("    vad type   : {:#x}", t.raw());
             }
             if let Some(pm) = r.private_memory {
                 outln!("    private    : {}", pm);

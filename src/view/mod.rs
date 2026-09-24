@@ -24,7 +24,7 @@ use crate::symbols::{
 };
 use crate::target::mm::{
     AddressDescription, AddressModule, MemoryRegionInfo, ProcessMemoryUsage, PteLevel, PteWalk,
-    SystemMemorySummary,
+    SystemMemorySummary, VadProtection, VadType,
 };
 use crate::target::object::{
     DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, FileObjectDetail, HandleEntryDetail,
@@ -402,8 +402,11 @@ pub fn memory_region(r: &MemoryRegionInfo) -> View {
         ("start", View::Hex(r.start.0)),
         ("end", View::Hex(r.end.0)),
         ("size", View::Num(r.size())),
-        ("protection", View::OptNum(r.protection)),
-        ("vad_type", View::OptNum(r.vad_type)),
+        (
+            "protection",
+            View::OptNum(r.protection.map(VadProtection::raw)),
+        ),
+        ("vad_type", View::OptNum(r.vad_type.map(VadType::raw))),
         ("private_memory", View::OptBool(r.private_memory)),
         ("commit_charge", View::OptNum(r.commit_charge)),
         ("details", View::OptStr(r.details.clone())),

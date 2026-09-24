@@ -1857,8 +1857,8 @@ pub struct MemoryRegionInfo {
     pub level: usize,
     pub start: VirtAddr,
     pub end: VirtAddr,
-    pub protection: Option<u64>,
-    pub vad_type: Option<u64>,
+    pub protection: Option<VadProtection>,
+    pub vad_type: Option<VadType>,
     pub private_memory: Option<bool>,
     pub commit_charge: Option<u64>,
     pub details: Option<String>,
@@ -1867,6 +1867,95 @@ pub struct MemoryRegionInfo {
 impl MemoryRegionInfo {
     pub fn size(&self) -> u64 {
         self.end.0.saturating_sub(self.start.0)
+    }
+}
+
+/// `_MMVAD_FLAGS.Protection`: an index into the memory manager's protection
+/// table, not a `PAGE_*` mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VadProtection {
+    NoAccess,
+    ReadOnly,
+    Execute,
+    ExecuteRead,
+    ReadWrite,
+    WriteCopy,
+    ExecuteReadWrite,
+    ExecuteWriteCopy,
+    Unknown(u64),
+}
+
+impl VadProtection {
+    pub fn from_raw(raw: u64) -> Self {
+        match raw {
+            0 => Self::NoAccess,
+            1 => Self::ReadOnly,
+            2 => Self::Execute,
+            3 => Self::ExecuteRead,
+            4 => Self::ReadWrite,
+            5 => Self::WriteCopy,
+            6 => Self::ExecuteReadWrite,
+            7 => Self::ExecuteWriteCopy,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn raw(self) -> u64 {
+        match self {
+            Self::NoAccess => 0,
+            Self::ReadOnly => 1,
+            Self::Execute => 2,
+            Self::ExecuteRead => 3,
+            Self::ReadWrite => 4,
+            Self::WriteCopy => 5,
+            Self::ExecuteReadWrite => 6,
+            Self::ExecuteWriteCopy => 7,
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+/// `_MMVAD_FLAGS.VadType`, an `_MI_VAD_TYPE` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VadType {
+    None,
+    DevicePhysicalMemory,
+    ImageMap,
+    Awe,
+    WriteWatch,
+    LargePages,
+    RotatePhysical,
+    LargePageSection,
+    Unknown(u64),
+}
+
+impl VadType {
+    pub fn from_raw(raw: u64) -> Self {
+        match raw {
+            0 => Self::None,
+            1 => Self::DevicePhysicalMemory,
+            2 => Self::ImageMap,
+            3 => Self::Awe,
+            4 => Self::WriteWatch,
+            5 => Self::LargePages,
+            6 => Self::RotatePhysical,
+            7 => Self::LargePageSection,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn raw(self) -> u64 {
+        match self {
+            Self::None => 0,
+            Self::DevicePhysicalMemory => 1,
+            Self::ImageMap => 2,
+            Self::Awe => 3,
+            Self::WriteWatch => 4,
+            Self::LargePages => 5,
+            Self::RotatePhysical => 6,
+            Self::LargePageSection => 7,
+            Self::Unknown(raw) => raw,
+        }
     }
 }
 
@@ -2418,10 +2507,12 @@ impl Target {
             .map(u64::from);
         let protection = flags
             .zip(flags_layout)
-            .and_then(|(raw, layout)| Self::bitfield_value(layout, "Protection", raw));
+            .and_then(|(raw, layout)| Self::bitfield_value(layout, "Protection", raw))
+            .map(VadProtection::from_raw);
         let vad_type = flags
             .zip(flags_layout)
-            .and_then(|(raw, layout)| Self::bitfield_value(layout, "VadType", raw));
+            .and_then(|(raw, layout)| Self::bitfield_value(layout, "VadType", raw))
+            .map(VadType::from_raw);
         let private_memory = flags.zip(flags_layout).and_then(|(raw, layout)| {
             Self::bitfield_value(layout, "PrivateMemory", raw).map(|v| v != 0)
         });

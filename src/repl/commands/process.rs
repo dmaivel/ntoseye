@@ -14,7 +14,7 @@ use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::layout::StructRef;
 use crate::memory::PAGE_SIZE;
 use crate::symbols::{ModuleSymbolStatus, glob_matches};
-use crate::target::mm::MemoryRegionInfo;
+use crate::target::mm::{MemoryRegionInfo, VadProtection, VadType};
 use crate::target::{
     AttachReport, Target, ThreadInfo, decimal_pid_literal, fast_ref_address, kthread_state_name,
     process_matches, wait_reason_name,
@@ -554,27 +554,28 @@ fn format_region_size(size: u64) -> String {
     }
 }
 
-fn vad_protection_label(protection: Option<u64>) -> String {
-    match protection {
-        Some(0) => "none".to_string(),
-        Some(1) => "r".to_string(),
-        Some(2) => "x".to_string(),
-        Some(3) => "x/r".to_string(),
-        Some(4) => "rw".to_string(),
-        Some(5) => "cow".to_string(),
-        Some(6) => "x/rw".to_string(),
-        Some(7) => "x/cow".to_string(),
-        Some(value) => format!("prot:{value}"),
-        None => "-".to_string(),
-    }
+fn vad_protection_label(protection: Option<VadProtection>) -> String {
+    let label = match protection {
+        Some(VadProtection::NoAccess) => "none",
+        Some(VadProtection::ReadOnly) => "r",
+        Some(VadProtection::Execute) => "x",
+        Some(VadProtection::ExecuteRead) => "x/r",
+        Some(VadProtection::ReadWrite) => "rw",
+        Some(VadProtection::WriteCopy) => "cow",
+        Some(VadProtection::ExecuteReadWrite) => "x/rw",
+        Some(VadProtection::ExecuteWriteCopy) => "x/cow",
+        Some(VadProtection::Unknown(value)) => return format!("prot:{value}"),
+        None => "-",
+    };
+    label.to_string()
 }
 
 fn vad_type_label(region: &MemoryRegionInfo) -> String {
     match region.vad_type {
-        Some(2) => "mapped".to_string(),
-        Some(3) => "image".to_string(),
+        Some(VadType::ImageMap) => "image".to_string(),
         Some(_) if region.private_memory == Some(true) => "private".to_string(),
-        Some(value) => format!("vad:{value}"),
+        Some(VadType::None) if region.private_memory == Some(false) => "mapped".to_string(),
+        Some(vad_type) => format!("vad:{}", vad_type.raw()),
         None => "vad".to_string(),
     }
 }
@@ -600,9 +601,7 @@ fn region_matches_filter(
             .as_deref()
             .is_some_and(|details| details.to_ascii_lowercase().contains(&filter))
         || vad_type_label(region).contains(&filter)
-        || vad_protection_label(region.protection)
-            .to_ascii_lowercase()
-            .contains(&filter)
+        || vad_protection_label(region.protection).contains(&filter)
 }
 
 impl ReplState<'_> {
@@ -1964,5 +1963,32 @@ impl ReplState<'_> {
         outln!("switched to vCPU {}\n", self.ctx.current_thread);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn region(vad_type: u64, private_memory: bool) -> MemoryRegionInfo {
+        MemoryRegionInfo {
+            node_address: VirtAddr(0),
+            level: 0,
+            start: VirtAddr(0x10000),
+            end: VirtAddr(0x20000),
+            protection: None,
+            vad_type: Some(VadType::from_raw(vad_type)),
+            private_memory: Some(private_memory),
+            commit_charge: None,
+            details: None,
+        }
+    }
+
+    #[test]
+    fn vad_type_labels_follow_mi_vad_type() {
+        assert_eq!(vad_type_label(&region(2, false)), "image");
+        assert_eq!(vad_type_label(&region(0, false)), "mapped");
+        assert_eq!(vad_type_label(&region(3, true)), "private");
+        assert_eq!(vad_type_label(&region(3, false)), "vad:3");
     }
 }
