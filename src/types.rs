@@ -185,6 +185,18 @@ pub enum PageTableLevel {
     Pte,
 }
 
+impl PageTableLevel {
+    /// WinDbg's name for an entry at this level.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pxe => "PXE",
+            Self::Ppe => "PPE",
+            Self::Pde => "PDE",
+            Self::Pte => "PTE",
+        }
+    }
+}
+
 impl VirtAddr {
     pub const fn from_u64(value: u64) -> Self {
         Self(value)

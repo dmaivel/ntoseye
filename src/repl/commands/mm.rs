@@ -298,13 +298,8 @@ fn print_pfn(detail: &PfnDetail) {
     );
 }
 
-fn print_pte_entry(name: &str, address: u64, raw: u64) {
-    let level = match name {
-        "PPE" => PageTableLevel::Ppe,
-        "PDE" => PageTableLevel::Pde,
-        "PTE" => PageTableLevel::Pte,
-        _ => PageTableLevel::Pxe,
-    };
+fn print_pte_entry(level: PageTableLevel, address: u64, raw: u64) {
+    let name = level.name();
     let value = PageTableEntry(raw);
     if value.is_present() {
         outln!(
@@ -330,7 +325,7 @@ fn print_vtop(detail: &VtopDetail) {
         ui::addr(detail.dtb)
     );
     for level in &detail.levels {
-        print_pte_entry(&level.name, level.address.0, level.value);
+        print_pte_entry(level.level, level.address.0, level.value);
     }
     match detail.physical {
         Some(physical) => outln!("  physical             : {}", ui::addr(physical)),

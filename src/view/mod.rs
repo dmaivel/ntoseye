@@ -448,7 +448,7 @@ pub fn memory_search_match(m: &MemorySearchMatch) -> View {
 /// One page-table level (WinDbg-style flags).
 pub fn pte_level(pte: &PteLevel) -> View {
     View::Object(vec![
-        ("level", View::Str(pte.name.clone())),
+        ("level", View::Str(pte.level.name().to_string())),
         ("address", View::Hex(pte.address.0)),
         ("value", View::Hex(pte.value.0)),
         ("pfn", View::Hex(pte.value.pfn())),

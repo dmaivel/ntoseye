@@ -18,7 +18,7 @@ use crate::target::pool::{
     pool_block_state, pool_field_from_buf, pool_layout, read_kernel_global_u64, read_pool_field,
     scan_big_pool_entries, scan_pool_page_lax, tag_string,
 };
-use crate::types::{Arch, Dtb, PageTableEntry, VirtAddr};
+use crate::types::{Arch, Dtb, PageTableEntry, PageTableLevel, VirtAddr};
 
 use super::{DiagnosticMetric, DiagnosticValue, Target};
 use crate::guest::ProcessInfo;
@@ -138,7 +138,7 @@ pub struct PfnDetail {
 /// One page-table level reached by [`Target::vtop`].
 #[derive(Debug, Clone)]
 pub struct VtopLevel {
-    pub name: String,
+    pub level: PageTableLevel,
     pub address: VirtAddr,
     pub value: u64,
 }
@@ -910,7 +910,7 @@ impl Target {
                 .into_iter()
                 .flatten()
                 .map(|level| VtopLevel {
-                    name: level.name,
+                    level: level.level,
                     address: level.address,
                     value: level.value.0,
                 })
@@ -1546,7 +1546,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .ok_or_else(|| Error::DebugInfo("PML4 address overflow".to_string()))?;
     let pml4e: PageTableEntry = memory.read(pml4_address)?;
     levels.push(VtopLevel {
-        name: "PXE".to_string(),
+        level: PageTableLevel::Pxe,
         address: VirtAddr(pml4_address),
         value: pml4e.0,
     });
@@ -1566,7 +1566,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .ok_or_else(|| Error::DebugInfo("PDPT address overflow".to_string()))?;
     let pdpte: PageTableEntry = memory.read(pdpt_address)?;
     levels.push(VtopLevel {
-        name: "PPE".to_string(),
+        level: PageTableLevel::Ppe,
         address: VirtAddr(pdpt_address),
         value: pdpte.0,
     });
@@ -1597,7 +1597,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .ok_or_else(|| Error::DebugInfo("PD address overflow".to_string()))?;
     let pde: PageTableEntry = memory.read(pde_address)?;
     levels.push(VtopLevel {
-        name: "PDE".to_string(),
+        level: PageTableLevel::Pde,
         address: VirtAddr(pde_address),
         value: pde.0,
     });
@@ -1628,7 +1628,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .ok_or_else(|| Error::DebugInfo("PT address overflow".to_string()))?;
     let pte: PageTableEntry = memory.read(pte_address)?;
     levels.push(VtopLevel {
-        name: "PTE".to_string(),
+        level: PageTableLevel::Pte,
         address: VirtAddr(pte_address),
         value: pte.0,
     });
@@ -1937,7 +1937,7 @@ pub struct SystemMemorySummary {
 }
 
 pub struct PteLevel {
-    pub name: String, // TODO maybe enum instead?
+    pub level: PageTableLevel,
     pub address: VirtAddr,
     pub value: PageTableEntry,
 }
@@ -2468,12 +2468,12 @@ impl Target {
         let ppe_value: PageTableEntry = memory.read(ppe_address)?;
 
         let pxe = PteLevel {
-            name: "PXE".into(),
+            level: PageTableLevel::Pxe,
             address: pxe_address,
             value: pxe_value,
         };
         let ppe = PteLevel {
-            name: "PPE".into(),
+            level: PageTableLevel::Ppe,
             address: ppe_address,
             value: ppe_value,
         };
@@ -2492,7 +2492,7 @@ impl Target {
         let pde_address = VirtAddr((((address.0 & 0xFFFFFFFFFFFF) >> 21) << 3) + pde_base.0);
         let pde_value: PageTableEntry = memory.read(pde_address)?;
         let pde = PteLevel {
-            name: "PDE".into(),
+            level: PageTableLevel::Pde,
             address: pde_address,
             value: pde_value,
         };
@@ -2511,7 +2511,7 @@ impl Target {
         let pte_address = VirtAddr(((address.0 & 0xFFFFFFFFFFFF) >> 12) << 3) + pte_base.0;
         let pte_value: PageTableEntry = memory.read(pte_address)?;
         let pte = PteLevel {
-            name: "PTE".into(),
+            level: PageTableLevel::Pte,
             address: pte_address,
             value: pte_value,
         };

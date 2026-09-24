@@ -9,7 +9,7 @@ use crate::target::mm::{
     VtopDetail, VtopLevel,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
-use crate::types::{PageTableEntry, PageTableLevel};
+use crate::types::PageTableEntry;
 
 fn vm_counter(counter: &VmCounter) -> View {
     View::Object(vec![
@@ -189,14 +189,8 @@ pub fn pfn(detail: &PfnDetail) -> View {
 
 fn vtop_level(level: &VtopLevel) -> View {
     let value = PageTableEntry(level.value);
-    let table_level = match level.name.as_str() {
-        "PPE" => PageTableLevel::Ppe,
-        "PDE" => PageTableLevel::Pde,
-        "PTE" => PageTableLevel::Pte,
-        _ => PageTableLevel::Pxe,
-    };
     View::Object(vec![
-        ("level", View::Str(level.name.clone())),
+        ("level", View::Str(level.level.name().to_string())),
         ("address", View::Hex(level.address.0)),
         ("value", View::Hex(level.value)),
         ("pfn", View::Hex(value.pfn())),
@@ -205,7 +199,7 @@ fn vtop_level(level: &VtopLevel) -> View {
         ("writable", View::Bool(value.is_writable())),
         ("user", View::Bool(value.is_user())),
         ("nx", View::Bool(value.is_nx())),
-        ("flags", View::Str(value.flags_for_level(table_level))),
+        ("flags", View::Str(value.flags_for_level(level.level))),
     ])
 }
 

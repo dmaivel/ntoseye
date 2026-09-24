@@ -150,7 +150,7 @@ repl_command! {
 fn pte_level_cell(level: &PteLevel) -> String {
     format!(
         "{} at {:X}\ncontains {:016X}\npfn {:<5x} {:>11}",
-        level.name,
+        level.level.name(),
         level.address,
         ui::Value(level.value.0),
         level.value.pfn(),
