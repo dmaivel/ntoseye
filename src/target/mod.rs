@@ -31,7 +31,7 @@ use crate::{
     phys::PhysMem,
     symbols::SymbolStore,
     types::{Arch, Dtb, VirtAddr},
-    unwind::RecoveredFrame,
+    unwind::RecoveredStackTrace,
 };
 
 pub struct Target {
@@ -135,6 +135,10 @@ pub struct SelectedFrame {
     /// Whether `seed_registers` is the live vCPU register file, as opposed to
     /// a `.cxr`/`.trap` context read from memory. Decides [`Self::is_live`].
     pub seed_live: bool,
+    /// The address space the stack walk recovered this frame in. A context
+    /// with no walk behind it (`.cxr`, `.trap`) takes its root from its
+    /// registers instead.
+    pub dtb: Option<Dtb>,
 }
 
 impl SelectedFrame {
@@ -149,13 +153,15 @@ impl SelectedFrame {
     /// Select frame `index` of a recovered trace, keeping the walk's seed
     /// context so repeated selections stay anchored to the same register file.
     /// `seed_live` says whether that seed was the vCPU's own register file.
+    /// `None` when the trace has no frame `index`.
     pub fn from_recovered(
-        frame: &RecoveredFrame,
+        trace: &RecoveredStackTrace,
         index: usize,
         seed_registers: Option<&HashMap<String, u64>>,
         seed_live: bool,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        let frame = trace.frames.get(index)?;
+        Some(Self {
             index,
             ip: frame.frame.ip,
             sp: frame.frame.sp,
@@ -166,7 +172,8 @@ impl SelectedFrame {
                 .cloned()
                 .unwrap_or_else(|| frame.registers.clone()),
             seed_live,
-        }
+            dtb: Some(trace.dtb),
+        })
     }
 
     /// Select a context given only register values (`.cxr`, `.ecxr`, `.trap`),
@@ -191,6 +198,7 @@ impl SelectedFrame {
             registers,
             seed_registers,
             seed_live: false,
+            dtb: None,
         }
     }
 }

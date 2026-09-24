@@ -6,6 +6,7 @@ use super::memory::MAX_DISASSEMBLE_INSTRUCTIONS;
 use super::variables::VARIABLES_BASE;
 use super::*;
 use crate::expr::Expr;
+use crate::guest::ProcessInfo;
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::session::session_over_memory;
 use crate::symbols::{LocalVariableLocation, ProcedureLocal};
@@ -417,6 +418,74 @@ fn locals_come_from_the_address_space_the_frame_was_recovered_in() {
 
     let value = row(&locals, "count")["value"].as_str().unwrap();
     assert!(value.starts_with("0x2a"), "{value}");
+}
+
+#[test]
+fn watches_evaluate_in_the_address_space_the_frame_was_recovered_in() {
+    let mut session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let inspection_dtb = session.target.current_dtb();
+    let process_dtb = 0x1a_b000;
+    session.target.symbols.set_kernel(Some(1), inspection_dtb);
+    session
+        .target
+        .symbols
+        .register_module_for_test(2, "driver", process_dtb);
+    let base = 0x3000_0000;
+    session.target.symbols.inject_procedure_locals_for_test(
+        2,
+        0x10,
+        vec![ProcedureLocal {
+            name: "count".to_string(),
+            type_name: "ULONG".to_string(),
+            type_data: ParsedType::Primitive("ULONG".to_string()),
+            byte_size: Some(4),
+            is_parameter: false,
+            location: LocalVariableLocation::Register {
+                register: "rbx".to_string(),
+            },
+        }],
+    );
+    // The console is scoped to an unrelated process; the watch still reads
+    // the frame's.
+    let attached_dtb = 0x2c_d000;
+    session.target.enter_process_scope(ProcessInfo {
+        pid: 8,
+        name: "other.exe".to_string(),
+        dtb: attached_dtb,
+        eprocess_va: VirtAddr(0),
+        wow64_peb: None,
+    });
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let ip = base + 0x10;
+    server.frames.push(FrameRef {
+        thread: 1,
+        index: 1,
+        ip,
+        sp: 0x2000,
+        symbol: "driver!Routine+0x10".to_string(),
+        source_location: None,
+        frame_base: None,
+        registers: HashMap::from([("rip".to_string(), ip), ("rbx".to_string(), 0x2a)]),
+        seed_registers: HashMap::new(),
+        dtb: process_dtb,
+    });
+
+    let response = server
+        .on_evaluate(&json!({
+            "expression": "count",
+            "context": "watch",
+            "frameId": 1,
+        }))
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        response["result"].as_str().unwrap().starts_with("0x2a"),
+        "{response}"
+    );
+    let target = &server.session.as_ref().unwrap().target;
+    assert_eq!(target.current_dtb(), attached_dtb);
 }
 
 #[test]

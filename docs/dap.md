@@ -180,7 +180,7 @@ Structs, unions, arrays, and pointers expand through `dt` decoding. Null pointer
 
 The Registers scope is `r`. Frame 0 is the live register file and is writable, while caller frames show the sparse recovered context. Under a parked Windows thread every frame is recovered, so none is writable.
 
-Watch and hover use [core expressions](usage.md#expressions), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Expressions see the selected frame's registers but evaluate in the console's inspection context, as `?` does, so a `.process` scope applies to them. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
+Watch and hover use [core expressions](usage.md#expressions), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Expressions see the selected frame's registers and read the address space its stack was recovered in, as its locals do. The Debug Console evaluates in the console's inspection context instead, so a `.process` scope applies there. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
 
 Scalar registers, locals, struct fields, and array elements can be written in place. Bitfields and values wider than 8 bytes require console commands such as `eb` or `ed`.
 

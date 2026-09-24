@@ -251,6 +251,7 @@ impl Server {
             registers: frame.registers.clone(),
             seed_registers: frame.seed_registers.clone(),
             seed_live,
+            dtb: Some(frame.dtb),
         };
         if let Some(session) = self.session.as_mut() {
             session.select_frame(selected);

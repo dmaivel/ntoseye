@@ -33,7 +33,23 @@ impl Server {
                 "variablesReference": 0,
             })));
         }
-        let (expr, value) = self.parse_and_evaluate(&expression)?;
+        // A watch or hover on a frame reads that frame's address space, as its
+        // Locals do; only the Debug Console follows a `.process` scope.
+        let attached = match args.get("frameId") {
+            Some(_) => self.session()?.target.take_attached_process(),
+            None => None,
+        };
+        let evaluated = self.evaluate_value(&expression);
+        if attached.is_some() {
+            self.session()?.target.restore_attached_process(attached);
+        }
+        evaluated
+    }
+
+    /// Evaluate a watch, hover or clipboard expression into a response body
+    /// with its type, memory reference and expandable children.
+    fn evaluate_value(&mut self, expression: &str) -> Handled {
+        let (expr, value) = self.parse_and_evaluate(expression)?;
         let (result, type_name, memory_reference, expansion, indexed_variables) = {
             let session = self.session()?;
             let type_data = value.type_data().cloned();

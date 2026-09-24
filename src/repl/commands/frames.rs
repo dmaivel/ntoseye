@@ -150,11 +150,11 @@ impl ReplState<'_> {
             let Some((recovered, seed, live)) = self.recovered_live_trace(1)? else {
                 return Ok(());
             };
-            let Some(frame) = recovered.frames.first() else {
+            let Some(selected) = SelectedFrame::from_recovered(&recovered, 0, Some(&seed), live)
+            else {
                 error!("current frame is unavailable");
                 return Ok(());
             };
-            let selected = SelectedFrame::from_recovered(frame, 0, Some(&seed), live);
             self.print_selected_frame(&selected, show_registers);
             return Ok(());
         };
@@ -167,11 +167,11 @@ impl ReplState<'_> {
         let Some((recovered, seed, live)) = self.recovered_live_trace(limit)? else {
             return Ok(());
         };
-        let Some(frame) = recovered.frames.get(index) else {
+        let Some(selected) = SelectedFrame::from_recovered(&recovered, index, Some(&seed), live)
+        else {
             error!("frame {} is unavailable", index);
             return Ok(());
         };
-        let selected = SelectedFrame::from_recovered(frame, index, Some(&seed), live);
         self.set_selected_frame(selected.clone());
         self.print_selected_frame(&selected, show_registers);
         Ok(())

@@ -440,6 +440,7 @@ impl Frame {
             registers: self.registers.clone(),
             seed_registers: self.registers.clone(),
             seed_live: self.writable,
+            dtb: None,
         }
     }
 }

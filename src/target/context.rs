@@ -149,6 +149,16 @@ impl Target {
         self.process = None;
     }
 
+    /// Set the attached process aside, so inspection follows the selected
+    /// frame's own root until [`Self::restore_attached_process`].
+    pub fn take_attached_process(&mut self) -> Option<ProcessInfo> {
+        self.process.take()
+    }
+
+    pub fn restore_attached_process(&mut self, process: Option<ProcessInfo>) {
+        self.process = process;
+    }
+
     /// Scope inspection to `info`'s address space without loading its module
     /// symbols, which [`Self::attach_process_info`] does. Memory, type, and
     /// kernel-symbol reads need only the page tables.

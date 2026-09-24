@@ -73,14 +73,14 @@ impl Session {
     pub fn select_frame(&mut self, selected: SelectedFrame) {
         self.target.registers = Some(selected.registers.clone());
         let dtb_register = self.target.arch().dtb_register();
-        if let Some(dtb) = selected.registers.get(dtb_register).copied()
-            && dtb != 0
-            && self.target.guest.is_some()
-            && self.target.kernel_dtb() != DTB_IDENTITY
-        {
-            self.target.set_context_dtb_override(dtb);
-        } else {
-            self.target.clear_context_dtb_override();
+        let dtb = selected.dtb.or_else(|| {
+            selected.registers.get(dtb_register).copied().filter(|dtb| {
+                *dtb != 0 && self.target.guest.is_some() && self.target.kernel_dtb() != DTB_IDENTITY
+            })
+        });
+        match dtb {
+            Some(dtb) => self.target.set_context_dtb_override(dtb),
+            None => self.target.clear_context_dtb_override(),
         }
         self.target.selected_frame = Some(selected);
     }
@@ -204,11 +204,8 @@ impl Session {
             return Err(Error::InvalidArgument("frame index is too large".into()));
         }
         let (trace, seed, live) = self.recovered_live_trace(index.saturating_add(1))?;
-        let frame = trace
-            .frames
-            .get(index)
+        let selected = SelectedFrame::from_recovered(&trace, index, Some(&seed), live)
             .ok_or_else(|| Error::DebugInfo(format!("frame {index} is unavailable")))?;
-        let selected = SelectedFrame::from_recovered(frame, index, Some(&seed), live);
         self.select_frame(selected.clone());
         Ok(selected)
     }
