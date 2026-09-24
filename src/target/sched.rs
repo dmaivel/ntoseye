@@ -9,7 +9,7 @@ use crate::cpu_state::{MAX_PROCESSORS, kpcr_for_processor, kprcb_for_processor, 
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
-use crate::kuser_shared;
+use crate::kuser_shared::KuserSharedData;
 use crate::layout::{ParsedType, TypeInfo};
 use crate::session::Session;
 use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk};
@@ -757,7 +757,7 @@ impl Target {
     }
 
     fn interrupt_time(&self) -> (DiagnosticValue<Option<u64>>, Option<String>) {
-        match kuser_shared::read_interrupt_time(self) {
+        match KuserSharedData::new(self).interrupt_time() {
             Some(value) => (
                 available(Some(value)),
                 Some("KUSER_SHARED_DATA.InterruptTime".to_string()),

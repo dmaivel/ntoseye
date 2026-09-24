@@ -6,10 +6,7 @@ use crate::backend::MemoryOps;
 use crate::cpu_state::processor_count;
 use crate::error::{Error, Result};
 use crate::guest::{Guest, ModuleInfo};
-use crate::kuser_shared::{
-    read_interrupt_time, read_nt_build_number, read_nt_major_version, read_nt_minor_version,
-    read_nt_product_type, read_system_time,
-};
+use crate::kuser_shared::KuserSharedData;
 use crate::layout::{StructRef, Types};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::session::Session;
@@ -701,16 +698,28 @@ fn dump_uptime_seconds(target: &Target) -> Option<u64> {
         .map(|time| time as u64)
 }
 
-fn system_time(target: &Target) -> Option<u64> {
-    dump_system_time(target).or_else(|| read_system_time(target).filter(|time| *time > 0))
+fn system_time(target: &Target, kuser: &KuserSharedData<'_>) -> Option<u64> {
+    dump_system_time(target).or_else(|| kuser.system_time().filter(|time| *time > 0))
 }
 
-fn uptime_seconds(target: &Target) -> Option<u64> {
+fn uptime_seconds(target: &Target, kuser: &KuserSharedData<'_>) -> Option<u64> {
     dump_uptime_seconds(target).or_else(|| {
-        read_interrupt_time(target)
+        kuser
+            .interrupt_time()
             .filter(|ticks| *ticks > 0)
             .map(|ticks| ticks / 10_000_000)
     })
+}
+
+fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail {
+    let system_time = system_time(target, kuser);
+    let uptime_seconds = uptime_seconds(target, kuser);
+    TargetTimeDetail {
+        system_time,
+        system_time_iso: system_time.and_then(filetime_to_iso),
+        uptime_seconds,
+        uptime: uptime_seconds.map(format_uptime),
+    }
 }
 
 fn format_uptime(seconds: u64) -> String {
@@ -799,22 +808,23 @@ impl Target {
             .phys
             .dmp_info()
             .and_then(|info| info.system_info.as_ref());
+        let kuser = KuserSharedData::new(self);
         let major = dump_info
             .map(|info| info.major_version as u64)
             .filter(|value| *value != 0)
-            .or_else(|| read_nt_major_version(self));
+            .or_else(|| kuser.nt_major_version());
         let minor = dump_info
             .map(|info| info.minor_version as u64)
             .filter(|value| *value != 0)
-            .or_else(|| read_nt_minor_version(self));
+            .or_else(|| kuser.nt_minor_version());
         let build = symbol_build_number(self)
-            .or_else(|| read_nt_build_number(self))
+            .or_else(|| kuser.nt_build_number())
             .map(|value| value & 0xffff);
         let product = dump_info
             .map(|info| info.product_type as u64)
             .filter(|value| *value != 0)
-            .or_else(|| read_nt_product_type(self));
-        let time = self.target_time()?;
+            .or_else(|| kuser.nt_product_type());
+        let time = target_time(self, &kuser);
 
         let modules = self
             .kernel_modules_with_versions()
@@ -905,14 +915,7 @@ impl Target {
     /// in seconds and WinDbg-style day/hour/minute/second form. Missing KUSER
     /// data and missing dump metadata are represented by `None` fields.
     pub fn target_time(&self) -> Result<TargetTimeDetail> {
-        let system_time = system_time(self);
-        let uptime_seconds = uptime_seconds(self);
-        Ok(TargetTimeDetail {
-            system_time,
-            system_time_iso: system_time.and_then(filetime_to_iso),
-            uptime_seconds,
-            uptime: uptime_seconds.map(format_uptime),
-        })
+        Ok(target_time(self, &KuserSharedData::new(self)))
     }
 }
 
