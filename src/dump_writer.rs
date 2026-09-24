@@ -172,9 +172,21 @@ impl DumpMetadata {
                     "physical dump run {run_index} has no pages"
                 )));
             }
-            base_page
+            let run_end = base_page
                 .checked_add(page_count)
                 .ok_or_else(|| Error::DebugInfo("physical dump run overflows u64".into()))?;
+            for (previous_index, &(previous_base, previous_count)) in
+                self.runs[..run_index].iter().enumerate()
+            {
+                let previous_end = previous_base
+                    .checked_add(previous_count)
+                    .ok_or_else(|| Error::DebugInfo("physical dump run overflows u64".into()))?;
+                if base_page < previous_end && previous_base < run_end {
+                    return Err(Error::DebugInfo(format!(
+                        "physical dump runs {previous_index} and {run_index} overlap"
+                    )));
+                }
+            }
             pages = pages
                 .checked_add(page_count)
                 .ok_or_else(|| Error::DebugInfo("physical dump page count overflows u64".into()))?;
@@ -1043,6 +1055,37 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
         assert!(temporary_paths(&path).is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn overlapping_runs_are_rejected_and_adjacent_runs_are_written() {
+        let path = std::env::temp_dir().join(format!(
+            "ntoseye-dump-writer-{}-overlapping-runs.dmp",
+            std::process::id()
+        ));
+        let original = b"previous dump";
+        fs::write(&path, original).unwrap();
+        let mut bytes = vec![0; 3 * PAGE_SIZE];
+        bytes[PAGE_SIZE..2 * PAGE_SIZE].fill(0x11);
+        bytes[2 * PAGE_SIZE..].fill(0x22);
+        let memory = SyntheticMemory { bytes };
+
+        let overlapping = test_metadata(vec![(1, 2), (2, 1)]);
+        assert!(write_kernel_dump(&path, &memory, &overlapping, || false, || {}).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(temporary_paths(&path).is_empty());
+
+        let adjacent = test_metadata(vec![(1, 1), (2, 1)]);
+        write_kernel_dump(&path, &memory, &adjacent, || false, || {}).unwrap();
+        let dump = DmpMem::open(&path).unwrap();
+        for (page, expected) in [(1, 0x11), (2, 0x22)] {
+            let mut actual = [0; PAGE_SIZE];
+            dump.read_bytes(page * PAGE_SIZE as u64, &mut actual)
+                .unwrap();
+            assert!(actual.iter().all(|&byte| byte == expected));
+        }
+
         fs::remove_file(path).unwrap();
     }
 
