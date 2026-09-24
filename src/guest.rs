@@ -2193,12 +2193,16 @@ impl Guest {
         // header isn't in memory, fall back to downloading by image metadata.
         let ntoskrnl = match obj.load_symbols() {
             Ok(loaded) => loaded,
-            Err(_) if is_triage => {
-                let driver = phys
+            Err(error) if is_triage => {
+                // Without the driver list there is no fallback; the header
+                // path's failure is the one to report.
+                let Some(driver) = phys
                     .dmp_info()
                     .and_then(|info| info.triage_drivers.iter().find(|d| d.base == ntoskrnl_va.0))
                     .cloned()
-                    .ok_or(Error::NtoskrnlNotFound)?;
+                else {
+                    return Err(error);
+                };
 
                 Image::new(phys, symbols, kernel_dtb, ntoskrnl_va, arch)
                     .load_symbols_from_module_info(
