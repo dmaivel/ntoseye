@@ -753,6 +753,11 @@ pub struct KdBackend {
     bp_handles: HashMap<u64, u32>,
     managed_bp_addresses: HashSet<u64>,
     breakin_addresses: HashSet<u64>,
+    /// A break-in we sent was answered by another stop (a module-load
+    /// notification or a breakpoint hit that raced it), so the target still
+    /// holds it: the next unmanaged `STATUS_BREAKPOINT` is that break-in,
+    /// arriving late.
+    late_breakin: bool,
     pending_write_breakpoint: Option<PendingWriteBreakpoint>,
     /// Per-processor register state for the current halt: the fetched
     /// `CONTEXT` and `KSPECIAL_REGISTERS`, and what the stop reported without
@@ -1015,10 +1020,10 @@ impl KdBackend {
         }
 
         let mut breakin_addresses = HashSet::new();
-        if initial_stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE
+        let initial_breakin = initial_stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE
             && initial_stop.exception_code == STATUS_BREAKPOINT
-            && !stopped_on_stale_breakpoint
-        {
+            && !stopped_on_stale_breakpoint;
+        if initial_breakin {
             breakin_addresses.insert(initial_stop.program_counter);
         }
 
@@ -1037,6 +1042,7 @@ impl KdBackend {
             bp_handles: HashMap::new(),
             managed_bp_addresses: HashSet::new(),
             breakin_addresses,
+            late_breakin: !initial_breakin,
             pending_write_breakpoint: None,
             reconnect_assist_after_continue: None,
             registers: HaltRegisters::default(),
@@ -1235,13 +1241,19 @@ impl KdBackend {
     }
 
     fn known_breakin_stop(&self, stop: &StateChange) -> bool {
-        stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE
-            && stop.exception_code == STATUS_BREAKPOINT
-            && self.breakin_addresses.contains(&stop.program_counter)
-            && !self.managed_bp_addresses.contains(&stop.program_counter)
+        self.unmanaged_breakpoint_stop(stop)
+            && (self.late_breakin || self.breakin_addresses.contains(&stop.program_counter))
             // A break the host asked for is not assist noise, even though the
             // guest signals it from the same address our break-ins land on.
             && self.surface_break_at != Some(stop.program_counter)
+    }
+
+    /// A `STATUS_BREAKPOINT` exception on none of our breakpoints: how the
+    /// target reports a break-in.
+    fn unmanaged_breakpoint_stop(&self, stop: &StateChange) -> bool {
+        stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE
+            && stop.exception_code == STATUS_BREAKPOINT
+            && !self.managed_bp_addresses.contains(&stop.program_counter)
     }
 
     fn mark_known_breakin_stop(&self, mut stop: StateChange) -> StateChange {
@@ -1306,11 +1318,15 @@ impl KdBackend {
     }
 
     fn record_stop(&mut self, stop: &StateChange) {
+        if self.unmanaged_breakpoint_stop(stop) {
+            self.late_breakin = false;
+        }
         if stop.target_reloaded {
             kd_trace!("kd: target reload detected; clearing target-owned breakpoint state");
             self.bp_handles.clear();
             self.managed_bp_addresses.clear();
             self.breakin_addresses.clear();
+            self.late_breakin = false;
             self.pending_write_breakpoint = None;
         } else if stop.is_bugcheck {
             self.reconnect_assist_after_continue = Some(POST_BUGCHECK_RECONNECT_ASSIST_DELAY);
@@ -2952,6 +2968,7 @@ impl DebugBackend for KdBackend {
             let arch = self.arch;
             breakin_and_wait(self.framing()?, arch, Duration::from_secs(10))?
         };
+        self.late_breakin = !self.unmanaged_breakpoint_stop(&stop);
         self.record_stop(&stop);
         Ok(stop_event(stop))
     }

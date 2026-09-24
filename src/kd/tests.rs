@@ -838,6 +838,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         bp_handles: HashMap::new(),
         managed_bp_addresses: HashSet::new(),
         breakin_addresses: HashSet::new(),
+        late_breakin: false,
         pending_write_breakpoint: None,
         registers: HaltRegisters::default(),
         stop_was_managed_breakpoint: false,
@@ -960,6 +961,7 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         bp_handles: HashMap::new(),
         managed_bp_addresses: HashSet::new(),
         breakin_addresses: HashSet::new(),
+        late_breakin: false,
         pending_write_breakpoint: None,
         registers: HaltRegisters::default(),
         stop_was_managed_breakpoint: false,
@@ -1862,6 +1864,53 @@ fn known_breakin_stop_is_marked_assisted_unless_managed() {
     );
     backend.managed_bp_addresses.insert(pc);
     assert!(!backend.mark_known_breakin_stop(stop).assisted_breakin);
+}
+
+#[test]
+fn a_breakin_answered_by_another_stop_is_absorbed_when_it_arrives_late() {
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let breakin_clone = host.try_clone().unwrap();
+    let pump_host = host.try_clone().unwrap();
+    let pump = PumpHandle {
+        join: spawn(move || KdFraming::new(pump_host.into())),
+        stop_rx: mpsc::channel().1,
+        shutdown: Arc::new(AtomicBool::new(false)),
+        reported_stop: Arc::new(AtomicBool::new(false)),
+        breakin_requested: Arc::new(AtomicBool::new(false)),
+    };
+    let mut backend = kd_backend_with_pump(pump, breakin_clone);
+    // The break-in landed while the target was reporting a module load, so
+    // it answered with that notification and still holds the break-in.
+    backend.late_breakin = true;
+    let breakin_pc = 0xffff_f800_0000_dfb0;
+    let late = StateChange {
+        processor: 0,
+        number_processors: 1,
+        new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
+        exception_code: STATUS_BREAKPOINT,
+        exception_first_chance: Some(true),
+        exception_address: Some(breakin_pc),
+        program_counter: breakin_pc,
+        kernel_base_hint: None,
+        is_bugcheck: false,
+        bugcheck: None,
+        target_reloaded: false,
+        assisted_breakin: false,
+        control_report: None,
+    };
+
+    let late = backend.mark_known_breakin_stop(late);
+    assert!(late.assisted_breakin);
+    backend.record_stop(&late);
+
+    // Consumed: a later `int 3` elsewhere is the guest's own again.
+    let guest_int3 = StateChange {
+        program_counter: 0xffff_f800_1234_0000,
+        exception_address: Some(0xffff_f800_1234_0000),
+        assisted_breakin: false,
+        ..late
+    };
+    assert!(!backend.mark_known_breakin_stop(guest_int3).assisted_breakin);
 }
 
 #[test]
