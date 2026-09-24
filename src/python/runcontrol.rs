@@ -17,7 +17,7 @@ use super::{err, raise, timeout_arg, view_record};
 use crate::dbg_backend::ContinueDisposition;
 use crate::disasm::ControlFlow;
 use crate::error::Result as CoreResult;
-use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind};
+use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode};
 use crate::types::VirtAddr;
 use crate::view;
 
@@ -215,7 +215,7 @@ pub fn run_to(
     dbg: &Bound<'_, Debugger>,
     location: Location,
     timeout: Option<f64>,
-    over: Option<bool>,
+    step: Option<StepMode>,
 ) -> PyResult<Option<Py<Stop>>> {
     reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
@@ -223,9 +223,9 @@ pub fn run_to(
         require_halted(session, "run_to")?;
         location.resolve(session, session.target.current_dtb())
     })?;
-    settle(dbg, timeout, move |session, remaining| match over {
+    settle(dbg, timeout, move |session, remaining| match step {
         None => run_to_address(session, VirtAddr(address), remaining),
-        Some(over) => session.step_until(over, STEP_UNTIL_LIMIT, remaining, |ip, _| ip == address),
+        Some(mode) => session.step_until(mode, STEP_UNTIL_LIMIT, remaining, |ip, _| ip == address),
     })
 }
 
@@ -251,7 +251,7 @@ pub fn step(dbg: &Bound<'_, Debugger>, until: Option<UntilFlow>) -> PyResult<Py<
         .with_session(|session| require_halted(session, "step"))?;
     match until {
         None => settle_stop(dbg, single_step),
-        Some(kind) => step_to_flow(dbg, false, kind),
+        Some(kind) => step_to_flow(dbg, StepMode::Into, kind),
     }
 }
 
@@ -265,7 +265,7 @@ pub fn step_over(dbg: &Bound<'_, Debugger>, until: Option<UntilFlow>) -> PyResul
         }
     })?;
     match (until, plan) {
-        (Some(kind), _) => step_to_flow(dbg, true, kind),
+        (Some(kind), _) => step_to_flow(dbg, StepMode::Over, kind),
         (None, Some(StepKind::RunTo(next))) => {
             // A call: run to the instruction after it, again past declined hits.
             settle_stop(dbg, move |session, _| run_to_address(session, next, None))
@@ -280,10 +280,10 @@ fn single_step(session: &mut Session, _: Option<Duration>) -> CoreResult<Continu
     })
 }
 
-/// Step (`over` calls, or into them) until the next instruction of `kind`.
-fn step_to_flow(dbg: &Bound<'_, Debugger>, over: bool, kind: UntilFlow) -> PyResult<Py<Stop>> {
+/// Step into or over calls per `mode` until the next instruction of `kind`.
+fn step_to_flow(dbg: &Bound<'_, Debugger>, mode: StepMode, kind: UntilFlow) -> PyResult<Py<Stop>> {
     settle_stop(dbg, move |session, _| {
-        session.step_until(over, STEP_UNTIL_LIMIT, None, |_, flow| kind.matches(flow))
+        session.step_until(mode, STEP_UNTIL_LIMIT, None, |_, flow| kind.matches(flow))
     })
 }
 

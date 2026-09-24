@@ -278,6 +278,15 @@ pub enum StepKind {
     RunTo(VirtAddr),
 }
 
+/// Whether a multi-instruction step follows calls or runs over them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepMode {
+    /// Single-step into calls.
+    Into,
+    /// Run each call to its return site as one step.
+    Over,
+}
+
 /// Architecture-neutral summary of the instruction at the program counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentInstruction {
@@ -1542,15 +1551,15 @@ impl Session {
         at(ip - step)
     }
 
-    /// Step until `stop` accepts the instruction about to execute, into calls
-    /// or `over` them: the SDK's `step(until=)` and `run_to(step=)`. Returns
-    /// the `Step` there; a breakpoint, exception, or other stop met on the way
-    /// is returned as is. An interrupt request ([`Target::interrupt`]) or an
-    /// elapsed `timeout` ends the walk where it is, as a `Step`; `limit`
+    /// Step until `stop` accepts the instruction about to execute, into or
+    /// over calls per `mode`: the SDK's `step(until=)` and `run_to(step=)`.
+    /// Returns the `Step` there; a breakpoint, exception, or other stop met on
+    /// the way is returned as is. An interrupt request ([`Target::interrupt`])
+    /// or an elapsed `timeout` ends the walk where it is, as a `Step`; `limit`
     /// instructions without a match is an error.
     pub fn step_until(
         &mut self,
-        over: bool,
+        mode: StepMode,
         limit: usize,
         timeout: Option<Duration>,
         stop: impl Fn(u64, ControlFlow) -> bool,
@@ -1576,7 +1585,7 @@ impl Session {
                 return Ok(outcome);
             }
             let step = match self.step_over_target()? {
-                StepKind::RunTo(next) if over => {
+                StepKind::RunTo(next) if mode == StepMode::Over => {
                     let remaining =
                         deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
                     self.run_to(next, remaining, &cancel)?

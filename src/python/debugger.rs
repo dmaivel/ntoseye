@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3::{PyTraverseError, PyVisit};
 
-use super::args::{Disposition, StepMode, Until};
+use super::args::{Disposition, Step, Until};
 use super::breakpoints::{Breakpoints, Exceptions};
 use super::context::Space;
 use super::handle::{Debugger, Owner, require_halted};
@@ -191,9 +191,9 @@ impl Debugger {
         slf: &Bound<'_, Self>,
         target: Location,
         timeout: Option<f64>,
-        step: Option<StepMode>,
+        step: Option<Step>,
     ) -> PyResult<Option<Py<Stop>>> {
-        runcontrol::run_to(slf, target, timeout, step.map(|StepMode(over)| over))
+        runcontrol::run_to(slf, target, timeout, step.map(|Step(mode)| mode))
     }
 
     /// Single-step one instruction, or with `until` ("call", "ret", "branch")

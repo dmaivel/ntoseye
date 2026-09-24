@@ -40,7 +40,7 @@ use crate::kd::KdMemorySource;
 use crate::layout::{FieldInfo, ParsedType, find_field};
 use crate::output;
 use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore, supports_capability};
-use crate::session::{ContinueOutcome, Session};
+use crate::session::{ContinueOutcome, Session, StepMode};
 use crate::symbols::{
     LocalVariableLocation, ProcedureLocal, SourceLocation, parse_source_paths, parse_symbol_sources,
 };
@@ -513,9 +513,9 @@ impl Server {
             "evaluate" => self.on_evaluate(&request.arguments),
             "continue" => self.on_continue(&request),
             "pause" => self.on_pause(&request),
-            "next" => self.on_step(&request, StepMode::Over),
-            "stepIn" => self.on_step(&request, StepMode::Into),
-            "stepOut" => self.on_step(&request, StepMode::Out),
+            "next" => self.on_step(&request, StepRequest::Step(StepMode::Over)),
+            "stepIn" => self.on_step(&request, StepRequest::Step(StepMode::Into)),
+            "stepOut" => self.on_step(&request, StepRequest::Out),
             "setBreakpoints" => self.on_set_breakpoints(&request.arguments),
             "setFunctionBreakpoints" => self.on_set_function_breakpoints(&request.arguments),
             "setInstructionBreakpoints" => self.on_set_instruction_breakpoints(&request.arguments),
@@ -667,7 +667,7 @@ impl Server {
         Ok(None)
     }
 
-    fn on_step(&mut self, request: &Request, mode: StepMode) -> Handled {
+    fn on_step(&mut self, request: &Request, step: StepRequest) -> Handled {
         let instruction_granularity =
             arg_str(&request.arguments, "granularity").as_deref() == Some("instruction");
         if let Some(thread) = arg_i64(&request.arguments, "threadId")
@@ -677,7 +677,7 @@ impl Server {
             return Ok(None);
         }
         self.invalidate_stop_state();
-        let outcome = self.run_step(mode, instruction_granularity);
+        let outcome = self.run_step(step, instruction_granularity);
         match outcome {
             Ok(outcome) => {
                 self.respond(request, Ok(None));
@@ -704,14 +704,17 @@ impl Server {
     /// Step by source line, or by instruction when requested or unmapped.
     fn run_step(
         &mut self,
-        mode: StepMode,
+        step: StepRequest,
         instruction_granularity: bool,
     ) -> result::Result<ContinueOutcome, String> {
-        let cancel = Arc::clone(&self.cancel);
-        if mode == StepMode::Out {
-            let session = self.session()?;
-            return session.step_out(&cancel).map_err(|error| error.to_string());
-        }
+        let mode = match step {
+            StepRequest::Step(mode) => mode,
+            StepRequest::Out => {
+                let cancel = Arc::clone(&self.cancel);
+                let session = self.session()?;
+                return session.step_out(&cancel).map_err(|error| error.to_string());
+            }
+        };
 
         let (mut rip, start) = {
             let session = self.session()?;
@@ -818,7 +821,6 @@ impl Server {
             StepMode::Over => session
                 .step_over(&cancel)
                 .map_err(|error| error.to_string()),
-            StepMode::Out => session.step_out(&cancel).map_err(|error| error.to_string()),
         }
     }
 
@@ -2738,10 +2740,11 @@ struct DisassembledRow {
     text: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StepMode {
-    Over,
-    Into,
+/// A DAP step request: `next` and `stepIn` step by line or instruction,
+/// `stepOut` runs to the caller.
+#[derive(Clone, Copy)]
+enum StepRequest {
+    Step(StepMode),
     Out,
 }
 

@@ -19,6 +19,7 @@ use crate::Backend;
 use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::kd::KdMemorySource;
+use crate::session::StepMode;
 
 /// A string argument restricted to fixed spellings, typed as
 /// `typing.Literal[...]` in the stubs.
@@ -99,10 +100,10 @@ literal_arg! {
 }
 
 literal_arg! {
-    /// `run_to(step=...)`: `true` steps over calls.
-    StepMode(bool) {
-        "over" => true,
-        "into" => false,
+    /// `run_to(step=...)`.
+    Step(StepMode) {
+        "over" => StepMode::Over,
+        "into" => StepMode::Into,
     }
 }
 

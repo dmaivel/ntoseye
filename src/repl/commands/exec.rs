@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::gdb::breakpoints::Breakpoint;
 use crate::session::{
-    CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StopResolution,
+    CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StepMode,
+    StopResolution,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -811,9 +812,13 @@ impl ReplState<'_> {
         }
     }
 
-    fn step_until(&mut self, over: bool, stop: impl Fn(u64, ControlFlow) -> bool) -> Result<()> {
+    fn step_until(
+        &mut self,
+        mode: StepMode,
+        stop: impl Fn(u64, ControlFlow) -> bool,
+    ) -> Result<()> {
         self.clear_selected_frame();
-        match self.ctx.step_until(over, STEP_UNTIL_LIMIT, None, stop) {
+        match self.ctx.step_until(mode, STEP_UNTIL_LIMIT, None, stop) {
             Ok(ContinueOutcome::Step { .. }) => self.print_current_stop(),
             Ok(outcome) => print_parked_outcome(self.ctx, &self.caches, outcome),
             Err(error @ Error::StepLimit(_)) => {
@@ -836,46 +841,46 @@ impl ReplState<'_> {
         );
     }
 
-    fn step_until_flow(&mut self, wanted: ControlFlow, over: bool) -> Result<()> {
-        self.step_until(over, move |_, flow| flow == wanted)
+    fn step_until_flow(&mut self, wanted: ControlFlow, mode: StepMode) -> Result<()> {
+        self.step_until(mode, move |_, flow| flow == wanted)
     }
 
     fn cmd_pa(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if let Some(address) = self.required_address(&invocation, "pa")? {
-            self.step_until(true, move |ip, _| ip == address.0)?;
+            self.step_until(StepMode::Over, move |ip, _| ip == address.0)?;
         }
         Ok(())
     }
 
     fn cmd_ta(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if let Some(address) = self.required_address(&invocation, "ta")? {
-            self.step_until(false, move |ip, _| ip == address.0)?;
+            self.step_until(StepMode::Into, move |ip, _| ip == address.0)?;
         }
         Ok(())
     }
 
     fn cmd_pc(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Call, true)
+        self.step_until_flow(ControlFlow::Call, StepMode::Over)
     }
 
     fn cmd_tc(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Call, false)
+        self.step_until_flow(ControlFlow::Call, StepMode::Into)
     }
 
     fn cmd_pt(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Ret, true)
+        self.step_until_flow(ControlFlow::Ret, StepMode::Over)
     }
 
     fn cmd_tt(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Ret, false)
+        self.step_until_flow(ControlFlow::Ret, StepMode::Into)
     }
 
     fn cmd_ph(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Branch, true)
+        self.step_until_flow(ControlFlow::Branch, StepMode::Over)
     }
 
     fn cmd_th(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Branch, false)
+        self.step_until_flow(ControlFlow::Branch, StepMode::Into)
     }
 
     fn cmd_wt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
