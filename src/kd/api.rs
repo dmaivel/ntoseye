@@ -412,19 +412,14 @@ pub fn read_virtual_memory<T: Read + Write>(
     addr: u64,
     len: u32,
 ) -> Result<Vec<u8>> {
-    let mut header = make_header(DBGKD_READ_VIRTUAL_MEMORY, processor);
-    write_u64(&mut header, UNION_OFFSET, addr);
-    write_u32(&mut header, UNION_OFFSET + 8, len);
-    let (parsed, reply_header, data) = send_manipulate(framing, &header, &[])?;
-    check_status(&parsed, DBGKD_READ_VIRTUAL_MEMORY)?;
-    let actual = read_u32(&reply_header, UNION_OFFSET + 12);
-    if actual > len || data.len() != actual as usize || (len != 0 && actual == 0) {
-        return Err(Error::Kd(format!(
-            "invalid virtual-memory read at {addr:#x}: received {} bytes, target reported {actual} for request {len}",
-            data.len()
-        )));
-    }
-    Ok(data)
+    read_memory(
+        framing,
+        DBGKD_READ_VIRTUAL_MEMORY,
+        "virtual",
+        processor,
+        addr,
+        len,
+    )
 }
 
 /// `DbgKdReadPhysicalMemoryApi`
@@ -434,15 +429,35 @@ pub fn read_physical_memory<T: Read + Write>(
     addr: u64,
     len: u32,
 ) -> Result<Vec<u8>> {
-    let mut header = make_header(DBGKD_READ_PHYSICAL_MEMORY, processor);
+    read_memory(
+        framing,
+        DBGKD_READ_PHYSICAL_MEMORY,
+        "physical",
+        processor,
+        addr,
+        len,
+    )
+}
+
+/// Virtual and physical reads share one request and reply layout; `space`
+/// names the address space in errors.
+fn read_memory<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    api: u32,
+    space: &str,
+    processor: u16,
+    addr: u64,
+    len: u32,
+) -> Result<Vec<u8>> {
+    let mut header = make_header(api, processor);
     write_u64(&mut header, UNION_OFFSET, addr);
     write_u32(&mut header, UNION_OFFSET + 8, len);
     let (parsed, reply_header, data) = send_manipulate(framing, &header, &[])?;
-    check_status(&parsed, DBGKD_READ_PHYSICAL_MEMORY)?;
+    check_status(&parsed, api)?;
     let actual = read_u32(&reply_header, UNION_OFFSET + 12);
     if actual > len || data.len() != actual as usize || (len != 0 && actual == 0) {
         return Err(Error::Kd(format!(
-            "invalid physical-memory read at {addr:#x}: received {} bytes, target reported {actual} for request {len}",
+            "invalid {space}-memory read at {addr:#x}: received {} bytes, target reported {actual} for request {len}",
             data.len()
         )));
     }
