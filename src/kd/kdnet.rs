@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
-use crate::kd::framing::BREAKIN_BYTE;
+use crate::kd::framing::{self, BREAKIN_BYTE, DATA_PACKET_LEADER, Header, PACKET_TRAILING_BYTE};
 
 const MAGIC: &[u8; 4] = b"MDBG";
 const HEADER_SIZE: usize = 6;
@@ -27,8 +27,6 @@ const MAX_KD_STREAM_SIZE: usize = 4017;
 const CHANNEL_DATA: u8 = 0;
 const CHANNEL_CONTROL: u8 = 1;
 const HOST_DIRECTION: u64 = 0x80;
-const DATA_PACKET_LEADER: u32 = 0x3030_3030;
-const PACKET_TRAILING_BYTE: u8 = 0xaa;
 
 type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
@@ -251,9 +249,7 @@ impl KdNetStream {
             self.inbound.clear();
             self.inbound
                 .extend_from_slice(&datagram[payload_start..payload_end]);
-            if self.inbound.len() >= 4
-                && u32::from_le_bytes(self.inbound[..4].try_into().unwrap()) == DATA_PACKET_LEADER
-            {
+            if self.inbound.starts_with(&DATA_PACKET_LEADER.to_le_bytes()) {
                 self.inbound.push(PACKET_TRAILING_BYTE);
             }
             self.inbound_offset = 0;
@@ -418,12 +414,8 @@ impl Write for KdNetStream {
             return Ok(());
         };
 
-        if self.outbound.len() >= 16
-            && u32::from_le_bytes(self.outbound[..4].try_into().unwrap()) == DATA_PACKET_LEADER
-        {
-            let payload_len = u16::from_le_bytes(self.outbound[6..8].try_into().unwrap()) as usize;
-            let expected = 16 + payload_len + 1;
-            if self.outbound.len() != expected
+        if let Some(header) = Header::peek(&self.outbound).filter(Header::is_data) {
+            if self.outbound.len() != header.packet_len()
                 || self.outbound.last().copied() != Some(PACKET_TRAILING_BYTE)
             {
                 self.outbound.clear();
@@ -432,15 +424,13 @@ impl Write for KdNetStream {
             self.outbound.pop();
         }
 
-        if self.outbound.len() >= 16 {
-            let packet_id = u32::from_le_bytes(self.outbound[8..12].try_into().unwrap());
-            let wire_checksum = u32::from_le_bytes(self.outbound[12..16].try_into().unwrap());
-            let computed_checksum = self.outbound[16..]
-                .iter()
-                .fold(0u32, |sum, byte| sum.wrapping_add(*byte as u32));
+        if let Some(header) = Header::peek(&self.outbound) {
+            let computed_checksum = framing::checksum(&self.outbound[framing::HEADER_SIZE..]);
             kd_trace!(
-                "kdnet: send KD bytes={} id={packet_id:#x} checksum={wire_checksum:#x}/{computed_checksum:#x}",
-                self.outbound.len()
+                "kdnet: send KD bytes={} id={:#x} checksum={:#x}/{computed_checksum:#x}",
+                self.outbound.len(),
+                header.packet_id,
+                header.checksum
             );
         }
 
@@ -623,7 +613,10 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::*;
-    use crate::kd::framing::KdFraming;
+    use crate::kd::framing::{
+        INITIAL_PACKET_ID, KdFraming, PACKET_TYPE_KD_STATE_CHANGE64,
+        PACKET_TYPE_KD_STATE_MANIPULATE, data_packet,
+    };
     use crate::kd::transport::KdTransport;
 
     /// Body size of the poke kdnet.dll sends.
@@ -664,20 +657,13 @@ mod tests {
     }
 
     fn kd_data_packet(payload: &[u8]) -> Vec<u8> {
-        kd_data_packet_with_id(0x8080_0000, payload)
+        kd_data_packet_with_id(INITIAL_PACKET_ID, payload)
     }
 
+    /// A KD data packet as KDNET carries it: without the KDCOM trailer.
     fn kd_data_packet_with_id(packet_id: u32, payload: &[u8]) -> Vec<u8> {
-        let mut packet = vec![0u8; 16];
-        packet[..4].copy_from_slice(&DATA_PACKET_LEADER.to_le_bytes());
-        packet[4..6].copy_from_slice(&7u16.to_le_bytes());
-        packet[6..8].copy_from_slice(&(payload.len() as u16).to_le_bytes());
-        packet[8..12].copy_from_slice(&packet_id.to_le_bytes());
-        let checksum = payload
-            .iter()
-            .fold(0u32, |sum, b| sum.wrapping_add(*b as u32));
-        packet[12..16].copy_from_slice(&checksum.to_le_bytes());
-        packet.extend_from_slice(payload);
+        let mut packet = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, packet_id, payload);
+        packet.pop();
         packet
     }
 
@@ -756,13 +742,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
 
-        let mut kd_packet = vec![0u8; 19];
-        kd_packet[..4].copy_from_slice(&DATA_PACKET_LEADER.to_le_bytes());
-        kd_packet[4..6].copy_from_slice(&7u16.to_le_bytes());
-        kd_packet[6..8].copy_from_slice(&3u16.to_le_bytes());
-        kd_packet[8..12].copy_from_slice(&0x8080_0000u32.to_le_bytes());
-        kd_packet[12..16].copy_from_slice(&6u32.to_le_bytes());
-        kd_packet[16..].copy_from_slice(&[1, 2, 3]);
+        let kd_packet = kd_data_packet(&[1, 2, 3]);
         let target_kd_packet = kd_packet.clone();
 
         let target_thread = std::thread::spawn(move || -> io::Result<Vec<u8>> {
@@ -849,11 +829,7 @@ mod tests {
         *write_lock(&host.state.data_key).unwrap() = Some(key2);
         host.state.version.store(5, Ordering::Relaxed);
 
-        let mut kd_packet = vec![0u8; 17];
-        kd_packet[..4].copy_from_slice(&DATA_PACKET_LEADER.to_le_bytes());
-        kd_packet[4..6].copy_from_slice(&2u16.to_le_bytes());
-        kd_packet[8..12].copy_from_slice(&0x8080_0000u32.to_le_bytes());
-        kd_packet[16] = PACKET_TRAILING_BYTE;
+        let kd_packet = data_packet(PACKET_TYPE_KD_STATE_MANIPULATE, INITIAL_PACKET_ID, &[]);
 
         host.write_all(&kd_packet).unwrap();
         host.flush().unwrap();
@@ -873,8 +849,9 @@ mod tests {
             decrypt_payload(pkt, key2).unwrap();
             verify_authentication(pkt, &host.state.hmac_key).unwrap();
             assert_eq!(
-                &pkt[HEADER_SIZE + METADATA_SIZE..HEADER_SIZE + METADATA_SIZE + 16],
-                &kd_packet[..16]
+                &pkt[HEADER_SIZE + METADATA_SIZE
+                    ..HEADER_SIZE + METADATA_SIZE + framing::HEADER_SIZE],
+                &kd_packet[..framing::HEADER_SIZE]
             );
         }
     }

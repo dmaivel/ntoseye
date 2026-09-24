@@ -11,19 +11,19 @@ use crate::error::{Error, Result};
 
 use super::wire::{read_u16, read_u32};
 
-const DATA_PACKET_LEADER: u32 = 0x30303030;
-const CONTROL_PACKET_LEADER: u32 = 0x69696969;
-const DATA_LEADER_BYTE: u8 = 0x30;
-const CONTROL_LEADER_BYTE: u8 = 0x69;
-const PACKET_TRAILING_BYTE: u8 = 0xAA;
+pub const DATA_PACKET_LEADER: u32 = 0x30303030;
+pub const CONTROL_PACKET_LEADER: u32 = 0x69696969;
+const DATA_LEADER_BYTE: u8 = DATA_PACKET_LEADER as u8;
+const CONTROL_LEADER_BYTE: u8 = CONTROL_PACKET_LEADER as u8;
+pub const PACKET_TRAILING_BYTE: u8 = 0xAA;
 pub const BREAKIN_BYTE: u8 = 0x62;
 
-const INITIAL_PACKET_ID: u32 = 0x80800000;
-const SYNC_PACKET_ID: u32 = 0x00000800;
+pub const INITIAL_PACKET_ID: u32 = 0x80800000;
+pub const SYNC_PACKET_ID: u32 = 0x00000800;
 const KDNET_INITIAL_PACKET_ID: u32 = 0x80000000;
 
 pub const PACKET_MAX_SIZE: usize = 4000;
-const HEADER_SIZE: usize = 16;
+pub const HEADER_SIZE: usize = 16;
 
 pub const PACKET_TYPE_KD_STATE_CHANGE64: u16 = 7;
 pub const PACKET_TYPE_KD_STATE_MANIPULATE: u16 = 2;
@@ -33,17 +33,38 @@ pub const PACKET_TYPE_KD_RESEND: u16 = 5;
 pub const PACKET_TYPE_KD_RESET: u16 = 6;
 pub const PACKET_TYPE_KD_FILE_IO: u16 = 11;
 
+/// The header opening every KD packet, data and control alike.
 #[derive(Debug, Clone, Copy)]
-struct Header {
-    leader: u32,
-    packet_type: u16,
-    byte_count: u16,
-    packet_id: u32,
-    checksum: u32,
+pub struct Header {
+    pub leader: u32,
+    pub packet_type: u16,
+    pub byte_count: u16,
+    pub packet_id: u32,
+    pub checksum: u32,
 }
 
 impl Header {
-    fn encode(&self) -> [u8; HEADER_SIZE] {
+    pub fn data(packet_type: u16, packet_id: u32, payload: &[u8]) -> Self {
+        Self {
+            leader: DATA_PACKET_LEADER,
+            packet_type,
+            byte_count: payload.len() as u16,
+            packet_id,
+            checksum: checksum(payload),
+        }
+    }
+
+    pub fn control(packet_type: u16, packet_id: u32) -> Self {
+        Self {
+            leader: CONTROL_PACKET_LEADER,
+            packet_type,
+            byte_count: 0,
+            packet_id,
+            checksum: 0,
+        }
+    }
+
+    pub fn encode(&self) -> [u8; HEADER_SIZE] {
         let mut buf = [0u8; HEADER_SIZE];
         buf[0..4].copy_from_slice(&self.leader.to_le_bytes());
         buf[4..6].copy_from_slice(&self.packet_type.to_le_bytes());
@@ -53,7 +74,7 @@ impl Header {
         buf
     }
 
-    fn decode(buf: &[u8; HEADER_SIZE]) -> Self {
+    pub fn decode(buf: &[u8; HEADER_SIZE]) -> Self {
         Self {
             leader: read_u32(buf, 0),
             packet_type: read_u16(buf, 4),
@@ -62,12 +83,55 @@ impl Header {
             checksum: read_u32(buf, 12),
         }
     }
+
+    /// The header at the start of `bytes`, if they are long enough to hold one.
+    pub fn peek(bytes: &[u8]) -> Option<Self> {
+        bytes.first_chunk::<HEADER_SIZE>().map(Self::decode)
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.leader == DATA_PACKET_LEADER
+    }
+
+    /// Wire size of the packet this header opens, trailer included.
+    pub fn packet_len(&self) -> usize {
+        if self.is_data() {
+            HEADER_SIZE + self.byte_count as usize + 1
+        } else {
+            HEADER_SIZE
+        }
+    }
 }
 
-fn checksum(bytes: &[u8]) -> u32 {
+pub fn checksum(bytes: &[u8]) -> u32 {
     bytes
         .iter()
         .fold(0u32, |acc, &b| acc.wrapping_add(b as u32))
+}
+
+fn write_data_packet(
+    out: &mut impl Write,
+    packet_type: u16,
+    packet_id: u32,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    out.write_all(&Header::data(packet_type, packet_id, payload).encode())?;
+    out.write_all(payload)?;
+    out.write_all(&[PACKET_TRAILING_BYTE])
+}
+
+/// A complete data packet as the target would put it on the wire.
+#[cfg(test)]
+pub fn data_packet(packet_type: u16, packet_id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_SIZE + payload.len() + 1);
+    write_data_packet(&mut out, packet_type, packet_id, payload).expect("Vec writes cannot fail");
+    out
+}
+
+/// A complete control packet as the target would put it on the wire.
+#[cfg(test)]
+pub fn control_packet(packet_type: u16, packet_id: u32) -> Vec<u8> {
+    Header::control(packet_type, packet_id).encode().to_vec()
 }
 
 fn is_temporary_read_error(kind: ErrorKind) -> bool {
@@ -247,14 +311,6 @@ impl<T: Read + Write> KdFraming<T> {
         let mut resend_streak = 0usize;
         let attempts = MAX_SEND_RETRIES.max(if self.kdnet_packet_ids { 24 } else { 0 });
         for attempt in 0..attempts {
-            let header = Header {
-                leader: DATA_PACKET_LEADER,
-                packet_type,
-                byte_count: payload.len() as u16,
-                packet_id: self.current_packet_id,
-                checksum: checksum(payload),
-            };
-
             kd_trace!(
                 "kd: send_data: type={} id={:#x} len={} attempt={}",
                 packet_type,
@@ -263,9 +319,12 @@ impl<T: Read + Write> KdFraming<T> {
                 attempt
             );
 
-            self.transport.write_all(&header.encode())?;
-            self.transport.write_all(payload)?;
-            self.transport.write_all(&[PACKET_TRAILING_BYTE])?;
+            write_data_packet(
+                &mut self.transport,
+                packet_type,
+                self.current_packet_id,
+                payload,
+            )?;
             self.transport.flush()?;
 
             // Inner loop: drain any non-ACK packets queued in the buffer
@@ -454,14 +513,8 @@ impl<T: Read + Write> KdFraming<T> {
     }
 
     fn send_control(&mut self, packet_type: u16, packet_id: u32) -> Result<()> {
-        let header = Header {
-            leader: CONTROL_PACKET_LEADER,
-            packet_type,
-            byte_count: 0,
-            packet_id,
-            checksum: 0,
-        };
-        self.transport.write_all(&header.encode())?;
+        self.transport
+            .write_all(&Header::control(packet_type, packet_id).encode())?;
         self.transport.flush()?;
         Ok(())
     }
@@ -481,7 +534,7 @@ impl<T: Read + Write> KdFraming<T> {
             header_buf[4..].copy_from_slice(&tail);
             let header = Header::decode(&header_buf);
 
-            if header.leader == CONTROL_PACKET_LEADER {
+            if !header.is_data() {
                 return Ok(match header.packet_type {
                     PACKET_TYPE_KD_ACKNOWLEDGE => Received::Ack {
                         packet_id: header.packet_id,
@@ -626,31 +679,6 @@ mod tests {
 
     fn ack_for(id: u32) -> Vec<u8> {
         control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, id)
-    }
-
-    fn control_packet(packet_type: u16, packet_id: u32) -> Vec<u8> {
-        let h = Header {
-            leader: CONTROL_PACKET_LEADER,
-            packet_type,
-            byte_count: 0,
-            packet_id,
-            checksum: 0,
-        };
-        h.encode().to_vec()
-    }
-
-    fn data_packet(packet_type: u16, packet_id: u32, payload: &[u8]) -> Vec<u8> {
-        let h = Header {
-            leader: DATA_PACKET_LEADER,
-            packet_type,
-            byte_count: payload.len() as u16,
-            packet_id,
-            checksum: checksum(payload),
-        };
-        let mut out = h.encode().to_vec();
-        out.extend_from_slice(payload);
-        out.push(PACKET_TRAILING_BYTE);
-        out
     }
 
     #[test]

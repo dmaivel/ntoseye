@@ -892,10 +892,9 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     use super::*;
-    use crate::kd::api::test_wire::{
-        INITIAL_PACKET_ID, ack_then_reply, build_reply, first_outbound_id,
-    };
+    use crate::kd::api::test_wire::{ack_then_reply, build_reply, first_outbound_id};
     use crate::kd::context;
+    use crate::kd::framing::INITIAL_PACKET_ID;
 
     #[test]
     fn advance_pc_refuses_a_program_counter_that_moved_since_the_decision() {

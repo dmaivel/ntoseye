@@ -2,8 +2,10 @@ use super::*;
 const ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET: usize = 0x10;
 use crate::guest::{Guest, Image};
 use crate::kd::framing::{
-    PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
-    PACKET_TYPE_KD_RESET, PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
+    CONTROL_PACKET_LEADER, DATA_PACKET_LEADER, HEADER_SIZE, Header, INITIAL_PACKET_ID,
+    PACKET_TRAILING_BYTE, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO,
+    PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_RESET, PACKET_TYPE_KD_STATE_CHANGE64,
+    PACKET_TYPE_KD_STATE_MANIPULATE, control_packet, data_packet,
 };
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
 use crate::phys::PhysMem;
@@ -50,13 +52,13 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
 
     let worker = spawn(move || {
         let version_request = read_wire_packet(&mut kernel);
-        let version_id = u32::from_le_bytes(version_request[8..12].try_into().unwrap());
+        let version_id = wire_header(&version_request).packet_id;
         assert_eq!(
             u32::from_le_bytes(version_request[16..20].try_into().unwrap()),
             api::DBGKD_GET_VERSION
         );
         kernel
-            .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, version_id))
+            .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, version_id))
             .unwrap();
         let mut version_union = [0u8; 40];
         version_union[8..10].copy_from_slice(&0xaa64u16.to_le_bytes());
@@ -64,16 +66,16 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
         version_union[24..32].copy_from_slice(&module_list.to_le_bytes());
         let version_reply = manipulate_reply_payload(api::DBGKD_GET_VERSION, 0, &version_union);
         kernel
-            .write_all(&wire_data_packet(
+            .write_all(&data_packet(
                 PACKET_TYPE_KD_STATE_MANIPULATE,
-                WIRE_FIRST_PACKET_ID,
+                INITIAL_PACKET_ID,
                 &version_reply,
             ))
             .unwrap();
         let _version_ack = read_wire_packet(&mut kernel);
 
         let ttbr_request = read_wire_packet(&mut kernel);
-        let ttbr_id = u32::from_le_bytes(ttbr_request[8..12].try_into().unwrap());
+        let ttbr_id = wire_header(&ttbr_request).packet_id;
         assert_eq!(
             u32::from_le_bytes(ttbr_request[16..20].try_into().unwrap()),
             api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER
@@ -83,7 +85,7 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
             ARM64_WINDBG_TTBR1_EL1
         );
         kernel
-            .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, ttbr_id))
+            .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, ttbr_id))
             .unwrap();
         let ttbr = 0x0040_0000_80d4_5800u64;
         let mut ttbr_union = [0u8; 12];
@@ -93,9 +95,9 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
         let ttbr_reply =
             manipulate_reply_payload(api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER, 0, &ttbr_union);
         kernel
-            .write_all(&wire_data_packet(
+            .write_all(&data_packet(
                 PACKET_TYPE_KD_STATE_MANIPULATE,
-                WIRE_FIRST_PACKET_ID ^ 1,
+                INITIAL_PACKET_ID ^ 1,
                 &ttbr_reply,
             ))
             .unwrap();
@@ -135,8 +137,8 @@ fn transparent_arm64_state_change_uses_arm64_continue_layout() {
     });
 
     let packet = read_wire_packet(&mut kernel);
-    let packet_id = u32::from_le_bytes(packet[8..12].try_into().unwrap());
-    let request = &packet[WIRE_HEADER_SIZE..];
+    let packet_id = wire_header(&packet).packet_id;
+    let request = &packet[HEADER_SIZE..];
     assert_eq!(
         u32::from_le_bytes(request[0..4].try_into().unwrap()),
         api::DBGKD_CONTINUE_API2
@@ -149,7 +151,7 @@ fn transparent_arm64_state_change_uses_arm64_continue_layout() {
     assert_eq!(&request[24..40], &[0; 16]);
 
     kernel
-        .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, packet_id))
+        .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, packet_id))
         .unwrap();
     kernel.flush().unwrap();
     handle.join().unwrap().unwrap();
@@ -724,47 +726,40 @@ fn parse_thread_id_for_processor_count_rejects_out_of_range() {
     assert!(parse_thread_id_for_processor_count("p1.5", 4).is_err());
 }
 
-const WIRE_DATA_LEADER: u32 = 0x3030_3030;
-const WIRE_CONTROL_LEADER: u32 = 0x6969_6969;
-const WIRE_HEADER_SIZE: usize = 16;
-const WIRE_TRAILER: u8 = 0xAA;
-const WIRE_FIRST_PACKET_ID: u32 = 0x8080_0000;
-
-fn wire_control_packet(packet_type: u16, packet_id: u32) -> Vec<u8> {
-    let mut pkt = Vec::new();
-    pkt.extend_from_slice(&WIRE_CONTROL_LEADER.to_le_bytes());
-    pkt.extend_from_slice(&packet_type.to_le_bytes());
-    pkt.extend_from_slice(&0u16.to_le_bytes());
-    pkt.extend_from_slice(&packet_id.to_le_bytes());
-    pkt.extend_from_slice(&0u32.to_le_bytes());
-    pkt
+fn wire_header(packet: &[u8]) -> Header {
+    Header::peek(packet).expect("packet holds a KD header")
 }
 
-fn wire_data_packet(packet_type: u16, packet_id: u32, payload: &[u8]) -> Vec<u8> {
-    let checksum = payload.iter().fold(0u32, |a, &b| a.wrapping_add(b as u32));
-    let mut pkt = Vec::new();
-    pkt.extend_from_slice(&WIRE_DATA_LEADER.to_le_bytes());
-    pkt.extend_from_slice(&packet_type.to_le_bytes());
-    pkt.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-    pkt.extend_from_slice(&packet_id.to_le_bytes());
-    pkt.extend_from_slice(&checksum.to_le_bytes());
-    pkt.extend_from_slice(payload);
-    pkt.push(WIRE_TRAILER);
-    pkt
+/// Read one whole packet, header through trailer, off the host's side of the wire.
+fn try_read_wire_packet(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    let mut packet = vec![0u8; HEADER_SIZE];
+    stream.read_exact(&mut packet)?;
+    packet.resize(wire_header(&packet).packet_len(), 0);
+    stream.read_exact(&mut packet[HEADER_SIZE..])?;
+    Ok(packet)
 }
 
 fn read_wire_packet(stream: &mut UnixStream) -> Vec<u8> {
-    let mut header = [0u8; WIRE_HEADER_SIZE];
-    stream.read_exact(&mut header).unwrap();
-    let mut pkt = header.to_vec();
-    let leader = u32::from_le_bytes(header[0..4].try_into().unwrap());
-    if leader == WIRE_DATA_LEADER {
-        let len = u16::from_le_bytes(header[6..8].try_into().unwrap()) as usize;
-        let mut rest = vec![0u8; len + 1];
-        stream.read_exact(&mut rest).unwrap();
-        pkt.extend_from_slice(&rest);
+    try_read_wire_packet(stream).unwrap()
+}
+
+/// ACK and return the payload of the host's next data packet, skipping the
+/// host's ACKs of our replies; `None` once the host hangs up.
+fn recv_host_request(kernel: &mut UnixStream) -> Option<Vec<u8>> {
+    loop {
+        let packet = try_read_wire_packet(kernel).ok()?;
+        let header = wire_header(&packet);
+        if !header.is_data() {
+            continue;
+        }
+        kernel
+            .write_all(&control_packet(
+                PACKET_TYPE_KD_ACKNOWLEDGE,
+                header.packet_id,
+            ))
+            .unwrap();
+        return Some(packet[HEADER_SIZE..packet.len() - 1].to_vec());
     }
-    pkt
 }
 
 fn state_change_payload(new_state: u32, pc: u64) -> Vec<u8> {
@@ -784,30 +779,21 @@ fn exception_state_change_payload(pc: u64) -> Vec<u8> {
 fn file_io_create_file_gets_explicit_failure_reply() {
     let mut payload = vec![0u8; DBGKD_FILE_IO_HEADER_SIZE];
     payload[0..4].copy_from_slice(&DBGKD_CREATE_FILE_API.to_le_bytes());
-    let ack = wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, WIRE_FIRST_PACKET_ID);
+    let ack = control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, INITIAL_PACKET_ID);
     let mut framing = KdFraming::new(Loopback::with_inbound(ack));
 
     handle_file_io(&mut framing, &payload).unwrap();
 
     let out = &framing.transport_ref().outbound;
-    assert_eq!(out.len(), WIRE_HEADER_SIZE + DBGKD_FILE_IO_HEADER_SIZE + 1);
+    assert_eq!(out.len(), HEADER_SIZE + DBGKD_FILE_IO_HEADER_SIZE + 1);
+    assert_eq!(wire_header(out).leader, DATA_PACKET_LEADER);
+    assert_eq!(wire_header(out).packet_type, PACKET_TYPE_KD_FILE_IO);
     assert_eq!(
-        u32::from_le_bytes(out[0..4].try_into().unwrap()),
-        WIRE_DATA_LEADER
-    );
-    assert_eq!(
-        u16::from_le_bytes(out[4..6].try_into().unwrap()),
-        PACKET_TYPE_KD_FILE_IO
-    );
-    assert_eq!(
-        u16::from_le_bytes(out[6..8].try_into().unwrap()) as usize,
+        wire_header(out).byte_count as usize,
         DBGKD_FILE_IO_HEADER_SIZE
     );
-    assert_eq!(
-        u32::from_le_bytes(out[8..12].try_into().unwrap()),
-        WIRE_FIRST_PACKET_ID
-    );
-    let reply = &out[WIRE_HEADER_SIZE..WIRE_HEADER_SIZE + DBGKD_FILE_IO_HEADER_SIZE];
+    assert_eq!(wire_header(out).packet_id, INITIAL_PACKET_ID);
+    let reply = &out[HEADER_SIZE..HEADER_SIZE + DBGKD_FILE_IO_HEADER_SIZE];
     assert_eq!(
         u32::from_le_bytes(reply[0..4].try_into().unwrap()),
         DBGKD_CREATE_FILE_API
@@ -817,8 +803,8 @@ fn file_io_create_file_gets_explicit_failure_reply() {
         STATUS_UNSUCCESSFUL
     );
     assert_eq!(
-        out[WIRE_HEADER_SIZE + DBGKD_FILE_IO_HEADER_SIZE],
-        WIRE_TRAILER
+        out[HEADER_SIZE + DBGKD_FILE_IO_HEADER_SIZE],
+        PACKET_TRAILING_BYTE
     );
 }
 
@@ -862,7 +848,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
 fn scripted_target(replies: &[Vec<u8>]) -> Vec<u8> {
     let mut stream = Vec::new();
     for (index, reply) in replies.iter().enumerate() {
-        let id = api::test_wire::INITIAL_PACKET_ID ^ (index as u32 & 1);
+        let id = INITIAL_PACKET_ID ^ (index as u32 & 1);
         stream.extend_from_slice(&api::test_wire::ack_then_reply(id, id, reply));
     }
     stream
@@ -1037,7 +1023,7 @@ fn kd_memory_reads_physical_bytes_through_shared_backend() {
 
     let worker = spawn(move || {
         let request = read_wire_packet(&mut kernel);
-        let packet_id = u32::from_le_bytes(request[8..12].try_into().unwrap());
+        let packet_id = wire_header(&request).packet_id;
         assert_eq!(
             u32::from_le_bytes(request[16..20].try_into().unwrap()),
             api::DBGKD_READ_PHYSICAL_MEMORY
@@ -1047,21 +1033,18 @@ fn kd_memory_reads_physical_bytes_through_shared_backend() {
             0x1234_5000
         );
         kernel
-            .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, packet_id))
+            .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, packet_id))
             .unwrap();
         let reply = physical_memory_reply_payload(0, 0x1234_5000, &expected);
         kernel
-            .write_all(&wire_data_packet(
+            .write_all(&data_packet(
                 PACKET_TYPE_KD_STATE_MANIPULATE,
-                WIRE_FIRST_PACKET_ID,
+                INITIAL_PACKET_ID,
                 &reply,
             ))
             .unwrap();
         let ack = read_wire_packet(&mut kernel);
-        assert_eq!(
-            u16::from_le_bytes(ack[4..6].try_into().unwrap()),
-            PACKET_TYPE_KD_ACKNOWLEDGE
-        );
+        assert_eq!(wire_header(&ack).packet_type, PACKET_TYPE_KD_ACKNOWLEDGE);
     });
 
     let mut actual = [0u8; 4];
@@ -1104,23 +1087,12 @@ fn serve_virtual_memory_capped(
 ) -> JoinHandle<usize> {
     const UNION: usize = 16;
     spawn(move || {
-        let mut kernel_id = WIRE_FIRST_PACKET_ID;
+        let mut kernel_id = INITIAL_PACKET_ID;
         let mut served = 0usize;
         loop {
-            let mut header = [0u8; WIRE_HEADER_SIZE];
-            if kernel.read_exact(&mut header).is_err() {
+            let Some(request) = recv_host_request(&mut kernel) else {
                 return served;
-            }
-            if u32::from_le_bytes(header[0..4].try_into().unwrap()) != WIRE_DATA_LEADER {
-                continue; // host ACK of our last reply
-            }
-            let len = u16::from_le_bytes(header[6..8].try_into().unwrap()) as usize;
-            let mut request = vec![0u8; len + 1];
-            kernel.read_exact(&mut request).unwrap();
-            let host_id = u32::from_le_bytes(header[8..12].try_into().unwrap());
-            kernel
-                .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, host_id))
-                .unwrap();
+            };
 
             let api_number = u32::from_le_bytes(request[0..4].try_into().unwrap());
             let addr = u64::from_le_bytes(request[UNION..UNION + 8].try_into().unwrap());
@@ -1143,7 +1115,7 @@ fn serve_virtual_memory_capped(
                 }
                 reply[UNION + 12..UNION + 16].copy_from_slice(&(wanted as u32).to_le_bytes());
                 kernel
-                    .write_all(&wire_data_packet(
+                    .write_all(&data_packet(
                         PACKET_TYPE_KD_STATE_MANIPULATE,
                         kernel_id,
                         &reply,
@@ -1177,7 +1149,7 @@ fn serve_virtual_memory_capped(
                 reply[8..12].copy_from_slice(&0xC000_0005u32.to_le_bytes());
             }
             kernel
-                .write_all(&wire_data_packet(
+                .write_all(&data_packet(
                     PACKET_TYPE_KD_STATE_MANIPULATE,
                     kernel_id,
                     &reply,
@@ -1199,25 +1171,14 @@ fn serve_breakpoints(
 ) -> JoinHandle<Vec<(u32, u64)>> {
     const UNION: usize = 16;
     spawn(move || {
-        let mut kernel_id = WIRE_FIRST_PACKET_ID;
+        let mut kernel_id = INITIAL_PACKET_ID;
         let mut script = script.into_iter();
         let mut seen = Vec::new();
         loop {
-            let mut header = [0u8; WIRE_HEADER_SIZE];
-            if kernel.read_exact(&mut header).is_err() {
+            let Some(request) = recv_host_request(&mut kernel) else {
                 assert!(script.next().is_none(), "missing breakpoint request");
                 return seen;
-            }
-            if u32::from_le_bytes(header[0..4].try_into().unwrap()) != WIRE_DATA_LEADER {
-                continue; // host ACK of our last reply
-            }
-            let len = u16::from_le_bytes(header[6..8].try_into().unwrap()) as usize;
-            let mut request = vec![0u8; len + 1];
-            kernel.read_exact(&mut request).unwrap();
-            let host_id = u32::from_le_bytes(header[8..12].try_into().unwrap());
-            kernel
-                .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, host_id))
-                .unwrap();
+            };
 
             let api_number = u32::from_le_bytes(request[0..4].try_into().unwrap());
             seen.push((api_number, wire::read_u64(&request, UNION)));
@@ -1230,7 +1191,7 @@ fn serve_breakpoints(
             reply[8..12].copy_from_slice(&status.to_le_bytes());
             reply[UNION + 8..UNION + 12].copy_from_slice(&handle.to_le_bytes());
             kernel
-                .write_all(&wire_data_packet(
+                .write_all(&data_packet(
                     PACKET_TYPE_KD_STATE_MANIPULATE,
                     kernel_id,
                     &reply,
@@ -1347,24 +1308,13 @@ fn exit_restores_breakpoints_the_host_left_installed() {
 fn serve_manipulate(mut kernel: UnixStream, script: Vec<(u32, u32, Vec<u8>)>) -> JoinHandle<()> {
     const UNION: usize = 16;
     spawn(move || {
-        let mut kernel_id = WIRE_FIRST_PACKET_ID;
+        let mut kernel_id = INITIAL_PACKET_ID;
         let mut script = script.into_iter();
         loop {
-            let mut header = [0u8; WIRE_HEADER_SIZE];
-            if kernel.read_exact(&mut header).is_err() {
+            let Some(request) = recv_host_request(&mut kernel) else {
                 assert!(script.next().is_none(), "missing manipulate request");
                 return;
-            }
-            if u32::from_le_bytes(header[0..4].try_into().unwrap()) != WIRE_DATA_LEADER {
-                continue; // host ACK of our last reply
-            }
-            let len = u16::from_le_bytes(header[6..8].try_into().unwrap()) as usize;
-            let mut request = vec![0u8; len + 1];
-            kernel.read_exact(&mut request).unwrap();
-            let host_id = u32::from_le_bytes(header[8..12].try_into().unwrap());
-            kernel
-                .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, host_id))
-                .unwrap();
+            };
 
             let (api_number, status, data) = script.next().expect("unexpected manipulate request");
             assert_eq!(
@@ -1377,7 +1327,7 @@ fn serve_manipulate(mut kernel: UnixStream, script: Vec<(u32, u32, Vec<u8>)>) ->
             reply[UNION + 12..UNION + 16].copy_from_slice(&(data.len() as u32).to_le_bytes());
             reply.extend_from_slice(&data);
             kernel
-                .write_all(&wire_data_packet(
+                .write_all(&data_packet(
                     PACKET_TYPE_KD_STATE_MANIPULATE,
                     kernel_id,
                     &reply,
@@ -2007,9 +1957,9 @@ fn pending_write_breakpoint_retry_completes_late_reply_without_resend() {
 
     let payload = write_breakpoint_reply_payload(0, addr, handle);
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_STATE_MANIPULATE,
-            WIRE_FIRST_PACKET_ID,
+            INITIAL_PACKET_ID,
             &payload,
         ))
         .unwrap();
@@ -2022,18 +1972,9 @@ fn pending_write_breakpoint_retry_completes_late_reply_without_resend() {
     assert!(backend.pending_write_breakpoint.is_none());
 
     let ack = read_wire_packet(&mut kernel);
-    assert_eq!(
-        u32::from_le_bytes(ack[0..4].try_into().unwrap()),
-        WIRE_CONTROL_LEADER
-    );
-    assert_eq!(
-        u16::from_le_bytes(ack[4..6].try_into().unwrap()),
-        PACKET_TYPE_KD_ACKNOWLEDGE
-    );
-    assert_eq!(
-        u32::from_le_bytes(ack[8..12].try_into().unwrap()),
-        WIRE_FIRST_PACKET_ID
-    );
+    assert_eq!(wire_header(&ack).leader, CONTROL_PACKET_LEADER);
+    assert_eq!(wire_header(&ack).packet_type, PACKET_TYPE_KD_ACKNOWLEDGE);
+    assert_eq!(wire_header(&ack).packet_id, INITIAL_PACKET_ID);
 
     let mut extra = [0u8; 1];
     match kernel.read(&mut extra) {
@@ -2089,9 +2030,9 @@ fn pump_services_state_change_and_returns_framing() {
     };
 
     let pc = 0xfffff800_deadbeef;
-    let pkt = wire_data_packet(
+    let pkt = data_packet(
         PACKET_TYPE_KD_STATE_CHANGE64,
-        WIRE_FIRST_PACKET_ID,
+        INITIAL_PACKET_ID,
         &exception_state_change_payload(pc),
     );
     kernel.write_all(&pkt).unwrap();
@@ -2148,42 +2089,33 @@ fn exit_resume_consumes_pump_stop_before_final_continue() {
         let mut payload = exception_state_change_payload(pc);
         payload[32..36].copy_from_slice(&0xc000_0005u32.to_le_bytes());
         kernel
-            .write_all(&wire_data_packet(
+            .write_all(&data_packet(
                 PACKET_TYPE_KD_STATE_CHANGE64,
-                WIRE_FIRST_PACKET_ID,
+                INITIAL_PACKET_ID,
                 &payload,
             ))
             .unwrap();
         kernel.flush().unwrap();
 
         let ack = read_wire_packet(&mut kernel);
-        assert_eq!(
-            u32::from_le_bytes(ack[0..4].try_into().unwrap()),
-            WIRE_CONTROL_LEADER
-        );
-        assert_eq!(
-            u16::from_le_bytes(ack[4..6].try_into().unwrap()),
-            PACKET_TYPE_KD_ACKNOWLEDGE
-        );
+        assert_eq!(wire_header(&ack).leader, CONTROL_PACKET_LEADER);
+        assert_eq!(wire_header(&ack).packet_type, PACKET_TYPE_KD_ACKNOWLEDGE);
 
         let read_special_packet = read_wire_packet(&mut kernel);
         let read_special_request =
-            &read_special_packet[WIRE_HEADER_SIZE..WIRE_HEADER_SIZE + api::MANIPULATE_HEADER_SIZE];
+            &read_special_packet[HEADER_SIZE..HEADER_SIZE + api::MANIPULATE_HEADER_SIZE];
         assert_eq!(
             u32::from_le_bytes(read_special_request[0..4].try_into().unwrap()),
             api::DBGKD_READ_CONTROL_SPACE
         );
-        let read_special_id = u32::from_le_bytes(read_special_packet[8..12].try_into().unwrap());
+        let read_special_id = wire_header(&read_special_packet).packet_id;
         kernel
-            .write_all(&wire_control_packet(
-                PACKET_TYPE_KD_ACKNOWLEDGE,
-                read_special_id,
-            ))
+            .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, read_special_id))
             .unwrap();
         kernel
-            .write_all(&wire_data_packet(
+            .write_all(&data_packet(
                 PACKET_TYPE_KD_STATE_MANIPULATE,
-                WIRE_FIRST_PACKET_ID ^ 1,
+                INITIAL_PACKET_ID ^ 1,
                 &read_special_registers_reply_payload(0),
             ))
             .unwrap();
@@ -2191,18 +2123,15 @@ fn exit_resume_consumes_pump_stop_before_final_continue() {
 
         let read_special_ack = read_wire_packet(&mut kernel);
         assert_eq!(
-            u16::from_le_bytes(read_special_ack[4..6].try_into().unwrap()),
+            wire_header(&read_special_ack).packet_type,
             PACKET_TYPE_KD_ACKNOWLEDGE
         );
 
         let continue_packet = read_wire_packet(&mut kernel);
-        let continue_id = u32::from_le_bytes(continue_packet[8..12].try_into().unwrap());
+        let continue_id = wire_header(&continue_packet).packet_id;
         continue_tx.send(continue_packet).unwrap();
         kernel
-            .write_all(&wire_control_packet(
-                PACKET_TYPE_KD_ACKNOWLEDGE,
-                continue_id,
-            ))
+            .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, continue_id))
             .unwrap();
         kernel.flush().unwrap();
         done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2217,15 +2146,12 @@ fn exit_resume_consumes_pump_stop_before_final_continue() {
 
     assert!(matches!(backend.link, Link::RunningInline(_)));
     assert!(backend.exit_prepared);
+    assert_eq!(wire_header(&continue_packet).leader, DATA_PACKET_LEADER);
     assert_eq!(
-        u32::from_le_bytes(continue_packet[0..4].try_into().unwrap()),
-        WIRE_DATA_LEADER
-    );
-    assert_eq!(
-        u16::from_le_bytes(continue_packet[4..6].try_into().unwrap()),
+        wire_header(&continue_packet).packet_type,
         PACKET_TYPE_KD_STATE_MANIPULATE
     );
-    let request = &continue_packet[WIRE_HEADER_SIZE..];
+    let request = &continue_packet[HEADER_SIZE..];
     assert_eq!(
         u32::from_le_bytes(request[0..4].try_into().unwrap()),
         api::DBGKD_CONTINUE_API2
@@ -2388,9 +2314,9 @@ fn has_pending_stop_flags_undrained_pump_stop_until_consumed() {
     let mut payload = exception_state_change_payload(pc);
     payload[32..36].copy_from_slice(&STATUS_BREAKPOINT.to_le_bytes());
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
-            WIRE_FIRST_PACKET_ID,
+            INITIAL_PACKET_ID,
             &payload,
         ))
         .unwrap();
@@ -2456,10 +2382,10 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         })
     };
 
-    let mut kernel_id = WIRE_FIRST_PACKET_ID;
+    let mut kernel_id = INITIAL_PACKET_ID;
     let mut send = |kernel: &mut UnixStream, packet_type: u16, payload: &[u8]| {
         kernel
-            .write_all(&wire_data_packet(packet_type, kernel_id, payload))
+            .write_all(&data_packet(packet_type, kernel_id, payload))
             .unwrap();
         kernel.flush().unwrap();
         kernel_id ^= 1;
@@ -2473,16 +2399,8 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
 
     let mut context_written = 0usize;
     loop {
-        let packet = read_wire_packet(&mut kernel);
-        if u32::from_le_bytes(packet[0..4].try_into().unwrap()) == WIRE_CONTROL_LEADER {
-            continue;
-        }
-        let host_id = u32::from_le_bytes(packet[8..12].try_into().unwrap());
-        let request = &packet[WIRE_HEADER_SIZE..packet.len() - 1];
+        let request = recv_host_request(&mut kernel).expect("host hung up");
         let api_number = u32::from_le_bytes(request[0..4].try_into().unwrap());
-        kernel
-            .write_all(&wire_control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, host_id))
-            .unwrap();
         let reply = match api_number {
             api::DBGKD_GET_CONTEXT => {
                 let mut context = vec![0u8; context::CONTEXT_SIZE];
@@ -2567,7 +2485,7 @@ fn pump_sends_breakin_after_peer_reset_while_waiting_for_reconnect() {
     };
 
     kernel
-        .write_all(&wire_control_packet(PACKET_TYPE_KD_RESET, 0))
+        .write_all(&control_packet(PACKET_TYPE_KD_RESET, 0))
         .unwrap();
     kernel.flush().unwrap();
 
@@ -2622,7 +2540,7 @@ fn pump_tags_stop_after_assisted_reconnect_breakin() {
     };
 
     kernel
-        .write_all(&wire_control_packet(PACKET_TYPE_KD_RESET, 0))
+        .write_all(&control_packet(PACKET_TYPE_KD_RESET, 0))
         .unwrap();
     kernel.flush().unwrap();
 
@@ -2643,9 +2561,9 @@ fn pump_tags_stop_after_assisted_reconnect_breakin() {
 
     let pc = 0xfffff800_deadbeef;
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
-            WIRE_FIRST_PACKET_ID,
+            INITIAL_PACKET_ID,
             &exception_state_change_payload(pc),
         ))
         .unwrap();
@@ -2688,13 +2606,13 @@ fn pump_surfaces_reloaded_transparent_state_change() {
     };
 
     kernel
-        .write_all(&wire_control_packet(PACKET_TYPE_KD_RESET, 0))
+        .write_all(&control_packet(PACKET_TYPE_KD_RESET, 0))
         .unwrap();
     let pc = 0xfffff800_feedface;
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
-            WIRE_FIRST_PACKET_ID,
+            INITIAL_PACKET_ID,
             &state_change_payload(DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, pc),
         ))
         .unwrap();
@@ -2738,9 +2656,9 @@ fn pump_surfaces_load_symbols_as_a_module_change_stop() {
 
     let pc = 0xfffff800_cafebabe;
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
-            WIRE_FIRST_PACKET_ID,
+            INITIAL_PACKET_ID,
             &state_change_payload(DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, pc),
         ))
         .unwrap();
@@ -2890,9 +2808,9 @@ fn await_refresh_sets_flag_without_breakin() {
 
     let refresh = debug_io_print_payload(KD_REFRESH_MESSAGE);
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_DEBUG_IO,
-            WIRE_FIRST_PACKET_ID,
+            INITIAL_PACKET_ID,
             &refresh,
         ))
         .unwrap();
@@ -2900,7 +2818,7 @@ fn await_refresh_sets_flag_without_breakin() {
 
     let mut outbound = Vec::new();
     let mut buf = [0u8; 64];
-    while outbound.len() < WIRE_HEADER_SIZE {
+    while outbound.len() < HEADER_SIZE {
         match kernel.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => outbound.extend_from_slice(&buf[..n]),
@@ -2911,7 +2829,7 @@ fn await_refresh_sets_flag_without_breakin() {
         }
     }
     assert!(
-        outbound.len() >= WIRE_HEADER_SIZE,
+        outbound.len() >= HEADER_SIZE,
         "refresh packet should be ACKed"
     );
     assert!(
@@ -2938,9 +2856,9 @@ fn await_refresh_sets_flag_without_breakin() {
 
     let pc = 0xfffff800_deadbeef;
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
-            WIRE_FIRST_PACKET_ID ^ 1,
+            INITIAL_PACKET_ID ^ 1,
             &exception_state_change_payload(pc),
         ))
         .unwrap();
@@ -2977,11 +2895,11 @@ fn await_bugcheck_aware(prints: &[&[u8]], pc: u64) -> StateChange {
         .expect("await_state_change failed")
     });
 
-    let mut packet_id = WIRE_FIRST_PACKET_ID;
+    let mut packet_id = INITIAL_PACKET_ID;
     let mut buf = [0u8; 128];
     for text in prints {
         kernel
-            .write_all(&wire_data_packet(
+            .write_all(&data_packet(
                 PACKET_TYPE_KD_DEBUG_IO,
                 packet_id,
                 &debug_io_print_payload(text),
@@ -2992,7 +2910,7 @@ fn await_bugcheck_aware(prints: &[&[u8]], pc: u64) -> StateChange {
         packet_id ^= 1;
     }
     kernel
-        .write_all(&wire_data_packet(
+        .write_all(&data_packet(
             PACKET_TYPE_KD_STATE_CHANGE64,
             packet_id,
             &exception_state_change_payload(pc),
