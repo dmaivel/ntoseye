@@ -80,7 +80,8 @@ pub enum TargetSpec {
 impl TargetSpec {
     /// Reject argument combinations that cannot work before touching any
     /// transport, with the same wording for every host.
-    pub fn validate(&self) -> std::result::Result<(), String> {
+    pub fn validate(&self) -> error::Result<()> {
+        let invalid = |message: &str| error::Error::InvalidArgument(message.to_string());
         let Self::Live {
             backend,
             connect,
@@ -92,20 +93,22 @@ impl TargetSpec {
         };
         match backend {
             Backend::KdNet if kdnet_key.is_none() => {
-                return Err("kdnet backend requires a key".into());
+                return Err(invalid("kdnet backend requires a key"));
             }
             Backend::Kd | Backend::Gdb | Backend::Memory if kdnet_key.is_some() => {
-                return Err("key is only valid for the kdnet backend".into());
+                return Err(invalid("key is only valid for the kdnet backend"));
             }
             Backend::Memory if connect.is_some() => {
-                return Err("memory backend does not use a connect endpoint".into());
+                return Err(invalid("memory backend does not use a connect endpoint"));
             }
             _ => {}
         }
         if !matches!(backend, Backend::Kd | Backend::KdNet)
             && *memory_source != kd::KdMemorySource::Auto
         {
-            return Err("memory_source is only valid for kd and kdnet backends".into());
+            return Err(invalid(
+                "memory_source is only valid for kd and kdnet backends",
+            ));
         }
         Ok(())
     }

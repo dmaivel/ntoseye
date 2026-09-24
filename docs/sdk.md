@@ -107,7 +107,7 @@ The session lives on its own thread. A `Debugger` can be used from any Python th
 
 `dbg.command(line, timeout=None)` runs a REPL command and returns text. REPL state (aliases, radix, and `$vars`) persists between calls. If a command resumes the target, `timeout` is its stop budget and the resulting stop is available as `dbg.stop`. Prefer typed SDK methods for structured results; for example, use `dbg.inspect.triage()` rather than parsing `dbg.command("!analyze -v")`.
 
-All SDK exceptions derive from `ntoseye.NtoseyeError`. `MemoryAccessError` reports an unreadable/partially readable guest range; `TargetRunningError` means an operation requires a halted target; `SymbolNotFoundError` also derives from `LookupError`; `StaleHandleError` identifies a handle from before a reboot. An argument outside its fixed choices (`backend="windbg"`, `until="calls"`) raises `ValueError` before anything touches the target.
+All SDK exceptions derive from `ntoseye.NtoseyeError`. `MemoryAccessError` reports an unreadable/partially readable guest range; `TargetRunningError` means an operation requires a halted target; `SymbolNotFoundError` also derives from `LookupError`; `StaleHandleError` identifies a handle from before a reboot. An argument outside its fixed choices (`backend="windbg"`, `until="calls"`) or an invalid combination (`backend="kdnet"` without `key`) raises `ValueError` before anything touches the target.
 
 `to_dict()` on a process, thread, module, CPU, driver, or breakpoint returns the same fields the MCP server reports for it; on a value object (a `Field`, `Symbol`, `MemoryRegion`, ...) it returns the object's attributes.
 

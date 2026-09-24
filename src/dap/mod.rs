@@ -2799,7 +2799,10 @@ fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
         kdnet_key: arg_str(args, "kdnetKey"),
         memory_source,
     };
-    spec.validate()?;
+    spec.validate().map_err(|error| match error {
+        Error::InvalidArgument(message) => message,
+        other => other.to_string(),
+    })?;
     Ok(spec)
 }
 

@@ -624,7 +624,10 @@ impl NtoseyeMcp {
                 }
             }
         };
-        spec.validate().map_err(invalid_params)?;
+        spec.validate().map_err(|error| match error {
+            Error::InvalidArgument(message) => invalid_params(message),
+            other => invalid_params(other.to_string()),
+        })?;
         let label = match &spec {
             TargetSpec::Dump(_) => "dump".to_string(),
             TargetSpec::Live { backend, .. } => backend.to_string(),

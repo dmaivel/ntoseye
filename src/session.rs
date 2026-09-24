@@ -616,7 +616,7 @@ impl Session {
     /// KD wait for a target, the memory-source decision) through `progress`
     /// one line at a time. Only live KD attaches report anything.
     pub fn open_with_progress(spec: &TargetSpec, progress: &mut dyn FnMut(&str)) -> Result<Self> {
-        spec.validate().map_err(Error::DebugInfo)?;
+        spec.validate()?;
         match spec {
             TargetSpec::Dump(path) => {
                 let phys = Arc::new(PhysMem::dmp(path)?);

@@ -21,9 +21,12 @@ def test_native_errors_raise_the_package_classes() -> None:
         ntoseye.attach("gdb", "127.0.0.1:1")
 
 
-@pytest.mark.parametrize("kwargs", [{"backend": "windbg"}, {"backend": "dmp"}])
+@pytest.mark.parametrize(
+    "kwargs", [{"backend": "windbg"}, {"backend": "dmp"}, {"backend": "kdnet"}]
+)
 def test_attach_rejects_bad_arguments_before_connecting(kwargs: dict[str, str]) -> None:
-    # A spelling outside the Literal, and a dump without its path.
+    # A spelling outside the Literal, a dump without its path, and kdnet
+    # without its key.
     with pytest.raises(ValueError):
         ntoseye.attach(**kwargs)  # type: ignore[arg-type]
 
