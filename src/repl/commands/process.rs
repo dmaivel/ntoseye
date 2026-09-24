@@ -11,13 +11,13 @@ use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::layout::StructRef;
 use crate::memory::PAGE_SIZE;
 use crate::symbols::{ModuleSymbolStatus, glob_matches};
 use crate::target::mm::{MemoryRegionInfo, VadProtection, VadType};
+use crate::target::sched::ProcessDetail;
 use crate::target::{
-    AttachReport, Target, ThreadInfo, decimal_pid_literal, fast_ref_address, kthread_state_name,
-    process_matches, wait_reason_name,
+    AttachReport, Target, ThreadInfo, decimal_pid_literal, kthread_state_name, process_matches,
+    wait_reason_name,
 };
 use crate::triage_report::filetime_to_iso;
 use crate::types::VirtAddr;
@@ -179,72 +179,16 @@ fn parse_process_arguments<'a>(
     })
 }
 
-fn read_struct_path<T>(root: StructRef<'_>, path: &[&str]) -> Option<T>
-where
-    T: Copy + zerocopy::FromZeros + zerocopy::FromBytes + zerocopy::IntoBytes,
-{
-    let (field, parents) = path.split_last()?;
-    let mut current = root;
-    for parent in parents {
-        current = match current.embedded(parent) {
-            Ok(nested) => nested,
-            Err(_) => current.follow(parent).ok()?,
-        };
-    }
-    current.read_field(field).ok()
-}
-
-fn process_field<T>(target: &Target, process: &ProcessInfo, paths: &[&[&str]]) -> Option<T>
-where
-    T: Copy + zerocopy::FromZeros + zerocopy::FromBytes + zerocopy::IntoBytes,
-{
-    paths.iter().find_map(|path| {
-        let root = target
-            .guest()
-            .ok()?
-            .ntoskrnl
-            .types_in(process.dtb)
-            .struct_at("_EPROCESS", process.eprocess_va)
-            .ok()?;
-        read_struct_path(root, path)
-    })
-}
-
-fn thread_field<T>(
-    target: &Target,
-    thread: &ThreadInfo,
-    type_name: &str,
-    base: VirtAddr,
-    paths: &[&[&str]],
-) -> Option<T>
-where
-    T: Copy + zerocopy::FromZeros + zerocopy::FromBytes + zerocopy::IntoBytes,
-{
-    let dtb = target
-        .thread_process_dtb(thread)
-        .unwrap_or_else(|| target.current_dtb());
-    paths.iter().find_map(|path| {
-        let root = target
-            .guest()
-            .ok()?
-            .ntoskrnl
-            .types_in(dtb)
-            .struct_at(type_name, base)
-            .ok()?;
-        read_struct_path(root, path)
-    })
-}
-
 fn display_decimal(value: Option<u64>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn display_pointer(value: Option<u64>) -> String {
+fn display_pointer(value: Option<VirtAddr>) -> String {
     value
-        .filter(|value| *value != 0)
-        .map(ui::addr)
+        .filter(|value| !value.is_zero())
+        .map(|value| ui::addr(value.0))
         .unwrap_or_else(|| "-".to_string())
 }
 
@@ -372,176 +316,62 @@ fn print_thread_detail(thread: &ThreadInfo) {
 
 fn print_thread_extended_detail(target: &Target, thread: &ThreadInfo) {
     print_thread_detail(thread);
-    let win32_thread = thread_field(
-        target,
-        thread,
-        "_ETHREAD",
-        thread.ethread,
-        &[&["Win32Thread"]],
-    );
-    let user_time =
-        thread_field::<u32>(target, thread, "_KTHREAD", thread.kthread, &[&["UserTime"]])
-            .map(u64::from)
-            .or_else(|| {
-                thread_field::<u32>(target, thread, "_ETHREAD", thread.ethread, &[&["UserTime"]])
-                    .map(u64::from)
-            });
-    let kernel_time = thread_field::<u32>(
-        target,
-        thread,
-        "_KTHREAD",
-        thread.kthread,
-        &[&["KernelTime"]],
-    )
-    .map(u64::from)
-    .or_else(|| {
-        thread_field::<u32>(
-            target,
-            thread,
-            "_ETHREAD",
-            thread.ethread,
-            &[&["KernelTime"]],
-        )
-        .map(u64::from)
-    });
-    let wait_time =
-        thread_field::<u32>(target, thread, "_KTHREAD", thread.kthread, &[&["WaitTime"]])
-            .map(u64::from);
-    let ready_time = thread_field::<u32>(
-        target,
-        thread,
-        "_KTHREAD",
-        thread.kthread,
-        &[&["ReadyTime"]],
-    )
-    .map(u64::from);
-    let quantum_target = thread_field::<u32>(
-        target,
-        thread,
-        "_KTHREAD",
-        thread.kthread,
-        &[&["QuantumTarget"]],
-    )
-    .map(u64::from);
-    outln!("  win32thread={}", display_pointer(win32_thread));
+    let detail = target.thread_extended_detail(thread);
+    outln!("  win32thread={}", display_pointer(detail.win32_thread));
     outln!(
         "  times user={} kernel={} wait_time={} ready_time={} quantum_target={}",
-        display_decimal(user_time),
-        display_decimal(kernel_time),
-        display_decimal(wait_time),
-        display_decimal(ready_time),
-        display_decimal(quantum_target),
+        display_decimal(detail.user_time),
+        display_decimal(detail.kernel_time),
+        display_decimal(detail.wait_time),
+        display_decimal(detail.ready_time),
+        display_decimal(detail.quantum_target),
     );
 }
 
-fn process_brief_row(target: &Target, process: &ProcessInfo) -> Vec<String> {
-    let object_table = process_field::<u64>(target, process, &[&["ObjectTable"]]);
-    let handle_count = object_table
-        .and_then(|object_table| {
-            target
-                .guest()
-                .ok()?
-                .ntoskrnl
-                .types_in(process.dtb)
-                .struct_at("_HANDLE_TABLE", VirtAddr(object_table & !0xf))
-                .ok()?
-                .read_field::<u32>("HandleCount")
-                .ok()
-                .map(u64::from)
-        })
-        .or_else(|| process_field::<u32>(target, process, &[&["HandleCount"]]).map(u64::from));
-    let dirbase = process_field(
-        target,
-        process,
-        &[&["Pcb", "DirectoryTableBase"], &["DirectoryTableBase"]],
-    );
-    let parent = process_field(
-        target,
-        process,
-        &[&["InheritedFromUniqueProcessId"], &["ParentCid"]],
-    );
-    let session_id = target
-        .process_session_id(process.eprocess_va)
-        .map(u64::from);
+fn process_brief_row(process: &ProcessInfo, detail: &ProcessDetail) -> Vec<String> {
     vec![
-        display_pointer((process.eprocess_va.0 != 0).then_some(process.eprocess_va.0)),
-        display_decimal(session_id),
+        display_pointer(Some(process.eprocess_va)),
+        display_decimal(detail.session_id.map(u64::from)),
         format!("{} ({:#x})", process.pid, process.pid),
-        display_pointer(process_field(target, process, &[&["Peb"]])),
-        display_pointer(process.wow64_peb.map(|address| address.0)),
-        display_decimal(parent),
-        display_pointer(dirbase),
-        display_pointer(object_table),
-        display_decimal(handle_count),
+        display_pointer(detail.peb),
+        display_pointer(process.wow64_peb),
+        display_decimal(detail.parent_pid),
+        display_pointer(detail.directory_table_base.map(VirtAddr)),
+        display_pointer(detail.object_table),
+        display_decimal(detail.handle_count),
         process.name.clone(),
     ]
 }
 
-fn print_process_detail(target: &Target, process: &ProcessInfo) {
-    let token = process_field(target, process, &[&["Token"]]).map(|raw| fast_ref_address(raw).0);
-    let vm = |field| process_field(target, process, &[&["Vm", field], &[field]]);
-    let quota_paged = process_field(
-        target,
-        process,
-        &[
-            &["QuotaUsage", "PagedPool"],
-            &["QuotaUsage", "PagedPoolUsage"],
-        ],
-    );
-    let quota_nonpaged = process_field(
-        target,
-        process,
-        &[
-            &["QuotaUsage", "NonPagedPool"],
-            &["QuotaUsage", "NonPagedPoolUsage"],
-        ],
-    );
-    outln!(
-        "  VadRoot        {}",
-        display_pointer(process_field(
-            target,
-            process,
-            &[&["VadRoot", "Root"], &["VadRoot"]]
-        ))
-    );
-    outln!("  Token         {}", display_pointer(token));
-    outln!(
-        "  Wow64Peb      {}",
-        display_pointer(process.wow64_peb.map(|address| address.0))
-    );
-    let create_time = process_field(target, process, &[&["CreateTime"]]).and_then(filetime_to_iso);
+fn print_process_detail(process: &ProcessInfo, detail: &ProcessDetail) {
+    outln!("  VadRoot        {}", display_pointer(detail.vad_root));
+    outln!("  Token         {}", display_pointer(detail.token));
+    outln!("  Wow64Peb      {}", display_pointer(process.wow64_peb));
     outln!(
         "  CreateTime    {}",
-        create_time.unwrap_or_else(|| "-".to_string())
+        detail
+            .create_time
+            .and_then(filetime_to_iso)
+            .unwrap_or_else(|| "-".to_string())
     );
-    outln!(
-        "  UserTime      {}",
-        display_decimal(process_field(target, process, &[&["UserTime"]]))
-    );
-    outln!(
-        "  KernelTime    {}",
-        display_decimal(process_field(target, process, &[&["KernelTime"]]))
-    );
+    outln!("  UserTime      {}", display_decimal(detail.user_time));
+    outln!("  KernelTime    {}", display_decimal(detail.kernel_time));
     outln!(
         "  QuotaPoolUsage paged={} nonpaged={}",
-        display_decimal(quota_paged),
-        display_decimal(quota_nonpaged)
+        display_decimal(detail.quota_paged_pool),
+        display_decimal(detail.quota_nonpaged_pool)
     );
     outln!(
         "  WorkingSet    {}  Commit={}  PeakVirtualSize={}  PrivatePageCount={}",
-        display_decimal(vm("WorkingSetSize")),
-        display_decimal(vm("PagefileUsage").or_else(|| vm("CommitCharge"))),
-        display_decimal(vm("PeakVirtualSize")),
-        display_decimal(
-            vm("PrivatePageCount")
-                .or_else(|| vm("PrivateUsage"))
-                .or_else(|| process_field(target, process, &[&["NumberOfPrivatePages"]])),
-        )
+        display_decimal(detail.working_set_size),
+        display_decimal(detail.commit_charge),
+        display_decimal(detail.peak_virtual_size),
+        display_decimal(detail.private_page_count),
     );
     outln!(
         "  DebugPort     {}  Job={}",
-        display_pointer(process_field(target, process, &[&["DebugPort"]])),
-        display_pointer(process_field(target, process, &[&["Job"]]))
+        display_pointer(detail.debug_port),
+        display_pointer(detail.job)
     );
 }
 
@@ -1463,13 +1293,17 @@ impl ReplState<'_> {
             "HandleCount".to_string(),
             "Image".to_string(),
         ]);
-        for process in &selected {
-            builder.push_record(process_brief_row(&self.ctx.target, process));
+        let details: Vec<ProcessDetail> = selected
+            .iter()
+            .map(|process| self.ctx.target.process_detail(process))
+            .collect();
+        for (process, detail) in selected.iter().zip(&details) {
+            builder.push_record(process_brief_row(process, detail));
         }
         print_padded_table(builder);
 
         if flags & 1 != 0 || flags & 2 != 0 || flags & 4 != 0 {
-            for process in &selected {
+            for (process, detail) in selected.iter().zip(&details) {
                 outln!(
                     "{} {} ({})",
                     ui::label("process:"),
@@ -1477,7 +1311,7 @@ impl ReplState<'_> {
                     process.name
                 );
                 if flags & 1 != 0 {
-                    print_process_detail(&self.ctx.target, process);
+                    print_process_detail(process, detail);
                 }
                 if flags & 2 != 0 || flags & 4 != 0 {
                     self.print_process_threads(process, flags & 4 != 0);

@@ -78,9 +78,7 @@ impl Process {
                 .types_in(info.dtb)
                 .struct_at("_EPROCESS", info.eprocess_va)
                 .map_err(err)?;
-            let ppid = eprocess
-                .read_field::<u64>("InheritedFromUniqueProcessId")
-                .map_err(err)?;
+            let ppid = session.target.process_parent_pid(&info).map_err(err)?;
             let peb = eprocess.read_field::<VirtAddr>("Peb").map_err(err)?;
             Ok(ProcessDetails {
                 ppid,

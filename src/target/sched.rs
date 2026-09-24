@@ -10,7 +10,7 @@ use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared::KuserSharedData;
-use crate::layout::{ParsedType, TypeInfo};
+use crate::layout::{ParsedType, StructRef, TypeInfo};
 use crate::session::Session;
 use crate::target::{
     DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
@@ -249,6 +249,44 @@ pub struct StacksDetail {
     pub threads: Vec<StackThreadDetail>,
 }
 
+/// `!process` columns and details. Each field is `None` when this build's
+/// layout lacks it or its read failed.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessDetail {
+    pub session_id: Option<u32>,
+    pub peb: Option<VirtAddr>,
+    pub parent_pid: Option<u64>,
+    pub directory_table_base: Option<u64>,
+    pub object_table: Option<VirtAddr>,
+    pub handle_count: Option<u64>,
+    pub vad_root: Option<VirtAddr>,
+    pub token: Option<VirtAddr>,
+    /// `CreateTime` as a FILETIME.
+    pub create_time: Option<u64>,
+    pub user_time: Option<u64>,
+    pub kernel_time: Option<u64>,
+    pub quota_paged_pool: Option<u64>,
+    pub quota_nonpaged_pool: Option<u64>,
+    pub working_set_size: Option<u64>,
+    pub commit_charge: Option<u64>,
+    pub peak_virtual_size: Option<u64>,
+    pub private_page_count: Option<u64>,
+    pub debug_port: Option<VirtAddr>,
+    pub job: Option<VirtAddr>,
+}
+
+/// Extended thread details. Each field is `None` when this build's layout
+/// lacks it or its read failed.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadExtendedDetail {
+    pub win32_thread: Option<VirtAddr>,
+    pub user_time: Option<u64>,
+    pub kernel_time: Option<u64>,
+    pub wait_time: Option<u64>,
+    pub ready_time: Option<u64>,
+    pub quantum_target: Option<u64>,
+}
+
 fn available<T>(value: T) -> DiagnosticValue<T> {
     DiagnosticValue::Available(value)
 }
@@ -259,6 +297,33 @@ fn unavailable<T>(error: impl Into<String>) -> DiagnosticValue<T> {
 
 fn optional<T>(value: Option<T>) -> DiagnosticValue<Option<T>> {
     available(value)
+}
+
+/// The integer at the first readable path below `root`. Every segment but
+/// the last names an embedded struct, or a pointer to one, to step into.
+fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
+    fn enter<'a>(parent: &StructRef<'a>, name: &str) -> Option<StructRef<'a>> {
+        parent.embedded(name).or_else(|_| parent.follow(name)).ok()
+    }
+    paths.iter().find_map(|path| {
+        let (field, parents) = path.split_last()?;
+        let Some((first, rest)) = parents.split_first() else {
+            return root.read_uint(field).ok();
+        };
+        let mut current = enter(root, first)?;
+        for parent in rest {
+            current = enter(&current, parent)?;
+        }
+        current.read_uint(field).ok()
+    })
+}
+
+/// `InheritedFromUniqueProcessId`, or `ParentCid` on builds without it; the
+/// primary field's error is kept when neither is readable.
+fn parent_pid(eprocess: &StructRef<'_>) -> Result<u64> {
+    eprocess
+        .read_uint("InheritedFromUniqueProcessId")
+        .or_else(|error| eprocess.read_uint("ParentCid").map_err(|_| error))
 }
 
 fn thread_summary(thread: &ThreadInfo) -> ThreadSummary {
@@ -1338,6 +1403,103 @@ fn top_symbol_contains(value: &DiagnosticValue<Option<String>>, needle: &str) ->
 }
 
 impl Target {
+    /// The process's parent PID; see [`parent_pid`] for the field fallback.
+    pub fn process_parent_pid(&self, process: &ProcessInfo) -> Result<u64> {
+        let eprocess = self
+            .guest()?
+            .ntoskrnl
+            .types_in(process.dtb)
+            .struct_at("_EPROCESS", process.eprocess_va)?;
+        parent_pid(&eprocess)
+    }
+
+    /// Read the layout-sensitive `_EPROCESS` fields `!process` reports,
+    /// trying each build's field names in turn.
+    pub fn process_detail(&self, process: &ProcessInfo) -> ProcessDetail {
+        let session_id = self.process_session_id(process.eprocess_va);
+        let unavailable = || ProcessDetail {
+            session_id,
+            ..ProcessDetail::default()
+        };
+        let Ok(guest) = self.guest() else {
+            return unavailable();
+        };
+        let types = guest.ntoskrnl.types_in(process.dtb);
+        let Ok(eprocess) = types.struct_at("_EPROCESS", process.eprocess_va) else {
+            return unavailable();
+        };
+        let eprocess = eprocess.prefetch();
+        let field = |paths: &[&[&str]]| read_first_uint(&eprocess, paths);
+        let pointer = |name: &str| field(&[&[name]]).map(VirtAddr);
+        let vm = |name: &str| field(&[&["Vm", name], &[name]]);
+
+        let object_table = pointer("ObjectTable");
+        let handle_count = object_table
+            .and_then(|table| {
+                types
+                    .struct_at("_HANDLE_TABLE", VirtAddr(table.0 & !0xf))
+                    .ok()?
+                    .read_uint("HandleCount")
+                    .ok()
+            })
+            .or_else(|| field(&[&["HandleCount"]]));
+        ProcessDetail {
+            session_id,
+            peb: pointer("Peb"),
+            parent_pid: parent_pid(&eprocess).ok(),
+            directory_table_base: field(&[&["Pcb", "DirectoryTableBase"], &["DirectoryTableBase"]]),
+            object_table,
+            handle_count,
+            vad_root: field(&[&["VadRoot", "Root"], &["VadRoot"]]).map(VirtAddr),
+            token: field(&[&["Token"]]).map(fast_ref_address),
+            create_time: field(&[&["CreateTime"]]),
+            user_time: field(&[&["UserTime"]]),
+            kernel_time: field(&[&["KernelTime"]]),
+            quota_paged_pool: field(&[
+                &["QuotaUsage", "PagedPool"],
+                &["QuotaUsage", "PagedPoolUsage"],
+            ]),
+            quota_nonpaged_pool: field(&[
+                &["QuotaUsage", "NonPagedPool"],
+                &["QuotaUsage", "NonPagedPoolUsage"],
+            ]),
+            working_set_size: vm("WorkingSetSize"),
+            commit_charge: vm("PagefileUsage").or_else(|| vm("CommitCharge")),
+            peak_virtual_size: vm("PeakVirtualSize"),
+            private_page_count: vm("PrivatePageCount")
+                .or_else(|| vm("PrivateUsage"))
+                .or_else(|| field(&[&["NumberOfPrivatePages"]])),
+            debug_port: pointer("DebugPort"),
+            job: pointer("Job"),
+        }
+    }
+
+    /// Read the extended `_KTHREAD`/`_ETHREAD` fields shown by thread
+    /// listings, through the owning process's address space.
+    pub fn thread_extended_detail(&self, thread: &ThreadInfo) -> ThreadExtendedDetail {
+        let Ok(guest) = self.guest() else {
+            return ThreadExtendedDetail::default();
+        };
+        let dtb = self
+            .thread_process_dtb(thread)
+            .unwrap_or_else(|| self.current_dtb());
+        let types = guest.ntoskrnl.types_in(dtb);
+        let ethread = types.struct_at("_ETHREAD", thread.ethread).ok();
+        let kthread = types.struct_at("_KTHREAD", thread.kthread).ok();
+        let read = |root: &Option<StructRef<'_>>, name: &str| {
+            root.as_ref()
+                .and_then(|root| read_first_uint(root, &[&[name]]))
+        };
+        ThreadExtendedDetail {
+            win32_thread: read(&ethread, "Win32Thread").map(VirtAddr),
+            user_time: read(&kthread, "UserTime").or_else(|| read(&ethread, "UserTime")),
+            kernel_time: read(&kthread, "KernelTime").or_else(|| read(&ethread, "KernelTime")),
+            wait_time: read(&kthread, "WaitTime"),
+            ready_time: read(&kthread, "ReadyTime"),
+            quantum_target: read(&kthread, "QuantumTarget"),
+        }
+    }
+
     pub fn enumerate_threads_for_process_info(
         &self,
         process: &ProcessInfo,
