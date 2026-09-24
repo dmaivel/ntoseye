@@ -88,7 +88,7 @@ impl ReplState<'_> {
             outln!("  frame base {}", ui::addr(base));
         }
         if show_registers {
-            print_sparse_registers(&frame.registers);
+            print_sparse_registers(&frame.registers, Some("  registers:"), 4);
         }
         outln!();
     }
@@ -346,12 +346,20 @@ pub fn registers_from_trap_frame(frame: &KtrapFrame) -> HashMap<String, u64> {
     registers
 }
 
-fn print_sparse_registers(registers: &HashMap<String, u64>) {
+/// Print a recovered (partial) register set sorted by name, one row per
+/// register at `indent` columns, under an optional heading line.
+pub(super) fn print_sparse_registers(
+    registers: &HashMap<String, u64>,
+    heading: Option<&str>,
+    indent: usize,
+) {
     let mut names: Vec<_> = registers.keys().collect();
     names.sort();
-    outln!("  registers:");
+    if let Some(heading) = heading {
+        outln!("{heading}");
+    }
     for name in names {
-        outln!("    {:<8} {}", name, ui::addr(registers[name]));
+        outln!("{:indent$}{:<8} {}", "", name, ui::addr(registers[name]));
     }
 }
 

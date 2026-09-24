@@ -20,6 +20,8 @@ use crate::unwind::{
 
 use crate::repl::*;
 
+use super::frames::print_sparse_registers;
+
 repl_command! {
     cmd_pte;
     names: ["!pte", "pte"],
@@ -391,7 +393,7 @@ impl ReplState<'_> {
                     );
                 }
             } else {
-                print_selected_registers(&frame.registers);
+                print_sparse_registers(&frame.registers, None, 2);
             }
             outln!();
             return Ok(());
@@ -1180,14 +1182,6 @@ impl ReplState<'_> {
         outln!();
 
         Ok(())
-    }
-}
-
-fn print_selected_registers(registers: &std::collections::HashMap<String, u64>) {
-    let mut names: Vec<_> = registers.keys().collect();
-    names.sort();
-    for name in names {
-        outln!("  {:<8} {}", name, ui::addr(registers[name]));
     }
 }
 
