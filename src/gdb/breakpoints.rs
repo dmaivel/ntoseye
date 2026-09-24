@@ -45,6 +45,24 @@ pub enum BreakpointSpec {
     },
 }
 
+/// What a code breakpoint is planted on, which decides whether it can wait
+/// for a module to load and whether it outlives its first hit.
+enum CodeSite {
+    /// A fixed address, labelled with the symbol it was typed as, if any.
+    Address {
+        address: VirtAddr,
+        symbol: Option<String>,
+    },
+    /// A symbol or source line, installed at `address` once it resolves and
+    /// deferred until then.
+    Spec {
+        spec: BreakpointSpec,
+        address: Option<VirtAddr>,
+    },
+    /// An internal stop the debugger removes once it is hit.
+    Temporary(VirtAddr),
+}
+
 impl BreakpointSpec {
     pub fn source(raw: &str, address_index: usize) -> Option<Self> {
         let (file, line) = raw.rsplit_once(':')?;
@@ -529,10 +547,7 @@ impl BreakpointManager {
         self.add_code_configured(
             client,
             debugger,
-            Some(address),
-            symbol,
-            None,
-            false,
+            CodeSite::Address { address, symbol },
             BreakpointConfig {
                 condition,
                 ..BreakpointConfig::default()
@@ -548,7 +563,12 @@ impl BreakpointManager {
         symbol: Option<String>,
         config: BreakpointConfig,
     ) -> Result<u32> {
-        self.add_code_configured(client, debugger, Some(address), symbol, None, false, config)
+        self.add_code_configured(
+            client,
+            debugger,
+            CodeSite::Address { address, symbol },
+            config,
+        )
     }
 
     pub fn add_symbolic(
@@ -570,15 +590,7 @@ impl BreakpointManager {
                 address = spec.resolve(debugger, dtb)?;
             }
         }
-        self.add_code_configured(
-            client,
-            debugger,
-            address,
-            Some(symbol),
-            Some(spec),
-            false,
-            config,
-        )
+        self.add_code_configured(client, debugger, CodeSite::Spec { spec, address }, config)
     }
 
     /// Add one deferred identity per currently known address for `file:line`.
@@ -622,10 +634,7 @@ impl BreakpointManager {
                 self.add_code_configured(
                     client,
                     debugger,
-                    address,
-                    Some(source.clone()),
-                    Some(spec),
-                    false,
+                    CodeSite::Spec { spec, address },
                     config.clone(),
                 )
             })();
@@ -681,10 +690,7 @@ impl BreakpointManager {
         self.add_code_configured(
             client,
             debugger,
-            Some(address),
-            None,
-            None,
-            true,
+            CodeSite::Temporary(address),
             BreakpointConfig::default(),
         )
     }
@@ -693,12 +699,17 @@ impl BreakpointManager {
         &mut self,
         client: &mut dyn DebugBackend,
         debugger: &Target,
-        address: Option<VirtAddr>,
-        symbol: Option<String>,
-        spec: Option<BreakpointSpec>,
-        temporary: bool,
+        site: CodeSite,
         config: BreakpointConfig,
     ) -> Result<u32> {
+        let temporary = matches!(site, CodeSite::Temporary(_));
+        let (address, symbol, spec) = match site {
+            CodeSite::Address { address, symbol } => (Some(address), symbol, None),
+            CodeSite::Spec { spec, address } => {
+                (address, Some(spec.label().to_string()), Some(spec))
+            }
+            CodeSite::Temporary(address) => (Some(address), None, None),
+        };
         let condition_expr = Self::configured_condition(&config)?;
         let automatic_scope = config.scope.is_none();
         let fallback_scope = config
