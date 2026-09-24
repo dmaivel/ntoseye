@@ -1120,16 +1120,44 @@ fn lookup_source_line(
     Some((line, end_rva))
 }
 
-fn source_file_matches(recorded: &str, query: &str) -> bool {
-    let recorded = recorded.replace('\\', "/");
-    let query = query.replace('\\', "/");
-    if query.contains('/') {
-        recorded.eq_ignore_ascii_case(&query)
-    } else {
-        recorded
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.eq_ignore_ascii_case(&query))
+/// The file of a source-line lookup, normalized once so every recorded path
+/// is compared in place. Matching ignores ASCII case and treats `\` and `/`
+/// alike.
+enum SourceFileQuery {
+    /// A path, which must equal the whole recorded path.
+    Path(String),
+    /// A bare file name, which must equal the recorded path's last component.
+    Name(String),
+}
+
+impl SourceFileQuery {
+    fn new(query: &str) -> Self {
+        let query = query.replace('\\', "/");
+        if query.contains('/') {
+            Self::Path(query)
+        } else {
+            Self::Name(query)
+        }
+    }
+
+    fn matches(&self, recorded: &str) -> bool {
+        match self {
+            Self::Path(path) => {
+                let fold = |byte: u8| match byte {
+                    b'\\' => b'/',
+                    byte => byte.to_ascii_lowercase(),
+                };
+                recorded.len() == path.len()
+                    && recorded
+                        .bytes()
+                        .zip(path.bytes())
+                        .all(|(recorded, query)| fold(recorded) == fold(query))
+            }
+            Self::Name(name) => recorded
+                .rsplit(['/', '\\'])
+                .next()
+                .is_some_and(|base| base.eq_ignore_ascii_case(name)),
+        }
     }
 }
 
@@ -2657,6 +2685,7 @@ impl SymbolStore {
     pub fn source_addresses(&self, dtb: Dtb, file: &str, line: u32) -> Vec<VirtAddr> {
         let mut addresses = Vec::new();
         let mappings = self.source_paths.read();
+        let query = SourceFileQuery::new(file);
         for module in self.modules.iter() {
             if !self.module_in_scope(&module, dtb) {
                 continue;
@@ -2671,7 +2700,7 @@ impl SymbolStore {
                         if entry.location.line != line {
                             return false;
                         }
-                        if source_file_matches(&entry.location.file, file) {
+                        if query.matches(&entry.location.file) {
                             return true;
                         }
                         remap_source_file(&entry.location.file, &mappings)

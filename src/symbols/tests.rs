@@ -439,12 +439,11 @@ fn definition_range_excludes_gaps() {
 
 #[test]
 fn source_file_matching_supports_windows_paths_and_basenames() {
-    assert!(source_file_matches(
-        r"C:\agent\src\private.c",
-        r"c:\AGENT\src\PRIVATE.c"
-    ));
-    assert!(source_file_matches(r"C:\agent\src\private.c", "PRIVATE.c"));
-    assert!(!source_file_matches(r"C:\agent\src\private.c", "other.c"));
+    let recorded = r"C:\agent\src\private.c";
+    assert!(SourceFileQuery::new(r"c:\AGENT\src\PRIVATE.c").matches(recorded));
+    assert!(SourceFileQuery::new("c:/agent/SRC/private.c").matches(recorded));
+    assert!(SourceFileQuery::new("PRIVATE.c").matches(recorded));
+    assert!(!SourceFileQuery::new("other.c").matches(recorded));
 }
 
 #[test]
