@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 #[cfg(feature = "python-embed")]
 use pyo3::types::PyList;
 use pyo3::types::{PyDict, PyModule, PyString, PyTuple};
@@ -95,27 +96,30 @@ fn register_command(
 /// `ntoseye` script, the package is the installed one. An embedding binary
 /// installs its own copy over any wheel on the interpreter's `sys.path`, so a
 /// script always sees the SDK of the REPL it runs in.
+///
+/// Runs at most once per process, whichever thread gets there first; the
+/// others wait. Running the package's Python can switch threads, so a
+/// check-then-install would let a second thread replace a half-installed
+/// package, leaving two `ntoseye` modules with distinct exception classes.
 fn install_package(py: Python<'_>) -> PyResult<()> {
-    let modules = py.import("sys")?.getattr("modules")?;
-    if !modules.contains("ntoseye._repl_host")? {
-        let host = PyModule::new(py, "ntoseye._repl_host")?;
-        host.add_function(wrap_pyfunction!(register_command, &host)?)?;
-        modules.set_item("ntoseye._repl_host", &host)?;
-    }
-    #[cfg(feature = "python-embed")]
-    embed_package(py, &modules)?;
-    Ok(())
+    static INSTALLED: PyOnceLock<()> = PyOnceLock::new();
+    INSTALLED
+        .get_or_try_init(py, || {
+            let modules = py.import("sys")?.getattr("modules")?;
+            let host = PyModule::new(py, "ntoseye._repl_host")?;
+            host.add_function(wrap_pyfunction!(register_command, &host)?)?;
+            modules.set_item("ntoseye._repl_host", &host)?;
+            #[cfg(feature = "python-embed")]
+            embed_package(py, &modules)?;
+            Ok::<_, PyErr>(())
+        })
+        .map(|_| ())
 }
 
 /// Install the extension module as `ntoseye._ntoseye` and the package's
 /// Python sources over it.
 #[cfg(feature = "python-embed")]
 fn embed_package(py: Python<'_>, modules: &Bound<'_, PyAny>) -> PyResult<()> {
-    // `ntoseye.repl` is registered last, once everything under it is in
-    // place, so a script never sees a half-installed package.
-    if modules.contains("ntoseye.repl")? {
-        return Ok(());
-    }
     let native = wrap_pymodule!(_ntoseye)(py);
     modules.set_item("ntoseye._ntoseye", native)?;
     let package = PyModule::new(py, "ntoseye")?;
