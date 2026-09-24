@@ -10,6 +10,7 @@ use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, MAX_SEARCH_LEN, err, raise, view_dict, view_record, view_records};
 use crate::backend::MemoryOps;
 use crate::layout::utf16le_lossy;
+use crate::memory::pattern_offsets;
 use crate::target::MemorySearchMatch as CoreMemorySearchMatch;
 use crate::target::mm::{
     AddressModule as CoreAddressModule, MemoryRegionInfo, VadProtection, VadType,
@@ -115,13 +116,6 @@ fn check_search_len(length: usize) -> PyResult<()> {
         )));
     }
     Ok(())
-}
-
-fn matching_offsets<'a>(bytes: &'a [u8], pattern: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
-    bytes
-        .windows(pattern.len())
-        .enumerate()
-        .filter_map(move |(offset, window)| (window == pattern).then_some(offset))
 }
 
 #[pymethods]
@@ -261,14 +255,14 @@ impl Memory {
                     .target
                     .read_physical(start, &mut bytes)
                     .map_err(err)?;
-                Ok(matching_offsets(&bytes, pattern)
+                Ok(pattern_offsets(&bytes, pattern)
                     .map(|offset| MemorySearchMatch::physical(start, offset))
                     .collect())
             } else {
                 session
                     .read_masked(VirtAddr(start), &mut bytes)
                     .map_err(err)?;
-                let hits = matching_offsets(&bytes, pattern)
+                let hits = pattern_offsets(&bytes, pattern)
                     .map(|offset| start.wrapping_add(offset as u64))
                     .collect::<Vec<_>>();
                 session

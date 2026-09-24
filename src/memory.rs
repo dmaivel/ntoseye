@@ -48,6 +48,18 @@ pub fn read_page_chunks(
     running.map(|()| (data, valid))
 }
 
+/// Offsets of every occurrence of `pattern` in `haystack`, overlapping ones
+/// included. `pattern` must not be empty.
+pub fn pattern_offsets<'a>(
+    haystack: &'a [u8],
+    pattern: &'a [u8],
+) -> impl Iterator<Item = usize> + 'a {
+    haystack
+        .windows(pattern.len())
+        .enumerate()
+        .filter_map(move |(offset, window)| (window == pattern).then_some(offset))
+}
+
 pub const PAGE_SHIFT: u32 = 12;
 pub const PTE_SHIFT: u8 = 12;
 pub const PDE_SHIFT: u8 = 21;

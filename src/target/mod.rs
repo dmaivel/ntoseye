@@ -34,7 +34,7 @@ use crate::{
         read_pe_image,
     },
     layout::{StructRef, TypeInfo, Types},
-    memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
+    memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE, pattern_offsets},
     phys::PhysMem,
     symbols::{
         LocalVariableLocation, ProcedureLocal, SourceLineExtent, SourceLocation, SymbolCandidate,
@@ -1264,16 +1264,14 @@ impl Target {
 
     /// Search `length` bytes from `start` in the current address space for the
     /// byte `pattern`, returning the addresses of all (overlapping) matches.
-    /// Shared by the SDK and MCP `search`.
     pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<Vec<u64>> {
         if pattern.is_empty() || pattern.len() > length {
             return Ok(Vec::new());
         }
         let mut buf = vec![0u8; length];
         self.context_memory().read_bytes(start, &mut buf)?;
-        Ok((0..=buf.len() - pattern.len())
-            .filter(|&i| &buf[i..i + pattern.len()] == pattern)
-            .map(|i| start.0.wrapping_add(i as u64))
+        Ok(pattern_offsets(&buf, pattern)
+            .map(|offset| start.0.wrapping_add(offset as u64))
             .collect())
     }
 
