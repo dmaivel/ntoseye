@@ -225,16 +225,22 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
                 ui::addr(frame.lr),
                 ui::addr(frame.sp)
             );
-            outln!("  pc  {}   cpsr {:#x}", ui::addr(frame.pc), frame.cpsr);
+            let hex =
+                |value: Option<u64>| value.map_or_else(|| "-".to_string(), |v| format!("{v:#x}"));
+            outln!("  pc  {}   cpsr {}", ui::addr(frame.pc), hex(frame.cpsr));
             outln!(
-                "  esr {:#x}  fault address {}  irql {}  previous mode {}",
-                frame.esr,
-                ui::addr(frame.fault_address),
-                frame.previous_irql,
-                if frame.previous_mode == 0 {
-                    "kernel"
-                } else {
-                    "user"
+                "  esr {}  fault address {}  irql {}  previous mode {}",
+                hex(frame.esr),
+                frame
+                    .fault_address
+                    .map_or_else(|| "-".to_string(), ui::addr),
+                frame
+                    .previous_irql
+                    .map_or_else(|| "-".to_string(), |irql| irql.to_string()),
+                match frame.previous_mode {
+                    Some(0) => "kernel",
+                    Some(_) => "user",
+                    None => "-",
                 }
             );
             for (name, values) in [
@@ -246,7 +252,7 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
                 let values = values
                     .iter()
                     .enumerate()
-                    .map(|(index, value)| format!("{name}{index} {value:#x}"))
+                    .map(|(index, value)| format!("{name}{index} {}", hex(*value)))
                     .collect::<Vec<_>>();
                 outln!("  {}", values.join("   "));
             }

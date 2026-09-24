@@ -617,29 +617,26 @@ fn ktrap_frame_registers(frame: &KtrapFrame) -> View {
                 ("lr", View::Hex(frame.lr)),
                 ("sp", View::Hex(frame.sp)),
                 ("pc", View::Hex(frame.pc)),
-                ("cpsr", View::Hex(frame.cpsr)),
-                ("esr", View::Hex(frame.esr)),
-                ("fault_address", View::Hex(frame.fault_address)),
-                ("previous_mode", View::Num(frame.previous_mode as u64)),
-                ("previous_irql", View::Num(frame.previous_irql as u64)),
+                ("cpsr", View::OptHex(frame.cpsr)),
+                ("esr", View::OptHex(frame.esr)),
+                ("fault_address", View::OptHex(frame.fault_address)),
+                (
+                    "previous_mode",
+                    View::OptNum(frame.previous_mode.map(u64::from)),
+                ),
+                (
+                    "previous_irql",
+                    View::OptNum(frame.previous_irql.map(u64::from)),
+                ),
             ]);
+            let registers = |values: &[Option<u64>]| {
+                View::List(values.iter().copied().map(View::OptHex).collect())
+            };
             fields.extend([
-                (
-                    "bcr",
-                    View::List(frame.bcr.iter().copied().map(View::Hex).collect()),
-                ),
-                (
-                    "bvr",
-                    View::List(frame.bvr.iter().copied().map(View::Hex).collect()),
-                ),
-                (
-                    "wcr",
-                    View::List(frame.wcr.iter().copied().map(View::Hex).collect()),
-                ),
-                (
-                    "wvr",
-                    View::List(frame.wvr.iter().copied().map(View::Hex).collect()),
-                ),
+                ("bcr", registers(&frame.bcr)),
+                ("bvr", registers(&frame.bvr)),
+                ("wcr", registers(&frame.wcr)),
+                ("wvr", registers(&frame.wvr)),
             ]);
             View::Object(fields)
         }

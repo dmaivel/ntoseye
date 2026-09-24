@@ -17,8 +17,8 @@ pub const KSWITCH_FRAME_TYPE: &str = "_KSWITCH_FRAME";
 
 /// A decoded ARM64 `_KTRAP_FRAME` as described by the target PDB. ARM64 saves
 /// X0-X18 in the trap frame and keeps the control/debug state alongside the
-/// return context. Fields absent from a particular build remain unavailable to
-/// callers rather than being filled from a guessed fixed offset.
+/// return context. Optional fields absent from a particular build are `None`
+/// rather than being filled from a guessed fixed offset.
 #[derive(Clone, Debug)]
 pub struct Arm64TrapFrame {
     pub x: [u64; 19],
@@ -26,15 +26,15 @@ pub struct Arm64TrapFrame {
     pub fp: u64,
     pub pc: u64,
     pub sp: u64,
-    pub cpsr: u64,
-    pub esr: u64,
-    pub fault_address: u64,
-    pub bcr: [u64; 8],
-    pub bvr: [u64; 8],
-    pub wcr: [u64; 2],
-    pub wvr: [u64; 2],
-    pub previous_mode: u8,
-    pub previous_irql: u8,
+    pub cpsr: Option<u64>,
+    pub esr: Option<u64>,
+    pub fault_address: Option<u64>,
+    pub bcr: [Option<u64>; 8],
+    pub bvr: [Option<u64>; 8],
+    pub wcr: [Option<u64>; 2],
+    pub wvr: [Option<u64>; 2],
+    pub previous_mode: Option<u8>,
+    pub previous_irql: Option<u8>,
 }
 
 /// The x64 state saved by a `_KTRAP_FRAME`. The nonvolatile r12-r15 live in
@@ -165,31 +165,19 @@ impl KtrapFrame {
         for (index, value) in x.iter_mut().enumerate() {
             *value = array_field("X", index, 8)?;
         }
-        let mut bcr = [0u64; 8];
-        for (index, value) in bcr.iter_mut().enumerate() {
-            *value = array_field("Bcr", index, 4).unwrap_or(0);
-        }
-        let mut bvr = [0u64; 8];
-        for (index, value) in bvr.iter_mut().enumerate() {
-            *value = array_field("Bvr", index, 8).unwrap_or(0);
-        }
-        let mut wcr = [0u64; 2];
-        for (index, value) in wcr.iter_mut().enumerate() {
-            *value = array_field("Wcr", index, 4).unwrap_or(0);
-        }
-        let mut wvr = [0u64; 2];
-        for (index, value) in wvr.iter_mut().enumerate() {
-            *value = array_field("Wvr", index, 8).unwrap_or(0);
-        }
+        let bcr = std::array::from_fn(|index| array_field("Bcr", index, 4).ok());
+        let bvr = std::array::from_fn(|index| array_field("Bvr", index, 8).ok());
+        let wcr = std::array::from_fn(|index| array_field("Wcr", index, 4).ok());
+        let wvr = std::array::from_fn(|index| array_field("Wvr", index, 8).ok());
         let pc = field(&["Pc"])?;
         let sp = field(&["Sp"])?;
         let fp = field(&["Fp"])?;
         let lr = field(&["Lr"])?;
-        let cpsr = field(&["Spsr", "Cpsr"]).unwrap_or(0);
-        let esr = field(&["Esr"]).unwrap_or(0);
-        let fault_address = field(&["FaultAddress", "Far"]).unwrap_or(0);
-        let previous_mode = field(&["PreviousMode"]).unwrap_or(0) as u8;
-        let previous_irql = field(&["PreviousIrql"]).unwrap_or(0) as u8;
+        let cpsr = field(&["Spsr", "Cpsr"]).ok();
+        let esr = field(&["Esr"]).ok();
+        let fault_address = field(&["FaultAddress", "Far"]).ok();
+        let previous_mode = field(&["PreviousMode"]).ok().map(|mode| mode as u8);
+        let previous_irql = field(&["PreviousIrql"]).ok().map(|irql| irql as u8);
         Ok(Self {
             address,
             data: KtrapFrameData::Arm64(Box::new(Arm64TrapFrame {
@@ -271,7 +259,7 @@ impl From<&KtrapFrame> for SavedThreadRegisters {
                         x,
                         sp: Some(frame.sp),
                         pc: Some(frame.pc),
-                        cpsr: Some(frame.cpsr),
+                        cpsr: frame.cpsr,
                         fp: Some(frame.fp),
                         lr: Some(frame.lr),
                     }),
@@ -514,9 +502,9 @@ mod tests {
         assert_eq!(arm.fp, 0x7788);
         assert_eq!(arm.pc, 0xffff_0000_0000_1000);
         assert_eq!(arm.sp, 0xffff_0000_1234_5000);
-        assert_eq!(arm.cpsr, 0x6000_03c5);
-        assert_eq!(arm.esr, 0x1234_5678);
-        assert_eq!(arm.fault_address, 0x4000);
+        assert_eq!(arm.cpsr, Some(0x6000_03c5));
+        assert_eq!(arm.esr, Some(0x1234_5678));
+        assert_eq!(arm.fault_address, Some(0x4000));
         assert_eq!(frame.instruction_pointer(), arm.pc);
         assert_eq!(frame.stack_pointer(), arm.sp);
 
@@ -527,7 +515,7 @@ mod tests {
         assert_eq!(registers.get("x18"), Some(arm.x[18]));
         assert_eq!(registers.get("fp"), Some(arm.fp));
         assert_eq!(registers.get("lr"), Some(arm.lr));
-        assert_eq!(registers.get("cpsr"), Some(arm.cpsr));
+        assert_eq!(registers.get("cpsr"), arm.cpsr);
     }
 
     #[test]
@@ -539,6 +527,50 @@ mod tests {
             KtrapFrame::decode(&layout, 0, &buf),
             Err(Error::FieldNotFound(name)) if name == "Rip"
         ));
+    }
+
+    #[test]
+    fn absent_arm64_optional_fields_are_unavailable_not_zero() {
+        let mut fields = HashMap::new();
+        for (name, offset, size) in [
+            ("X", 0x00, 19 * 8),
+            ("Lr", 0x98, 8),
+            ("Fp", 0xa0, 8),
+            ("Pc", 0xa8, 8),
+            ("Sp", 0xb0, 8),
+            ("Bcr", 0xb8, 8 * 4),
+        ] {
+            fields.insert(
+                name.to_string(),
+                FieldInfo {
+                    offset,
+                    size,
+                    type_data: ParsedType::Primitive("test".into()),
+                },
+            );
+        }
+        // The frame buffer ends before the last four Bcr slots.
+        let layout = TypeInfo {
+            name: KTRAP_FRAME_TYPE.to_string(),
+            pointer_size: 8,
+            size: 0xc8,
+            fields,
+        };
+        let mut buf = vec![0u8; layout.size];
+        buf[0xb8..0xbc].copy_from_slice(&0x1e5u32.to_le_bytes());
+
+        let frame = KtrapFrame::decode(&layout, 0, &buf).unwrap();
+        let arm = frame.arm64().unwrap();
+        assert_eq!(arm.cpsr, None);
+        assert_eq!(arm.esr, None);
+        assert_eq!(arm.fault_address, None);
+        assert_eq!(arm.previous_mode, None);
+        assert_eq!(arm.previous_irql, None);
+        assert_eq!(arm.bcr[0], Some(0x1e5));
+        assert_eq!(arm.bcr[3], Some(0));
+        assert_eq!(arm.bcr[4], None);
+        assert_eq!(arm.wvr, [None; 2]);
+        assert_eq!(SavedThreadRegisters::from(&frame).get("cpsr"), None);
     }
 
     #[test]
