@@ -108,8 +108,9 @@ pub fn read_bugcheck_data<M: MemoryOps<VirtAddr>>(
     Ok(data)
 }
 
-pub fn module_filename(name: &str) -> String {
-    name.rsplit(['\\', '/']).next().unwrap_or(name).to_string()
+/// The file name at the end of a Windows or POSIX module path.
+pub fn module_filename(name: &str) -> &str {
+    name.rsplit(['\\', '/']).next().unwrap_or(name)
 }
 
 pub fn driver_filename_for_address(
@@ -122,13 +123,13 @@ pub fn driver_filename_for_address(
         .iter()
         .chain(trace.process_modules.iter())
         .find(|module| module.contains_address(VirtAddr(address)))
-        .map(|module| module_filename(&module.name))
+        .map(|module| module_filename(&module.name).to_owned())
         .filter(|name| name.to_ascii_lowercase().ends_with(".sys"))
         .or_else(|| {
             debugger
                 .symbols
                 .find_module_for_address(trace.kernel_dtb, VirtAddr(address))
-                .map(|module| module_filename(&module.name))
+                .map(|module| module_filename(&module.name).to_owned())
                 .filter(|name| name.to_ascii_lowercase().ends_with(".sys"))
         })
 }

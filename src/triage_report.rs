@@ -2,7 +2,7 @@
 
 use crate::backend::MemoryOps;
 use crate::bugchecks::{
-    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
+    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck, module_filename,
 };
 use crate::bytes::{read_u16, read_u32};
 use crate::dmp::{
@@ -606,7 +606,7 @@ fn add_culprit_evidence(
     let module = module_filename(module);
     let candidate = candidates
         .iter_mut()
-        .find(|candidate| names_match(&candidate.module, &module));
+        .find(|candidate| names_match(&candidate.module, module));
     if let Some(candidate) = candidate {
         candidate.confidence = candidate.confidence.max(confidence);
         if !candidate
@@ -618,7 +618,7 @@ fn add_culprit_evidence(
         }
     } else {
         candidates.push(CulpritCandidate {
-            module,
+            module: module.to_owned(),
             confidence,
             evidence: vec![evidence],
         });
@@ -897,10 +897,6 @@ fn evidence_module_for_address(report: &TriageReport, address: u64) -> Option<&s
         })
 }
 
-fn module_filename(name: &str) -> String {
-    name.rsplit(['\\', '/']).next().unwrap_or(name).to_string()
-}
-
 fn canonical_module_component(name: &str) -> String {
     let filename = module_filename(name);
     filename
@@ -909,7 +905,7 @@ fn canonical_module_component(name: &str) -> String {
             extension.eq_ignore_ascii_case("sys") || extension.eq_ignore_ascii_case("exe")
         })
         .map(|(stem, _)| stem)
-        .unwrap_or(&filename)
+        .unwrap_or(filename)
         .to_ascii_lowercase()
 }
 
@@ -963,7 +959,7 @@ fn module_name_matches(recorded: &str, module: &ModuleInfo) -> bool {
 
 fn names_match(left: &str, right: &str) -> bool {
     fn basename(name: &str) -> &str {
-        let name = name.rsplit(['\\', '/']).next().unwrap_or(name);
+        let name = module_filename(name);
         name.get(..name.len().saturating_sub(4))
             .filter(|_| {
                 name.get(name.len().saturating_sub(4)..)
