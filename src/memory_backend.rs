@@ -43,6 +43,7 @@ impl DebugBackend for MemoryBackend {
             BackendCapability::unsupported(DebugCapability::ThreadSelection),
             BackendCapability::unsupported(DebugCapability::KernelBreakpoints),
             BackendCapability::unsupported(DebugCapability::UserModeBreakpoints),
+            BackendCapability::unsupported(DebugCapability::Watchpoints),
             BackendCapability::unsupported(DebugCapability::TargetReloadDetection),
             BackendCapability::unsupported(DebugCapability::KernelBaseHint),
             BackendCapability::unsupported(DebugCapability::BugcheckDetection),
