@@ -4,6 +4,15 @@ struct MemoryRegion {
     length: u64,
 }
 
+impl MemoryRegion {
+    /// Host address of the `len` bytes at `offset` into the region, if they
+    /// all lie inside it.
+    fn host_range(&self, offset: u64, len: usize) -> Option<u64> {
+        let hva = self.start.checked_add(offset)?;
+        (hva.checked_add(len as u64)? <= self.end).then_some(hva)
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use nix::sys::uio::{RemoteIoVec, process_vm_readv, process_vm_writev};
@@ -271,16 +280,9 @@ mod platform {
             }
         }
         fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
-            let hva = gpa_to_offset(self.layout, addr)
-                .and_then(|offset| self.memory.start.checked_add(offset))
-                .ok_or(Error::BadPhysicalAddress(addr))?;
-            let end = hva
-                .checked_add(len as u64)
-                .ok_or(Error::BadPhysicalAddress(addr))?;
-            if end > self.memory.end {
-                return Err(Error::BadPhysicalAddress(addr));
-            }
-            Ok(hva)
+            gpa_to_offset(self.layout, addr)
+                .and_then(|offset| self.memory.host_range(offset, len))
+                .ok_or(Error::BadPhysicalAddress(addr))
         }
     }
 
@@ -651,18 +653,9 @@ mod platform {
         }
 
         fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
-            let hva = self
-                .memory
-                .start
-                .checked_add(self.gpa_offset(addr)?)
-                .ok_or(Error::BadPhysicalAddress(addr))?;
-            let end = hva
-                .checked_add(len as u64)
-                .ok_or(Error::BadPhysicalAddress(addr))?;
-            if end > self.memory.end {
-                return Err(Error::BadPhysicalAddress(addr));
-            }
-            Ok(hva)
+            self.memory
+                .host_range(self.gpa_offset(addr)?, len)
+                .ok_or(Error::BadPhysicalAddress(addr))
         }
 
         fn read_bytes_at(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
