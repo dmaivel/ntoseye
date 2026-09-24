@@ -160,8 +160,42 @@ pub enum ApcSelector {
     Thread(VirtAddr),
     /// Select all threads owned by a PID or EPROCESS value.
     Process(u64),
+    /// Resolve a numeric target as a thread first, then a PID/EPROCESS.
+    Number(u64),
     /// Enumerate every thread in the bounded process/thread walk.
     All,
+}
+
+fn names_thread(thread: &ThreadInfo, value: u64) -> bool {
+    thread.ethread.0 == value || thread.kthread.0 == value || thread.tid == Some(value)
+}
+
+fn names_process(thread: &ThreadInfo, value: u64) -> bool {
+    thread.pid == Some(value) || thread.eprocess.is_some_and(|address| address.0 == value)
+}
+
+/// The threads `selector` names out of one thread walk, with a `Number`
+/// resolved to the thread it names or, failing that, the process.
+fn select_threads(
+    selector: ApcSelector,
+    threads: Vec<ThreadInfo>,
+) -> (ApcSelector, Vec<ThreadInfo>) {
+    let selector = match selector {
+        ApcSelector::Number(value) if threads.iter().any(|thread| names_thread(thread, value)) => {
+            ApcSelector::Thread(VirtAddr(value))
+        }
+        ApcSelector::Number(value) => ApcSelector::Process(value),
+        selector => selector,
+    };
+    let selected = threads
+        .into_iter()
+        .filter(|thread| match selector {
+            ApcSelector::Thread(value) => names_thread(thread, value.0),
+            ApcSelector::Process(value) => names_process(thread, value),
+            _ => true,
+        })
+        .collect();
+    (selector, selected)
 }
 
 #[derive(Debug, Clone)]
@@ -1087,7 +1121,7 @@ impl Session {
         Ok(detail)
     }
 
-    fn select_apc_threads(&self, selector: ApcSelector) -> Result<Vec<ThreadInfo>> {
+    fn select_apc_threads(&self, selector: ApcSelector) -> Result<(ApcSelector, Vec<ThreadInfo>)> {
         match selector {
             ApcSelector::CurrentThread => {
                 let thread = if let Some(thread) = self.target.windows_thread_selection.as_ref() {
@@ -1100,28 +1134,9 @@ impl Session {
                     self.target
                         .current_windows_thread_for_processor(processor)?
                 };
-                Ok(vec![thread])
+                Ok((selector, vec![thread]))
             }
-            ApcSelector::All => self.target.enumerate_threads(),
-            ApcSelector::Thread(value) => Ok(self
-                .target
-                .enumerate_threads()?
-                .into_iter()
-                .filter(|thread| {
-                    thread.ethread == value
-                        || thread.kthread == value
-                        || thread.tid == Some(value.0)
-                })
-                .collect()),
-            ApcSelector::Process(value) => Ok(self
-                .target
-                .enumerate_threads()?
-                .into_iter()
-                .filter(|thread| {
-                    thread.pid == Some(value)
-                        || thread.eprocess.is_some_and(|address| address.0 == value)
-                })
-                .collect()),
+            selector => Ok(select_threads(selector, self.target.enumerate_threads()?)),
         }
     }
 
@@ -1151,7 +1166,7 @@ impl Session {
     /// preserve their per-list termination; layout failure is retained in
     /// `layout_error` while thread metadata still remains usable.
     pub fn inspect_apcs(&self, selector: ApcSelector) -> Result<ApcListDetail> {
-        let threads = self.select_apc_threads(selector)?;
+        let (selector, threads) = self.select_apc_threads(selector)?;
         let layout = self.target.apc_layout();
         let layout_error = layout.as_ref().err().map(ToString::to_string);
         let trace = resolve_thread_trace_context(&self.target, self.target.kernel_dtb());
@@ -1584,5 +1599,53 @@ mod tests {
                 .to_string()
                 .contains(&format!("processor index {MAX_PROCESSORS}"))
         );
+    }
+
+    fn selector_test_thread(ethread: u64, tid: u64, pid: u64) -> ThreadInfo {
+        ThreadInfo {
+            ethread: VirtAddr(ethread),
+            kthread: VirtAddr(ethread + 0x100),
+            tid: Some(tid),
+            pid: Some(pid),
+            process_name: None,
+            eprocess: Some(VirtAddr(pid + 0x1000)),
+            state: None,
+            wait_reason: None,
+            priority: None,
+            base_priority: None,
+            wait_irql: None,
+            kernel_stack_resident: None,
+            start_address: None,
+            win32_start_address: None,
+            teb: None,
+            kernel_stack: None,
+            stack_base: None,
+            stack_limit: None,
+            trap_frame: None,
+            pending_irps: None,
+        }
+    }
+
+    #[test]
+    fn numeric_apc_selection_prefers_a_thread_over_a_process() {
+        let thread = selector_test_thread(1, 7, 50);
+        let process = selector_test_thread(2, 8, 7);
+        let ethreads = |selected: Vec<ThreadInfo>| {
+            selected
+                .iter()
+                .map(|thread| thread.ethread)
+                .collect::<Vec<_>>()
+        };
+
+        let (selector, selected) = select_threads(
+            ApcSelector::Number(7),
+            vec![thread.clone(), process.clone()],
+        );
+        assert_eq!(selector, ApcSelector::Thread(VirtAddr(7)));
+        assert_eq!(ethreads(selected), [VirtAddr(1)]);
+
+        let (selector, selected) = select_threads(ApcSelector::Number(50), vec![thread, process]);
+        assert_eq!(selector, ApcSelector::Process(50));
+        assert_eq!(ethreads(selected), [VirtAddr(1)]);
     }
 }

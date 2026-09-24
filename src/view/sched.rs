@@ -310,6 +310,10 @@ fn apc_selector(selector: ApcSelector) -> View {
             ("kind", View::Str("process".to_string())),
             ("value", View::Hex(value)),
         ]),
+        ApcSelector::Number(value) => View::Object(vec![
+            ("kind", View::Str("number".to_string())),
+            ("value", View::Hex(value)),
+        ]),
         ApcSelector::All => View::Str("all".to_string()),
     }
 }

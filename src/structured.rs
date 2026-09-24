@@ -579,10 +579,7 @@ impl Args<'_, '_> {
             _ => {}
         }
         if let Ok(value) = self.eval(text) {
-            if self.state.ctx.find_windows_thread(value.0).is_ok() {
-                return Ok(ApcSelector::Thread(value));
-            }
-            return Ok(ApcSelector::Process(value.0));
+            return Ok(ApcSelector::Number(value.0));
         }
         let processes = self.target().matching_processes(Some(text))?;
         match processes.as_slice() {

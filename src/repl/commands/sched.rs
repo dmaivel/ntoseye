@@ -404,19 +404,7 @@ impl ReplState<'_> {
         let value =
             Expr::eval_with_radix(argument, &self.ctx.target, self.radix).map(|value| value.0);
         if let Ok(value) = value {
-            let threads = self.ctx.target.enumerate_threads().unwrap_or_default();
-            if threads.iter().any(|thread| {
-                thread.ethread.0 == value || thread.kthread.0 == value || thread.tid == Some(value)
-            }) {
-                return Ok(ApcSelector::Thread(VirtAddr(value)));
-            }
-            if threads.iter().any(|thread| {
-                thread.pid == Some(value)
-                    || thread.eprocess.is_some_and(|address| address.0 == value)
-            }) {
-                return Ok(ApcSelector::Process(value));
-            }
-            return Ok(ApcSelector::Process(value));
+            return Ok(ApcSelector::Number(value));
         }
         let needle = argument.to_ascii_lowercase();
         let processes = self.ctx.target.guest()?.enumerate_processes()?;
