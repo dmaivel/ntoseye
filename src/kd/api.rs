@@ -3,6 +3,7 @@
 
 use std::io::{Read, Write};
 
+use crate::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::dbg_backend::ContinueDisposition;
 use crate::error::{Error, Result};
 use crate::kd::{
@@ -11,7 +12,6 @@ use crate::kd::{
         PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
     },
     handle_debug_io, handle_file_io,
-    wire::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64},
 };
 
 pub const DBGKD_READ_VIRTUAL_MEMORY: u32 = 0x0000_3130;
@@ -41,11 +41,11 @@ pub const DBGKD_SET_CONTEXT_EX: u32 = 0x0000_3160;
 #[cfg(test)]
 pub mod test_wire {
     use super::{MANIPULATE_HEADER_SIZE, UNION_OFFSET};
+    use crate::bytes::{write_u16, write_u32};
     use crate::kd::framing::{
         INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE,
         SYNC_PACKET_ID, control_packet, data_packet,
     };
-    use crate::kd::wire::{write_u16, write_u32};
 
     /// The packet id the target sees on our first request of a session.
     pub fn first_outbound_id() -> u32 {

@@ -1,3 +1,4 @@
+use crate::bytes::{read_u16, read_u32, read_u64};
 #[cfg(test)]
 use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
 use crate::dmp::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
@@ -9,7 +10,6 @@ use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::kd::context;
 use crate::kd::context_arm64;
-use crate::kd::wire::{read_u16, read_u32, read_u64};
 use crate::layout::utf16le_nul_terminated;
 use crate::types::VirtAddr;
 use std::mem::{offset_of, size_of};

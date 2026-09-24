@@ -8,6 +8,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::transport::KdTransport;
+use crate::bytes::{read_u16, read_u32, read_u64};
 use crate::dbg_backend::DebugLog;
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
@@ -16,7 +17,6 @@ use crate::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
 };
 use crate::kd::trace_enabled;
-use crate::kd::wire::{read_u16, read_u32, read_u64};
 use crate::types::{Arch, VirtAddr};
 
 use super::{

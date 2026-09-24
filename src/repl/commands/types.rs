@@ -869,7 +869,7 @@ impl ReplState<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kd::wire::write_u64;
+    use crate::bytes::write_u64;
     use crate::output::capture;
     use crate::session::{Session, session_over_memory};
 

@@ -39,9 +39,9 @@ use std::io::{ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
+use crate::bytes::{read_u32, read_u64, write_u32, write_u64};
 use crate::error::{Error, Result};
 use crate::kd::framing::{KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_FILE_IO};
-use crate::kd::wire::{read_u32, read_u64, write_u32, write_u64};
 use crate::layout::utf16le_nul_terminated;
 
 use super::{

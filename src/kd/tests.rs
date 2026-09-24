@@ -327,8 +327,8 @@ fn a_stop_report_answers_for_the_trap_state_until_the_target_runs() {
     let mut backend = kd_backend_with_framing(host);
 
     let mut report = vec![0u8; AMD64_CONTROL_REPORT_SIZE];
-    wire::write_u64(&mut report, AMD64_CONTROL_DR6_OFFSET, 0xffff_0ff0 | 0x4000);
-    wire::write_u32(
+    bytes::write_u64(&mut report, AMD64_CONTROL_DR6_OFFSET, 0xffff_0ff0 | 0x4000);
+    bytes::write_u32(
         &mut report,
         AMD64_CONTROL_EFLAGS_OFFSET,
         (TF | 0x246) as u32,
@@ -626,16 +626,16 @@ fn context_debug_registers_update_special_registers() {
     update_special_debug_registers_from_context(&mut special, &ctx).unwrap();
 
     assert_eq!(
-        wire::read_u64(&special, KSPECIAL_REGISTERS_DR0_OFFSET),
+        bytes::read_u64(&special, KSPECIAL_REGISTERS_DR0_OFFSET),
         0xffff_f804_1234_5678
     );
-    assert_eq!(wire::read_u64(&special, KSPECIAL_REGISTERS_DR6_OFFSET), 3);
+    assert_eq!(bytes::read_u64(&special, KSPECIAL_REGISTERS_DR6_OFFSET), 3);
     assert_eq!(
-        wire::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET),
+        bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET),
         0xd0402
     );
     assert_eq!(
-        wire::read_u64(&special, KSPECIAL_REGISTERS_CR0_OFFSET),
+        bytes::read_u64(&special, KSPECIAL_REGISTERS_CR0_OFFSET),
         0xa5a5_a5a5_a5a5_a5a5,
         "non-debug special registers must remain untouched"
     );
@@ -654,23 +654,23 @@ fn arm64_context_debug_registers_update_special_registers() {
     update_arm64_debug_registers_from_context(&mut special, &ctx).unwrap();
 
     assert_eq!(
-        wire::read_u64(&special, ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET),
+        bytes::read_u64(&special, ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET),
         0x4000
     );
     assert_eq!(
-        wire::read_u32(&special, ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET),
+        bytes::read_u32(&special, ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET),
         0xe9e1
     );
     assert_eq!(
-        wire::read_u64(&special, ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET + 8),
+        bytes::read_u64(&special, ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET + 8),
         0x5000
     );
     assert_eq!(
-        wire::read_u32(&special, ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET + 4),
+        bytes::read_u32(&special, ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET + 4),
         0x0000_e9e1
     );
     assert_eq!(
-        wire::read_u64(&special, ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET),
+        bytes::read_u64(&special, ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET),
         0xa5a5_a5a5_a5a5_a5a5,
         "non-debug special registers must remain untouched"
     );
@@ -861,7 +861,7 @@ fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
         ));
         for chunk in guest_context.chunks(512) {
             let mut union = [0u8; 12];
-            wire::write_u32(&mut union, 8, chunk.len() as u32);
+            bytes::write_u32(&mut union, 8, chunk.len() as u32);
             replies.push(api::test_wire::build_reply(
                 api::DBGKD_SET_CONTEXT_EX,
                 0,
@@ -894,7 +894,7 @@ fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
         assert!(
             !sent
                 .windows(4)
-                .any(|word| wire::read_u32(word, 0) == api::DBGKD_SET_CONTEXT_EX),
+                .any(|word| bytes::read_u32(word, 0) == api::DBGKD_SET_CONTEXT_EX),
             "resume stepped the PC past an int3 it does not own (owned_by_us={owned_by_us})"
         );
         outcome.unwrap();
@@ -1152,7 +1152,7 @@ fn serve_breakpoints(
             };
 
             let api_number = u32::from_le_bytes(request[0..4].try_into().unwrap());
-            seen.push((api_number, wire::read_u64(&request, UNION)));
+            seen.push((api_number, bytes::read_u64(&request, UNION)));
 
             let (expected_api, status, handle) =
                 script.next().expect("unexpected breakpoint request");
@@ -1223,10 +1223,10 @@ fn a_refused_restore_keeps_a_site_that_still_holds_a_breakpoint() {
     let mut refused = api::test_wire::build_reply(api::DBGKD_RESTORE_BREAKPOINT, 0, &[], &[]);
     refused[8..12].copy_from_slice(&STATUS_UNSUCCESSFUL.to_le_bytes());
     let mut probe = vec![0u8; api::MANIPULATE_HEADER_SIZE];
-    wire::write_u32(&mut probe, 0, api::DBGKD_READ_VIRTUAL_MEMORY);
-    wire::write_u64(&mut probe, 16, ADDR);
-    wire::write_u32(&mut probe, 16 + 8, 1);
-    wire::write_u32(&mut probe, 16 + 12, 1);
+    bytes::write_u32(&mut probe, 0, api::DBGKD_READ_VIRTUAL_MEMORY);
+    bytes::write_u64(&mut probe, 16, ADDR);
+    bytes::write_u32(&mut probe, 16 + 8, 1);
+    bytes::write_u32(&mut probe, 16 + 12, 1);
     probe.push(0xcc);
 
     let (host, target) = UnixStream::pair().unwrap();
@@ -1319,9 +1319,9 @@ fn arm64_registers_survive_refused_control_space() {
     backend.exit_prepared = true;
 
     let mut ctx = vec![0u8; context_arm64::CONTEXT_SIZE];
-    wire::write_u64(&mut ctx, context_arm64::OFFSET_PC, 0xffff_f800_1234_5678);
-    wire::write_u64(&mut ctx, context_arm64::OFFSET_BVR0, 0xffff_f800_dead_0000);
-    wire::write_u32(&mut ctx, context_arm64::OFFSET_BCR0, 0x1e5);
+    bytes::write_u64(&mut ctx, context_arm64::OFFSET_PC, 0xffff_f800_1234_5678);
+    bytes::write_u64(&mut ctx, context_arm64::OFFSET_BVR0, 0xffff_f800_dead_0000);
+    bytes::write_u32(&mut ctx, context_arm64::OFFSET_BCR0, 0x1e5);
     let expected = ctx.clone();
 
     let worker = serve_manipulate(

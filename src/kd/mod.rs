@@ -13,6 +13,7 @@ use std::thread::spawn;
 use std::time::{Duration, Instant};
 
 use crate::backend::MemoryOps;
+use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent, TrapState,
@@ -77,7 +78,6 @@ mod file_io;
 pub use file_io::*;
 mod event_loop;
 pub use event_loop::*;
-pub mod wire;
 
 #[derive(Debug, Clone)]
 pub struct StateChange {
@@ -130,14 +130,14 @@ impl ControlReport {
     fn amd64_trap_state(&self) -> Option<TrapState> {
         let report = self.amd64()?;
         Some(TrapState {
-            eflags: u64::from(wire::read_u32(report, AMD64_CONTROL_EFLAGS_OFFSET)),
-            dr6: wire::read_u64(report, AMD64_CONTROL_DR6_OFFSET),
+            eflags: u64::from(bytes::read_u32(report, AMD64_CONTROL_EFLAGS_OFFSET)),
+            dr6: bytes::read_u64(report, AMD64_CONTROL_DR6_OFFSET),
         })
     }
 
     /// AMD64 DR7, which a continue must preserve.
     fn amd64_dr7(&self) -> Option<u64> {
-        Some(wire::read_u64(self.amd64()?, AMD64_CONTROL_DR7_OFFSET))
+        Some(bytes::read_u64(self.amd64()?, AMD64_CONTROL_DR7_OFFSET))
     }
 }
 
@@ -1503,15 +1503,15 @@ impl KdBackend {
     fn read_dr_slot_state(&mut self, slot: u8) -> Result<DebugRegisterSlotState> {
         let special = self.read_special_registers_uncached(self.current_processor)?;
         Ok(DebugRegisterSlotState {
-            address: wire::read_u64(&special, Self::kspecial_dr_offset(slot)),
-            dr7: wire::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET),
+            address: bytes::read_u64(&special, Self::kspecial_dr_offset(slot)),
+            dr7: bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET),
         })
     }
 
     fn apply_dr_restore(&mut self, slot: u8, state: DebugRegisterSlotState) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        wire::write_u64(&mut special, Self::kspecial_dr_offset(slot), state.address);
-        wire::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, state.dr7);
+        bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), state.address);
+        bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, state.dr7);
         self.write_special_registers(special)
     }
 
@@ -1519,16 +1519,16 @@ impl KdBackend {
         let special = self.read_special_registers_uncached(self.current_processor)?;
         let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
         Ok(Arm64DebugRegisterSlotState {
-            address: wire::read_u64(&special, address_offset),
-            control: wire::read_u32(&special, control_offset),
+            address: bytes::read_u64(&special, address_offset),
+            control: bytes::read_u32(&special, control_offset),
         })
     }
 
     fn apply_arm64_restore(&mut self, slot: u8, state: Arm64DebugRegisterSlotState) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
         let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
-        wire::write_u64(&mut special, address_offset, state.address);
-        wire::write_u32(&mut special, control_offset, state.control);
+        bytes::write_u64(&mut special, address_offset, state.address);
+        bytes::write_u32(&mut special, control_offset, state.control);
         self.write_special_registers(special)
     }
 
@@ -1624,11 +1624,11 @@ impl KdBackend {
 
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
         if matches!(access, HwBreakpointAccess::Execute) {
-            wire::write_u64(&mut special, address_offset, addr);
-            wire::write_u32(&mut special, control_offset, hwbp::arm64_bcr_value(addr));
+            bytes::write_u64(&mut special, address_offset, addr);
+            bytes::write_u32(&mut special, control_offset, hwbp::arm64_bcr_value(addr));
         } else {
-            wire::write_u64(&mut special, address_offset, hwbp::arm64_wvr_address(addr));
-            wire::write_u32(
+            bytes::write_u64(&mut special, address_offset, hwbp::arm64_wvr_address(addr));
+            bytes::write_u32(
                 &mut special,
                 control_offset,
                 hwbp::arm64_wcr_value(addr, access, len),
@@ -1640,8 +1640,8 @@ impl KdBackend {
     fn apply_arm64_clear(&mut self, slot: u8) -> Result<()> {
         let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        wire::write_u64(&mut special, address_offset, 0);
-        wire::write_u32(&mut special, control_offset, 0);
+        bytes::write_u64(&mut special, address_offset, 0);
+        bytes::write_u32(&mut special, control_offset, 0);
         self.write_special_registers(special)
     }
 
@@ -1659,10 +1659,10 @@ impl KdBackend {
         len: u8,
     ) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        wire::write_u64(&mut special, Self::kspecial_dr_offset(slot), addr);
-        let dr7 = wire::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
+        bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), addr);
+        let dr7 = bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
         let dr7 = hwbp::dr7_set_slot(dr7, slot, access, len);
-        wire::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
+        bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
         self.write_special_registers(special)
     }
 
@@ -1670,10 +1670,10 @@ impl KdBackend {
     /// address register.
     fn apply_dr_clear(&mut self, slot: u8) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        let dr7 = wire::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
+        let dr7 = bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
         let dr7 = hwbp::dr7_clear_slot(dr7, slot);
-        wire::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
-        wire::write_u64(&mut special, Self::kspecial_dr_offset(slot), 0);
+        bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
+        bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), 0);
         self.write_special_registers(special)
     }
 
@@ -1827,7 +1827,7 @@ impl KdBackend {
                 let dr7 = match self.registers.special(processor) {
                     // A `ba` installed during this halt wrote the cache; it
                     // is newer than the report.
-                    Some(special) => wire::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET),
+                    Some(special) => bytes::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET),
                     None => reported_dr7.expect("read the registers when no report offered DR7"),
                 };
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
@@ -2012,7 +2012,7 @@ impl KdBackend {
         let register_value = match self.arch {
             Arch::Amd64 => {
                 let special = self.read_special_registers_uncached(processor)?;
-                wire::read_u64(&special, KSPECIAL_REGISTERS_CR3_OFFSET)
+                bytes::read_u64(&special, KSPECIAL_REGISTERS_CR3_OFFSET)
             }
             Arch::Arm64 => {
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
@@ -2262,7 +2262,7 @@ impl KdBackend {
         let Some(special) = self.registers.special(processor) else {
             return false;
         };
-        let cr3 = wire::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
+        let cr3 = bytes::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
         let mask = self.arch.dtb_page_mask();
         cr3 & mask == root & mask
     }
@@ -2475,7 +2475,7 @@ impl DebugBackend for KdBackend {
                 }
             });
             if let Some(efer) = efer {
-                wire::write_u64(&mut ctx, context::OFFSET_EFER, efer);
+                bytes::write_u64(&mut ctx, context::OFFSET_EFER, efer);
             }
         }
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());

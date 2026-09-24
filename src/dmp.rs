@@ -6,11 +6,10 @@ use std::time::Duration;
 use memmap2::Mmap;
 use zerocopy::FromBytes;
 
-use crate::kd::wire::{
-    read_u16, read_u32, read_u64, read_u64 as buffer_u64, write_u16, write_u32, write_u64,
-};
-
 use crate::backend::MemoryOps;
+use crate::bytes::{
+    get_u32, get_u64, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
+};
 use crate::cpu_state;
 use crate::dbg_backend::{
     BackendCapability, DebugBackend, DebugCapability, StopEvent,
@@ -888,13 +887,13 @@ impl DmpBackend {
 
         let matches_header = |regs: &Vec<u8>| {
             if self.header_context.is_arm64() {
-                buffer_u64(regs, context_arm64::OFFSET_PC)
+                read_u64(regs, context_arm64::OFFSET_PC)
                     == self.header_context.instruction_pointer()
-                    && buffer_u64(regs, context_arm64::OFFSET_SP)
+                    && read_u64(regs, context_arm64::OFFSET_SP)
                         == self.header_context.stack_pointer()
             } else {
-                buffer_u64(regs, context::OFFSET_RIP) == self.header_context.instruction_pointer()
-                    && buffer_u64(regs, context::OFFSET_RSP) == self.header_context.stack_pointer()
+                read_u64(regs, context::OFFSET_RIP) == self.header_context.instruction_pointer()
+                    && read_u64(regs, context::OFFSET_RSP) == self.header_context.stack_pointer()
             }
         };
         match self.per_cpu_registers.iter().position(matches_header) {
@@ -908,21 +907,11 @@ impl DmpBackend {
     }
 
     fn read_u64_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<u64> {
-        let off = layout.field_offset(field).ok()? as usize;
-        if off + 8 <= snap.len() {
-            Some(u64::from_le_bytes(snap[off..off + 8].try_into().ok()?))
-        } else {
-            None
-        }
+        get_u64(snap, layout.field_offset(field).ok()? as usize)
     }
 
     fn read_i32_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<i32> {
-        let off = layout.field_offset(field).ok()? as usize;
-        if off + 4 <= snap.len() {
-            Some(i32::from_le_bytes(snap[off..off + 4].try_into().ok()?))
-        } else {
-            None
-        }
+        get_u32(snap, layout.field_offset(field).ok()? as usize).map(u32::cast_signed)
     }
 
     fn extract_triage_crash_info(target: &Target, info: &DmpInfo) -> Option<TriageCrashInfo> {
@@ -961,14 +950,7 @@ impl DmpBackend {
                 let client_id_layout =
                     target.symbols.find_type_across_modules(dtb, "_CLIENT_ID")?;
                 let ut_off = client_id_layout.field_offset("UniqueThread").ok()? as usize;
-                let off = cid_off + ut_off;
-                let tid = if off + 8 <= thread_snap.len() {
-                    Some(u64::from_le_bytes(
-                        thread_snap[off..off + 8].try_into().ok()?,
-                    ))
-                } else {
-                    None
-                };
+                let tid = get_u64(thread_snap, cid_off + ut_off);
                 let exit_st = Self::read_i32_field(thread_snap, &ethread_layout, "ExitStatus");
                 Some((tid, exit_st))
             })

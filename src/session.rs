@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::bugchecks::{looks_like_kernel_pointer, plausible_bugcheck_code};
+use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, LastEvent, StopEvent,
@@ -1949,14 +1950,10 @@ impl Session {
     /// Decode an `EXCEPTION_RECORD64` at `address` (`.exr`).
     pub fn read_exception_record(&self, address: VirtAddr) -> Result<ExceptionRecord> {
         const SIZE: usize = 0x98;
-        let mut bytes = [0u8; SIZE];
-        self.read_record_bytes(address, &mut bytes)?;
-        let read_u32 = |offset: usize| {
-            u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("record field"))
-        };
-        let read_u64 = |offset: usize| {
-            u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("record field"))
-        };
+        let mut record = [0u8; SIZE];
+        self.read_record_bytes(address, &mut record)?;
+        let read_u32 = |offset| bytes::read_u32(&record, offset);
+        let read_u64 = |offset| bytes::read_u64(&record, offset);
         let count = (read_u32(24) as usize).min(15);
         let parameters = (0..count).map(|index| read_u64(32 + index * 8)).collect();
         Ok(ExceptionRecord {

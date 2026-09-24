@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 
-use super::wire::{read_u16, read_u32};
+use crate::bytes::{read_u16, read_u32};
 
 pub const DATA_PACKET_LEADER: u32 = 0x30303030;
 pub const CONTROL_PACKET_LEADER: u32 = 0x69696969;

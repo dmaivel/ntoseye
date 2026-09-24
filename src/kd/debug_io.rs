@@ -1,9 +1,9 @@
 use std::io::{Read, Write};
 
+use crate::bytes::{read_u16, read_u32, write_u16, write_u32};
 use crate::dbg_backend::{BugcheckInfo, DebugLog};
 use crate::error::Result;
 use crate::kd::framing::{KdFraming, PACKET_TYPE_KD_DEBUG_IO};
-use crate::kd::wire::{read_u16, read_u32, write_u16, write_u32};
 
 use super::{
     DBGKD_DEBUG_IO_HEADER_SIZE, DBGKD_DEBUG_IO_MIN_HEADER_SIZE, DBGKD_GET_STRING_API,

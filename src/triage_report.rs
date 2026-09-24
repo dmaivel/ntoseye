@@ -4,6 +4,7 @@ use crate::backend::MemoryOps;
 use crate::bugchecks::{
     BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
 };
+use crate::bytes::{read_u16, read_u32};
 use crate::dmp::{
     DmpBlackboxStream, DmpException, DmpInfo, DmpSystemInfo, TriageCrashInfo, UnloadedDriver,
 };
@@ -736,23 +737,23 @@ fn decode_whea_header_and_read<M: MemoryOps<VirtAddr>>(
     address: u64,
     header: &[u8; WHEA_HEADER_SIZE],
 ) -> WheaRecordState {
-    let signature = le_u32(header, 0);
+    let signature = read_u32(header, 0);
     if signature != WHEA_RECORD_SIGNATURE {
         return whea_malformed(format!("invalid WHEA signature {signature:#010x}"));
     }
-    let revision = le_u16(header, 4);
+    let revision = read_u16(header, 4);
     if revision != WHEA_SUPPORTED_REVISION {
         return whea_malformed(format!("unsupported WHEA record revision {revision:#06x}"));
     }
-    let signature_end = le_u32(header, 6);
+    let signature_end = read_u32(header, 6);
     if signature_end != WHEA_RECORD_SIGNATURE_END {
         return whea_malformed(format!(
             "invalid WHEA ending signature {signature_end:#010x}"
         ));
     }
-    let section_count = le_u16(header, 10) as usize;
-    let severity = le_u32(header, 12);
-    let length = le_u32(header, 20) as usize;
+    let section_count = read_u16(header, 10) as usize;
+    let severity = read_u32(header, 12);
+    let length = read_u32(header, 20) as usize;
     let descriptors_end = match section_count
         .checked_mul(WHEA_SECTION_DESCRIPTOR_SIZE)
         .and_then(|bytes| WHEA_HEADER_SIZE.checked_add(bytes))
@@ -780,8 +781,8 @@ fn decode_whea_header_and_read<M: MemoryOps<VirtAddr>>(
     let mut sections = Vec::with_capacity(section_count);
     for index in 0..section_count {
         let descriptor = WHEA_HEADER_SIZE + index * WHEA_SECTION_DESCRIPTOR_SIZE;
-        let offset = le_u32(&record, descriptor) as usize;
-        let section_length = le_u32(&record, descriptor + 4) as usize;
+        let offset = read_u32(&record, descriptor) as usize;
+        let section_length = read_u32(&record, descriptor + 4) as usize;
         let section_end = match offset.checked_add(section_length) {
             Some(end) => end,
             None => {
@@ -797,7 +798,7 @@ fn decode_whea_header_and_read<M: MemoryOps<VirtAddr>>(
         sections.push(WheaSection {
             offset: offset as u32,
             length: section_length as u32,
-            severity: le_u32(&record, descriptor + 48),
+            severity: read_u32(&record, descriptor + 48),
             kind: whea_section_kind(&section_type),
             section_type,
         });
@@ -829,9 +830,9 @@ fn whea_section_kind(section_type: &str) -> WheaSectionKind {
 fn format_guid(bytes: &[u8]) -> String {
     format!(
         "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        le_u32(bytes, 0),
-        le_u16(bytes, 4),
-        le_u16(bytes, 6),
+        read_u32(bytes, 0),
+        read_u16(bytes, 4),
+        read_u16(bytes, 6),
         bytes[8],
         bytes[9],
         bytes[10],
@@ -841,14 +842,6 @@ fn format_guid(bytes: &[u8]) -> String {
         bytes[14],
         bytes[15],
     )
-}
-
-fn le_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
-}
-
-fn le_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
 fn blackbox_findings(streams: &[DmpBlackboxStream]) -> Vec<BlackboxFinding> {

@@ -1,5 +1,6 @@
 use crate::{
     backend::MemoryOps,
+    bytes::{get_u16, get_u32, read_u16, read_u32, read_u64},
     dmp::DmpInfo,
     error::{Error, Result},
     layout::{StructRef, Types, utf16le_lossy},
@@ -401,13 +402,13 @@ pub fn pe_headers_end(probe: &[u8]) -> Option<usize> {
     if probe.len() < 0x40 || &probe[..2] != b"MZ" {
         return Some(probe.len());
     }
-    let e_lfanew = u32::from_le_bytes(probe[0x3c..0x40].try_into().unwrap()) as usize;
+    let e_lfanew = read_u32(probe, 0x3c) as usize;
     let nt = probe.get(e_lfanew..e_lfanew.checked_add(24)?)?;
     if &nt[..4] != b"PE\0\0" {
         return Some(probe.len());
     }
-    let sections = u16::from_le_bytes([nt[6], nt[7]]) as usize;
-    let optional = u16::from_le_bytes([nt[20], nt[21]]) as usize;
+    let sections = read_u16(nt, 6) as usize;
+    let optional = read_u16(nt, 20) as usize;
     Some(e_lfanew + 24 + optional + sections * 40)
 }
 
@@ -538,13 +539,7 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExpo
         return Err(Error::DebugInfo("truncated PE export directory".into()));
     }
     let data = read_export_bytes(image, base, directory_rva, DIRECTORY_SIZE)?;
-    let u32_at = |offset: usize| {
-        u32::from_le_bytes(
-            data[offset..offset + 4]
-                .try_into()
-                .expect("fixed export field"),
-        )
-    };
+    let u32_at = |offset| read_u32(&data, offset);
     let ordinal_base = u32_at(16);
     let function_count = u32_at(20) as usize;
     let name_count = u32_at(24) as usize;
@@ -562,16 +557,8 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExpo
     let ordinals = read_export_bytes(image, base, ordinals_rva, name_count * 2)?;
     let mut names_by_function: HashMap<usize, Vec<String>> = HashMap::new();
     for index in 0..name_count {
-        let name_rva = u32::from_le_bytes(
-            names[index * 4..index * 4 + 4]
-                .try_into()
-                .expect("fixed export name RVA"),
-        );
-        let function_index = usize::from(u16::from_le_bytes(
-            ordinals[index * 2..index * 2 + 2]
-                .try_into()
-                .expect("fixed export ordinal index"),
-        ));
+        let name_rva = read_u32(&names, index * 4);
+        let function_index = usize::from(read_u16(&ordinals, index * 2));
         if function_index >= function_count {
             return Err(Error::DebugInfo(format!(
                 "PE export name index {function_index} exceeds function count {function_count}"
@@ -586,11 +573,7 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExpo
     let mut exports = Vec::new();
     let forwarder_end = directory_rva.saturating_add(directory_size);
     for index in 0..function_count {
-        let function_rva = u32::from_le_bytes(
-            functions[index * 4..index * 4 + 4]
-                .try_into()
-                .expect("fixed export function RVA"),
-        );
+        let function_rva = read_u32(&functions, index * 4);
         if function_rva == 0 {
             continue;
         }
@@ -674,8 +657,8 @@ pub fn read_pe_version_info<B: MemoryOps<PhysAddr>>(
 
     let data_entry_rva = find_rt_version_data_entry(&rsrc_buf, rsrc_rva)?;
 
-    let ver_rva = read_u32_at(&rsrc_buf, data_entry_rva)?;
-    let ver_size = read_u32_at(&rsrc_buf, data_entry_rva + 4)? as usize;
+    let ver_rva = get_u32(&rsrc_buf, data_entry_rva)?;
+    let ver_size = get_u32(&rsrc_buf, data_entry_rva + 4)? as usize;
     if !(52..=32 * 1024).contains(&ver_size) {
         return None;
     }
@@ -711,7 +694,7 @@ fn find_rt_version_data_entry(rsrc: &[u8], rsrc_rva: u32) -> Option<usize> {
     }
 
     // Validate: the RVA should fall within the resource section
-    let rva = read_u32_at(rsrc, data_entry_off)?;
+    let rva = get_u32(rsrc, data_entry_off)?;
     if rva < rsrc_rva || (rva as usize - rsrc_rva as usize) >= rsrc.len() {
         return None;
     }
@@ -725,14 +708,14 @@ fn find_resource_id_entry(rsrc: &[u8], dir_off: usize, target_id: u32) -> Option
     if dir_off + 16 > rsrc.len() {
         return None;
     }
-    let num_named = read_u16_at(rsrc, dir_off + 12)? as usize;
-    let num_id = read_u16_at(rsrc, dir_off + 14)? as usize;
+    let num_named = get_u16(rsrc, dir_off + 12)? as usize;
+    let num_id = get_u16(rsrc, dir_off + 14)? as usize;
     let entries_start = dir_off + 16;
     for i in num_named..(num_named + num_id) {
         let entry_off = entries_start + i * 8;
-        let id = read_u32_at(rsrc, entry_off)?;
+        let id = get_u32(rsrc, entry_off)?;
         if id == target_id {
-            return read_u32_at(rsrc, entry_off + 4);
+            return get_u32(rsrc, entry_off + 4);
         }
     }
     None
@@ -749,13 +732,13 @@ fn first_resource_entry(rsrc: &[u8], parent_entry: u32) -> Option<u32> {
     if dir_off + 16 > rsrc.len() {
         return None;
     }
-    let num_named = read_u16_at(rsrc, dir_off + 12)? as usize;
-    let num_id = read_u16_at(rsrc, dir_off + 14)? as usize;
+    let num_named = get_u16(rsrc, dir_off + 12)? as usize;
+    let num_id = get_u16(rsrc, dir_off + 14)? as usize;
     if num_named + num_id == 0 {
         return None;
     }
     let first_entry_off = dir_off + 16;
-    read_u32_at(rsrc, first_entry_off + 4)
+    get_u32(rsrc, first_entry_off + 4)
 }
 
 fn parse_vs_fixedfileinfo(data: &[u8]) -> Option<(String, String)> {
@@ -769,15 +752,15 @@ fn parse_vs_fixedfileinfo(data: &[u8]) -> Option<(String, String)> {
 
     // dwFileVersionMS: HIWORD = Major, LOWORD = Minor
     // dwFileVersionLS: HIWORD = Build, LOWORD = Revision
-    let file_minor = u16::from_le_bytes([info[8], info[9]]);
-    let file_major = u16::from_le_bytes([info[10], info[11]]);
-    let file_revision = u16::from_le_bytes([info[12], info[13]]);
-    let file_build = u16::from_le_bytes([info[14], info[15]]);
+    let file_minor = read_u16(info, 8);
+    let file_major = read_u16(info, 10);
+    let file_revision = read_u16(info, 12);
+    let file_build = read_u16(info, 14);
 
-    let prod_minor = u16::from_le_bytes([info[16], info[17]]);
-    let prod_major = u16::from_le_bytes([info[18], info[19]]);
-    let prod_revision = u16::from_le_bytes([info[20], info[21]]);
-    let prod_build = u16::from_le_bytes([info[22], info[23]]);
+    let prod_minor = read_u16(info, 16);
+    let prod_major = read_u16(info, 18);
+    let prod_revision = read_u16(info, 20);
+    let prod_build = read_u16(info, 22);
 
     let file_ver = format!(
         "{}.{}.{}.{}",
@@ -788,16 +771,6 @@ fn parse_vs_fixedfileinfo(data: &[u8]) -> Option<(String, String)> {
         prod_major, prod_minor, prod_build, prod_revision
     );
     Some((file_ver, prod_ver))
-}
-
-fn read_u16_at(buf: &[u8], off: usize) -> Option<u16> {
-    buf.get(off..off + 2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-}
-
-fn read_u32_at(buf: &[u8], off: usize) -> Option<u32> {
-    buf.get(off..off + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 fn populate_module_versions<B: MemoryOps<PhysAddr>>(
@@ -1160,7 +1133,7 @@ impl EprocessSpan {
 
     fn u64_at(&self, offset: u64) -> u64 {
         let start = (offset - self.start) as usize;
-        u64::from_le_bytes(self.bytes[start..start + 8].try_into().unwrap())
+        read_u64(&self.bytes, start)
     }
 
     fn pid(&self) -> u64 {
@@ -2166,29 +2139,21 @@ impl Guest {
                 cursor.advance(Err(error.to_string()));
                 break;
             }
-            let u32_at =
-                |offset: usize| u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap());
+            let u32_at = |offset| read_u32(&entry, offset);
             cursor.advance(Ok(VirtAddr(u64::from(u32_at(0)))));
 
             let dll_base = u32_at(0x18);
             if dll_base == 0 {
                 continue;
             }
-            let name = read_unicode32(
-                &memory,
-                usize::from(u16::from_le_bytes([entry[0x2c], entry[0x2d]])),
-                u32_at(0x30),
-            )
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "<unknown>".to_string());
+            let name = read_unicode32(&memory, usize::from(read_u16(&entry, 0x2c)), u32_at(0x30))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "<unknown>".to_string());
             let mut module = ModuleInfo::new(name, VirtAddr(u64::from(dll_base)), u32_at(0x20))
                 .with_time_date_stamp(u32_at(0x44));
-            module.path = read_unicode32(
-                &memory,
-                usize::from(u16::from_le_bytes([entry[0x24], entry[0x25]])),
-                u32_at(0x28),
-            )
-            .filter(|path| !path.is_empty());
+            module.path =
+                read_unicode32(&memory, usize::from(read_u16(&entry, 0x24)), u32_at(0x28))
+                    .filter(|path| !path.is_empty());
             module.is_32bit = true;
             let entry_point = u32_at(0x1c);
             if entry_point != 0 {

@@ -13,13 +13,13 @@ use crate::dmp::structs::{ExceptionRecord64, Header64};
 
 use crate::backend::MemoryOps;
 use crate::bugchecks::current_bugcheck;
+use crate::bytes::{write_u32, write_u64};
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::dmp::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::error::{Error, Result};
 use crate::gdb::registers::RegisterMap;
 use crate::kd::context;
 use crate::kd::context_arm64;
-use crate::kd::wire::{write_u32, write_u64};
 use crate::layout::{FieldInfo, ParsedType};
 use crate::memory::PAGE_SIZE;
 use crate::session::Session;
@@ -747,9 +747,9 @@ pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytes::write_u64;
     use crate::dmp::DmpMem;
     use crate::gdb::registers::RegisterInfo;
-    use crate::kd::wire::write_u64;
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};

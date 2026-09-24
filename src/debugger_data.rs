@@ -5,6 +5,7 @@ use std::fmt;
 use std::mem::{offset_of, size_of};
 
 use crate::backend::MemoryOps;
+use crate::bytes::{get_u64, read_u32};
 use crate::error::{Error, Result};
 use crate::types::VirtAddr;
 
@@ -147,8 +148,7 @@ impl DebuggerDataBlock {
     }
 
     fn u64_at(&self, offset: usize) -> Option<u64> {
-        let bytes = self.bytes.get(offset..offset.checked_add(8)?)?;
-        Some(u64::from_le_bytes(bytes.try_into().ok()?))
+        get_u64(&self.bytes, offset)
     }
 }
 
@@ -175,10 +175,10 @@ fn parse_debugger_data_block<M: MemoryOps<VirtAddr>>(
 ) -> Option<DebuggerDataBlock> {
     let mut header = [0u8; KDBG_HEADER_SIZE];
     memory.read_bytes(candidate.address, &mut header).ok()?;
-    if read_u32(&header, KDBG_OWNER_TAG_OFFSET)? != KDBG_OWNER_TAG {
+    if read_u32(&header, KDBG_OWNER_TAG_OFFSET) != KDBG_OWNER_TAG {
         return None;
     }
-    let remote_size = read_u32(&header, KDBG_REMOTE_SIZE_OFFSET)?;
+    let remote_size = read_u32(&header, KDBG_REMOTE_SIZE_OFFSET);
     let remote_size_usize = usize::try_from(remote_size).ok()?;
     if !(KDBG_HEADER_SIZE..=KDBG_MAX_REMOTE_SIZE).contains(&remote_size_usize) {
         return None;
@@ -229,12 +229,6 @@ fn read_pointer<M: MemoryOps<VirtAddr>>(memory: &M, address: VirtAddr) -> Option
     let mut bytes = [0u8; 8];
     memory.read_bytes(address, &mut bytes).ok()?;
     Some(VirtAddr(u64::from_le_bytes(bytes)))
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
-    ))
 }
 
 /// Evaluate a deliberately small, straight-line subset of an x64 memory-manager

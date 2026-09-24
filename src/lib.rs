@@ -127,6 +127,7 @@ pub mod output;
 
 pub mod backend;
 pub mod bugchecks;
+pub mod bytes;
 #[cfg(feature = "cli")]
 pub mod cli;
 #[cfg(feature = "cli")]
