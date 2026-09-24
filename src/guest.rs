@@ -2354,6 +2354,10 @@ impl Guest {
             return report;
         }
         let names = deferred.module_names();
+        let deferred_bases: Vec<_> = deferred
+            .modules()
+            .map(|module| module.base_address)
+            .collect();
         for module in deferred.modules() {
             Self::apply_module_symbol_status(
                 symbols,
@@ -2398,6 +2402,13 @@ impl Guest {
                 ));
             });
         if let Err(error) = spawned {
+            let error = error.to_string();
+            report.fetching -= deferred_bases.len();
+            for base_address in deferred_bases {
+                let status = ModuleSymbolStatus::Failed(error.clone());
+                symbols.set_module_symbol_status(dtb, base_address, status.clone());
+                report.record_status(&status);
+            }
             symbols.push_notice(format!("could not start background symbol fetch: {error}"));
         }
         report
