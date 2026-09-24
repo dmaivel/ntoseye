@@ -529,6 +529,10 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExpo
     };
     let directory_rva = directory.VirtualAddress;
     let directory_size = directory.Size;
+    // Most drivers export nothing: the directory entry is present but zero.
+    if directory_rva == 0 && directory_size == 0 {
+        return Ok(Vec::new());
+    }
     if directory_size < DIRECTORY_SIZE as u32 {
         return Err(Error::DebugInfo("truncated PE export directory".into()));
     }
@@ -3317,6 +3321,17 @@ mod tests {
         put(&mut image, 0x2410, b"Alpha\0");
         put(&mut image, 0x2420, b"Forwarded\0");
         image
+    }
+
+    #[test]
+    fn an_image_that_exports_nothing_has_no_exports() {
+        let mut image = image_with_exports(1);
+        let opt = 0x80 + 24;
+        image[opt + 112..opt + 120].fill(0);
+        assert_eq!(
+            read_pe_exports(&PeImage::complete(image), VirtAddr(0x10_0000)).unwrap(),
+            []
+        );
     }
 
     #[test]
