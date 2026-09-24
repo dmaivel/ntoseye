@@ -1,6 +1,37 @@
 use std::collections::HashMap;
+use std::result;
 
 use crate::error::{Error, Result};
+
+/// ARM64 names the rest of the debugger reads, each paired with the
+/// architectural register it aliases. Shared code spells the program
+/// counter and stack pointer the x64 way; `fp`, `lr` and `pstate` are the
+/// ABI names users type.
+const ARM64_ALIASES: [(&str, &str); 5] = [
+    ("rip", "pc"),
+    ("rsp", "sp"),
+    ("fp", "x29"),
+    ("lr", "x30"),
+    ("pstate", "cpsr"),
+];
+
+/// Append every ARM64 alias to `registers`, each reading the same bytes as
+/// the register it names. Fails with the architectural name `registers`
+/// does not carry.
+pub fn push_arm64_aliases(registers: &mut Vec<RegisterInfo>) -> result::Result<(), &'static str> {
+    for (alias, canonical) in ARM64_ALIASES {
+        let register = registers
+            .iter()
+            .find(|reg| reg.name == canonical)
+            .ok_or(canonical)?
+            .clone();
+        registers.push(RegisterInfo {
+            name: alias.to_string(),
+            ..register
+        });
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct RegisterInfo {

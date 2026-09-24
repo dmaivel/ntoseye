@@ -15,7 +15,7 @@ pub use breakpoints::{
     BreakpointConfig, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager,
     BreakpointSpec,
 };
-pub use registers::{RegisterInfo, RegisterMap};
+pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases};
 
 /// Bytes of a packet shown per trace line.
 const TRACE_BYTES: usize = 200;
@@ -156,16 +156,6 @@ fn description_arch(xml: &str) -> Result<Arch> {
         ))),
     }
 }
-
-/// Names the rest of the debugger reads, mapped onto what an AArch64 target
-/// description calls them. KD's ARM64 register map carries the same aliases.
-const ARM64_ALIASES: [(&str, &str); 5] = [
-    ("rip", "pc"),
-    ("rsp", "sp"),
-    ("fp", "x29"),
-    ("lr", "x30"),
-    ("pstate", "cpsr"),
-];
 
 /// System registers ntoseye needs, spelled the way it spells them elsewhere.
 /// `cr3` is the kernel page-table root on both architectures, so the ARM64
@@ -881,16 +871,11 @@ impl GdbClient {
             .collect();
 
         if self.arch == Arch::Arm64 {
-            for (alias, source) in ARM64_ALIASES {
-                let Some(register) = registers.iter().find(|reg| reg.name == source) else {
-                    return Err(Error::UnsupportedArchitecture(format!(
-                        "the stub's AArch64 description has no `{source}` register"
-                    )));
-                };
-                let mut register = register.clone();
-                register.name = alias.to_string();
-                registers.push(register);
-            }
+            push_arm64_aliases(&mut registers).map_err(|missing| {
+                Error::UnsupportedArchitecture(format!(
+                    "the stub's AArch64 description has no `{missing}` register"
+                ))
+            })?;
 
             let mut offset = g_bytes;
             for (name, system_register) in ARM64_SYSTEM_REGISTERS {

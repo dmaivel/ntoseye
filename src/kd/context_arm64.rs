@@ -17,7 +17,7 @@
 //! state and the stopped processor's system registers when available,
 //! mirroring how the AMD64 map appends CR0-CR8 from KSPECIAL_REGISTERS.
 
-use crate::gdb::{RegisterInfo, RegisterMap};
+use crate::gdb::{RegisterInfo, RegisterMap, push_arm64_aliases};
 
 pub const CONTEXT_SIZE: usize = 0x390; // 912
 
@@ -74,16 +74,10 @@ pub fn build_register_map() -> RegisterMap {
     for i in 0..31 {
         registers.push(next_reg(&format!("x{i}"), OFFSET_X0 + i * 8, 8));
     }
-    // Aliases upper layers read by x64 names ("rip" everywhere, "rsp" in
-    // expr), plus the ABI names for display.
-    registers.push(next_reg("fp", OFFSET_X0 + 29 * 8, 8));
-    registers.push(next_reg("lr", OFFSET_X0 + 30 * 8, 8));
     registers.push(next_reg("sp", OFFSET_SP, 8));
-    registers.push(next_reg("rsp", OFFSET_SP, 8));
     registers.push(next_reg("pc", OFFSET_PC, 8));
-    registers.push(next_reg("rip", OFFSET_PC, 8));
     registers.push(next_reg("cpsr", OFFSET_CPSR, 4));
-    registers.push(next_reg("pstate", OFFSET_CPSR, 4));
+    push_arm64_aliases(&mut registers).expect("CONTEXT carries every aliased register");
     for i in 0..32 {
         registers.push(next_reg(&format!("v{i}"), OFFSET_V0 + i * 16, 16));
     }
