@@ -928,12 +928,13 @@ impl Session {
     /// `.cxr` / `.trap` and the DAP frame selection so the two can't drift.
     pub fn select_frame(&mut self, selected: SelectedFrame) {
         self.target.registers = Some(selected.registers.clone());
-        if let Some(cr3) = selected.registers.get("cr3").copied()
-            && cr3 != 0
+        let dtb_register = self.target.arch().dtb_register();
+        if let Some(dtb) = selected.registers.get(dtb_register).copied()
+            && dtb != 0
             && self.target.guest.is_some()
             && self.target.kernel_dtb() != DTB_IDENTITY
         {
-            self.target.set_context_dtb_override(cr3);
+            self.target.set_context_dtb_override(dtb);
         } else {
             self.target.clear_context_dtb_override();
         }
