@@ -86,6 +86,16 @@ fn advance_page(page_offset: u64) -> Result<u64> {
         .ok_or_else(|| invalid("page file offset overflowed"))
 }
 
+fn remaining_page_data(data: &[u8], page_offset: u64) -> Result<u64> {
+    let offset = usize::try_from(page_offset)
+        .map_err(|_| invalid("page data offset exceeds the dump size"))?;
+    let remaining = data
+        .get(offset..)
+        .ok_or_else(|| invalid("page data offset exceeds the dump size"))?;
+    u64::try_from(remaining.len() / PAGE_SIZE)
+        .map_err(|_| invalid("page data extent exceeds addressable pages"))
+}
+
 /// Parse the dump header and build its physical-memory map.
 pub fn parse(data: &[u8]) -> Result<ParsedDump> {
     let mut cursor = Cursor::new(data);
@@ -129,7 +139,12 @@ fn full_physmem(headers: &Header64, cursor: &mut Cursor<'_>) -> Result<PhysmemMa
     let mut page_offset = cursor.position();
     let runs_buffer = &headers.physical_memory_block_buffer;
     let physmem_desc = read_from::<PhysmemDesc>(runs_buffer, 0)?;
+    if physmem_desc.number_of_pages > remaining_page_data(cursor.data, page_offset)? {
+        return Err(invalid("declared physical page count exceeds dump data"));
+    }
+
     let mut physmem = PhysmemMap::new();
+    let mut page_count = 0u64;
 
     for run_idx in 0..physmem_desc.number_of_runs as usize {
         let offset = size_of::<PhysmemDesc>() + run_idx * size_of::<PhysmemRun>();
@@ -138,6 +153,18 @@ fn full_physmem(headers: &Header64, cursor: &mut Cursor<'_>) -> Result<PhysmemMa
                 "physical memory run {run_idx} does not fit in the dump header"
             ))
         })?;
+
+        let next_page_count = page_count
+            .checked_add(run.page_count)
+            .ok_or_else(|| invalid("physical page count overflowed"))?;
+        if next_page_count > physmem_desc.number_of_pages {
+            return Err(invalid("physical memory runs exceed number_of_pages"));
+        }
+        if run.page_count > remaining_page_data(cursor.data, page_offset)? {
+            return Err(invalid(format!(
+                "physical memory run {run_idx} exceeds dump page data"
+            )));
+        }
 
         for page_idx in 0..run.page_count {
             let gpa = run
@@ -153,6 +180,11 @@ fn full_physmem(headers: &Header64, cursor: &mut Cursor<'_>) -> Result<PhysmemMa
             insert_page(&mut physmem, gpa, page_offset)?;
             page_offset = advance_page(page_offset)?;
         }
+        page_count = next_page_count;
+    }
+
+    if page_count != physmem_desc.number_of_pages {
+        return Err(invalid("physical memory runs do not match number_of_pages"));
     }
 
     Ok(physmem)
@@ -267,6 +299,16 @@ fn kernel_physmem(dump_type: DumpType, cursor: &mut Cursor<'_>) -> Result<Physme
             break;
         }
 
+        let next_page_count = page_count
+            .checked_add(pfn_range.number_of_pages)
+            .ok_or_else(|| invalid("page count overflowed"))?;
+        if dump_type == DumpType::CompleteMemory && next_page_count > total_number_of_pages {
+            return Err(invalid("page count exceeds total_number_of_pages"));
+        }
+        if pfn_range.number_of_pages > remaining_page_data(cursor.data, page_offset)? {
+            return Err(invalid("PFN range exceeds dump page data"));
+        }
+
         for page_idx in 0..pfn_range.number_of_pages {
             let gpa = pfn_range
                 .page_file_number
@@ -278,10 +320,128 @@ fn kernel_physmem(dump_type: DumpType, cursor: &mut Cursor<'_>) -> Result<Physme
             page_offset = advance_page(page_offset)?;
         }
 
-        page_count = page_count
-            .checked_add(pfn_range.number_of_pages)
-            .ok_or_else(|| invalid("page count overflowed"))?;
+        page_count = next_page_count;
     }
 
     Ok(physmem)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::{offset_of, size_of};
+
+    use crate::dmp::structs::RdmpHeader64;
+
+    use super::*;
+
+    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn full_dump(run_pages: u64, declared_pages: u64, file_pages: usize) -> Vec<u8> {
+        let mut data = vec![0; size_of::<Header64>() + file_pages * PAGE_SIZE];
+        put_u32(
+            &mut data,
+            offset_of!(Header64, signature),
+            DUMP_HEADER64_EXPECTED_SIGNATURE,
+        );
+        put_u32(
+            &mut data,
+            offset_of!(Header64, valid_dump),
+            DUMP_HEADER64_EXPECTED_VALID_DUMP,
+        );
+        put_u32(
+            &mut data,
+            offset_of!(Header64, dump_type),
+            DumpType::Full as u32,
+        );
+
+        let descriptor = offset_of!(Header64, physical_memory_block_buffer);
+        put_u32(
+            &mut data,
+            descriptor + offset_of!(PhysmemDesc, number_of_runs),
+            1,
+        );
+        put_u64(
+            &mut data,
+            descriptor + offset_of!(PhysmemDesc, number_of_pages),
+            declared_pages,
+        );
+        let run = descriptor + size_of::<PhysmemDesc>();
+        put_u64(&mut data, run + offset_of!(PhysmemRun, base_page), 1);
+        put_u64(
+            &mut data,
+            run + offset_of!(PhysmemRun, page_count),
+            run_pages,
+        );
+        data
+    }
+
+    fn complete_dump(ranges: &[(u64, u64)], total_pages: u64, file_pages: usize) -> Vec<u8> {
+        let metadata_size = (ranges.len() * size_of::<PfnRange>()) as u64;
+        let page_offset = metadata_size + 0x2020;
+        let file_size = (page_offset as usize)
+            .max(size_of::<Header64>() + size_of::<FullRdmpHeader64>())
+            + file_pages * PAGE_SIZE;
+        let mut data = vec![0; file_size];
+        put_u32(
+            &mut data,
+            offset_of!(Header64, signature),
+            DUMP_HEADER64_EXPECTED_SIGNATURE,
+        );
+        put_u32(
+            &mut data,
+            offset_of!(Header64, valid_dump),
+            DUMP_HEADER64_EXPECTED_VALID_DUMP,
+        );
+        put_u32(
+            &mut data,
+            offset_of!(Header64, dump_type),
+            DumpType::CompleteMemory as u32,
+        );
+
+        let header = size_of::<Header64>();
+        put_u32(&mut data, header, 0x40);
+        put_u32(&mut data, header + 4, 0x50_4D_44_52);
+        put_u32(&mut data, header + 8, 0x50_4D_55_44);
+        put_u64(
+            &mut data,
+            header + offset_of!(RdmpHeader64, metadata_size),
+            metadata_size,
+        );
+        put_u64(
+            &mut data,
+            header + offset_of!(RdmpHeader64, first_page_offset),
+            page_offset,
+        );
+        put_u64(
+            &mut data,
+            header + offset_of!(FullRdmpHeader64, total_number_of_pages),
+            total_pages,
+        );
+
+        let ranges_offset = header + size_of::<FullRdmpHeader64>();
+        for (index, &(first_page, page_count)) in ranges.iter().enumerate() {
+            let offset = ranges_offset + index * size_of::<PfnRange>();
+            put_u64(&mut data, offset, first_page);
+            put_u64(&mut data, offset + 8, page_count);
+        }
+        data
+    }
+
+    #[test]
+    fn full_dump_rejects_page_runs_larger_than_file_data() {
+        let data = full_dump(2, 2, 1);
+        assert!(parse(&data).is_err());
+    }
+
+    #[test]
+    fn complete_dump_rejects_a_range_exceeding_declared_pages() {
+        let data = complete_dump(&[(1, 1), (2, 2)], 2, 3);
+        assert!(parse(&data).is_err());
+    }
 }
