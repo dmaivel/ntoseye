@@ -1,13 +1,18 @@
 use std::collections::HashMap;
 
+use owo_colors::OwoColorize;
+
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::session::ExceptionRecord;
-use crate::target::{SavedThreadRegisters, SelectedFrame};
+use crate::target::{SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
-use crate::unwind::RecoveredStackTrace;
+use crate::unwind::{
+    RecoveredStackTrace, StackTrace, build_stacktrace_with_context,
+    build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context,
+};
 
 use crate::repl::*;
 
@@ -49,6 +54,31 @@ repl_command! {
     names: [".exr"],
     usage: ".exr <address|-1>",
     summary: "Display an EXCEPTION_RECORD64.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_registers;
+    names: ["r", "registers"],
+    usage: "r [register[=expression]]",
+    summary: "Display CPU registers or assign one register.",
+    details: "A 128-bit register (xmm0, ARM64 v0) displays at full width; assign its 64-bit halves (xmm0l/xmm0h, v0l/v0h).",
+    run_state: Halted,
+}
+
+repl_command! {
+    cmd_k;
+    names: ["kn", "k", "kb", "kp", "kv"],
+    usage: "kn|k|kb|kp|kv [count]",
+    summary: "Display a stack; kp adds PDB parameter locations and kv provenance.",
+    run_state: Halted,
+}
+
+repl_command! {
+    cmd_trap;
+    names: [".trap", "trap"],
+    usage: ".trap [address-expression]",
+    summary: "Decode and display a _KTRAP_FRAME (defaults to the current thread's saved frame).",
     completion: Expression,
 }
 
@@ -319,6 +349,337 @@ impl ReplState<'_> {
         };
         print_exception_record(0, &record);
     }
+
+    fn cmd_registers(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        // A live frame 0 (`.frame 0`, or the frame an editor client keeps
+        // selected) is the vCPU's own register file. Only a recovered context
+        // is shown from its snapshot and refused assignment.
+        if let Some(frame) = self
+            .ctx
+            .target
+            .selected_frame
+            .as_ref()
+            .filter(|frame| !frame.is_live())
+        {
+            let tail = invocation.raw_tail.trim();
+            if tail.contains('=') {
+                error!(
+                    "cannot assign registers while frame {} is selected; use `.cxr`/`.frame` reset first",
+                    frame.index
+                );
+                return Ok(());
+            }
+            if !tail.is_empty() && tail.split_whitespace().count() != 1 {
+                outln!("{}\n", command_help(invocation.name));
+                return Ok(());
+            }
+            outln!("registers (frame {})", frame.index);
+            if !tail.is_empty() {
+                let name = tail.trim_start_matches('@');
+                let lowered_name = name.to_ascii_lowercase();
+                let requested = match lowered_name.as_str() {
+                    "efl" | "rflags" => "eflags",
+                    name => name,
+                };
+                if let Some(value) = lookup_register(&frame.registers, requested) {
+                    outln!("{}={}", requested, ui::addr(value));
+                } else {
+                    error!(
+                        "register not recovered in frame {}: {}",
+                        frame.index, requested
+                    );
+                }
+            } else {
+                print_sparse_registers(&frame.registers, None, 2);
+            }
+            outln!();
+            return Ok(());
+        }
+        if self.ctx.parked_windows_thread().is_some() {
+            error!(
+                "selected Windows thread is parked and has no coherent register context; use `vcpu <id>`"
+            );
+            return Ok(());
+        }
+        if let Err(e) = self
+            .ctx
+            .backend
+            .set_current_thread(&self.ctx.current_thread)
+        {
+            error!("failed to select execution context: {:?}", e);
+            return Ok(());
+        }
+
+        let mut regs = match self.ctx.read_registers() {
+            Ok(r) => r,
+            Err(e) => {
+                error!("failed to read registers: {:?}", e);
+                return Ok(());
+            }
+        };
+        self.ctx.target.registers = Some(self.ctx.register_map.to_hashmap(&regs));
+
+        if !invocation.raw_tail.trim().is_empty() {
+            let tail = invocation.raw_tail.trim();
+            let Some((name, expression)) = tail.split_once('=') else {
+                if tail.split_whitespace().count() != 1 {
+                    outln!("{}\n", command_help(invocation.name));
+                    return Ok(());
+                }
+                let requested_name = tail.trim_start_matches('@').to_ascii_lowercase();
+                let name = match requested_name.as_str() {
+                    "efl" | "rflags" => "eflags",
+                    name => name,
+                };
+                match self.ctx.register_map.read_u64(name, &regs) {
+                    Ok(value) => outln!("{name}={}", ui::addr(value)),
+                    Err(Error::RegisterTooWide(_)) => {
+                        match self.ctx.register_map.read_u128(name, &regs) {
+                            Ok(value) => outln!("{name}={value:032x}"),
+                            Err(e) => error!("{e}"),
+                        }
+                    }
+                    Err(e) => error!("{e}"),
+                }
+                return Ok(());
+            };
+            let requested_name = name.trim().trim_start_matches('@').to_ascii_lowercase();
+            let name = match requested_name.as_str() {
+                "efl" | "rflags" => "eflags",
+                name => name,
+            };
+            let expression = expression.trim();
+            if name.is_empty() || expression.is_empty() {
+                outln!("{}\n", command_help(invocation.name));
+                return Ok(());
+            }
+            let Some(VirtAddr(value)) = self.eval_or_report(expression) else {
+                return Ok(());
+            };
+            if let Err(e) = self.ctx.write_register(name, value) {
+                error!("failed to write register {name}: {e}");
+                return Ok(());
+            }
+            regs = match self.ctx.read_registers() {
+                Ok(regs) => regs,
+                Err(e) => {
+                    error!("register written, but refresh failed: {e}");
+                    return Ok(());
+                }
+            };
+            self.ctx.target.registers = Some(self.ctx.register_map.to_hashmap(&regs));
+            outln!("@{name} = {}\n", ui::addr(value));
+        }
+
+        print_registers(&self.ctx.register_map, &regs, false);
+        // Control registers match the GP-register cluster's
+        // styling; segment selectors are 16-bit, so render
+        // them as 4 digits rather than padding to 64-bit
+        let read_cr = |name: &str| -> String {
+            self.ctx
+                .register_map
+                .read_u64(name, &regs)
+                .map(ui::addr)
+                .unwrap_or_else(|_| "N/A".to_string())
+        };
+        let read_seg = |name: &str| -> String {
+            self.ctx
+                .register_map
+                .read_u64(name, &regs)
+                .map(|v| format!("{:04x}", v))
+                .unwrap_or_else(|_| "N/A".to_string())
+        };
+
+        outln!();
+        outln!(
+            "  cr0 {}   cr2 {}   cr3 {}",
+            read_cr("cr0"),
+            read_cr("cr2"),
+            read_cr("cr3")
+        );
+        outln!("  cr4 {}   cr8 {}", read_cr("cr4"), read_cr("cr8"));
+        outln!();
+
+        outln!(
+            "  cs  {}   ds  {}   es  {}",
+            read_seg("cs"),
+            read_seg("ds"),
+            read_seg("es")
+        );
+        outln!(
+            "  fs  {}   gs  {}   ss  {}",
+            read_seg("fs"),
+            read_seg("gs"),
+            read_seg("ss")
+        );
+        outln!();
+
+        Ok(())
+    }
+
+    fn print_stack_parameters(&self, trace: &StackTrace, frame_offset: usize) -> Result<()> {
+        let mut printed_header = false;
+        for (index, frame) in trace.frames.iter().enumerate() {
+            let address = VirtAddr(frame.ip);
+            let Some(locals) = self.ctx.target.procedure_locals(address)? else {
+                continue;
+            };
+            let parameters: Vec<_> = locals.iter().filter(|local| local.is_parameter).collect();
+            if parameters.is_empty() {
+                continue;
+            }
+            if !printed_header {
+                outln!("{}", ui::label("parameters (PDB locations)"));
+                printed_header = true;
+            }
+            for parameter in parameters {
+                let location = parameter.location.describe();
+                outln!(
+                    "  #{:02}  {:<24} {:<20} {}",
+                    index + frame_offset,
+                    parameter.name,
+                    parameter.type_name,
+                    location
+                );
+            }
+        }
+        if !printed_header {
+            outln!(
+                "{}",
+                ui::muted("parameter locations unavailable from loaded private symbols")
+            );
+        }
+        Ok(())
+    }
+
+    fn cmd_k(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let frame_limit = match invocation.arg(0) {
+            Some(count) => match self.eval_or_report(count) {
+                Some(count) => usize::try_from(count.0).unwrap_or(usize::MAX).min(4096),
+                None => return Ok(()),
+            },
+            None => 64,
+        };
+        if self.ctx.parked_windows_thread().is_some() {
+            let trace = match self.ctx.backtrace(frame_limit) {
+                Ok(trace) => trace,
+                Err(error) => {
+                    error!("failed to unwind parked thread stack: {error}");
+                    return Ok(());
+                }
+            };
+            if invocation.name.eq_ignore_ascii_case("kv") {
+                print_stacktrace_data_with_provenance(&trace, frame_limit, false);
+            } else {
+                print_stacktrace_data(&trace, frame_limit, false);
+            }
+            if invocation.name.eq_ignore_ascii_case("kp") {
+                self.print_stack_parameters(&trace, 0)?;
+            }
+            outln!();
+            return Ok(());
+        }
+
+        let trace = if let Some(selected) = self.ctx.target.selected_frame.as_ref() {
+            build_stacktrace_with_register_values(
+                &self.ctx.target,
+                &self.ctx.register_map,
+                &selected.registers,
+                frame_limit,
+            )
+        } else {
+            if let Err(e) = self
+                .ctx
+                .backend
+                .set_current_thread(&self.ctx.current_thread)
+            {
+                error!("failed to select execution context: {:?}", e);
+                return Ok(());
+            }
+            let regs = match self.ctx.read_registers() {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("failed to read registers: {:?}", e);
+                    return Ok(());
+                }
+            };
+            build_stacktrace_with_context(
+                &self.ctx.target,
+                &self.ctx.register_map,
+                &regs,
+                frame_limit,
+            )
+        };
+        let offset = self
+            .ctx
+            .target
+            .selected_frame
+            .as_ref()
+            .map(|frame| frame.index)
+            .unwrap_or(0);
+        print_indexed_stacktrace(
+            &trace,
+            frame_limit,
+            offset,
+            invocation.name.eq_ignore_ascii_case("kv"),
+            self.ctx.target.selected_frame.as_ref().map(|_| offset),
+        );
+        if invocation.name.eq_ignore_ascii_case("kp") {
+            let plain = StackTrace {
+                frames: trace
+                    .frames
+                    .iter()
+                    .map(|frame| frame.frame.clone())
+                    .collect(),
+                truncated: trace.truncated,
+            };
+            self.print_stack_parameters(&plain, offset)?;
+        }
+        outln!();
+
+        Ok(())
+    }
+
+    fn cmd_trap(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let address = match invocation.arg(0) {
+            Some(expr) => match self.eval_or_report(expr) {
+                Some(address) => Some(address),
+                None => return Ok(()),
+            },
+            None => None,
+        };
+        if address.is_none()
+            && self
+                .ctx
+                .target
+                .current_thread_pseudo_register("trapframe")
+                .is_none()
+        {
+            self.clear_selected_frame();
+            outln!("selected context reset\n");
+            return Ok(());
+        }
+        match read_ktrap_frame_at_or_current(&self.ctx.target, address) {
+            Ok(frame) => {
+                // Trap frames are kernel structures; resolve the interrupted
+                // rip against the kernel address space like the bugcheck
+                // analysis does.
+                let trace =
+                    resolve_thread_trace_context(&self.ctx.target, self.ctx.target.kernel_dtb());
+                let symbol = format_symbol(&self.ctx.target, &trace, frame.instruction_pointer());
+                print_ktrap_frame(&frame, Some(&symbol));
+                let registers = registers_from_trap_frame(&frame);
+                let selected = self.select_register_values(0, registers);
+                outln!("selected trap context frame 00 at {}", ui::addr(selected));
+                outln!();
+            }
+            Err(e) => {
+                error!("{}", e);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub fn registers_from_trap_frame(frame: &KtrapFrame) -> HashMap<String, u64> {
@@ -348,11 +709,7 @@ pub fn registers_from_trap_frame(frame: &KtrapFrame) -> HashMap<String, u64> {
 
 /// Print a recovered (partial) register set sorted by name, one row per
 /// register at `indent` columns, under an optional heading line.
-pub(super) fn print_sparse_registers(
-    registers: &HashMap<String, u64>,
-    heading: Option<&str>,
-    indent: usize,
-) {
+fn print_sparse_registers(registers: &HashMap<String, u64>, heading: Option<&str>, indent: usize) {
     let mut names: Vec<_> = registers.keys().collect();
     names.sort();
     if let Some(heading) = heading {
@@ -382,4 +739,54 @@ fn print_exception_record(address: u64, record: &ExceptionRecord) {
         outln!("  Parameter[{}]: {}", index, ui::addr(*value));
     }
     outln!();
+}
+
+fn print_indexed_stacktrace(
+    trace: &RecoveredStackTrace,
+    display_limit: usize,
+    frame_offset: usize,
+    show_provenance: bool,
+    selected_index: Option<usize>,
+) {
+    for (index, recovered) in trace.frames.iter().take(display_limit).enumerate() {
+        let frame = &recovered.frame;
+        let global_index = frame_offset + index;
+        let marker = if selected_index == Some(global_index) {
+            "*"
+        } else {
+            " "
+        };
+        let symbol = if frame.symbol.starts_with("0x") {
+            frame.symbol.clone()
+        } else {
+            ui::symbol(&frame.symbol)
+        };
+        let provenance = if show_provenance {
+            format!("  [{}]", frame.source.as_str())
+        } else {
+            String::new()
+        };
+        let location = frame
+            .source_location
+            .as_ref()
+            .map(|location| format!("  [{}:{}]", location.file, location.line))
+            .unwrap_or_default();
+        outln!(
+            "{}{:02} {}  {}{}{}",
+            marker,
+            global_index,
+            ui::addr(frame.sp),
+            ui::addr(frame.ip),
+            if symbol.is_empty() {
+                "".to_string()
+            } else {
+                format!("  {symbol}")
+            },
+            format!("{provenance}{location}")
+        );
+    }
+    let hidden = trace.frames.len().saturating_sub(display_limit) + trace.truncated;
+    if hidden > 0 {
+        outln!("{}", format!("... {} more frames", hidden).bright_black());
+    }
 }

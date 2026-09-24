@@ -1,7 +1,7 @@
 use crate::dbg_backend::DebugCapability;
 use crate::diagnostics::print_warning;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::phys::PhysMem;
 use crate::repl::*;
@@ -47,6 +47,27 @@ repl_command! {
     summary: "Serve driver images from host files using a driver replacement map.",
     details: "With no arguments, show mappings and serving statistics. A path loads a WinDbg map file containing three-line records of `map`, target name, and host path. -m adds a mapping, -d removes one, -c clears the map. Target names match case-insensitively on path suffix boundaries; a bare filename matches any directory. Changes take effect on the next driver load.",
     completion: None,
+}
+
+repl_command! {
+    cmd_status();
+    names: ["status"],
+    usage: "status",
+    summary: "Display current VM status.",
+}
+
+repl_command! {
+    cmd_capabilities();
+    names: ["capabilities"],
+    usage: "capabilities",
+    summary: "Display backend capabilities.",
+}
+
+repl_command! {
+    cmd_dbgprint;
+    names: ["!dbgprint", "dbgprint"],
+    usage: "!dbgprint [count]",
+    summary: "Show captured guest debug output (DbgPrint).",
 }
 
 fn target_control_available(state: &ReplState<'_>) -> bool {
@@ -247,6 +268,72 @@ impl ReplState<'_> {
         }
         Ok(())
     }
+
+    fn cmd_status(&mut self) -> Result<()> {
+        if self.ctx.backend.is_running() {
+            outln!("VM is running\n");
+        } else {
+            if let Err(e) = self
+                .ctx
+                .backend
+                .set_current_thread(&self.ctx.current_thread)
+            {
+                error!("failed to select execution context: {:?}", e);
+                return Ok(());
+            }
+            print_stop_separator();
+            print_break_context(
+                &mut *self.ctx.backend,
+                &self.ctx.register_map,
+                &mut self.ctx.target,
+                &self.ctx.breakpoints,
+                &self.ctx.current_thread,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn cmd_capabilities(&mut self) -> Result<()> {
+        print_backend_capabilities(&self.ctx.capabilities());
+
+        Ok(())
+    }
+
+    /// Show captured guest debug output (DbgPrint). The stream also prints live
+    /// to the terminal as it arrives; this shows the retained history, last
+    /// `count` lines (default 50, or all retained when `count` is 0).
+    fn cmd_dbgprint(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        const DEFAULT_TAIL: usize = 50;
+        let count = match invocation.arg(0) {
+            Some(arg) => arg
+                .parse::<usize>()
+                .map_err(|_| Error::DebugInfo(format!("invalid count: {arg}")))?,
+            None => DEFAULT_TAIL,
+        };
+
+        let page = self.ctx.read_debug_output(0);
+        if page.lines.is_empty() {
+            outln!("{}\n", ui::muted("no debug output captured"));
+            return Ok(());
+        }
+
+        let start = if count == 0 {
+            0
+        } else {
+            page.lines.len().saturating_sub(count)
+        };
+        for line in &page.lines[start..] {
+            outln!(
+                "{} {}",
+                ui::muted(&fmt_timestamp(line.timestamp_ms)),
+                line.text
+            );
+        }
+        outln!();
+
+        Ok(())
+    }
 }
 
 fn parse_dump_arguments<'a>(invocation: &'a CommandInvocation<'a>) -> Option<&'a str> {
@@ -267,4 +354,14 @@ fn parse_dump_arguments<'a>(invocation: &'a CommandInvocation<'a>) -> Option<&'a
         }
     }
     path
+}
+
+/// Render a Unix-millis timestamp as a `HH:MM:SS.mmm` UTC time-of-day prefix.
+/// A bare wall-clock prefix is enough to correlate prints; no date needed.
+fn fmt_timestamp(ms: u64) -> String {
+    let secs = ms / 1000;
+    let millis = ms % 1000;
+    let tod = secs % 86_400;
+    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    format!("{h:02}:{m:02}:{s:02}.{millis:03}")
 }

@@ -1,4 +1,6 @@
 use tabled::builder::Builder;
+use tabled::settings::object::Rows;
+use tabled::settings::{Alignment, Modify, Panel};
 
 use crate::error::Result;
 use crate::expr::Expr;
@@ -6,7 +8,7 @@ use crate::memory::DTB_IDENTITY;
 use crate::repl::*;
 use crate::target::mm::{
     LookasideDetail, LookasideListsDetail, PfnDetail, PfnSelector, PoolFindDetail, PoolType,
-    PoolUsageDetail, PoolUsageSort, PtovDetail, VmDetail, VtopDetail,
+    PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, VmDetail, VtopDetail,
 };
 use crate::target::pool::tag_string;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
@@ -75,6 +77,22 @@ repl_command! {
     usage: "!lookaside [address]",
     summary: "List or decode GENERAL_LOOKASIDE caches.",
     details: "The no-argument form walks both exported nonpaged and paged lookaside lists with cycle detection. An address decodes one entry directly.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_pte;
+    names: ["!pte", "pte"],
+    usage: "!pte <address>",
+    summary: "Display page table entries for an address.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_pool;
+    names: ["!pool", "pool"],
+    usage: "!pool <address-expression>",
+    summary: "Inspect the pool page containing an address.",
     completion: Expression,
 }
 
@@ -514,6 +532,19 @@ fn print_lookaside_lists(detail: &LookasideListsDetail) {
     }
 }
 
+/// One `!pte` column: where the level's entry lives, its raw value, and the
+/// decoded PFN and flags.
+fn pte_level_cell(level: &PteLevel) -> String {
+    format!(
+        "{} at {:X}\ncontains {:016X}\npfn {:<5x} {:>11}",
+        level.level.name(),
+        level.address,
+        ui::Value(level.value.0),
+        level.value.pfn(),
+        level.value.flags()
+    )
+}
+
 impl ReplState<'_> {
     fn cmd_vm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let flags = match invocation.arg(0) {
@@ -652,6 +683,157 @@ impl ReplState<'_> {
             Ok(detail) => print_lookaside_lists(&detail),
             Err(error) => error!("{error}"),
         }
+        Ok(())
+    }
+
+    fn cmd_pte(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let expr = require_arg!(invocation, 0, "pte");
+        let Some(address) = self.eval_or_report(expr) else {
+            return Ok(());
+        };
+        match self.ctx.target.pte_traverse(address) {
+            Ok(result) => {
+                let mut levels = vec![result.pxe, result.ppe];
+
+                if let Some(x) = result.pde {
+                    levels.push(x);
+                }
+
+                if let Some(x) = result.pte {
+                    levels.push(x);
+                }
+
+                let header = format!(
+                    "VA {}  DTB {}",
+                    ui::addr(result.address.0),
+                    ui::addr(result.dtb)
+                );
+                let mut builder = Builder::default();
+
+                let row_strings: Vec<String> = levels.iter().map(pte_level_cell).collect();
+                builder.push_record(row_strings);
+
+                let mut table = builder.build();
+                table
+                    .with(Panel::header(header))
+                    .with(Modify::new(Rows::first()).with(Alignment::center()))
+                    .with(tabled::settings::Style::empty());
+
+                outln!("{}\n", table);
+            }
+            Err(e) => {
+                error!("{}\n", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cmd_pool(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(expr) = invocation.arg(0) else {
+            outln!("{}\n", command_help("pool"));
+            return Ok(());
+        };
+
+        let Some(target) = self.eval_or_report(expr) else {
+            return Ok(());
+        };
+
+        let detail = match self.ctx.target.inspect_pool(target) {
+            Ok(detail) => detail,
+            Err(error) => {
+                error!("{}", error);
+                return Ok(());
+            }
+        };
+        if let Some(big) = &detail.big {
+            outln!("big pool @ {}", ui::addr(big.address.0));
+            outln!("  target        : {}", ui::addr(big.target.0));
+            outln!(
+                "  range         : {} - {} ({} bytes)",
+                ui::addr(big.address.0),
+                ui::addr(big.address.0.saturating_add(big.size)),
+                big.size
+            );
+            outln!("  offset        : 0x{:x} / 0x{:x}", big.offset, big.size);
+            outln!("  tag           : '{}' (0x{:08x})", big.tag_name, big.tag);
+            outln!("  table entry   : {}[{}]", ui::addr(big.entry.0), big.index);
+            outln!(
+                "  nonpaged      : {}",
+                if big.nonpaged { "yes" } else { "no" }
+            );
+            outln!("  pattern       : 0x{:x}", big.pattern);
+            outln!("  pool flags    : 0x{:x}", big.pool_flags);
+            outln!("  slush size    : 0x{:x}", big.slush_size);
+            return Ok(());
+        }
+
+        outln!("pool page {}", ui::addr(detail.page.0));
+        outln!("  target        : {}", ui::addr(target.0));
+        if let Some(region) = &detail.region {
+            outln!(
+                "  region        : {} [{} - {}]",
+                region.name,
+                ui::addr(region.start.0),
+                ui::addr(region.end.0)
+            );
+        }
+        if let Some(idx) = detail.target_index {
+            outln!(
+                "  blocks in run : {} (target is #{})",
+                detail.blocks.len(),
+                idx + 1
+            );
+        }
+        outln!();
+        if detail.blocks.is_empty() {
+            outln!("  (no plausible pool block found for this address)");
+        } else {
+            outln!(
+                "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
+                "header",
+                "size",
+                "prev",
+                "state",
+                "type"
+            );
+            for block in &detail.blocks {
+                let marker = if block.marked { ">" } else { " " };
+                outln!(
+                    "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} '{}'",
+                    marker,
+                    ui::addr(block.header.0),
+                    block.size,
+                    block.previous_size,
+                    block.state,
+                    block.pool_type,
+                    block.tag_name
+                );
+            }
+            if let Some(idx) = detail.target_index {
+                let block = &detail.blocks[idx];
+                if let Some(offset) = block.target_offset {
+                    outln!(
+                        "  target offset : 0x{:x} into body (block @ {}, body @ {})",
+                        offset,
+                        ui::addr(block.header.0),
+                        ui::addr(block.body.0)
+                    );
+                }
+            }
+        }
+
+        if let Some(message) = &detail.message {
+            outln!("  {message}.");
+            outln!("  it may be segment heap, special pool, a mapped view, or image/stack.");
+            if let Some(hint) = &detail.segment_heap_hint {
+                outln!("  hint          : {}", hint);
+            }
+            if let Some(near) = &detail.near_symbol {
+                outln!("  near symbol   : {}", near);
+            }
+        }
+
         Ok(())
     }
 }

@@ -1,5 +1,6 @@
-//! Process address-space layout: the VAD tree and the flat region map of
-//! the selected process, or the kernel module map when detached.
+//! Address-space layout: the VAD tree and the flat region map of the
+//! selected process (or the kernel module map when detached), and what an
+//! arbitrary address belongs to.
 
 use tabled::builder::Builder;
 
@@ -26,6 +27,14 @@ repl_command! {
     details: "Select a process by PID or EPROCESS expression; with no argument the current context is used (`.process /p <pid>` to select one). `vmmap [address|filter]` keeps the flat region view of the attached process, or the kernel modules when detached. VAD walks are bounded and skip unreadable entries rather than aborting the listing.",
     completion: [Process, None],
     run_state: Halted,
+}
+
+repl_command! {
+    cmd_address;
+    names: ["!address", "address"],
+    usage: "!address <address-expression>",
+    summary: "Describe what an address belongs to (module+section, or VAD region).",
+    completion: Expression,
 }
 
 fn format_region_size(size: u64) -> String {
@@ -257,6 +266,71 @@ impl ReplState<'_> {
         } else {
             print_padded_table(builder);
         }
+        Ok(())
+    }
+
+    fn cmd_address(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(expr) = invocation.arg(0) else {
+            outln!("{}\n", command_help("address"));
+            return Ok(());
+        };
+
+        let Some(addr) = self.eval_or_report(expr) else {
+            return Ok(());
+        };
+
+        let d = match self.ctx.target.describe_address(addr) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
+
+        outln!("address {}", ui::addr(d.address.0));
+        outln!("  kind    : {}", d.kind);
+        if let Some(m) = &d.module {
+            outln!(
+                "  module  : {}+{:#x}  (base {}, size {:#x})",
+                m.name,
+                m.offset,
+                ui::addr(m.base.0),
+                m.size
+            );
+        }
+        if let Some(s) = &d.section {
+            outln!("  section : {}", s);
+        }
+        if let Some(va) = &d.va_type {
+            outln!("  region  : {}", va);
+        }
+        if let Some(r) = &d.region {
+            outln!(
+                "  region  : {} - {}",
+                ui::addr(r.start.0),
+                ui::addr(r.end.0)
+            );
+            if let Some(p) = r.protection {
+                outln!("    protection : {:#x}", p.raw());
+            }
+            if let Some(t) = r.vad_type {
+                outln!("    vad type   : {:#x}", t.raw());
+            }
+            if let Some(pm) = r.private_memory {
+                outln!("    private    : {}", pm);
+            }
+            if let Some(det) = &r.details {
+                outln!("    details    : {}", det);
+            }
+        }
+        if d.module.is_none() && d.region.is_none() && d.va_type.is_none() {
+            outln!(
+                "  {}",
+                "not inside any loaded module, kernel region, or VAD".bright_black()
+            );
+        }
+        outln!();
+
         Ok(())
     }
 }
