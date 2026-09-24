@@ -30,10 +30,9 @@ use std::time::Duration;
 use crate::diagnostics;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
-use crate::output;
 use crate::repl::{
-    DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitBudget, command_registry,
-    parse_command,
+    Flow, RemoteClient, ReplStore, StopWaitBudget, command_registry, parse_command,
+    run_remote_command,
 };
 use crate::session::{RunStatus, Session};
 use crate::structured;
@@ -424,74 +423,52 @@ impl CommandOutput {
     }
 }
 
-/// Run one REPL line on the actor with REPL semantics, bounded by `budget`.
-///
-/// [`ReplState::begin_remote_line`] renders a parked stop first; each command
-/// on the line is then admitted by [`ReplState::gate_remote_command`] against
-/// the target's state at that point, so `break; bp ...; g` is one call. Guest
-/// debug output captured since the previous call and the run state are
-/// gathered afterwards.
+/// MCP-specific rendering around the shared host-neutral REPL dispatch.
 fn run_command(
     actor: &mut Actor,
     line: &str,
     budget: StopWaitBudget,
     format: OutputFormat,
 ) -> CommandOutput {
-    let store = actor
-        .repl
-        .take()
-        .unwrap_or_else(|| ReplStore::new(&actor.ctx, DispatchContext::Remote(RemoteClient::Mcp)));
-    let mut state = ReplState::attach(&mut actor.ctx, store);
-    state.stop_wait = Some(budget);
-    state.line = line.trim().to_string();
     let mut result = None;
-    let (flow, mut text) = output::capture(|| {
-        let line = state.line.clone();
-        if let Some(flow) = state.begin_remote_line(&line)? {
-            return Ok(flow);
-        }
-        if format == OutputFormat::Json {
+    let remote = run_remote_command(
+        &mut actor.ctx,
+        &mut actor.repl,
+        RemoteClient::Mcp,
+        line,
+        budget,
+        |state, line| {
+            if format != OutputFormat::Json {
+                return None;
+            }
             // The structured decoders bypass `dispatch_one` and its gate, so
             // admit the (single) command here. A line without a decoding
             // falls through to `dispatch_line`, whose gate is then a no-op:
             // the target is already halted or the command never needed it.
-            let spec = parse_command(&line)
+            let spec = parse_command(line)
                 .ok()
                 .flatten()
                 .and_then(|parsed| command_registry().get(parsed.name));
-            if let Some(spec) = spec
-                && let Some(flow) = state.gate_remote_command(spec)?
-            {
-                return Ok(flow);
+            if let Some(spec) = spec {
+                match state.gate_remote_command(spec) {
+                    Ok(Some(flow)) => return Some(Ok(flow)),
+                    Ok(None) => {}
+                    Err(error) => return Some(Err(error)),
+                }
             }
-            match structured::structured_command(&mut state, &line) {
+            match structured::structured_command(state, line) {
                 Some(Ok(view)) => {
                     result = Some(view::to_json(&view));
-                    return Ok(Flow::Continue);
+                    Some(Ok(Flow::Continue))
                 }
                 Some(Err(error)) => {
                     outln!("error: {error}");
-                    return Ok(Flow::Denied);
+                    Some(Ok(Flow::Denied))
                 }
-                None => {}
+                None => None,
             }
-        }
-        state.dispatch_line(&line)
-    });
-    let ok = match flow {
-        Ok(Flow::Continue | Flow::Quit) => true,
-        Ok(Flow::Denied) => false,
-        Err(e) => {
-            text.push_str(&format!("error: {e}\n"));
-            false
-        }
-    };
-    let status = state.ctx.run_status();
-    // `run_status` may have ingested a stop that arrived during the command;
-    // show it now rather than on the next call.
-    let (_, late) = output::capture(|| state.surface_parked_stop());
-    text.push_str(&late);
-    actor.repl = Some(state.detach());
+        },
+    );
 
     let page = actor.ctx.read_debug_output(actor.debug_seq);
     actor.debug_seq = page.next_seq;
@@ -503,10 +480,10 @@ fn run_command(
         _ => Vec::new(),
     };
     CommandOutput {
-        ok,
-        text,
+        ok: remote.ok,
+        text: remote.text,
         result,
-        status,
+        status: remote.status,
         debug_output,
     }
 }

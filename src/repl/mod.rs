@@ -88,6 +88,7 @@ mod heap;
 #[cfg(feature = "cli")]
 mod line_editor;
 mod memory_view;
+mod remote;
 mod stop;
 
 pub use crate::exception_policy::*;
@@ -101,6 +102,7 @@ pub use heap::*;
 #[cfg(feature = "cli")]
 use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
+pub use remote::*;
 pub use stop::*;
 
 pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
@@ -264,31 +266,42 @@ pub struct ReplState<'a> {
     pub unseen_stop_rendered: bool,
 }
 
-/// Deadline for a bounded stop wait, plus a host-owned cancel flag (client
-/// disconnect, server shutdown) that ends the wait early. Elapsing never
-/// interrupts the target; it only returns control.
+/// An optional deadline plus a host-owned cancel flag (client disconnect,
+/// server shutdown). Reaching the deadline or cancellation returns control
+/// without interrupting the target.
 #[derive(Clone, Debug)]
 pub struct StopWaitBudget {
-    pub deadline: Instant,
+    /// `None` waits until a stop or `cancel`.
+    pub deadline: Option<Instant>,
     pub cancel: Arc<AtomicBool>,
 }
 
 impl StopWaitBudget {
     pub fn new(timeout: Duration, cancel: Arc<AtomicBool>) -> Self {
         Self {
-            deadline: Instant::now() + timeout,
+            deadline: Some(Instant::now() + timeout),
+            cancel,
+        }
+    }
+
+    /// A budget with no deadline, ended only by `cancel`.
+    pub fn unbounded(cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            deadline: None,
             cancel,
         }
     }
 
     pub fn exhausted(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed) || Instant::now() >= self.deadline
+        self.cancel.load(Ordering::Relaxed)
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
     }
 }
 
-/// Where a command line comes from. Event-driven and remote contexts must not
-/// let a command move the target on their own; see
-/// [`ReplState::run_control_denial`].
+/// Where a command line comes from. It determines which run-control commands
+/// are allowed; see [`ReplState::run_control_denial`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispatchContext {
     /// The user's prompt: anything goes.
@@ -297,17 +310,22 @@ pub enum DispatchContext {
     BreakpointAction,
     /// An exception policy's command; the policy's `-f` owns the disposition.
     ExceptionCommand,
-    /// A request/response host that cannot block on a run, because its client
-    /// owns run control; the variant names which controls to point at.
+    /// A request/response host whose command policy and stop-wait budget govern
+    /// whether and how long a command may run the target.
     Remote(RemoteClient),
 }
 
 /// The protocol server behind a [`DispatchContext::Remote`] session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteClient {
-    /// The MCP `command` tool. Resumes are allowed but bounded by
-    /// [`ReplState::stop_wait`]; `quit` is refused (the client closes).
+    /// The MCP `command` tool. Resumes are allowed; the optional deadline and
+    /// cancellation in [`ReplState::stop_wait`] govern the wait. `quit` is
+    /// refused (the client closes).
     Mcp,
+    /// The Python SDK's `Debugger.command()`. A resume waits for a stop unless
+    /// [`ReplState::stop_wait`] has an elapsed deadline or cancellation; `quit`
+    /// is refused because the owner calls `close()` explicitly.
+    Sdk,
     /// The DAP Debug Console, alongside the client's own run-control buttons.
     Dap,
     /// `monitor` commands from a GDB remote client, which owns run control.
@@ -315,8 +333,8 @@ pub enum RemoteClient {
 }
 
 /// Everything a [`ReplState`] owns besides its session borrow. A host that
-/// runs commands one at a time against a session it owns (the MCP `command`
-/// tool) keeps one of these between calls, so completion caches, aliases,
+/// runs commands one at a time against a session it owns (MCP or the Python
+/// SDK) keeps one of these between calls, so completion caches, aliases,
 /// exception policies, and the radix persist exactly as in the interactive
 /// REPL, and rebuilds the borrowing `ReplState` per call with
 /// [`ReplState::attach`].
@@ -412,10 +430,11 @@ impl<'a> ReplState<'a> {
     }
 
     /// Build a transient REPL state around an existing context for one-off
-    /// command dispatch (e.g. the Python SDK's `run_command`). Completion caches
-    /// start empty (no live REPL to populate them). Output goes to stdout unless
+    /// command dispatch. Completion caches start empty (no live REPL to
+    /// populate them). Output goes to stdout unless
     /// the caller wraps dispatch in [`crate::output::capture`].
-    pub fn for_oneshot(ctx: &'a mut Session) -> Self {
+    #[cfg(test)]
+    fn for_oneshot(ctx: &'a mut Session) -> Self {
         if ctx.target.selected_frame.is_none() {
             ctx.restore_live_register_cache();
         }

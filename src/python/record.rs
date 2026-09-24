@@ -4,9 +4,40 @@
 //! `if peb.ldr:`). Both keep dict access (`record["ip"]`, `to_dict()`) so the
 //! shape stays the one the MCP JSON surface documents.
 
-use pyo3::exceptions::PyAttributeError;
+use std::convert::Infallible;
+
+use pyo3::exceptions::{PyAttributeError, PyKeyError};
+#[cfg(feature = "python-stubs")]
+use pyo3::inspect::PyStaticExpr;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyIterator, PyList, PyTuple};
+#[cfg(feature = "python-stubs")]
+use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyList, PyTuple};
+#[cfg(feature = "python-stubs")]
+use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
+
+use super::iter::NameIterator;
+
+/// A `to_dict()` result: a plain `dict` of string keys and plain values,
+/// typed as `dict[str, Any]` for type checkers.
+pub struct PlainDict<'py>(pub Bound<'py, PyDict>);
+
+impl<'py> IntoPyObject<'py> for PlainDict<'py> {
+    type Target = PyDict;
+    type Output = Bound<'py, PyDict>;
+    type Error = Infallible;
+
+    #[cfg(feature = "python-stubs")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_subscript!(
+        PyDict::TYPE_HINT,
+        PyString::TYPE_HINT,
+        type_hint_identifier!("typing", "Any")
+    );
+
+    fn into_pyobject(self, _py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(self.0)
+    }
+}
 
 /// An immutable, ordered set of named fields with attribute access.
 #[pyclass(module = "ntoseye", frozen)]
@@ -36,7 +67,7 @@ impl Record {
         let fields = self.fields.bind(py);
         fields
             .get_item(key)?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(key.to_string()))
+            .ok_or_else(|| PyKeyError::new_err(key.to_string()))
     }
 
     fn __contains__(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
@@ -47,8 +78,8 @@ impl Record {
         self.fields.bind(py).len()
     }
 
-    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
-        self.fields.bind(py).keys().try_iter()
+    fn __iter__(&self, py: Python<'_>) -> PyResult<NameIterator> {
+        Ok(NameIterator::new(self.keys(py)?))
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -59,11 +90,13 @@ impl Record {
         self.fields.bind(py).eq(other)
     }
 
-    fn __dir__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let names = self.fields.bind(py).keys();
-        for method in ["keys", "values", "items", "get", "to_dict"] {
-            names.append(method)?;
-        }
+    fn __dir__(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let mut names = self.keys(py)?;
+        names.extend(
+            ["keys", "values", "items", "get", "to_dict"]
+                .into_iter()
+                .map(str::to_string),
+        );
         Ok(names)
     }
 
@@ -81,16 +114,23 @@ impl Record {
         Ok(format!("Record({})", parts.join(", ")))
     }
 
-    fn keys<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        self.fields.bind(py).keys()
+    /// The field names, in order.
+    fn keys(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.fields.bind(py).keys().extract()
     }
 
-    fn values<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        self.fields.bind(py).values()
+    /// The field values, in order.
+    fn values<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyAny>> {
+        self.fields.bind(py).values().iter().collect()
     }
 
-    fn items<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        self.fields.bind(py).items()
+    /// `(name, value)` pairs, in order.
+    fn items<'py>(&self, py: Python<'py>) -> PyResult<Vec<(String, Bound<'py, PyAny>)>> {
+        self.fields
+            .bind(py)
+            .iter()
+            .map(|(key, value)| Ok((key.extract()?, value)))
+            .collect()
     }
 
     /// The field, or `default` when the record has no such field.
@@ -111,12 +151,12 @@ impl Record {
 
     /// A plain nested `dict` (records and diagnostics converted throughout),
     /// the shape the MCP `format=json` surface returns.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let dict = PyDict::new(py);
         for (key, value) in self.fields.bind(py).iter() {
             dict.set_item(key, plain(&value)?)?;
         }
-        Ok(dict)
+        Ok(PlainDict(dict))
     }
 }
 
@@ -178,7 +218,7 @@ impl Diagnostic {
     }
 
     /// The `{available, value, error[, source]}` dict the MCP surface returns.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let dict = PyDict::new(py);
         dict.set_item("available", self.error.is_none())?;
         dict.set_item("value", plain(self.value.bind(py))?)?;
@@ -186,7 +226,7 @@ impl Diagnostic {
         if let Some(source) = &self.source {
             dict.set_item("source", source.as_deref())?;
         }
-        Ok(dict)
+        Ok(PlainDict(dict))
     }
 }
 
@@ -211,10 +251,10 @@ fn summarize(value: &Bound<'_, PyAny>) -> PyResult<String> {
 /// Convert records and diagnostics to dicts throughout a value.
 fn plain<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     if let Ok(record) = value.cast::<Record>() {
-        return Ok(record.get().to_dict(value.py())?.into_any());
+        return Ok(record.get().to_dict(value.py())?.0.into_any());
     }
     if let Ok(diagnostic) = value.cast::<Diagnostic>() {
-        return Ok(diagnostic.get().to_dict(value.py())?.into_any());
+        return Ok(diagnostic.get().to_dict(value.py())?.0.into_any());
     }
     if let Ok(list) = value.cast::<PyList>() {
         let out = PyList::empty(value.py());

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Search memory and inspect structured match objects.
 
-Scans a small range around a symbol for a common byte pattern (`48` by default)
-and prints the typed `MemorySearchMatch` fields returned by `search_details`.
-Uses the passive `memory` backend.
+Scans a small range around a symbol for a byte pattern and prints typed
+`MemorySearchMatch` fields returned by `Memory.search()`. Uses the passive
+`memory` backend.
 
     python3 search_details.py
     python3 search_details.py --symbol nt!NtOpenProcess --pattern 488b --length 0x400
@@ -23,8 +23,8 @@ def parse_pattern(text: str) -> bytes:
         raise argparse.ArgumentTypeError("hex pattern must have an even number of digits")
     try:
         return bytes.fromhex(cleaned)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e)) from e
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def main() -> None:
@@ -37,28 +37,26 @@ def main() -> None:
     ap.add_argument("--limit", default=16, type=int, help="matches to print")
     args = ap.parse_args()
 
-    dbg = ntoseye.attach(backend=args.backend, connect=args.connect)
+    with ntoseye.attach(backend=args.backend, connect=args.connect) as dbg:
+        start = dbg.eval(args.symbol)
+        hits = dbg.memory.search(args.pattern, start, args.length)
 
-    start = dbg.eval(args.symbol)
-    hits = dbg.search_details(start, args.pattern, args.length)
-
-    print(
-        f"{len(hits)} matches for {args.pattern.hex()} "
-        f"in {args.length:#x} bytes at {args.symbol} ({start:#x})"
-    )
-    print(f"  {'ADDRESS':>18}  {'OFFSET':>8}  {'KIND':<14}  {'MODULE':<24}  SECTION  SYMBOL")
-    for hit in hits[: args.limit]:
-        module = hit.module
-        module_name = module.name if module else "-"
-        section = hit.section or "-"
-        symbol = hit.symbol or "-"
         print(
-            f"  {hit.address:#018x}  {hit.offset:#8x}  "
-            f"{hit.kind:<14}  {module_name:<24}  {section:<7}  {symbol}"
+            f"{len(hits)} matches for {args.pattern.hex()} "
+            f"in {args.length:#x} bytes at {args.symbol} ({start:#x})"
         )
+        print(f"  {'ADDRESS':>18}  {'OFFSET':>8}  {'KIND':<14}  {'MODULE':<24}  SECTION  SYMBOL")
+        for hit in hits[: args.limit]:
+            module_name = hit.module.name if hit.module else "-"
+            section = hit.section or "-"
+            symbol = hit.symbol or "-"
+            print(
+                f"  {hit.address:#018x}  {hit.offset:#8x}  "
+                f"{hit.kind:<14}  {module_name:<24}  {section:<7}  {symbol}"
+            )
 
-    if len(hits) > args.limit:
-        print(f"\n... {len(hits) - args.limit} more matches not shown")
+        if len(hits) > args.limit:
+            print(f"\n... {len(hits) - args.limit} more matches not shown")
 
 
 if __name__ == "__main__":

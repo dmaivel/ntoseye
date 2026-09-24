@@ -11,12 +11,15 @@ use crate::bugchecks::{BugcheckAnalysis, BugcheckTrapFrame};
 use crate::dbg_backend::{BackendCapability, DebugOutputPage};
 use crate::disasm::DisasmRow;
 use crate::dmp::{DmpException, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
+use crate::exception_policy::{ExceptionPolicy, ExceptionPolicyFinalAction, exception_alias};
 use crate::gdb::breakpoints::Breakpoint;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
-use crate::session::{RunStatus, VcpuInfo};
+use crate::session::{
+    CallTrace, CallTraceEnd, CallTraceFrame, ExceptionRecord, RunStatus, VcpuInfo,
+};
 use crate::symbols::{
-    LocalVariableLocation, ProcedureLocal, SourceLocation, SymbolCandidate, SymbolVisibility,
-    TypeInfo, format_symbol_with_offset,
+    LocalVariableLocation, ModuleSymbolStatus, ProcedureLocal, SourceLocation, SymbolCandidate,
+    SymbolVisibility, TypeInfo, format_symbol_with_offset,
 };
 use crate::target::mm::{
     AddressDescription, AddressModule, MemoryRegionInfo, ProcessMemoryUsage, PteLevel, PteWalk,
@@ -40,7 +43,7 @@ use crate::triage_report::{
     VerifierFinding, WheaFinding, WheaRecordState, WheaSectionKind, exception_code_name,
     filetime_to_iso,
 };
-use crate::types::VirtAddr;
+use crate::types::{Dtb, VirtAddr};
 use crate::unwind::StackFrame;
 
 // Shared shape for SDK/MCP structure rendering; surfaces disagree only on how
@@ -384,7 +387,7 @@ pub fn irp_hit(h: &IrpHit) -> View {
 
 /// What an address belongs to (the loaded module/section, the process VAD
 /// region, or nothing recognized).
-fn address_module(m: &AddressModule) -> View {
+pub fn address_module(m: &AddressModule) -> View {
     View::Object(vec![
         ("name", View::Str(m.name.clone())),
         ("base", View::Hex(m.base.0)),
@@ -639,6 +642,27 @@ fn ktrap_frame_registers(frame: &KtrapFrame) -> View {
     }
 }
 
+/// A decoded `EXCEPTION_RECORD64` (`.exr`). `record_address` is where the
+/// record was read from; `None` for the current event's record, which is
+/// reconstructed from the stop rather than read from guest memory.
+pub fn exception_record(record_address: Option<u64>, record: &ExceptionRecord) -> View {
+    View::Object(vec![
+        ("record_address", View::OptHex(record_address)),
+        ("code", View::Hex(u64::from(record.code))),
+        (
+            "code_name",
+            View::Str(exception_code_name(record.code).to_string()),
+        ),
+        ("flags", View::Hex(u64::from(record.flags))),
+        ("nested", View::Hex(record.nested)),
+        ("exception_address", View::Hex(record.address)),
+        (
+            "parameters",
+            View::List(record.parameters.iter().copied().map(View::Hex).collect()),
+        ),
+    ])
+}
+
 /// A decoded `_KTRAP_FRAME` shared by structured host APIs.
 pub fn trap_frame(frame: &KtrapFrame, rip_symbol: Option<String>) -> View {
     View::Object(vec![
@@ -751,6 +775,7 @@ pub fn module(module: &ModuleInfo) -> View {
     let mut fields = vec![
         ("name", View::Str(module.name.clone())),
         ("short_name", View::Str(module.short_name.clone())),
+        ("path", View::OptStr(module.path.clone())),
         ("base", View::Hex(module.base_address.0)),
         ("end", View::Hex(module.end_address().0)),
         ("size", View::Num(module.size.into())),
@@ -1355,16 +1380,24 @@ fn local_location(location: &LocalVariableLocation) -> View {
 }
 
 pub fn procedure_local(target: &Target, address: VirtAddr, local: &ProcedureLocal) -> View {
+    let View::Object(mut fields) = procedure_local_layout(local) else {
+        unreachable!("a local's layout is an object");
+    };
+    fields.push((
+        "value",
+        View::OptHex(target.resolve_procedure_local_value(address, local)),
+    ));
+    View::Object(fields)
+}
+
+/// A PDB local or parameter's layout, without evaluating it.
+pub fn procedure_local_layout(local: &ProcedureLocal) -> View {
     View::Object(vec![
         ("name", View::Str(local.name.clone())),
         ("type_name", View::Str(local.type_name.clone())),
         ("byte_size", View::OptNum(local.byte_size)),
         ("parameter", View::Bool(local.is_parameter)),
         ("location", local_location(&local.location)),
-        (
-            "value",
-            View::OptHex(target.resolve_procedure_local_value(address, local)),
-        ),
     ])
 }
 
@@ -1394,6 +1427,7 @@ pub fn process(process: &ProcessInfo) -> View {
         ("name", View::Str(process.name.clone())),
         ("dtb", View::Hex(process.dtb)),
         ("eprocess", View::Hex(process.eprocess_va.0)),
+        ("wow64", View::Bool(process.is_wow64())),
     ])
 }
 
@@ -1643,7 +1677,8 @@ pub fn resource(resource: &ResourceDetail) -> View {
     ])
 }
 
-fn list_termination(termination: &ListTermination) -> View {
+/// How a guest linked-list walk ended.
+pub fn list_termination(termination: &ListTermination) -> View {
     let (kind, address, error) = match termination {
         ListTermination::Head => ("head", None, None),
         ListTermination::Null => ("null", None, None),
@@ -1735,6 +1770,90 @@ pub fn memory_usage(summary: &SystemMemorySummary) -> View {
         ),
         ("process_count", View::Num(summary.process_count as u64)),
         ("truncated", View::Bool(summary.truncated)),
+    ])
+}
+
+/// A `wt` call trace: why it stopped, the instructions it stepped, and the
+/// call tree.
+pub fn call_trace(trace: &CallTrace) -> View {
+    let (end, error) = match &trace.end {
+        CallTraceEnd::Returned => ("returned", None),
+        CallTraceEnd::Limit => ("limit", None),
+        CallTraceEnd::Interrupted => ("interrupted", None),
+        CallTraceEnd::Breakpoint => ("breakpoint", None),
+        CallTraceEnd::Failed(error) => ("failed", Some(error.clone())),
+    };
+    View::Object(vec![
+        ("end", View::Str(end.to_string())),
+        ("error", View::OptStr(error)),
+        ("instructions", View::Num(trace.instructions as u64)),
+        ("root", call_trace_frame(&trace.root)),
+    ])
+}
+
+fn call_trace_frame(frame: &CallTraceFrame) -> View {
+    View::Object(vec![
+        ("name", View::Str(frame.name.clone())),
+        ("instructions", View::Num(frame.instructions as u64)),
+        (
+            "children",
+            View::List(frame.children.iter().map(call_trace_frame).collect()),
+        ),
+    ])
+}
+
+/// One exception stop policy (`sx`).
+pub fn exception_policy(code: u32, policy: &ExceptionPolicy) -> View {
+    let disposition = match policy.final_action {
+        Some(ExceptionPolicyFinalAction::Continue(disposition)) => Some(disposition.name()),
+        Some(ExceptionPolicyFinalAction::Break) => Some("break"),
+        None => None,
+    };
+    View::Object(vec![
+        ("code", View::Hex(u64::from(code))),
+        (
+            "alias",
+            View::OptStr(exception_alias(code).map(str::to_string)),
+        ),
+        ("mode", View::Str(policy.mode.name().to_string())),
+        ("disposition", View::OptStr(disposition.map(str::to_string))),
+        ("command", View::OptStr(policy.command.clone())),
+    ])
+}
+
+/// A module's symbol status and PDB identity (`lmv`).
+pub fn module_symbols(target: &Target, info: &ModuleInfo, dtb: Dtb) -> View {
+    let status = target.symbols.module_symbol_status(dtb, info.base_address);
+    let identity = target.symbols.module_pdb_identity(dtb, info.base_address);
+    let source = target.symbols.module_symbol_source(dtb, info.base_address);
+    let status_name = match (&status, &identity) {
+        (Some(status), _) => status.label().to_string(),
+        (None, Some(_)) => "loaded".to_string(),
+        (None, None) => "unknown".to_string(),
+    };
+    let failed = match &status {
+        Some(ModuleSymbolStatus::Failed(error)) => Some(error.clone()),
+        _ => None,
+    };
+    View::Object(vec![
+        ("status", View::Str(status_name)),
+        (
+            "source",
+            View::OptStr(source.as_ref().map(|source| source.label().to_string())),
+        ),
+        (
+            "pdb_guid",
+            View::OptStr(
+                identity
+                    .as_ref()
+                    .map(|identity| format!("{:032X}", identity.guid)),
+            ),
+        ),
+        (
+            "pdb_age",
+            View::OptNum(identity.map(|identity| u64::from(identity.age))),
+        ),
+        ("error", View::OptStr(failed)),
     ])
 }
 

@@ -1,13 +1,10 @@
 use std::fs;
-use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::guest::{
-    ModuleInfo, ProcessInfo, StructRef, image_base, read_pe_header_page, size_of_image,
-};
+use crate::guest::{ModuleInfo, StructRef, image_base, read_pe_header_page, size_of_image};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
-use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target};
+use crate::target::{DiagnosticValue, ListTermination, Target};
 use crate::types::{Arch, VirtAddr};
 use iced_x86::{Code, Decoder, DecoderOptions};
 use pelite::{PeView, Wrap};
@@ -17,7 +14,6 @@ const IMAGE_SCN_MEM_DISCARDABLE: u32 = 0x0200_0000;
 const IMAGE_DIRECTORY_ENTRY_BASERELOC: usize = 5;
 const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
 const IMAGE_REL_BASED_DIR64: u16 = 10;
-const MAX_LOADER_MODULES: usize = 1000;
 const MAX_REPORT_RANGES: usize = 64;
 const MAX_BYTE_DIFFS: usize = 4096;
 const SECTION_READ_CHUNK: usize = 0x1000;
@@ -397,44 +393,6 @@ fn read_loader_list_heads(ldr: &StructRef<'_>) -> LoaderListHeads {
 
 fn unavailable_loader_lists(error: impl ToString) -> DiagnosticValue<LoaderListHeads> {
     DiagnosticValue::Unavailable(error.to_string())
-}
-
-fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>> {
-    let dll_base = record.read_pointer("DllBase")?;
-    if dll_base.is_zero() {
-        return Ok(None);
-    }
-    let size_of_image: u32 = record.read_field("SizeOfImage")?;
-    let name = record
-        .unicode_string("BaseDllName")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "<unknown>".to_string());
-    let mut info = ModuleInfo::new(name, dll_base, size_of_image);
-    if let Ok(entry_point) = record.read_pointer("EntryPoint")
-        && !entry_point.is_zero()
-    {
-        info.entry_point = Some(entry_point);
-    }
-    if let Ok(timestamp) = record.read_field::<u32>("TimeDateStamp") {
-        info.time_date_stamp = Some(timestamp);
-    }
-    if let Ok(checksum) = record.read_field::<u32>("CheckSum") {
-        info.checksum = Some(checksum);
-    }
-    Ok(Some(info))
-}
-
-fn read_ptr_width(
-    memory: &impl MemoryOps<VirtAddr>,
-    address: VirtAddr,
-    pointer_size: usize,
-) -> Result<VirtAddr> {
-    if pointer_size == 4 {
-        memory.read::<u32>(address).map(VirtAddr::from)
-    } else {
-        memory.read::<u64>(address).map(VirtAddr)
-    }
 }
 
 fn loader_module_detail(module: ModuleInfo) -> LoaderModuleDetail {
@@ -829,150 +787,18 @@ impl Target {
                 Error::DebugInfo("this command requires an attached user process".into())
             })?
             .clone();
-        let (mut modules, termination) = self.walk_loader_modules(&process)?;
-        let mut wow64_termination = None;
-        if let Some(peb32) = process.wow64_peb {
-            let (mut modules32, termination32) = self.walk_loader_modules32(process.dtb, peb32)?;
-            wow64_termination = Some(termination32);
-            for mut module in modules32.drain(..) {
-                if let Some(native) = modules
-                    .iter_mut()
-                    .find(|native| native.base_address == module.base_address)
-                {
-                    native.is_32bit = true;
-                    continue;
-                }
-                if modules
-                    .iter()
-                    .any(|native| native.short_name == module.short_name)
-                {
-                    module.short_name.push_str("32");
-                }
-                modules.push(module);
-            }
-        }
-        let modules = modules
+        let detail = self.guest()?.process_modules_detail(&process)?;
+        let modules = detail
+            .modules
             .into_iter()
             .filter(|module| containing.is_none_or(|address| module.contains_address(address)))
             .map(loader_module_detail)
             .collect();
         Ok(LoaderModulesDetail {
             modules,
-            termination,
-            wow64_termination,
+            termination: detail.termination,
+            wow64_termination: detail.wow64_termination,
         })
-    }
-
-    fn walk_loader_modules(
-        &self,
-        process: &ProcessInfo,
-    ) -> Result<(Vec<ModuleInfo>, ListTermination)> {
-        let types = self.guest()?.ntoskrnl.types_in(process.dtb);
-        let eprocess = types.struct_at("_EPROCESS", process.eprocess_va)?;
-        let peb = eprocess.follow("Peb")?;
-        if peb.addr().is_zero() {
-            return Err(Error::MissingPEB);
-        }
-        let ldr = peb.follow("Ldr")?;
-        if ldr.addr().is_zero() {
-            return Ok((Vec::new(), ListTermination::Null));
-        }
-        let head = ldr.embedded("InLoadOrderModuleList")?.addr();
-        let record_layout = types.layout("_LDR_DATA_TABLE_ENTRY")?;
-        let link_offset = record_layout.field_offset("InLoadOrderLinks")?;
-        let pointer_size = usize::from(record_layout.pointer_size);
-        let memory = self.current_process()?.memory();
-        let read_ptr = |address| read_ptr_width(&memory, address, pointer_size);
-        let mut modules = Vec::new();
-        let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
-        cursor.advance(read_ptr(head).map_err(|error| error.to_string()));
-        while let Some(link) = cursor.take_current() {
-            let record_address = VirtAddr(link.0.wrapping_sub(link_offset));
-            let record = types
-                .struct_with_layout(Arc::clone(&record_layout), record_address)
-                .prefetch();
-            match module_info_from_record(&record) {
-                Ok(Some(module)) => modules.push(module),
-                Ok(None) => {}
-                Err(error) => {
-                    cursor.advance(Err(error.to_string()));
-                    break;
-                }
-            }
-            cursor
-                .advance(read_ptr(record_address + link_offset).map_err(|error| error.to_string()));
-        }
-        Ok((modules, cursor.finish()))
-    }
-
-    fn walk_loader_modules32(
-        &self,
-        dtb: u64,
-        peb32: VirtAddr,
-    ) -> Result<(Vec<ModuleInfo>, ListTermination)> {
-        const IN_LOAD_ORDER_MODULE_LIST: u64 = 0x0c;
-        const ENTRY_LEN: usize = 0x48;
-        let types = self.guest()?.ntoskrnl.types_in(dtb);
-        let ldr: u32 = types.struct_at("_PEB32", peb32)?.read_field("Ldr")?;
-        if ldr == 0 {
-            return Ok((Vec::new(), ListTermination::Null));
-        }
-        let memory = self.current_process()?.memory();
-        let head = VirtAddr(u64::from(ldr) + IN_LOAD_ORDER_MODULE_LIST);
-        let read_link = |address: VirtAddr| memory.read::<u32>(address).map(VirtAddr::from);
-        let mut modules = Vec::new();
-        let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
-        cursor.advance(read_link(head).map_err(|error| error.to_string()));
-        while let Some(current) = cursor.take_current() {
-            let mut entry = [0u8; ENTRY_LEN];
-            if let Err(error) = memory.read_bytes(current, &mut entry) {
-                cursor.advance(Err(error.to_string()));
-                break;
-            }
-            let u32_at =
-                |offset: usize| u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap());
-            cursor.advance(Ok(VirtAddr(u64::from(u32_at(0)))));
-            let dll_base = u32_at(0x18);
-            if dll_base == 0 {
-                continue;
-            }
-            let name_len = usize::from(u16::from_le_bytes([entry[0x2c], entry[0x2d]]));
-            let name_buffer = u32_at(0x30);
-            let name = if name_len == 0 || name_buffer == 0 {
-                String::new()
-            } else {
-                let mut buf = vec![0u8; name_len];
-                memory
-                    .read_bytes(VirtAddr(u64::from(name_buffer)), &mut buf)
-                    .map(|()| {
-                        let u16s: Vec<u16> = buf
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|chunk| u16::from_le_bytes(*chunk))
-                            .collect();
-                        String::from_utf16_lossy(&u16s)
-                    })
-                    .unwrap_or_default()
-            };
-            let mut module = ModuleInfo::new(
-                if name.is_empty() {
-                    "<unknown>".to_string()
-                } else {
-                    name
-                },
-                VirtAddr(u64::from(dll_base)),
-                u32_at(0x20),
-            );
-            module.is_32bit = true;
-            let entry_point = u32_at(0x1c);
-            if entry_point != 0 {
-                module.entry_point = Some(VirtAddr(u64::from(entry_point)));
-            }
-            module.time_date_stamp = Some(u32_at(0x44));
-            modules.push(module);
-        }
-        Ok((modules, cursor.finish()))
     }
 
     /// Compare executable cached-image sections with the loaded module. Both

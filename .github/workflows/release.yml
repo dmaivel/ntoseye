@@ -171,8 +171,6 @@ jobs:
           print("version:", ntoseye.__version__)
           assert hasattr(ntoseye, "attach"), "attach missing"
           assert hasattr(ntoseye, "Debugger"), "Debugger missing"
-          for m in ("backtrace", "pte_walk", "read_struct", "disassemble"):
-              assert hasattr(ntoseye.Debugger, m), f"Debugger.{m} missing"
           PY
       - name: Upload wheel
         uses: actions/upload-artifact@v4

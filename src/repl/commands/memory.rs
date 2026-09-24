@@ -7,12 +7,11 @@ use owo_colors::OwoColorize;
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
-use crate::memory::PAGE_SIZE;
+use crate::memory::{PAGE_SIZE, for_each_page_chunk, read_page_chunks};
 use crate::types::{Arch, VirtAddr};
 use crate::ui;
 use crate::unwind::{
-    ThreadTraceContext, format_symbol, function_range, resolve_thread_trace_context,
-    try_format_symbol,
+    ThreadTraceContext, format_symbol, resolve_thread_trace_context, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -282,68 +281,6 @@ repl_command! {
     summary: "Search memory for a byte pattern.",
     details: "hex bytes: 4883792000740a or \\x48\\x83\\x79\\x20\\x00\\x74\\x0a",
     completion: [Expression, None, Expression],
-}
-
-fn page_bounded_unit_read_len(
-    address: VirtAddr,
-    remaining_units: usize,
-    unit_size: usize,
-) -> usize {
-    debug_assert!(remaining_units > 0);
-    debug_assert!(unit_size > 0);
-
-    let page_remaining = PAGE_SIZE - address.page_offset() as usize;
-    let bounded = remaining_units
-        .saturating_mul(unit_size)
-        .min(page_remaining);
-    let whole_units = bounded - bounded % unit_size;
-    // A unit beginning at the final byte of a page must be read whole across
-    // the boundary; otherwise every read ends on a unit boundary.
-    if whole_units == 0 {
-        unit_size
-    } else {
-        whole_units
-    }
-}
-
-pub fn for_each_page_chunk(
-    start: VirtAddr,
-    length: usize,
-    mut visit: impl FnMut(usize, VirtAddr, usize),
-) {
-    let mut offset = 0usize;
-    while offset < length {
-        let address = start + offset as u64;
-        let chunk_len = page_bounded_unit_read_len(address, length - offset, 1);
-        visit(offset, address, chunk_len);
-        offset += chunk_len;
-    }
-}
-
-/// Read `length` bytes a page at a time, marking each page readable or not,
-/// so one missing page does not hide the rest. A running target is not a
-/// missing page: that refusal applies to the whole range and is returned.
-pub fn read_page_chunks(
-    start: VirtAddr,
-    length: usize,
-    mut read: impl FnMut(VirtAddr, &mut [u8]) -> Result<()>,
-) -> Result<(Vec<u8>, Vec<bool>)> {
-    let mut data = vec![0u8; length];
-    let mut valid = vec![false; length];
-    let mut running = Ok(());
-    for_each_page_chunk(
-        start,
-        length,
-        |offset, address, chunk_len| match best_effort(read(
-            address,
-            &mut data[offset..offset + chunk_len],
-        )) {
-            Ok(Some(())) => valid[offset..offset + chunk_len].fill(true),
-            Ok(None) => {}
-            Err(error) => running = Err(error),
-        },
-    );
-    running.map(|()| (data, valid))
 }
 
 pub fn parse_write_values(
@@ -939,39 +876,28 @@ impl ReplState<'_> {
             None => 256,
         };
 
-        let mut units: Vec<u16> = Vec::new();
-        let mut terminated = false;
-        let mut failed_at = None;
-        let mut addr = start;
-        while units.len() < max_chars && !terminated {
-            // End each ordinary read at both a page boundary and a whole-unit
-            // boundary. If one UTF-16 unit itself straddles pages, read that
-            // unit whole so neither byte is discarded.
-            let want = page_bounded_unit_read_len(addr, max_chars - units.len(), char_size);
-            let mut buf = vec![0u8; want];
-            if let Err(e) = self.read_for_display(addr, &mut buf) {
-                failed_at = Some((addr, e));
-                break;
+        let read = match self.ctx.read_terminated(start, max_chars, char_size) {
+            Ok(read) => read,
+            Err(error) => {
+                error!("failed to read string at {:#x}: {}", start.0, error);
+                return Ok(());
             }
-            terminated = push_string_units(&buf, char_size, max_chars, &mut units);
-            addr += want as u64;
-        }
-
-        if units.is_empty()
-            && let Some((addr, e)) = failed_at
-        {
-            error!("failed to read string at {:#x}: {}", addr, e);
-            return Ok(());
-        }
-
+        };
         let text: String = if char_size == 1 {
-            units.iter().map(|&u| u as u8 as char).collect()
+            read.bytes.iter().map(|&byte| char::from(byte)).collect()
         } else {
+            let units: Vec<u16> = read
+                .bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|unit| u16::from_le_bytes(*unit))
+                .collect();
             String::from_utf16_lossy(&units)
         };
-        let suffix = if failed_at.is_some() {
+        let suffix = if read.unreadable {
             " <unreadable>".red().to_string()
-        } else if !terminated {
+        } else if read.bytes.len() / char_size == max_chars {
             "...".bright_black().to_string()
         } else {
             String::new()
@@ -1124,49 +1050,12 @@ impl ReplState<'_> {
             None => 8,
         };
 
-        let max_bytes = count.saturating_mul(max_instruction_bytes(self.ctx.target.arch()));
-        let initial_start = VirtAddr(address.0.saturating_sub(max_bytes as u64));
-        let range = AddressRange {
-            start: initial_start,
-            end: address,
-        };
-        let (data, valid) = match self.read_virtual_best_effort(&range) {
-            Ok(read) => read,
+        let rows = match self.ctx.disassemble_back(address, count) {
+            Ok(rows) => rows,
             Err(error) => {
                 error!("{error}");
                 return Ok(());
             }
-        };
-        let mut suffix_len = valid.iter().rev().take_while(|valid| **valid).count();
-        if self.ctx.target.arch() == Arch::Arm64 {
-            suffix_len -= suffix_len % 4;
-        }
-        let suffix_offset = data.len().saturating_sub(suffix_len);
-        let read_start = initial_start + suffix_offset as u64;
-        let bytes = &data[suffix_offset..];
-        if bytes.is_empty() {
-            error!("could not read memory before {}", ui::addr(address.0));
-            return Ok(());
-        }
-
-        let dtb = self.ctx.target.current_process()?.dtb();
-        let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
-        let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
-        let bitness = self.ctx.target.code_bitness(address);
-        let Some(rows) = decode_preceding(
-            self.ctx.target.arch(),
-            bytes,
-            read_start.0,
-            address.0,
-            count,
-            bitness,
-            resolve,
-        ) else {
-            error!(
-                "could not decode instructions ending at {}",
-                ui::addr(address.0)
-            );
-            return Ok(());
         };
         render_rows(&rows, |_| None);
         outln!();
@@ -1183,41 +1072,14 @@ impl ReplState<'_> {
             }
         };
 
-        let dtb = self.ctx.target.current_process()?.dtb();
-        let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
-        let Some((start, end)) = function_range(&self.ctx.target, &trace, address.0) else {
-            error!("no runtime-function entry contains {}", ui::addr(address.0));
-            return Ok(());
-        };
-        let Some(len) = end
-            .checked_sub(start)
-            .and_then(|len| usize::try_from(len).ok())
-        else {
-            error!("invalid function range {start:#x}..{end:#x}");
-            return Ok(());
-        };
-        const MAX_FUNCTION_BYTES: usize = 1024 * 1024;
-        if len == 0 || len > MAX_FUNCTION_BYTES {
-            error!("refusing invalid function size {len:#x} bytes");
-            return Ok(());
-        }
-
-        let symbol = format_symbol(&self.ctx.target, &trace, start);
-        outln!("{}  {} bytes", ui::symbol(&symbol), len);
-        let mut bytes = vec![0u8; len];
-        if let Err(e) = self.read_for_display(VirtAddr(start), &mut bytes) {
-            outln!("{e}\n");
-            return Ok(());
-        }
-        let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
-        let bitness = self.ctx.target.code_bitness(VirtAddr(start));
-        let rows = match self.ctx.target.arch() {
-            Arch::Amd64 => {
-                let mut formatter = disasm_formatter();
-                decode_rows(&bytes, start, None, bitness, &mut formatter, resolve)
+        let (symbol, len, rows) = match self.ctx.disassemble_function(address) {
+            Ok(disassembly) => disassembly,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
             }
-            Arch::Arm64 => decode_rows_arm64(&bytes, start, None, resolve),
         };
+        outln!("{}  {} bytes", ui::symbol(&symbol), len);
         render_rows(&rows, |_| None);
         outln!();
 
@@ -1697,24 +1559,5 @@ fn format_unix_timestamp(seconds: i64, nanos: u32) -> String {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}")
     } else {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::page_bounded_unit_read_len;
-    use crate::types::VirtAddr;
-
-    #[test]
-    fn utf16_page_chunks_never_drop_an_unaligned_unit_byte() {
-        assert_eq!(page_bounded_unit_read_len(VirtAddr(0xffd), 8, 2), 2);
-        assert_eq!(page_bounded_unit_read_len(VirtAddr(0xfff), 7, 2), 2);
-    }
-
-    #[test]
-    fn string_page_chunks_respect_unit_budget() {
-        assert_eq!(page_bounded_unit_read_len(VirtAddr(0x100), 3, 2), 6);
-        assert_eq!(page_bounded_unit_read_len(VirtAddr(0x100), 3, 1), 3);
-        assert_eq!(page_bounded_unit_read_len(VirtAddr(0xffe), 1, 2), 2);
     }
 }

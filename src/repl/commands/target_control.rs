@@ -169,12 +169,10 @@ impl ReplState<'_> {
         if !target_control_available(self) {
             return Ok(());
         }
-        if let Err(error) = self.ctx.backend.reboot_target() {
+        if let Err(error) = self.ctx.request_reboot() {
             error!("failed to reboot target: {error}");
             return Ok(());
         }
-        self.clear_selected_frame();
-        self.ctx.clear_resume_state();
         outln!("Target is rebooting; waiting for target reload.");
         self.wait_for_stop_after_resume()
     }
@@ -183,12 +181,10 @@ impl ReplState<'_> {
         if !target_control_available(self) {
             return Ok(());
         }
-        if let Err(error) = self.ctx.backend.cause_bugcheck() {
+        if let Err(error) = self.ctx.request_crash() {
             error!("failed to force target bugcheck: {error}");
             return Ok(());
         }
-        self.clear_selected_frame();
-        self.ctx.clear_resume_state();
         outln!(
             "Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash dump before rebooting or breaking in."
         );

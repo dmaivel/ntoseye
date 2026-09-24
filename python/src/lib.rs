@@ -1,6 +1,5 @@
-use pyo3::prelude::*;
+//! The wheel's extension module: `PyInit__ntoseye` for the SDK's module,
+//! which lives in core (`ntoseye::python::_ntoseye`) so the REPL embeds the
+//! same one.
 
-#[pymodule]
-fn _ntoseye(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    ntoseye_core::python::register_module(m)
-}
+pub use ntoseye_core::python::_ntoseye;

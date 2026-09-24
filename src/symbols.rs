@@ -129,6 +129,15 @@ struct ParsedIndexData {
     diagnostics: Vec<SymbolIndexDiagnostic>,
 }
 
+/// A PDB enum ([`SymbolStore::enum_def`]).
+#[derive(Debug)]
+pub struct EnumDef {
+    /// `(name, value)` in declaration order.
+    pub variants: Vec<(String, i64)>,
+    /// Storage width in bytes of the underlying type, when it resolves.
+    pub size: Option<u64>,
+}
+
 pub struct SymbolStore {
     pdbs: DashMap<u128, Mutex<pdb2::PDB<'static, Cursor<&'static [u8]>>>>,
 
@@ -163,6 +172,9 @@ pub struct SymbolStore {
     /// `None` remembers a type the PDB does not define, so repeated misses
     /// (`_MM_SESSION_SPACE` per process) cost a map probe, not a stream scan.
     type_cache: DashMap<(u128, String), Option<Arc<TypeInfo>>>,
+    /// (guid, enum name) -> definition, `None` for a miss; see
+    /// [`Self::enum_def`].
+    enum_cache: DashMap<(u128, String), Option<Arc<EnumDef>>>,
 
     /// (guid, procedure-relative RVA) -> locals in scope there. A single
     /// lookup walks the whole type stream and every compiland's symbols, and
@@ -1473,6 +1485,7 @@ impl SymbolStore {
             source_lines: DashMap::new(),
             index_diagnostics: DashMap::new(),
             type_cache: DashMap::new(),
+            enum_cache: DashMap::new(),
             locals_cache: DashMap::new(),
             on_disk_images: DashMap::new(),
             modules: DashMap::new(),
@@ -1720,6 +1733,8 @@ impl SymbolStore {
             self.index_diagnostics.remove(&guid);
             self.type_cache
                 .retain(|(cached_guid, _), _| *cached_guid != guid);
+            self.enum_cache
+                .retain(|(cached_guid, _), _| *cached_guid != guid);
             self.locals_cache
                 .retain(|(cached_guid, _), _| *cached_guid != guid);
         }
@@ -1924,7 +1939,7 @@ impl SymbolStore {
         }
     }
 
-    fn read_c_string_lossy(bytes: &[u8]) -> String {
+    pub fn read_c_string_lossy(bytes: &[u8]) -> String {
         let nul = bytes
             .iter()
             .position(|byte| *byte == 0)
@@ -2582,6 +2597,20 @@ impl SymbolStore {
         guids
             .into_iter()
             .find_map(|guid| self.enum_variants(guid, name))
+    }
+
+    /// Resolve an enum together with the PDB GUID that defines it. Hosts that
+    /// cache generated enum classes need the GUID in their cache key because
+    /// distinct modules may define enums with the same name.
+    pub fn find_enum_def_across_modules(
+        &self,
+        dtb: Dtb,
+        enum_name: &str,
+    ) -> Option<(u128, Arc<EnumDef>)> {
+        let (guids, name) = self.type_lookup_guids(dtb, enum_name);
+        guids
+            .into_iter()
+            .find_map(|guid| self.enum_def(guid, name).map(|def| (guid, def)))
     }
 
     /// Error text for a name that didn't resolve as a struct/union: point at the
@@ -3932,14 +3961,29 @@ impl SymbolStore {
         Some(type_info)
     }
 
-    /// Variants `(name, value)` of a PDB enum, in declaration order. Enums live
-    /// in the type stream but aren't in the (class-only) type index, so this
-    /// scans like `dump_struct_with_types`. Lets callers map a raw enum value
-    /// (e.g. an `_MI_SYSTEM_VA_TYPE` region tag) back to its name.
-    pub fn enum_variants<S>(&self, guid: u128, enum_name: S) -> Option<Vec<(String, i64)>>
-    where
-        S: AsRef<str>,
-    {
+    /// Variants `(name, value)` of a PDB enum, in declaration order. Lets
+    /// callers map a raw enum value (e.g. an `_MI_SYSTEM_VA_TYPE` region tag)
+    /// back to its name.
+    pub fn enum_variants(&self, guid: u128, enum_name: &str) -> Option<Vec<(String, i64)>> {
+        self.enum_def(guid, enum_name)
+            .map(|def| def.variants.clone())
+    }
+
+    /// A PDB enum's variants and storage width. Enums live in the type stream
+    /// but aren't in the (class-only) type index, so the first lookup scans
+    /// like `dump_struct_with_types`; the result (a miss too) is cached per
+    /// guid, which is what makes reading enum-typed fields cheap.
+    pub fn enum_def(&self, guid: u128, enum_name: &str) -> Option<Arc<EnumDef>> {
+        let cache_key = (guid, enum_name.to_string());
+        if let Some(cached) = self.enum_cache.get(&cache_key) {
+            return cached.clone();
+        }
+        let def = self.scan_enum(guid, enum_name).map(Arc::new);
+        self.enum_cache.insert(cache_key, def.clone());
+        def
+    }
+
+    fn scan_enum(&self, guid: u128, enum_name: &str) -> Option<EnumDef> {
         let pdb = self.pdbs.get_mut(&guid)?;
         let mut pdb_lock = pdb.lock();
         let type_information = pdb_lock.type_information().ok()?;
@@ -3950,13 +3994,14 @@ impl SymbolStore {
             type_finder.update(&iter);
 
             if let Ok(TypeData::Enumeration(en)) = typ.parse()
-                && en.name.to_string() == enum_name.as_ref()
+                && en.name.to_string() == enum_name
                 && !en.properties.forward_reference()
             {
-                let mut out = Vec::new();
-                self.collect_enum_variants(&type_finder, en.fields, &mut out)
+                let mut variants = Vec::new();
+                self.collect_enum_variants(&type_finder, en.fields, &mut variants)
                     .ok()?;
-                return Some(out);
+                let size = self.type_size(guid, &type_finder, en.underlying_type).ok();
+                return Some(EnumDef { variants, size });
             }
         }
         None

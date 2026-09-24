@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Attach to a process and inspect it in its own address space.
+"""Inspect a process through its address-space-bound views.
 
-Demonstrates the context manager, process-context switching (`attach_process`),
-and reading a struct from the attached process. Uses the passive `memory`
-backend.
+A `Process` exposes its own `memory`, `modules`, and `threads`; no global
+process selection is needed. Uses the passive `memory` backend.
 
     python3 inspect_process.py
     python3 inspect_process.py --name explorer.exe
@@ -12,30 +11,33 @@ backend.
 import argparse
 import ntoseye
 
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--backend", default="memory", choices=["memory", "gdb", "kd"])
     ap.add_argument("--connect", default=None)
-    ap.add_argument("--name", default="lsass.exe", help="process image name to attach to")
+    ap.add_argument("--name", default="lsass.exe", help="process image name to inspect")
     args = ap.parse_args()
 
     with ntoseye.attach(backend=args.backend, connect=args.connect) as dbg:
-        proc = next((p for p in dbg.processes() if p.ImageFileName == args.name), None)
-        if proc is None:
+        matches = dbg.processes.find(args.name)
+        if not matches:
             raise SystemExit(f"process {args.name!r} not found")
-        pid = proc.UniqueProcessId
+        proc = matches[0]
 
-        print(f"attaching to {args.name} (pid {pid}, eprocess {proc.addr:#x})")
-        dbg.attach_process(pid)  # subsequent *user* memory reads target this process
-        print("current process:", dbg.current_process())
+        print(f"{proc.name} (pid {proc.pid}, eprocess {proc.eprocess:#x}, dtb {proc.dtb:#x})")
+        print(f"  ActiveThreads   : {proc.object.ActiveThreads}")
+        print(f"  threads         : {len(proc.threads)}")
+        # Alternate access: `proc.object["ActiveProcessLinks"]` reads the same
+        # field. It is needed only when a field is named like a cursor member
+        # (`addr`, `type`, `read`, ...) or when assigning to a field.
+        print(f"  ActiveLinks     : {proc.object.ActiveProcessLinks.Flink:#x}")
 
-        # The _EPROCESS cursor reads kernel memory, so its fields read directly.
-        print(f"  UniqueProcessId : {proc.UniqueProcessId}")
-        print(f"  ImageFileName   : {proc.ImageFileName}")
-        print(f"  ActiveThreads   : {proc.ActiveThreads}")
-        print(f"  threads (walked): {len(proc.threads())}")
-
-        dbg.detach()
+        if proc.peb is None:
+            print("  PEB             : unavailable")
+        else:
+            print(f"  PEB             : {proc.peb.addr:#x}")
+            print(f"  user bytes      : {proc.memory.read(proc.peb.addr, 16).hex()}")
 
 
 if __name__ == "__main__":

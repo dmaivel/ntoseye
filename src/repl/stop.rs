@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
-use crate::dbg_backend::{BugcheckInfo, DebugBackend};
+use crate::dbg_backend::{BugcheckInfo, DebugBackend, StopEvent};
 use crate::error::Result;
 use crate::gdb::{BreakpointManager, RegisterMap};
 use crate::session::{ContinueOutcome, Session, StopResolution};
@@ -316,26 +316,8 @@ pub fn surface_pending_stop(session: &mut Session, caches: &ReplCaches) -> Resul
     }
 
     if let StopResolution::Stopped { event, .. } = &resolution
-        && let ExceptionPolicyAction::Continue {
-            notify,
-            disposition,
-            command: None,
-        } = session.exception_policies.action_for(event)
+        && continue_exception_policy(session, event)?
     {
-        if notify {
-            let code = event.exception_code.unwrap_or_default();
-            let chance = match event.first_chance {
-                Some(true) => "first chance",
-                Some(false) => "second chance",
-                None => "unknown chance",
-            };
-            outln!("Exception {code:#010x} ({chance}); continuing");
-        }
-        session.target.selected_frame = None;
-        session
-            .backend
-            .continue_execution_with_disposition(disposition)?;
-        session.record_continuation_disposition(disposition);
         return Ok(false);
     }
 
@@ -343,19 +325,33 @@ pub fn surface_pending_stop(session: &mut Session, caches: &ReplCaches) -> Resul
     Ok(true)
 }
 
-pub fn surface_interrupt_stop(session: &mut Session, caches: &ReplCaches) -> Result<()> {
-    loop {
-        let event = session.backend.interrupt()?;
-        let resolution = session.classify_stop_event(event)?;
-        if matches!(
-            resolution,
-            StopResolution::Resumed | StopResolution::ModulesChanged
-        ) {
-            continue;
-        }
-        print_async_stop_resolution(session, caches, resolution);
-        return Ok(());
+/// Apply a command-free automatic continue for an exception stop.
+pub fn continue_exception_policy(session: &mut Session, event: &StopEvent) -> Result<bool> {
+    let ExceptionPolicyAction::Continue {
+        notify,
+        disposition,
+        command: None,
+    } = session.exception_policies.action_for(event)
+    else {
+        return Ok(false);
+    };
+    if notify {
+        let chance = match event.first_chance {
+            Some(true) => "first chance",
+            Some(false) => "second chance",
+            None => "unknown chance",
+        };
+        outln!(
+            "Exception {:#010x} ({chance}); continuing",
+            event.exception_code.unwrap_or_default()
+        );
     }
+    session.target.selected_frame = None;
+    session
+        .backend
+        .continue_execution_with_disposition(disposition)?;
+    session.record_continuation_disposition(disposition);
+    Ok(true)
 }
 
 pub use crate::session::step_one_and_clear_tf;

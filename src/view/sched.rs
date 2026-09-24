@@ -1,28 +1,13 @@
 //! sched: [`View`](super::View) builders for the structured inspectors.
 
-use super::{View, diagnostic};
+use super::{View, diagnostic, list_termination};
 use crate::target::sched::{
     ApcDetail, ApcListDetail, ApcSelector, ApcThread, DpcDetail, DpcQueue, DpcQueuesDetail,
     ReadyQueue, ReadyQueueEntry, ReadyQueuesDetail, RunningDetail, RunningProcessor,
     SchedulerError, StackFrameDetail, StackThreadDetail, StacksDetail, ThreadSummary,
     TimerBucketTermination, TimerDetail, TimerListDetail, TimerListEntry,
 };
-use crate::target::{DiagnosticValue, ListTermination, kthread_state_name, wait_reason_name};
-
-fn list_termination(termination: &ListTermination) -> View {
-    let (kind, address, error) = match termination {
-        ListTermination::Head => ("head", None, None),
-        ListTermination::Null => ("null", None, None),
-        ListTermination::Cycle(address) => ("cycle", Some(address.0), None),
-        ListTermination::Bound => ("bound", None, None),
-        ListTermination::Corrupt(error) => ("corrupt", None, Some(error.clone())),
-    };
-    View::Object(vec![
-        ("kind", View::Str(kind.to_string())),
-        ("address", View::OptHex(address)),
-        ("error", View::OptStr(error)),
-    ])
-}
+use crate::target::{DiagnosticValue, kthread_state_name, wait_reason_name};
 
 fn thread_summary(thread: &ThreadSummary) -> View {
     View::Object(vec![

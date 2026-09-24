@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::result;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub mod cpu;
 pub mod heap;
@@ -28,7 +28,10 @@ use crate::{
         locate_debugger_data_block,
     },
     error::{Error, Result},
-    guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, WinObject},
+    guest::{
+        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, WinObject,
+        read_pe_exports,
+    },
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
     symbols::{
@@ -80,6 +83,48 @@ pub struct Target {
     /// discovery that fell back to bare memory access). Never printed here;
     /// the session forwards them to the host.
     pub notices: Vec<String>,
+    /// Bumped each time [`Self::reload_guest`] rebuilds the guest. Hosts stamp
+    /// the handles they hand out with it, so an address from before a reboot
+    /// is refused instead of read through the new kernel's layout.
+    generation: Arc<AtomicU64>,
+}
+
+/// The inspection scope a host has selected (`.process`, `.context`, `.frame`,
+/// `.thread`), moved out whole by [`Target::take_selection`] so a host can run
+/// one operation in a scope of its own and put the user's selection back.
+pub struct TargetSelection {
+    current_process: Option<WinObject>,
+    current_process_info: Option<ProcessInfo>,
+    context_dtb_override: Option<Dtb>,
+    selected_frame: Option<SelectedFrame>,
+    windows_thread_selection: Option<ThreadInfo>,
+    registers: Option<HashMap<String, u64>>,
+}
+
+impl TargetSelection {
+    fn holds_live_registers(&self) -> bool {
+        self.selected_frame
+            .as_ref()
+            .is_none_or(SelectedFrame::is_live)
+    }
+
+    /// Move the register cache out when it holds the live vCPU file rather
+    /// than a selected frame's or context record's recovered registers.
+    pub fn take_live_registers(&mut self) -> Option<HashMap<String, u64>> {
+        if self.holds_live_registers() {
+            self.registers.take()
+        } else {
+            None
+        }
+    }
+
+    /// Put back a live register cache moved out with
+    /// [`Self::take_live_registers`] (as the operation left it).
+    pub fn put_live_registers(&mut self, registers: Option<HashMap<String, u64>>) {
+        if self.holds_live_registers() {
+            self.registers = registers;
+        }
+    }
 }
 
 /// A debugger-selected register context. Register values are kept as a sparse
@@ -923,6 +968,7 @@ impl Target {
             last_exception_code: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             notices,
+            generation: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -967,6 +1013,7 @@ impl Target {
             last_exception_code: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             notices: Vec::new(),
+            generation: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -1267,6 +1314,61 @@ impl Target {
         self.clear_current_windows_thread_context();
         self.current_process = None;
         self.current_process_info = None;
+    }
+
+    /// Scope inspection to `info`'s address space without loading its module
+    /// symbols, which [`Self::attach_process_info`] does. Memory, type, and
+    /// kernel-symbol reads need only the page tables, so the scope's object
+    /// carries no image base (reading it from the PEB would cost two guest
+    /// reads per scoped SDK call, and kernel-only processes have none).
+    pub fn enter_process_scope(&mut self, info: ProcessInfo) -> Result<()> {
+        let winobj = self.guest()?.ntoskrnl.sibling(info.dtb, VirtAddr(0));
+        self.detach();
+        self.current_process = Some(winobj);
+        self.current_process_info = Some(info);
+        Ok(())
+    }
+
+    /// Move the selected inspection scope out, leaving the target detached
+    /// with no frame, thread, or register overrides.
+    pub fn take_selection(&mut self) -> TargetSelection {
+        TargetSelection {
+            current_process: self.current_process.take(),
+            current_process_info: self.current_process_info.take(),
+            context_dtb_override: self.context_dtb_override.take(),
+            selected_frame: self.selected_frame.take(),
+            windows_thread_selection: self.windows_thread_selection.take(),
+            registers: self.registers.take(),
+        }
+    }
+
+    /// Put back a scope taken with [`Self::take_selection`].
+    pub fn restore_selection(&mut self, selection: TargetSelection) {
+        self.current_process = selection.current_process;
+        self.current_process_info = selection.current_process_info;
+        self.context_dtb_override = selection.context_dtb_override;
+        self.selected_frame = selection.selected_frame;
+        self.windows_thread_selection = selection.windows_thread_selection;
+        self.registers = selection.registers;
+    }
+
+    /// The exports of the module mapped at `base` in `dtb`'s address space,
+    /// read from its in-memory export directory ([`read_pe_exports`]).
+    pub fn module_exports(&self, dtb: Dtb, base: VirtAddr) -> Result<Vec<ModuleExportInfo>> {
+        let object = self.current_process()?.sibling(dtb, base);
+        let image = object.read_image()?;
+        read_pe_exports(&image, base)
+    }
+
+    /// How many times the guest has been rebuilt; see the field.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// The rebuild counter itself, for a host that checks handle staleness
+    /// from another thread without a trip to the session.
+    pub fn generation_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.generation)
     }
 
     /// Load symbols for one module (by short name, e.g. `user32`) or, with
@@ -1793,6 +1895,7 @@ impl Target {
         self.guest = Some(guest);
         self.triage_fallback = None;
         self.triage_modules_cache = None;
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.detach();
         self.clear_context_dtb_override();
         self.registers = None;

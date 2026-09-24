@@ -8,6 +8,46 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
 pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
+
+/// Visit a byte range in chunks that never cross a virtual-memory page.
+pub fn for_each_page_chunk(
+    start: VirtAddr,
+    length: usize,
+    mut visit: impl FnMut(usize, VirtAddr, usize),
+) {
+    let mut offset = 0usize;
+    while offset < length {
+        let address = start + offset as u64;
+        let page_remaining = PAGE_SIZE - address.page_offset() as usize;
+        let chunk_len = (length - offset).min(page_remaining);
+        visit(offset, address, chunk_len);
+        offset += chunk_len;
+    }
+}
+
+/// Read a byte range page by page, preserving holes in `valid`. Unreadable
+/// pages are skipped; a running-target refusal applies to the whole range.
+pub fn read_page_chunks(
+    start: VirtAddr,
+    length: usize,
+    mut read: impl FnMut(VirtAddr, &mut [u8]) -> Result<()>,
+) -> Result<(Vec<u8>, Vec<bool>)> {
+    let mut data = vec![0u8; length];
+    let mut valid = vec![false; length];
+    let mut running = Ok(());
+    for_each_page_chunk(start, length, |offset, address, chunk_len| {
+        if running.is_err() {
+            return;
+        }
+        match read(address, &mut data[offset..offset + chunk_len]) {
+            Ok(()) => valid[offset..offset + chunk_len].fill(true),
+            Err(error @ Error::TargetRunning(_)) => running = Err(error),
+            Err(_) => {}
+        }
+    });
+    running.map(|()| (data, valid))
+}
+
 pub const PAGE_SHIFT: u32 = 12;
 pub const PTE_SHIFT: u8 = 12;
 pub const PDE_SHIFT: u8 = 21;

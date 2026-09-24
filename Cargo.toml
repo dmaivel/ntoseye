@@ -52,7 +52,8 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6"
 
-pyo3 = { version = "0.29.0", features = ["abi3-py39"], optional = true }
+pyo3 = { version = "0.29.2", features = ["abi3-py39", "indexmap"], optional = true }
+indexmap = { version = "2.14.0", optional = true }
 
 ctrlc = { version = "3.4", optional = true }
 clap = { version = "4.6", features = ["derive"], optional = true }
@@ -87,9 +88,12 @@ cli = ["repl", "dep:ctrlc", "dep:clap", "dep:dialoguer", "dep:nu-ansi-term", "de
 mcp = ["repl", "dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:tower-http", "dep:anyhow"]
 dap = ["repl", "dep:serde_json", "dep:base64"]
 gdbserver = ["repl", "dep:gdbstub"]
-python = ["repl", "dep:pyo3"]
+python = ["repl", "dep:pyo3", "dep:indexmap"]
 python-embed = ["python", "pyo3/auto-initialize"]
 python-extension = ["python", "pyo3/extension-module"]
+# Emit PyO3 introspection data, from which `maturin` generates the SDK's type
+# stubs (`python/ntoseye/_ntoseye.pyi`).
+python-stubs = ["python", "pyo3/experimental-inspect"]
 
 [dev-dependencies]
 parking_lot = "0.12"

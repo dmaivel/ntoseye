@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 
-use crate::backend::MemoryOps;
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
 use crate::error::Result;
 use crate::expr::Expr;
-use crate::gdb::RegisterMap;
-use crate::kd::{context, context_arm64};
-use crate::target::{SavedThreadRegisters, SelectedFrame, Target};
+use crate::session::ExceptionRecord;
+use crate::target::{SavedThreadRegisters, SelectedFrame};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::triage_report::exception_code_name;
-use crate::types::{Arch, VirtAddr};
+use crate::types::VirtAddr;
 use crate::unwind::RecoveredStackTrace;
 
 use crate::repl::*;
@@ -181,9 +179,15 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let Some(registers) = read_context_at(&self.ctx.target, address) else {
-            error!("could not read a CONTEXT at {}", ui::addr(address.0));
-            return Ok(());
+        let registers = match self.ctx.read_context_record(address) {
+            Ok(registers) => registers,
+            Err(error) => {
+                error!(
+                    "could not read a CONTEXT at {}: {error}",
+                    ui::addr(address.0)
+                );
+                return Ok(());
+            }
         };
         let selected = SelectedFrame::from_registers(0, registers);
         self.set_selected_frame(selected.clone());
@@ -224,14 +228,18 @@ impl ReplState<'_> {
         }
 
         if let Some(address) = self.exception_context_pointer() {
-            if let Some(registers) = read_context_at(&self.ctx.target, VirtAddr(address)) {
-                let selected = SelectedFrame::from_registers(0, registers);
-                self.set_selected_frame(selected.clone());
-                outln!("exception context {}", ui::addr(address));
-                self.print_selected_frame(&selected, false);
-                return Ok(());
+            match self.ctx.read_context_record(VirtAddr(address)) {
+                Ok(registers) => {
+                    let selected = SelectedFrame::from_registers(0, registers);
+                    self.set_selected_frame(selected.clone());
+                    outln!("exception context {}", ui::addr(address));
+                    self.print_selected_frame(&selected, false);
+                }
+                Err(error) => error!(
+                    "could not read exception context at {}: {error}",
+                    ui::addr(address)
+                ),
             }
-            error!("could not read exception context at {}", ui::addr(address));
             return Ok(());
         }
 
@@ -303,60 +311,26 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let Some(record) = read_exception_record(&self.ctx.target, address) else {
-            error!(
-                "could not read an EXCEPTION_RECORD64 at {}",
-                ui::addr(address.0)
-            );
-            return Ok(());
+        let record = match self.ctx.read_exception_record(address) {
+            Ok(record) => record,
+            Err(error) => {
+                error!(
+                    "could not read an EXCEPTION_RECORD64 at {}: {error}",
+                    ui::addr(address.0)
+                );
+                return Ok(());
+            }
         };
         print_exception_record(address.0, &record);
         Ok(())
     }
 
     fn print_current_exception_record(&self) {
-        let Some(event) = self.ctx.last_event.as_ref() else {
-            if let Some(exception) = self
-                .ctx
-                .target
-                .phys
-                .dmp_info()
-                .and_then(|info| info.exception.as_ref())
-            {
-                print_exception_record(
-                    0,
-                    &ExceptionRecord {
-                        code: exception.code,
-                        flags: exception.flags,
-                        nested: 0,
-                        address: exception.address,
-                        parameters: exception.parameters.clone(),
-                    },
-                );
-                return;
-            }
+        let Some(record) = self.ctx.current_exception_record() else {
             error!("no current exception record");
             return;
         };
-        let stop = &event.stop;
-        let code = stop
-            .exception_code
-            .or_else(|| stop.bugcheck.as_ref().map(|info| info.parameters[0] as u32));
-        let Some(code) = code else {
-            error!("no current exception record");
-            return;
-        };
-        let address = stop.exception_address.or(stop.program_counter).unwrap_or(0);
-        print_exception_record(
-            0,
-            &ExceptionRecord {
-                code,
-                flags: 0,
-                nested: 0,
-                address,
-                parameters: Vec::new(),
-            },
-        );
+        print_exception_record(0, &record);
     }
 }
 
@@ -392,79 +366,6 @@ fn print_sparse_registers(registers: &HashMap<String, u64>) {
     for name in names {
         outln!("    {:<8} {}", name, ui::addr(registers[name]));
     }
-}
-
-fn read_context_at(target: &Target, address: VirtAddr) -> Option<HashMap<String, u64>> {
-    let size = match target.arch() {
-        Arch::Amd64 => context::CONTEXT_SIZE,
-        Arch::Arm64 => context_arm64::CONTEXT_SIZE,
-    };
-    let mut bytes = vec![0u8; size];
-    if !read_context_bytes(target, address, &mut bytes) {
-        return None;
-    }
-    Some(target_register_map(target).to_hashmap(&bytes))
-}
-
-fn target_register_map(target: &Target) -> RegisterMap {
-    // Context records use the same architecture-specific offsets as the KD
-    // register map. This helper is intentionally local so no backend state is
-    // mutated while a context is being inspected.
-    match target.arch() {
-        Arch::Amd64 => context::build_register_map(),
-        Arch::Arm64 => context_arm64::build_register_map(),
-    }
-}
-
-fn read_context_bytes(target: &Target, address: VirtAddr, bytes: &mut [u8]) -> bool {
-    target.context_memory().read_bytes(address, bytes).is_ok()
-        || target
-            .kernel_address_space()
-            .read_bytes(address, bytes)
-            .is_ok()
-}
-
-#[derive(Clone, Debug)]
-struct ExceptionRecord {
-    code: u32,
-    flags: u32,
-    nested: u64,
-    address: u64,
-    parameters: Vec<u64>,
-}
-
-fn read_exception_record(target: &Target, address: VirtAddr) -> Option<ExceptionRecord> {
-    const SIZE: usize = 0x98;
-    let mut bytes = vec![0u8; SIZE];
-    if !read_context_bytes(target, address, &mut bytes) {
-        return None;
-    }
-    let read_u32 = |offset: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(
-            bytes.get(offset..offset + 4)?.try_into().ok()?,
-        ))
-    };
-    let read_u64 = |offset: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(
-            bytes.get(offset..offset + 8)?.try_into().ok()?,
-        ))
-    };
-    let code = read_u32(0)?;
-    let flags = read_u32(4)?;
-    let nested = read_u64(8)?;
-    let exception_address = read_u64(16)?;
-    let count = usize::try_from(read_u32(24)?).ok()?.min(15);
-    let mut parameters = Vec::with_capacity(count);
-    for index in 0..count {
-        parameters.push(read_u64(32 + index * 8)?);
-    }
-    Some(ExceptionRecord {
-        code,
-        flags,
-        nested,
-        address: exception_address,
-        parameters,
-    })
 }
 
 fn print_exception_record(address: u64, record: &ExceptionRecord) {

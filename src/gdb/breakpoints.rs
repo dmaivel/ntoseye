@@ -102,8 +102,9 @@ impl BreakpointSpec {
     /// (`bu mod!sym+0x29`). The symbol half is what a module load makes
     /// available, so it is looked up in the breakpoint's own address space
     /// and the offset applied afterwards. Returns the resolved address and
-    /// the offset that was applied.
-    fn resolve_symbol_offset(
+    /// the offset that was applied. Hosts resolving a `[module!]symbol[+off]`
+    /// spec (the SDK's `run_to`, watchpoints) share it.
+    pub fn resolve_symbol_offset(
         debugger: &Target,
         dtb: Dtb,
         name: &str,
@@ -1146,6 +1147,12 @@ impl BreakpointManager {
             .collect();
         bps.sort_by_key(|bp| bp.id);
         bps
+    }
+
+    /// Find a managed breakpoint, including a one-shot hit retained until the
+    /// next resume so the stop that reported it can expose its handle.
+    pub fn get(&self, id: u32) -> Option<&Breakpoint> {
+        self.breakpoints.get(&id)
     }
 
     pub fn has_enabled_breakpoints(&self) -> bool {

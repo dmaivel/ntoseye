@@ -165,6 +165,9 @@ impl ReplState<'_> {
             DispatchContext::Remote(RemoteClient::Mcp) if spec.flow == Flow::Quit => Some(format!(
                 "'{name}' ends the interactive REPL; use the close tool to release the session"
             )),
+            DispatchContext::Remote(RemoteClient::Sdk) if spec.flow == Flow::Quit => Some(format!(
+                "'{name}' ends the interactive REPL; call close() to release the session"
+            )),
             DispatchContext::Remote(RemoteClient::Dap) if spec.flow == Flow::Quit => Some(format!(
                 "'{name}' ends the interactive REPL; disconnect from the client to end the \
                  debug session"

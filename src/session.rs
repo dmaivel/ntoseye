@@ -17,13 +17,16 @@ use single_instance::SingleInstance;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
-use crate::bugchecks::looks_like_kernel_pointer;
+use crate::bugchecks::{looks_like_kernel_pointer, plausible_bugcheck_code};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, LastEvent, StopEvent,
     WatchpointAccess,
 };
-use crate::disasm::{DisasmRow, decode_rows, decode_rows_arm64, disasm_formatter};
+use crate::disasm::{
+    ControlFlow, DisasmRow, classify, decode_preceding, decode_rows, decode_rows_arm64,
+    disasm_formatter, max_instruction_bytes,
+};
 use crate::dmp::DmpBackend;
 use crate::error::{Error, Result};
 use crate::exception_policy::{ExceptionPolicyAction, ExceptionPolicyTable};
@@ -33,18 +36,19 @@ use crate::gdb::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, GdbClient, RegisterMap,
 };
 use crate::guest::{ModuleSymbolLoadReport, ProcessInfo};
-use crate::kd::{KdBackend, KdMemorySource, hwbp, kd_files, trace_enabled};
-use crate::memory::DTB_IDENTITY;
+use crate::kd::{KdBackend, KdMemorySource, context, context_arm64, hwbp, kd_files, trace_enabled};
+use crate::memory::{DTB_IDENTITY, PAGE_SIZE, read_page_chunks};
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
-use crate::target::{ReloadReport, SelectedFrame, Target, ThreadInfo};
+use crate::target::{ReloadReport, SelectedFrame, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackTrace, build_parked_thread_recovered_stack,
     build_parked_thread_stack, build_stacktrace, build_stacktrace_with_context,
-    build_stacktrace_with_register_values, preferred_code_dtb, resolve_thread_trace_context,
+    build_stacktrace_with_register_values, format_symbol, function_range, preferred_code_dtb,
+    resolve_thread_trace_context,
 };
 use crate::{Backend, TargetSpec};
 #[cfg(test)]
@@ -120,6 +124,29 @@ pub enum ContinueOutcome {
     Halted { rip: u64 },
 }
 
+/// The readable contents of a NUL-terminated string, without the terminator.
+pub struct TerminatedRead {
+    /// Readable bytes before the terminator or the first unreadable page.
+    pub bytes: Vec<u8>,
+    /// The string ran into an unreadable page before its terminator.
+    pub unreadable: bool,
+}
+
+impl ContinueOutcome {
+    /// A hit on `breakpoint` at `rip`.
+    fn breakpoint_hit(breakpoint: &Breakpoint, rip: u64, condition_error: Option<String>) -> Self {
+        ContinueOutcome::Breakpoint {
+            id: breakpoint.id,
+            address: breakpoint.address.0,
+            symbol: breakpoint.symbol.clone(),
+            temporary: breakpoint.temporary,
+            action: breakpoint.action.clone(),
+            rip,
+            condition_error,
+        }
+    }
+}
+
 /// A "where am I" snapshot for the read-only status surface: whether the guest
 /// is running, and if halted, the current stop site and inspection scope.
 /// `coherent` is false after a reboot until the kernel's loaded-module list
@@ -151,6 +178,63 @@ pub struct RunStatus {
     /// changes) and invalidate stale addresses without parsing prose.
     pub kernel_base: u64,
 }
+
+/// The fields decoded from a 64-bit Windows `EXCEPTION_RECORD` by `.exr`.
+#[derive(Debug, Clone)]
+pub struct ExceptionRecord {
+    pub code: u32,
+    pub flags: u32,
+    pub nested: u64,
+    pub address: u64,
+    pub parameters: Vec<u64>,
+}
+
+/// One call-tree node of a [`CallTrace`].
+#[derive(Debug, Clone)]
+pub struct CallTraceFrame {
+    pub name: String,
+    pub instructions: usize,
+    pub children: Vec<CallTraceFrame>,
+}
+
+/// The call tree `wt` collected ([`Session::trace_calls`]), how many
+/// instructions it single-stepped, and why it stopped.
+#[derive(Debug, Clone)]
+pub struct CallTrace {
+    pub root: CallTraceFrame,
+    pub instructions: usize,
+    pub end: CallTraceEnd,
+}
+
+/// Why [`Session::trace_calls`] stopped tracing. Anything but `Returned`
+/// leaves a partial tree whose open frames are folded into their callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallTraceEnd {
+    /// The traced function returned to its caller.
+    Returned,
+    /// The instruction limit ran out first.
+    Limit,
+    /// An interrupt request ([`Target::interrupt`]) ended the trace.
+    Interrupted,
+    /// A step landed on an enabled code breakpoint.
+    Breakpoint,
+    /// A step or register/instruction read failed.
+    Failed(String),
+}
+
+/// The halted vCPU's instruction and stack pointers, page-table root, and the
+/// control flow of the instruction at the IP: what stepping loops decide on.
+#[derive(Debug, Clone, Copy)]
+pub struct ControlState {
+    pub ip: u64,
+    pub sp: u64,
+    pub dtb: u64,
+    pub flow: ControlFlow,
+}
+
+/// Instruction cap for a step-until walk (`pc`/`tc`/`pa`/..., and the SDK's
+/// `step(until=)`/`run_to(step=)`) that never finds its target.
+pub const STEP_UNTIL_LIMIT: usize = 100_000;
 
 /// How [`Session::classify_reload_stop`] classified a freshly observed stop:
 /// real stop, reboot artifact, or transport noise.
@@ -378,6 +462,34 @@ const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
 /// [`Error::TargetRunning`] payload for the live register file.
 const REGISTERS_NEED_HALT: &str = "Registers belong to the halted context.";
 
+/// A session's inspection selection, moved out by [`Session::take_selection`].
+pub struct Selection {
+    target: TargetSelection,
+    current_thread: String,
+    parked_windows_thread: Option<VirtAddr>,
+}
+
+impl Selection {
+    /// Move out the cached register file when it is the current vCPU's live
+    /// one (no parked thread, no `.frame`/`.cxr` context), so a scoped
+    /// operation on the same vCPU uses it instead of reading the registers
+    /// again. Hand it back with [`Self::put_live_registers`].
+    pub fn take_live_registers(&mut self) -> Option<HashMap<String, u64>> {
+        if self.parked_windows_thread.is_some() {
+            return None;
+        }
+        self.target.take_live_registers()
+    }
+
+    /// Return the live register file taken with [`Self::take_live_registers`],
+    /// as the scoped operation left it (refreshed, or cleared by a resume).
+    pub fn put_live_registers(&mut self, registers: Option<HashMap<String, u64>>) {
+        if self.parked_windows_thread.is_none() {
+            self.target.put_live_registers(registers);
+        }
+    }
+}
+
 /// The root owner of a live debugging session: the introspection context, the
 /// backend that drives the target, and the session state layered on top.
 pub struct Session {
@@ -427,6 +539,11 @@ pub struct Session {
     /// `wait_for_stop` returns this as the proper event instead of a bare
     /// "halted", and `resume` clears it. `None` whenever the host is up to date.
     parked_stop: Option<ContinueOutcome>,
+    /// The stop the target is halted at, as it was surfaced: set by every
+    /// visible classification and every host-facing run/step result, cleared
+    /// when the target moves. Unlike `parked_stop` it is not consumed by
+    /// reading it, so any host can ask "where are we stopped, and why".
+    current_stop: Option<ContinueOutcome>,
     /// The most recent per-stop module refresh report, retained so the REPL can
     /// render its existing module-symbol summary after the core reconciles
     /// breakpoints. Other hosts simply leave it unconsumed.
@@ -690,6 +807,7 @@ impl Session {
             bugcheck_trap_original: Vec::new(),
             reload_surface_pending: false,
             parked_stop: None,
+            current_stop: None,
             module_refresh_report: None,
             notices: Vec::new(),
             symbols_reconciled_at: 0,
@@ -709,6 +827,21 @@ impl Session {
         // explains why it is needed, instead of beside an unrelated stop.
         session.arm_bugcheck_trap();
 
+        // A crash dump sits at its bugcheck: that is the stop it is halted at.
+        if let Some(dump) = session.target.phys.dmp_info()
+            && plausible_bugcheck_code(u64::from(dump.bug_check_code))
+        {
+            let info = BugcheckInfo {
+                code: dump.bug_check_code,
+                parameters: dump.bug_check_parameters,
+                driver: None,
+            };
+            session.current_stop = Some(ContinueOutcome::Bugcheck {
+                rip: Some(session.current_rip()).filter(|&rip| rip != 0),
+                info: Some(info),
+            });
+        }
+
         Ok(session)
     }
 
@@ -717,12 +850,13 @@ impl Session {
     /// plain step + trap-flag clear. Afterward re-arm enabled breakpoints (the
     /// stub can drop non-hit ones on a stop) and re-select the landed-on thread.
     /// The full "step one instruction", shared by the REPL (`si`) and the SDK.
-    pub fn step(&mut self) -> Result<()> {
+    pub fn step(&mut self) -> Result<u64> {
         self.require_live_register_context()?;
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).
         self.parked_stop = None;
+        self.current_stop = None;
         self.backend.set_current_thread(&self.current_thread)?;
         if !step_over_current_breakpoint(
             self.backend.as_mut(),
@@ -751,7 +885,9 @@ impl Session {
             self.current_thread = tid;
         }
         self.refresh_context_for_current_thread();
-        Ok(())
+        let rip = self.current_rip();
+        self.current_stop = Some(ContinueOutcome::Step { rip });
+        Ok(rip)
     }
 
     /// Select `id` as the current inspection thread (e.g. a vCPU id), so
@@ -875,6 +1011,34 @@ impl Session {
         Ok(())
     }
 
+    /// Move the whole inspection selection out (process scope, frame, parked
+    /// thread, vCPU), leaving the session detached on the same vCPU. A host
+    /// that scopes one operation itself (the Python SDK binds every handle to
+    /// its own address space) runs it between this and
+    /// [`Self::restore_selection`], so the user's `.process`/`.thread`/`.frame`
+    /// choice survives untouched.
+    pub fn take_selection(&mut self) -> Selection {
+        Selection {
+            target: self.target.take_selection(),
+            current_thread: self.current_thread.clone(),
+            parked_windows_thread: self.parked_windows_thread.take(),
+        }
+    }
+
+    /// Put back a selection taken with [`Self::take_selection`], switching the
+    /// backend back to its vCPU if the operation moved it.
+    pub fn restore_selection(&mut self, selection: Selection) -> Result<()> {
+        let switched = if self.current_thread != selection.current_thread {
+            self.backend.set_current_thread(&selection.current_thread)
+        } else {
+            Ok(())
+        };
+        self.current_thread = selection.current_thread;
+        self.parked_windows_thread = selection.parked_windows_thread;
+        self.target.restore_selection(selection.target);
+        switched
+    }
+
     /// Select stack frame `index` (`.frame N`) of the current live thread as
     /// the inspection context, so registers, locals, and expressions see that
     /// frame's recovered register file. Returns the frame. A parked thread has
@@ -976,6 +1140,26 @@ impl Session {
         // `$exr_code` follows the same boundary as host-visible stop events;
         // absorbed transport noise must not overwrite it.
         self.target.last_exception_code = event.exception_code;
+        self.current_stop = Some(self.continue_outcome_from_resolution(resolution.clone()));
+    }
+
+    /// The stop the target is halted at, if it has stopped since it last
+    /// moved; see [`Self::note_stop`].
+    pub fn current_stop(&self) -> Option<&ContinueOutcome> {
+        self.current_stop.as_ref()
+    }
+
+    /// Record `outcome` as the stop the target is halted at, for a host that
+    /// reports a stop differently from its classification (a temporary
+    /// breakpoint reached is a `Step`; a requested break-in is an interrupt).
+    /// `Running` and `Halted` carry no stop and leave it alone.
+    pub fn note_stop(&mut self, outcome: &ContinueOutcome) {
+        if !matches!(
+            outcome,
+            ContinueOutcome::Running | ContinueOutcome::Halted { .. }
+        ) {
+            self.current_stop = Some(outcome.clone());
+        }
     }
 
     /// Attach the acknowledgment chosen for the current stop. A successful
@@ -984,6 +1168,7 @@ impl Session {
         if let Some(last_event) = &mut self.last_event {
             last_event.disposition = Some(disposition);
         }
+        self.current_stop = None;
     }
 
     fn continue_outcome_from_resolution(&self, resolution: StopResolution) -> ContinueOutcome {
@@ -993,15 +1178,7 @@ impl Session {
                 rip,
                 condition_error,
                 ..
-            } => ContinueOutcome::Breakpoint {
-                id: breakpoint.id,
-                address: breakpoint.address.0,
-                symbol: breakpoint.symbol,
-                temporary: breakpoint.temporary,
-                action: breakpoint.action,
-                rip,
-                condition_error,
-            },
+            } => ContinueOutcome::breakpoint_hit(&breakpoint, rip, condition_error),
             StopResolution::Bugcheck { event } => ContinueOutcome::Bugcheck {
                 rip: event.program_counter,
                 info: event.bugcheck,
@@ -1077,18 +1254,79 @@ impl Session {
     /// condition result) rather than as a bare `STATUS_BREAKPOINT` stop. A
     /// target that is not running is not broken into (KD would wait out its
     /// break-in timeout): a stop parked by [`Self::with_target_halted`] or
-    /// [`Self::service_idle`] is surfaced, and a plain halt reports its pc.
+    /// [`Self::service_idle`] is surfaced, and a halted target reports the
+    /// stop it is halted at ([`Self::current_stop`]), or its pc.
     pub fn interrupt_outcome(&mut self) -> Result<ContinueOutcome> {
-        if let Some(parked) = self.parked_stop.take() {
-            return Ok(parked);
-        }
-        if !self.backend.is_running() && !self.backend.has_pending_stop() {
-            return Ok(ContinueOutcome::Halted {
-                rip: self.current_rip(),
-            });
+        if let Some(stop) = self.stop_without_breakin() {
+            return Ok(stop);
         }
         self.interrupt_classified()
             .map(|(resolution, _)| self.continue_outcome_from_resolution(resolution))
+    }
+
+    /// [`Self::interrupt_outcome`] for a host that asked for the break-in and
+    /// reports it as such: the break-in the interrupt itself caused comes back
+    /// as a `Stopped` without an exception code. A parked stop, or a pending
+    /// guest exception (a real `int 3`) the break-in collected, keeps its code.
+    pub fn interrupt_requested(&mut self) -> Result<ContinueOutcome> {
+        if let Some(stop) = self.stop_without_breakin() {
+            return Ok(stop);
+        }
+        let (resolution, own_breakin_candidate) = self.interrupt_classified()?;
+        let own_breakin = self.is_own_breakin(&resolution, own_breakin_candidate);
+        let mut outcome = self.continue_outcome_from_resolution(resolution);
+        if own_breakin
+            && let ContinueOutcome::Stopped {
+                exception_code,
+                first_chance,
+                exception_address,
+                ..
+            } = &mut outcome
+        {
+            *exception_code = None;
+            *first_chance = None;
+            *exception_address = None;
+        }
+        self.note_stop(&outcome);
+        Ok(outcome)
+    }
+
+    /// The stop an interrupt reports without breaking in: a parked stop, or
+    /// the one a halted target is at. `None` when the target must be broken
+    /// into.
+    fn stop_without_breakin(&mut self) -> Option<ContinueOutcome> {
+        if let Some(parked) = self.parked_stop.take() {
+            return Some(parked);
+        }
+        (!self.backend.is_running() && !self.backend.has_pending_stop())
+            .then(|| self.halted_outcome())
+    }
+
+    /// The stop a halted target is at, or a bare halt at its pc when it has
+    /// not stopped since it last moved (attached halted).
+    pub fn halted_outcome(&mut self) -> ContinueOutcome {
+        match &self.current_stop {
+            Some(stop) => stop.clone(),
+            None => ContinueOutcome::Halted {
+                rip: self.current_rip(),
+            },
+        }
+    }
+
+    /// Whether an interrupt's stop is the break-in it requested. The KD rule
+    /// is the same status/non-managed-address split used by
+    /// `stop_is_assisted_refresh_breakin`: a STATUS_BREAKPOINT that classified
+    /// as an ordinary stop and is not on one of our sites. A stop the backend
+    /// already had pending (`candidate` false) wins even with the same status.
+    fn is_own_breakin(&self, resolution: &StopResolution, candidate: bool) -> bool {
+        let StopResolution::Stopped { event, .. } = resolution else {
+            return false;
+        };
+        candidate
+            && event.exception_code == Some(STATUS_BREAKPOINT)
+            && event
+                .program_counter
+                .is_none_or(|pc| self.breakpoints.breakpoint_id_at_address(pc).is_none())
     }
 
     /// Run `edit` with the target halted, restoring the previous run state.
@@ -1111,22 +1349,7 @@ impl Session {
         }
 
         let (resolution, own_breakin_candidate) = self.interrupt_classified()?;
-        let (exception_code, program_counter) = match &resolution {
-            StopResolution::Stopped { event, .. } => (event.exception_code, event.program_counter),
-            _ => (None, None),
-        };
-        // The KD break-in rule is the same status/non-managed-address split
-        // used by `stop_is_assisted_refresh_breakin`: a STATUS_BREAKPOINT that
-        // classified as an ordinary stop and is not on one of our sites is the
-        // break-in we requested. A backend-reported pending stop wins even if
-        // it carries the same status; any other resolution is parked conservatively.
-        let own_breakin = own_breakin_candidate
-            && exception_code == Some(STATUS_BREAKPOINT)
-            && matches!(&resolution, StopResolution::Stopped { .. })
-            && program_counter
-                .is_none_or(|pc| self.breakpoints.breakpoint_id_at_address(pc).is_none());
-
-        if !own_breakin {
+        if !self.is_own_breakin(&resolution, own_breakin_candidate) {
             self.parked_stop = Some(self.continue_outcome_from_resolution(resolution));
             return edit(self);
         }
@@ -1268,45 +1491,259 @@ impl Session {
         Ok(VirtAddr(caller.ip))
     }
 
+    /// The halted vCPU's [`ControlState`]: IP, SP, page-table root, and the
+    /// control flow of the instruction at the IP (read breakpoint-masked).
+    pub fn control_state(&mut self) -> Result<ControlState> {
+        let registers = self.read_registers()?;
+        let ip = self
+            .register_map
+            .read_u64("rip", &registers)
+            .or_else(|_| self.register_map.read_u64("pc", &registers))?;
+        let sp = self
+            .register_map
+            .read_u64("rsp", &registers)
+            .or_else(|_| self.register_map.read_u64("sp", &registers))?;
+        let dtb = self
+            .register_map
+            .read_u64(self.target.arch().dtb_register(), &registers)
+            .unwrap_or(0);
+        let mut bytes = [0u8; 16];
+        let length = if self.target.arch() == Arch::Arm64 {
+            4
+        } else {
+            bytes.len()
+        };
+        self.read_masked(VirtAddr(ip), &mut bytes[..length])?;
+        Ok(ControlState {
+            ip,
+            sp,
+            dtb,
+            flow: classify(&bytes[..length], self.target.arch()),
+        })
+    }
+
+    /// The enabled code breakpoint (in the current context) that a step from
+    /// `previous_ip` landed on: one at `ip`, or one just before it when the
+    /// trap reported the IP past the breakpoint byte. A step that started on
+    /// a breakpoint does not count the one it left.
+    pub fn code_breakpoint_after_step(&self, previous_ip: u64, ip: u64) -> Option<u32> {
+        let at = |address: u64| {
+            self.breakpoints
+                .enabled_breakpoint_id_for_current_context(&self.target, VirtAddr(address))
+        };
+        if let Some(id) = at(ip) {
+            return Some(id);
+        }
+        let step = u64::from(self.register_map.breakpoint_step_size());
+        if at(previous_ip).is_some() || ip < step {
+            return None;
+        }
+        at(ip - step)
+    }
+
+    /// Step until `stop` accepts the instruction about to execute, into calls
+    /// or `over` them: the SDK's `step(until=)` and `run_to(step=)`. Returns
+    /// the `Step` there; a breakpoint, exception, or other stop met on the way
+    /// is returned as is. An interrupt request ([`Target::interrupt`]) or an
+    /// elapsed `timeout` ends the walk where it is, as a `Step`; `limit`
+    /// instructions without a match is an error.
+    pub fn step_until(
+        &mut self,
+        over: bool,
+        limit: usize,
+        timeout: Option<Duration>,
+        stop: impl Fn(u64, ControlFlow) -> bool,
+    ) -> Result<ContinueOutcome> {
+        self.require_live_register_context()?;
+        self.clear_selected_frame();
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let cancel = Arc::clone(&self.target.interrupt);
+        for _ in 0..limit {
+            if cancel.swap(false, Ordering::SeqCst) {
+                let outcome = ContinueOutcome::Step {
+                    rip: self.current_rip(),
+                };
+                self.note_stop(&outcome);
+                return Ok(outcome);
+            }
+            let state = self.control_state()?;
+            if stop(state.ip, state.flow)
+                || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                let outcome = ContinueOutcome::Step { rip: state.ip };
+                self.note_stop(&outcome);
+                return Ok(outcome);
+            }
+            let step = match self.step_over_target()? {
+                StepKind::RunTo(next) if over => {
+                    let remaining =
+                        deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                    self.run_to(next, remaining, &cancel)?
+                }
+                _ => ContinueOutcome::Step { rip: self.step()? },
+            };
+            let rip = match step {
+                ContinueOutcome::Step { rip } => rip,
+                // `run_to` was cancelled or timed out and halted the target.
+                ContinueOutcome::Running => {
+                    let outcome = ContinueOutcome::Step {
+                        rip: self.current_rip(),
+                    };
+                    self.note_stop(&outcome);
+                    return Ok(outcome);
+                }
+                other => return Ok(other),
+            };
+            if let Some(outcome) = self
+                .code_breakpoint_after_step(state.ip, rip)
+                .and_then(|id| self.breakpoint_outcome(id, rip))
+            {
+                self.note_stop(&outcome);
+                return Ok(outcome);
+            }
+        }
+        Err(Error::StepLimit(limit))
+    }
+
+    fn breakpoint_outcome(&self, id: u32, rip: u64) -> Option<ContinueOutcome> {
+        let breakpoint = self.breakpoints.get(id)?;
+        Some(ContinueOutcome::breakpoint_hit(breakpoint, rip, None))
+    }
+
+    /// Single-step the current function and collect its call tree (`wt`), up
+    /// to `limit` instructions. A frame closes on a `ret` that moves the stack
+    /// pointer above the one it was entered with, so a `ret` that does not
+    /// leave the frame (a retpoline) is not taken for a return. An interrupt
+    /// request ([`Target::interrupt`]), a breakpoint, or a failed step ends
+    /// the trace early; [`CallTrace::end`] says which.
+    pub fn trace_calls(&mut self, limit: usize) -> Result<CallTrace> {
+        if limit == 0 {
+            return Err(Error::InvalidArgument(
+                "the instruction limit must be greater than zero".into(),
+            ));
+        }
+        let name = |target: &Target, state: &ControlState| {
+            let trace = resolve_thread_trace_context(target, state.dtb);
+            format_symbol(target, &trace, state.ip)
+        };
+        let frame = |name| CallTraceFrame {
+            name,
+            instructions: 0,
+            children: Vec::new(),
+        };
+        let mut current = self.control_state()?;
+        // Each open frame with the stack pointer it was entered with.
+        let mut stack = vec![(frame(name(&self.target, &current)), current.sp)];
+        let mut instructions = 0usize;
+        let arm64 = self.target.arch() == Arch::Arm64;
+        let end = loop {
+            if instructions >= limit {
+                break CallTraceEnd::Limit;
+            }
+            if self.target.interrupt.swap(false, Ordering::SeqCst) {
+                break CallTraceEnd::Interrupted;
+            }
+            if let Err(error) = self.step() {
+                break CallTraceEnd::Failed(error.to_string());
+            }
+            instructions += 1;
+            let next = match self.control_state() {
+                Ok(state) => state,
+                Err(error) => break CallTraceEnd::Failed(error.to_string()),
+            };
+            if self
+                .code_breakpoint_after_step(current.ip, next.ip)
+                .is_some()
+            {
+                break CallTraceEnd::Breakpoint;
+            }
+            let (open, entry_sp) = stack.last_mut().expect("the traced function's frame");
+            open.instructions += 1;
+            if current.flow == ControlFlow::Call {
+                stack.push((frame(name(&self.target, &next)), next.sp));
+            } else if current.flow == ControlFlow::Ret
+                && (next.sp > *entry_sp || (arm64 && next.sp >= *entry_sp))
+            {
+                let (completed, _) = stack.pop().expect("an open frame");
+                match stack.last_mut() {
+                    Some((parent, _)) => parent.children.push(completed),
+                    None => {
+                        stack.push((completed, 0));
+                        break CallTraceEnd::Returned;
+                    }
+                }
+            }
+            current = next;
+        };
+
+        let (mut root, _) = stack.remove(0);
+        // Fold frames still open when the trace ended into their callers.
+        let mut open: Vec<CallTraceFrame> = stack.into_iter().map(|(frame, _)| frame).collect();
+        while let Some(completed) = open.pop() {
+            open.last_mut()
+                .unwrap_or(&mut root)
+                .children
+                .push(completed);
+        }
+        Ok(CallTrace {
+            root,
+            instructions,
+            end,
+        })
+    }
+
     /// Run until `address` is reached. If a breakpoint is already set there in
     /// the current context this is a plain [`Self::continue_until_break`];
     /// otherwise it installs a temporary breakpoint, runs to it, removes it, and
     /// reports reaching it as [`ContinueOutcome::Step`]. A *different* breakpoint,
-    /// bugcheck, or exception en route is surfaced as-is. Blocks until a stop
-    /// (checking `cancel` between polls); on cancel it halts, removes the temp
-    /// breakpoint, and returns [`ContinueOutcome::Running`]. The run-to-address
-    /// primitive behind [`Self::step_over`] / [`Self::step_out`].
-    pub fn run_to(&mut self, address: VirtAddr, cancel: &AtomicBool) -> Result<ContinueOutcome> {
+    /// bugcheck, or exception en route is surfaced as-is. Blocks until a stop,
+    /// `timeout`, or `cancel` (checked between polls); the last two halt the
+    /// target where it is, remove the temp breakpoint, and return
+    /// [`ContinueOutcome::Running`]. The run-to-address primitive behind
+    /// [`Self::step_over`] / [`Self::step_out`].
+    pub fn run_to(
+        &mut self,
+        address: VirtAddr,
+        timeout: Option<Duration>,
+        cancel: &AtomicBool,
+    ) -> Result<ContinueOutcome> {
         // Already breakpointed here → just continue; the existing bp will report.
-        if self
+        let temp_id = if self
             .breakpoints
             .enabled_breakpoint_id_for_current_context(&self.target, address)
             .is_some()
         {
-            return self.continue_until_break(None, cancel, ContinueDisposition::Handled);
-        }
+            None
+        } else {
+            Some(self.breakpoints.add_temporary_code(
+                self.backend.as_mut(),
+                &self.target,
+                address,
+            )?)
+        };
+        let outcome = self.continue_until_break(timeout, cancel, ContinueDisposition::Handled);
 
-        let temp_id =
-            self.breakpoints
-                .add_temporary_code(self.backend.as_mut(), &self.target, address)?;
-        let outcome = self.continue_until_break(None, cancel, ContinueDisposition::Handled);
-
-        // Removing a breakpoint writes guest memory, so halt first if a cancel
-        // left the VM running. A target reload already cleared the manager, so
-        // the remove may be a no-op, ignore its error.
+        // A cancel or timeout leaves the VM running; halt it where it is (the
+        // temp breakpoint's removal writes guest memory anyway). A target
+        // reload already cleared the manager, so the remove may be a no-op;
+        // ignore its error.
         if self.backend.is_running() {
             let _ = self.interrupt();
         }
-        let _ = self
-            .breakpoints
-            .remove(self.backend.as_mut(), &self.target, temp_id);
-
-        match outcome? {
-            ContinueOutcome::Breakpoint { id, rip, .. } if id == temp_id => {
-                Ok(ContinueOutcome::Step { rip })
-            }
-            other => Ok(other),
+        if let Some(temp_id) = temp_id {
+            let _ = self
+                .breakpoints
+                .remove(self.backend.as_mut(), &self.target, temp_id);
         }
+
+        let outcome = match outcome? {
+            ContinueOutcome::Breakpoint { id, rip, .. } if Some(id) == temp_id => {
+                ContinueOutcome::Step { rip }
+            }
+            other => other,
+        };
+        self.note_stop(&outcome);
+        Ok(outcome)
     }
 
     /// Step over the current instruction: single-step it, or, if it's a `call`,
@@ -1314,28 +1751,28 @@ impl Session {
     /// Shared by the REPL `p` (target only) and the SDKs.
     pub fn step_over(&mut self, cancel: &AtomicBool) -> Result<ContinueOutcome> {
         match self.step_over_target()? {
-            StepKind::Single => {
-                self.step()?;
-                Ok(ContinueOutcome::Step {
-                    rip: self.current_rip(),
-                })
-            }
-            StepKind::RunTo(addr) => self.run_to(addr, cancel),
+            StepKind::Single => Ok(ContinueOutcome::Step { rip: self.step()? }),
+            StepKind::RunTo(addr) => self.run_to(addr, None, cancel),
         }
     }
 
     /// Step out of the current function: run to the caller's return address.
     pub fn step_out(&mut self, cancel: &AtomicBool) -> Result<ContinueOutcome> {
         let target = self.step_out_target()?;
-        self.run_to(target, cancel)
+        self.run_to(target, None, cancel)
     }
 
     /// Best-effort current RIP of the selected thread (0 if unreadable).
-    fn current_rip(&mut self) -> u64 {
+    pub fn current_rip(&mut self) -> u64 {
         self.backend
             .read_registers()
             .ok()
-            .and_then(|r| self.register_map.read_u64("rip", &r).ok())
+            .and_then(|r| {
+                self.register_map
+                    .read_u64("rip", &r)
+                    .or_else(|_| self.register_map.read_u64("pc", &r))
+                    .ok()
+            })
             .unwrap_or(0)
     }
 
@@ -1480,6 +1917,86 @@ impl Session {
         let stopped_thread =
             refresh_windows_thread_context_for_backend_thread(&mut self.target, &current_thread);
         (stopped_process, stopped_thread)
+    }
+
+    /// Read `buf` at `address` in the current inspection space, falling back
+    /// to the kernel's: a record a trap or bugcheck saved lives in either.
+    /// The error is the current space's.
+    fn read_record_bytes(&self, address: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        let current = self.target.context_memory().read_bytes(address, buf);
+        if current.is_err()
+            && self
+                .target
+                .kernel_address_space()
+                .read_bytes(address, buf)
+                .is_ok()
+        {
+            return Ok(());
+        }
+        current
+    }
+
+    /// Decode an `EXCEPTION_RECORD64` at `address` (`.exr`).
+    pub fn read_exception_record(&self, address: VirtAddr) -> Result<ExceptionRecord> {
+        const SIZE: usize = 0x98;
+        let mut bytes = [0u8; SIZE];
+        self.read_record_bytes(address, &mut bytes)?;
+        let read_u32 = |offset: usize| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("record field"))
+        };
+        let read_u64 = |offset: usize| {
+            u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("record field"))
+        };
+        let count = (read_u32(24) as usize).min(15);
+        let parameters = (0..count).map(|index| read_u64(32 + index * 8)).collect();
+        Ok(ExceptionRecord {
+            code: read_u32(0),
+            flags: read_u32(4),
+            nested: read_u64(8),
+            address: read_u64(16),
+            parameters,
+        })
+    }
+
+    /// Decode the `CONTEXT` record at `address` into a register map, without
+    /// changing the selected backend context (`.cxr`).
+    pub fn read_context_record(&self, address: VirtAddr) -> Result<HashMap<String, u64>> {
+        let (size, map) = match self.target.arch() {
+            Arch::Amd64 => (context::CONTEXT_SIZE, context::build_register_map()),
+            Arch::Arm64 => (
+                context_arm64::CONTEXT_SIZE,
+                context_arm64::build_register_map(),
+            ),
+        };
+        let mut bytes = vec![0u8; size];
+        self.read_record_bytes(address, &mut bytes)?;
+        Ok(map.to_hashmap(&bytes))
+    }
+
+    /// The current `.exr -1` view, when the last event contains exception
+    /// metadata or the attached dump carries a saved exception record.
+    pub fn current_exception_record(&self) -> Option<ExceptionRecord> {
+        if let Some(event) = &self.last_event {
+            let stop = &event.stop;
+            let code = stop
+                .exception_code
+                .or_else(|| stop.bugcheck.as_ref().map(|info| info.parameters[0] as u32))?;
+            return Some(ExceptionRecord {
+                code,
+                flags: 0,
+                nested: 0,
+                address: stop.exception_address.or(stop.program_counter).unwrap_or(0),
+                parameters: Vec::new(),
+            });
+        }
+        let exception = self.target.phys.dmp_info()?.exception.as_ref()?;
+        Some(ExceptionRecord {
+            code: exception.code,
+            flags: exception.flags,
+            nested: 0,
+            address: exception.address,
+            parameters: exception.parameters.clone(),
+        })
     }
 
     /// A read-only run-control snapshot for the "where am I" surface (see
@@ -1960,6 +2477,64 @@ impl Session {
         Ok(())
     }
 
+    /// Read up to `max_units` NUL-terminated 1- or 2-byte units. The returned
+    /// bytes exclude the terminator; a later unreadable page is reported with
+    /// the readable prefix, while a failure at the start remains an error.
+    pub fn read_terminated(
+        &mut self,
+        addr: VirtAddr,
+        max_units: usize,
+        unit: usize,
+    ) -> Result<TerminatedRead> {
+        if !matches!(unit, 1 | 2) {
+            return Err(Error::InvalidArgument(
+                "string unit size must be 1 or 2 bytes".to_string(),
+            ));
+        }
+        let max_bytes = max_units
+            .checked_mul(unit)
+            .ok_or_else(|| Error::InvalidArgument("string length overflows".to_string()))?;
+        let mut bytes = Vec::with_capacity(max_bytes.min(PAGE_SIZE));
+        let mut unreadable = false;
+        while bytes.len() < max_bytes {
+            let offset = u64::try_from(bytes.len())
+                .map_err(|_| Error::InvalidArgument("string address overflows".to_string()))?;
+            let current = addr
+                .0
+                .checked_add(offset)
+                .ok_or_else(|| Error::InvalidArgument("string address overflows".to_string()))?;
+            let page_remaining = PAGE_SIZE - VirtAddr(current).page_offset() as usize;
+            let chunk_len = page_remaining.min(max_bytes - bytes.len());
+            let mut page = [0u8; PAGE_SIZE];
+            if let Err(error) = self.read_masked(VirtAddr(current), &mut page[..chunk_len]) {
+                if matches!(&error, Error::TargetRunning(_)) {
+                    return Err(error);
+                }
+                if bytes.is_empty() {
+                    return Err(error);
+                }
+                unreadable = true;
+                break;
+            }
+
+            let first_new_unit = bytes.len() / unit;
+            bytes.extend_from_slice(&page[..chunk_len]);
+            let complete_units = bytes.len() / unit;
+            if let Some(index) = (first_new_unit..complete_units).find(|&index| {
+                let start = index * unit;
+                bytes[start..start + unit].iter().all(|byte| *byte == 0)
+            }) {
+                bytes.truncate(index * unit);
+                return Ok(TerminatedRead {
+                    bytes,
+                    unreadable: false,
+                });
+            }
+        }
+        bytes.truncate(bytes.len() - bytes.len() % unit);
+        Ok(TerminatedRead { bytes, unreadable })
+    }
+
     /// Read as much of `buf` as the guest will give with [`Self::read_masked`],
     /// one page-sized chunk at a time, returning how many leading bytes are
     /// valid. Chunks are relative to `addr`, so an unmapped page truncates the
@@ -2039,6 +2614,90 @@ impl Session {
             }
             Arch::Arm64 => Ok(decode_rows_arm64(&buf, addr.0, Some(count), resolve)),
         }
+    }
+
+    /// Disassemble the runtime function containing `addr`. Returns its start
+    /// symbol, byte length, and decoded rows.
+    pub fn disassemble_function(&self, addr: VirtAddr) -> Result<(String, usize, Vec<DisasmRow>)> {
+        let dtb = self.target.current_process()?.dtb();
+        let trace = resolve_thread_trace_context(&self.target, dtb);
+        let Some((start, end)) = function_range(&self.target, &trace, addr.0) else {
+            return Err(Error::DebugInfo(format!(
+                "no runtime-function entry contains {:#x}",
+                addr.0
+            )));
+        };
+        let len = end
+            .checked_sub(start)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or_else(|| {
+                Error::DebugInfo(format!("invalid function range {start:#x}..{end:#x}"))
+            })?;
+        const MAX_FUNCTION_BYTES: usize = 1024 * 1024;
+        if len == 0 || len > MAX_FUNCTION_BYTES {
+            return Err(Error::DebugInfo(format!(
+                "refusing invalid function size {len:#x} bytes"
+            )));
+        }
+
+        let mut bytes = vec![0u8; len];
+        self.read_masked(VirtAddr(start), &mut bytes)?;
+        let resolve = |target| format_symbol(&self.target, &trace, target);
+        let bitness = self.target.code_bitness(VirtAddr(start));
+        let rows = match self.target.arch() {
+            Arch::Amd64 => {
+                let mut formatter = disasm_formatter();
+                decode_rows(&bytes, start, None, bitness, &mut formatter, resolve)
+            }
+            Arch::Arm64 => decode_rows_arm64(&bytes, start, None, resolve),
+        };
+        Ok((format_symbol(&self.target, &trace, start), len, rows))
+    }
+
+    /// Disassemble the instructions ending at `addr`. Missing pages before
+    /// the readable suffix are skipped.
+    pub fn disassemble_back(&self, addr: VirtAddr, count: usize) -> Result<Vec<DisasmRow>> {
+        if count == 0 {
+            return Err(Error::InvalidArgument(
+                "instruction count must be greater than zero".to_string(),
+            ));
+        }
+        let arch = self.target.arch();
+        let max_bytes = count.saturating_mul(max_instruction_bytes(arch));
+        let start = VirtAddr(addr.0.saturating_sub(max_bytes as u64));
+        let length = usize::try_from(addr.0 - start.0).unwrap_or(max_bytes);
+        let (data, valid) =
+            read_page_chunks(start, length, |address, buf| self.read_masked(address, buf))?;
+        let readable_suffix_start = valid
+            .iter()
+            .rposition(|readable| !readable)
+            .map_or(0, |last_unreadable| last_unreadable + 1);
+        let mut suffix_len = length - readable_suffix_start;
+        if arch == Arch::Arm64 {
+            suffix_len -= suffix_len % 4;
+        }
+        let suffix_offset = length.saturating_sub(suffix_len);
+        let read_start = start.0 + suffix_offset as u64;
+        let bytes = &data[suffix_offset..];
+        if bytes.is_empty() {
+            return Err(Error::DebugInfo(format!(
+                "could not read memory before {:#x}",
+                addr.0
+            )));
+        }
+
+        let dtb = self.target.current_process()?.dtb();
+        let trace = resolve_thread_trace_context(&self.target, dtb);
+        let bitness = self.target.code_bitness(addr);
+        decode_preceding(arch, bytes, read_start, addr.0, count, bitness, |target| {
+            format_symbol(&self.target, &trace, target)
+        })
+        .ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "could not decode instructions ending at {:#x}",
+                addr.0
+            ))
+        })
     }
 
     /// The current backend context's call stack with the sparse registers
@@ -2252,7 +2911,24 @@ impl Session {
         self.target.last_exception_code = None;
         self.parked_windows_thread = None;
         self.parked_stop = None;
+        self.current_stop = None;
         self.module_refresh_report = None;
+    }
+
+    /// Request a target reboot and clear register/context state before its
+    /// reload stop is collected.
+    pub fn request_reboot(&mut self) -> Result<()> {
+        self.backend.reboot_target()?;
+        self.clear_resume_state();
+        Ok(())
+    }
+
+    /// Request a target bugcheck and clear register/context state before the
+    /// resulting stop is collected.
+    pub fn request_crash(&mut self) -> Result<()> {
+        self.backend.cause_bugcheck()?;
+        self.clear_resume_state();
+        Ok(())
     }
 
     /// Resume with an explicit exception acknowledgment while preserving the
@@ -2273,6 +2949,7 @@ impl Session {
         // observe is now spent; drop it so a later `wait_for_stop` doesn't replay
         // a stale event.
         self.parked_stop = None;
+        self.current_stop = None;
         // If a post-reboot rediscovery is still pending only because the module
         // list wasn't up yet, finish it from memory before continuing. We are
         // halted, so the next `continue` starts the pump with the reconnect-assist

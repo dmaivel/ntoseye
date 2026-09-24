@@ -1,9 +1,9 @@
 """REPL command scripting helpers for ntoseye.
 
-This module is provided by the embedded ntoseye REPL at script-load time. The
-package copy exists so editors can resolve `import ntoseye.repl as repl`, and so
-running a REPL command script under a normal Python interpreter fails with a
-clear error instead of an import error.
+Command scripts in `~/.ntoseye/commands/` import this module; the REPL runs
+this same file in its embedded interpreter and supplies `register_command`.
+Under a plain Python interpreter `register_command` raises, so a command
+script run outside the REPL fails clearly.
 """
 
 from __future__ import annotations
@@ -35,18 +35,28 @@ Breakpoint = _Completion("breakpoint")
 Alias = _Completion("alias")
 
 
-def register_command(
-    name: str,
-    help: str,
-    fn: Callable[..., Any],
-    strategies: list[str] | None = None,
-) -> None:
-    raise RuntimeError(
-        "ntoseye.repl.register_command is only available inside the ntoseye REPL"
-    )
+try:
+    from ._repl_host import register_command  # type: ignore[import-not-found]  # embedded REPL only
+except ImportError:
+
+    def register_command(
+        name: str,
+        help: str,
+        fn: Callable[..., Any],
+        strategies: list[str] | None = None,
+    ) -> None:
+        """Register a REPL command called as ``fn(dbg, *raw_args)``; ``dbg`` is
+        a borrowed ``Debugger``, valid only until the command returns."""
+        raise RuntimeError(
+            "ntoseye.repl.register_command is only available inside the ntoseye REPL"
+        )
 
 
 def command(name: str, help: str, **completions: _Completion) -> Callable[[_F], _F]:
+    """Decorator form of ``register_command``: keyword arguments bind completion
+    markers to the command's parameters by name. ``dbg`` (the first
+    parameter) is a borrowed ``Debugger``, valid only until the command
+    returns."""
     def deco(fn: _F) -> _F:
         params = list(inspect.signature(fn).parameters)[1:]
         strategies = []

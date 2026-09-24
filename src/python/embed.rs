@@ -4,48 +4,22 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule, PyString, PyTuple};
+use pyo3::wrap_pymodule;
 
 use crate::diagnostics;
 use crate::repl::CompletionStrategy;
 use crate::session::Session;
 use crate::symbols::ntoseye_home;
 
-use super::{Debugger, Struct, Type};
+use super::{_ntoseye, Debugger};
 
-/// Module prelude for `ntoseye.repl`: the `command` decorator and the
-/// per-argument completion markers (`Process`, `Symbol`, ...). The decorator
-/// reads the function signature and binds completion to parameters by name, then
-/// calls the low-level `register_command(name, help, fn, strategies)`.
-const REPL_MODULE_PRELUDE: &str = r#"
-class _Completion:
-    __slots__ = ("strat",)
-    def __init__(self, strat):
-        self.strat = strat
-
-Process = _Completion("process")
-Symbol = _Completion("symbol")
-Expression = _Completion("expression")
-Type = _Completion("type")
-Driver = _Completion("driver")
-Thread = _Completion("thread")
-Vcpu = _Completion("vcpu")
-Breakpoint = _Completion("breakpoint")
-Alias = _Completion("alias")
-
-def command(name, help, **completions):
-    import inspect
-    def deco(fn):
-        params = list(inspect.signature(fn).parameters)[1:]  # skip dbg
-        strats = []
-        for p in params:
-            c = completions.get(p)
-            strats.append(c.strat if isinstance(c, _Completion) else "none")
-        register_command(name, help, fn, strats)
-        return fn
-    return deco
-"#;
+/// The package's own Python, run in the embedded interpreter as `ntoseye`
+/// and `ntoseye.repl`, so REPL command scripts and the wheel share one copy.
+const PACKAGE_INIT: &str = include_str!("../../python/ntoseye/__init__.py");
+const PACKAGE_REPL: &str = include_str!("../../python/ntoseye/repl.py");
 
 /// Outcome of loading the python commands dir: names registered, and per-file
 /// load failures.
@@ -110,42 +84,45 @@ fn register_command(
     });
 }
 
-/// Install the importable REPL scripting module before a script is executed.
-///
-/// `ntoseye.repl` is the documented API for command scripts. A synthetic
-/// top-level `ntoseye` package is also registered so `import ntoseye.repl` works
-/// even when the wheel is not installed in the embedded interpreter's
-/// `sys.path`. The top-level module carries the regular SDK type names for
-/// annotations; REPL-only command helpers live under `ntoseye.repl`.
-fn install_repl_module<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
-    let ntoseye = PyModule::new(py, "ntoseye")?;
-    ntoseye.add("Debugger", py.get_type::<Debugger>())?;
-    ntoseye.add("Struct", py.get_type::<Struct>())?;
-    ntoseye.add("Type", py.get_type::<Type>())?;
-    ntoseye.add("NtoseyeError", py.get_type::<super::NtoseyeError>())?;
-    ntoseye.add(
-        "MemoryAccessError",
-        py.get_type::<super::MemoryAccessError>(),
-    )?;
-    ntoseye.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    ntoseye.setattr("__path__", PyList::empty(py))?;
+/// Install the `ntoseye` package in the embedded interpreter, once: the
+/// extension module as `ntoseye._ntoseye`, the REPL's `register_command` as
+/// `ntoseye._repl_host`, and the package's Python sources over them. It takes
+/// precedence over a wheel on the embedded interpreter's `sys.path`, so a
+/// script always sees the SDK of the REPL it runs in.
+fn install_package(py: Python<'_>) -> PyResult<()> {
+    let modules = py.import("sys")?.getattr("modules")?;
+    // `ntoseye.repl` is registered last, once everything under it is in
+    // place, so a script never sees a half-installed package.
+    if modules.contains("ntoseye.repl")? {
+        return Ok(());
+    }
+    let native = wrap_pymodule!(_ntoseye)(py);
+    modules.set_item("ntoseye._ntoseye", native)?;
+    let host = PyModule::new(py, "ntoseye._repl_host")?;
+    host.add_function(wrap_pyfunction!(register_command, &host)?)?;
+    modules.set_item("ntoseye._repl_host", &host)?;
 
+    let package = PyModule::new(py, "ntoseye")?;
+    package.setattr("__path__", PyList::empty(py))?;
+    // Registered before it runs: its relative imports resolve through it.
+    modules.set_item("ntoseye", &package)?;
+    run_source(&package, PACKAGE_INIT)?;
     let repl = PyModule::new(py, "ntoseye.repl")?;
-    repl.add("Debugger", py.get_type::<Debugger>())?;
-    repl.add_function(wrap_pyfunction!(register_command, &repl)?)?;
+    run_source(&repl, PACKAGE_REPL)?;
+    package.setattr("repl", &repl)?;
+    modules.set_item("ntoseye.repl", repl)
+}
 
-    let prelude = CString::new(REPL_MODULE_PRELUDE)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    py.run(prelude.as_c_str(), Some(&repl.dict()), None)?;
+/// Run `source` as the body of `module`, a module of the `ntoseye` package.
+fn run_source(module: &Bound<'_, PyModule>, source: &str) -> PyResult<()> {
+    module.setattr("__package__", "ntoseye")?;
+    run_code(module.py(), source, &module.dict())
+}
 
-    ntoseye.add("repl", &repl)?;
-
-    let sys = py.import("sys")?;
-    let modules = sys.getattr("modules")?;
-    modules.set_item("ntoseye", &ntoseye)?;
-    modules.set_item("ntoseye.repl", &repl)?;
-
-    Ok(repl)
+/// Run `source` with `globals` as its namespace.
+fn run_code(py: Python<'_>, source: &str, globals: &Bound<'_, PyDict>) -> PyResult<()> {
+    let code = CString::new(source).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    py.run(code.as_c_str(), Some(globals), None)
 }
 
 /// Drop every registered command (used by `reload` before re-execing scripts).
@@ -221,12 +198,8 @@ pub fn load_commands_dir() -> LoadReport {
 /// registration.
 pub fn exec_script(source: &str, script_name: &str) -> Result<(), String> {
     Python::attach(|py| -> PyResult<()> {
-        let globals = PyDict::new(py);
-        install_repl_module(py)?;
-        let code = CString::new(source)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        py.run(code.as_c_str(), Some(&globals), None)?;
-        Ok(())
+        install_package(py)?;
+        run_code(py, source, &PyDict::new(py))
     })
     .map_err(|e| format!("{script_name}: {e}"))
 }

@@ -77,6 +77,9 @@ pub enum Error {
     #[error("{0}")]
     DebugInfo(String),
 
+    #[error("step-until limit ({0} instructions) reached")]
+    StepLimit(usize),
+
     #[error("PDB file not found for {0:?}")]
     PdbNotFound(PathBuf),
 

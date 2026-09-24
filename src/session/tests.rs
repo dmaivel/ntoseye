@@ -2,6 +2,8 @@ use super::*;
 use crate::dbg_backend::TrapState;
 use crate::gdb::breakpoints::{Breakpoint, HardwareBreakpoint};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
+use crate::memory::PAGE_SIZE;
+use crate::types::VirtAddr;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
@@ -303,6 +305,33 @@ pub fn session_with_mock(backend: MockBackend) -> Session {
     session.backend = Box::new(backend);
     session.register_map = build_register_map();
     session
+}
+
+#[test]
+fn terminated_reads_join_utf16_page_chunks_and_keep_readable_prefixes() {
+    let base = 0x1000;
+    let mut mapped = vec![0xff; PAGE_SIZE + 4];
+    mapped[PAGE_SIZE - 1..PAGE_SIZE + 3].copy_from_slice(&[0x41, 0x00, 0x00, 0x00]);
+    let mut session = session_over_memory(base, &mapped);
+
+    let read = session
+        .read_terminated(VirtAddr(base + PAGE_SIZE as u64 - 1), 2, 2)
+        .unwrap();
+    assert_eq!(read.bytes, vec![0x41, 0x00]);
+    assert!(!read.unreadable);
+
+    let page = vec![b'X'; PAGE_SIZE];
+    let mut session = session_over_memory(base, &page);
+    let read = session
+        .read_terminated(VirtAddr(base + PAGE_SIZE as u64 - 2), 4, 1)
+        .unwrap();
+    assert_eq!(read.bytes, vec![b'X', b'X']);
+    assert!(read.unreadable);
+
+    // The unit budget ends the read before a terminator is found.
+    let read = session.read_terminated(VirtAddr(base), 3, 1).unwrap();
+    assert_eq!(read.bytes, b"XXX");
+    assert!(!read.unreadable);
 }
 
 #[test]

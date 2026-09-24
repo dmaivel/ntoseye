@@ -5,7 +5,8 @@ use crate::error::Result;
 use crate::expr::Expr;
 use crate::types::PhysAddr;
 
-use super::memory::{MAX_DISPLAY_BYTES, parse_write_values, read_page_chunks};
+use super::memory::{MAX_DISPLAY_BYTES, parse_write_values};
+use crate::memory::read_page_chunks;
 
 repl_command! {
     cmd_phys_db;

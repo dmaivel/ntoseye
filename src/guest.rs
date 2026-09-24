@@ -8,12 +8,12 @@ use crate::{
         ModuleSymbolStatus, ParsedType, SymbolIndexDiagnostic, SymbolStore, TypeInfo,
         download_jobs_parallel, le_uint,
     },
-    target::ListCursor,
     target::object::DriverObjectInfo,
+    target::{ListCursor, ListTermination},
     types::*,
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use pelite::{PeFile, PeView, Wrap};
+use pelite::{PeFile, PeView, Wrap, image::IMAGE_DIRECTORY_ENTRY_EXPORT};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
@@ -24,6 +24,7 @@ use zerocopy::{FromBytes, IntoBytes};
 /// `EPROCESS.ImageFileName` capacity: the kernel keeps this many bytes of the
 /// image name, unterminated when the name is at least this long.
 const IMAGE_FILE_NAME_LEN: usize = 15;
+const MAX_LOADER_MODULES: usize = 1000;
 
 /// used for enumeration without loading full WinObject
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ impl ProcessInfo {
 pub struct ModuleInfo {
     pub name: String,
     pub short_name: String,
+    pub path: Option<String>,
     pub base_address: VirtAddr,
     pub size: u32,
     /// From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
@@ -65,6 +67,7 @@ impl ModuleInfo {
         Self {
             name,
             short_name,
+            path: None,
             base_address,
             size,
             is_32bit: false,
@@ -113,6 +116,23 @@ impl ModuleInfo {
     pub fn contains_address(&self, address: VirtAddr) -> bool {
         address.0 >= self.base_address.0 && address.0 < self.end_address().0
     }
+}
+
+/// One export recovered from a module's mapped PE export directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleExportInfo {
+    pub name: Option<String>,
+    pub ordinal: u32,
+    pub address: Option<VirtAddr>,
+    pub forwarder: Option<String>,
+}
+
+/// Native and optional WOW64 loader-list results for one process.
+#[derive(Debug, Clone)]
+pub struct ProcessModulesDetail {
+    pub modules: Vec<ModuleInfo>,
+    pub termination: ListTermination,
+    pub wow64_termination: Option<ListTermination>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,6 +472,150 @@ pub fn read_pe_image(
             blocks: Mutex::new(HashMap::new()),
         }),
     })
+}
+
+fn read_export_bytes<'a>(
+    image: &'a PeImage,
+    base: VirtAddr,
+    rva: u32,
+    length: usize,
+) -> Result<Cow<'a, [u8]>> {
+    let start = rva as usize;
+    let end = start
+        .checked_add(length)
+        .filter(|&end| end <= image.size)
+        .ok_or_else(|| Error::DebugInfo("PE export data lies outside SizeOfImage".into()))?;
+    image
+        .read(start, end - start)
+        .ok_or(Error::BadVirtualAddress(base + u64::from(rva)))
+}
+
+fn read_export_string(image: &PeImage, base: VirtAddr, rva: u32) -> Result<String> {
+    const CHUNK: usize = 128;
+    const MAX_LENGTH: usize = 4096;
+    let mut bytes = Vec::new();
+    let mut offset = rva as usize;
+    while bytes.len() < MAX_LENGTH {
+        let length = CHUNK
+            .min(MAX_LENGTH - bytes.len())
+            .min(image.size.saturating_sub(offset));
+        if length == 0 {
+            break;
+        }
+        let chunk = read_export_bytes(image, base, offset as u32, length)?;
+        if let Some(end) = chunk.iter().position(|byte| *byte == 0) {
+            bytes.extend_from_slice(&chunk[..end]);
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        bytes.extend_from_slice(&chunk);
+        offset = offset.saturating_add(length);
+    }
+    Err(Error::DebugInfo(format!(
+        "unterminated or overlong PE export string at {:#x}",
+        base.0.saturating_add(u64::from(rva))
+    )))
+}
+
+/// Read named and ordinal-only exports from a mapped module image. The image
+/// remains lazy: only the export directory, address tables, and strings are
+/// fetched, and an unreadable mapped page remains a memory-access error.
+pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExportInfo>> {
+    const DIRECTORY_SIZE: usize = 40;
+    const MAX_EXPORTS: usize = 1_000_000;
+
+    let headers = PeView::from_bytes(image.headers())?;
+    let Some(directory) = headers.data_directory().get(IMAGE_DIRECTORY_ENTRY_EXPORT) else {
+        return Ok(Vec::new());
+    };
+    let directory_rva = directory.VirtualAddress;
+    let directory_size = directory.Size;
+    if directory_size < DIRECTORY_SIZE as u32 {
+        return Err(Error::DebugInfo("truncated PE export directory".into()));
+    }
+    let data = read_export_bytes(image, base, directory_rva, DIRECTORY_SIZE)?;
+    let u32_at = |offset: usize| {
+        u32::from_le_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .expect("fixed export field"),
+        )
+    };
+    let ordinal_base = u32_at(16);
+    let function_count = u32_at(20) as usize;
+    let name_count = u32_at(24) as usize;
+    let functions_rva = u32_at(28);
+    let names_rva = u32_at(32);
+    let ordinals_rva = u32_at(36);
+    if function_count > MAX_EXPORTS || name_count > MAX_EXPORTS {
+        return Err(Error::DebugInfo(
+            "PE export count exceeds the safety bound".into(),
+        ));
+    }
+
+    let functions = read_export_bytes(image, base, functions_rva, function_count * 4)?;
+    let names = read_export_bytes(image, base, names_rva, name_count * 4)?;
+    let ordinals = read_export_bytes(image, base, ordinals_rva, name_count * 2)?;
+    let mut names_by_function: HashMap<usize, Vec<String>> = HashMap::new();
+    for index in 0..name_count {
+        let name_rva = u32::from_le_bytes(
+            names[index * 4..index * 4 + 4]
+                .try_into()
+                .expect("fixed export name RVA"),
+        );
+        let function_index = usize::from(u16::from_le_bytes(
+            ordinals[index * 2..index * 2 + 2]
+                .try_into()
+                .expect("fixed export ordinal index"),
+        ));
+        if function_index >= function_count {
+            return Err(Error::DebugInfo(format!(
+                "PE export name index {function_index} exceeds function count {function_count}"
+            )));
+        }
+        names_by_function
+            .entry(function_index)
+            .or_default()
+            .push(read_export_string(image, base, name_rva)?);
+    }
+
+    let mut exports = Vec::new();
+    let forwarder_end = directory_rva.saturating_add(directory_size);
+    for index in 0..function_count {
+        let function_rva = u32::from_le_bytes(
+            functions[index * 4..index * 4 + 4]
+                .try_into()
+                .expect("fixed export function RVA"),
+        );
+        if function_rva == 0 {
+            continue;
+        }
+        let ordinal = ordinal_base
+            .checked_add(index as u32)
+            .ok_or_else(|| Error::DebugInfo("PE export ordinal overflow".into()))?;
+        let forwarder = (function_rva >= directory_rva && function_rva < forwarder_end)
+            .then(|| read_export_string(image, base, function_rva))
+            .transpose()?;
+        let address = forwarder
+            .is_none()
+            .then_some(VirtAddr(base.0.saturating_add(u64::from(function_rva))));
+        let names = names_by_function.remove(&index).unwrap_or_default();
+        if names.is_empty() {
+            exports.push(ModuleExportInfo {
+                name: None,
+                ordinal,
+                address,
+                forwarder,
+            });
+        } else {
+            exports.extend(names.into_iter().map(|name| ModuleExportInfo {
+                name: Some(name),
+                ordinal,
+                address,
+                forwarder: forwarder.clone(),
+            }));
+        }
+    }
+    Ok(exports)
 }
 
 /// Name of the PE section containing `address` within the image loaded at
@@ -880,15 +1044,19 @@ impl WinObject {
     pub fn image(&self) -> Option<Arc<PeImage>> {
         let mut cached = self.image.lock().unwrap_or_else(PoisonError::into_inner);
         if cached.is_none() {
-            let (phys, dtb, kernel_dtb, arch) =
-                (Arc::clone(&self.phys), self.dtb, self.kernel_dtb, self.arch);
-            let image = read_pe_image(self.base_address, move |address, buf| {
-                object_address_space(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
-            })
-            .ok()?;
+            let image = self.read_image().ok()?;
             *cached = Some(Arc::new(image));
         }
         cached.clone()
+    }
+
+    /// Read the mapped PE image in this object's address space.
+    pub fn read_image(&self) -> Result<PeImage> {
+        let (phys, dtb, kernel_dtb, arch) =
+            (Arc::clone(&self.phys), self.dtb, self.kernel_dtb, self.arch);
+        read_pe_image(self.base_address, move |address, buf| {
+            object_address_space(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
+        })
     }
 
     /// Resolve this object's struct/type namespace, read in its own address
@@ -1249,6 +1417,10 @@ fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>>
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "<unknown>".to_string());
     let mut info = ModuleInfo::new(name, dll_base, size_of_image);
+    info.path = record
+        .unicode_string("FullDllName")
+        .ok()
+        .filter(|path| !path.is_empty());
     if let Ok(entry_point) = record.read_pointer("EntryPoint")
         && !entry_point.is_zero()
     {
@@ -1261,6 +1433,37 @@ fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>>
         info = info.with_checksum(cs);
     }
     Ok(Some(info))
+}
+
+fn read_loader_pointer(
+    memory: &impl MemoryOps<VirtAddr>,
+    address: VirtAddr,
+    pointer_size: usize,
+) -> Result<VirtAddr> {
+    if pointer_size == 4 {
+        memory
+            .read::<u32>(address)
+            .map(|pointer| VirtAddr(u64::from(pointer)))
+    } else {
+        memory.read::<u64>(address).map(VirtAddr)
+    }
+}
+
+fn read_unicode32(memory: &impl MemoryOps<VirtAddr>, length: usize, buffer: u32) -> Option<String> {
+    if length == 0 || buffer == 0 {
+        return None;
+    }
+    let mut bytes = vec![0u8; length];
+    memory
+        .read_bytes(VirtAddr(u64::from(buffer)), &mut bytes)
+        .ok()?;
+    let utf16: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
+        .collect();
+    Some(String::from_utf16_lossy(&utf16))
 }
 
 pub struct Guest {
@@ -1363,7 +1566,7 @@ struct HaltMemo {
     drivers: Option<Vec<DriverObjectInfo>>,
     /// Loader lists by `_EPROCESS`; every thread of a process walked in one
     /// halt shares them.
-    process_modules: HashMap<VirtAddr, Option<Vec<ModuleInfo>>>,
+    process_modules: HashMap<VirtAddr, Option<ProcessModulesDetail>>,
 }
 
 fn is_valid_kernel_dtb_amd64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
@@ -1857,9 +2060,9 @@ impl Guest {
     /// miss. Memory without a halt signal is never memoized.
     fn memoized<T: Clone>(
         &self,
-        slot: impl Fn(&mut HaltMemo) -> &mut Option<Vec<T>>,
-        walk: impl FnOnce() -> Result<Vec<T>>,
-    ) -> Result<Vec<T>> {
+        slot: impl Fn(&mut HaltMemo) -> &mut Option<T>,
+        walk: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         let Some(epoch) = self.ntoskrnl.phys.halt_epoch() else {
             return walk();
         };
@@ -2192,45 +2395,70 @@ impl Guest {
     }
 
     pub fn process_modules(&self, info: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
+        self.process_modules_detail(info)
+            .map(|detail| detail.modules)
+    }
+
+    /// One shared native/WOW64 loader-list walk for `lm`, `!dlls`, and the SDK.
+    /// Partial entries and each list's termination are preserved for callers
+    /// that need to diagnose a corrupt or truncated list.
+    pub fn process_modules_detail(&self, info: &ProcessInfo) -> Result<ProcessModulesDetail> {
         self.memoized(
             |memo| memo.process_modules.entry(info.eprocess_va).or_default(),
             || self.walk_process_modules(info),
         )
     }
 
-    fn walk_process_modules(&self, info: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
-        let eprocess = self
-            .ntoskrnl
-            .types_in(info.dtb)
-            .struct_at("_EPROCESS", info.eprocess_va)?;
-
+    fn walk_process_modules(&self, info: &ProcessInfo) -> Result<ProcessModulesDetail> {
+        let types = self.ntoskrnl.types_in(info.dtb);
+        let eprocess = types.struct_at("_EPROCESS", info.eprocess_va)?;
         let peb = eprocess.follow("Peb")?;
         if peb.addr().is_zero() {
             return Err(Error::MissingPEB);
         }
-
         let ldr = peb.follow("Ldr")?;
-        if ldr.addr().is_zero() {
-            // process still initializing: no loaded-module list yet
-            return Ok(Vec::new());
-        }
-
         let mut modules = Vec::new();
-        for record in ldr.list(
-            "InLoadOrderModuleList",
-            "_LDR_DATA_TABLE_ENTRY",
-            "InLoadOrderLinks",
-        )? {
-            if let Some(module) = module_info_from_record(&record?)? {
-                modules.push(module);
+        let termination = if ldr.addr().is_zero() {
+            ListTermination::Null
+        } else {
+            let head = ldr.embedded("InLoadOrderModuleList")?.addr();
+            let layout = types.layout("_LDR_DATA_TABLE_ENTRY")?;
+            let link_offset = layout.field_offset("InLoadOrderLinks")?;
+            let pointer_size = usize::from(layout.pointer_size);
+            let memory = self.ntoskrnl.address_space(&self.ntoskrnl.phys, info.dtb);
+            let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
+            cursor.advance(
+                read_loader_pointer(&memory, head, pointer_size).map_err(|error| error.to_string()),
+            );
+            while let Some(link) = cursor.take_current() {
+                let record_address = VirtAddr(link.0.wrapping_sub(link_offset));
+                let record = types
+                    .struct_with_layout(Arc::clone(&layout), record_address)
+                    .prefetch();
+                match module_info_from_record(&record) {
+                    Ok(Some(module)) => modules.push(module),
+                    Ok(None) => {}
+                    Err(error) => {
+                        cursor.advance(Err(error.to_string()));
+                        break;
+                    }
+                }
+                cursor.advance(
+                    read_loader_pointer(&memory, record_address + link_offset, pointer_size)
+                        .map_err(|error| error.to_string()),
+                );
             }
-        }
+            cursor.finish()
+        };
 
+        let mut wow64_termination = None;
         if let Some(peb32) = info.wow64_peb {
-            for mut module in self.process_modules32(info.dtb, peb32)? {
-                // Both lists carry the executable itself (one mapping, x86
-                // code) and an ntdll (two: the 32-bit copy is addressed as
-                // `ntdll32!`, as WinDbg's wow64exts does).
+            let (modules32, termination32) = self.process_modules32(info.dtb, peb32)?;
+            wow64_termination = Some(termination32);
+            // Both lists carry the executable itself (one mapping, x86 code)
+            // and an ntdll (two: the 32-bit copy is addressed as `ntdll32!`,
+            // as WinDbg's wow64exts does).
+            for mut module in modules32 {
                 if let Some(native) = modules
                     .iter_mut()
                     .find(|native| native.base_address == module.base_address)
@@ -2248,41 +2476,42 @@ impl Guest {
             }
         }
 
-        Ok(modules)
+        Ok(ProcessModulesDetail {
+            modules,
+            termination,
+            wow64_termination,
+        })
     }
 
     /// The 32-bit loader list of a WOW64 process. `_PEB_LDR_DATA32` and
     /// `_LDR_DATA_TABLE_ENTRY32` are not in the kernel's PDB and the 32-bit
     /// ntdll's is not loaded before this walk finds it, so the entry layout
     /// is the fixed x86 ABI (unchanged since Windows 2000): `DllBase` +0x18,
-    /// `EntryPoint` +0x1c, `SizeOfImage` +0x20, `BaseDllName` +0x2c,
-    /// `TimeDateStamp` +0x44.
-    fn process_modules32(&self, dtb: Dtb, peb32: VirtAddr) -> Result<Vec<ModuleInfo>> {
+    /// `EntryPoint` +0x1c, `SizeOfImage` +0x20, `FullDllName` +0x24,
+    /// `BaseDllName` +0x2c, `TimeDateStamp` +0x44.
+    fn process_modules32(
+        &self,
+        dtb: Dtb,
+        peb32: VirtAddr,
+    ) -> Result<(Vec<ModuleInfo>, ListTermination)> {
         const IN_LOAD_ORDER_MODULE_LIST: u64 = 0x0c;
         const ENTRY_LEN: usize = 0x48;
-        const MAX: usize = 1000;
 
         let types = self.ntoskrnl.types_in(dtb);
         let ldr: u32 = types.struct_at("_PEB32", peb32)?.read_field("Ldr")?;
         if ldr == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), ListTermination::Null));
         }
         let memory = self.ntoskrnl.address_space(&self.ntoskrnl.phys, dtb);
         let head = VirtAddr(u64::from(ldr) + IN_LOAD_ORDER_MODULE_LIST);
-        let read_link = |address: VirtAddr| memory.read::<u32>(address).map(u64::from);
-
+        let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
+        cursor.advance(read_loader_pointer(&memory, head, 4).map_err(|error| error.to_string()));
         let mut modules = Vec::new();
-        let mut cursor = ListCursor::new(head, MAX);
-        cursor.advance(
-            read_link(head)
-                .map(VirtAddr)
-                .map_err(|error| error.to_string()),
-        );
         while let Some(current) = cursor.take_current() {
             let mut entry = [0u8; ENTRY_LEN];
             if let Err(error) = memory.read_bytes(current, &mut entry) {
                 cursor.advance(Err(error.to_string()));
-                return Err(error);
+                break;
             }
             let u32_at =
                 |offset: usize| u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap());
@@ -2292,32 +2521,21 @@ impl Guest {
             if dll_base == 0 {
                 continue;
             }
-            let name_len = usize::from(u16::from_le_bytes([entry[0x2c], entry[0x2d]]));
-            let name_buffer = u32_at(0x30);
-            let name = if name_len == 0 || name_buffer == 0 {
-                String::new()
-            } else {
-                let mut buf = vec![0u8; name_len];
-                memory
-                    .read_bytes(VirtAddr(u64::from(name_buffer)), &mut buf)
-                    .map(|()| {
-                        let u16s: Vec<u16> = buf
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|c| u16::from_le_bytes(*c))
-                            .collect();
-                        String::from_utf16_lossy(&u16s)
-                    })
-                    .unwrap_or_default()
-            };
-            let name = if name.is_empty() {
-                "<unknown>".to_string()
-            } else {
-                name
-            };
+            let name = read_unicode32(
+                &memory,
+                usize::from(u16::from_le_bytes([entry[0x2c], entry[0x2d]])),
+                u32_at(0x30),
+            )
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "<unknown>".to_string());
             let mut module = ModuleInfo::new(name, VirtAddr(u64::from(dll_base)), u32_at(0x20))
                 .with_time_date_stamp(u32_at(0x44));
+            module.path = read_unicode32(
+                &memory,
+                usize::from(u16::from_le_bytes([entry[0x24], entry[0x25]])),
+                u32_at(0x28),
+            )
+            .filter(|path| !path.is_empty());
             module.is_32bit = true;
             let entry_point = u32_at(0x1c);
             if entry_point != 0 {
@@ -2325,7 +2543,7 @@ impl Guest {
             }
             modules.push(module);
         }
-        Ok(modules)
+        Ok((modules, cursor.finish()))
     }
 
     pub fn kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
@@ -2863,8 +3081,8 @@ fn partition_first_occurrence<T, K: Eq + std::hash::Hash>(
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE_BLOCK, ModuleSymbolLoadReport, PE_HEADER_PROBE, PeImage, partition_first_occurrence,
-        read_pe_header_page, read_pe_image,
+        IMAGE_BLOCK, ModuleExportInfo, ModuleSymbolLoadReport, PE_HEADER_PROBE, PeImage,
+        partition_first_occurrence, read_pe_exports, read_pe_header_page, read_pe_image,
     };
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
@@ -3063,5 +3281,76 @@ mod tests {
         assert_eq!(report.diagnostics.len(), 64);
         assert_eq!(report.diagnostics[0].module, "driver.sys");
         assert_eq!(report.diagnostics[0].compiland.as_deref(), Some("0.obj"));
+    }
+
+    /// `synthetic_image` with an export directory in `.rdata`: ordinal base
+    /// 5, three functions (a named one, a forwarder, an ordinal-only one),
+    /// and a name table whose second entry points at `name_index`.
+    fn image_with_exports(name_index: u16) -> Vec<u8> {
+        const DIRECTORY: usize = 0x2000;
+        let mut image = synthetic_image();
+        image[DIRECTORY..0x3000].fill(0);
+        let put = |image: &mut Vec<u8>, at: usize, bytes: &[u8]| {
+            image[at..at + bytes.len()].copy_from_slice(bytes);
+        };
+        let opt = 0x80 + 24;
+        put(&mut image, opt + 112, &(DIRECTORY as u32).to_le_bytes());
+        put(&mut image, opt + 116, &0x500u32.to_le_bytes());
+        for (offset, value) in [
+            (16, 5u32),
+            (20, 3),
+            (24, 2),
+            (28, 0x2100),
+            (32, 0x2200),
+            (36, 0x2300),
+        ] {
+            put(&mut image, DIRECTORY + offset, &value.to_le_bytes());
+        }
+        for (index, rva) in [0x1010u32, 0x2400, 0x1020].into_iter().enumerate() {
+            put(&mut image, 0x2100 + 4 * index, &rva.to_le_bytes());
+        }
+        put(&mut image, 0x2200, &0x2410u32.to_le_bytes());
+        put(&mut image, 0x2204, &0x2420u32.to_le_bytes());
+        put(&mut image, 0x2300, &0u16.to_le_bytes());
+        put(&mut image, 0x2302, &name_index.to_le_bytes());
+        put(&mut image, 0x2400, b"OTHER.Func\0");
+        put(&mut image, 0x2410, b"Alpha\0");
+        put(&mut image, 0x2420, b"Forwarded\0");
+        image
+    }
+
+    #[test]
+    fn exports_cover_named_forwarded_and_ordinal_only_entries() {
+        let base = VirtAddr(0x10_0000);
+        let exports = read_pe_exports(&PeImage::complete(image_with_exports(1)), base).unwrap();
+        assert_eq!(
+            exports,
+            [
+                ModuleExportInfo {
+                    name: Some("Alpha".into()),
+                    ordinal: 5,
+                    address: Some(base + 0x1010u64),
+                    forwarder: None,
+                },
+                ModuleExportInfo {
+                    name: Some("Forwarded".into()),
+                    ordinal: 6,
+                    address: None,
+                    forwarder: Some("OTHER.Func".into()),
+                },
+                ModuleExportInfo {
+                    name: None,
+                    ordinal: 7,
+                    address: Some(base + 0x1020u64),
+                    forwarder: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn export_name_past_the_function_table_is_an_error() {
+        let image = PeImage::complete(image_with_exports(3));
+        assert!(read_pe_exports(&image, VirtAddr(0x10_0000)).is_err());
     }
 }

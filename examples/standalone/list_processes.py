@@ -2,7 +2,8 @@
 """List running processes and loaded kernel modules.
 
 Uses the passive `memory` backend for read-only live-VM introspection, so it
-never pauses or otherwise interferes with the guest.
+never pauses or otherwise interferes with the guest. Select another backend
+with `--backend` when desired.
 
     python3 list_processes.py
     python3 list_processes.py --backend gdb --connect 127.0.0.1:1234
@@ -11,24 +12,24 @@ never pauses or otherwise interferes with the guest.
 import argparse
 import ntoseye
 
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--backend", default="memory", choices=["memory", "gdb", "kd"])
     ap.add_argument("--connect", default=None, help="backend target (socket/addr)")
     args = ap.parse_args()
 
-    dbg = ntoseye.attach(backend=args.backend, connect=args.connect)
+    with ntoseye.attach(backend=args.backend, connect=args.connect) as dbg:
+        procs = dbg.processes
+        print(f"{len(procs)} processes:")
+        print(f"  {'PID':>6}  {'NAME':<24} EPROCESS")
+        for proc in sorted(procs, key=lambda p: p.pid):
+            print(f"  {proc.pid:>6}  {proc.name:<24} {proc.eprocess:#x}")
 
-    procs = dbg.processes()  # _EPROCESS cursors
-    print(f"{len(procs)} processes:")
-    print(f"  {'PID':>6}  {'NAME':<24} EPROCESS")
-    for proc in sorted(procs, key=lambda p: p.UniqueProcessId):
-        print(f"  {proc.UniqueProcessId:>6}  {proc.ImageFileName:<24} {proc.addr:#x}")
-
-    mods = dbg.kernel_modules()
-    print(f"\n{len(mods)} kernel modules (first 10):")
-    for m in mods[:10]:
-        print(f"  {m.base:#018x}  {m.size:>#9x}  {m.name}")
+        mods = list(dbg.modules)
+        print(f"\n{len(mods)} kernel modules (first 10):")
+        for module in mods[:10]:
+            print(f"  {module.base:#018x}  {module.size:>#9x}  {module.name}")
 
 
 if __name__ == "__main__":

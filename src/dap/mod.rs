@@ -760,7 +760,7 @@ impl Server {
             return self.step_once(mode);
         };
         let cancel = Arc::clone(&self.cancel);
-        match self.session()?.run_to(end, &cancel) {
+        match self.session()?.run_to(end, None, &cancel) {
             Ok(outcome) => Ok(outcome),
             // The temporary breakpoint could not be written (a non-resident or
             // read-only page at that address). Stepping needs no breakpoint.
@@ -809,10 +809,8 @@ impl Server {
         let session = self.session()?;
         match mode {
             StepMode::Into => {
-                session.step().map_err(|error| error.to_string())?;
-                Ok(ContinueOutcome::Step {
-                    rip: session.run_status().rip.unwrap_or(0),
-                })
+                let rip = session.step().map_err(|error| error.to_string())?;
+                Ok(ContinueOutcome::Step { rip })
             }
             StepMode::Over => session
                 .step_over(&cancel)

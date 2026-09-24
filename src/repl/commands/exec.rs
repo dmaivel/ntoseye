@@ -3,15 +3,15 @@ use std::sync::atomic::Ordering;
 use owo_colors::OwoColorize;
 
 use crate::dbg_backend::ContinueDisposition;
-use crate::disasm::{ControlFlow, classify};
+use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::gdb::breakpoints::Breakpoint;
-use crate::session::{StepKind, StopResolution};
-use crate::target::Target;
-use crate::types::{Arch, VirtAddr};
+use crate::session::{
+    CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StopResolution,
+};
+use crate::types::VirtAddr;
 use crate::ui;
-use crate::unwind::{format_symbol, resolve_thread_trace_context};
 
 use crate::repl::*;
 
@@ -166,29 +166,9 @@ repl_command! {
     run: Run,
 }
 
-const STEP_UNTIL_LIMIT: usize = 100_000;
 const WATCH_TRACE_DEFAULT_LIMIT: usize = 10_000;
 
-struct TraceFrame {
-    name: String,
-    entry_sp: u64,
-    instructions: usize,
-    children: Vec<TraceFrame>,
-}
-
-struct ExecutionState {
-    ip: u64,
-    sp: u64,
-    dtb: u64,
-    flow: ControlFlow,
-}
-
-fn format_trace_symbol(target: &Target, dtb: u64, ip: u64) -> String {
-    let trace = resolve_thread_trace_context(target, dtb);
-    format_symbol(target, &trace, ip)
-}
-
-fn render_trace_frame(frame: &TraceFrame, depth: usize) {
+fn render_trace_frame(frame: &CallTraceFrame, depth: usize) {
     outln!(
         "{}{} ({} instructions)",
         "  ".repeat(depth),
@@ -237,14 +217,19 @@ impl ReplState<'_> {
     /// has already halted it). As WinDbg queues input typed at a running
     /// debuggee, a command that needs the target halted (or would move it)
     /// waits within the stop budget for the halt; nothing runs while the
-    /// target is still running. A resume is refused once against a stop the
-    /// client has not seen (parked between calls, or collected here) so the
-    /// stop is seen before it is continued past. Returns the flow to report
-    /// instead of running the command; `None` means run it now.
+    /// target is still running. MCP refuses one resume against a stop the
+    /// client has not seen; the SDK has no such gate because the stop is
+    /// exposed as `dbg.stop`. Returns the flow to report instead of running
+    /// the command; `None` means run it now.
     pub fn gate_remote_command(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
-        if self.context != DispatchContext::Remote(RemoteClient::Mcp) {
-            return Ok(None);
-        }
+        let client = match self.context {
+            DispatchContext::Remote(client)
+                if matches!(client, RemoteClient::Mcp | RemoteClient::Sdk) =>
+            {
+                client
+            }
+            _ => return Ok(None),
+        };
         let name = spec.names[0];
         let moves = spec.run != RunEffect::None;
         let needs_halt = spec.run_state == Some(RunState::Halted);
@@ -256,7 +241,7 @@ impl ReplState<'_> {
             }
             self.unseen_stop_rendered = true;
         }
-        if self.unseen_stop_rendered && moves {
+        if client == RemoteClient::Mcp && self.unseen_stop_rendered && moves {
             outln!(
                 "the target stopped (above); '{name}' was not run so the stop is not \
                  skipped. Re-issue it to continue."
@@ -282,22 +267,45 @@ impl ReplState<'_> {
 
     pub fn interrupt_running_vm(&mut self) -> Result<()> {
         self.clear_selected_frame();
-        match surface_pending_stop(self.ctx, &self.caches) {
-            Ok(true) => {
-                if let Err(error) = self.apply_buffered_exception_policy() {
-                    error!("failed to apply exception policy: {error}");
+        let had_pending_stop = self.ctx.backend.has_pending_stop();
+        let mut apply_pending_exception_policy = had_pending_stop;
+        let mut outcome = match self.ctx.interrupt_outcome() {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                error!("failed to interrupt: {error}");
+                return Ok(());
+            }
+        };
+
+        // A pending stop whose exception policy continues without a command
+        // is continued, then broken into again, so the requested pause still
+        // ends on a visible stop.
+        if had_pending_stop
+            && matches!(&outcome, ContinueOutcome::Stopped { .. })
+            && let Some(event) = self.ctx.last_event.as_ref().map(|last| last.stop.clone())
+            && continue_exception_policy(self.ctx, &event)?
+        {
+            apply_pending_exception_policy = false;
+            outcome = match self.ctx.interrupt_outcome() {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    error!("failed to interrupt: {error}");
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            Ok(false) => {}
-            Err(e) => {
-                error!("error checking running VM: {e}");
-                return Ok(());
-            }
+            };
         }
 
-        if let Err(e) = surface_interrupt_stop(self.ctx, &self.caches) {
-            error!("failed to interrupt: {e}");
+        let surfaced = !matches!(
+            &outcome,
+            ContinueOutcome::Running | ContinueOutcome::Halted { .. }
+        );
+        print_parked_outcome(self.ctx, &self.caches, outcome);
+
+        if apply_pending_exception_policy
+            && surfaced
+            && let Err(error) = self.apply_buffered_exception_policy()
+        {
+            error!("failed to apply exception policy: {error}");
         }
 
         Ok(())
@@ -592,13 +600,14 @@ impl ReplState<'_> {
                         .as_ref()
                         .is_some_and(StopWaitBudget::exhausted) =>
                 {
-                    outln!(
-                        "{}",
-                        ui::muted(
-                            "target still running; call again to keep waiting, or `break` to \
-                             interrupt"
-                        )
-                    );
+                    let hint = if self.context == DispatchContext::Remote(RemoteClient::Sdk) {
+                        "target still running; `dbg.wait()` to keep waiting, or \
+                         `dbg.interrupt()` to break in"
+                    } else {
+                        "target still running; call again to keep waiting, or `break` to \
+                         interrupt"
+                    };
+                    outln!("{}", ui::muted(hint));
                     break;
                 }
                 Ok(None) => {}
@@ -693,38 +702,6 @@ impl ReplState<'_> {
         })
     }
 
-    fn stopped_at_code_breakpoint(&mut self, previous_ip: u64) -> bool {
-        let Some(ip) = self.current_ip() else {
-            return false;
-        };
-        self.stopped_at_code_breakpoint_at(previous_ip, ip)
-    }
-
-    fn stopped_at_code_breakpoint_at(&self, previous_ip: u64, ip: u64) -> bool {
-        let address = VirtAddr(ip);
-        if self
-            .ctx
-            .breakpoints
-            .enabled_breakpoint_id_for_current_context(&self.ctx.target, address)
-            .is_some()
-        {
-            return true;
-        }
-        let step = u64::from(self.ctx.register_map.breakpoint_step_size());
-        let started_on_breakpoint = self
-            .ctx
-            .breakpoints
-            .enabled_breakpoint_id_for_current_context(&self.ctx.target, VirtAddr(previous_ip))
-            .is_some();
-        !started_on_breakpoint
-            && ip >= step
-            && self
-                .ctx
-                .breakpoints
-                .enabled_breakpoint_id_for_current_context(&self.ctx.target, VirtAddr(ip - step))
-                .is_some()
-    }
-
     fn run_to_temporary_code_breakpoint_with_disposition(
         &mut self,
         address: VirtAddr,
@@ -780,7 +757,14 @@ impl ReplState<'_> {
         }
         self.caches.refresh_breakpoints(&self.ctx.breakpoints);
 
-        result.map(|_| self.current_ip() == Some(address.0))
+        result.map(|_| {
+            let reached = self.current_ip() == Some(address.0);
+            if reached {
+                self.ctx
+                    .note_stop(&ContinueOutcome::Step { rip: address.0 });
+            }
+            reached
+        })
     }
 
     fn cmd_p(&mut self) -> Result<()> {
@@ -827,52 +811,20 @@ impl ReplState<'_> {
         }
     }
 
-    fn current_execution_state(&mut self) -> Result<ExecutionState> {
-        let registers = self.ctx.read_registers()?;
-        let ip = self
-            .ctx
-            .register_map
-            .read_u64("rip", &registers)
-            .or_else(|_| self.ctx.register_map.read_u64("pc", &registers))?;
-        let sp = self
-            .ctx
-            .register_map
-            .read_u64("rsp", &registers)
-            .or_else(|_| self.ctx.register_map.read_u64("sp", &registers))?;
-        let dtb = self
-            .ctx
-            .register_map
-            .read_u64(self.ctx.target.arch().dtb_register(), &registers)
-            .unwrap_or(0);
-        let mut bytes = [0u8; 16];
-        let length = if self.ctx.target.arch() == Arch::Arm64 {
-            4
-        } else {
-            bytes.len()
-        };
-        self.ctx.read_masked(VirtAddr(ip), &mut bytes[..length])?;
-        Ok(ExecutionState {
-            ip,
-            sp,
-            dtb,
-            flow: classify(&bytes[..length], self.ctx.target.arch()),
-        })
-    }
-
     fn step_until(&mut self, over: bool, stop: impl Fn(u64, ControlFlow) -> bool) -> Result<()> {
         self.clear_selected_frame();
-        let was_quiet = self.quiet_stops;
-        self.quiet_stops = true;
-        let outcome = self.step_until_quiet(over, stop);
-        self.quiet_stops = was_quiet;
-        if outcome? {
-            self.print_current_stop();
+        match self.ctx.step_until(over, STEP_UNTIL_LIMIT, None, stop) {
+            Ok(ContinueOutcome::Step { .. }) => self.print_current_stop(),
+            Ok(outcome) => print_parked_outcome(self.ctx, &self.caches, outcome),
+            Err(error @ Error::StepLimit(_)) => {
+                error!("{error}");
+                self.print_current_stop();
+            }
+            Err(error) => error!("failed while stepping: {error}"),
         }
         Ok(())
     }
 
-    /// Render the halted context once, after a multi-step command settles on
-    /// its own stop (a real breakpoint or exception already rendered itself).
     fn print_current_stop(&mut self) {
         print_stop_separator();
         print_break_context(
@@ -882,48 +834,6 @@ impl ReplState<'_> {
             &self.ctx.breakpoints,
             &self.ctx.current_thread,
         );
-    }
-
-    /// `Ok(true)` when the loop stopped on its own condition (or limit) and
-    /// the caller should render the stop; `Ok(false)` when another stop
-    /// surfaced and was already rendered.
-    fn step_until_quiet(
-        &mut self,
-        over: bool,
-        stop: impl Fn(u64, ControlFlow) -> bool,
-    ) -> Result<bool> {
-        for _ in 0..STEP_UNTIL_LIMIT {
-            if self.ctx.target.interrupt.swap(false, Ordering::SeqCst) {
-                outln!();
-                return Ok(true);
-            }
-            let state = match self.current_execution_state() {
-                Ok(state) => state,
-                Err(error) => {
-                    error!("failed to read current instruction: {error}");
-                    return Ok(false);
-                }
-            };
-            if stop(state.ip, state.flow) {
-                return Ok(true);
-            }
-            let result = if over {
-                self.step_over_once()
-            } else {
-                self.single_step_checked().map(|_| true)
-            };
-            match result {
-                Ok(reached) if over && !reached => return Ok(false),
-                Ok(_) if self.stopped_at_code_breakpoint(state.ip) => return Ok(false),
-                Ok(_) => {}
-                Err(error) => {
-                    error!("failed while stepping: {error}");
-                    return Ok(false);
-                }
-            }
-        }
-        error!("step-until limit ({STEP_UNTIL_LIMIT}) reached");
-        Ok(true)
     }
 
     fn step_until_flow(&mut self, wanted: ControlFlow, over: bool) -> Result<()> {
@@ -988,100 +898,28 @@ impl ReplState<'_> {
                 }
             }
         };
-        if limit == 0 {
-            error!("watch-trace count must be greater than zero");
-            return Ok(());
-        }
-
         self.watch_trace(limit)
     }
 
     fn watch_trace(&mut self, limit: usize) -> Result<()> {
-        let mut current = match self.current_execution_state() {
-            Ok(state) => state,
+        let trace = match self.ctx.trace_calls(limit) {
+            Ok(trace) => trace,
             Err(error) => {
-                error!("failed to read current instruction: {error}");
+                error!("{error}");
                 return Ok(());
             }
         };
-        let mut stack = vec![TraceFrame {
-            name: format_trace_symbol(&self.ctx.target, current.dtb, current.ip),
-            entry_sp: current.sp,
-            instructions: 0,
-            children: Vec::new(),
-        }];
-        let mut root = None;
-        let mut instructions = 0usize;
-
-        while instructions < limit {
-            if self.ctx.target.interrupt.swap(false, Ordering::SeqCst) {
-                outln!("wt interrupted after {instructions} instructions");
-                break;
+        let count = trace.instructions;
+        match &trace.end {
+            CallTraceEnd::Returned => {}
+            CallTraceEnd::Limit => outln!("wt instruction cap reached after {count} instructions"),
+            CallTraceEnd::Interrupted => outln!("wt interrupted after {count} instructions"),
+            CallTraceEnd::Breakpoint => error!("watch-trace stopped at a code breakpoint"),
+            CallTraceEnd::Failed(error) => {
+                error!("watch-trace stopped after {count} instructions: {error}")
             }
-            if let Err(error) = self.ctx.step() {
-                error!(
-                    "watch-trace stopped after {} instructions: {error}",
-                    instructions
-                );
-                break;
-            }
-            instructions += 1;
-            let next = match self.current_execution_state() {
-                Ok(state) => state,
-                Err(error) => {
-                    error!("watch-trace stopped after {}: {error}", instructions);
-                    break;
-                }
-            };
-            if self.stopped_at_code_breakpoint_at(current.ip, next.ip) {
-                error!("watch-trace stopped at a code breakpoint");
-                break;
-            }
-            let Some(frame) = stack.last_mut() else {
-                break;
-            };
-            frame.instructions += 1;
-
-            if current.flow == ControlFlow::Call {
-                stack.push(TraceFrame {
-                    name: format_trace_symbol(&self.ctx.target, next.dtb, next.ip),
-                    entry_sp: next.sp,
-                    instructions: 0,
-                    children: Vec::new(),
-                });
-            } else if current.flow == ControlFlow::Ret
-                && (next.sp > frame.entry_sp
-                    || (self.ctx.target.arch() == Arch::Arm64 && next.sp >= frame.entry_sp))
-            {
-                let completed = stack.pop().expect("trace frame exists");
-                if let Some(parent) = stack.last_mut() {
-                    parent.children.push(completed);
-                } else {
-                    root = Some(completed);
-                    break;
-                }
-            }
-            current = next;
         }
-
-        if root.is_none() {
-            if instructions >= limit {
-                outln!("wt instruction cap reached after {instructions} instructions");
-            }
-            while stack.len() > 1 {
-                let completed = stack.pop().expect("trace frame exists");
-                stack
-                    .last_mut()
-                    .expect("root trace frame exists")
-                    .children
-                    .push(completed);
-            }
-            root = stack.pop();
-        }
-
-        if let Some(root) = root {
-            render_trace_frame(&root, 0);
-        }
+        render_trace_frame(&trace.root, 0);
         Ok(())
     }
 

@@ -15,6 +15,16 @@ pub enum ExceptionPolicyMode {
 }
 
 impl ExceptionPolicyMode {
+    /// The mode's name in structured output and the SDK.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Break => "break",
+            Self::SecondChance => "second_chance",
+            Self::Notify => "notify",
+            Self::Ignore => "ignore",
+        }
+    }
+
     pub fn command(self) -> &'static str {
         match self {
             Self::Break => "sxe",

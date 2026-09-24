@@ -1,6 +1,6 @@
 //! usermode: [`View`](super::View) builders for the structured inspectors.
 
-use super::{View, diagnostic};
+use super::{View, diagnostic, list_termination};
 use crate::target::DiagnosticValue;
 use crate::target::usermode::{
     ByteDiff, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
@@ -312,7 +312,8 @@ pub fn teb(detail: &TebDetail) -> View {
     ])
 }
 
-fn loader_module(detail: &LoaderModuleDetail) -> View {
+/// One loader-list entry (`!dlls`).
+pub fn loader_module(detail: &LoaderModuleDetail) -> View {
     let fields = vec![
         ("name", View::Str(detail.name.clone())),
         ("short_name", View::Str(detail.short_name.clone())),
@@ -339,18 +340,29 @@ fn loader_module(detail: &LoaderModuleDetail) -> View {
 
 /// Build a loader-module view; top-level keys: `modules`, `termination`, `wow64_termination`.
 pub fn loader_modules(detail: &LoaderModulesDetail) -> View {
-    View::Object(vec![
+    let View::Object(mut fields) = loader_terminations(detail) else {
+        unreachable!("terminations are an object");
+    };
+    fields.insert(
+        0,
         (
             "modules",
             View::List(detail.modules.iter().map(loader_module).collect()),
         ),
-        ("termination", super::list_termination(&detail.termination)),
+    );
+    View::Object(fields)
+}
+
+/// How a process's native and WOW64 loader lists ended.
+pub fn loader_terminations(detail: &LoaderModulesDetail) -> View {
+    View::Object(vec![
+        ("termination", list_termination(&detail.termination)),
         (
             "wow64_termination",
             detail
                 .wow64_termination
                 .as_ref()
-                .map_or(View::Null, super::list_termination),
+                .map_or(View::Null, list_termination),
         ),
     ])
 }
