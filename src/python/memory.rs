@@ -60,9 +60,7 @@ impl Memory {
             } else {
                 session
                     .target
-                    .current_process()
-                    .map_err(err)?
-                    .memory()
+                    .process_memory()
                     .write_bytes(VirtAddr(addr), data)
                     .map_err(err)
             }

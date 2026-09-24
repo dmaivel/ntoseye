@@ -6,7 +6,7 @@ use crate::backend::MemoryOps;
 use crate::cpu_state;
 use crate::dbg_backend::DebugCapability;
 use crate::error::{Error, Result};
-use crate::guest::WinObject;
+use crate::guest::Image;
 use crate::session::{Session, processor_index_from_backend_thread_id};
 use crate::symbols::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::target::{DiagnosticValue, Target};
@@ -208,7 +208,7 @@ pub fn parse_msr_name(name: &str) -> Option<u32> {
         .map(|(value, _)| *value)
 }
 
-fn kernel(target: &Target) -> Result<&WinObject> {
+fn kernel(target: &Target) -> Result<&Image> {
     Ok(&target.guest()?.ntoskrnl)
 }
 

@@ -29,8 +29,8 @@ use crate::{
     },
     error::{Error, Result},
     guest::{
-        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, WinObject,
-        read_pe_exports,
+        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, Types,
+        read_pe_exports, read_pe_image,
     },
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
@@ -46,13 +46,12 @@ pub struct Target {
     pub symbols: Arc<SymbolStore>,
     pub guest: Option<Guest>,
     debugger_data: Option<DebuggerDataBlock>,
-    pub current_process: Option<WinObject>,
-    pub current_process_info: Option<ProcessInfo>,
+    /// The attached process (`.process`/`attach`), or `None` for the kernel
+    /// scope. Its `dtb` roots the process address space; see
+    /// [`Self::process_dtb`].
+    process: Option<ProcessInfo>,
     /// Explicit code-machine override (`32` or `64`); `None` follows context.
     pub effmach: Option<u32>,
-    /// Bare WinObject for triage dumps without a discovered kernel, providing
-    /// identity-mapped memory access so commands like disassemble/search work.
-    triage_fallback: Option<WinObject>,
     triage_modules_cache: Option<Vec<ModuleInfo>>,
     context_dtb_override: Option<Dtb>,
     pub registers: Option<HashMap<String, u64>>,
@@ -93,8 +92,7 @@ pub struct Target {
 /// `.thread`), moved out whole by [`Target::take_selection`] so a host can run
 /// one operation in a scope of its own and put the user's selection back.
 pub struct TargetSelection {
-    current_process: Option<WinObject>,
-    current_process_info: Option<ProcessInfo>,
+    process: Option<ProcessInfo>,
     context_dtb_override: Option<Dtb>,
     selected_frame: Option<SelectedFrame>,
     windows_thread_selection: Option<ThreadInfo>,
@@ -219,6 +217,7 @@ pub struct BuiltinVar {
 
 pub const CODE_BITNESS_X86: u32 = 32;
 pub const CODE_BITNESS_AMD64: u32 = 64;
+
 const COMPATIBILITY_MODE_CS: u64 = 0x23;
 const WOW64_ADDRESS_LIMIT: u64 = 1 << 32;
 
@@ -935,17 +934,6 @@ impl Target {
             );
         }
 
-        let triage_fallback = if guest.is_none() {
-            Some(WinObject::new(
-                phys.clone(),
-                symbols.clone(),
-                DTB_IDENTITY,
-                VirtAddr(0),
-            ))
-        } else {
-            None
-        };
-
         let triage_modules_cache = triage_modules;
 
         Ok(Self {
@@ -953,10 +941,8 @@ impl Target {
             symbols,
             guest,
             debugger_data: None,
-            current_process: None,
-            current_process_info: None,
+            process: None,
             effmach: None,
-            triage_fallback,
             triage_modules_cache,
             context_dtb_override: None,
             registers: None,
@@ -998,10 +984,8 @@ impl Target {
             symbols,
             guest: Some(guest),
             debugger_data: None,
-            current_process: None,
-            current_process_info: None,
+            process: None,
             effmach: None,
-            triage_fallback: None,
             triage_modules_cache: None,
             context_dtb_override: None,
             registers: None,
@@ -1017,13 +1001,43 @@ impl Target {
         })
     }
 
-    pub fn current_process(&self) -> Result<&WinObject> {
-        match &self.current_process {
-            Some(p) => Ok(p),
-            None => match &self.guest {
-                Some(g) => Ok(&g.ntoskrnl),
-                None => self.triage_fallback.as_ref().ok_or(Error::NtoskrnlNotFound),
-            },
+    /// The attached process, or `None` in the kernel scope.
+    pub fn attached_process(&self) -> Option<&ProcessInfo> {
+        self.process.as_ref()
+    }
+
+    /// Root of the selected process scope: the attached process's, else the
+    /// kernel's (identity mapping when no kernel was found). Unlike
+    /// [`Self::current_dtb`], it ignores the halted thread's CR3.
+    pub fn process_dtb(&self) -> Dtb {
+        self.process
+            .as_ref()
+            .map_or_else(|| self.kernel_dtb(), |process| process.dtb)
+    }
+
+    /// Memory of the selected process scope (see [`Self::process_dtb`]).
+    pub fn process_memory(&self) -> AddressSpace<'_, PhysMem> {
+        self.address_space(self.process_dtb())
+    }
+
+    /// Kernel types read in the selected process scope. Without a discovered
+    /// kernel only `module!`-qualified names resolve.
+    pub fn process_types(&self) -> Types<'_> {
+        self.types_in(self.process_dtb())
+    }
+
+    /// Kernel types read through `dtb`'s page tables.
+    pub fn types_in(&self, dtb: Dtb) -> Types<'_> {
+        match &self.guest {
+            Some(guest) => guest.ntoskrnl.types_in(dtb),
+            None => Types::new(
+                &self.symbols,
+                None,
+                &self.phys,
+                self.arch(),
+                self.kernel_dtb(),
+                dtb,
+            ),
         }
     }
 
@@ -1055,7 +1069,7 @@ impl Target {
     /// user-mode modules when attached to a process, otherwise the kernel module
     /// list. Shared by the REPL `lm`, the SDK, and MCP.
     pub fn modules(&self) -> Result<Vec<ModuleInfo>> {
-        match &self.current_process_info {
+        match &self.process {
             Some(process) => self.guest()?.process_modules(process),
             None => self.kernel_modules(),
         }
@@ -1064,7 +1078,7 @@ impl Target {
     pub fn modules_with_versions(&self) -> Result<Vec<ModuleInfo>> {
         let mut mods = self.modules()?;
         if let Ok(g) = self.guest() {
-            match &self.current_process_info {
+            match &self.process {
                 Some(info) => g.populate_process_module_versions(&mut mods, info),
                 None => g.populate_kernel_module_versions(&mut mods),
             }
@@ -1123,19 +1137,18 @@ impl Target {
                     .and_then(|modules| modules.into_iter().find(named))
             })
             .ok_or_else(|| Error::InvalidArgument(format!("no loaded module named '{name}'")))?;
-        let (time_date_stamp, size_of_image) = self
-            .current_process()
-            .and_then(|process| {
-                SymbolStore::read_image_lookup_info(&process.memory(), module.base_address)
-            })
-            .ok()
-            .or_else(|| module.time_date_stamp.map(|stamp| (stamp, module.size)))
-            .ok_or_else(|| {
-                Error::DebugInfo(format!(
-                    "{}: neither its PE header nor its loader entry gives a timestamp to look it up by",
-                    module.name
-                ))
-            })?;
+        let (time_date_stamp, size_of_image) = SymbolStore::read_image_lookup_info(
+            &self.process_memory(),
+            module.base_address,
+        )
+        .ok()
+        .or_else(|| module.time_date_stamp.map(|stamp| (stamp, module.size)))
+        .ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "{}: neither its PE header nor its loader entry gives a timestamp to look it up by",
+                module.name
+            ))
+        })?;
         Ok((module, time_date_stamp, size_of_image))
     }
 
@@ -1147,9 +1160,7 @@ impl Target {
             return Ok(Vec::new());
         }
         let mut buf = vec![0u8; length];
-        self.current_process()?
-            .memory()
-            .read_bytes(start, &mut buf)?;
+        self.process_memory().read_bytes(start, &mut buf)?;
         Ok((0..=buf.len() - pattern.len())
             .filter(|&i| &buf[i..i + pattern.len()] == pattern)
             .map(|i| start.0.wrapping_add(i as u64))
@@ -1198,7 +1209,7 @@ impl Target {
     /// richer form.
     pub fn walk_list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<u64>> {
         const MAX: usize = 1000;
-        let mem = self.current_process()?.memory();
+        let mem = self.process_memory();
         let mut cursor = ListCursor::new(head, MAX);
         cursor.advance(Ok(mem.read::<VirtAddr>(head)?));
         let mut out = Vec::new();
@@ -1216,35 +1227,20 @@ impl Target {
     /// Rust `String` (empty when null/zero-length). `Length`/`Buffer` come from
     /// the PDB layout, not hardcoded offsets. Shared by the SDK and MCP.
     pub fn read_unicode_string(&self, addr: VirtAddr) -> Result<String> {
-        let proc = self.current_process()?;
-        match proc.types().struct_at("_UNICODE_STRING", addr) {
-            Ok(s) => s.read_unicode_string(),
+        let types = self.process_types();
+        let descriptor = match types.struct_at("_UNICODE_STRING", addr) {
+            // No kernel namespace (a triage dump without ntoskrnl): take the
+            // layout from whichever loaded module defines it.
             Err(Error::ExpectedSymbols) => {
-                let dtb = self.kernel_dtb();
-                let ti = self
+                let layout = self
                     .symbols
-                    .find_type_across_modules(dtb, "_UNICODE_STRING")
+                    .find_type_across_modules(self.kernel_dtb(), "_UNICODE_STRING")
                     .ok_or(Error::ExpectedSymbols)?;
-                let mem = proc.memory();
-                let len_off = ti.field_offset("Length")?;
-                let buf_off = ti.field_offset("Buffer")?;
-                let length: u16 = mem.read(addr + len_off)?;
-                let buffer: VirtAddr = mem.read(addr + buf_off)?;
-                if length == 0 || buffer.is_zero() {
-                    return Ok(String::new());
-                }
-                let mut buf = vec![0u8; length as usize];
-                mem.read_bytes(buffer, &mut buf)?;
-                let u16s: Vec<u16> = buf
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|c| u16::from_le_bytes(*c))
-                    .collect();
-                Ok(String::from_utf16_lossy(&u16s))
+                types.struct_with_layout(layout, addr)
             }
-            Err(e) => Err(e),
-        }
+            descriptor => descriptor?,
+        };
+        descriptor.read_unicode_string()
     }
 
     /// Read a NUL-terminated byte string (`CHAR*`) at `addr` in the current
@@ -1254,7 +1250,7 @@ impl Target {
     /// completely unmapped start address errors. The `CHAR*` counterpart to
     /// [`read_unicode_string`](Self::read_unicode_string).
     pub fn read_c_string(&self, addr: VirtAddr, max_len: usize) -> Result<String> {
-        let mem = self.current_process()?.memory();
+        let mem = self.process_memory();
         let mut bytes = Vec::new();
         while bytes.len() < max_len {
             let cur = addr + bytes.len() as u64;
@@ -1292,19 +1288,21 @@ impl Target {
         let name = process_info.name.clone();
         let guest = self.guest.as_ref().ok_or(Error::NtoskrnlNotFound)?;
 
+        // A kernel-only process (System, Registry, ...) has no PEB and so no
+        // user modules; attaching still scopes its address space.
         let symbol_report =
-            guest.load_all_process_module_symbols(&self.phys, &self.symbols, &process_info);
+            match guest.load_all_process_module_symbols(&self.phys, &self.symbols, &process_info) {
+                Err(Error::MissingPEB) => ModuleSymbolLoadReport::default(),
+                report => report?,
+            };
 
-        let winobj = guest.winobj_from_process_info(&process_info)?;
-
-        self.current_process = Some(winobj);
-        self.current_process_info = Some(process_info);
+        self.process = Some(process_info);
         self.selected_frame = None;
         self.clear_context_dtb_override();
         self.clear_current_windows_thread_context();
         Ok(AttachReport {
             name,
-            symbol_report: symbol_report?,
+            symbol_report,
         })
     }
 
@@ -1312,29 +1310,22 @@ impl Target {
         self.selected_frame = None;
         self.clear_context_dtb_override();
         self.clear_current_windows_thread_context();
-        self.current_process = None;
-        self.current_process_info = None;
+        self.process = None;
     }
 
     /// Scope inspection to `info`'s address space without loading its module
     /// symbols, which [`Self::attach_process_info`] does. Memory, type, and
-    /// kernel-symbol reads need only the page tables, so the scope's object
-    /// carries no image base (reading it from the PEB would cost two guest
-    /// reads per scoped SDK call, and kernel-only processes have none).
-    pub fn enter_process_scope(&mut self, info: ProcessInfo) -> Result<()> {
-        let winobj = self.guest()?.ntoskrnl.sibling(info.dtb, VirtAddr(0));
+    /// kernel-symbol reads need only the page tables.
+    pub fn enter_process_scope(&mut self, info: ProcessInfo) {
         self.detach();
-        self.current_process = Some(winobj);
-        self.current_process_info = Some(info);
-        Ok(())
+        self.process = Some(info);
     }
 
     /// Move the selected inspection scope out, leaving the target detached
     /// with no frame, thread, or register overrides.
     pub fn take_selection(&mut self) -> TargetSelection {
         TargetSelection {
-            current_process: self.current_process.take(),
-            current_process_info: self.current_process_info.take(),
+            process: self.process.take(),
             context_dtb_override: self.context_dtb_override.take(),
             selected_frame: self.selected_frame.take(),
             windows_thread_selection: self.windows_thread_selection.take(),
@@ -1344,8 +1335,7 @@ impl Target {
 
     /// Put back a scope taken with [`Self::take_selection`].
     pub fn restore_selection(&mut self, selection: TargetSelection) {
-        self.current_process = selection.current_process;
-        self.current_process_info = selection.current_process_info;
+        self.process = selection.process;
         self.context_dtb_override = selection.context_dtb_override;
         self.selected_frame = selection.selected_frame;
         self.windows_thread_selection = selection.windows_thread_selection;
@@ -1355,8 +1345,10 @@ impl Target {
     /// The exports of the module mapped at `base` in `dtb`'s address space,
     /// read from its in-memory export directory ([`read_pe_exports`]).
     pub fn module_exports(&self, dtb: Dtb, base: VirtAddr) -> Result<Vec<ModuleExportInfo>> {
-        let object = self.current_process()?.sibling(dtb, base);
-        let image = object.read_image()?;
+        let (phys, kernel_dtb, arch) = (Arc::clone(&self.phys), self.kernel_dtb(), self.arch());
+        let image = read_pe_image(base, move |address, buf| {
+            AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
+        })?;
         read_pe_exports(&image, base)
     }
 
@@ -1457,12 +1449,7 @@ impl Target {
             .as_ref()
             .and_then(|guest| guest.enumerate_processes().ok())
             .unwrap_or_default();
-        select_thread_process_dtb(
-            thread,
-            self.current_process_info.as_ref(),
-            &processes,
-            self.kernel_dtb(),
-        )
+        select_thread_process_dtb(thread, self.process.as_ref(), &processes, self.kernel_dtb())
     }
 
     /// The process whose page-table root is `cr3_masked`. The selected
@@ -1568,15 +1555,15 @@ impl Target {
             "bug_param3" => self.bugcheck_data(3),
             "bug_param4" => self.bugcheck_data(4),
             "ntbase" | "kernelbase" => self.guest.as_ref().map(|g| g.ntoskrnl.base_address.0),
-            "processbase" | "imagebase" => self.current_process.as_ref().map(|p| p.base_address.0),
-            "processdtb" => self.current_process_info.as_ref().map(|p| p.dtb),
+            "processbase" | "imagebase" => self.current_process_image_base(),
+            "processdtb" => self.process.as_ref().map(|p| p.dtb),
             "attachedeprocess" | "attachedprocess" => {
-                self.current_process_info.as_ref().map(|p| p.eprocess_va.0)
+                self.process.as_ref().map(|p| p.eprocess_va.0)
             }
-            "attachedpid" => self.current_process_info.as_ref().map(|p| p.pid),
-            "eprocess" | "process" => self.current_process_info.as_ref().map(|p| p.eprocess_va.0),
+            "attachedpid" => self.process.as_ref().map(|p| p.pid),
+            "eprocess" | "process" => self.process.as_ref().map(|p| p.eprocess_va.0),
             "peb" => self.current_process_peb(),
-            "pid" => self.current_process_info.as_ref().map(|p| p.pid),
+            "pid" => self.process.as_ref().map(|p| p.pid),
             // `$t0`-`$t19` are WinDbg's twenty writable slots. An assigned
             // value already wins in the evaluator's user-variable lookup, so
             // only the documented default of zero belongs here.
@@ -1617,7 +1604,7 @@ impl Target {
     /// `_EPROCESS`. A System-context stop has none, which stays `None` so the
     /// expression reports an error rather than handing back zero.
     fn current_process_peb(&self) -> Option<u64> {
-        let eprocess_va = self.current_process_info.as_ref()?.eprocess_va;
+        let eprocess_va = self.process.as_ref()?.eprocess_va;
         let peb: VirtAddr = self
             .guest()
             .ok()?
@@ -1628,6 +1615,19 @@ impl Target {
             .read_field("Peb")
             .ok()?;
         (!peb.is_zero()).then_some(peb.0)
+    }
+
+    /// `$processbase`: the attached process's main image base, from its PEB's
+    /// `ImageBaseAddress`. `None` for a kernel-only process.
+    fn current_process_image_base(&self) -> Option<u64> {
+        let peb = VirtAddr(self.current_process_peb()?);
+        let base: VirtAddr = self
+            .process_types()
+            .struct_at("_PEB", peb)
+            .ok()?
+            .read_field("ImageBaseAddress")
+            .ok()?;
+        Some(base.0)
     }
 
     /// One entry of `nt!KiBugCheckData`: the bugcheck code at index 0 and its
@@ -1706,15 +1706,11 @@ impl Target {
             });
         }
 
-        if let Some(process) = &self.current_process_info {
+        if let Some(process) = &self.process {
             vars.extend([
                 BuiltinVar {
                     name: "processbase",
-                    value: self
-                        .current_process
-                        .as_ref()
-                        .map(|p| p.base_address.0)
-                        .unwrap_or(0),
+                    value: self.current_process_image_base().unwrap_or(0),
                     source: "attached process image base",
                 },
                 BuiltinVar {
@@ -1893,7 +1889,6 @@ impl Target {
             };
 
         self.guest = Some(guest);
-        self.triage_fallback = None;
         self.triage_modules_cache = None;
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.detach();
@@ -1911,9 +1906,6 @@ impl Target {
     }
 
     pub fn current_kernel_mapping_is_valid(&self) -> bool {
-        if self.triage_fallback.is_some() {
-            return true;
-        }
         // Triage dumps often lack the ntoskrnl base page, so the MZ check
         // below would fail on a perfectly coherent snapshot.
         if self.phys.dmp_info().is_some_and(|i| i.is_triage) {
@@ -1966,11 +1958,7 @@ impl Target {
             }
         }
 
-        let dtb = self
-            .current_process_info
-            .as_ref()
-            .map(|process| process.dtb)
-            .unwrap_or_else(|| self.kernel_dtb());
+        let dtb = self.process_dtb();
         let bases = modules
             .iter()
             .map(|module| module.base_address)
@@ -1994,8 +1982,8 @@ impl Target {
         // An explicit process attach is authoritative for the live inspection
         // address space. `context_dtb_override` follows the halted vCPU's CR3
         // only in the unattached case.
-        match &self.current_process {
-            Some(p) => p.dtb(),
+        match &self.process {
+            Some(process) => process.dtb,
             None => self
                 .context_dtb_override
                 .unwrap_or_else(|| self.kernel_dtb()),
@@ -2037,10 +2025,7 @@ impl Target {
             return CODE_BITNESS_X86;
         }
 
-        let is_wow64 = self
-            .current_process_info
-            .as_ref()
-            .is_some_and(ProcessInfo::is_wow64);
+        let is_wow64 = self.process.as_ref().is_some_and(ProcessInfo::is_wow64);
         if !is_wow64 {
             return CODE_BITNESS_AMD64;
         }
@@ -2053,10 +2038,7 @@ impl Target {
     /// ARM64 the kernel root (TTBR1) is threaded in so kernel-VA reads work
     /// from any space; on AMD64 one CR3 covers both halves.
     pub fn address_space(&self, dtb: Dtb) -> AddressSpace<'_, PhysMem> {
-        match self.arch() {
-            Arch::Amd64 => AddressSpace::new(&self.phys, dtb),
-            Arch::Arm64 => AddressSpace::new_arm64(&self.phys, dtb, self.kernel_dtb()),
-        }
+        AddressSpace::for_arch(&self.phys, dtb, self.kernel_dtb(), self.arch())
     }
 
     /// Kernel-root address space (reads kernel VAs on both arches).
@@ -2302,7 +2284,7 @@ impl Target {
     }
 
     pub fn selected_process_info(&self) -> Result<ProcessInfo> {
-        if let Some(process) = self.current_process_info.as_ref() {
+        if let Some(process) = self.process.as_ref() {
             return Ok(process.clone());
         }
 

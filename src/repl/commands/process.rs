@@ -1155,7 +1155,7 @@ impl ReplState<'_> {
                 None => self.current_process_context(&processes),
             }
         } else {
-            self.ctx.target.current_process_info.clone()
+            self.ctx.target.attached_process().cloned()
         };
 
         if let Some(process) = vad_process {
@@ -1302,7 +1302,7 @@ impl ReplState<'_> {
     }
 
     fn current_process_context(&self, processes: &[ProcessInfo]) -> Option<ProcessInfo> {
-        if let Some(process) = &self.ctx.target.current_process_info {
+        if let Some(process) = self.ctx.target.attached_process() {
             return Some(process.clone());
         }
         if let Some(thread) = &self.ctx.target.windows_thread_selection
@@ -1621,15 +1621,14 @@ impl ReplState<'_> {
         } else {
             self.ctx
                 .target
-                .current_process_info
-                .as_ref()
+                .attached_process()
                 .map(|process| process.dtb)
                 .unwrap_or_else(|| self.ctx.target.kernel_dtb())
         };
         let modules = if kernel {
             self.ctx.target.kernel_modules_with_versions()
         } else if user {
-            if self.ctx.target.current_process_info.is_none() {
+            if self.ctx.target.attached_process().is_none() {
                 Ok(Vec::new())
             } else {
                 self.ctx.target.modules_with_versions()
@@ -1896,7 +1895,7 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        if self.ctx.target.current_process.is_some() {
+        if self.ctx.target.attached_process().is_some() {
             self.ctx.target.detach();
         }
         self.clear_selected_frame();
@@ -1907,7 +1906,7 @@ impl ReplState<'_> {
     }
 
     fn cmd_detach(&mut self) -> Result<()> {
-        if self.ctx.target.current_process.is_none() {
+        if self.ctx.target.attached_process().is_none() {
             error!("not attached to any process");
         } else {
             self.ctx.target.detach();

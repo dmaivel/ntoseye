@@ -1,6 +1,6 @@
 use super::*;
 const ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET: usize = 0x10;
-use crate::guest::{Guest, WinObject};
+use crate::guest::{Guest, Image};
 use crate::kd::framing::{
     PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
     PACKET_TYPE_KD_RESET, PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
@@ -1479,7 +1479,7 @@ fn synthetic_guest(
     }));
     let store = Arc::new(SymbolStore::new());
     store.inject_module_for_test(FAKE_GUID, types, symbols);
-    let mut ntoskrnl = WinObject::new_with_arch(
+    let mut ntoskrnl = Image::new(
         phys,
         store,
         FAKE_KERNEL_DTB,

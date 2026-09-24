@@ -36,7 +36,7 @@ use crate::{
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
-    guest::{Guest, ModuleInfo, PeImage, WinObject, pe_headers_end, read_pe_image},
+    guest::{Guest, Image, ModuleInfo, PeImage, pe_headers_end, read_pe_image},
     kd::{context, context_arm64},
     memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
@@ -225,7 +225,7 @@ struct StackTracer<'a> {
     /// the scan looks at is its own request over the transport.
     stack_pages: RefCell<HashMap<u64, Option<Box<[u8]>>>>,
     /// The kernel object, whose image is shared across traces.
-    kernel: Option<&'a WinObject>,
+    kernel: Option<&'a Image>,
 }
 
 pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceContext {
@@ -1539,7 +1539,7 @@ impl<'a> StackTracer<'a> {
             .filter(|kernel| {
                 kernel.base_address == module.info.base_address && kernel.dtb() == module.dtb
             })
-            .and_then(WinObject::image);
+            .and_then(Image::image);
         let image = match kernel_image {
             Some(image) => image,
             None => {

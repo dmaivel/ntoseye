@@ -1684,7 +1684,7 @@ fn segment_heap_detail(
 
 impl Target {
     fn heap_context(&self) -> Result<(Dtb, VirtAddr, bool)> {
-        let process = self.current_process_info.as_ref().ok_or_else(|| {
+        let process = self.attached_process().ok_or_else(|| {
             Error::DebugInfo("this command requires an attached user process".into())
         })?;
         let wow64 = process.wow64_peb.is_some();

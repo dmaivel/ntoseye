@@ -114,10 +114,7 @@ pub fn in_context<R>(
 /// a process scope detaches (clearing frame and thread), so it goes first.
 fn apply(session: &mut Session, ctx: &Context) -> PyResult<()> {
     if let Some(process) = &ctx.process {
-        session
-            .target
-            .enter_process_scope(process.clone())
-            .map_err(err)?;
+        session.target.enter_process_scope(process.clone());
     }
     if let Some(vcpu) = &ctx.vcpu {
         session.set_current_thread(vcpu).map_err(err)?;

@@ -298,6 +298,15 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         }
     }
 
+    /// The address space rooted at `dtb` for `arch`. AArch64 kernel VAs walk
+    /// `kernel_dtb` (TTBR1) whatever `dtb` is; one AMD64 CR3 covers both halves.
+    pub fn for_arch(backend: &'a B, dtb: Dtb, kernel_dtb: Dtb, arch: Arch) -> Self {
+        match arch {
+            Arch::Amd64 => Self::new(backend, dtb),
+            Arch::Arm64 => Self::new_arm64(backend, dtb, kernel_dtb),
+        }
+    }
+
     fn read_pt_entry(&self, table_base: PhysAddr, index: usize) -> Result<Option<PageTableEntry>> {
         let mut entry = [0u8; 8];
         match self

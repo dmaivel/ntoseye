@@ -776,8 +776,7 @@ impl ReplState<'_> {
         let dtb = self
             .ctx
             .target
-            .current_process_info
-            .as_ref()
+            .attached_process()
             .map(|process| process.dtb)
             .unwrap_or_else(|| self.ctx.target.kernel_dtb());
         let modules = match self.ctx.target.modules() {

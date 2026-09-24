@@ -516,18 +516,18 @@ impl Struct {
             let len = u32::from(*len);
             let size = ((pos + len).div_ceil(8).clamp(1, 8)) as usize;
             let write = self.owner.with_in(py, &self.space.context(), |session| {
-                let result = session.target.current_process().and_then(|process| {
-                    let memory = process.memory();
-                    let mut bytes = vec![0; size];
-                    memory.read_bytes(VirtAddr(addr), &mut bytes)?;
-                    let mask = bitfield_mask(len);
-                    let raw = (le_uint(&bytes) & !(mask << pos)) | ((integer & mask) << pos);
-                    for (index, byte) in bytes.iter_mut().enumerate() {
-                        *byte = (raw >> (8 * index)) as u8;
-                    }
-                    memory.write_bytes(VirtAddr(addr), &bytes)
-                });
-                Ok(result)
+                let memory = session.target.process_memory();
+                let mut bytes = vec![0; size];
+                Ok(memory
+                    .read_bytes(VirtAddr(addr), &mut bytes)
+                    .and_then(|()| {
+                        let mask = bitfield_mask(len);
+                        let raw = (le_uint(&bytes) & !(mask << pos)) | ((integer & mask) << pos);
+                        for (index, byte) in bytes.iter_mut().enumerate() {
+                            *byte = (raw >> (8 * index)) as u8;
+                        }
+                        memory.write_bytes(VirtAddr(addr), &bytes)
+                    }))
             })?;
             return write.map_err(err);
         }
@@ -539,9 +539,10 @@ impl Struct {
             let size = pointer_width(name, field.size)?;
             let bytes = integer.to_le_bytes();
             let write = self.owner.with_in(py, &self.space.context(), |session| {
-                Ok(session.target.current_process().and_then(|process| {
-                    process.memory().write_bytes(VirtAddr(addr), &bytes[..size])
-                }))
+                Ok(session
+                    .target
+                    .process_memory()
+                    .write_bytes(VirtAddr(addr), &bytes[..size]))
             })?;
             return write.map_err(err);
         }
@@ -569,8 +570,8 @@ impl Struct {
         let write = self.owner.with_in(py, &self.space.context(), |session| {
             Ok(session
                 .target
-                .current_process()
-                .and_then(|process| process.memory().write_bytes(VirtAddr(addr), &bytes)))
+                .process_memory()
+                .write_bytes(VirtAddr(addr), &bytes))
         })?;
         write.map_err(err)
     }
@@ -820,17 +821,15 @@ fn list_record_addresses(
 ) -> PyResult<Vec<u64>> {
     let scoped = owner.with_in(py, &space.context(), |session| {
         let dtb = session.target.current_dtb();
-        let addresses = match session.target.current_process() {
-            Ok(process) => process
-                .types_in(dtb)
-                .list_at(VirtAddr(head), record_type, link_field)
-                .and_then(|records| {
-                    records
-                        .map(|record| record.map(|record| record.addr().0))
-                        .collect::<CoreResult<Vec<_>>>()
-                }),
-            Err(error) => Err(error),
-        };
+        let addresses = session
+            .target
+            .types_in(dtb)
+            .list_at(VirtAddr(head), record_type, link_field)
+            .and_then(|records| {
+                records
+                    .map(|record| record.map(|record| record.addr().0))
+                    .collect::<CoreResult<Vec<_>>>()
+            });
         Ok(addresses)
     })?;
     scoped.map_err(err)

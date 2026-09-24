@@ -1080,7 +1080,7 @@ impl<'a> GdbTarget<'a> {
     fn published_modules(&self) -> Vec<ModuleInfo> {
         let target = &self.session.target;
         let mut modules = target.kernel_modules().unwrap_or_default();
-        if target.current_process_info.is_some() {
+        if target.attached_process().is_some() {
             modules.extend(target.modules().unwrap_or_default());
         }
         modules
@@ -1478,8 +1478,8 @@ impl MultiThreadBase for GdbTarget<'_> {
         let written = self
             .session
             .target
-            .current_process()
-            .and_then(|process| process.memory().write_bytes(VirtAddr(start_addr), data));
+            .process_memory()
+            .write_bytes(VirtAddr(start_addr), data);
         written.map_err(|_| TargetError::Errno(EFAULT as u8))
     }
 

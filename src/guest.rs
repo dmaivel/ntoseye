@@ -26,7 +26,7 @@ use zerocopy::{FromBytes, IntoBytes};
 const IMAGE_FILE_NAME_LEN: usize = 15;
 const MAX_LOADER_MODULES: usize = 1000;
 
-/// used for enumeration without loading full WinObject
+/// A process's identity and the root (`dtb`) of its address space.
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: u64,
@@ -841,7 +841,7 @@ pub fn read_pe_image_from_file(path: &Path) -> Result<PeImage> {
 }
 
 pub struct SymbolRef<'a> {
-    obj: &'a WinObject,
+    obj: &'a Image,
     rva: u32,
 }
 
@@ -858,26 +858,13 @@ impl SymbolRef<'_> {
     }
 }
 
-/// The address space a module lives in: AArch64 kernel VAs walk `kernel_dtb`
-/// (TTBR1) while `dtb` stays the process root.
-fn object_address_space(
-    phys: &Arc<PhysMem>,
-    dtb: Dtb,
-    kernel_dtb: Dtb,
-    arch: Arch,
-) -> AddressSpace<'_, Arc<PhysMem>> {
-    match arch {
-        Arch::Amd64 => AddressSpace::new(phys, dtb),
-        Arch::Arm64 => AddressSpace::new_arm64(phys, dtb, kernel_dtb),
-    }
-}
-
-/// A structured view into a loaded module's memory: it carries its own address
-/// space (`dtb`) and the handles needed to read and resolve symbols/types
-/// (`kvm`, `symbols`), so navigation methods don't take them as arguments. The
-/// handles are shared (`Arc`), not borrowed; a `WinObject` can't borrow its
-/// `Target` siblings, but it can own a refcounted handle to them.
-pub struct WinObject {
+/// A PE image mapped into guest memory: ntoskrnl, a driver, or a user-mode
+/// EXE/DLL. It carries the address space it is mapped in (`dtb`) and the
+/// handles needed to read it and resolve its symbols and types, so navigation
+/// methods don't take them as arguments. The handles are shared (`Arc`), not
+/// borrowed; an `Image` can't borrow its `Target` siblings, but it can own
+/// a refcounted handle to them.
+pub struct Image {
     pub base_address: VirtAddr,
     dtb: Dtb,
     arch: Arch,
@@ -894,17 +881,8 @@ pub struct WinObject {
     symbols: Arc<SymbolStore>,
 }
 
-impl WinObject {
+impl Image {
     pub fn new(
-        phys: Arc<PhysMem>,
-        symbols: Arc<SymbolStore>,
-        dtb: Dtb,
-        base_address: VirtAddr,
-    ) -> Self {
-        Self::new_with_arch(phys, symbols, dtb, base_address, Arch::Amd64)
-    }
-
-    pub fn new_with_arch(
         phys: Arc<PhysMem>,
         symbols: Arc<SymbolStore>,
         dtb: Dtb,
@@ -975,37 +953,18 @@ impl WinObject {
             .map_or(0, |view| size_of_image(&view) as usize)
     }
 
-    /// A sibling object sharing this one's physical-memory and symbol handles,
-    /// at a new base in a possibly different address space. Symbols are not
-    /// loaded yet (`guid` is `None`).
-    pub fn sibling(&self, dtb: Dtb, base_address: VirtAddr) -> WinObject {
-        WinObject {
-            base_address,
-            dtb,
-            arch: self.arch,
-            kernel_dtb: self.kernel_dtb,
-            headers: None,
-            image: Mutex::new(None),
-            guid: None,
-            phys: Arc::clone(&self.phys),
-            symbols: Arc::clone(&self.symbols),
-        }
-    }
-
     pub fn address_of(&self, rva: impl Into<u64>) -> VirtAddr {
         self.base_address + rva.into()
     }
 
-    fn address_space<'a>(
-        &self,
-        phys: &'a Arc<PhysMem>,
-        dtb: Dtb,
-    ) -> AddressSpace<'a, Arc<PhysMem>> {
-        object_address_space(phys, dtb, self.kernel_dtb, self.arch)
+    pub fn memory(&self) -> AddressSpace<'_, Arc<PhysMem>> {
+        self.memory_in(self.dtb)
     }
 
-    pub fn memory(&self) -> AddressSpace<'_, Arc<PhysMem>> {
-        self.address_space(&self.phys, self.dtb)
+    /// Like [`memory`](Self::memory), but rooted at `dtb`: another process's
+    /// space, keeping this object's architecture and kernel root.
+    pub fn memory_in(&self, dtb: Dtb) -> AddressSpace<'_, Arc<PhysMem>> {
+        AddressSpace::for_arch(&self.phys, dtb, self.kernel_dtb, self.arch)
     }
 
     pub fn symbol<S>(&self, name: S) -> Result<SymbolRef<'_>>
@@ -1059,7 +1018,7 @@ impl WinObject {
         let (phys, dtb, kernel_dtb, arch) =
             (Arc::clone(&self.phys), self.dtb, self.kernel_dtb, self.arch);
         read_pe_image(self.base_address, move |address, buf| {
-            object_address_space(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
+            AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
         })
     }
 
@@ -1067,29 +1026,65 @@ impl WinObject {
     /// space. Use [`types_in`](Self::types_in) to read the same types from a
     /// different `dtb` (e.g. ntoskrnl's kernel types against a process's space).
     pub fn types(&self) -> Types<'_> {
-        Types {
-            obj: self,
-            dtb: self.dtb,
-        }
+        self.types_in(self.dtb)
     }
 
     /// Like [`types`](Self::types), but reads against `dtb` instead of this
     /// object's own, for kernel types navigated through a process's space.
     pub fn types_in(&self, dtb: Dtb) -> Types<'_> {
-        Types { obj: self, dtb }
+        Types {
+            symbols: &self.symbols,
+            guid: self.guid,
+            phys: &self.phys,
+            arch: self.arch,
+            kernel_dtb: self.kernel_dtb,
+            dtb,
+        }
     }
 }
 
-/// A `WinObject`'s struct/type namespace bound to a read address space: the
-/// entry point for layout lookups and fluent cursors. Cheap to copy. To structs
-/// what the object itself is to symbols.
+/// A module's struct/type namespace bound to a read address space: the entry
+/// point for layout lookups and fluent cursors. Cheap to copy. The namespace
+/// (`guid`) and the space (`dtb`) are independent, so kernel types read
+/// through any process's page tables.
 #[derive(Clone, Copy)]
 pub struct Types<'a> {
-    obj: &'a WinObject,
+    symbols: &'a SymbolStore,
+    /// Module whose PDB answers unqualified names; `None` resolves only
+    /// `module!`-qualified names (a target without a discovered kernel).
+    guid: Option<u128>,
+    phys: &'a Arc<PhysMem>,
+    arch: Arch,
+    kernel_dtb: Dtb,
     dtb: Dtb,
 }
 
 impl<'a> Types<'a> {
+    /// The namespace of module `guid` (see [`Image::types_in`]) without an
+    /// image object: how a target with no discovered kernel still reaches
+    /// qualified types in its identity-mapped memory.
+    pub fn new(
+        symbols: &'a SymbolStore,
+        guid: Option<u128>,
+        phys: &'a Arc<PhysMem>,
+        arch: Arch,
+        kernel_dtb: Dtb,
+        dtb: Dtb,
+    ) -> Self {
+        Self {
+            symbols,
+            guid,
+            phys,
+            arch,
+            kernel_dtb,
+            dtb,
+        }
+    }
+
+    fn memory(self) -> AddressSpace<'a, Arc<PhysMem>> {
+        AddressSpace::for_arch(self.phys, self.dtb, self.kernel_dtb, self.arch)
+    }
+
     /// The parsed layout of struct `name` from the object's PDB (cached). A
     /// `module!`-qualified name resolves in this space's modules instead,
     /// which is how a 32-bit layout (`ntdll32!_PEB`) and the nested types it
@@ -1100,14 +1095,12 @@ impl<'a> Types<'a> {
     {
         if name.as_ref().contains('!') {
             return self
-                .obj
                 .symbols
                 .find_type_across_modules(self.dtb, name.as_ref())
                 .ok_or_else(|| Error::StructNotFound(name.into()));
         }
-        let guid = self.obj.guid.ok_or(Error::ExpectedSymbols)?;
-        self.obj
-            .symbols
+        let guid = self.guid.ok_or(Error::ExpectedSymbols)?;
+        self.symbols
             .dump_struct_with_types(guid, name.as_ref())
             .ok_or_else(|| Error::StructNotFound(name.into()))
     }
@@ -1123,8 +1116,7 @@ impl<'a> Types<'a> {
     /// space. Callers that cache layouts can avoid repeating the type lookup.
     pub fn struct_with_layout(self, layout: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
         StructRef {
-            obj: self.obj,
-            dtb: self.dtb,
+            types: self,
             ti: layout,
             base,
             image: None,
@@ -1145,11 +1137,8 @@ impl<'a> Types<'a> {
         record_type: &str,
         link_field: &str,
     ) -> Result<impl Iterator<Item = Result<StructRef<'a>>> + 'a> {
-        let (obj, dtb) = (self.obj, self.dtb);
         let record_ti = self.layout(record_type)?;
         let link_offset = record_ti.field_offset(link_field)?;
-
-        let list_memory = |dtb: Dtb| obj.address_space(&obj.phys, dtb);
 
         const MAX: usize = 1000;
         let pointer_size = usize::from(record_ti.pointer_size);
@@ -1158,14 +1147,14 @@ impl<'a> Types<'a> {
             memory(&mut bytes[..pointer_size])?;
             Ok(VirtAddr(le_uint(&bytes[..pointer_size])))
         };
-        let initial = read_link(&|buf| list_memory(dtb).read_bytes(head, buf))?;
+        let initial = read_link(&|buf| self.memory().read_bytes(head, buf))?;
         let mut cursor = ListCursor::new(head, MAX);
         cursor.advance(Ok(initial));
 
         Ok(std::iter::from_fn(move || {
             let current = cursor.take_current()?;
 
-            let record = Types { obj, dtb }
+            let record = self
                 .struct_with_layout(
                     Arc::clone(&record_ti),
                     VirtAddr(current.0.wrapping_sub(link_offset)),
@@ -1191,8 +1180,8 @@ impl<'a> Types<'a> {
 /// [`SymbolRef`] is to symbols: `follow`/`read_field`/`list` chain off it, and
 /// the type cache makes each step's layout lookup cheap.
 pub struct StructRef<'a> {
-    obj: &'a WinObject,
-    dtb: Dtb,
+    /// Namespace for the types of fields walked into, and the space read.
+    types: Types<'a>,
     ti: Arc<TypeInfo>,
     base: VirtAddr,
     /// Prefetched copy of the struct's bytes from `base`; field reads inside
@@ -1206,7 +1195,7 @@ const STRUCT_PREFETCH_MAX: usize = 0x1000;
 
 impl<'a> StructRef<'a> {
     fn memory(&self) -> AddressSpace<'a, Arc<PhysMem>> {
-        self.obj.address_space(&self.obj.phys, self.dtb)
+        self.types.memory()
     }
 
     /// Read the struct's bytes once so later field reads are served from the
@@ -1303,7 +1292,7 @@ impl<'a> StructRef<'a> {
 
     /// Wrap a freshly resolved layout at `base`, carrying this cursor's context.
     fn with(&self, ti: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
-        self.obj.types_in(self.dtb).struct_with_layout(ti, base)
+        self.types.struct_with_layout(ti, base)
     }
 
     /// Read a scalar field by name. The Rust type `T` (inferred from context)
@@ -1332,7 +1321,7 @@ impl<'a> StructRef<'a> {
         };
         let struct_name = struct_name.clone();
         let target = VirtAddr(self.read_uint_at(name, field.offset as u64, field.size)?);
-        let ti = self.obj.types_in(self.dtb).layout(&struct_name)?;
+        let ti = self.types.layout(&struct_name)?;
         Ok(self.with(ti, target))
     }
 
@@ -1352,7 +1341,7 @@ impl<'a> StructRef<'a> {
             }
         };
         let base = self.base + field.offset as u64;
-        let ti = self.obj.types_in(self.dtb).layout(&type_name)?;
+        let ti = self.types.layout(&type_name)?;
         let mut embedded = self.with(ti, base);
         // Carry the enclosing image so the sub-struct's fields stay free.
         if let Some(image) = &self.image {
@@ -1400,9 +1389,7 @@ impl<'a> StructRef<'a> {
         link_field: &str,
     ) -> Result<impl Iterator<Item = Result<StructRef<'a>>> + 'a> {
         let head = self.base + self.field(head_field)?.offset as u64;
-        self.obj
-            .types_in(self.dtb)
-            .list_at(head, record_type, link_field)
+        self.types.list_at(head, record_type, link_field)
     }
 }
 
@@ -1471,7 +1458,7 @@ fn read_unicode32(memory: &impl MemoryOps<VirtAddr>, length: usize, buffer: u32)
 }
 
 pub struct Guest {
-    pub ntoskrnl: WinObject,
+    pub ntoskrnl: Image,
     memo: Mutex<HaltMemo>,
 }
 
@@ -2026,7 +2013,7 @@ fn find_ntoskrnl_va_triage(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<Vir
     Ok(None)
 }
 
-fn find_ntoskrnl(phys: Arc<PhysMem>, symbols: Arc<SymbolStore>) -> Result<Option<WinObject>> {
+fn find_ntoskrnl(phys: Arc<PhysMem>, symbols: Arc<SymbolStore>) -> Result<Option<Image>> {
     let Some((kernel_dtb, arch)) = find_kernel(&phys)? else {
         return Ok(None);
     };
@@ -2039,7 +2026,7 @@ fn find_ntoskrnl(phys: Arc<PhysMem>, symbols: Arc<SymbolStore>) -> Result<Option
         return Ok(None);
     };
 
-    Ok(Some(WinObject::new_with_arch(
+    Ok(Some(Image::new(
         phys,
         symbols,
         kernel_dtb,
@@ -2049,7 +2036,7 @@ fn find_ntoskrnl(phys: Arc<PhysMem>, symbols: Arc<SymbolStore>) -> Result<Option
 }
 
 impl Guest {
-    pub fn from_kernel(ntoskrnl: WinObject) -> Self {
+    pub fn from_kernel(ntoskrnl: Image) -> Self {
         Self {
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
@@ -2126,7 +2113,7 @@ impl Guest {
         symbols: Arc<SymbolStore>,
         location: KernelLocation,
     ) -> Result<Self> {
-        Self::with_kernel(WinObject::new_with_arch(
+        Self::with_kernel(Image::new(
             phys,
             symbols,
             location.dtb,
@@ -2135,7 +2122,7 @@ impl Guest {
         ))
     }
 
-    fn with_kernel(ntoskrnl: WinObject) -> Result<Self> {
+    fn with_kernel(ntoskrnl: Image) -> Result<Self> {
         let ntoskrnl = ntoskrnl.load_symbols()?;
         // Type/enum layout lookups prefer the kernel's definitions over
         // same-named user-mode types once attached to a process; tell the
@@ -2184,7 +2171,7 @@ impl Guest {
             None => return Err(Error::NtoskrnlNotFound),
         };
 
-        let obj = WinObject::new_with_arch(
+        let obj = Image::new(
             Arc::clone(&phys),
             Arc::clone(&symbols),
             kernel_dtb,
@@ -2203,7 +2190,7 @@ impl Guest {
                     .cloned()
                     .ok_or(Error::NtoskrnlNotFound)?;
 
-                WinObject::new_with_arch(phys, symbols, kernel_dtb, ntoskrnl_va, arch)
+                Image::new(phys, symbols, kernel_dtb, ntoskrnl_va, arch)
                     .load_symbols_from_module_info(
                         &driver.name,
                         driver.time_date_stamp,
@@ -2383,21 +2370,6 @@ impl Guest {
         Err(Error::MissingImage)
     }
 
-    pub fn winobj_from_process_info(&self, info: &ProcessInfo) -> Result<WinObject> {
-        let eprocess = self
-            .ntoskrnl
-            .types_in(info.dtb)
-            .struct_at("_EPROCESS", info.eprocess_va)?;
-
-        let peb = eprocess.follow("Peb")?;
-        if peb.addr().is_zero() {
-            return Err(Error::MissingPEB);
-        }
-
-        let base_address: VirtAddr = peb.read_field("ImageBaseAddress")?;
-        Ok(self.ntoskrnl.sibling(info.dtb, base_address))
-    }
-
     pub fn process_modules(&self, info: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
         self.process_modules_detail(info)
             .map(|detail| detail.modules)
@@ -2429,7 +2401,7 @@ impl Guest {
             let layout = types.layout("_LDR_DATA_TABLE_ENTRY")?;
             let link_offset = layout.field_offset("InLoadOrderLinks")?;
             let pointer_size = usize::from(layout.pointer_size);
-            let memory = self.ntoskrnl.address_space(&self.ntoskrnl.phys, info.dtb);
+            let memory = self.ntoskrnl.memory_in(info.dtb);
             let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
             cursor.advance(
                 read_loader_pointer(&memory, head, pointer_size).map_err(|error| error.to_string()),
@@ -2506,7 +2478,7 @@ impl Guest {
         if ldr == 0 {
             return Ok((Vec::new(), ListTermination::Null));
         }
-        let memory = self.ntoskrnl.address_space(&self.ntoskrnl.phys, dtb);
+        let memory = self.ntoskrnl.memory_in(dtb);
         let head = VirtAddr(u64::from(ldr) + IN_LOAD_ORDER_MODULE_LIST);
         let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
         cursor.advance(read_loader_pointer(&memory, head, 4).map_err(|error| error.to_string()));
@@ -2602,9 +2574,7 @@ impl Guest {
     }
 
     pub fn populate_process_module_versions(&self, modules: &mut [ModuleInfo], info: &ProcessInfo) {
-        let process_mem = self.ntoskrnl.sibling(info.dtb, VirtAddr(0));
-        let memory = process_mem.memory();
-        populate_module_versions(modules, &memory);
+        populate_module_versions(modules, &self.ntoskrnl.memory_in(info.dtb));
     }
 
     fn is_session_space(addr: VirtAddr) -> bool {

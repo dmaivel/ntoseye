@@ -319,8 +319,7 @@ fn unavailable<T>(error: &str) -> DiagnosticValue<T> {
 
 fn attached_dtb(target: &Target) -> Result<u64> {
     target
-        .current_process_info
-        .as_ref()
+        .attached_process()
         .map(|process| process.dtb)
         .ok_or_else(|| Error::DebugInfo("this command requires an attached user process".into()))
 }
@@ -439,8 +438,7 @@ impl Target {
     /// was requested.
     pub fn inspect_peb(&self, address: Option<VirtAddr>) -> Result<PebDetail> {
         let process = self
-            .current_process_info
-            .as_ref()
+            .attached_process()
             .ok_or_else(|| Error::DebugInfo("no attached process".into()))?;
         let dtb = process.dtb;
         let peb_address = if let Some(address) = address {
@@ -528,11 +526,7 @@ impl Target {
     }
 
     fn decode_loader_heads32(&self, ldr: VirtAddr) -> DiagnosticValue<LoaderListHeads> {
-        let process = match self.current_process() {
-            Ok(process) => process,
-            Err(error) => return DiagnosticValue::Unavailable(error.to_string()),
-        };
-        let memory = process.memory();
+        let memory = self.process_memory();
         let read_head = |offset: u64| {
             let address = ldr + offset;
             LoaderListHead {
@@ -781,8 +775,7 @@ impl Target {
     /// lists are merged, matching `!dlls -c`.
     pub fn loader_modules(&self, containing: Option<VirtAddr>) -> Result<LoaderModulesDetail> {
         let process = self
-            .current_process_info
-            .as_ref()
+            .attached_process()
             .ok_or_else(|| {
                 Error::DebugInfo("this command requires an attached user process".into())
             })?
@@ -808,7 +801,7 @@ impl Target {
     pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheckDetail> {
         let mut modules = self.modules()?;
         if find_module(&modules, module).is_none()
-            && self.current_process_info.is_some()
+            && self.attached_process().is_some()
             && let Ok(kernel_modules) = self.kernel_modules()
         {
             modules.extend(kernel_modules);
@@ -964,15 +957,7 @@ impl Target {
             };
         }
         let mut actual = vec![0u8; section.expected.len()];
-        let memory = match self.current_process() {
-            Ok(process) => process.memory(),
-            Err(error) => {
-                return SectionCheckResult {
-                    unavailable: Some(error.to_string()),
-                    ..SectionCheckResult::default()
-                };
-            }
-        };
+        let memory = self.process_memory();
         for offset in (0..section.expected.len()).step_by(SECTION_READ_CHUNK) {
             let take = (section.expected.len() - offset).min(SECTION_READ_CHUNK);
             let address = base + section.rva as u64 + offset as u64;
@@ -1365,7 +1350,7 @@ fn module_identity(target: &Target, module: &ModuleInfo) -> Result<(u32, u32)> {
     {
         return Ok((timestamp, module.size));
     }
-    let memory = target.current_process()?.memory();
+    let memory = target.process_memory();
     let header = read_pe_header_page(module.base_address, &memory)?;
     let view = PeView::from_bytes(&header)?;
     Ok((

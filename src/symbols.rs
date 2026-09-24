@@ -2,7 +2,7 @@ use crate::{
     backend::MemoryOps,
     error::{Error, Result},
     guest::{
-        ModuleInfo, PeImage, WinObject, read_pe_header_page, read_pe_image_from_file, size_of_image,
+        Image, ModuleInfo, PeImage, read_pe_header_page, read_pe_image_from_file, size_of_image,
     },
     memory,
     types::{Arch, Dtb, PhysAddr, VirtAddr},
@@ -2099,7 +2099,7 @@ impl SymbolStore {
         path.rsplit(['\\', '/']).next().unwrap_or(path)
     }
 
-    pub fn load_from_binary(&self, object: &mut WinObject, name: &str) -> Result<Option<u128>> {
+    pub fn load_from_binary(&self, object: &mut Image, name: &str) -> Result<Option<u128>> {
         let view = object.view().ok_or(Error::ViewFailed)?;
         if name.eq_ignore_ascii_case("ntoskrnl.exe")
             && !matches!(view.file_header().Machine, 0x8664 | 0xaa64)

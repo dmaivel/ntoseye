@@ -1667,7 +1667,7 @@ impl BreakpointManager {
     }
 
     fn scope_for_current_context(debugger: &Target) -> BreakpointScope {
-        match &debugger.current_process_info {
+        match debugger.attached_process() {
             Some(ProcessInfo { pid, name, dtb, .. }) => BreakpointScope::Process {
                 pid: *pid,
                 dtb: *dtb,
