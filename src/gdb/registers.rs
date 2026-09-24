@@ -36,7 +36,43 @@ impl RegisterMap {
             map.by_name.insert(reg.name.clone(), reg.clone());
             map.ordered.push(reg);
         }
+        map.add_vector_halves();
         map
+    }
+
+    /// Name each 128-bit register's 64-bit halves `{name}l` / `{name}h`
+    /// (as KD's AMD64 map spells `xmm0l`/`xmm0h`), unless the map already
+    /// defines them. They are lookups into the same bytes, not wire registers.
+    fn add_vector_halves(&mut self) {
+        let vectors: Vec<RegisterInfo> = self
+            .ordered
+            .iter()
+            .filter(|reg| reg.size == 16)
+            .cloned()
+            .collect();
+        for reg in vectors {
+            for (suffix, offset) in [("l", reg.offset), ("h", reg.offset + 8)] {
+                let name = format!("{}{suffix}", reg.name);
+                self.by_name.entry(name.clone()).or_insert(RegisterInfo {
+                    name,
+                    offset,
+                    size: 8,
+                    regnum: reg.regnum,
+                });
+            }
+        }
+    }
+
+    /// The register `name`, if it fits the 64-bit accessors.
+    fn scalar(&self, name: &str) -> Result<&RegisterInfo> {
+        let info = self
+            .by_name
+            .get(name)
+            .ok_or_else(|| Error::RegisterNotFound(name.to_string()))?;
+        if info.size > 8 {
+            return Err(Error::RegisterTooWide(name.to_string()));
+        }
+        Ok(info)
     }
 
     /// Program-counter advance caused by executing the arch's breakpoint
@@ -53,10 +89,7 @@ impl RegisterMap {
     where
         S: Into<String> + AsRef<str>,
     {
-        let info = self
-            .by_name
-            .get(name.as_ref())
-            .ok_or(Error::RegisterNotFound(name.into()))?;
+        let info = self.scalar(name.as_ref())?;
         if info.offset + info.size > data.len() {
             return Err(Error::BufferNotEnough);
         }
@@ -95,10 +128,7 @@ impl RegisterMap {
     where
         S: Into<String> + AsRef<str>,
     {
-        let info = self
-            .by_name
-            .get(name.as_ref())
-            .ok_or(Error::RegisterNotFound(name.into()))?;
+        let info = self.scalar(name.as_ref())?;
         if info.offset + info.size > data.len() {
             return Err(Error::BufferNotEnough);
         }
@@ -108,19 +138,38 @@ impl RegisterMap {
         Ok(())
     }
 
+    /// Every register that fits 64 bits, by name. A 128-bit register appears
+    /// as its `{name}l` / `{name}h` halves, never as a truncated whole; see
+    /// [`wide_values`](Self::wide_values) for full-width values.
     pub fn to_hashmap(&self, data: &[u8]) -> HashMap<String, u64> {
+        let mut values = HashMap::with_capacity(self.ordered.len());
+        let mut insert = |name: String, offset: usize, size: usize| {
+            if let Some(bytes) = data.get(offset..offset + size) {
+                let mut buf = [0u8; 8];
+                buf[..size].copy_from_slice(bytes);
+                values.insert(name, u64::from_le_bytes(buf));
+            }
+        };
+        for reg in &self.ordered {
+            match reg.size {
+                0..=8 => insert(reg.name.clone(), reg.offset, reg.size),
+                16 => {
+                    insert(format!("{}l", reg.name), reg.offset, 8);
+                    insert(format!("{}h", reg.name), reg.offset + 8, 8);
+                }
+                _ => {}
+            }
+        }
+        values
+    }
+
+    /// Registers wider than 64 bits and at most 128, at full width, in wire
+    /// order (AMD64 `xmmN`, ARM64 `vN`).
+    pub fn wide_values(&self, data: &[u8]) -> Vec<(String, u128)> {
         self.ordered
             .iter()
-            .filter_map(|reg| {
-                if reg.offset + reg.size > data.len() {
-                    return None;
-                }
-                let slice = &data[reg.offset..reg.offset + reg.size];
-                let mut buf = [0u8; 8];
-                let copy_len = slice.len().min(8);
-                buf[..copy_len].copy_from_slice(&slice[..copy_len]);
-                Some((reg.name.clone(), u64::from_le_bytes(buf)))
-            })
+            .filter(|reg| (9..=16).contains(&reg.size))
+            .filter_map(|reg| Some((reg.name.clone(), self.read_u128(&reg.name, data).ok()?)))
             .collect()
     }
 
@@ -218,6 +267,7 @@ impl RegisterMap {
             map.by_name.insert(reg.name.clone(), reg.clone());
             map.ordered.push(reg);
         }
+        map.add_vector_halves();
         map
     }
 
@@ -327,5 +377,40 @@ mod tests {
         let map = RegisterMap::parse_target_xml(xml);
         let value = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeffu128;
         assert_eq!(map.read_u128("xmm0", &value.to_le_bytes()).unwrap(), value);
+    }
+
+    /// A 128-bit register never reaches the 64-bit views truncated: they see
+    /// its halves, and the whole is only available at full width.
+    #[test]
+    fn vector_registers_split_into_halves_for_scalar_views() {
+        let xml = r#"<target><feature name="core">
+            <reg name="x0" bitsize="64"/>
+            <reg name="v0" bitsize="128"/>
+        </feature></target>"#;
+        let map = RegisterMap::parse_target_xml(xml);
+        let v0 = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeffu128;
+        let mut regs = 7u64.to_le_bytes().to_vec();
+        regs.extend_from_slice(&v0.to_le_bytes());
+
+        let scalars = map.to_hashmap(&regs);
+        assert_eq!(scalars.get("x0"), Some(&7));
+        assert_eq!(scalars.get("v0l"), Some(&0x8899_aabb_ccdd_eeff));
+        assert_eq!(scalars.get("v0h"), Some(&0x0011_2233_4455_6677));
+        assert!(!scalars.contains_key("v0"));
+        assert_eq!(map.wide_values(&regs), [("v0".to_string(), v0)]);
+        assert!(matches!(
+            map.read_u64("v0", &regs),
+            Err(Error::RegisterTooWide(name)) if name == "v0"
+        ));
+
+        map.write_u64("v0h", &mut regs, 0xdead_beef).unwrap();
+        assert_eq!(
+            map.read_u128("v0", &regs).unwrap(),
+            (0xdead_beef << 64) | 0x8899_aabb_ccdd_eeff
+        );
+        assert!(matches!(
+            map.write_u64("v0", &mut regs, 0),
+            Err(Error::RegisterTooWide(_))
+        ));
     }
 }

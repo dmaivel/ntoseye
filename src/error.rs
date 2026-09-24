@@ -58,6 +58,9 @@ pub enum Error {
     #[error("Register '{0}' not found")]
     RegisterNotFound(String),
 
+    #[error("Register '{0}' is wider than 64 bits (a 128-bit register has '{0}l' / '{0}h' halves)")]
+    RegisterTooWide(String),
+
     #[error("Breakpoint '{0}' not found")]
     BPNotFound(u32),
 

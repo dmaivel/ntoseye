@@ -570,6 +570,12 @@ impl Expr {
                 "registers unavailable while VM is running".into(),
             ));
         }
+        // A 128-bit register reaches the scalar file only as its halves.
+        if context.register_value(&format!("{name}l")).is_some()
+            && context.register_value(&format!("{name}h")).is_some()
+        {
+            return Err(Error::RegisterTooWide(name.to_string()));
+        }
         Err(Error::RegisterNotFound(name.to_string()))
     }
 

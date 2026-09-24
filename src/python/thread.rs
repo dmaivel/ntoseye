@@ -590,19 +590,31 @@ pub struct Registers {
 }
 
 impl Registers {
-    fn values(&self, py: Python<'_>) -> PyResult<HashMap<String, u64>> {
+    /// Register values by name. A live file adds 128-bit registers at full
+    /// width (`xmm0`, `v0`) beside their 64-bit halves; a recovered frame
+    /// holds only what unwinding recovered.
+    fn values(&self, py: Python<'_>) -> PyResult<HashMap<String, u128>> {
         self.owner.check(py)?;
         if let Some(values) = &self.values {
-            return Ok(values.clone());
+            return Ok(values
+                .iter()
+                .map(|(name, value)| (name.clone(), u128::from(*value)))
+                .collect());
         }
         self.owner.with_in(py, &self.context, |session| {
             require_halted(session, "registers")?;
             let bytes = session.read_registers().map_err(err)?;
-            Ok(session.register_map.to_hashmap(&bytes))
+            let map = &session.register_map;
+            Ok(map
+                .to_hashmap(&bytes)
+                .into_iter()
+                .map(|(name, value)| (name, u128::from(value)))
+                .chain(map.wide_values(&bytes))
+                .collect())
         })
     }
 
-    fn value(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
+    fn value(&self, py: Python<'_>, name: &str) -> PyResult<u128> {
         let values = self.values(py)?;
         register_value(&values, name).ok_or_else(|| PyKeyError::new_err(name.to_string()))
     }
@@ -622,7 +634,7 @@ impl Registers {
 
 #[pymethods]
 impl Registers {
-    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<u128> {
         let values = self.values(py)?;
         register_value(&values, name)
             .ok_or_else(|| PyAttributeError::new_err(format!("register '{name}' is not available")))
@@ -632,7 +644,7 @@ impl Registers {
         self.set_value(py, name, value.extract()?)
     }
 
-    fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
+    fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<u128> {
         self.value(py, name)
     }
 
@@ -664,7 +676,7 @@ impl Registers {
     }
 
     /// `(name, value)` pairs, sorted by name.
-    fn items(&self, py: Python<'_>) -> PyResult<Vec<(String, u64)>> {
+    fn items(&self, py: Python<'_>) -> PyResult<Vec<(String, u128)>> {
         Ok(sorted_registers(&self.values(py)?))
     }
 
@@ -673,7 +685,7 @@ impl Registers {
     }
 
     /// The registers as a plain `dict`, sorted by name.
-    fn to_dict(&self, py: Python<'_>) -> PyResult<IndexMap<String, u64>> {
+    fn to_dict(&self, py: Python<'_>) -> PyResult<IndexMap<String, u128>> {
         Ok(register_map(&self.values(py)?))
     }
 
@@ -1016,17 +1028,17 @@ fn optional_enum<'py>(
         .transpose()
 }
 
-fn register_map(values: &HashMap<String, u64>) -> IndexMap<String, u64> {
+fn register_map<V: Copy>(values: &HashMap<String, V>) -> IndexMap<String, V> {
     sorted_registers(values).into_iter().collect()
 }
 
-fn register_value(values: &HashMap<String, u64>, name: &str) -> Option<u64> {
+fn register_value<V: Copy>(values: &HashMap<String, V>, name: &str) -> Option<V> {
     values
         .iter()
         .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(*value))
 }
 
-fn sorted_registers(values: &HashMap<String, u64>) -> Vec<(String, u64)> {
+fn sorted_registers<V: Copy>(values: &HashMap<String, V>) -> Vec<(String, V)> {
     let mut values: Vec<_> = values
         .iter()
         .map(|(name, value)| (name.clone(), *value))

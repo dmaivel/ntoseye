@@ -145,7 +145,7 @@ Earlier releases used `(TYPE)address->field` to compute a field address. Aggrega
 
 ## Frames and context
 
-- `r [register[=expression]]` (`registers`) - Display CPU registers or assign one register.
+- `r [register[=expression]]` (`registers`) - Display CPU registers or assign one register. A 128-bit register (`xmm0`, ARM64 `v0`) displays at full width; assign its 64-bit halves (`xmm0l`/`xmm0h`, `v0l`/`v0h`).
 - `kn|k|kb|kp|kv [count]` - Display a stack; `kp` adds PDB parameter locations and `kv` adds provenance.
 - `.frame [/r] [N]` (`frame`) - Select or display a zero-based stack frame; `/r` also displays recovered registers.
 - `.cxr [address]` - Select a CONTEXT record, or reset the selected context.

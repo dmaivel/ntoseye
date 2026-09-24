@@ -1428,18 +1428,32 @@ impl Server {
         // justifies, and so does a parked Windows thread, which has no live
         // file at all.
         let live_context = frame_index == 0 && session.parked_windows_thread().is_none();
-        let values = match live_context.then(|| session.read_registers()) {
-            Some(Ok(registers)) => session.register_map.to_hashmap(&registers),
-            _ => snapshot,
+        let live = live_context
+            .then(|| session.read_registers().ok())
+            .flatten();
+        let (values, wide): (_, HashMap<String, u128>) = match &live {
+            Some(registers) => (
+                session.register_map.to_hashmap(registers),
+                session
+                    .register_map
+                    .wide_values(registers)
+                    .into_iter()
+                    .collect(),
+            ),
+            None => (snapshot, HashMap::new()),
         };
         let mut variables = Vec::new();
         for name in session.register_map.names().iter() {
-            let Some(value) = values.get(name.as_str()) else {
+            let value = if let Some(value) = values.get(name.as_str()) {
+                format!("{value:#018x}")
+            } else if let Some(value) = wide.get(name.as_str()) {
+                format!("{value:#034x}")
+            } else {
                 continue;
             };
             variables.push(json!({
                 "name": name,
-                "value": format!("{value:#018x}"),
+                "value": value,
                 "variablesReference": 0,
                 "presentationHint": {"kind": "data", "attributes": ["rawString"]},
             }));

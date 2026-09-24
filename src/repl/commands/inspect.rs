@@ -40,6 +40,7 @@ repl_command! {
     names: ["r", "registers"],
     usage: "r [register[=expression]]",
     summary: "Display CPU registers or assign one register.",
+    details: "A 128-bit register (xmm0, ARM64 v0) displays at full width; assign its 64-bit halves (xmm0l/xmm0h, v0l/v0h).",
     run_state: Halted,
 }
 
@@ -430,6 +431,12 @@ impl ReplState<'_> {
                 };
                 match self.ctx.register_map.read_u64(name, &regs) {
                     Ok(value) => outln!("{name}={}", ui::addr(value)),
+                    Err(Error::RegisterTooWide(_)) => {
+                        match self.ctx.register_map.read_u128(name, &regs) {
+                            Ok(value) => outln!("{name}={value:032x}"),
+                            Err(e) => error!("{e}"),
+                        }
+                    }
                     Err(e) => error!("{e}"),
                 }
                 return Ok(());

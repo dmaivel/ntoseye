@@ -211,14 +211,24 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
             ])
         }),
         "r" | "registers" if argv.is_empty() => args.state.ctx.read_registers().map(|regs| {
-            let map = args.state.ctx.register_map.to_hashmap(&regs);
-            let mut entries: Vec<(String, u64)> = map.into_iter().collect();
-            entries.sort();
+            let register_map = &args.state.ctx.register_map;
+            let mut entries: Vec<(String, View)> = register_map
+                .to_hashmap(&regs)
+                .into_iter()
+                .map(|(name, value)| (name, View::Hex(value)))
+                .chain(
+                    register_map
+                        .wide_values(&regs)
+                        .into_iter()
+                        .map(|(name, value)| (name, View::Str(format!("{value:#034x}")))),
+                )
+                .collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
             View::List(
                 entries
                     .into_iter()
                     .map(|(name, value)| {
-                        View::Object(vec![("name", View::Str(name)), ("value", View::Hex(value))])
+                        View::Object(vec![("name", View::Str(name)), ("value", value)])
                     })
                     .collect(),
             )
