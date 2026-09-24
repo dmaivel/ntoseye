@@ -203,12 +203,12 @@ impl RegisterMap {
         Some(rest[..rest.find("</architecture>")?].trim())
     }
 
-    pub fn parse_target_xml(xml: &str) -> Self {
+    pub fn parse_target_xml(xml: &str) -> Result<Self> {
         let mut map = RegisterMap {
             step_size: 1,
             ..RegisterMap::default()
         };
-        let mut next_regnum: Option<usize> = None;
+        let mut next_regnum = 0usize;
         let mut registers = Vec::new();
 
         let xml = Self::strip_xml_comments(xml);
@@ -232,20 +232,36 @@ impl RegisterMap {
             let bitsize = Self::extract_attr(element, "bitsize");
             let explicit_regnum = Self::extract_attr(element, "regnum");
 
-            if let (Some(name), Some(bitsize)) = (name, bitsize) {
-                let size_bits: usize = bitsize.parse().unwrap_or(0);
+            let explicit_regnum = explicit_regnum
+                .map(|value| {
+                    value.parse::<usize>().map_err(|_| {
+                        Error::Rsp(format!("invalid register regnum '{value}' in target XML"))
+                    })
+                })
+                .transpose()?;
+            let size_bits = bitsize
+                .map(|value| {
+                    let size = value.parse::<usize>().map_err(|_| {
+                        Error::Rsp(format!("invalid register bitsize '{value}' in target XML"))
+                    })?;
+                    if size == 0 || size % 8 != 0 {
+                        return Err(Error::Rsp(format!(
+                            "invalid register bitsize '{value}' in target XML"
+                        )));
+                    }
+                    Ok(size)
+                })
+                .transpose()?;
+
+            if let Some(name) = name {
+                let size_bits = size_bits.ok_or_else(|| {
+                    Error::Rsp(format!("register '{name}' has no bitsize in target XML"))
+                })?;
                 let size_bytes = size_bits / 8;
-
-                let regnum: usize =
-                    if let Some(explicit) = explicit_regnum.and_then(|s| s.parse().ok()) {
-                        next_regnum = Some(explicit + 1);
-                        explicit
-                    } else {
-                        let num = next_regnum.unwrap_or(0);
-                        next_regnum = Some(num + 1);
-                        num
-                    };
-
+                let regnum = explicit_regnum.unwrap_or(next_regnum);
+                next_regnum = regnum.checked_add(1).ok_or_else(|| {
+                    Error::Rsp("register regnum overflows in target XML".to_string())
+                })?;
                 registers.push(RegisterInfo {
                     name: name.to_string(),
                     offset: 0,
@@ -260,15 +276,17 @@ impl RegisterMap {
         // The g packet packs registers in ascending regnum; the XML may list
         // them in any order (and skip numbers).
         registers.sort_by_key(|reg| reg.regnum);
-        let mut offset = 0;
+        let mut offset = 0usize;
         for mut reg in registers {
             reg.offset = offset;
-            offset += reg.size;
+            offset = offset
+                .checked_add(reg.size)
+                .ok_or_else(|| Error::Rsp("register offsets overflow in target XML".to_string()))?;
             map.by_name.insert(reg.name.clone(), reg.clone());
             map.ordered.push(reg);
         }
         map.add_vector_halves();
-        map
+        Ok(map)
     }
 
     fn strip_xml_comments(xml: &str) -> String {
@@ -313,7 +331,7 @@ mod tests {
             </target>
         "#;
 
-        let map = RegisterMap::parse_target_xml(xml);
+        let map = RegisterMap::parse_target_xml(xml).unwrap();
         let regs = map.to_hashmap(&[1u8; 16]);
 
         assert_eq!(
@@ -321,6 +339,45 @@ mod tests {
             0x0101_0101_0101_0101
         );
         assert_eq!(regs.get("rip"), Some(&0x0101_0101_0101_0101));
+    }
+
+    #[test]
+    fn malformed_bitsize_is_rejected() {
+        let xml = r#"<target><feature name="core">
+            <reg name="broken" bitsize="not-a-width"/>
+            <reg name="rax" bitsize="8"/>
+        </feature></target>"#;
+        assert!(matches!(
+            RegisterMap::parse_target_xml(xml),
+            Err(Error::Rsp(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_explicit_regnum_is_rejected() {
+        let xml = r#"<target><feature name="core">
+            <reg name="rax" bitsize="64" regnum="not-a-number"/>
+        </feature></target>"#;
+
+        assert!(matches!(
+            RegisterMap::parse_target_xml(xml),
+            Err(Error::Rsp(_))
+        ));
+    }
+
+    #[test]
+    fn target_register_offsets_reject_overflow() {
+        let bitsize = (usize::MAX / 8 * 8).to_string();
+        let mut xml = String::from("<target><feature name=\"core\">");
+        for index in 0..9 {
+            xml.push_str(&format!("<reg name=\"r{index}\" bitsize=\"{bitsize}\"/>"));
+        }
+        xml.push_str("</feature></target>");
+
+        assert!(matches!(
+            RegisterMap::parse_target_xml(&xml),
+            Err(Error::Rsp(_))
+        ));
     }
 
     #[test]
@@ -333,7 +390,7 @@ mod tests {
               <reg name="cs" bitsize="16"/>
             </feature></target>
         "#;
-        let map = RegisterMap::parse_target_xml(xml);
+        let map = RegisterMap::parse_target_xml(xml).unwrap();
         let mut regs = vec![0xa5; 22];
 
         map.write_u64("rax", &mut regs, 1).unwrap();
@@ -374,7 +431,7 @@ mod tests {
         let xml = r#"<target><feature name="core">
             <reg name="xmm0" bitsize="128"/>
         </feature></target>"#;
-        let map = RegisterMap::parse_target_xml(xml);
+        let map = RegisterMap::parse_target_xml(xml).unwrap();
         let value = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeffu128;
         assert_eq!(map.read_u128("xmm0", &value.to_le_bytes()).unwrap(), value);
     }
@@ -387,7 +444,7 @@ mod tests {
             <reg name="x0" bitsize="64"/>
             <reg name="v0" bitsize="128"/>
         </feature></target>"#;
-        let map = RegisterMap::parse_target_xml(xml);
+        let map = RegisterMap::parse_target_xml(xml).unwrap();
         let v0 = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeffu128;
         let mut regs = 7u64.to_le_bytes().to_vec();
         regs.extend_from_slice(&v0.to_le_bytes());

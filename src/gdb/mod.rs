@@ -329,7 +329,7 @@ impl GdbClient {
         let description = client.fetch_target_description()?;
         let arch = TargetArch::from_description(&description)?;
         client.register_map =
-            client.build_register_map(&RegisterMap::parse_target_xml(&description), arch)?;
+            client.build_register_map(&RegisterMap::parse_target_xml(&description)?, arch)?;
 
         Ok(client)
     }

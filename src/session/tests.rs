@@ -111,7 +111,8 @@ impl MockBackend {
                  <reg name="rip" bitsize="64"/>
                  <reg name="eflags" bitsize="32"/>
                </feature></target>"#,
-        );
+        )
+        .unwrap();
         self.regs = vec![0u8; 20];
         self
     }
