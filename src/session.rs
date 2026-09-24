@@ -1980,7 +1980,7 @@ impl Session {
             let stop = &event.stop;
             let code = stop
                 .exception_code
-                .or_else(|| stop.bugcheck.as_ref().map(|info| info.parameters[0] as u32))?;
+                .or_else(|| stop.bugcheck.as_ref().map(|info| info.code))?;
             return Some(ExceptionRecord {
                 code,
                 flags: 0,

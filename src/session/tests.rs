@@ -307,6 +307,24 @@ pub fn session_with_mock(backend: MockBackend) -> Session {
     session
 }
 
+#[test]
+fn bugcheck_exception_record_uses_bugcheck_code() {
+    let mut session = session_over_memory(0x1000, &[0; 0x100]);
+    let mut stop = breakpoint_event(0x1000);
+    stop.exception_code = None;
+    stop.bugcheck = Some(BugcheckInfo {
+        code: 0xdead_beef,
+        parameters: [0x1020, 2, 3, 4],
+        driver: None,
+    });
+    session.last_event = Some(LastEvent::new(stop));
+
+    assert_eq!(
+        session.current_exception_record().unwrap().code,
+        0xdead_beef
+    );
+}
+
 /// With nothing attached, the bytes `db` and `s` show are the halted
 /// context's, the same space an expression like `poi(addr)` reads.
 #[test]
