@@ -1297,17 +1297,6 @@ impl Target {
             .collect()
     }
 
-    /// Search memory and return structured rows instead of bare addresses.
-    pub fn search_details(
-        &self,
-        start: VirtAddr,
-        pattern: &[u8],
-        length: usize,
-    ) -> Result<Vec<MemorySearchMatch>> {
-        let matches = self.search(start, pattern, length)?;
-        self.describe_search_matches(start, &matches)
-    }
-
     /// Walk an intrusive `_LIST_ENTRY` from `head` (the list-head address) in
     /// the current address space, returning each record's base
     /// (`link_addr - link_offset`). Bounded (max 1000) and cycle-stopping,
