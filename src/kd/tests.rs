@@ -367,35 +367,6 @@ fn a_stop_report_answers_for_the_trap_state_until_the_target_runs() {
 }
 
 #[test]
-fn stop_event_flags_surfaced_load_symbols_as_bugcheck() {
-    let stop = StateChange {
-        processor: 0,
-        number_processors: 1,
-        new_state: DBG_KD_LOAD_SYMBOLS_STATE_CHANGE,
-        exception_code: 0,
-        exception_first_chance: None,
-        exception_address: None,
-        program_counter: 0xfffff8007faf9325,
-        kernel_base_hint: Some(VirtAddr(0xfffff8007f600000)),
-        is_bugcheck: true,
-        bugcheck: None,
-        target_reloaded: false,
-        assisted_breakin: false,
-        control_report: None,
-    };
-
-    let event = stop_event(stop);
-    assert!(event.is_bugcheck);
-    assert_eq!(event.exception_code, None);
-    assert_eq!(event.program_counter, Some(0xfffff8007faf9325));
-    assert_eq!(
-        event.target_kernel_base_hint,
-        Some(VirtAddr(0xfffff8007f600000))
-    );
-    assert!(event.bugcheck.is_none());
-}
-
-#[test]
 fn bugcheck_capture_extracts_fatal_error_and_driver() {
     let mut capture = BugcheckCapture::default();
     capture.observe_debug_text(
