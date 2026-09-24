@@ -1,3 +1,9 @@
+use std::time::Duration;
+
+use indicatif::{ProgressBar, ProgressStyle};
+use owo_colors::OwoColorize;
+use tabled::builder::Builder;
+
 use crate::cpu_state;
 use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::error::{Error, Result};
@@ -14,6 +20,7 @@ use crate::ui;
 
 const IDT_VECTOR_COUNT: u16 = 256;
 const MSR_SWITCH: &str = "/p";
+const MAX_PROCESSOR_SELECTION: usize = 256;
 
 repl_command! {
     cmd_rdmsr;
@@ -85,6 +92,23 @@ repl_command! {
     usage: "!cpuinfo",
     summary: "Display vendor, family, model, stepping, speed, and feature bits.",
     details: "Shows processor number, vendor, family, model and stepping, speed, and feature bits when available; triage-dump metadata fills unavailable fields.",
+}
+
+repl_command! {
+    cmd_vcpus();
+    names: ["~", "vcpus"],
+    usage: "~",
+    summary: "List vCPU contexts and their RIP values.",
+    run_state: Halted,
+}
+
+repl_command! {
+    cmd_vcpu;
+    names: ["vcpu"],
+    usage: "vcpu <id>",
+    summary: "Switch to a different vCPU context.",
+    completion: Vcpu,
+    run_state: Halted,
 }
 
 fn current_processor(state: &ReplState<'_>) -> u16 {
@@ -706,6 +730,225 @@ impl ReplState<'_> {
             Ok(detail) => print_cpuinfo(&detail),
             Err(error) => error!("{error}"),
         }
+        Ok(())
+    }
+
+    pub fn cmd_tilde(&mut self, line: &str) -> Result<Flow> {
+        let body = line.trim().strip_prefix('~').unwrap_or_default();
+        if body.is_empty() {
+            self.cmd_vcpus()?;
+            return Ok(Flow::Continue);
+        }
+        let (selector, suffix) = if let Some(rest) = body.strip_prefix('*') {
+            (None, rest)
+        } else {
+            let digits = body.chars().take_while(|ch| ch.is_ascii_digit()).count();
+            if digits == 0 {
+                error!(
+                    "invalid processor selector '{}'; expected ~, ~N[s|k|r], or ~*k",
+                    line
+                );
+                return Ok(Flow::Continue);
+            }
+            let selector =
+                match Expr::eval_with_radix(&body[..digits], &self.ctx.target, self.radix) {
+                    Ok(value) => Some(value.0),
+                    Err(_) => {
+                        error!("processor {} out of range", &body[..digits]);
+                        return Ok(Flow::Continue);
+                    }
+                };
+            (selector, &body[digits..])
+        };
+        let mut actions = suffix.chars();
+        let action = actions.next().unwrap_or('s');
+        if !matches!(action, 's' | 'k' | 'r') {
+            error!("invalid processor action '{}'; expected s, k, or r", action);
+            return Ok(Flow::Continue);
+        }
+        // WinDbg accepts a whole command after the selector (`~*kb`, `~0kv`).
+        // Only the three single-letter actions are implemented, so anything
+        // trailing must be reported: silently running `~*k` for a pasted
+        // `~*kb` answers a question the user did not ask.
+        let trailing = actions.as_str();
+        if !trailing.is_empty() {
+            error!(
+                "unsupported processor command '{}{}'; expected ~, ~N[s|k|r], or ~*k",
+                action, trailing
+            );
+            return Ok(Flow::Continue);
+        }
+        let ids = match self.ctx.backend.thread_list() {
+            Ok(ids) => ids,
+            Err(error) => {
+                error!("failed to list processors: {}", error);
+                return Ok(Flow::Continue);
+            }
+        };
+        let resolve = |number: u64| {
+            ids.iter()
+                .find(|id| processor_index_from_backend_thread_id(id) == u16::try_from(number).ok())
+                .cloned()
+                .or_else(|| {
+                    ids.iter()
+                        .find(|id| {
+                            id.as_str()
+                                .eq_ignore_ascii_case(&format!("p1.{:x}", number.saturating_add(1)))
+                        })
+                        .cloned()
+                })
+                .or_else(|| {
+                    usize::try_from(number)
+                        .ok()
+                        .and_then(|index| ids.get(index).cloned())
+                })
+        };
+        let selected = if let Some(number) = selector {
+            if usize::try_from(number).map_or(true, |number| number >= ids.len()) {
+                error!("processor {} out of range", number);
+                return Ok(Flow::Continue);
+            }
+            resolve(number).into_iter().collect::<Vec<_>>()
+        } else {
+            ids.iter()
+                .take(MAX_PROCESSOR_SELECTION)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if selected.is_empty() {
+            error!("processor not found");
+            return Ok(Flow::Continue);
+        }
+        let original = self.ctx.current_thread.clone();
+        if action == 's' {
+            let id = selected[0].clone();
+            if let Err(error) = self.ctx.set_current_thread(&id) {
+                error!("failed to switch processor: {}", error);
+            } else {
+                self.clear_selected_frame();
+                refresh_windows_thread_context_for_backend_thread(&mut self.ctx.target, &id);
+                self.caches.refresh_symbol_context(&self.ctx.target);
+                outln!("switched to processor {}\n", id);
+            }
+            return Ok(Flow::Continue);
+        }
+
+        for id in selected {
+            if let Err(error) = self.ctx.set_current_thread(&id) {
+                error!("failed to switch processor {}: {}", id, error);
+                continue;
+            }
+            self.clear_selected_frame();
+            refresh_windows_thread_context_for_backend_thread(&mut self.ctx.target, &id);
+            self.caches.refresh_symbol_context(&self.ctx.target);
+            if let Err(error) = self.dispatch_line(if action == 'k' { "k" } else { "r" }) {
+                error!("processor {} command failed: {}", id, error);
+            }
+        }
+        if let Err(error) = self.ctx.set_current_thread(&original) {
+            error!("failed to restore processor {}: {}", original, error);
+        } else {
+            self.clear_selected_frame();
+            refresh_windows_thread_context_for_backend_thread(&mut self.ctx.target, &original);
+            self.caches.refresh_symbol_context(&self.ctx.target);
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn cmd_vcpus(&mut self) -> Result<()> {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.black.bright} {msg}")
+                .unwrap(),
+        );
+
+        pb.set_message(format!("{}", "Waiting on GDB...".bright_black()));
+        pb.enable_steady_tick(Duration::from_millis(100));
+
+        let vcpus = match self.ctx.vcpus() {
+            Ok(vcpus) => vcpus,
+            Err(e) => {
+                pb.finish_and_clear();
+                error!("{}", e);
+                return Ok(());
+            }
+        };
+        self.caches.refresh_vcpus(self.ctx.backend.as_mut());
+
+        pb.finish_and_clear();
+
+        let mut builder = Builder::default();
+        builder.push_record(vec!["vCPU", "RIP", "Context", "Symbol"]);
+        for vcpu in vcpus {
+            let (rip_cell, symbol_cell) = match vcpu.rip {
+                Some(rip) => (
+                    ui::addr(rip),
+                    vcpu.symbol.unwrap_or_else(|| format!("{rip:#x}")),
+                ),
+                None => (ui::muted("unavailable"), vcpu.error.unwrap_or_default()),
+            };
+            builder.push_record(vec![
+                vcpu.id.to_string(),
+                rip_cell.to_string(),
+                vcpu.context.to_string(),
+                symbol_cell,
+            ]);
+        }
+
+        print_padded_table(builder);
+
+        Ok(())
+    }
+
+    fn cmd_vcpu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let requested = require_arg!(invocation, 0, "vcpu");
+
+        let threads = match self.ctx.backend.thread_list() {
+            Ok(t) => t,
+            Err(e) => {
+                error!("failed to get vCPU list: {:?}", e);
+                return Ok(());
+            }
+        };
+
+        let thread_id = threads
+            .iter()
+            .find(|thread| thread.as_str() == requested)
+            .cloned()
+            .or_else(|| {
+                Expr::eval_with_radix(requested, &self.ctx.target, self.radix)
+                    .ok()
+                    .and_then(|value| u16::try_from(value.0).ok())
+                    .and_then(|number| {
+                        threads
+                            .iter()
+                            .find(|thread| {
+                                processor_index_from_backend_thread_id(thread) == Some(number)
+                            })
+                            .cloned()
+                            .or_else(|| threads.get(number as usize).cloned())
+                    })
+            });
+        let Some(thread_id) = thread_id else {
+            error!("vCPU '{}' not found (use 'vcpus' to list vCPUs)", requested);
+            return Ok(());
+        };
+
+        if let Err(e) = self.ctx.set_current_thread(&thread_id) {
+            error!("failed to switch vCPU: {:?}", e);
+            return Ok(());
+        }
+
+        self.clear_selected_frame();
+
+        refresh_windows_thread_context_for_backend_thread(
+            &mut self.ctx.target,
+            &self.ctx.current_thread,
+        );
+        self.caches.refresh_symbol_context(&self.ctx.target);
+        outln!("switched to vCPU {}\n", self.ctx.current_thread);
+
         Ok(())
     }
 }

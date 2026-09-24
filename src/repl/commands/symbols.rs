@@ -1,12 +1,17 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use tabled::builder::Builder;
+
+use owo_colors::OwoColorize;
+
 use crate::error::Result;
 use crate::expr::{Expr, ExprValue};
+use crate::guest::ModuleInfo;
 use crate::layout::{FieldInfo, nested_layout_name};
 use crate::symbols::{
-    ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, parse_source_paths,
-    parse_symbol_sources,
+    ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, glob_matches,
+    parse_source_paths, parse_symbol_sources,
 };
 use crate::target::UserVar;
 use crate::types::VirtAddr;
@@ -145,6 +150,15 @@ repl_command! {
     summary: "Download a loaded module's PE file into the symbol cache and print its path.",
     details: "The file is looked up by the TimeDateStamp and SizeOfImage in the module's mapped PE header, the symbol-server key, so it is the exact build that is running. A disassembler database made from it rebases onto the live module.",
     completion: Symbol,
+}
+
+repl_command! {
+    cmd_lm;
+    names: ["lm"],
+    usage: "lm [m <pattern>] [v] [u|k] [t]",
+    summary: "List loaded modules.",
+    details: "`m` applies a module-name glob, `v m` prints verbose symbol information, `u` selects user modules, `k` selects kernel modules, and `t` adds timestamps.",
+    completion: [None, Symbol, None, None],
 }
 
 repl_command! {
@@ -760,6 +774,203 @@ impl ReplState<'_> {
             }
             Err(err) => error!("symbol reload failed: {}", err),
         }
+    }
+
+    fn cmd_lm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let mut pattern = None;
+        let mut verbose = false;
+        let mut user = false;
+        let mut kernel = false;
+        let mut timestamp = false;
+        let mut glob_filter = false;
+        let mut index = 0;
+        while index < invocation.argv.len() {
+            let arg = invocation.arg(index).unwrap_or_default();
+            let lower = arg.to_ascii_lowercase();
+            match lower.as_str() {
+                "v" => verbose = true,
+                "u" => user = true,
+                "k" => kernel = true,
+                "t" => timestamp = true,
+                "m" => {
+                    glob_filter = true;
+                    index += 1;
+                    pattern = invocation.arg(index);
+                }
+                _ if pattern.is_none() => pattern = Some(arg),
+                _ => {}
+            }
+            index += 1;
+        }
+        let dtb = if kernel {
+            self.ctx.target.kernel_dtb()
+        } else {
+            self.ctx
+                .target
+                .attached_process()
+                .map(|process| process.dtb)
+                .unwrap_or_else(|| self.ctx.target.kernel_dtb())
+        };
+        let modules = if kernel {
+            self.ctx.target.kernel_modules_with_versions()
+        } else if user {
+            if self.ctx.target.attached_process().is_none() {
+                Ok(Vec::new())
+            } else {
+                self.ctx.target.modules_with_versions()
+            }
+        } else {
+            self.ctx.target.modules_with_versions()
+        };
+        match modules {
+            Ok(modules) => {
+                let matches = |module: &ModuleInfo| {
+                    pattern.is_none_or(|pattern| {
+                        if glob_filter {
+                            glob_matches(pattern, &module.short_name, true)
+                                || glob_matches(pattern, &module.name, true)
+                                || module
+                                    .name
+                                    .rsplit(['\\', '/'])
+                                    .next()
+                                    .is_some_and(|name| glob_matches(pattern, name, true))
+                        } else {
+                            module
+                                .short_name
+                                .to_ascii_lowercase()
+                                .contains(&pattern.to_ascii_lowercase())
+                                || module
+                                    .name
+                                    .to_ascii_lowercase()
+                                    .contains(&pattern.to_ascii_lowercase())
+                        }
+                    })
+                };
+                if verbose {
+                    let mut shown = 0;
+                    for module in modules.iter().filter(|module| matches(module)) {
+                        shown += 1;
+                        let status = self
+                            .ctx
+                            .target
+                            .symbols
+                            .module_symbol_status(dtb, module.base_address);
+                        outln!("{} ({})", module.name, module.short_name);
+                        outln!(
+                            "  range   : {} - {}",
+                            ui::addr(module.base_address.0),
+                            ui::addr(module.end_address().0)
+                        );
+                        outln!(
+                            "  symbols : {}",
+                            status
+                                .as_ref()
+                                .map(|status| status.label().to_string())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        );
+                        outln!(
+                            "  source  : {}",
+                            self.ctx
+                                .target
+                                .symbols
+                                .module_symbol_source(dtb, module.base_address)
+                                .map(|source| source.label().to_string())
+                                .unwrap_or_else(|| "-".to_string())
+                        );
+                        match self
+                            .ctx
+                            .target
+                            .symbols
+                            .module_pdb_identity(dtb, module.base_address)
+                        {
+                            Some(identity) => {
+                                outln!("  pdb guid: {:032X}", identity.guid);
+                                outln!("  pdb age : {}", identity.age);
+                            }
+                            None => outln!("  pdb     : -"),
+                        }
+                        if let Some(ModuleSymbolStatus::Failed(reason)) = status {
+                            outln!("  error   : {}", reason);
+                        }
+                        if timestamp {
+                            outln!(
+                                "  timestamp: {}",
+                                module
+                                    .time_date_stamp
+                                    .map(|stamp| format!("{stamp:#x}"))
+                                    .unwrap_or_else(|| "-".to_string())
+                            );
+                        }
+                        outln!();
+                    }
+                    if shown == 0 {
+                        outln!("{}\n", "no matching modules".bright_black());
+                    }
+                    return Ok(());
+                }
+                let mut builder = Builder::default();
+                let mut header = vec![
+                    "Start".to_string(),
+                    "End".to_string(),
+                    "Module".to_string(),
+                    "Version".to_string(),
+                    "Symbols".to_string(),
+                    "Source".to_string(),
+                ];
+                if timestamp {
+                    header.push("Timestamp".to_string());
+                }
+                header.push("Image".to_string());
+                builder.push_record(header);
+
+                let mut count = 0;
+                for module in modules {
+                    if !matches(&module) {
+                        continue;
+                    }
+                    count += 1;
+                    let mut row = vec![
+                        ui::addr(module.base_address.0).to_string(),
+                        ui::addr(module.end_address().0).to_string(),
+                        module.short_name.to_string(),
+                        module.file_version.as_deref().unwrap_or("-").to_string(),
+                        self.ctx
+                            .target
+                            .symbols
+                            .module_symbol_status(dtb, module.base_address)
+                            .map(|status| status.label().to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        self.ctx
+                            .target
+                            .symbols
+                            .module_symbol_source(dtb, module.base_address)
+                            .map(|source| source.label().to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                    ];
+                    if timestamp {
+                        row.push(
+                            module
+                                .time_date_stamp
+                                .map(|stamp| format!("{stamp:#x}"))
+                                .unwrap_or_else(|| "-".to_string()),
+                        );
+                    }
+                    row.push(module.name);
+                    builder.push_record(row);
+                }
+
+                if count == 0 {
+                    outln!("{}\n", "no matching modules".bright_black());
+                } else {
+                    print_padded_table(builder);
+                }
+            }
+            Err(e) => {
+                error!("failed to list modules: {}", e);
+            }
+        }
+
+        Ok(())
     }
 
     fn cmd_lmv(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

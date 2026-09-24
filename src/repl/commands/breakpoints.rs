@@ -16,7 +16,7 @@ use crate::gdb::breakpoints::{
 use crate::target::decimal_pid_literal;
 use crate::ui;
 
-use crate::repl::commands::process::ThreadResolution;
+use crate::repl::commands::thread::ThreadResolution;
 use crate::repl::*;
 use crate::types::VirtAddr;
 
