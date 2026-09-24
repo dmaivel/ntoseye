@@ -1403,8 +1403,35 @@ impl Target {
         Ok(true)
     }
 
+    /// Follow a register-derived root (a halted thread's CR3/TTBR0, or a
+    /// context record's) for inspection. A root that cannot reach the kernel
+    /// is a KVA-shadow user root; it is replaced by its process's full
+    /// `DirectoryTableBase`, so kernel reads keep working at user-mode stops.
     pub fn set_context_dtb_override(&mut self, dtb: Dtb) {
-        self.context_dtb_override = Some(self.normalize_dtb(dtb));
+        let dtb = self.normalize_dtb(dtb);
+        self.context_dtb_override = Some(self.full_root(dtb));
+    }
+
+    /// `dtb`, or the full root of the process whose KVA-shadow user root it
+    /// is. The probe is a read, not a walk, so a backend that serves kernel
+    /// reads itself (KD) keeps the root it was given.
+    fn full_root(&self, dtb: Dtb) -> Dtb {
+        let Some(guest) = &self.guest else {
+            return dtb;
+        };
+        let Ok(process_list) = guest.ntoskrnl.symbol("PsActiveProcessHead") else {
+            return dtb;
+        };
+        if self
+            .address_space(dtb)
+            .read::<u64>(process_list.address())
+            .is_ok()
+        {
+            return dtb;
+        }
+        guest
+            .process_for_user_root(dtb, self.arch().dtb_page_mask())
+            .map_or(dtb, |process| process.dtb)
     }
 
     pub fn clear_context_dtb_override(&mut self) {
@@ -1455,18 +1482,19 @@ impl Target {
         select_thread_process_dtb(thread, self.process.as_ref(), &processes, self.kernel_dtb())
     }
 
-    /// The process whose page-table root is `cr3_masked`. The selected
-    /// Windows thread's owner is checked first: at a stop that is almost
-    /// always the answer and costs one EPROCESS read, where the fallback walks
-    /// the process list.
+    /// The process whose page-table root is `cr3_masked`, including a
+    /// KVA-shadow user root. The selected Windows thread's owner is checked
+    /// first: at a stop that is almost always the answer and costs one
+    /// EPROCESS read, where the fallback walks the process list.
     pub fn process_for_cr3(&self, cr3_masked: u64) -> Option<ProcessInfo> {
         let guest = self.guest.as_ref()?;
+        let mask = self.arch().dtb_page_mask();
         if let Some(eprocess) = self
             .windows_thread_selection
             .as_ref()
             .and_then(|thread| thread.eprocess)
             && let Ok(process) = guest.process_at(eprocess)
-            && (process.dtb & self.arch().dtb_page_mask()) == cr3_masked
+            && (process.dtb & mask) == cr3_masked
         {
             return Some(process);
         }
@@ -1474,7 +1502,8 @@ impl Target {
             .enumerate_processes()
             .ok()?
             .into_iter()
-            .find(|process| (process.dtb & self.arch().dtb_page_mask()) == cr3_masked)
+            .find(|process| (process.dtb & mask) == cr3_masked)
+            .or_else(|| guest.process_for_user_root(cr3_masked, mask))
     }
 
     pub fn current_thread_pseudo_register(&self, name: &str) -> Option<u64> {

@@ -2282,6 +2282,28 @@ impl Guest {
         })
     }
 
+    /// The process whose KVA-shadow user root is `user_root`
+    /// (`_KPROCESS.UserDirectoryTableBase`), compared under `mask`. `None`
+    /// when no process owns it or the kernel has no shadow roots.
+    pub fn process_for_user_root(&self, user_root: Dtb, mask: u64) -> Option<ProcessInfo> {
+        let types = self.ntoskrnl.types();
+        let user_root_offset = types.layout("_EPROCESS").ok()?.field_offset("Pcb").ok()?
+            + types
+                .layout("_KPROCESS")
+                .ok()?
+                .field_offset("UserDirectoryTableBase")
+                .ok()?;
+        let memory = self.ntoskrnl.memory();
+        self.enumerate_processes()
+            .ok()?
+            .into_iter()
+            .find(|process| {
+                memory
+                    .read::<u64>(process.eprocess_va + user_root_offset)
+                    .is_ok_and(|root| root & mask == user_root)
+            })
+    }
+
     /// The 32-bit PEB behind `_EPROCESS.WoW64Process`: since Windows 10 1511
     /// the pointer is to an `_EWOW64PROCESS` holding it, before that it was
     /// the PEB itself. Unreadable is reported as native rather than failing

@@ -1501,12 +1501,17 @@ fn resume_and_halt(backend: &Arc<Mutex<KdBackend>>) {
     backend.link.halt();
 }
 
-#[test]
-fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
+const SMSS_EPROCESS: u64 = 0xffff_e000_0002_0000;
+
+/// A halted guest whose process list is System (root `0x1ad000`) and
+/// smss.exe (`SMSS_EPROCESS`, root `0x2be000`, KVA-shadow user root
+/// `0x2bf000` stored with PCID bits).
+fn two_process_guest() -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
     const PID: u32 = 0x440;
     const LINKS: u32 = 0x448;
     const NAME: u32 = 0x5a8;
     const DTB: u32 = 0x28;
+    const USER_DTB: u32 = 0x388;
     let eprocess = layout(
         "_EPROCESS",
         0x600,
@@ -1523,39 +1528,47 @@ fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
     let kprocess = layout(
         "_KPROCESS",
         0x438,
-        &[("DirectoryTableBase", primitive(DTB, 8))],
+        &[
+            ("DirectoryTableBase", primitive(DTB, 8)),
+            ("UserDirectoryTableBase", primitive(USER_DTB, 8)),
+        ],
     );
 
     let head = FAKE_KERNEL_BASE + 0x1008;
     let system = 0xffff_e000_0001_0000u64;
-    let smss = 0xffff_e000_0002_0000u64;
     let mut nt = vec![0u8; 0x2000];
     put_u64(&mut nt, 0x1000, system);
     put_u64(&mut nt, 0x1008, system + LINKS as u64);
-    let process = |pid: u64, dtb: u64, name: &[u8], next: u64| {
+    let process = |pid: u64, dtb: u64, user_dtb: u64, name: &[u8], next: u64| {
         let mut bytes = vec![0u8; 0x600];
         put_u64(&mut bytes, PID as usize, pid);
         put_u64(&mut bytes, DTB as usize, dtb);
+        put_u64(&mut bytes, USER_DTB as usize, user_dtb);
         put_u64(&mut bytes, LINKS as usize, next + LINKS as u64);
         bytes[NAME as usize..NAME as usize + name.len()].copy_from_slice(name);
         bytes
     };
     let regions = vec![
         (FAKE_KERNEL_BASE, nt),
-        (system, process(4, 0x1ad000, b"System", smss)),
+        (system, process(4, 0x1ad000, 0, b"System", SMSS_EPROCESS)),
         (
-            smss,
-            process(0x1d8, 0x2be000, b"smss.exe", head - LINKS as u64),
+            SMSS_EPROCESS,
+            process(0x1d8, 0x2be000, 0x2bf002, b"smss.exe", head - LINKS as u64),
         ),
     ];
-    let (guest, backend, worker) = synthetic_guest(
+    synthetic_guest(
         regions,
         vec![eprocess, kprocess],
         &[
             ("PsInitialSystemProcess", 0x1000),
             ("PsActiveProcessHead", 0x1008),
         ],
-    );
+    )
+}
+
+#[test]
+fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
+    let (guest, backend, worker) = two_process_guest();
 
     let first = guest.enumerate_processes().unwrap();
     let names: Vec<_> = first.iter().map(|p| (p.name.as_str(), p.pid)).collect();
@@ -1564,7 +1577,7 @@ fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
 
     let second = guest.enumerate_processes().unwrap();
     assert_eq!(second.len(), 2);
-    let one = guest.process_at(VirtAddr(smss)).unwrap();
+    let one = guest.process_at(VirtAddr(SMSS_EPROCESS)).unwrap();
     assert_eq!(
         (one.name.as_str(), one.pid, one.dtb),
         ("smss.exe", 0x1d8, 0x2be000)
@@ -1579,6 +1592,23 @@ fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
     // single-process lookup is served from the halt's lines, and the
     // resume drops them: three fills per halt.
     assert_eq!(worker.join().unwrap(), 3 + 3);
+}
+
+/// A KVA-shadow user root, what CR3 holds at a user-mode stop, names the
+/// process whose `UserDirectoryTableBase` it is.
+#[test]
+fn kva_shadow_user_root_resolves_to_its_process() {
+    let (guest, backend, worker) = two_process_guest();
+    let mask = Arch::Amd64.dtb_page_mask();
+
+    let owner = guest.process_for_user_root(0x2bf000, mask).unwrap();
+
+    assert_eq!((owner.pid, owner.dtb), (0x1d8, 0x2be000));
+    assert!(guest.process_for_user_root(0x3c0000, mask).is_none());
+
+    drop(guest);
+    drop(backend);
+    worker.join().unwrap();
 }
 
 #[test]
