@@ -1521,6 +1521,7 @@ impl Target {
     }
 
     pub fn current_windows_thread_for_processor(&self, processor: u16) -> Result<ThreadInfo> {
+        let prcb = kprcb_for_processor(self, processor)?;
         let guest = self.guest()?;
         let memory = guest.ntoskrnl.memory();
         let prcb_current_thread_offset = guest
@@ -1534,15 +1535,6 @@ impl Target {
             .layout("_ETHREAD")?
             .field_offset("Tcb")
             .unwrap_or(0);
-        let processor_block = guest.ntoskrnl.symbol("KiProcessorBlock")?.address();
-        let prcb: VirtAddr = memory.read(processor_block + (processor as u64) * 8)?;
-        if prcb.is_zero() {
-            return Err(Error::DebugInfo(format!(
-                "KiProcessorBlock[{}] is null",
-                processor
-            )));
-        }
-
         let kthread: VirtAddr = memory.read(prcb + prcb_current_thread_offset)?;
         if kthread.is_zero() {
             return Err(Error::DebugInfo(format!(
@@ -1558,6 +1550,7 @@ impl Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::session_over_memory;
 
     #[test]
     fn idle_detection_uses_pid_zero_or_idle_name() {
@@ -1577,5 +1570,19 @@ mod tests {
         assert!(thread_is_idle(&summary));
         summary.pid = optional(Some(4));
         assert!(!thread_is_idle(&summary));
+    }
+
+    #[test]
+    fn current_windows_thread_rejects_out_of_range_processor() {
+        let session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let error = session
+            .target
+            .current_windows_thread_for_processor(MAX_PROCESSORS)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("processor index {MAX_PROCESSORS}"))
+        );
     }
 }
