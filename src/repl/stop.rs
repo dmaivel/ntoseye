@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
+use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::{BugcheckInfo, DebugBackend, StopEvent};
 use crate::error::Result;
-use crate::gdb::{BreakpointManager, RegisterMap};
+use crate::gdb::RegisterMap;
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::target::{Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;

@@ -8,13 +8,8 @@ use crate::dbg_backend::{DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, 
 use crate::error::{Error, Result};
 use crate::types::Arch;
 
-pub mod breakpoints;
 pub mod registers;
 
-pub use breakpoints::{
-    BreakpointConfig, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager,
-    BreakpointSpec,
-};
 pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases};
 
 /// Bytes of a packet shown per trace line.

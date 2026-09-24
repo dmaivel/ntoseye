@@ -5,10 +5,9 @@ use std::result;
 
 use serde_json::{Value, json};
 
+use crate::breakpoints::{Breakpoint, BreakpointConfig};
 use crate::dbg_backend::WatchpointAccess;
 use crate::error::Result;
-use crate::gdb::BreakpointConfig;
-use crate::gdb::breakpoints::Breakpoint;
 use crate::session::Session;
 use crate::types::VirtAddr;
 

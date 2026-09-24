@@ -2,11 +2,11 @@ use std::sync::atomic::Ordering;
 
 use owo_colors::OwoColorize;
 
+use crate::breakpoints::Breakpoint;
 use crate::dbg_backend::ContinueDisposition;
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
-use crate::gdb::breakpoints::Breakpoint;
 use crate::session::{
     CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StepMode,
     StopResolution,

@@ -13,14 +13,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::TargetSpec;
+use crate::breakpoints::{Breakpoint, BreakpointManager};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugOutputPage, LastEvent, StopEvent,
 };
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
-use crate::gdb::breakpoints::Breakpoint;
-use crate::gdb::{BreakpointManager, RegisterMap};
+use crate::gdb::RegisterMap;
 use crate::guest::{ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::lifecycle::InstanceGuard;
 use crate::target::{ReloadReport, Target, TargetSelection, ThreadInfo};

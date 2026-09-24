@@ -5,9 +5,9 @@
 use super::View;
 use super::process::{process, thread};
 use super::symbols::source_location;
+use crate::breakpoints::Breakpoint;
 use crate::disasm::DisasmRow;
 use crate::exception_policy::{ExceptionPolicy, ExceptionPolicyFinalAction, exception_alias};
-use crate::gdb::breakpoints::Breakpoint;
 use crate::session::{CallTrace, CallTraceEnd, CallTraceFrame, RunStatus, VcpuInfo};
 use crate::unwind::StackFrame;
 

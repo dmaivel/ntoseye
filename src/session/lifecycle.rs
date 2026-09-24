@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use single_instance::SingleInstance;
 
+use crate::breakpoints::BreakpointManager;
 use crate::bugchecks::plausible_bugcheck_code;
 use crate::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
 use crate::dmp::DmpBackend;
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
-use crate::gdb::{BreakpointManager, GdbClient};
+use crate::gdb::GdbClient;
 use crate::kd::{KdBackend, KdMemorySource};
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;

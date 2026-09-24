@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
+use crate::breakpoints::{Breakpoint, BreakpointConfig, BreakpointScope, ThreadScope};
 use crate::dbg_backend::{BugcheckInfo, DebugCapability, WatchpointAccess};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
-use crate::gdb::breakpoints::{Breakpoint, BreakpointConfig, BreakpointScope, ThreadScope};
 use crate::guest::ModuleSymbolLoadReport;
 use crate::session::Session;
 use crate::types::{Arch, VirtAddr};

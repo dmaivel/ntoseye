@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 use iced_x86::{Code, Decoder, DecoderOptions, Mnemonic};
 
 use crate::backend::MemoryOps;
+use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::{ContinueDisposition, DebugBackend, clear_trap_flag};
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
-use crate::gdb::{BreakpointManager, RegisterMap};
+use crate::gdb::RegisterMap;
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
     STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,

@@ -1,8 +1,9 @@
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
+use crate::breakpoints::BreakpointManager;
 use crate::error::Error;
-use crate::gdb::{BreakpointManager, RegisterMap};
+use crate::gdb::RegisterMap;
 use crate::symbols::SourceLocation;
 use crate::target::Target;
 use crate::types::{Arch, VirtAddr};

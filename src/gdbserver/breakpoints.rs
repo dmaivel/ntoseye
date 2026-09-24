@@ -7,9 +7,9 @@ use gdbstub::target::ext::breakpoints::{
 };
 use gdbstub::target::{TargetError, TargetResult};
 
+use crate::breakpoints::BreakpointConfig;
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::error::Error;
-use crate::gdb::BreakpointConfig;
 use crate::types::VirtAddr;
 
 use super::{GdbTarget, Planted, PlantedKind};

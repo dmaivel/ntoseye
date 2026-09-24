@@ -4,12 +4,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, StopEvent, clear_trap_flag,
 };
 use crate::error::Result;
 use crate::exception_policy::ExceptionPolicyAction;
-use crate::gdb::BreakpointManager;
 use crate::guest::ProcessInfo;
 use crate::kd::trace_enabled;
 use crate::session::context::{

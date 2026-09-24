@@ -1,13 +1,15 @@
 //! Attributing a stop to a breakpoint or watchpoint, and absorbing hits
 //! that thread, processor, pass-count, or condition filters reject.
 
+use crate::breakpoints::{
+    Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, ThreadScope,
+};
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
     processor_index_from_backend_thread_id,
 };
 use crate::error::Result;
-use crate::gdb::breakpoints::{Breakpoint, ThreadScope};
-use crate::gdb::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, RegisterMap};
+use crate::gdb::RegisterMap;
 use crate::kd::hwbp;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,

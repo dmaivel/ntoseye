@@ -7,12 +7,12 @@ use tabled::settings::Padding;
 
 use owo_colors::OwoColorize;
 
+use crate::breakpoints::{
+    BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec, ThreadScope,
+};
 use crate::dbg_backend::HwBreakpointAccess;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
-use crate::gdb::breakpoints::{
-    BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec, ThreadScope,
-};
 use crate::target::decimal_pid_literal;
 use crate::ui;
 

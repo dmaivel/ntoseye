@@ -1,10 +1,10 @@
 //! Guest reboot detection, and the target rebuild and module-list
 //! rediscovery that follow it.
 
+use crate::breakpoints::BreakpointManager;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::StopEvent;
 use crate::error::Result;
-use crate::gdb::BreakpointManager;
 use crate::kd::{kd_files, trace_enabled};
 use crate::session::{STATUS_BREAKPOINT, Session, TargetReloadOutcome};
 use crate::target::{ReloadReport, Target};

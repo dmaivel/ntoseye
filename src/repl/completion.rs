@@ -3,8 +3,8 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 
+use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::DebugBackend;
-use crate::gdb::BreakpointManager;
 use crate::symbols::{SymbolIndex, SymbolStore};
 use crate::target::object::DriverObjectInfo;
 use crate::target::{Target, ThreadInfo};
