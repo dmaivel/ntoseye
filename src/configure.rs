@@ -655,6 +655,17 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
+/// A failed command's stderr, or its stdout when stderr is empty.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn command_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        stderr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,7 +14,7 @@ use crate::{
 use super::{
     ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
     ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
-    backup_file, kdnet_instructions, shell_quote,
+    backup_file, command_detail, kdnet_instructions, sanitize_filename, shell_quote,
 };
 
 const QEMU_NS: &str = "http://libvirt.org/schemas/domain/qemu/1.0";
@@ -186,15 +186,6 @@ fn virsh<const N: usize>(args: [&str; N]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn command_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        stderr
-    }
-}
-
 fn write_define_xml(domain: &str, xml: &str) -> Result<PathBuf> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -206,18 +197,6 @@ fn write_define_xml(domain: &str, xml: &str) -> Result<PathBuf> {
     ));
     fs::write(&path, xml)?;
     Ok(path)
-}
-
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn libvirt_instructions(xml: &str, request: ConfigureRequest, domain: &str) -> Instructions {

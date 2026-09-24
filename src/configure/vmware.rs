@@ -3,7 +3,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Command,
 };
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
 use super::{
     ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
     ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
-    atomic_replace, backup_file, kdnet_instructions,
+    atomic_replace, backup_file, command_detail, kdnet_instructions,
 };
 
 const BACKENDS: &[BackendSelection] = &[
@@ -282,15 +282,6 @@ fn vmrun_result(args: &[&str]) -> Result<String> {
         ),
         VmrunError::Failed(reason) => Error::DebugInfo(format!("vmrun failed: {reason}")),
     })
-}
-
-fn command_detail(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        stderr
-    }
 }
 
 fn vmx_paths(output: &str) -> Vec<String> {

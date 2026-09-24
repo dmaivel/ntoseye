@@ -3,7 +3,7 @@
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Command,
 };
 
 use crate::error::{Error, Result};
@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use super::{
     ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
     ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
-    backup_file, kdnet_instructions,
+    backup_file, command_detail, kdnet_instructions,
 };
 
 const BACKENDS: &[BackendSelection] = &[
@@ -373,15 +373,6 @@ fn osascript_result(script: &str, arguments: &[&str]) -> Result<String> {
             Error::DebugInfo(format!("UTM AppleScript failed: {reason}"))
         }
     })
-}
-
-fn command_detail(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        stderr
-    }
 }
 
 #[cfg(test)]
