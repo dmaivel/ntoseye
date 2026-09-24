@@ -555,16 +555,9 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let value = match Expr::eval_with_radix(
-            require_arg!(invocation, 1, "wrmsr"),
-            &self.ctx.target,
-            self.radix,
-        ) {
-            Ok(value) => value.0,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
+        let Some(VirtAddr(value)) = self.eval_or_report(require_arg!(invocation, 1, "wrmsr"))
+        else {
+            return Ok(());
         };
         let processor = current_processor(self);
         match self.ctx.write_msr(processor, msr, value) {
@@ -650,16 +643,13 @@ impl ReplState<'_> {
             return Ok(());
         }
         let vector = match invocation.arg(0) {
-            Some(text) => match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-                Ok(value) if value.0 < u64::from(IDT_VECTOR_COUNT) => Some(value.0 as u16),
-                Ok(value) => {
+            Some(text) => match self.eval_or_report(text) {
+                Some(value) if value.0 < u64::from(IDT_VECTOR_COUNT) => Some(value.0 as u16),
+                Some(value) => {
                     error!("IDT vector {:#x} is outside 0..255", value.0);
                     return Ok(());
                 }
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+                None => return Ok(()),
             },
             None => None,
         };

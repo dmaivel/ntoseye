@@ -161,12 +161,8 @@ fn pte_level_cell(level: &PteLevel) -> String {
 impl ReplState<'_> {
     fn cmd_pte(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let expr = require_arg!(invocation, 0, "pte");
-        let address = match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(expr) else {
+            return Ok(());
         };
         match self.ctx.target.pte_traverse(address) {
             Ok(result) => {
@@ -208,12 +204,9 @@ impl ReplState<'_> {
 
     fn cmd_trap(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let address = match invocation.arg(0) {
-            Some(expr) => match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-                Ok(address) => Some(address),
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
+            Some(expr) => match self.eval_or_report(expr) {
+                Some(address) => Some(address),
+                None => return Ok(()),
             },
             None => None,
         };
@@ -256,12 +249,8 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        let target = match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-            Ok(target) => target,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(target) = self.eval_or_report(expr) else {
+            return Ok(());
         };
 
         let detail = match self.ctx.target.inspect_pool(target) {
@@ -465,12 +454,8 @@ impl ReplState<'_> {
                 outln!("{}\n", command_help(invocation.name));
                 return Ok(());
             }
-            let value = match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
-                Ok(value) => value.0,
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
+            let Some(VirtAddr(value)) = self.eval_or_report(expression) else {
+                return Ok(());
             };
             if let Err(e) = self.ctx.write_register(name, value) {
                 error!("failed to write register {name}: {e}");
@@ -570,12 +555,9 @@ impl ReplState<'_> {
 
     fn cmd_k(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let frame_limit = match invocation.arg(0) {
-            Some(count) => match Expr::eval_with_radix(count, &self.ctx.target, self.radix) {
-                Ok(count) => usize::try_from(count.0).unwrap_or(usize::MAX).min(4096),
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
+            Some(count) => match self.eval_or_report(count) {
+                Some(count) => usize::try_from(count.0).unwrap_or(usize::MAX).min(4096),
+                None => return Ok(()),
             },
             None => 64,
         };
@@ -730,12 +712,8 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        let addr = match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(addr) = self.eval_or_report(expr) else {
+            return Ok(());
         };
 
         let irp = match self.ctx.target.inspect_irp(addr) {
@@ -898,12 +876,8 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        let addr = match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(addr) = self.eval_or_report(expr) else {
+            return Ok(());
         };
 
         let dev = match self.ctx.target.inspect_device_object(addr) {
@@ -948,12 +922,8 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        let addr = match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(addr) = self.eval_or_report(expr) else {
+            return Ok(());
         };
 
         let o = match self.ctx.target.inspect_object_header(addr) {
@@ -1153,12 +1123,8 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        let addr = match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(addr) = self.eval_or_report(expr) else {
+            return Ok(());
         };
 
         let d = match self.ctx.target.describe_address(addr) {

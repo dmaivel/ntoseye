@@ -797,19 +797,13 @@ impl ReplState<'_> {
         &self,
         invocation: &CommandInvocation<'_>,
         command: &str,
-    ) -> Result<Option<VirtAddr>> {
+    ) -> Option<VirtAddr> {
         let expression = invocation.raw_tail.trim();
         if expression.is_empty() {
             outln!("{}\n", command_help(command));
-            return Ok(None);
+            return None;
         }
-        match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
-            Ok(address) => Ok(Some(address)),
-            Err(error) => {
-                error!("{}", error);
-                Ok(None)
-            }
-        }
+        self.eval_or_report(expression)
     }
 
     fn step_until(
@@ -846,14 +840,14 @@ impl ReplState<'_> {
     }
 
     fn cmd_pa(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(address) = self.required_address(&invocation, "pa")? {
+        if let Some(address) = self.required_address(&invocation, "pa") {
             self.step_until(StepMode::Over, move |ip, _| ip == address.0)?;
         }
         Ok(())
     }
 
     fn cmd_ta(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(address) = self.required_address(&invocation, "ta")? {
+        if let Some(address) = self.required_address(&invocation, "ta") {
             self.step_until(StepMode::Into, move |ip, _| ip == address.0)?;
         }
         Ok(())
@@ -887,21 +881,16 @@ impl ReplState<'_> {
         self.clear_selected_frame();
         let limit = match invocation.arg(0) {
             None => WATCH_TRACE_DEFAULT_LIMIT,
-            Some(expression) => {
-                match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
-                    Ok(value) => match usize::try_from(value.0) {
-                        Ok(count) => count,
-                        Err(_) => {
-                            error!("watch-trace count is too large");
-                            return Ok(());
-                        }
-                    },
-                    Err(error) => {
-                        error!("{}", error);
+            Some(expression) => match self.eval_or_report(expression) {
+                Some(value) => match usize::try_from(value.0) {
+                    Ok(count) => count,
+                    Err(_) => {
+                        error!("watch-trace count is too large");
                         return Ok(());
                     }
-                }
-            }
+                },
+                None => return Ok(()),
+            },
         };
         self.watch_trace(limit)
     }

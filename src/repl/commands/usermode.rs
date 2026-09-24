@@ -1,7 +1,6 @@
 use std::fmt::Display;
 
 use crate::error::Result;
-use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::usermode::{
     ByteDiff, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
@@ -653,12 +652,9 @@ impl ReplState<'_> {
             return Ok(());
         }
         let address = match invocation.arg(0) {
-            Some(text) => match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-                Ok(address) => Some(address),
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            Some(text) => match self.eval_or_report(text) {
+                Some(address) => Some(address),
+                None => return Ok(()),
             },
             None => None,
         };
@@ -675,12 +671,9 @@ impl ReplState<'_> {
             return Ok(());
         }
         let address = match invocation.arg(0) {
-            Some(text) => match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-                Ok(address) => Some(address),
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            Some(text) => match self.eval_or_report(text) {
+                Some(address) => Some(address),
+                None => return Ok(()),
             },
             None => None,
         };
@@ -707,12 +700,9 @@ impl ReplState<'_> {
                 outln!("{}\n", command_help("!dlls"));
                 return Ok(());
             };
-            filter = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-                Ok(address) => Some(address),
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            filter = match self.eval_or_report(text) {
+                Some(address) => Some(address),
+                None => return Ok(()),
             };
         }
         match self.ctx.target.loader_modules(filter) {

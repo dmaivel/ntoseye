@@ -1,5 +1,7 @@
 use crate::diagnostics::print_warning;
+use crate::expr::Expr;
 use crate::repl::*;
+use crate::types::VirtAddr;
 
 const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
@@ -43,6 +45,18 @@ impl ReplState<'_> {
     pub fn flush_notices(&mut self) {
         for notice in self.ctx.take_notices() {
             print_warning(notice);
+        }
+    }
+
+    /// Evaluate a command's expression argument in the current radix. A
+    /// failure is reported here, so the command only has to stop on `None`.
+    fn eval_or_report(&self, text: &str) -> Option<VirtAddr> {
+        match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                error!("{error}");
+                None
+            }
         }
     }
 

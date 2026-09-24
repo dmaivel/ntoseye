@@ -3,13 +3,13 @@ use std::fmt::Display;
 use tabled::builder::Builder;
 
 use crate::error::Result;
-use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::DiagnosticValue;
 use crate::target::security::{
     AclDetail, ObjectSecurityDetail, SecurityDescriptorDetail, SessionDetail,
     SessionProcessesDetail, SessionsDetail, SidDetail,
 };
+use crate::types::VirtAddr;
 use crate::ui;
 
 const MAX_SESSION_DISPLAY: usize = 64;
@@ -323,6 +323,20 @@ fn parse_session_id(text: &str) -> Option<i64> {
 }
 
 impl ReplState<'_> {
+    /// The address argument of a command that takes exactly one expression,
+    /// or `None` once usage or the evaluation error has been reported.
+    fn single_address_arg(
+        &self,
+        invocation: &CommandInvocation<'_>,
+        command: &str,
+    ) -> Option<VirtAddr> {
+        let [text] = invocation.argv.as_slice() else {
+            outln!("{}\n", command_help(command));
+            return None;
+        };
+        self.eval_or_report(text)
+    }
+
     fn cmd_sd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if invocation.argv.is_empty()
             || invocation.argv.len() > 2
@@ -335,12 +349,8 @@ impl ReplState<'_> {
             outln!("{}\n", command_help("!sd"));
             return Ok(());
         };
-        let address = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(text) else {
+            return Ok(());
         };
         let annotate_well_known = invocation.arg(1) == Some("1");
         match self
@@ -355,20 +365,8 @@ impl ReplState<'_> {
     }
 
     fn cmd_acl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(text) = invocation.arg(0) else {
-            outln!("{}\n", command_help("!acl"));
+        let Some(address) = self.single_address_arg(&invocation, "!acl") else {
             return Ok(());
-        };
-        if invocation.argv.len() != 1 {
-            outln!("{}\n", command_help("!acl"));
-            return Ok(());
-        }
-        let address = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
         };
         match self.ctx.target.inspect_acl(address) {
             Ok(detail) => print_acl(&detail, "ACL", false),
@@ -378,20 +376,8 @@ impl ReplState<'_> {
     }
 
     fn cmd_sid(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(text) = invocation.arg(0) else {
-            outln!("{}\n", command_help("!sid"));
+        let Some(address) = self.single_address_arg(&invocation, "!sid") else {
             return Ok(());
-        };
-        if invocation.argv.len() != 1 {
-            outln!("{}\n", command_help("!sid"));
-            return Ok(());
-        }
-        let address = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
         };
         match self.ctx.target.inspect_sid(address) {
             Ok(sid) => outln!(
@@ -408,20 +394,8 @@ impl ReplState<'_> {
     }
 
     fn cmd_objsd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(text) = invocation.arg(0) else {
-            outln!("{}\n", command_help("!objsd"));
+        let Some(object) = self.single_address_arg(&invocation, "!objsd") else {
             return Ok(());
-        };
-        if invocation.argv.len() != 1 {
-            outln!("{}\n", command_help("!objsd"));
-            return Ok(());
-        }
-        let object = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
         };
         match self.ctx.target.inspect_object_security(object) {
             Ok(detail) => print_object_security(&detail),
@@ -481,12 +455,9 @@ impl ReplState<'_> {
             None => None,
         };
         let flags = match invocation.arg(1) {
-            Some(text) => match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-                Ok(flags) => flags.0,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            Some(text) => match self.eval_or_report(text) {
+                Some(flags) => flags.0,
+                None => return Ok(()),
             },
             None => 0,
         };

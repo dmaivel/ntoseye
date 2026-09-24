@@ -78,22 +78,6 @@ repl_command! {
     completion: Expression,
 }
 
-fn eval_value(state: &ReplState<'_>, text: &str) -> std::result::Result<u64, String> {
-    Expr::eval_with_radix(text, &state.ctx.target, state.radix)
-        .map(|value| value.0)
-        .map_err(|error| error.to_string())
-}
-
-fn eval_arg(state: &ReplState<'_>, text: &str) -> Option<u64> {
-    match eval_value(state, text) {
-        Ok(value) => Some(value),
-        Err(error) => {
-            error!("{error}");
-            None
-        }
-    }
-}
-
 fn diagnostic_hex(value: &DiagnosticValue<u64>) -> String {
     match value {
         DiagnosticValue::Available(value) => format!("{value:#x}"),
@@ -533,12 +517,9 @@ fn print_lookaside_lists(detail: &LookasideListsDetail) {
 impl ReplState<'_> {
     fn cmd_vm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let flags = match invocation.arg(0) {
-            Some(arg) => match eval_value(self, arg) {
-                Ok(flags) => flags,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            Some(arg) => match self.eval_or_report(arg) {
+                Some(VirtAddr(flags)) => flags,
+                None => return Ok(()),
             },
             None => 0,
         };
@@ -560,7 +541,7 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         };
-        let Some(value) = eval_arg(self, value_arg) else {
+        let Some(VirtAddr(value)) = self.eval_or_report(value_arg) else {
             return Ok(());
         };
         let selector = if physical {
@@ -584,13 +565,13 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         };
-        let Some(dtb) = eval_arg(self, dtb_arg) else {
+        let Some(VirtAddr(dtb)) = self.eval_or_report(dtb_arg) else {
             return Ok(());
         };
-        let Some(va) = eval_arg(self, va_arg) else {
+        let Some(va) = self.eval_or_report(va_arg) else {
             return Ok(());
         };
-        match self.ctx.target.vtop(dtb, VirtAddr(va)) {
+        match self.ctx.target.vtop(dtb, va) {
             Ok(detail) => print_vtop(&detail),
             Err(error) => error!("{error}"),
         }
@@ -602,7 +583,7 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         };
-        let Some(pa) = eval_arg(self, pa_arg) else {
+        let Some(VirtAddr(pa)) = self.eval_or_report(pa_arg) else {
             return Ok(());
         };
         match self.ctx.target.ptov(pa) {
@@ -615,8 +596,8 @@ impl ReplState<'_> {
     fn cmd_poolused(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let (flags, tag_filter) = match invocation.arg(0) {
             None => (0, None),
-            Some(arg) => match eval_value(self, arg) {
-                Ok(flags) => (flags, invocation.arg(1)),
+            Some(arg) => match Expr::eval_with_radix(arg, &self.ctx.target, self.radix) {
+                Ok(VirtAddr(flags)) => (flags, invocation.arg(1)),
                 Err(_) => (0, Some(arg)),
             },
         };
@@ -637,9 +618,12 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         };
-        let pool_type = match invocation.arg(1).map(|value| eval_value(self, value)) {
-            Some(Ok(0)) => Some(PoolType::NonPaged),
-            Some(Ok(1)) => Some(PoolType::Paged),
+        let pool_type = invocation
+            .arg(1)
+            .map(|value| Expr::eval_with_radix(value, &self.ctx.target, self.radix));
+        let pool_type = match pool_type {
+            Some(Ok(VirtAddr(0))) => Some(PoolType::NonPaged),
+            Some(Ok(VirtAddr(1))) => Some(PoolType::Paged),
             Some(Ok(_)) | Some(Err(_)) => {
                 outln!("pool type must be 0 (nonpaged) or 1 (paged)");
                 return Ok(());
@@ -655,10 +639,10 @@ impl ReplState<'_> {
 
     fn cmd_lookaside(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if let Some(argument) = invocation.arg(0) {
-            let Some(address) = eval_arg(self, argument) else {
+            let Some(address) = self.eval_or_report(argument) else {
                 return Ok(());
             };
-            match self.ctx.target.inspect_lookaside(VirtAddr(address)) {
+            match self.ctx.target.inspect_lookaside(address) {
                 Ok(detail) => print_lookaside_record(&detail),
                 Err(error) => error!("{error}"),
             }

@@ -707,12 +707,8 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let address = match Expr::eval_with_radix(addr_str, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(addr_str) else {
+            return Ok(());
         };
         let condition = parsed.condition.clone();
         let config = match self.breakpoint_config(parsed) {

@@ -1,7 +1,6 @@
 use tabled::builder::Builder;
 
 use crate::error::Result;
-use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::DiagnosticValue;
 use crate::target::heap::{
@@ -176,12 +175,8 @@ impl ReplState<'_> {
                 }
             }
             Request::Find(text) => {
-                let address = match Expr::eval_with_radix(&text, &self.ctx.target, self.radix) {
-                    Ok(address) => address,
-                    Err(error) => {
-                        error!("{error}");
-                        return Ok(());
-                    }
+                let Some(address) = self.eval_or_report(&text) else {
+                    return Ok(());
                 };
                 match self.ctx.target.find_heap_block(address) {
                     Ok(detail) => {
@@ -201,13 +196,7 @@ impl ReplState<'_> {
     /// to the target core.  A numeric value is an index when that index exists;
     /// otherwise it is interpreted as a heap address.
     fn parse_heap_selector(&self, text: &str) -> Option<HeapSelector> {
-        let value = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(value) => value.0,
-            Err(error) => {
-                error!("{error}");
-                return None;
-            }
-        };
+        let VirtAddr(value) = self.eval_or_report(text)?;
         let summary = match self.ctx.target.heap_summary() {
             Ok(summary) => summary,
             Err(error) => {

@@ -3,7 +3,6 @@ use std::fmt::Display;
 use tabled::builder::Builder;
 
 use crate::error::Result;
-use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::mm::SystemMemorySummary;
 use crate::target::object::ResourceDetail;
@@ -194,23 +193,11 @@ fn print_resource(detail: &ResourceDetail) {
     }
 }
 
-fn parse_expression(
-    state: &ReplState<'_>,
-    expression: &str,
-) -> std::result::Result<VirtAddr, String> {
-    Expr::eval_with_radix(expression, &state.ctx.target, state.radix)
-        .map_err(|error| error.to_string())
-}
-
 impl ReplState<'_> {
     fn cmd_handle(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if let Some(expression) = invocation.arg(0) {
-            let handle = match parse_expression(self, expression) {
-                Ok(value) => value.0,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            let Some(VirtAddr(handle)) = self.eval_or_report(expression) else {
+                return Ok(());
             };
             match self.ctx.target.inspect_handle(handle) {
                 Ok(detail) => {
@@ -332,12 +319,8 @@ impl ReplState<'_> {
 
     fn cmd_fileobj(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let expression = require_arg!(invocation, 0, "!fileobj");
-        let address = match parse_expression(self, expression) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(expression) else {
+            return Ok(());
         };
         match self.ctx.target.inspect_file_object(address) {
             Ok(file) => {
@@ -420,12 +403,8 @@ impl ReplState<'_> {
 
     fn cmd_locks(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if let Some(expression) = invocation.arg(0) {
-            let address = match parse_expression(self, expression) {
-                Ok(address) => address,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            let Some(address) = self.eval_or_report(expression) else {
+                return Ok(());
             };
             match self.ctx.target.inspect_resource(address) {
                 Ok(detail) => print_resource(&detail),
@@ -461,12 +440,9 @@ impl ReplState<'_> {
 
     fn cmd_memusage(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let limit = match invocation.arg(0) {
-            Some(expression) => match parse_expression(self, expression) {
-                Ok(value) => value.0 as usize,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            Some(expression) => match self.eval_or_report(expression) {
+                Some(value) => value.0 as usize,
+                None => return Ok(()),
             },
             None => DEFAULT_MEMORY_PROCESS_LIMIT,
         };

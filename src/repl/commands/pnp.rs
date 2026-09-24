@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::pnp::{
     DevNodeDetail, DevNodeSummary, DeviceStackDetail, PnpTriageDetail, StateHistoryEntry,
@@ -255,12 +254,9 @@ impl ReplState<'_> {
             return Ok(());
         };
         let node = match request.node {
-            Some(text) => match Expr::eval_with_radix(&text, &self.ctx.target, self.radix) {
-                Ok(address) => Some(address),
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            Some(text) => match self.eval_or_report(&text) {
+                Some(address) => Some(address),
+                None => return Ok(()),
             },
             None => None,
         };
@@ -281,12 +277,8 @@ impl ReplState<'_> {
             return Ok(());
         }
         let text = invocation.arg(0).unwrap_or_default();
-        let address = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(text) else {
+            return Ok(());
         };
 
         match self.ctx.target.inspect_device_stack(address) {

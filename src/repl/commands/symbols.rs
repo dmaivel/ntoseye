@@ -223,12 +223,8 @@ impl ReplState<'_> {
             outln!("{}\n", command_help("ln"));
             return Ok(());
         };
-        let addr = match Expr::eval_with_radix(arg, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(addr) = self.eval_or_report(arg) else {
+            return Ok(());
         };
         match self
             .ctx
@@ -640,12 +636,9 @@ impl ReplState<'_> {
             return Ok(());
         };
         let address = match spec.address {
-            Some(text) => match Expr::eval_with_radix(&text, &self.ctx.target, self.radix) {
-                Ok(address) => address,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
+            Some(text) => match self.eval_or_report(&text) {
+                Some(address) => address,
+                None => return Ok(()),
             },
             None => match self.scope_ip() {
                 Some(ip) => ip,
@@ -674,12 +667,9 @@ impl ReplState<'_> {
 
     fn cmd_dv(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let address = if let Some(arg) = invocation.arg(0) {
-            match Expr::eval_with_radix(arg, &self.ctx.target, self.radix) {
-                Ok(address) => address,
-                Err(err) => {
-                    error!("{}", err);
-                    return Ok(());
-                }
+            match self.eval_or_report(arg) {
+                Some(address) => address,
+                None => return Ok(()),
             }
         } else {
             let Some(rip) = self.scope_ip() else {

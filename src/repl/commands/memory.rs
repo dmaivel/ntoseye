@@ -379,14 +379,9 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let address =
-            match Expr::eval_with_radix(invocation.arg(0).unwrap(), &self.ctx.target, self.radix) {
-                Ok(a) => a,
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
-            };
+        let Some(address) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+            return Ok(());
+        };
 
         let values = match parse_write_values(self, invocation) {
             Ok(values) => values,
@@ -452,12 +447,8 @@ impl ReplState<'_> {
             error!("usage: .pagein [/p <pid|eprocess>] <address>");
             return Ok(());
         };
-        let address = match Expr::eval_with_radix(address_text, &self.ctx.target, self.radix) {
-            Ok(value) => value,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(address_text) else {
+            return Ok(());
         };
 
         let process = match process_text {
@@ -743,12 +734,8 @@ impl ReplState<'_> {
         unicode: bool,
     ) -> Result<()> {
         let start_arg = require_arg!(invocation, 0, command);
-        let address = match Expr::eval_with_radix(start_arg, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(start_arg) else {
+            return Ok(());
         };
         let StringDescriptorFields {
             length,
@@ -852,30 +839,23 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(command));
             return Ok(());
         };
-        let start = match Expr::eval_with_radix(start_arg, &self.ctx.target, self.radix) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(start) = self.eval_or_report(start_arg) else {
+            return Ok(());
         };
         let max_chars = match invocation.arg(1) {
-            Some(arg) => match Expr::eval_with_radix(arg, &self.ctx.target, self.radix) {
-                Ok(v) if v.0 > 0 => match checked_display_string_count(v.0, char_size) {
+            Some(arg) => match self.eval_or_report(arg) {
+                Some(v) if v.0 > 0 => match checked_display_string_count(v.0, char_size) {
                     Ok(count) => count,
                     Err(error) => {
                         error!("{error}");
                         return Ok(());
                     }
                 },
-                Ok(_) => {
+                Some(_) => {
                     error!("invalid max-chars: {}", arg);
                     return Ok(());
                 }
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
+                None => return Ok(()),
             },
             None => 256,
         };
@@ -916,68 +896,56 @@ impl ReplState<'_> {
             Arch::Amd64 => 15u64,
             Arch::Arm64 => 4u64,
         };
-        let (start_addr, byte_len, instruction_limit) = match invocation
-            .arg(1)
-            .and_then(windbg_count_expression)
-        {
-            Some(count_expr) => {
-                let start_arg = require_arg!(invocation, 0, "u");
-                let start = match Expr::eval_with_radix(start_arg, &self.ctx.target, self.radix) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!("{}", e);
-                        return Ok(());
-                    }
-                };
-                let count = match Expr::eval_with_radix(count_expr, &self.ctx.target, self.radix) {
-                    Ok(c) if c.0 > 0 && c.0 <= MAX_DISASSEMBLY_INSTRUCTIONS as u64 => c.0,
-                    Ok(_) => {
-                        error!(
-                            "instruction count must be 1..{}",
-                            MAX_DISASSEMBLY_INSTRUCTIONS
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        error!("{}", e);
-                        return Ok(());
-                    }
-                };
-                (start, count * max_instruction_bytes, Some(count as usize))
-            }
-            None => match invocation.arg(1) {
-                Some(_) => {
-                    let range = match AddressRange::parse(
-                        &invocation,
-                        &self.ctx.target,
-                        self.radix,
-                        DEFAULT_INSTRUCTIONS,
-                        1,
-                    ) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            error!("{}", e);
-                            return Ok(());
-                        }
-                    };
-                    (range.start, range.len() as u64, None)
-                }
-                None => {
+        let (start_addr, byte_len, instruction_limit) =
+            match invocation.arg(1).and_then(windbg_count_expression) {
+                Some(count_expr) => {
                     let start_arg = require_arg!(invocation, 0, "u");
-                    match Expr::eval_with_radix(start_arg, &self.ctx.target, self.radix) {
-                        Ok(a) => (
-                            a,
-                            DEFAULT_INSTRUCTIONS * max_instruction_bytes,
-                            Some(DEFAULT_INSTRUCTIONS as usize),
-                        ),
-                        Err(e) => {
-                            error!("{}", e);
+                    let Some(start) = self.eval_or_report(start_arg) else {
+                        return Ok(());
+                    };
+                    let count = match self.eval_or_report(count_expr) {
+                        Some(c) if c.0 > 0 && c.0 <= MAX_DISASSEMBLY_INSTRUCTIONS as u64 => c.0,
+                        Some(_) => {
+                            error!(
+                                "instruction count must be 1..{}",
+                                MAX_DISASSEMBLY_INSTRUCTIONS
+                            );
                             return Ok(());
                         }
-                    }
+                        None => return Ok(()),
+                    };
+                    (start, count * max_instruction_bytes, Some(count as usize))
                 }
-            },
-        };
+                None => match invocation.arg(1) {
+                    Some(_) => {
+                        let range = match AddressRange::parse(
+                            &invocation,
+                            &self.ctx.target,
+                            self.radix,
+                            DEFAULT_INSTRUCTIONS,
+                            1,
+                        ) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                error!("{}", e);
+                                return Ok(());
+                            }
+                        };
+                        (range.start, range.len() as u64, None)
+                    }
+                    None => {
+                        let start_arg = require_arg!(invocation, 0, "u");
+                        match self.eval_or_report(start_arg) {
+                            Some(a) => (
+                                a,
+                                DEFAULT_INSTRUCTIONS * max_instruction_bytes,
+                                Some(DEFAULT_INSTRUCTIONS as usize),
+                            ),
+                            None => return Ok(()),
+                        }
+                    }
+                },
+            };
 
         // An instruction window may run past the end of the mapped image;
         // keep what is readable up to the first unreadable page.
@@ -1022,12 +990,8 @@ impl ReplState<'_> {
 
     fn cmd_ub(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let address_arg = require_arg!(invocation, 0, "ub");
-        let address = match Expr::eval_with_radix(address_arg, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(address_arg) else {
+            return Ok(());
         };
         let count = match invocation.arg(1) {
             Some(arg) => match eval_range_length(arg, &self.ctx.target, self.radix, address, 1) {
@@ -1061,12 +1025,8 @@ impl ReplState<'_> {
 
     fn cmd_uf(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let expression = invocation.arg(0).unwrap_or("@rip");
-        let address = match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(expression) else {
+            return Ok(());
         };
 
         let (symbol, len, rows) = match self.ctx.disassemble_function(address) {
@@ -1134,14 +1094,9 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(command));
             return Ok(());
         }
-        let address =
-            match Expr::eval_with_radix(invocation.arg(0).unwrap(), &self.ctx.target, self.radix) {
-                Ok(address) => address,
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
-            };
+        let Some(address) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+            return Ok(());
+        };
         let text = invocation.join_args(1);
         let mut bytes = if unicode {
             text.encode_utf16()
@@ -1322,12 +1277,8 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(".formats"));
             return Ok(());
         }
-        let value = match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
-            Ok(value) => value.0,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+        let Some(VirtAddr(value)) = self.eval_or_report(expression) else {
+            return Ok(());
         };
         outln!("hexadecimal: 0x{value:016x}");
         outln!("decimal: {value} (signed {})", value as i64);
@@ -1373,14 +1324,9 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let address =
-            match Expr::eval_with_radix(invocation.arg(0).unwrap(), &self.ctx.target, self.radix) {
-                Ok(a) => a,
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
-            };
+        let Some(address) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+            return Ok(());
+        };
 
         let pattern_str = invocation.arg(1).unwrap();
         let pattern = match parse_byte_pattern(pattern_str) {
@@ -1430,14 +1376,9 @@ impl ReplState<'_> {
 
         let pattern_str = invocation.arg(1).unwrap();
 
-        let start_addr =
-            match Expr::eval_with_radix(invocation.arg(0).unwrap(), &self.ctx.target, self.radix) {
-                Ok(a) => a,
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
-            };
+        let Some(start_addr) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+            return Ok(());
+        };
 
         let pattern = match parse_byte_pattern(pattern_str) {
             Some(pattern) => pattern,
@@ -1448,21 +1389,16 @@ impl ReplState<'_> {
         };
 
         let length = match invocation.arg(2) {
-            Some(length_arg) => {
-                match Expr::eval_with_radix(length_arg, &self.ctx.target, self.radix) {
-                    Ok(value) => match usize::try_from(value.0) {
-                        Ok(length) => length,
-                        Err(_) => {
-                            error!("invalid length: {}", length_arg);
-                            return Ok(());
-                        }
-                    },
-                    Err(e) => {
-                        error!("{}", e);
+            Some(length_arg) => match self.eval_or_report(length_arg) {
+                Some(value) => match usize::try_from(value.0) {
+                    Ok(length) => length,
+                    Err(_) => {
+                        error!("invalid length: {}", length_arg);
                         return Ok(());
                     }
-                }
-            }
+                },
+                None => return Ok(()),
+            },
             None => 0x100,
         };
 

@@ -2,8 +2,7 @@ use crate::repl::*;
 
 use crate::backend::MemoryOps;
 use crate::error::Result;
-use crate::expr::Expr;
-use crate::types::PhysAddr;
+use crate::types::{PhysAddr, VirtAddr};
 
 use super::memory::{MAX_DISPLAY_BYTES, parse_write_values};
 use crate::memory::read_page_chunks;
@@ -117,14 +116,9 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(command));
             return Ok(());
         }
-        let address =
-            match Expr::eval_with_radix(invocation.arg(0).unwrap(), &self.ctx.target, self.radix) {
-                Ok(address) => address.0,
-                Err(e) => {
-                    error!("{}", e);
-                    return Ok(());
-                }
-            };
+        let Some(VirtAddr(address)) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+            return Ok(());
+        };
         let values = match parse_write_values(self, invocation) {
             Ok(values) => values,
             Err(e) => {

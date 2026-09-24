@@ -686,31 +686,21 @@ impl ReplState<'_> {
             outln!("{}\n", command_help("dl"));
             return Ok(());
         }
-        let address = match Expr::eval_with_radix(positional[0], &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{}", error);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(positional[0]) else {
+            return Ok(());
         };
-        let limit = match Expr::eval_with_radix(positional[1], &self.ctx.target, self.radix) {
-            Ok(count) => count.0.min(MAX_LIST_ENTRIES as u64) as usize,
-            Err(error) => {
-                error!("{}", error);
-                return Ok(());
-            }
+        let limit = match self.eval_or_report(positional[1]) {
+            Some(count) => count.0.min(MAX_LIST_ENTRIES as u64) as usize,
+            None => return Ok(()),
         };
         let display_words = match positional.get(2) {
-            Some(size) => match Expr::eval_with_radix(size, &self.ctx.target, self.radix) {
-                Ok(size) if size.0 > 0 => size.0.min(MAX_DL_WORDS as u64) as usize,
-                Ok(_) => {
+            Some(size) => match self.eval_or_report(size) {
+                Some(size) if size.0 > 0 => size.0.min(MAX_DL_WORDS as u64) as usize,
+                Some(_) => {
                     error!("dl size must be greater than zero");
                     return Ok(());
                 }
-                Err(error) => {
-                    error!("{}", error);
-                    return Ok(());
-                }
+                None => return Ok(()),
             },
             None => 2,
         };
@@ -813,16 +803,13 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let head = match Expr::eval_with_radix(address_text, &self.ctx.target, self.radix) {
-            Ok(address) if !address.is_zero() => address,
-            Ok(_) => {
+        let head = match self.eval_or_report(address_text) {
+            Some(address) if !address.is_zero() => address,
+            Some(_) => {
                 error!("!list requires a nonzero list head address");
                 return Ok(());
             }
-            Err(error) => {
-                error!("{}", error);
-                return Ok(());
-            }
+            None => return Ok(()),
         };
         let resolved = match self.resolve_field_path(type_info.as_ref(), &path) {
             Ok(path) => path,

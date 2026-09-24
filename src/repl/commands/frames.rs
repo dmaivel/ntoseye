@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
 use crate::error::Result;
-use crate::expr::Expr;
 use crate::session::ExceptionRecord;
 use crate::target::{SavedThreadRegisters, SelectedFrame};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
@@ -101,12 +100,8 @@ impl ReplState<'_> {
             match arg.as_ref() {
                 "/r" | "-r" => show_registers = true,
                 value if index.is_none() => {
-                    let parsed = match Expr::eval_with_radix(value, &self.ctx.target, self.radix) {
-                        Ok(parsed) => parsed,
-                        Err(error) => {
-                            error!("{}", error);
-                            return Ok(());
-                        }
+                    let Some(parsed) = self.eval_or_report(value) else {
+                        return Ok(());
                     };
                     index = Some(usize::try_from(parsed.0).unwrap_or(usize::MAX));
                 }
@@ -172,12 +167,8 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
-        let address = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{}", error);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(text) else {
+            return Ok(());
         };
         let registers = match self.ctx.read_context_record(address) {
             Ok(registers) => registers,
@@ -304,12 +295,8 @@ impl ReplState<'_> {
             self.print_current_exception_record();
             return Ok(());
         }
-        let address = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                error!("{}", error);
-                return Ok(());
-            }
+        let Some(address) = self.eval_or_report(text) else {
+            return Ok(());
         };
         let record = match self.ctx.read_exception_record(address) {
             Ok(record) => record,
