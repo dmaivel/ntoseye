@@ -168,13 +168,12 @@ impl TypeInfo {
                 continue;
             }
             let slice = &buf[off..off + sz];
+            let raw = le_uint(slice);
             let value = match &f.type_data {
-                ParsedType::Bitfield { pos, len, .. } => {
-                    FieldValue::Bitfield(bitfield_value(le_uint(slice), *pos, *len))
-                }
-                ParsedType::Pointer(_) => FieldValue::Pointer(le_uint(slice)),
+                ParsedType::Bitfield { .. } => FieldValue::Bitfield(f.decode(raw)),
+                ParsedType::Pointer(_) => FieldValue::Pointer(raw),
                 _ => match sz {
-                    1 | 2 | 4 | 8 => FieldValue::Int(le_uint(slice)),
+                    1 | 2 | 4 | 8 => FieldValue::Int(raw),
                     _ => FieldValue::Bytes(slice.to_vec()),
                 },
             };

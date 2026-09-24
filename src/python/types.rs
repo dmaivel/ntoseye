@@ -19,8 +19,8 @@ use super::{err, raise};
 use crate::backend::MemoryOps;
 use crate::error::Result as CoreResult;
 use crate::layout::{
-    EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, bitfield_mask, bitfield_value, le_uint,
-    named_type, unqualified_type_name,
+    EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, bitfield_mask, le_uint, named_type,
+    unqualified_type_name,
 };
 use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
@@ -394,10 +394,9 @@ impl Struct {
         let bytes = read.map_err(err)?;
 
         let result = match &field.type_data {
-            ParsedType::Bitfield { pos, len, .. } => {
-                bitfield_value(le_uint(&bytes), *pos, *len).into_bound_py_any(py)?
+            ParsedType::Bitfield { .. } | ParsedType::Pointer(_) => {
+                field.decode(le_uint(&bytes)).into_bound_py_any(py)?
             }
-            ParsedType::Pointer(_) => le_uint(&bytes).into_bound_py_any(py)?,
             ParsedType::Enum(enum_name) if matches!(size, 1 | 2 | 4 | 8) => {
                 return enum_value(py, &self.owner, &self.space, enum_name, le_uint(&bytes));
             }
