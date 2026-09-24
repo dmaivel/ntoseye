@@ -3,7 +3,7 @@
 //! palette lives in one place and stays consistent.
 
 use owo_colors::OwoColorize;
-use std::fmt::{self, Display};
+use std::fmt::{self, Display, Write as _};
 
 use crate::disasm::{AsmKind, AsmToken};
 use crate::types::VirtAddr;
@@ -45,7 +45,11 @@ pub fn symbol(sym: &str) -> String {
 
 /// Secondary / de-emphasized text: scan tags, "N more", offsets, raw fallbacks.
 pub fn muted(text: &str) -> String {
-    text.bright_black().to_string()
+    muted_style(&text).to_string()
+}
+
+fn muted_style<T: Display>(text: &T) -> impl Display + '_ {
+    text.bright_black()
 }
 
 /// A bold, uncolored label/header (e.g. `break:`, `breakpoint:`, section
@@ -78,13 +82,14 @@ impl_value_fmt!(fmt::Display, fmt::LowerHex, fmt::UpperHex, fmt::Binary);
 pub fn disasm_asm(tokens: &[AsmToken]) -> String {
     let mut out = String::new();
     for token in tokens {
-        match token.kind {
-            AsmKind::Register => out.push_str(&token.text.cyan().to_string()),
-            AsmKind::Number => out.push_str(&token.text.green().to_string()),
-            AsmKind::Punctuation | AsmKind::Keyword => out.push_str(&muted(&token.text)),
-            AsmKind::Mnemonic => out.push_str(&token.text.bright_magenta().to_string()),
-            AsmKind::Text => out.push_str(&token.text),
-        }
+        let text = &token.text;
+        let _ = match token.kind {
+            AsmKind::Register => write!(out, "{}", text.cyan()),
+            AsmKind::Number => write!(out, "{}", text.green()),
+            AsmKind::Punctuation | AsmKind::Keyword => write!(out, "{}", muted_style(text)),
+            AsmKind::Mnemonic => write!(out, "{}", text.bright_magenta()),
+            AsmKind::Text => out.write_str(text),
+        };
     }
     out
 }

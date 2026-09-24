@@ -4,6 +4,8 @@ use iced_x86::{
     Instruction, MemorySizeOptions, Mnemonic, NasmFormatter,
 };
 
+use std::fmt::Write as _;
+
 use crate::types::Arch;
 
 /// Control-flow class for the instruction at the start of a byte buffer.
@@ -207,6 +209,18 @@ impl DisasmRow {
     }
 }
 
+/// Instruction bytes as space-separated lowercase hex pairs.
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 3);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 {
+            hex.push(' ');
+        }
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 /// Decode `bytes` (loaded at `start_addr`) into rows with the given x86
 /// `bitness` (see `Target::code_bitness`), stopping after `limit`
 /// instructions when `Some`. `resolve` turns a branch / RIP-relative target
@@ -241,11 +255,7 @@ pub fn decode_rows(
         formatter.format(&instruction, &mut TokenSink(&mut tokens));
 
         let ip = mask_code_address(bitness, instruction.ip());
-        let hex = instr_bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let hex = hex_bytes(instr_bytes);
 
         let comment = if instruction.is_ip_rel_memory_operand() {
             Some(resolve(mask_code_address(
@@ -295,11 +305,7 @@ pub fn decode_rows_arm64(
         let ip = instruction.address();
         let start_index = (ip - start_addr) as usize;
         let instr_bytes = &bytes[start_index..start_index + 4];
-        let hex = instr_bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let hex = hex_bytes(instr_bytes);
 
         // The x64 path gets semantic tokens from iced's formatter; bad64 has
         // no formatter callback, but exposes typed operands, so classify those
