@@ -25,7 +25,7 @@ use crate::target::Target;
 use crate::triage::{
     TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,
 };
-use crate::types::{PhysAddr, VirtAddr};
+use crate::types::{Arch, PhysAddr, VirtAddr};
 
 pub mod parse;
 pub mod structs;
@@ -435,6 +435,14 @@ pub struct DmpInfo {
     /// intact; false means the triage dump may be truncated or corrupt.
     pub triage_signature_valid: bool,
     pub kern_base: Option<u64>,
+}
+
+impl DmpInfo {
+    /// The dumped machine's architecture, from its header's machine type.
+    pub fn arch(&self) -> Option<Arch> {
+        let machine = self.system_info.as_ref()?.machine_image_type;
+        Arch::from_machine_type(u16::try_from(machine).ok()?)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,5 +1,6 @@
 use crate::{
     backend::MemoryOps,
+    dmp::DmpInfo,
     error::{Error, Result},
     memory::{self, AddressSpace, DTB_IDENTITY, PAGE_SIZE},
     phys::PhysMem,
@@ -2156,8 +2157,7 @@ impl Guest {
         // discovery, which already resolved the arch.
         let arch = phys
             .dmp_info()
-            .and_then(|info| info.system_info.as_ref())
-            .and_then(|si| Arch::from_machine_type(si.machine_image_type as u16))
+            .and_then(DmpInfo::arch)
             .unwrap_or(Arch::Amd64);
 
         let ntoskrnl_va = if is_triage {

@@ -27,6 +27,7 @@ use crate::{
         DebuggerDataBlock, DebuggerDataCandidate, MetadataSource, MetadataValue,
         locate_debugger_data_block,
     },
+    dmp::DmpInfo,
     error::{Error, Result},
     guest::{
         Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo, Types,
@@ -923,14 +924,17 @@ impl Target {
         if let Some(ref guest) = guest {
             let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
         } else if let Some(ref modules) = triage_modules {
-            let dtb = DTB_IDENTITY;
+            let arch = phys
+                .dmp_info()
+                .and_then(DmpInfo::arch)
+                .unwrap_or(Arch::Amd64);
             let _ = Guest::load_module_symbols(
                 &phys,
                 &symbols,
                 modules.clone(),
-                dtb,
+                DTB_IDENTITY,
                 false,
-                Arch::Amd64,
+                arch,
             );
         }
 
@@ -2027,12 +2031,17 @@ impl Target {
         self.address_space(self.current_dtb())
     }
 
-    /// Guest architecture (AMD64 until the kernel is discovered).
+    /// Guest architecture: the discovered kernel's, else a dump's declared
+    /// machine type, else AMD64.
     pub fn arch(&self) -> Arch {
-        self.guest
-            .as_ref()
-            .map(|g| g.ntoskrnl.arch())
-            .unwrap_or(Arch::Amd64)
+        match &self.guest {
+            Some(guest) => guest.ntoskrnl.arch(),
+            None => self
+                .phys
+                .dmp_info()
+                .and_then(DmpInfo::arch)
+                .unwrap_or(Arch::Amd64),
+        }
     }
 
     /// Select x86 or AMD64 decoding for a code address in the current scope.
