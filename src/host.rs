@@ -144,31 +144,36 @@ mod platform {
             }
         })?;
         let reader = BufReader::new(maps);
-
-        let region = reader
-            .lines()
-            .map_while(|line| line.ok())
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.is_empty() {
-                    return None;
-                }
-                let addrs: Vec<&str> = parts[0].split('-').collect();
-                if addrs.len() != 2 {
-                    return None;
-                }
-                let start = u64::from_str_radix(addrs[0], 16).ok()?;
-                let end = u64::from_str_radix(addrs[1], 16).ok()?;
-                Some(MemoryRegion {
-                    start,
-                    end,
-                    length: end - start,
-                })
-            })
-            .max_by_key(|r| r.length)
+        let region = primary_memory_region_from_maps(reader.lines().map_while(|line| line.ok()))
             .ok_or(Error::NoVmMemoryRegion)?;
 
         Ok(region)
+    }
+
+    fn primary_memory_region_from_maps<I, S>(lines: I) -> Option<MemoryRegion>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        lines
+            .into_iter()
+            .filter_map(|line| {
+                let mut parts = line.as_ref().split_whitespace();
+                let addresses = parts.next()?;
+                let permissions = parts.next()?;
+                if !permissions.starts_with("rw") {
+                    return None;
+                }
+                let (start, end) = addresses.split_once('-')?;
+                let start = u64::from_str_radix(start, 16).ok()?;
+                let end = u64::from_str_radix(end, 16).ok()?;
+                Some(MemoryRegion {
+                    start,
+                    end,
+                    length: end.checked_sub(start)?,
+                })
+            })
+            .max_by_key(|region| region.length)
     }
 
     /// Offset of a guest-physical address into the VM's RAM mapping, or
@@ -318,6 +323,20 @@ mod platform {
             assert_eq!(parse_pid(OsStr::new("fb")), None);
             assert_eq!(parse_pid(OsStr::new("self")), None);
             assert_eq!(parse_pid(OsStr::new("thread-self")), None);
+        }
+
+        #[test]
+        fn guest_memory_selection_ignores_non_writable_mappings() {
+            let maps = concat!(
+                "1000-3000 rw-p 00000000 00:00 0\n",
+                "3000-a000 r--p 00000000 00:00 0\n",
+                "a000-14000 ---p 00000000 00:00 0\n",
+            );
+            let region = primary_memory_region_from_maps(maps.lines()).unwrap();
+
+            assert_eq!(region.start, 0x1000);
+            assert_eq!(region.end, 0x3000);
+            assert_eq!(region.length, 0x2000);
         }
 
         #[test]
