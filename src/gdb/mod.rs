@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::dbg_backend::{DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent};
 use crate::error::{Error, Result};
+use crate::types::Arch;
 
 pub mod breakpoints;
 pub mod registers;
@@ -140,36 +141,19 @@ impl StopReply {
     }
 }
 
-/// What the target description says the stub is debugging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetArch {
-    Amd64,
-    Arm64,
-}
-
-impl TargetArch {
-    fn from_description(xml: &str) -> Result<Self> {
-        let Some(architecture) = RegisterMap::target_architecture(xml) else {
-            return Err(Error::UnsupportedArchitecture(
-                "the stub's target description declares no architecture".into(),
-            ));
-        };
-        match architecture {
-            "i386:x86-64" => Ok(Self::Amd64),
-            "aarch64" => Ok(Self::Arm64),
-            other => Err(Error::UnsupportedArchitecture(format!(
-                "{other}; ntoseye debugs AMD64 and ARM64 Windows"
-            ))),
-        }
-    }
-
-    /// How far the program counter moves when the arch's breakpoint
-    /// instruction executes, which is also the `Z0` packet's kind.
-    fn breakpoint_step_size(self) -> u8 {
-        match self {
-            Self::Amd64 => 1,
-            Self::Arm64 => 4,
-        }
+/// The architecture a target description declares the stub is debugging.
+fn description_arch(xml: &str) -> Result<Arch> {
+    let Some(architecture) = RegisterMap::target_architecture(xml) else {
+        return Err(Error::UnsupportedArchitecture(
+            "the stub's target description declares no architecture".into(),
+        ));
+    };
+    match architecture {
+        "i386:x86-64" => Ok(Arch::Amd64),
+        "aarch64" => Ok(Arch::Arm64),
+        other => Err(Error::UnsupportedArchitecture(format!(
+            "{other}; ntoseye debugs AMD64 and ARM64 Windows"
+        ))),
     }
 }
 
@@ -243,6 +227,7 @@ pub struct GdbClient {
     features: StubFeatures,
     rx_state: PacketReadState,
     no_ack_mode: bool,
+    arch: Arch,
     register_map: RegisterMap,
     is_running: bool,
     hardware_sites: [Option<HardwareSite>; HW_BREAKPOINT_SLOTS as usize],
@@ -300,6 +285,7 @@ impl GdbClient {
             features: StubFeatures::default(),
             rx_state: PacketReadState::default(),
             no_ack_mode: false,
+            arch: Arch::default(),
             register_map: RegisterMap::default(),
             is_running: false, // NOTE if the user toys with VM via GUI, this value goes bad
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
@@ -327,9 +313,9 @@ impl GdbClient {
         client.last_stop = client.send_packet("?")?;
 
         let description = client.fetch_target_description()?;
-        let arch = TargetArch::from_description(&description)?;
+        client.arch = description_arch(&description)?;
         client.register_map =
-            client.build_register_map(&RegisterMap::parse_target_xml(&description)?, arch)?;
+            client.build_register_map(&RegisterMap::parse_target_xml(&description)?)?;
 
         Ok(client)
     }
@@ -554,7 +540,7 @@ impl GdbClient {
     }
 
     fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let kind = self.register_map.breakpoint_step_size();
+        let kind = self.arch.breakpoint_size();
         let response = self.send_packet(&format!("Z0,{:x},{}", addr, kind))?;
         if response == "OK" {
             Ok(())
@@ -569,7 +555,7 @@ impl GdbClient {
     }
 
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let kind = self.register_map.breakpoint_step_size();
+        let kind = self.arch.breakpoint_size();
         let response = self.send_packet(&format!("z0,{:x},{}", addr, kind))?;
         if response == "OK" {
             Ok(())
@@ -885,11 +871,7 @@ impl GdbClient {
     /// offset into its reply, so the description is cut to that length and
     /// the few system registers ntoseye needs are appended behind it, read
     /// individually. ARM64 also gets the x64 spellings the shared code uses.
-    fn build_register_map(
-        &mut self,
-        description: &RegisterMap,
-        arch: TargetArch,
-    ) -> Result<RegisterMap> {
+    fn build_register_map(&mut self, description: &RegisterMap) -> Result<RegisterMap> {
         let g_bytes = GdbClient::read_registers(self)?.len();
         let mut registers: Vec<RegisterInfo> = description
             .registers()
@@ -898,7 +880,7 @@ impl GdbClient {
             .cloned()
             .collect();
 
-        if arch == TargetArch::Arm64 {
+        if self.arch == Arch::Arm64 {
             for (alias, source) in ARM64_ALIASES {
                 let Some(register) = registers.iter().find(|reg| reg.name == source) else {
                     return Err(Error::UnsupportedArchitecture(format!(
@@ -935,9 +917,7 @@ impl GdbClient {
             }
         }
 
-        let mut map = RegisterMap::from_registers(registers);
-        map.set_breakpoint_step_size(arch.breakpoint_step_size());
-        Ok(map)
+        Ok(RegisterMap::from_registers(registers))
     }
 
     /// Read one register by its target-description number.
@@ -1111,9 +1091,10 @@ mod tests {
 
     use super::{
         GdbClient, HW_BREAKPOINT_SLOTS, PacketReadState, RegisterMap, StopReply, StubFeatures,
-        TargetArch,
+        description_arch,
     };
     use crate::dbg_backend::DebugBackend;
+    use crate::types::Arch;
 
     /// A running target behind a stub that answers the break byte with a stop
     /// on `p01.02` and records every packet it is sent.
@@ -1157,6 +1138,7 @@ mod tests {
             features: StubFeatures::default(),
             rx_state: PacketReadState::default(),
             no_ack_mode: true,
+            arch: Arch::Amd64,
             register_map: RegisterMap::default(),
             is_running: true,
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
@@ -1194,15 +1176,15 @@ mod tests {
     #[test]
     fn accepts_the_architectures_ntoseye_debugs() {
         let describe = |arch: &str| {
-            TargetArch::from_description(&format!(
+            description_arch(&format!(
                 "<target><architecture>{arch}</architecture></target>"
             ))
         };
-        assert_eq!(describe("i386:x86-64").unwrap(), TargetArch::Amd64);
-        assert_eq!(describe("aarch64").unwrap(), TargetArch::Arm64);
+        assert_eq!(describe("i386:x86-64").unwrap(), Arch::Amd64);
+        assert_eq!(describe("aarch64").unwrap(), Arch::Arm64);
         // A 32-bit stub has no Windows kernel ntoseye can read.
         assert!(describe("i386").is_err());
-        assert!(TargetArch::from_description("<target></target>").is_err());
+        assert!(description_arch("<target></target>").is_err());
     }
 
     #[test]

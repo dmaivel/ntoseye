@@ -642,7 +642,7 @@ pub fn advance_pc_past_breakpoint(
             processor + 1
         )));
     }
-    let next_pc = pc.wrapping_add(register_map.breakpoint_step_size() as u64);
+    let next_pc = pc.wrapping_add(u64::from(arch.breakpoint_size()));
     register_map.write_u64("rip", &mut context, next_pc)?;
     kd_trace!(
         "kd: advance_pc: p{} read pc={:#x}, writing {}-byte CONTEXT in chunks",

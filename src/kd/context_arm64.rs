@@ -107,9 +107,7 @@ pub fn build_register_map() -> RegisterMap {
     registers.push(next_reg("esr", OFFSET_ESR, 8));
     registers.push(next_reg("far", OFFSET_FAR, 8));
 
-    let mut map = RegisterMap::from_registers(registers);
-    map.set_breakpoint_step_size(4);
-    map
+    RegisterMap::from_registers(registers)
 }
 
 #[cfg(test)]
@@ -149,7 +147,5 @@ mod tests {
         let want_wvr: u64 = 0x8877_6655_4433_2211;
         buf[OFFSET_WVR0..OFFSET_WVR0 + 8].copy_from_slice(&want_wvr.to_le_bytes());
         assert_eq!(map.read_u64("wvr0", &buf).unwrap(), want_wvr);
-
-        assert_eq!(map.breakpoint_step_size(), 4);
     }
 }

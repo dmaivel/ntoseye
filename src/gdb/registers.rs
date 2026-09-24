@@ -16,9 +16,6 @@ pub struct RegisterInfo {
 pub struct RegisterMap {
     by_name: HashMap<String, RegisterInfo>,
     ordered: Vec<RegisterInfo>,
-    /// How many bytes the breakpoint instruction advances the program counter
-    /// when it executes: 1 for x86 `int3`, 4 for AArch64 `brk #0xF000`.
-    step_size: u8,
 }
 
 impl RegisterMap {
@@ -28,10 +25,7 @@ impl RegisterMap {
     /// backends (like KD) that build their register layout from a fixed
     /// struct rather than parsing a target description.
     pub fn from_registers(registers: Vec<RegisterInfo>) -> Self {
-        let mut map = RegisterMap {
-            step_size: 1,
-            ..RegisterMap::default()
-        };
+        let mut map = RegisterMap::default();
         for reg in registers {
             map.by_name.insert(reg.name.clone(), reg.clone());
             map.ordered.push(reg);
@@ -73,16 +67,6 @@ impl RegisterMap {
             return Err(Error::RegisterTooWide(name.to_string()));
         }
         Ok(info)
-    }
-
-    /// Program-counter advance caused by executing the arch's breakpoint
-    /// instruction (x86: 1 byte `int3`; AArch64: 4 byte `brk #0xF000`).
-    pub fn breakpoint_step_size(&self) -> u8 {
-        self.step_size
-    }
-
-    pub fn set_breakpoint_step_size(&mut self, step_size: u8) {
-        self.step_size = step_size;
     }
 
     pub fn read_u64<S>(&self, name: S, data: &[u8]) -> Result<u64>
@@ -206,10 +190,7 @@ impl RegisterMap {
     }
 
     pub fn parse_target_xml(xml: &str) -> Result<Self> {
-        let mut map = RegisterMap {
-            step_size: 1,
-            ..RegisterMap::default()
-        };
+        let mut map = RegisterMap::default();
         let mut next_regnum = 0usize;
         let mut registers = Vec::new();
 

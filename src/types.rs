@@ -155,6 +155,16 @@ impl Arch {
         }
     }
 
+    /// Bytes in the software breakpoint instruction (x86 `int3`, AArch64
+    /// `brk #0xF000`): how far the program counter must move to step past
+    /// one, and the kind an RSP `Z0` packet names.
+    pub const fn breakpoint_size(self) -> u8 {
+        match self {
+            Self::Amd64 => 1,
+            Self::Arm64 => 4,
+        }
+    }
+
     pub fn from_machine_type(machine: u16) -> Option<Self> {
         match machine {
             0x8664 => Some(Self::Amd64),

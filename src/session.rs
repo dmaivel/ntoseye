@@ -1545,7 +1545,7 @@ impl Session {
         if let Some(id) = at(ip) {
             return Some(id);
         }
-        let step = u64::from(self.register_map.breakpoint_step_size());
+        let step = u64::from(self.target.arch().breakpoint_size());
         if at(previous_ip).is_some() || ip < step {
             return None;
         }
@@ -2180,7 +2180,7 @@ impl Session {
         // breakpoint into guest memory, and memory here is read out of band
         // through the host mapping, so nothing else would ever see the
         // original instruction again.
-        let mut original = vec![0u8; usize::from(self.register_map.breakpoint_step_size())];
+        let mut original = vec![0u8; usize::from(self.target.arch().breakpoint_size())];
         if self
             .target
             .address_space(kernel_dtb)
@@ -4252,7 +4252,7 @@ pub fn rewind_thread_off_breakpoint(
     let cr3 = register_map
         .read_u64(arch.dtb_register(), &regs)
         .unwrap_or(0);
-    let Some(prev) = rip.checked_sub(register_map.breakpoint_step_size() as u64) else {
+    let Some(prev) = rip.checked_sub(u64::from(arch.breakpoint_size())) else {
         return;
     };
     if !matches!(
