@@ -1724,7 +1724,11 @@ fn is_ntoskrnl_header(header: &[u8]) -> bool {
 
 /// Whether the kernel-only, no-execute page at `frame` (mapped by `entry`)
 /// starts with the ntoskrnl image header.
-fn is_ntoskrnl_page(phys: &PhysMem, entry: PageTableEntry, frame: PhysAddr) -> Result<bool> {
+fn is_ntoskrnl_page(
+    phys: &impl MemoryOps<PhysAddr>,
+    entry: PageTableEntry,
+    frame: PhysAddr,
+) -> Result<bool> {
     if entry.is_user() || !entry.is_nx() {
         return Ok(false);
     }
@@ -1735,7 +1739,7 @@ fn is_ntoskrnl_page(phys: &PhysMem, entry: PageTableEntry, frame: PhysAddr) -> R
     Ok(is_ntoskrnl_header(&header))
 }
 
-fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>> {
+fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &impl MemoryOps<PhysAddr>) -> Result<Option<VirtAddr>> {
     const KERNEL_VA_MIN: VirtAddr = VirtAddr::from_u64(0xfffff80000000000);
     const KERNEL_VA_MAX: VirtAddr = VirtAddr::from_u64(0xfffff80800000000);
 
@@ -1759,7 +1763,10 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
             continue;
         };
 
-        let pdpte_count = if pml4_index == pml4e_count - 1 {
+        // The scan ends at KERNEL_VA_MAX (inclusive): each level is clamped
+        // only on the path that leads to it.
+        let on_last_pml4 = pml4_index == KERNEL_VA_MAX.pml4_index();
+        let pdpte_count = if on_last_pml4 {
             KERNEL_VA_MAX.pdpt_index() + 1
         } else {
             512
@@ -1782,7 +1789,8 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
                 continue;
             };
 
-            let pde_count = if pdpt_index == pdpte_count - 1 {
+            let on_last_pdpt = on_last_pml4 && pdpt_index == KERNEL_VA_MAX.pdpt_index();
+            let pde_count = if on_last_pdpt {
                 KERNEL_VA_MAX.pd_index() + 1
             } else {
                 512
@@ -1807,7 +1815,7 @@ fn find_ntoskrnl_va(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>>
                     continue;
                 };
 
-                let pte_count = if pd_index == pde_count - 1 {
+                let pte_count = if on_last_pdpt && pd_index == KERNEL_VA_MAX.pd_index() {
                     KERNEL_VA_MAX.pt_index() + 1
                 } else {
                     512
@@ -3080,13 +3088,15 @@ fn partition_first_occurrence<T, K: Eq + std::hash::Hash>(
 mod tests {
     use super::{
         IMAGE_BLOCK, ModuleExportInfo, ModuleSymbolLoadReport, PE_HEADER_PROBE, PeImage,
-        partition_first_occurrence, read_pe_exports, read_pe_header_page, read_pe_image,
+        find_ntoskrnl_va, partition_first_occurrence, read_pe_exports, read_pe_header_page,
+        read_pe_image,
     };
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
     use crate::memory::{AddressSpace, DTB_IDENTITY};
     use crate::symbols::SymbolIndexDiagnostic;
     use crate::types::{PhysAddr, VirtAddr};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3361,5 +3371,67 @@ mod tests {
     fn export_name_past_the_function_table_is_an_error() {
         let image = PeImage::complete(image_with_exports(3));
         assert!(read_pe_exports(&image, VirtAddr(0x10_0000)).is_err());
+    }
+
+    /// Physical memory holding only the 4 KiB pages written to it.
+    #[derive(Default)]
+    struct SparsePhys(HashMap<u64, Box<[u8; 0x1000]>>);
+
+    impl SparsePhys {
+        fn write_u64(&mut self, addr: u64, value: u64) {
+            let page = self
+                .0
+                .entry(addr & !0xfff)
+                .or_insert_with(|| Box::new([0; 0x1000]));
+            let at = (addr & 0xfff) as usize;
+            page[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+
+        fn write_ntoskrnl_header(&mut self, frame: u64) {
+            self.write_u64(frame, 0x0000_0090_5a4d);
+            self.write_u64(frame + 0x200, u64::from_le_bytes(*b"POOLCODE"));
+        }
+    }
+
+    impl MemoryOps<PhysAddr> for SparsePhys {
+        fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+            for (offset, byte) in buf.iter_mut().enumerate() {
+                let at = addr + offset as u64;
+                let page = self
+                    .0
+                    .get(&(at & !0xfff))
+                    .ok_or(Error::BadPhysicalAddress(at))?;
+                *byte = page[(at & 0xfff) as usize];
+            }
+            Ok(())
+        }
+
+        fn write_bytes(&self, addr: PhysAddr, _buf: &[u8]) -> Result<()> {
+            Err(Error::BadPhysicalAddress(addr))
+        }
+    }
+
+    /// The AMD64 kernel-image scan covers `0xffff_f800_0000_0000` through
+    /// `0xffff_f808_0000_0000` inclusive: an image mapped at the upper bound is
+    /// found, one mapped a slot past it is not.
+    #[test]
+    fn ntoskrnl_scan_ends_at_its_upper_bound() {
+        const DTB: u64 = 0x1000;
+        const PDPT: u64 = 0x2000;
+        // Present, writable, supervisor, large page, no-execute.
+        const KERNEL_LARGE_PAGE: u64 = 0x80 | 0b11 | (1 << 63);
+        let upper = VirtAddr(0xffff_f808_0000_0000);
+        let mut phys = SparsePhys::default();
+        phys.write_u64(DTB + 8 * upper.pml4_index() as u64, PDPT | 0b11);
+
+        let past = upper.pdpt_index() as u64 + 1;
+        phys.write_u64(PDPT + 8 * past, 0x8000_0000 | KERNEL_LARGE_PAGE);
+        phys.write_ntoskrnl_header(0x8000_0000);
+        assert_eq!(find_ntoskrnl_va(DTB, &phys).unwrap(), None);
+
+        let at_bound = upper.pdpt_index() as u64;
+        phys.write_u64(PDPT + 8 * at_bound, 0x4000_0000 | KERNEL_LARGE_PAGE);
+        phys.write_ntoskrnl_header(0x4000_0000);
+        assert_eq!(find_ntoskrnl_va(DTB, &phys).unwrap(), Some(upper));
     }
 }
