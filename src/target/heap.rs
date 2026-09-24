@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo, le_uint};
 use crate::memory::AddressSpace;
 use crate::phys::PhysMem;
-use crate::target::{DiagnosticValue, Target};
+use crate::target::{DiagnosticValue, ListCursor, Target};
 use crate::types::{Dtb, VirtAddr};
 
 pub const NT_HEAP_SIGNATURE: u32 = 0xEEFF_EEFF;
@@ -223,14 +223,11 @@ impl<'a> HeapReader<'a> {
     /// link's offset inside each record. Bounded and cycle-safe.
     fn list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<VirtAddr>> {
         let mut records = Vec::new();
-        let mut link = VirtAddr(self.read_pointer(head)?);
-        while link != head && !link.is_zero() && records.len() < MAX_LIST {
-            let record = VirtAddr(link.0.wrapping_sub(link_offset));
-            if records.contains(&record) {
-                break;
-            }
-            records.push(record);
-            link = VirtAddr(self.read_pointer(link)?);
+        let mut cursor = ListCursor::new(head, MAX_LIST);
+        cursor.advance(Ok(VirtAddr(self.read_pointer(head)?)));
+        while let Some(link) = cursor.take_current() {
+            records.push(VirtAddr(link.0.wrapping_sub(link_offset)));
+            cursor.advance(Ok(VirtAddr(self.read_pointer(link)?)));
         }
         Ok(records)
     }

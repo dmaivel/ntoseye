@@ -11,7 +11,9 @@ use crate::layout::{StructRef, TypeInfo};
 use crate::memory::PAGE_SIZE;
 use crate::types::VirtAddr;
 
-use super::{DiagnosticValue, ListTermination, Target, bounded_list_walk, fast_ref_address};
+use super::{
+    DiagnosticValue, ListCursor, ListTermination, Target, bounded_list_walk, fast_ref_address,
+};
 
 #[derive(Debug, Clone)]
 pub struct DriverObjectInfo {
@@ -594,22 +596,13 @@ impl Target {
             .filter(|s| !s.is_empty());
 
         let mut device_chain = Vec::new();
-        let mut seen = Vec::new();
-        let mut cur: VirtAddr = drv.read_field("DeviceObject")?;
-        for _ in 0..128 {
-            if cur.is_zero() || seen.contains(&cur.0) {
-                break;
-            }
-            seen.push(cur.0);
+        let mut devices = ListCursor::from_first(drv.read_field("DeviceObject")?, 128);
+        while let Some(cur) = devices.take_current() {
             let Ok(link) = self.read_device_link(cur) else {
                 break;
             };
-            let next = link.next;
+            devices.advance(Ok(link.next));
             device_chain.push(link);
-            if next.is_zero() {
-                break;
-            }
-            cur = next;
         }
 
         let mut dispatch = Vec::with_capacity(28);
@@ -672,13 +665,8 @@ impl Target {
         let attached_device: VirtAddr = dev.read_field("AttachedDevice")?;
 
         let mut attached_stack = Vec::new();
-        let mut seen = Vec::new();
-        let mut cur = attached_device;
-        for _ in 0..64 {
-            if cur.is_zero() || seen.contains(&cur.0) {
-                break;
-            }
-            seen.push(cur.0);
+        let mut devices = ListCursor::from_first(attached_device, 64);
+        while let Some(cur) = devices.take_current() {
             let Ok(d) = self.kernel_struct("_DEVICE_OBJECT", cur) else {
                 break;
             };
@@ -689,10 +677,7 @@ impl Target {
                 device_type: d.read_field("DeviceType")?,
                 flags: d.read_field("Flags")?,
             });
-            if next.is_zero() {
-                break;
-            }
-            cur = next;
+            devices.advance(Ok(next));
         }
 
         Ok(DeviceObjectDetail {
@@ -1435,14 +1420,8 @@ impl Target {
 
             // Walk the process thread list (ETHREAD.ThreadListEntry).
             let head = p.eprocess_va + head_off;
-            let mut seen_t = Vec::new();
-            let mut cur = read_ptr(head);
-            for _ in 0..4096 {
-                let Some(node) = cur else { break };
-                if node.is_zero() || node == head || seen_t.contains(&node.0) {
-                    break;
-                }
-                seen_t.push(node.0);
+            let (thread_links, _) = bounded_list_walk(head, 4096, |link| mem.read(link));
+            for node in thread_links {
                 let ethread = node - link_off;
 
                 let tid = cid_off
@@ -1452,15 +1431,9 @@ impl Target {
                 let wait = wait_off.and_then(|o| mem.read::<u8>(ethread + tcb_off + o).ok());
 
                 // Walk this thread's IrpList (IRP.ThreadListEntry).
-                let irp_head = ethread + list_off;
-                let mut seen_i = Vec::new();
-                let mut icur = read_ptr(irp_head);
-                for _ in 0..256 {
-                    let Some(inode) = icur else { break };
-                    if inode.is_zero() || inode == irp_head || seen_i.contains(&inode.0) {
-                        break;
-                    }
-                    seen_i.push(inode.0);
+                let (irp_links, _) =
+                    bounded_list_walk(ethread + list_off, 256, |link| mem.read(link));
+                for inode in irp_links {
                     let irp = inode - rec_off;
                     if let Some((sc, cl)) = self.plausible_irp(irp) {
                         out.push(IrpHit {
@@ -1477,9 +1450,7 @@ impl Target {
                             device: None,
                         });
                     }
-                    icur = read_ptr(inode);
                 }
-                cur = read_ptr(node);
             }
         }
 
@@ -1493,14 +1464,8 @@ impl Target {
                     {
                         continue;
                     }
-                    let mut seen = Vec::new();
-                    let mut cur = Some(driver.device_object);
-                    for _ in 0..256 {
-                        let Some(dev) = cur else { break };
-                        if dev.is_zero() || seen.contains(&dev.0) {
-                            break;
-                        }
-                        seen.push(dev.0);
+                    let mut devices = ListCursor::from_first(driver.device_object, 256);
+                    while let Some(dev) = devices.take_current() {
                         let current_irp = read_ptr(dev + cur_off).unwrap_or(VirtAddr(0));
                         if !current_irp.is_zero()
                             && let Some((sc, cl)) = self.plausible_irp(current_irp)
@@ -1519,7 +1484,10 @@ impl Target {
                                 device: Some(dev),
                             });
                         }
-                        cur = read_ptr(dev + next_off);
+                        devices.advance(
+                            mem.read(dev + next_off)
+                                .map_err(|error: Error| error.to_string()),
+                        );
                     }
                 }
             }
