@@ -460,8 +460,9 @@ fn process_brief_row(target: &Target, process: &ProcessInfo) -> Vec<String> {
         process,
         &[&["InheritedFromUniqueProcessId"], &["ParentCid"]],
     );
-    let session_id =
-        super::security::process_session_id(target, process.eprocess_va).map(u64::from);
+    let session_id = target
+        .process_session_id(process.eprocess_va)
+        .map(u64::from);
     vec![
         display_pointer((process.eprocess_va.0 != 0).then_some(process.eprocess_va.0)),
         display_decimal(session_id),

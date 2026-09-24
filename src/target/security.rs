@@ -689,7 +689,9 @@ impl Target {
         })
     }
 
-    fn process_session_id(&self, eprocess: VirtAddr) -> Option<u32> {
+    /// Resolve one process's session ID from its session space, falling back
+    /// to the primary token's `SessionId`.
+    pub fn process_session_id(&self, eprocess: VirtAddr) -> Option<u32> {
         let kernel_dtb = self.kernel_dtb();
         let types = self.guest().ok()?.ntoskrnl.types_in(kernel_dtb);
         let eprocess = types.struct_at("_EPROCESS", eprocess).ok()?;
@@ -834,12 +836,6 @@ impl Target {
             truncated,
         })
     }
-}
-
-/// Resolve one process's session ID using session-space metadata and the
-/// primary-token fallback used by the session inspectors.
-pub fn process_session_id(target: &Target, eprocess: VirtAddr) -> Option<u32> {
-    target.process_session_id(eprocess)
 }
 
 #[cfg(test)]

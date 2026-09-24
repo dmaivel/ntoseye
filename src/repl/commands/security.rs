@@ -6,13 +6,10 @@ use crate::error::Result;
 use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::DiagnosticValue;
-use crate::target::Target;
 use crate::target::security::{
     AclDetail, ObjectSecurityDetail, SecurityDescriptorDetail, SessionDetail,
     SessionProcessesDetail, SessionsDetail, SidDetail,
-    process_session_id as target_process_session_id,
 };
-use crate::types::VirtAddr;
 use crate::ui;
 
 const MAX_SESSION_DISPLAY: usize = 64;
@@ -323,12 +320,6 @@ fn parse_session_id(text: &str) -> Option<i64> {
             None
         }
     }
-}
-
-/// Shared by the legacy process command while session inspection migrates to
-/// the structured target API.
-pub fn process_session_id(target: &Target, eprocess: VirtAddr) -> Option<u32> {
-    target_process_session_id(target, eprocess)
 }
 
 impl ReplState<'_> {

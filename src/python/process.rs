@@ -19,7 +19,6 @@ use crate::guest::ProcessInfo;
 use crate::target::heap::HeapSelector;
 use crate::target::mm::MemoryRegionInfo;
 use crate::target::sched::ApcSelector;
-use crate::target::security::process_session_id;
 use crate::types::VirtAddr;
 use crate::view;
 
@@ -85,7 +84,7 @@ impl Process {
             let peb = eprocess.read_field::<VirtAddr>("Peb").map_err(err)?;
             Ok(ProcessDetails {
                 ppid,
-                session: process_session_id(&session.target, info.eprocess_va),
+                session: session.target.process_session_id(info.eprocess_va),
                 peb: (!peb.is_zero()).then_some(peb.0),
             })
         })
