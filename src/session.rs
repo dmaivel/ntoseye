@@ -44,7 +44,7 @@ use crate::phys::PhysMem;
 use crate::target::{ReloadReport, SelectedFrame, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
-use crate::types::{Arch, VirtAddr};
+use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackTrace, build_parked_thread_recovered_stack,
     build_parked_thread_stack, build_stacktrace, build_stacktrace_with_context,
@@ -2477,7 +2477,12 @@ impl Session {
     /// back to the original code, so every host (REPL, MCP, SDK) sees the same
     /// bytes the guest would run.
     pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        let dtb = self.target.current_dtb();
+        self.read_masked_in(self.target.current_dtb(), addr, buf)
+    }
+
+    /// [`Self::read_masked`] in the address space `dtb` rather than the
+    /// inspection one, for values that belong to a particular stack frame.
+    pub fn read_masked_in(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
         self.target.address_space(dtb).read_bytes(addr, buf)?;
         self.breakpoints
             .mask_breakpoint_bytes(&self.target, addr, buf, dtb);

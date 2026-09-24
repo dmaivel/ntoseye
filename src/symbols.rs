@@ -1431,6 +1431,19 @@ impl SymbolStore {
         );
     }
 
+    /// Answer `procedure_locals` at `rva` in the module injected under `guid`
+    /// with `locals`, for tests that drive locals without a PDB.
+    #[cfg(test)]
+    pub fn inject_procedure_locals_for_test(
+        &self,
+        guid: u128,
+        rva: u32,
+        locals: Vec<ProcedureLocal>,
+    ) {
+        self.locals_cache
+            .insert((guid, rva), Some(Arc::new(locals)));
+    }
+
     /// Register a loaded module and its C13 source-line records without a PDB,
     /// for tests that drive line-granular stepping over synthetic memory. Each
     /// record is `(rva, length, line)`; a `None` length means the next record

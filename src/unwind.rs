@@ -120,10 +120,24 @@ pub struct RecoveredFrame {
     pub frame_base: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RecoveredStackTrace {
     pub frames: Vec<RecoveredFrame>,
     pub truncated: usize,
+    /// The address space the walk read the stack and resolved symbols in
+    /// ([`ThreadTraceContext::dtb`]), which is what a frame's locals and
+    /// their values live in.
+    pub dtb: Dtb,
+}
+
+impl RecoveredStackTrace {
+    fn new(trace: &ThreadTraceContext) -> Self {
+        Self {
+            frames: Vec::new(),
+            truncated: 0,
+            dtb: trace.dtb(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,7 +704,7 @@ fn build_recovered_stacktrace_arm64(
     );
 
     let initial_registers = register_map.to_hashmap(regs);
-    let mut stacktrace = RecoveredStackTrace::default();
+    let mut stacktrace = RecoveredStackTrace::new(&trace);
     for (index, (context, source, fp)) in raw.into_iter().enumerate() {
         let mut registers;
         if index == 0 {
@@ -927,7 +941,7 @@ fn build_recovered_stacktrace_seeded(
         raw.iter().map(|(context, _, _)| context.rip),
     );
 
-    let mut stacktrace = RecoveredStackTrace::default();
+    let mut stacktrace = RecoveredStackTrace::new(trace);
     for (index, (context, source, frame_base)) in raw.into_iter().enumerate() {
         let mut registers;
         if index == 0 {
@@ -1077,6 +1091,12 @@ impl RegisterContext {
 }
 
 impl ThreadTraceContext {
+    /// The traced thread's address space: its process's page-table root when
+    /// the walk identified one, else the root it was given.
+    pub fn dtb(&self) -> Dtb {
+        self.process_dtb.unwrap_or(self.active_dtb)
+    }
+
     fn module_for_address(&self, address: u64) -> Option<OwnedModule> {
         self.kernel_modules
             .iter()
@@ -1093,7 +1113,7 @@ impl ThreadTraceContext {
                     .cloned()
                     .map(|info| OwnedModule {
                         info,
-                        dtb: self.process_dtb.unwrap_or(self.active_dtb),
+                        dtb: self.dtb(),
                     })
             })
     }

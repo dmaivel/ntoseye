@@ -174,13 +174,13 @@ The call stack uses `k`, with source lines from private PDBs. Frame names and so
 
 ### Locals, registers, and watches
 
-Locals and parameters use PDB locations, as in `dv`. Caller frames contain only registers recovered by unwinding; other values are unavailable. Local lookup uses the current inspection context, not necessarily the address space used to recover that frame, so locals may be unavailable or refer to a different module when those contexts differ.
+Locals and parameters use PDB locations, as in `dv`. Caller frames contain only registers recovered by unwinding; other values are unavailable. A frame's locals, their values, and what they expand into come from the address space its stack was recovered in, so a parked thread's frames show its own process's locals whatever `.process` selects.
 
 Structs, unions, arrays, and pointers expand through `dt` decoding. Null pointers and unresolved or zero-sized types cannot expand. Use console `dt` to inspect the raw layout.
 
 The Registers scope is `r`. Frame 0 is the live register file and is writable, while caller frames show the sparse recovered context. Under a parked Windows thread every frame is recovered, so none is writable.
 
-Watch and hover use [core expressions](usage.md#expressions), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
+Watch and hover use [core expressions](usage.md#expressions), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Expressions see the selected frame's registers but evaluate in the console's inspection context, as `?` does, so a `.process` scope applies to them. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
 
 Scalar registers, locals, struct fields, and array elements can be written in place. Bitfields and values wider than 8 bytes require console commands such as `eb` or `ed`.
 

@@ -10,7 +10,7 @@ use crate::layout::{
     nested_layout_name, primitive_size, utf16le_lossy,
 };
 use crate::session::Session;
-use crate::types::VirtAddr;
+use crate::types::{Dtb, VirtAddr};
 
 /// Default console array limit; protocol clients request bounded windows.
 pub const MAX_ARRAY_ELEMENTS: usize = 16;
@@ -25,6 +25,8 @@ const MAX_STRING_CHARS: usize = 256;
 /// A host-neutral view over PDB type layouts and the target bytes they decode.
 pub struct TypeView<'a> {
     session: &'a Session,
+    /// The address space types are resolved and values read in.
+    dtb: Dtb,
 }
 
 /// A decoded field ready for a host to present, with an optional child
@@ -67,27 +69,34 @@ pub enum Expand {
 }
 
 impl<'a> TypeView<'a> {
+    /// A view over the inspection address space, the one `dt` reads.
     pub fn new(session: &'a Session) -> Self {
-        Self { session }
+        Self::in_address_space(session, session.target.current_dtb())
     }
 
-    /// Resolve a PDB type across loaded modules using the target's current
-    /// DTB, the same lookup used by `dt` and the DAP variables tree. A
+    /// A view over the address space `dtb`, for values that belong to a
+    /// stack frame recovered in it.
+    pub fn in_address_space(session: &'a Session, dtb: Dtb) -> Self {
+        Self { session, dtb }
+    }
+
+    /// Resolve a PDB type across the modules loaded in the view's address
+    /// space, the same lookup used by `dt` and the DAP variables tree. A
     /// `module!` qualifier selects the module (`ntdll32!_PEB`).
     pub fn lookup_type(&self, type_name: &str) -> Option<Arc<TypeInfo>> {
         self.session
             .target
             .symbols
-            .find_type_across_modules(self.session.target.current_dtb(), type_name)
+            .find_type_across_modules(self.dtb, type_name)
     }
 
-    /// Resolve enum variants across loaded modules using the target's current
-    /// DTB, so enum values have the same symbolic text in every host.
+    /// Resolve enum variants across the modules loaded in the view's address
+    /// space, so enum values have the same symbolic text in every host.
     pub fn lookup_enum(&self, type_name: &str) -> Option<Vec<(String, i64)>> {
         self.session
             .target
             .symbols
-            .find_enum_across_modules(self.session.target.current_dtb(), type_name)
+            .find_enum_across_modules(self.dtb, type_name)
     }
 
     /// Compute a parsed type's byte size using the target's PDB layouts, as
@@ -360,7 +369,7 @@ impl<'a> TypeView<'a> {
         }
         let mut bytes = [0u8; 8];
         self.session
-            .read_masked(address, &mut bytes[..size])
+            .read_masked_in(self.dtb, address, &mut bytes[..size])
             .map_err(|error| error.to_string())?;
         Ok(le_uint(&bytes[..size]))
     }
@@ -375,7 +384,7 @@ impl<'a> TypeView<'a> {
         }
         let mut bytes = vec![0u8; size];
         self.session
-            .read_masked(address, &mut bytes)
+            .read_masked_in(self.dtb, address, &mut bytes)
             .map_err(|error| error.to_string())?;
         Ok(bytes)
     }

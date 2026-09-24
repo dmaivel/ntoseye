@@ -47,7 +47,7 @@ use crate::symbols::{
 use crate::target::{SelectedFrame, Target};
 use crate::termination;
 use crate::triage_report::exception_code_name;
-use crate::types::VirtAddr;
+use crate::types::{Dtb, VirtAddr};
 use crate::typeview::{Expand, FieldView, TypeView};
 use crate::{Backend, TargetSpec};
 
@@ -98,12 +98,17 @@ struct FrameRef {
     frame_base: Option<u64>,
     registers: HashMap<String, u64>,
     seed_registers: HashMap<String, u64>,
+    /// The address space the frame was recovered in, where its locals live.
+    /// A parked thread's frames belong to its own process, whatever the
+    /// console's inspection context is.
+    dtb: Dtb,
 }
 
 /// What a `variablesReference` refers to: one of a frame's scopes, or an
 /// aggregate the client opened inside one. The scopes are frame-scoped and the
 /// aggregates address the guest directly, so both die with the stop that
-/// produced them.
+/// produced them. An aggregate keeps the address space it was found in, so
+/// a frame's locals open in that frame's process.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum VarRef {
     Locals(usize),
@@ -113,6 +118,7 @@ enum VarRef {
     Fields {
         type_name: String,
         address: VirtAddr,
+        dtb: Dtb,
     },
     /// Bounded array elements of one element layout and stride.
     Elements {
@@ -120,13 +126,19 @@ enum VarRef {
         count: u32,
         element_size: usize,
         address: VirtAddr,
+        dtb: Dtb,
     },
 }
 
-impl From<Expand> for VarRef {
-    fn from(expand: Expand) -> Self {
+impl VarRef {
+    /// The reference that opens `expand`, read in the address space `dtb`.
+    fn aggregate(expand: Expand, dtb: Dtb) -> Self {
         match expand {
-            Expand::Fields { type_name, address } => Self::Fields { type_name, address },
+            Expand::Fields { type_name, address } => Self::Fields {
+                type_name,
+                address,
+                dtb,
+            },
             Expand::Elements {
                 element,
                 count,
@@ -137,6 +149,7 @@ impl From<Expand> for VarRef {
                 count,
                 element_size,
                 address,
+                dtb,
             },
         }
     }
@@ -1260,6 +1273,7 @@ impl Server {
                 frame_base: frame.frame_base,
                 registers: frame.registers.clone(),
                 seed_registers: seed.clone(),
+                dtb: recovered.dtb,
             });
         }
         Ok(())
@@ -1365,8 +1379,12 @@ impl Server {
                 let rows = self.local_variables(handle)?;
                 Self::page_rows(rows, start, requested)
             }
-            VarRef::Fields { type_name, address } if filter != "indexed" => {
-                let rows = self.field_variables(&type_name, address)?;
+            VarRef::Fields {
+                type_name,
+                address,
+                dtb,
+            } if filter != "indexed" => {
+                let rows = self.field_variables(&type_name, address, dtb)?;
                 Self::page_rows(rows, start, requested)
             }
             VarRef::Elements {
@@ -1374,12 +1392,13 @@ impl Server {
                 count,
                 element_size,
                 address,
+                dtb,
             } if filter != "named" => {
                 let window = match requested {
                     0 => MAX_VARIABLE_PAGE,
                     requested => requested.min(MAX_VARIABLE_PAGE),
                 };
-                self.element_variables(&element, count, element_size, address, start, window)
+                self.element_variables(&element, count, element_size, address, dtb, start, window)
             }
             _ => Ok(Some(json!({"variables": []}))),
         }
@@ -1450,17 +1469,19 @@ impl Server {
 
     fn local_variables(&mut self, handle: usize) -> Handled {
         let ip = self.frames[handle].ip;
+        let dtb = self.frames[handle].dtb;
         self.select_frame(handle)?;
         let views = {
             let session = self.session()?;
             let locals = session
                 .target
-                .procedure_locals(VirtAddr(ip))
+                .symbols
+                .procedure_locals(dtb, VirtAddr(ip))
                 .map_err(|error| error.to_string())?;
             let Some(locals) = locals else {
                 return Ok(Some(json!({"variables": []})));
             };
-            let view = TypeView::new(session);
+            let view = TypeView::in_address_space(session, dtb);
             locals
                 .iter()
                 .map(|local| {
@@ -1495,16 +1516,16 @@ impl Server {
                 })
                 .collect::<Vec<_>>()
         };
-        let variables = self.variable_rows(views);
+        let variables = self.variable_rows(views, dtb);
         Ok(Some(json!({"variables": variables})))
     }
 
     /// Open a struct or union: one row per field, each with the value `dt`
     /// would print and a reference of its own when it is expandable in turn.
-    fn field_variables(&mut self, type_name: &str, address: VirtAddr) -> Handled {
+    fn field_variables(&mut self, type_name: &str, address: VirtAddr, dtb: Dtb) -> Handled {
         let views = {
             let session = self.session()?;
-            let view = TypeView::new(session);
+            let view = TypeView::in_address_space(session, dtb);
             let type_info = view
                 .lookup_type(type_name)
                 .ok_or_else(|| format!("type '{type_name}' is not in the loaded symbols"))?;
@@ -1513,7 +1534,7 @@ impl Server {
                 .map(|field| (field, false))
                 .collect::<Vec<_>>()
         };
-        let variables = self.variable_rows(views);
+        let variables = self.variable_rows(views, dtb);
         Ok(Some(json!({"variables": variables})))
     }
 
@@ -1525,25 +1546,27 @@ impl Server {
         count: u32,
         element_size: usize,
         address: VirtAddr,
+        dtb: Dtb,
         start: usize,
         window: usize,
     ) -> Handled {
         let views = {
             let session = self.session()?;
-            let view = TypeView::new(session);
+            let view = TypeView::in_address_space(session, dtb);
             view.elements_from(address, element, count, element_size, start, window)
                 .into_iter()
                 .map(|field| (field, false))
                 .collect::<Vec<_>>()
         };
-        let variables = self.variable_rows(views);
+        let variables = self.variable_rows(views, dtb);
         Ok(Some(json!({"variables": variables})))
     }
 
     /// Turn neutral field views into `variables` rows, allocating a reference
-    /// for every row the client may open. An aggregate has no scalar text, so
-    /// it is labeled by what opening it yields.
-    fn variable_rows(&mut self, views: Vec<(FieldView, bool)>) -> Vec<Value> {
+    /// for every row the client may open, in the address space `dtb` the
+    /// views were read in. An aggregate has no scalar text, so it is labeled
+    /// by what opening it yields.
+    fn variable_rows(&mut self, views: Vec<(FieldView, bool)>, dtb: Dtb) -> Vec<Value> {
         let mut variables = Vec::with_capacity(views.len());
         for (field, parameter) in views {
             let value = if field.value.is_empty() {
@@ -1560,7 +1583,7 @@ impl Server {
                 _ => None,
             };
             let reference = match field.expand {
-                Some(expand) => self.var_ref(VarRef::from(expand)),
+                Some(expand) => self.var_ref(VarRef::aggregate(expand, dtb)),
                 None => 0,
             };
             let mut variable = json!({
@@ -1670,11 +1693,13 @@ impl Server {
             }
             VarRef::Locals(handle) => {
                 let ip = self.frames[handle].ip;
+                let dtb = self.frames[handle].dtb;
                 let live_frame = self.frames[handle].index == 0;
                 let session = self.session()?;
                 let locals = session
                     .target
-                    .procedure_locals(VirtAddr(ip))
+                    .symbols
+                    .procedure_locals(dtb, VirtAddr(ip))
                     .map_err(|error| error.to_string())?
                     .unwrap_or_default();
                 let local = locals
@@ -1709,7 +1734,7 @@ impl Server {
                         let bytes = value.to_le_bytes();
                         session
                             .target
-                            .context_memory()
+                            .address_space(dtb)
                             .write_bytes(VirtAddr(address), &bytes[..size])
                             .map_err(|error| error.to_string())?;
                     }
@@ -1721,11 +1746,12 @@ impl Server {
                 let session = self.session()?;
                 let refreshed = session
                     .target
-                    .procedure_locals(VirtAddr(ip))
+                    .symbols
+                    .procedure_locals(dtb, VirtAddr(ip))
                     .ok()
                     .flatten()
                     .unwrap_or_default();
-                let view = TypeView::new(session);
+                let view = TypeView::in_address_space(session, dtb);
                 let text = refreshed
                     .iter()
                     .find(|local| local.name == name)
@@ -1754,10 +1780,14 @@ impl Server {
                     .unwrap_or_else(|| format!("{value:#x}"));
                 Ok(Some(json!({"value": text})))
             }
-            VarRef::Fields { type_name, address } => {
+            VarRef::Fields {
+                type_name,
+                address,
+                dtb,
+            } => {
                 let (field_address, size, field) = {
                     let session = self.session()?;
-                    let view = TypeView::new(session);
+                    let view = TypeView::in_address_space(session, dtb);
                     let type_info = view.lookup_type(&type_name).ok_or_else(|| {
                         format!("type '{type_name}' is not in the loaded symbols")
                     })?;
@@ -1778,9 +1808,9 @@ impl Server {
                     let field_address = address + u64::from(field.offset);
                     (field_address, size, field.clone())
                 };
-                self.write_scalar(field_address, size, value)?;
+                self.write_scalar(dtb, field_address, size, value)?;
                 let session = self.session()?;
-                let view = TypeView::new(session);
+                let view = TypeView::in_address_space(session, dtb);
                 Ok(Some(
                     json!({"value": view.value_text(field_address, &field)}),
                 ))
@@ -1790,6 +1820,7 @@ impl Server {
                 count,
                 element_size,
                 address,
+                dtb,
             } => {
                 let index = element_index(&name)?;
                 if index >= count {
@@ -1804,14 +1835,14 @@ impl Server {
                 }
                 let element_address =
                     address + u64::from(index) * u64::try_from(element_size).unwrap_or(1);
-                self.write_scalar(element_address, element_size, value)?;
+                self.write_scalar(dtb, element_address, element_size, value)?;
                 let field = FieldInfo {
                     offset: 0,
                     size: element_size as u64,
                     type_data: element,
                 };
                 let session = self.session()?;
-                let view = TypeView::new(session);
+                let view = TypeView::in_address_space(session, dtb);
                 Ok(Some(
                     json!({"value": view.value_text(element_address, &field)}),
                 ))
@@ -1819,10 +1850,11 @@ impl Server {
         }
     }
 
-    /// Write `size` little-endian bytes into the guest in the current process
-    /// context. The caller has already bounded `size` to a scalar width.
+    /// Write `size` little-endian bytes into the guest in the address space
+    /// `dtb`. The caller has already bounded `size` to a scalar width.
     fn write_scalar(
         &mut self,
+        dtb: Dtb,
         address: VirtAddr,
         size: usize,
         value: u64,
@@ -1830,7 +1862,7 @@ impl Server {
         let bytes = value.to_le_bytes();
         self.session()?
             .target
-            .context_memory()
+            .address_space(dtb)
             .write_bytes(address, &bytes[..size])
             .map_err(|error| error.to_string())
     }
@@ -1913,8 +1945,11 @@ impl Server {
                 indexed_variables,
             )
         };
+        // An evaluated expression reads the inspection context, and so do
+        // its children.
+        let dtb = self.session()?.target.current_dtb();
         let reference = expansion
-            .map(|expansion| self.var_ref(VarRef::from(expansion)))
+            .map(|expansion| self.var_ref(VarRef::aggregate(expansion, dtb)))
             .unwrap_or(0);
         let mut response = json!({
             "result": result,
@@ -2246,7 +2281,9 @@ impl Server {
             VarRef::Registers(_) => {
                 Err("registers cannot be watched; watch the memory they point at".into())
             }
-            VarRef::Fields { type_name, address } => {
+            VarRef::Fields {
+                type_name, address, ..
+            } => {
                 let field_name = {
                     let session = self.session()?;
                     let view = TypeView::new(session);

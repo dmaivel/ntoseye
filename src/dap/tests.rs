@@ -132,6 +132,7 @@ fn one_object_keeps_one_reference_however_often_it_is_asked_for() {
         count: COUNT,
         element_size: 8,
         address: VirtAddr(0x1000),
+        dtb,
     });
     let page = |server: &mut Server| {
         let body = server
@@ -377,6 +378,7 @@ fn a_console_context_change_invalidates_the_clients_view() {
         frame_base: None,
         registers: HashMap::new(),
         seed_registers: HashMap::new(),
+        dtb: 0,
     });
     server.vars.push(VarRef::Locals(0));
 
@@ -414,6 +416,7 @@ fn stack_frames_use_recovered_symbol_and_source_metadata() {
         frame_base: None,
         registers: HashMap::new(),
         seed_registers: HashMap::new(),
+        dtb: 0,
     });
 
     let frame = server.frame_value(0);
@@ -422,6 +425,57 @@ fn stack_frames_use_recovered_symbol_and_source_metadata() {
     assert_eq!(frame["line"], 42);
     assert_eq!(frame["column"], 7);
     assert_eq!(frame["source"]["origin"], "recorded as C:\\build\\driver.c");
+}
+
+/// A frame's locals live where the frame was recovered. A parked thread's
+/// stack is walked in its own process, which need not be the console's
+/// inspection context.
+#[test]
+fn locals_come_from_the_address_space_the_frame_was_recovered_in() {
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let inspection_dtb = session.target.current_dtb();
+    let process_dtb = 0x1a_b000;
+    assert_ne!(inspection_dtb, process_dtb);
+    session.target.symbols.set_kernel(Some(1), inspection_dtb);
+    session
+        .target
+        .symbols
+        .register_module_for_test(2, "driver", process_dtb);
+    let base = 0x3000_0000;
+    session.target.symbols.inject_procedure_locals_for_test(
+        2,
+        0x10,
+        vec![ProcedureLocal {
+            name: "count".to_string(),
+            type_name: "ULONG".to_string(),
+            type_data: ParsedType::Primitive("ULONG".to_string()),
+            byte_size: Some(4),
+            is_parameter: false,
+            location: LocalVariableLocation::Register {
+                register: "rbx".to_string(),
+            },
+        }],
+    );
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let ip = base + 0x10;
+    server.frames.push(FrameRef {
+        thread: 1,
+        index: 1,
+        ip,
+        sp: 0x2000,
+        symbol: "driver!Routine+0x10".to_string(),
+        source_location: None,
+        frame_base: None,
+        registers: HashMap::from([("rip".to_string(), ip), ("rbx".to_string(), 0x2a)]),
+        seed_registers: HashMap::new(),
+        dtb: process_dtb,
+    });
+
+    let locals = rows(server.local_variables(0).unwrap());
+
+    let value = row(&locals, "count")["value"].as_str().unwrap();
+    assert!(value.starts_with("0x2a"), "{value}");
 }
 
 #[test]
@@ -540,6 +594,7 @@ fn disconnect_releases_the_target_before_answering() {
 fn variable_windows_follow_the_requested_page_and_filter() {
     let memory: Vec<u8> = (0..64u8).collect();
     let session = session_over_memory(0x1000, &memory);
+    let dtb = session.target.current_dtb();
     let (_tx, rx) = mpsc::channel();
     let (mut server, _sink) = server_with_sink(Some(session), rx);
     let elements = server.var_ref(VarRef::Elements {
@@ -547,6 +602,7 @@ fn variable_windows_follow_the_requested_page_and_filter() {
         count: 64,
         element_size: 1,
         address: VirtAddr(0x1000),
+        dtb,
     });
 
     let page = |server: &mut Server, args: Value| -> Vec<(String, String)> {
@@ -603,9 +659,11 @@ fn variable_windows_follow_the_requested_page_and_filter() {
 #[test]
 fn named_children_honor_the_requested_window() {
     let mut server = server_with_node_layout();
+    let dtb = inspection_dtb(&server);
     let fields = server.var_ref(VarRef::Fields {
         type_name: "_NODE".to_string(),
         address: VirtAddr(0x1000),
+        dtb,
     });
 
     let all = rows(
@@ -691,6 +749,10 @@ fn server_with_node_layout() -> Server {
     )
 }
 
+fn inspection_dtb(server: &Server) -> Dtb {
+    server.session.as_ref().unwrap().target.current_dtb()
+}
+
 fn rows(body: Option<Value>) -> Vec<Value> {
     body.unwrap()["variables"].as_array().unwrap().clone()
 }
@@ -705,7 +767,12 @@ fn row<'a>(rows: &'a [Value], name: &str) -> &'a Value {
 fn structs_open_into_field_rows_with_decoded_values() {
     let mut server = server_with_node_layout();
 
-    let fields = rows(server.field_variables("_NODE", VirtAddr(0x1000)).unwrap());
+    let dtb = inspection_dtb(&server);
+    let fields = rows(
+        server
+            .field_variables("_NODE", VirtAddr(0x1000), dtb)
+            .unwrap(),
+    );
 
     assert_eq!(row(&fields, "Value")["value"], "0x2a");
     assert_eq!(row(&fields, "Value")["memoryReference"], "0x1000");
@@ -760,7 +827,12 @@ fn evaluated_members_read_values_but_data_watches_select_storage() {
 #[test]
 fn a_pointer_row_opens_its_pointee_and_a_null_one_does_not() {
     let mut server = server_with_node_layout();
-    let fields = rows(server.field_variables("_NODE", VirtAddr(0x1000)).unwrap());
+    let dtb = inspection_dtb(&server);
+    let fields = rows(
+        server
+            .field_variables("_NODE", VirtAddr(0x1000), dtb)
+            .unwrap(),
+    );
 
     // A null pointer has nothing to open: an expander arrow there would
     // lead to an empty list the user cannot tell from an empty struct.
@@ -780,6 +852,7 @@ fn a_pointer_row_opens_its_pointee_and_a_null_one_does_not() {
 #[test]
 fn stale_and_unknown_references_are_refused_rather_than_answered_empty() {
     let mut server = server_with_node_layout();
+    let dtb = inspection_dtb(&server);
 
     assert!(
         server
@@ -788,7 +861,7 @@ fn stale_and_unknown_references_are_refused_rather_than_answered_empty() {
     );
     assert!(
         server
-            .field_variables("_MISSING", VirtAddr(0x1000))
+            .field_variables("_MISSING", VirtAddr(0x1000), dtb)
             .is_err()
     );
 }
