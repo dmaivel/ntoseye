@@ -170,11 +170,11 @@ When the command line already pinned a target (`ntoseye dap --dump crash.dmp`), 
 
 DAP threads are backend execution contexts (vCPUs), as listed by `~`. Stops halt the whole target and set `allThreadsStopped`. Inspect Windows threads with `!process`, `!stacks`, and `!thread`; parked `_ETHREAD`s cannot be stepped or resumed.
 
-The call stack uses `k`, with source lines from private PDBs. `.thread <ethread>` selects a parked Windows thread’s saved context. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
+The call stack uses `k`, with source lines from private PDBs. Frame names and source lines retain the address space used to recover each frame, including a parked thread's process address space. `.thread <ethread>` selects a parked Windows thread’s saved context. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
 
 ### Locals, registers, and watches
 
-Locals and parameters use PDB locations, as in `dv`. Caller frames contain only registers recovered by unwinding; other values are unavailable.
+Locals and parameters use PDB locations, as in `dv`. Caller frames contain only registers recovered by unwinding; other values are unavailable. Local lookup uses the current inspection context, not necessarily the address space used to recover that frame, so locals may be unavailable or refer to a different module when those contexts differ.
 
 Structs, unions, arrays, and pointers expand through `dt` decoding. Null pointers and unresolved or zero-sized types cannot expand. Use console `dt` to inspect the raw layout.
 

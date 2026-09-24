@@ -372,6 +372,8 @@ fn a_console_context_change_invalidates_the_clients_view() {
         index: 0,
         ip: 0x1000,
         sp: 0x2000,
+        symbol: "0x1000".to_string(),
+        source_location: None,
         frame_base: None,
         registers: HashMap::new(),
         seed_registers: HashMap::new(),
@@ -388,6 +390,38 @@ fn a_console_context_change_invalidates_the_clients_view() {
         json!(["stacks", "variables", "registers"])
     );
     assert!(server.frames.is_empty() && server.vars.is_empty());
+}
+
+#[test]
+fn stack_frames_use_recovered_symbol_and_source_metadata() {
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(None, rx);
+    server.lines_start_at_1 = true;
+    server.columns_start_at_1 = true;
+    server.frames.push(FrameRef {
+        thread: 1,
+        index: 0,
+        ip: 0x1234,
+        sp: 0x2000,
+        symbol: "driver!RecoveredRoutine+0x4".to_string(),
+        source_location: Some(SourceLocation {
+            file: r"C:\build\driver.c".to_string(),
+            line: 42,
+            column: Some(7),
+            local_path: None,
+            local_exists: false,
+        }),
+        frame_base: None,
+        registers: HashMap::new(),
+        seed_registers: HashMap::new(),
+    });
+
+    let frame = server.frame_value(0);
+
+    assert_eq!(frame["name"], "driver!RecoveredRoutine+0x4");
+    assert_eq!(frame["line"], 42);
+    assert_eq!(frame["column"], 7);
+    assert_eq!(frame["source"]["origin"], "recorded as C:\\build\\driver.c");
 }
 
 #[test]

@@ -90,6 +90,8 @@ struct FrameRef {
     index: usize,
     ip: u64,
     sp: u64,
+    symbol: String,
+    source_location: Option<SourceLocation>,
     frame_base: Option<u64>,
     registers: HashMap<String, u64>,
     seed_registers: HashMap<String, u64>,
@@ -1250,6 +1252,8 @@ impl Server {
                 index,
                 ip: frame.frame.ip,
                 sp: frame.frame.sp,
+                symbol: frame.frame.symbol.clone(),
+                source_location: frame.frame.source_location.clone(),
                 frame_base: frame.frame_base,
                 registers: frame.registers.clone(),
                 seed_registers: seed.clone(),
@@ -1259,31 +1263,16 @@ impl Server {
     }
 
     fn frame_value(&mut self, handle: usize) -> Value {
-        let (ip, name) = {
-            let session = self.session.as_ref();
-            let frame = &self.frames[handle];
-            let name = session
-                .map(|session| {
-                    session
-                        .target
-                        .closest_symbol_current_context(VirtAddr(frame.ip))
-                })
-                .unwrap_or(None)
-                .unwrap_or_else(|| format!("{:#x}", frame.ip));
-            (frame.ip, name)
-        };
-        let location = self
-            .session
-            .as_ref()
-            .and_then(|session| session.target.source_location(VirtAddr(ip)));
+        let frame = &self.frames[handle];
+        let ip = frame.ip;
         let mut value = json!({
             "id": handle as i64 + 1,
-            "name": name,
+            "name": frame.symbol,
             "line": 0,
             "column": 0,
             "instructionPointerReference": format!("{ip:#x}"),
         });
-        if let Some(location) = &location {
+        if let Some(location) = &frame.source_location {
             value["line"] = json!(self.to_client_line(location.line as i64));
             value["column"] = json!(
                 location
