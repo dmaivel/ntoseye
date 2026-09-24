@@ -589,6 +589,12 @@ pub fn decimal_pid_literal(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
+/// Object pointer held in an `EX_FAST_REF`; the low four bits carry the
+/// cached reference count, not address bits.
+pub fn fast_ref_address(raw: u64) -> VirtAddr {
+    VirtAddr(raw & !0xf)
+}
+
 /// `KTHREAD.State` of a thread whose kernel stack has been freed.
 pub const KTHREAD_STATE_TERMINATED: u8 = 4;
 

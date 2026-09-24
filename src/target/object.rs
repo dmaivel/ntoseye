@@ -11,7 +11,7 @@ use crate::layout::{StructRef, TypeInfo};
 use crate::memory::PAGE_SIZE;
 use crate::types::VirtAddr;
 
-use super::{DiagnosticValue, ListTermination, Target, bounded_list_walk};
+use super::{DiagnosticValue, ListTermination, Target, bounded_list_walk, fast_ref_address};
 
 #[derive(Debug, Clone)]
 pub struct DriverObjectInfo {
@@ -1253,7 +1253,7 @@ impl Target {
                 if raw.is_zero() {
                     continue;
                 }
-                let block = VirtAddr(raw.0 & !0xf);
+                let block = fast_ref_address(raw.0);
                 if block.is_zero() {
                     continue;
                 }

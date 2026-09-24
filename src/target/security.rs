@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{StructRef, TypeInfo};
 use crate::symbols::glob_matches;
-use crate::target::{DiagnosticValue, Target};
+use crate::target::{DiagnosticValue, Target, fast_ref_address};
 use crate::types::VirtAddr;
 
 const MAX_SESSION_PROCESSES: usize = 4096;
@@ -673,7 +673,7 @@ impl Target {
             .types()
             .struct_at("_OBJECT_HEADER", header.header)?;
         let fast_reference = object_header.read_field::<u64>("SecurityDescriptor")?;
-        let descriptor_address = VirtAddr(fast_reference & !0xf);
+        let descriptor_address = fast_ref_address(fast_reference);
         let descriptor = if descriptor_address.is_zero() {
             None
         } else {
@@ -704,9 +704,9 @@ impl Target {
         }
 
         let token = eprocess
-            .read_field::<VirtAddr>("Token")
+            .read_field::<u64>("Token")
             .ok()
-            .map(|address| VirtAddr(address.0 & !0xf))
+            .map(fast_ref_address)
             .filter(|address| !address.is_zero())?;
         let token = types.struct_at("_TOKEN", token).ok()?;
         token.read_field::<u32>("SessionId").ok()
@@ -1012,7 +1012,7 @@ impl Target {
         let eprocess_layout = types.layout("_EPROCESS")?;
         let raw_token: u64 =
             self.read_layout_field(&eprocess_layout, process.eprocess_va, "Token")?;
-        let token = VirtAddr(raw_token & !0xf);
+        let token = fast_ref_address(raw_token);
         if token.is_zero() {
             return Err(Error::DebugInfo("_EPROCESS.Token is null".to_string()));
         }

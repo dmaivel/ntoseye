@@ -16,8 +16,8 @@ use crate::memory::PAGE_SIZE;
 use crate::symbols::{ModuleSymbolStatus, glob_matches};
 use crate::target::mm::MemoryRegionInfo;
 use crate::target::{
-    AttachReport, Target, ThreadInfo, decimal_pid_literal, kthread_state_name, process_matches,
-    wait_reason_name,
+    AttachReport, Target, ThreadInfo, decimal_pid_literal, fast_ref_address, kthread_state_name,
+    process_matches, wait_reason_name,
 };
 use crate::triage_report::filetime_to_iso;
 use crate::types::VirtAddr;
@@ -246,10 +246,6 @@ fn display_pointer(value: Option<u64>) -> String {
         .filter(|value| *value != 0)
         .map(ui::addr)
         .unwrap_or_else(|| "-".to_string())
-}
-
-fn masked_fast_ref(value: Option<u64>) -> Option<u64> {
-    value.map(|value| value & !0xf)
 }
 
 fn thread_state_label(thread: &ThreadInfo) -> String {
@@ -481,7 +477,7 @@ fn process_brief_row(target: &Target, process: &ProcessInfo) -> Vec<String> {
 }
 
 fn print_process_detail(target: &Target, process: &ProcessInfo) {
-    let token = masked_fast_ref(process_field(target, process, &[&["Token"]]));
+    let token = process_field(target, process, &[&["Token"]]).map(|raw| fast_ref_address(raw).0);
     let vm = |field| process_field(target, process, &[&["Vm", field], &[field]]);
     let quota_paged = process_field(
         target,

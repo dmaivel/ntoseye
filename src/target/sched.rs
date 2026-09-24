@@ -12,7 +12,9 @@ use crate::guest::ProcessInfo;
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{ParsedType, TypeInfo};
 use crate::session::Session;
-use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk};
+use crate::target::{
+    DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
+};
 use crate::types::VirtAddr;
 use crate::unwind::{StackFrame, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
 
@@ -1448,8 +1450,8 @@ impl Target {
         };
 
         // KTHREAD.Process (KPROCESS* == EPROCESS base) first; ThreadsProcess
-        // (older builds) and ProcessFastRef (EX_FAST_REF, refcount in low 4
-        // bits) are build-specific fallbacks.
+        // (older builds) and ProcessFastRef (EX_FAST_REF) are build-specific
+        // fallbacks.
         let eprocess = read_kthread_ptr("Process")
             .or_else(|| read_ethread_ptr("ThreadsProcess"))
             .or_else(|| {
@@ -1457,7 +1459,7 @@ impl Target {
                     .field_offset("ProcessFastRef")
                     .ok()
                     .and_then(|offset| memory.read::<u64>(ethread + offset).ok())
-                    .map(|raw| VirtAddr(raw & !0xf))
+                    .map(fast_ref_address)
                     .filter(|addr| !addr.is_zero())
             });
 
