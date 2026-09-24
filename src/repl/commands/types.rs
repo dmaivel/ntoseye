@@ -404,16 +404,25 @@ impl ReplState<'_> {
         Ok(ResolvedFieldPath { components })
     }
 
+    /// The address of the path's last field, and that field with its offset
+    /// taken from the struct it is read out of: the `dt` root, or the target
+    /// of the last pointer the path follows.
     fn runtime_field_address(
         &self,
         base: VirtAddr,
         path: &ResolvedFieldPath,
     ) -> std::result::Result<(VirtAddr, FieldInfo), String> {
         let mut current = base;
+        let mut offset = 0u32;
         for (index, component) in path.components.iter().enumerate() {
             let field_address = current + component.info.offset as u64;
+            offset = offset.saturating_add(component.info.offset);
             if index + 1 == path.components.len() {
-                return Ok((field_address, component.info.clone()));
+                let field = FieldInfo {
+                    offset,
+                    ..component.info.clone()
+                };
+                return Ok((field_address, field));
             }
             if matches!(component.info.type_data, ParsedType::Pointer(_)) {
                 let pointer = self.type_view().read_display_uint(
@@ -424,6 +433,7 @@ impl ReplState<'_> {
                     return Err(format!("field `{}` points to null", component.name));
                 }
                 current = VirtAddr(pointer);
+                offset = 0;
             } else {
                 current = field_address;
             }
@@ -471,15 +481,15 @@ impl ReplState<'_> {
             return Err("field path is empty".to_string());
         };
         let mut link_offset = 0u64;
-        if named_type(&last.info.type_data, "_LIST_ENTRY") {
-            link_offset = last.info.offset as u64;
-            return Ok((link_offset, link_offset, 8));
-        }
         for component in &path.components[..path.components.len() - 1] {
             if matches!(component.info.type_data, ParsedType::Pointer(_)) {
                 return Err("list field path cannot pass through a pointer".to_string());
             }
             link_offset = link_offset.saturating_add(component.info.offset as u64);
+        }
+        if named_type(&last.info.type_data, "_LIST_ENTRY") {
+            let entry_offset = link_offset.saturating_add(last.info.offset as u64);
+            return Ok((entry_offset, entry_offset, 8));
         }
         let next_offset = link_offset.saturating_add(last.info.offset as u64);
         let pointer_size = self.type_view().field_size(&last.info).clamp(1, 8);
@@ -972,7 +982,10 @@ mod tests {
         // its ABI layout.
         let (result, text) = capture(|| state.dispatch_line("dt _NODE 1000 Links.blink"));
         result.unwrap();
-        assert!(text.contains("Links.blink : <?>* = 0x1000"), "{text}");
+        assert!(
+            text.contains("+0x028 Links.blink : <?>* = 0x1000"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1038,6 +1051,45 @@ mod tests {
             vec![VirtAddr(0x1010), VirtAddr(0x1030), VirtAddr(0x7ff0)]
         );
         assert!(matches!(termination, ListTermination::Corrupt(_)));
+    }
+
+    #[test]
+    fn a_nested_list_link_is_offset_from_the_record_start() {
+        let mut session = session_over_memory(0x1000, &[0u8; 0x10]);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        let layout = |name: &str, field: &str, offset, type_name: &str| TypeInfo {
+            name: name.to_string(),
+            pointer_size: 8,
+            size: 0x40,
+            fields: [(
+                field.to_string(),
+                FieldInfo {
+                    offset,
+                    size: 0x10,
+                    type_data: ParsedType::Struct(type_name.to_string()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![
+                layout("_OUTER", "Inner", 0x10, "_INNER"),
+                layout("_INNER", "Links", 0x8, "_LIST_ENTRY"),
+            ],
+            &[],
+        );
+        let state = ReplState::for_oneshot(&mut session);
+        let outer = state.lookup_type("_OUTER").unwrap();
+
+        // Naming the entry and naming its Flink find the same link.
+        for path in ["Inner.Links", "Inner.Links.Flink"] {
+            let path: Vec<String> = parse_field_path(path).unwrap();
+            let resolved = state.resolve_field_path(&outer, &path).unwrap();
+            assert_eq!(state.list_offsets(&resolved), Ok((0x18, 0x18, 8)));
+        }
     }
 
     #[test]
