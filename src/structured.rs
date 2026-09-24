@@ -251,9 +251,8 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
             let detail = args.target().inspect_irql(processor)?;
             Ok(view::cpu::irql(&detail))
         }),
-        "!idt" | "idt" => args.opt_value(0).and_then(|vector| {
+        "!idt" | "idt" => args.opt_u16_value(0, "IDT vector").and_then(|vector| {
             let processor = args.current_processor();
-            let vector = vector.map(|v| v as u16);
             let detail = args.state.ctx.inspect_idt(processor, vector)?;
             Ok(view::cpu::idt(&detail))
         }),
@@ -277,10 +276,8 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
                 .inspect_running(include_idle, include_stacks)
                 .map(|detail| view::sched::running(&detail))
         }
-        "!ready" | "ready" => args.opt_value(0).and_then(|processor| {
-            let detail = args
-                .target()
-                .inspect_ready_queues(processor.map(|p| p as u16))?;
+        "!ready" | "ready" => args.opt_u16_value(0, "processor").and_then(|processor| {
+            let detail = args.target().inspect_ready_queues(processor)?;
             Ok(view::sched::ready_queues(&detail))
         }),
         "!dpcs" | "dpcs" => args
@@ -549,6 +546,12 @@ impl Args<'_, '_> {
         Ok(self.opt_addr(index)?.map(|value| value.0))
     }
 
+    fn opt_u16_value(&self, index: usize, what: &str) -> Result<Option<u16>> {
+        self.opt_value(index)?
+            .map(|value| checked_u16(value, what))
+            .transpose()
+    }
+
     fn value(&self, index: usize) -> Result<u64> {
         self.addr(index).map(|value| value.0)
     }
@@ -560,8 +563,7 @@ impl Args<'_, '_> {
     /// An optional processor-index argument, defaulting to the current vCPU's.
     fn processor(&self, index: usize) -> Result<u16> {
         Ok(self
-            .opt_value(index)?
-            .map(|value| value as u16)
+            .opt_u16_value(index, "processor")?
             .unwrap_or_else(|| self.current_processor()))
     }
 
@@ -656,5 +658,24 @@ impl Args<'_, '_> {
             })
             .map(|driver| driver.object)
             .ok_or_else(|| Error::DebugInfo(format!("no driver object named '{text}'")))
+    }
+}
+
+fn checked_u16(value: u64, what: &str) -> Result<u16> {
+    u16::try_from(value)
+        .map_err(|_| Error::InvalidArgument(format!("{what} {value} is out of range")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_u16_arguments_reject_overflow_without_truncating() {
+        assert_eq!(checked_u16(u16::MAX.into(), "processor").unwrap(), u16::MAX);
+        assert!(matches!(
+            checked_u16(0x1_0000, "IDT vector"),
+            Err(Error::InvalidArgument(_))
+        ));
     }
 }
