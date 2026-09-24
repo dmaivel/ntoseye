@@ -472,13 +472,11 @@ fn run_command(
 
     let page = actor.ctx.read_debug_output(actor.debug_seq);
     actor.debug_seq = page.next_seq;
-    let debug_output = match view::to_json(&view::debug_log(&page)) {
-        serde_json::Value::Object(mut map) => match map.remove("lines") {
-            Some(serde_json::Value::Array(lines)) => lines,
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
-    };
+    let debug_output = page
+        .lines
+        .iter()
+        .map(|line| view::to_json(&view::debug_log_line(line)))
+        .collect();
     CommandOutput {
         ok: remote.ok,
         text: remote.text,

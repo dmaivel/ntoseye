@@ -8,7 +8,7 @@ pub mod security;
 pub mod usermode;
 
 use crate::bugchecks::{BugcheckAnalysis, BugcheckTrapFrame};
-use crate::dbg_backend::{BackendCapability, DebugOutputPage};
+use crate::dbg_backend::{BackendCapability, DebugLine, DebugOutputPage};
 use crate::disasm::DisasmRow;
 use crate::dmp::{DmpException, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
 use crate::exception_policy::{ExceptionPolicy, ExceptionPolicyFinalAction, exception_alias};
@@ -520,23 +520,25 @@ pub fn vcpu(v: &VcpuInfo) -> View {
 
 /// A page of captured guest debug output plus the cursor for the next poll.
 pub fn debug_log(page: &DebugOutputPage) -> View {
-    let lines = page
-        .lines
-        .iter()
-        .map(|l| {
-            View::Object(vec![
-                ("seq", View::Num(l.seq)),
-                ("timestamp_ms", View::Num(l.timestamp_ms)),
-                ("text", View::Str(l.text.clone())),
-            ])
-        })
-        .collect();
     View::Object(vec![
-        ("lines", View::List(lines)),
+        (
+            "lines",
+            View::List(page.lines.iter().map(debug_log_line).collect()),
+        ),
         ("next_seq", View::Num(page.next_seq)),
         ("dropped", View::Bool(page.dropped)),
     ])
 }
+
+/// One captured guest debug output line.
+pub fn debug_log_line(line: &DebugLine) -> View {
+    View::Object(vec![
+        ("seq", View::Num(line.seq)),
+        ("timestamp_ms", View::Num(line.timestamp_ms)),
+        ("text", View::Str(line.text.clone())),
+    ])
+}
+
 /// A decoded bugcheck (BSOD): code/name/description, its four parameters, and the
 /// faulting instruction when one was identified.
 pub fn bugcheck(a: &BugcheckAnalysis) -> View {
