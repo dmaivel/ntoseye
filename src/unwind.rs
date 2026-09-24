@@ -300,7 +300,8 @@ pub fn try_format_symbol(
 
     if let Some(module) = trace.module_for_address(addr) {
         return Some(try_format(module.dtb).unwrap_or_else(|| {
-            // TODO lazily load module symbols on stop so user return addresses resolve past module+offset.
+            // The module has no PDB, or ensure_frame_module_symbols has not
+            // loaded it yet (a background fetch may still be running).
             let offset = addr.saturating_sub(module.info.base_address.0);
             format!("{}+{:#x}", module.info.short_name, offset)
         }));
