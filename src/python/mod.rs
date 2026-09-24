@@ -13,7 +13,7 @@ use std::time::Duration;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyList, PyType};
+use pyo3::types::{PyDict, PyList, PyType};
 
 #[cfg(all(feature = "cli", feature = "python-extension"))]
 use crate::cli;
@@ -21,7 +21,7 @@ use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::session::Session;
 use crate::target::meta::decode_error_code;
-use crate::view::{self, View};
+use crate::view::{self, PyShape, View};
 use crate::{Backend, TargetSpec};
 
 pub mod args;
@@ -159,7 +159,7 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
 /// Render a neutral [`View`] object into a [`Record`] (the shared shape with
 /// the MCP surface; here addresses come through as ints, there as hex).
 pub fn view_record<'py>(py: Python<'py>, v: &View) -> PyResult<Bound<'py, Record>> {
-    view::to_py(py, v)?
+    view::to_py(py, v, PyShape::Records)?
         .cast_into::<Record>()
         .map_err(|e| raise(e.to_string()))
 }
@@ -167,12 +167,15 @@ pub fn view_record<'py>(py: Python<'py>, v: &View) -> PyResult<Bound<'py, Record
 /// Render a neutral [`View`] object as a plain `dict`: an entity's `to_dict()`
 /// is the shape MCP renders for it.
 pub fn view_dict<'py>(py: Python<'py>, v: &View) -> PyResult<PlainDict<'py>> {
-    view_record(py, v)?.get().to_dict(py)
+    view::to_py(py, v, PyShape::Plain)?
+        .cast_into::<PyDict>()
+        .map(PlainDict)
+        .map_err(|e| raise(e.to_string()))
 }
 
 /// Render a neutral [`View`] list of objects into [`Record`]s.
 pub fn view_records<'py>(py: Python<'py>, v: &View) -> PyResult<Vec<Bound<'py, Record>>> {
-    view::to_py(py, v)?
+    view::to_py(py, v, PyShape::Records)?
         .cast_into::<PyList>()
         .map_err(|e| raise(e.to_string()))?
         .iter()

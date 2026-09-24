@@ -126,11 +126,24 @@ pub fn to_json(v: &View) -> serde_json::Value {
     }
 }
 
+/// How [`to_py`] renders objects and diagnostics.
+#[cfg(feature = "python")]
+#[derive(Clone, Copy)]
+pub enum PyShape {
+    /// [`Record`](crate::python::record::Record)s and
+    /// [`Diagnostic`](crate::python::record::Diagnostic)s with attribute access.
+    Records,
+    /// Plain `dict`s throughout, the shape `to_dict()` returns: a diagnostic
+    /// becomes `{available, value, error[, source]}` as in [`to_json`].
+    Plain,
+}
+
 /// Render a [`View`] to a Python object (the SDK): addresses become plain ints.
 #[cfg(feature = "python")]
 pub fn to_py<'py>(
     py: pyo3::Python<'py>,
     v: &View,
+    shape: PyShape,
 ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
     use crate::python::record::{Diagnostic, Record};
     use pyo3::IntoPyObjectExt;
@@ -157,7 +170,7 @@ pub fn to_py<'py>(
         View::List(items) => {
             let list = PyList::empty(py);
             for item in items {
-                list.append(to_py(py, item)?)?;
+                list.append(to_py(py, item, shape)?)?;
             }
             list.into_any()
         }
@@ -168,23 +181,41 @@ pub fn to_py<'py>(
                 if matches!(val, View::Hex(_) | View::OptHex(Some(_))) {
                     hex.push(*key);
                 }
-                dict.set_item(key, to_py(py, val)?)?;
+                dict.set_item(key, to_py(py, val, shape)?)?;
             }
-            Bound::new(py, Record::new(dict.unbind(), hex))?.into_any()
+            match shape {
+                PyShape::Records => Bound::new(py, Record::new(dict.unbind(), hex))?.into_any(),
+                PyShape::Plain => dict.into_any(),
+            }
         }
-        View::Diagnostic(diagnostic) => Bound::new(
-            py,
-            Diagnostic {
-                value: match &diagnostic.value {
-                    Some(value) => to_py(py, value)?.unbind(),
-                    None => py.None(),
-                },
-                hex: matches!(diagnostic.value, Some(View::Hex(_) | View::OptHex(Some(_)))),
-                error: diagnostic.error.clone(),
-                source: diagnostic.source.clone(),
-            },
-        )?
-        .into_any(),
+        View::Diagnostic(diagnostic) => {
+            let value = match &diagnostic.value {
+                Some(value) => to_py(py, value, shape)?,
+                None => py.None().into_bound(py),
+            };
+            match shape {
+                PyShape::Records => Bound::new(
+                    py,
+                    Diagnostic {
+                        value: value.unbind(),
+                        hex: matches!(diagnostic.value, Some(View::Hex(_) | View::OptHex(Some(_)))),
+                        error: diagnostic.error.clone(),
+                        source: diagnostic.source.clone(),
+                    },
+                )?
+                .into_any(),
+                PyShape::Plain => {
+                    let dict = PyDict::new(py);
+                    dict.set_item("available", diagnostic.error.is_none())?;
+                    dict.set_item("value", value)?;
+                    dict.set_item("error", diagnostic.error.as_deref())?;
+                    if let Some(source) = &diagnostic.source {
+                        dict.set_item("source", source.as_deref())?;
+                    }
+                    dict.into_any()
+                }
+            }
+        }
     })
 }
 
