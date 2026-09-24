@@ -60,6 +60,8 @@ Arithmetic and comparisons are unsigned `u64` operations. The one exception is `
 
 Registers take `@rax`, or a bare `rax` that a source local or module symbol of the same name shadows, including subregisters like `@eax` and `@ah`. Pseudo-registers take `$name` or WinDbg's `@$name`. The set is `$ip`, `$scopeip`, `$ra`, `$csp`, `$retreg`, `$proc`, `$thread`, `$teb`, `$tid`, `$tpid`, `$frame`, `$ptrsize`, `$pagesize`, `$exp`, `$exr_code`, `$peb`, `$exentry`, `$bug_code` with `$bug_param1`-`$bug_param4`, the twenty user slots `$t0`-`$t19`, and this debugger's own `$dtb`, `$ntbase`, and result slots `$0`-`$N`. `vars` lists what is currently available.
 
+When a Windows thread is selected, `vars` also lists available thread pseudo-registers: `$thread`, `$ethread`, `$kthread`, `$tid`, `$pid`, `$proc`, `$process`, `$eprocess`, `$teb`, `$threadstart`, `$startaddress`, `$win32start`, `$win32startaddress`, `$kernelstack`, `$stackbase`, `$stacklimit`, `$trapframe`, `$priority`, `$basepriority`, `$waitirql`, `$stackresident`, and `$kernelstackresident`.
+
 `$ra` is the caller of the current scope, recovered with one unwind step, so `g @$ra` runs to the return address, and `.frame 2` followed by `? $ra` names frame 3.
 
 `$bug_code` and `$bug_param1`-`$bug_param4` read `nt!KiBugCheckData` and stay zero until the target bugchecks. `!analyze` decodes the same array. `$exr_code` is the exception code of the current stop's record (`.lastevent`), and a pause or step stop carries no exception record, which leaves it absent.

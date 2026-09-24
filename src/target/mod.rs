@@ -402,34 +402,110 @@ impl ThreadInfo {
     /// the two apart is what lets the evaluator say "not available here"
     /// instead of "no such register".
     pub fn pseudo_register(&self, name: &str) -> Option<Option<u64>> {
-        let value = match name.to_ascii_lowercase().as_str() {
-            "thread" | "ethread" => Some(self.ethread.0),
-            "kthread" => Some(self.kthread.0),
-            "tid" => self.tid,
-            "pid" => self.pid,
-            "proc" | "process" | "eprocess" => self.eprocess.map(|addr| addr.0),
-            "teb" => self.teb.map(|addr| addr.0),
-            "threadstart" | "startaddress" => self.start_address.map(|addr| addr.0),
-            "win32start" | "win32startaddress" => self.win32_start_address.map(|addr| addr.0),
-            "kernelstack" => self.kernel_stack.map(|addr| addr.0),
-            "stackbase" => self.stack_base.map(|addr| addr.0),
-            "stacklimit" => self.stack_limit.map(|addr| addr.0),
-            "trapframe" => self.trap_frame.map(|addr| addr.0),
-            "priority" => self.priority.map(u64::from),
-            "basepriority" => self.base_priority.map(u64::from),
-            "waitirql" => self.wait_irql.map(u64::from),
-            "stackresident" | "kernelstackresident" => {
-                self.kernel_stack_resident.map(|resident| resident as u64)
-            }
-            _ => return None,
-        };
-        Some(value)
+        let register = THREAD_PSEUDO_REGISTERS.iter().find(|register| {
+            register
+                .names
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(name))
+        })?;
+        Some((register.read)(self))
     }
 
     pub fn pseudo_register_value(&self, name: &str) -> Option<u64> {
         self.pseudo_register(name).flatten()
     }
 }
+
+/// A thread pseudo-register: the names it answers to, the `vars` source
+/// text, and the thread state it reads.
+struct ThreadPseudoRegister {
+    names: &'static [&'static str],
+    source: &'static str,
+    read: fn(&ThreadInfo) -> Option<u64>,
+}
+
+const THREAD_PSEUDO_REGISTERS: &[ThreadPseudoRegister] = &[
+    ThreadPseudoRegister {
+        names: &["thread", "ethread"],
+        source: "current Windows ETHREAD",
+        read: |thread| Some(thread.ethread.0),
+    },
+    ThreadPseudoRegister {
+        names: &["kthread"],
+        source: "current Windows KTHREAD",
+        read: |thread| Some(thread.kthread.0),
+    },
+    ThreadPseudoRegister {
+        names: &["tid"],
+        source: "current Windows TID",
+        read: |thread| thread.tid,
+    },
+    ThreadPseudoRegister {
+        names: &["pid"],
+        source: "current Windows PID",
+        read: |thread| thread.pid,
+    },
+    ThreadPseudoRegister {
+        names: &["proc", "process", "eprocess"],
+        source: "current thread EPROCESS",
+        read: |thread| thread.eprocess.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["teb"],
+        source: "current thread TEB",
+        read: |thread| thread.teb.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["threadstart", "startaddress"],
+        source: "current thread start address",
+        read: |thread| thread.start_address.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["win32start", "win32startaddress"],
+        source: "current thread Win32 start address",
+        read: |thread| thread.win32_start_address.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["kernelstack"],
+        source: "current thread kernel stack",
+        read: |thread| thread.kernel_stack.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["stackbase"],
+        source: "current thread stack base",
+        read: |thread| thread.stack_base.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["stacklimit"],
+        source: "current thread stack limit",
+        read: |thread| thread.stack_limit.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["trapframe"],
+        source: "current thread trap frame",
+        read: |thread| thread.trap_frame.map(|address| address.0),
+    },
+    ThreadPseudoRegister {
+        names: &["priority"],
+        source: "current thread priority",
+        read: |thread| thread.priority.map(u64::from),
+    },
+    ThreadPseudoRegister {
+        names: &["basepriority"],
+        source: "current thread base priority",
+        read: |thread| thread.base_priority.map(u64::from),
+    },
+    ThreadPseudoRegister {
+        names: &["waitirql"],
+        source: "current thread wait IRQL",
+        read: |thread| thread.wait_irql.map(u64::from),
+    },
+    ThreadPseudoRegister {
+        names: &["stackresident", "kernelstackresident"],
+        source: "current thread kernel stack residency",
+        read: |thread| thread.kernel_stack_resident.map(u64::from),
+    },
+];
 fn thread_owner_matches(thread: &ThreadInfo, process: &ProcessInfo) -> bool {
     match thread.eprocess {
         Some(eprocess) => eprocess == process.eprocess_va,
@@ -1845,61 +1921,15 @@ impl Target {
         }
 
         if let Some(thread) = &self.windows_thread_selection {
-            let mut push = |name, value: Option<u64>, source| {
-                if let Some(value) = value {
-                    vars.push(BuiltinVar {
+            for register in THREAD_PSEUDO_REGISTERS {
+                if let Some(value) = (register.read)(thread) {
+                    vars.extend(register.names.iter().map(|&name| BuiltinVar {
                         name,
                         value,
-                        source,
-                    });
+                        source: register.source,
+                    }));
                 }
-            };
-            push("thread", Some(thread.ethread.0), "current Windows ETHREAD");
-            push("ethread", Some(thread.ethread.0), "current Windows ETHREAD");
-            push("kthread", Some(thread.kthread.0), "current Windows KTHREAD");
-            push("tid", thread.tid, "current Windows TID");
-            push("pid", thread.pid, "current Windows PID");
-            push(
-                "eprocess",
-                thread.eprocess.map(|addr| addr.0),
-                "current thread EPROCESS",
-            );
-            push(
-                "process",
-                thread.eprocess.map(|addr| addr.0),
-                "current thread EPROCESS",
-            );
-            push("teb", thread.teb.map(|addr| addr.0), "current thread TEB");
-            push(
-                "threadstart",
-                thread.start_address.map(|addr| addr.0),
-                "current thread start address",
-            );
-            push(
-                "win32start",
-                thread.win32_start_address.map(|addr| addr.0),
-                "current thread Win32 start address",
-            );
-            push(
-                "kernelstack",
-                thread.kernel_stack.map(|addr| addr.0),
-                "current thread kernel stack",
-            );
-            push(
-                "stackbase",
-                thread.stack_base.map(|addr| addr.0),
-                "current thread stack base",
-            );
-            push(
-                "stacklimit",
-                thread.stack_limit.map(|addr| addr.0),
-                "current thread stack limit",
-            );
-            push(
-                "trapframe",
-                thread.trap_frame.map(|addr| addr.0),
-                "current thread trap frame",
-            );
+            }
         }
 
         vars
@@ -2605,6 +2635,62 @@ mod tests {
         thread.teb = None;
         assert_eq!(thread.pseudo_register_value("TEB"), None);
         assert_eq!(thread.pseudo_register_value("unknown"), None);
+    }
+
+    #[test]
+    fn thread_pseudo_register_inventory_matches_lookup_names() {
+        const NAMES: &[&str] = &[
+            "thread",
+            "ethread",
+            "kthread",
+            "tid",
+            "pid",
+            "proc",
+            "process",
+            "eprocess",
+            "teb",
+            "threadstart",
+            "startaddress",
+            "win32start",
+            "win32startaddress",
+            "kernelstack",
+            "stackbase",
+            "stacklimit",
+            "trapframe",
+            "priority",
+            "basepriority",
+            "waitirql",
+            "stackresident",
+            "kernelstackresident",
+        ];
+        let thread = sample_thread();
+        let mut session = session_over_memory(0x1000, &[0u8; 0x80]);
+        session
+            .target
+            .set_current_windows_thread_context(thread.clone());
+        let variables = session.target.builtin_variables();
+
+        for name in NAMES {
+            let value = thread
+                .pseudo_register_value(name)
+                .unwrap_or_else(|| panic!("{name} should resolve for the sample thread"));
+            assert_eq!(session.target.builtin_variable_value(name), Some(value));
+            assert!(
+                variables
+                    .iter()
+                    .any(|variable| variable.name == *name && variable.value == value),
+                "{name} should be listed with its resolved value"
+            );
+        }
+        for variable in variables.iter().filter(|variable| {
+            variable.source.starts_with("current Windows")
+                || variable.source.starts_with("current thread")
+        }) {
+            assert_eq!(
+                session.target.builtin_variable_value(variable.name),
+                Some(variable.value)
+            );
+        }
     }
 
     #[test]
