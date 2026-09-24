@@ -46,39 +46,41 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 
 # Getting started
 
-## Install via shell script
+## Install
+
+### Shell script
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dmaivel/ntoseye/releases/latest/download/ntoseye-installer.sh | sh
 ```
 
-Prebuilt release binaries include the CLI and MCP server but have no Python, so they cannot run [custom commands](docs/sdk.md#repl-custom-commands) written in Python. Install with `uv tool install ntoseye` or `cargo install ntoseye` for those.
+The prebuilt binaries have no Python, so they cannot run [custom commands](docs/sdk.md#repl-custom-commands).
 
-## Install via uv or pipx
+### uv or pipx
 
 ```bash
 uv tool install ntoseye    # or: pipx install ntoseye
 ```
 
-The Python package installs the `ntoseye` command (CLI, MCP, DAP, and gdbserver) with custom commands, alongside the [Python SDK](docs/sdk.md). It runs on any Python 3.9 or newer, on Linux (x86-64, ARM64) and Apple Silicon macOS.
+Installs the `ntoseye` command with support for custom commands, in its own environment. Requires Python 3.9 or newer, on Linux (x86-64, ARM64) or Apple Silicon macOS.
 
-## Install via cargo
+### cargo
 
 ```bash
 cargo install ntoseye
 ```
 
-`cargo install` and default source builds embed Python for custom commands and link against the local Python installation.
+`cargo install` and default source builds embed Python and link against the local Python installation.
 
-## Install the Python SDK
+### Python SDK
 
-For standalone debugger automation from Python on Linux or Apple Silicon macOS:
+To drive the debugger from your own Python code, install the same package into your project's environment:
 
 ```bash
 pip install ntoseye
 ```
 
-The Python package exposes the debugger through `import ntoseye`, and also installs the `ntoseye` command. See the [Python SDK documentation](docs/sdk.md).
+This also puts the `ntoseye` command in that environment. See the [Python SDK documentation](docs/sdk.md).
 
 ## Building
 
@@ -103,12 +105,7 @@ If you are using QEMU/KVM, VMware, or UTM, you can use `ntoseye configure` for e
 1. Power off the Windows VM.
 2. Run `ntoseye configure` and select the hypervisor, virtual machine, and debugger backend. Note the `Run` command it prints.
 3. Start the VM, run the printed guest setup commands in Administrator PowerShell, and reboot.
-4. On Linux, allow `ntoseye` to inspect the hypervisor process. This resets on reboot:
-   ```bash
-   echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
-   ```
-   Alternatively, prefix the printed `Run` command with `sudo`.
-5. Run the command saved in step 2.
+4. Run the command saved in step 2.
 
 Run `ntoseye status` at any time to inspect configured transports, assigned guest ports, endpoints, and launch commands without changing a VM.
 
