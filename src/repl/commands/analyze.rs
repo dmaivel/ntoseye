@@ -6,7 +6,7 @@ use crate::expr::{Expr, NumberRadix};
 use crate::target::{Target, wait_reason_name};
 use crate::triage_report::{
     BlackboxState, FailureSignatureSource, TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState,
-    exception_code_name, filetime_to_iso,
+    exception_code_name, time::filetime_to_iso,
 };
 use crate::ui;
 

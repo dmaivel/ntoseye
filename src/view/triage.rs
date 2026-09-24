@@ -11,7 +11,7 @@ use crate::triage_report::{
     BlackboxFinding, BlackboxKind, BlackboxState, CulpritAttribution, CulpritConfidence,
     CulpritEvidenceKind, FailureCodeKind, FailureSignature, FailureSignatureSource, TriageReport,
     VerifierFinding, WheaFinding, WheaRecordState, WheaSectionKind, exception_code_name,
-    filetime_to_iso,
+    time::filetime_to_iso,
 };
 
 pub fn dump_exception(exception: &DmpException) -> View {

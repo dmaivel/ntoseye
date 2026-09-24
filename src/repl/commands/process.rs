@@ -19,7 +19,7 @@ use crate::target::{
     AttachReport, Target, ThreadInfo, decimal_pid_literal, kthread_state_name, process_matches,
     wait_reason_name,
 };
-use crate::triage_report::filetime_to_iso;
+use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
 

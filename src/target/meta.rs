@@ -12,7 +12,7 @@ use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::session::Session;
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target};
-use crate::triage_report::filetime_to_iso;
+use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 
 const VERIFIER_LEVEL_FLAGS: &[(u64, &str)] = &[
