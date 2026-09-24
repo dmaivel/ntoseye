@@ -1,4 +1,15 @@
+use super::cache::{ModuleIdentities, ModuleIdentity, PdbReference};
+use super::download::local_source_candidates;
+use super::index_build::{insert_symbol_rva, undecorate_x86};
+use super::locals::live_range_contains;
+use super::lookup::preferred_symbol_records;
+use super::source::{SourceFileQuery, lookup_source_line, remap_source_file};
 use super::*;
+use crate::backend::MemoryOps;
+use crate::error::Result;
+use crate::types::{Arch, PhysAddr};
+use std::io::Write;
+use std::path::Path;
 
 #[test]
 fn symbol_path_parser_supports_local_http_and_srv_syntax() {

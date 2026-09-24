@@ -9,7 +9,7 @@ use crate::{
     phys::PhysMem,
     symbols::{
         DownloadJob, ModuleSymbolDiscovery, ModuleSymbolLoad, ModuleSymbolSource,
-        ModuleSymbolStatus, SymbolIndexDiagnostic, SymbolStore, download_jobs_parallel,
+        ModuleSymbolStatus, SymbolIndexDiagnostic, SymbolStore, download::download_jobs_parallel,
     },
     types::*,
 };
