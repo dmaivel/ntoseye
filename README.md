@@ -52,7 +52,15 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dmaivel/ntoseye/releases/latest/download/ntoseye-installer.sh | sh
 ```
 
-Prebuilt release binaries include the CLI and MCP server but omit embedded Python for portability. Use a Cargo or source build for [in-REPL Python commands](docs/sdk.md); the standalone `pip install ntoseye` SDK needs neither.
+Prebuilt release binaries include the CLI and MCP server but have no Python, so they cannot run [custom commands](docs/sdk.md#repl-custom-commands) written in Python. Install with `uv tool install ntoseye` or `cargo install ntoseye` for those.
+
+## Install via uv or pipx
+
+```bash
+uv tool install ntoseye    # or: pipx install ntoseye
+```
+
+The Python package installs the `ntoseye` command (CLI, MCP, DAP, and gdbserver) with custom commands, alongside the [Python SDK](docs/sdk.md). It runs on any Python 3.9 or newer, on Linux (x86-64, ARM64) and Apple Silicon macOS.
 
 ## Install via cargo
 
@@ -60,7 +68,7 @@ Prebuilt release binaries include the CLI and MCP server but omit embedded Pytho
 cargo install ntoseye
 ```
 
-`cargo install` and default source builds enable embedded Python and link against the local Python installation.
+`cargo install` and default source builds embed Python for custom commands and link against the local Python installation.
 
 ## Install the Python SDK
 
@@ -70,7 +78,7 @@ For standalone debugger automation from Python on Linux or Apple Silicon macOS:
 pip install ntoseye
 ```
 
-The Python package exposes the debugger through `import ntoseye`; it does not install the `ntoseye` CLI. See the [Python SDK documentation](docs/sdk.md).
+The Python package exposes the debugger through `import ntoseye`, and also installs the `ntoseye` command. See the [Python SDK documentation](docs/sdk.md).
 
 ## Building
 

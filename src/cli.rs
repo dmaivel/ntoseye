@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use owo_colors::OwoColorize;
+use std::ffi::OsString;
 use std::mem::take;
 
 use std::path::PathBuf;
@@ -257,13 +258,22 @@ Windows ARM64 is supported (machine 0xAA64). Secure Boot must be
 disabled for bcdedit /debug on to work.";
 
 pub fn main() {
-    if let Err(e) = run() {
-        diagnostics::print_error(e);
-        std::process::exit(1);
+    std::process::exit(run_with_args(std::env::args_os()));
+}
+
+/// Run the CLI on `args` (the program name first) and return the process
+/// exit status. The wheel's `ntoseye` script calls this with `sys.argv`.
+pub fn run_with_args(args: impl IntoIterator<Item = OsString>) -> i32 {
+    match run(Cli::parse_from(args)) {
+        Ok(()) => 0,
+        Err(error) => {
+            diagnostics::print_error(error);
+            1
+        }
     }
 }
 
-fn run() -> Result<()> {
+fn run(cli: Cli) -> Result<()> {
     let Cli {
         version,
         gdbstub_instructions,
@@ -271,7 +281,7 @@ fn run() -> Result<()> {
         plain_repl,
         target: mut args,
         command,
-    } = Cli::parse();
+    } = cli;
     if version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());

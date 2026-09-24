@@ -42,7 +42,6 @@ use crate::output::log_input_line;
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::session::Session;
-#[cfg(feature = "cli")]
 use crate::symbols::ntoseye_home;
 #[cfg(feature = "cli")]
 use crate::target::Target;
@@ -385,6 +384,34 @@ impl ReplStore {
     }
 }
 
+/// Where custom command scripts live (`~/.ntoseye/commands/`).
+pub fn commands_dir() -> Option<PathBuf> {
+    ntoseye_home().map(|home| home.join("commands"))
+}
+
+/// Custom commands are Python, which this build lacks: say so when the
+/// commands directory holds scripts, instead of ignoring them silently.
+#[cfg(not(feature = "python"))]
+pub fn print_python_commands_notice() {
+    let Some(dir) = commands_dir() else {
+        return;
+    };
+    let scripts = std::fs::read_dir(&dir).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "py"))
+            .count()
+    });
+    if scripts > 0 {
+        let plural = if scripts == 1 { "" } else { "s" };
+        diagnostics::print_warning(format!(
+            "{} has {scripts} Python command script{plural}, which this build cannot run; \
+             `uv tool install ntoseye` (or `pipx install ntoseye`) installs an ntoseye that can",
+            dir.display()
+        ));
+    }
+}
+
 /// The user-command completion set: the registered Python commands when the
 /// binary embeds Python (`python-embed`), else empty.
 pub fn initial_user_commands() -> Vec<(String, String, Vec<CompletionStrategy>)> {
@@ -609,6 +636,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     }
     #[cfg(feature = "python")]
     embed::print_script_load_failures(&py_report);
+    #[cfg(not(feature = "python"))]
+    print_python_commands_notice();
     print_alias_load_failures(&alias_report);
 
     // Triage dumps may lack the ntoskrnl PE header needed for full kernel

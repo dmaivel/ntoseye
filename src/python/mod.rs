@@ -6,6 +6,8 @@
 //! [`handle::Debugger::with_session`], and scoped work goes through
 //! [`context::in_context`], so the user's REPL selection is never disturbed.
 
+#[cfg(all(feature = "cli", feature = "python-extension"))]
+use std::ffi::OsString;
 use std::time::Duration;
 
 use pyo3::exceptions::PyValueError;
@@ -13,6 +15,8 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyList, PyType};
 
+#[cfg(all(feature = "cli", feature = "python-extension"))]
+use crate::cli;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::session::Session;
@@ -233,6 +237,17 @@ fn decode_error(py: Python<'_>, code: u64) -> PyResult<Bound<'_, Record>> {
     view_record(py, &view::meta::error_code(&decode_error_code(code)))
 }
 
+/// Run the `ntoseye` command line on `sys.argv` and return its exit status:
+/// the wheel's `ntoseye` script. The GIL is released for the whole session;
+/// custom commands take it back while they run.
+#[cfg(all(feature = "cli", feature = "python-extension"))]
+#[pyfunction]
+#[pyo3(name = "_cli_main")]
+fn cli_main(py: Python<'_>) -> PyResult<i32> {
+    let argv: Vec<OsString> = py.import("sys")?.getattr("argv")?.extract()?;
+    Ok(py.detach(|| cli::run_with_args(argv)))
+}
+
 // The one list of what the SDK exports: the wheel's `PyInit__ntoseye`, the
 // REPL's embedded interpreter, and PyO3's introspection (the generated
 // `_ntoseye.pyi`) all read it. Exceptions and the package re-exports live in
@@ -243,6 +258,9 @@ fn decode_error(py: Python<'_>, code: u64) -> PyResult<Bound<'_, Record>> {
 pub mod _ntoseye {
     #[pymodule_export]
     use super::breakpoints::{Breakpoint, Breakpoints, Exceptions, Watchpoint};
+    #[cfg(all(feature = "cli", feature = "python-extension"))]
+    #[pymodule_export]
+    use super::cli_main;
     #[pymodule_export]
     use super::handle::Debugger;
     #[pymodule_export]

@@ -2061,6 +2061,13 @@ class _StopContext:
     Rust-only snapshot backing the shared properties of a typed stop.
     """
 
+def _cli_main() -> int:
+    """
+    Run the `ntoseye` command line on `sys.argv` and return its exit status:
+    the wheel's `ntoseye` script. The GIL is released for the whole session;
+    custom commands take it back while they run.
+    """
+
 def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connect: str |None = None, key: str |None = None, memory_source: Literal["auto", "host", "kd"] = ...) -> Debugger:
     """
     Attach to a guest and return a `Debugger`.

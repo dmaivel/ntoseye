@@ -1,6 +1,6 @@
 # Python SDK
 
-The `ntoseye` package exposes debugger introspection and run control to standalone Python programs. The native wheel is self-contained and does not require the `ntoseye` CLI or an embedded Python build. The type stubs ship with the package, generated from the extension itself; editor completion, type checkers, and docstrings describe the API.
+The `ntoseye` package exposes debugger introspection and run control to standalone Python programs. The native wheel is self-contained: it needs no separately installed `ntoseye`, and installs the `ntoseye` command itself. The type stubs ship with the package, generated from the extension itself; editor completion, type checkers, and docstrings describe the API.
 
 ## Install
 
@@ -115,7 +115,7 @@ All SDK exceptions derive from `ntoseye.NtoseyeError`. `MemoryAccessError` repor
 
 ## REPL custom commands
 
-Custom commands run inside the CLI's REPL session rather than attaching a second debugger. Put a `*.py` file in `~/.ntoseye/commands/`; scripts are loaded at startup, and `reload-scripts` picks up edits. This requires a build with the embedded interpreter; prebuilt release archives omit it. `ntoseye.repl` provides command decorators, completion markers, and the borrowed `Debugger` type.
+Custom commands run inside the CLI's REPL session rather than attaching a second debugger. Put a `*.py` file in `~/.ntoseye/commands/`; scripts are loaded at startup, and `reload-scripts` picks up edits. They run in the `ntoseye` command the Python package installs (`uv tool install ntoseye` or `pipx install ntoseye`) and in `cargo install` builds, which embed Python. The prebuilt release archives have no Python: they list the scripts they skipped and how to get a build that runs them. `ntoseye.repl` provides command decorators, completion markers, and the borrowed `Debugger` type.
 
 ```python
 import ntoseye.repl as repl

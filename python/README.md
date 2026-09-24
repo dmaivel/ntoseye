@@ -1,11 +1,13 @@
-# ntoseye (Python SDK)
+# ntoseye
 
 Drive the [ntoseye](https://github.com/dmaivel/ntoseye) Windows kernel debugger
-from Python.
+from Python, and run it from the command line.
 
 The standalone SDK uses the 0.37 API; see [`docs/sdk.md`](../docs/sdk.md) for
-address-space-bound views, run control, and the 0.36 migration table. The wheel
-does not install the `ntoseye` CLI.
+address-space-bound views, run control, and the 0.36 migration table. The
+package also installs the `ntoseye` command (the REPL, `ntoseye mcp`, `dap`,
+and `gdbserver`), which runs Python custom commands from
+`~/.ntoseye/commands/`: `uv tool install ntoseye` or `pipx install ntoseye`.
 
 ## Install
 

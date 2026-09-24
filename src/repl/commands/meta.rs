@@ -130,6 +130,8 @@ impl ReplState<'_> {
             embed::print_script_load_report(&py_report);
             *self.caches.user_commands.write().unwrap() = initial_user_commands();
         }
+        #[cfg(not(feature = "python"))]
+        print_python_commands_notice();
         let alias_report = self.reload_aliases();
         print_alias_load_report(&alias_report);
         Ok(())

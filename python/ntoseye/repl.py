@@ -1,9 +1,9 @@
 """REPL command scripting helpers for ntoseye.
 
-Command scripts in `~/.ntoseye/commands/` import this module; the REPL runs
-this same file in its embedded interpreter and supplies `register_command`.
-Under a plain Python interpreter `register_command` raises, so a command
-script run outside the REPL fails clearly.
+Command scripts in `~/.ntoseye/commands/` import this module. Inside the
+REPL (the `ntoseye` command this package installs, or a build with embedded
+Python) `register_command` is the REPL's own; anywhere else it raises, so a
+command script run outside the REPL fails clearly.
 """
 
 from __future__ import annotations

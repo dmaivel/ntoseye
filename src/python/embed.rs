@@ -6,19 +6,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyString, PyTuple};
+#[cfg(feature = "python-embed")]
+use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyModule, PyString, PyTuple};
+#[cfg(feature = "python-embed")]
 use pyo3::wrap_pymodule;
 
 use crate::diagnostics;
-use crate::repl::CompletionStrategy;
+use crate::repl::{CompletionStrategy, commands_dir};
 use crate::session::Session;
-use crate::symbols::ntoseye_home;
 
-use super::{_ntoseye, Debugger};
+#[cfg(feature = "python-embed")]
+use super::_ntoseye;
+use super::Debugger;
 
 /// The package's own Python, run in the embedded interpreter as `ntoseye`
 /// and `ntoseye.repl`, so REPL command scripts and the wheel share one copy.
+#[cfg(feature = "python-embed")]
 const PACKAGE_INIT: &str = include_str!("../../python/ntoseye/__init__.py");
+#[cfg(feature = "python-embed")]
 const PACKAGE_REPL: &str = include_str!("../../python/ntoseye/repl.py");
 
 /// Outcome of loading the python commands dir: names registered, and per-file
@@ -84,13 +90,27 @@ fn register_command(
     });
 }
 
-/// Install the `ntoseye` package in the embedded interpreter, once: the
-/// extension module as `ntoseye._ntoseye`, the REPL's `register_command` as
-/// `ntoseye._repl_host`, and the package's Python sources over them. It takes
-/// precedence over a wheel on the embedded interpreter's `sys.path`, so a
+/// Make `ntoseye.repl` usable by command scripts, once: the REPL's
+/// `register_command` becomes `ntoseye._repl_host`. Run from the wheel's
+/// `ntoseye` script, the package is the installed one. An embedding binary
+/// installs its own copy over any wheel on the interpreter's `sys.path`, so a
 /// script always sees the SDK of the REPL it runs in.
 fn install_package(py: Python<'_>) -> PyResult<()> {
     let modules = py.import("sys")?.getattr("modules")?;
+    if !modules.contains("ntoseye._repl_host")? {
+        let host = PyModule::new(py, "ntoseye._repl_host")?;
+        host.add_function(wrap_pyfunction!(register_command, &host)?)?;
+        modules.set_item("ntoseye._repl_host", &host)?;
+    }
+    #[cfg(feature = "python-embed")]
+    embed_package(py, &modules)?;
+    Ok(())
+}
+
+/// Install the extension module as `ntoseye._ntoseye` and the package's
+/// Python sources over it.
+#[cfg(feature = "python-embed")]
+fn embed_package(py: Python<'_>, modules: &Bound<'_, PyAny>) -> PyResult<()> {
     // `ntoseye.repl` is registered last, once everything under it is in
     // place, so a script never sees a half-installed package.
     if modules.contains("ntoseye.repl")? {
@@ -98,10 +118,6 @@ fn install_package(py: Python<'_>) -> PyResult<()> {
     }
     let native = wrap_pymodule!(_ntoseye)(py);
     modules.set_item("ntoseye._ntoseye", native)?;
-    let host = PyModule::new(py, "ntoseye._repl_host")?;
-    host.add_function(wrap_pyfunction!(register_command, &host)?)?;
-    modules.set_item("ntoseye._repl_host", &host)?;
-
     let package = PyModule::new(py, "ntoseye")?;
     package.setattr("__path__", PyList::empty(py))?;
     // Registered before it runs: its relative imports resolve through it.
@@ -114,6 +130,7 @@ fn install_package(py: Python<'_>) -> PyResult<()> {
 }
 
 /// Run `source` as the body of `module`, a module of the `ntoseye` package.
+#[cfg(feature = "python-embed")]
 fn run_source(module: &Bound<'_, PyModule>, source: &str) -> PyResult<()> {
     module.setattr("__package__", "ntoseye")?;
     run_code(module.py(), source, &module.dict())
@@ -144,10 +161,6 @@ pub fn command_list() -> Vec<(String, String, Vec<CompletionStrategy>)> {
 /// Whether a command name is registered.
 pub fn has_command(name: &str) -> bool {
     REGISTRY.lock().unwrap().iter().any(|r| r.name == name)
-}
-
-fn commands_dir() -> Option<PathBuf> {
-    ntoseye_home().map(|r| r.join("commands"))
 }
 
 /// Clear the registry and (re-)execute every `*.py` in the python commands dir
