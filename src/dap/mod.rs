@@ -73,6 +73,9 @@ const MAX_VARIABLE_PAGE: usize = 1024;
 /// Bound client-controlled disassembly buffers, matching console `u`.
 const MAX_DISASSEMBLE_INSTRUCTIONS: usize = 4096;
 
+/// Why a request that needs a target cannot be served.
+const NO_TARGET: &str = "no target is attached; send a launch or attach request";
+
 /// Whether the guest is running, halted, or the client has detached.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RunState {
@@ -478,9 +481,7 @@ impl Server {
     }
 
     fn session(&mut self) -> result::Result<&mut Session, String> {
-        self.session
-            .as_mut()
-            .ok_or_else(|| "no target is attached; send a launch or attach request".to_string())
+        self.session.as_mut().ok_or_else(|| NO_TARGET.to_string())
     }
 
     fn dispatch(&mut self, request: Request) {
@@ -1410,37 +1411,31 @@ impl Server {
 
     fn register_variables(&mut self, handle: usize) -> Handled {
         self.select_frame(handle)?;
-        let frame_index = self.frames[handle].index;
-        let snapshot = self.frames[handle].registers.clone();
-        let session = self.session()?;
+        let frame = &self.frames[handle];
+        let session = self.session.as_mut().ok_or(NO_TARGET)?;
         // Frame 0 is the live register file, so read it rather than the
         // snapshot taken when the stack was walked: a write (`setVariable`, or
         // `r rax=...` in the console) then shows up immediately. Caller frames
         // keep their recovered snapshot, which is all unwind metadata
         // justifies, and so does a parked Windows thread, which has no live
         // file at all.
-        let live_context = frame_index == 0 && session.parked_windows_thread().is_none();
+        let live_context = frame.index == 0 && session.parked_windows_thread().is_none();
         let live = live_context
             .then(|| session.read_registers().ok())
             .flatten();
-        let (values, wide): (_, HashMap<String, u128>) = match &live {
-            Some(registers) => (
-                session.register_map.to_hashmap(registers),
-                session
-                    .register_map
-                    .wide_values(registers)
-                    .into_iter()
-                    .collect(),
-            ),
-            None => (snapshot, HashMap::new()),
-        };
+        let map = &session.register_map;
         let mut variables = Vec::new();
-        for name in session.register_map.names().iter() {
-            let value = if let Some(value) = values.get(name.as_str()) {
-                format!("{value:#018x}")
-            } else if let Some(value) = wide.get(name.as_str()) {
-                format!("{value:#034x}")
-            } else {
+        for register in map.registers() {
+            let name = register.name.as_str();
+            let value = match (&live, register.size) {
+                (Some(file), 0..=8) => map.read_u64(name, file).ok().map(|v| format!("{v:#018x}")),
+                (Some(file), 9..=16) => {
+                    map.read_u128(name, file).ok().map(|v| format!("{v:#034x}"))
+                }
+                (Some(_), _) => None,
+                (None, _) => frame.registers.get(name).map(|v| format!("{v:#018x}")),
+            };
+            let Some(value) = value else {
                 continue;
             };
             variables.push(json!({
