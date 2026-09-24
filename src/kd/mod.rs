@@ -897,7 +897,6 @@ impl MemoryOps<PhysAddr> for KdMemory {
 
 impl KdBackend {
     /// Connect to a KDCOM serial pipe and stop at the initial state-change.
-    /// Connect to a KDCOM serial pipe and stop at the initial state-change.
     /// Connection progress (the wait for a target can run for a minute) is
     /// reported one line at a time through `progress`.
     pub fn connect(socket_path: &str, progress: &mut dyn FnMut(&str)) -> Result<Self> {
