@@ -1849,19 +1849,12 @@ impl Guest {
             .map(|s| s.address());
 
         let mut processes = Vec::new();
-        let mut visited = HashSet::new();
-
-        let mut current_eprocess = ps_initial_system_process;
 
         // Cycle detection handles a corrupt list that loops; the cap handles
         // one that wanders through unrelated memory without repeating.
         const PROCESS_WALK_LIMIT: usize = 65_536;
-        while processes.len() < PROCESS_WALK_LIMIT {
-            if current_eprocess.0 == 0 || visited.contains(&current_eprocess.0) {
-                break;
-            }
-            visited.insert(current_eprocess.0);
-
+        let mut cursor = ListCursor::from_first(ps_initial_system_process, PROCESS_WALK_LIMIT);
+        while let Some(current_eprocess) = cursor.take_current() {
             span.read(&memory, current_eprocess)?;
             let dtb = span.dtb();
             if dtb == 0 {
@@ -1880,15 +1873,13 @@ impl Guest {
                 wow64_peb: self.wow64_peb(dtb, span.wow64_process()),
             });
 
+            // PsActiveProcessHead is not embedded in an EPROCESS, so reaching
+            // it ends the walk before the link becomes a record address.
             let flink = span.active_process_links_flink();
-            if flink.0 == 0 || Some(flink) == ps_active_process_head {
+            if flink.is_zero() || Some(flink) == ps_active_process_head {
                 break;
             }
-
-            current_eprocess = flink - span.active_process_links_offset;
-            if current_eprocess == ps_initial_system_process {
-                break;
-            }
+            cursor.advance(Ok(flink - span.active_process_links_offset));
         }
 
         Ok(processes)
