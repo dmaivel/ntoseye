@@ -246,7 +246,7 @@ impl Module {
         let info = self.info.clone();
         let view = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
-            Ok(view::module_symbols(&session.target, &info, dtb))
+            Ok(view::module::module_symbols(&session.target, &info, dtb))
         })?;
         view_record(py, &view)
     }
@@ -294,11 +294,14 @@ impl Module {
                     })?;
                 Ok(view::usermode::loader_module(module))
             } else {
-                let mut fields = match view::module(&info) {
+                let mut fields = match view::module::module(&info) {
                     View::Object(fields) => fields,
                     _ => unreachable!(),
                 };
-                fields.push(("symbols", view::module_symbols(&session.target, &info, dtb)));
+                fields.push((
+                    "symbols",
+                    view::module::module_symbols(&session.target, &info, dtb),
+                ));
                 Ok(View::Object(fields))
             }
         })?;
@@ -314,7 +317,7 @@ impl Module {
                 .reload_module_symbols(Some(&name))
                 .map_err(err)
         })?;
-        view_record(py, &view::module_symbol_report(&report))
+        view_record(py, &view::module::module_symbol_report(&report))
     }
 
     /// Fetch the matching image from the symbol server cache (`.fetchimage`).
@@ -355,7 +358,7 @@ impl Module {
     /// The module as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::module(&self.info))
+        view_dict(py, &view::module::module(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -654,7 +657,7 @@ impl Driver {
                 .target
                 .inspect_driver_object(self.info.object)
                 .map_err(err)?;
-            Ok(view::driver_object(&session.target, &detail))
+            Ok(view::object::driver_object(&session.target, &detail))
         })?;
         view_record(py, &view)
     }
@@ -662,7 +665,7 @@ impl Driver {
     /// The driver object as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::driver_object_info(&self.info))
+        view_dict(py, &view::object::driver_object_info(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -714,7 +717,7 @@ impl Device {
                 .inspect_device_object(VirtAddr(self.address))
                 .map_err(err)
         })?;
-        view_record(py, &view::device_object(&detail))
+        view_record(py, &view::object::device_object(&detail))
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {

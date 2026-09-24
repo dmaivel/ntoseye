@@ -1,9 +1,11 @@
 //! security: [`View`](super::View) builders for the structured inspectors.
 
+use super::process::process;
 use super::{View, diagnostic};
 use crate::target::security::{
-    AceDetail, AclDetail, ObjectSecurityDetail, SecurityDescriptorDetail, SessionDetail,
-    SessionProcessDetail, SessionProcessesDetail, SessionsDetail, SidDetail,
+    AceDetail, AclDetail, ObjectSecurityDetail, PrivilegeInfo, SecurityDescriptorDetail,
+    SessionDetail, SessionProcessDetail, SessionProcessesDetail, SessionsDetail, SidAndAttributes,
+    SidDetail, TokenDetail,
 };
 
 /// Build a SID view; top-level keys are `address`, `sid`, `revision`,
@@ -123,7 +125,7 @@ fn session(detail: &SessionDetail) -> View {
         ("id", View::OptNum(detail.id)),
         (
             "processes",
-            View::List(detail.processes.iter().map(super::process).collect()),
+            View::List(detail.processes.iter().map(process).collect()),
         ),
     ])
 }
@@ -144,7 +146,7 @@ pub fn sessions(detail: &SessionsDetail) -> View {
 
 fn session_process(detail: &SessionProcessDetail) -> View {
     View::Object(vec![
-        ("process", super::process(&detail.process)),
+        ("process", process(&detail.process)),
         ("session", View::OptNum(detail.session)),
     ])
 }
@@ -162,5 +164,66 @@ pub fn session_processes(detail: &SessionProcessesDetail) -> View {
         ),
         ("process_count", View::Num(detail.process_count as u64)),
         ("truncated", View::Bool(detail.truncated)),
+    ])
+}
+
+fn sid_and_attributes(sid: &SidAndAttributes) -> View {
+    View::Object(vec![
+        ("sid", View::Str(sid.sid.clone())),
+        ("attributes", View::Hex(sid.attributes.into())),
+    ])
+}
+
+fn privilege(privilege: &PrivilegeInfo) -> View {
+    View::Object(vec![
+        ("luid", View::Hex(privilege.luid)),
+        ("attributes", View::Hex(privilege.attributes.into())),
+    ])
+}
+
+pub fn token(token: &TokenDetail) -> View {
+    View::Object(vec![
+        ("process", process(&token.process)),
+        ("token", View::Hex(token.token.0)),
+        (
+            "token_id",
+            diagnostic(&token.token_id, |value| View::Hex(*value)),
+        ),
+        (
+            "authentication_id",
+            diagnostic(&token.authentication_id, |value| View::Hex(*value)),
+        ),
+        (
+            "token_type",
+            diagnostic(&token.token_type, |value| View::Num((*value).into())),
+        ),
+        (
+            "impersonation_level",
+            diagnostic(&token.impersonation_level, |value| {
+                View::Num((*value).into())
+            }),
+        ),
+        (
+            "flags",
+            diagnostic(&token.flags, |value| View::Hex((*value).into())),
+        ),
+        (
+            "user",
+            diagnostic(&token.user, |user| {
+                user.as_ref().map(sid_and_attributes).unwrap_or(View::Null)
+            }),
+        ),
+        (
+            "groups",
+            diagnostic(&token.groups, |groups| {
+                View::List(groups.iter().map(sid_and_attributes).collect())
+            }),
+        ),
+        (
+            "privileges",
+            diagnostic(&token.privileges, |privileges| {
+                View::List(privileges.iter().map(privilege).collect())
+            }),
+        ),
     ])
 }

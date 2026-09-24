@@ -124,7 +124,12 @@ impl Symbols {
         })?;
         view_records(
             py,
-            &View::List(candidates.iter().map(view::symbol_candidate).collect()),
+            &View::List(
+                candidates
+                    .iter()
+                    .map(view::symbols::symbol_candidate)
+                    .collect(),
+            ),
         )
     }
 
@@ -159,7 +164,12 @@ impl Symbols {
         })?;
         view_records(
             py,
-            &View::List(results.iter().map(view::symbol_search_match).collect()),
+            &View::List(
+                results
+                    .iter()
+                    .map(view::symbols::symbol_search_match)
+                    .collect(),
+            ),
         )
     }
 
@@ -174,7 +184,7 @@ impl Symbols {
         })?;
         location
             .as_ref()
-            .map(|location| view_record(py, &view::source_location(location)))
+            .map(|location| view_record(py, &view::symbols::source_location(location)))
             .transpose()
     }
 
@@ -200,7 +210,7 @@ impl Symbols {
                 .unwrap_or_default();
             Ok(locals
                 .iter()
-                .map(view::procedure_local_layout)
+                .map(view::symbols::procedure_local_layout)
                 .collect::<Vec<_>>())
         })?;
         view_records(py, &View::List(rows))
@@ -214,7 +224,7 @@ impl Symbols {
                 .breakpoints
                 .resolve_symbolic(session.backend.as_mut(), &session.target)
                 .map_err(err)?;
-            Ok(view::module_symbol_report(&report))
+            Ok(view::module::module_symbol_report(&report))
         })?;
         view_record(py, &report)
     }

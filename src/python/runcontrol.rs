@@ -316,7 +316,7 @@ pub fn trace_calls<'py>(dbg: &Bound<'py, Debugger>, limit: usize) -> PyResult<Bo
         session.trace_calls(limit).map_err(err)
     })?;
     prune_conditions(dbg)?;
-    view_record(dbg.py(), &view::call_trace(&trace))
+    view_record(dbg.py(), &view::execution::call_trace(&trace))
 }
 
 pub fn interrupt(dbg: &Bound<'_, Debugger>) -> PyResult<Py<Stop>> {

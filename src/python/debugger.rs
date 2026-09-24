@@ -138,7 +138,7 @@ impl Debugger {
         let rows = self.with_session(|session| Ok(session.capabilities()))?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::capability).collect()),
+            &view::View::List(rows.iter().map(view::backend::capability).collect()),
         )
     }
 
@@ -271,7 +271,7 @@ impl Debugger {
     #[pyo3(signature = (since=0))]
     fn debug_log<'py>(&self, py: Python<'py>, since: u64) -> PyResult<Bound<'py, Record>> {
         let page = self.with_session(|session| Ok(session.read_debug_output(since)))?;
-        view_record(py, &view::debug_log(&page))
+        view_record(py, &view::backend::debug_log(&page))
     }
 
     /// Drain the diagnostics the debugger raised since the last call (a

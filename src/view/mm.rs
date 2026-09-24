@@ -1,12 +1,15 @@
 //! Neutral value-tree views for memory-manager inspectors.
 
-use super::{View, diagnostic, diagnostic_metric, memory_usage};
+use super::process::process;
+use super::{View, diagnostic, diagnostic_metric};
 use crate::target::DiagnosticValue;
+use crate::target::MemorySearchMatch;
 use crate::target::mm::{
-    BigPoolDetail, LookasideDetail, LookasideListsDetail, PfnDetail, PfnSelector, PoolBlockDetail,
-    PoolFindDetail, PoolFindMatch, PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType,
-    PoolUsageDetail, PtovDetail, PtovMapping, VmCounter, VmDetail, VmPoolDetail, VmPteDetail,
-    VtopDetail, VtopLevel,
+    AddressDescription, AddressModule, BigPoolDetail, LookasideDetail, LookasideListsDetail,
+    MemoryRegionInfo, PfnDetail, PfnSelector, PoolBlockDetail, PoolFindDetail, PoolFindMatch,
+    PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail, ProcessMemoryUsage,
+    PteLevel, PteWalk, PtovDetail, PtovMapping, SystemMemorySummary, VadProtection, VadType,
+    VmCounter, VmDetail, VmPoolDetail, VmPteDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
 use crate::types::PageTableEntry;
@@ -474,4 +477,211 @@ pub fn lookaside_lists(detail: &LookasideListsDetail) -> View {
         ("interrupted", View::Bool(detail.interrupted)),
         ("truncated", View::Bool(detail.truncated)),
     ])
+}
+
+/// What an address belongs to (the loaded module/section, the process VAD
+/// region, or nothing recognized).
+pub fn address_module(m: &AddressModule) -> View {
+    View::Object(vec![
+        ("name", View::Str(m.name.clone())),
+        ("base", View::Hex(m.base.0)),
+        ("size", View::Num(m.size as u64)),
+        ("offset", View::Hex(m.offset)),
+    ])
+}
+
+pub fn memory_region(r: &MemoryRegionInfo) -> View {
+    View::Object(vec![
+        ("start", View::Hex(r.start.0)),
+        ("end", View::Hex(r.end.0)),
+        ("size", View::Num(r.size())),
+        (
+            "protection",
+            View::OptNum(r.protection.map(VadProtection::raw)),
+        ),
+        ("vad_type", View::OptNum(r.vad_type.map(VadType::raw))),
+        ("private_memory", View::OptBool(r.private_memory)),
+        ("commit_charge", View::OptNum(r.commit_charge)),
+        ("details", View::OptStr(r.details.clone())),
+    ])
+}
+
+pub fn address_description(d: &AddressDescription) -> View {
+    let module = d.module.as_ref().map_or(View::Null, address_module);
+    let region = d.region.as_ref().map_or(View::Null, memory_region);
+    View::Object(vec![
+        ("address", View::Hex(d.address.0)),
+        ("dtb", View::Hex(d.dtb)),
+        ("kind", View::Str(d.kind.to_string())),
+        ("module", module),
+        ("section", View::OptStr(d.section.clone())),
+        ("va_type", View::OptStr(d.va_type.clone())),
+        ("region", region),
+    ])
+}
+
+/// One structured memory-search hit.
+pub fn memory_search_match(m: &MemorySearchMatch) -> View {
+    let d = &m.description;
+    View::Object(vec![
+        ("address", View::Hex(m.address.0)),
+        ("offset", View::Hex(m.offset)),
+        ("symbol", View::OptStr(m.symbol.clone())),
+        ("kind", View::Str(d.kind.to_string())),
+        (
+            "module",
+            d.module.as_ref().map_or(View::Null, address_module),
+        ),
+        ("section", View::OptStr(d.section.clone())),
+        ("va_type", View::OptStr(d.va_type.clone())),
+        (
+            "region",
+            d.region.as_ref().map_or(View::Null, memory_region),
+        ),
+    ])
+}
+
+/// One page-table level (WinDbg-style flags).
+pub fn pte_level(pte: &PteLevel) -> View {
+    View::Object(vec![
+        ("level", View::Str(pte.level.name().to_string())),
+        ("address", View::Hex(pte.address.0)),
+        ("value", View::Hex(pte.value.0)),
+        ("pfn", View::Hex(pte.value.pfn())),
+        ("present", View::Bool(pte.value.is_present())),
+        ("large_page", View::Bool(pte.value.is_large_page())),
+        ("writable", View::Bool(pte.value.is_writable())),
+        ("user", View::Bool(pte.value.is_user())),
+        ("nx", View::Bool(pte.value.is_nx())),
+        ("flags", View::Str(pte.value.flags())),
+    ])
+}
+
+/// A full page-table walk: the walked address and DTB, then the levels that
+/// were reached (a large-page mapping short-circuits, so fewer levels).
+pub fn pte_walk(walk: &PteWalk) -> View {
+    let levels = [
+        Some(&walk.pxe),
+        Some(&walk.ppe),
+        walk.pde.as_ref(),
+        walk.pte.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(pte_level)
+    .collect();
+    View::Object(vec![
+        ("address", View::Hex(walk.address.0)),
+        ("dtb", View::Hex(walk.dtb)),
+        ("levels", View::List(levels)),
+    ])
+}
+
+fn process_memory_usage(usage: &ProcessMemoryUsage) -> View {
+    View::Object(vec![
+        ("process", process(&usage.process)),
+        (
+            "virtual_size",
+            diagnostic(&usage.virtual_size, |value| View::Num(*value)),
+        ),
+        (
+            "peak_virtual_size",
+            diagnostic(&usage.peak_virtual_size, |value| View::Num(*value)),
+        ),
+        (
+            "working_set_size",
+            diagnostic(&usage.working_set_size, |value| View::Num(*value)),
+        ),
+        (
+            "peak_working_set_size",
+            diagnostic(&usage.peak_working_set_size, |value| View::Num(*value)),
+        ),
+        (
+            "pagefile_usage",
+            diagnostic(&usage.pagefile_usage, |value| View::Num(*value)),
+        ),
+        (
+            "peak_pagefile_usage",
+            diagnostic(&usage.peak_pagefile_usage, |value| View::Num(*value)),
+        ),
+        (
+            "private_usage",
+            diagnostic(&usage.private_usage, |value| View::Num(*value)),
+        ),
+    ])
+}
+
+pub fn memory_usage(summary: &SystemMemorySummary) -> View {
+    View::Object(vec![
+        (
+            "physical_pages",
+            diagnostic_metric(&summary.physical_pages, |value| View::Num(*value)),
+        ),
+        (
+            "available_pages",
+            diagnostic_metric(&summary.available_pages, |value| View::Num(*value)),
+        ),
+        (
+            "committed_pages",
+            diagnostic_metric(&summary.committed_pages, |value| View::Num(*value)),
+        ),
+        (
+            "commit_limit_pages",
+            diagnostic_metric(&summary.commit_limit_pages, |value| View::Num(*value)),
+        ),
+        (
+            "paged_pool_pages",
+            diagnostic_metric(&summary.paged_pool_pages, |value| View::Num(*value)),
+        ),
+        (
+            "nonpaged_pool_bytes",
+            diagnostic_metric(&summary.nonpaged_pool_bytes, |value| View::Num(*value)),
+        ),
+        (
+            "processes",
+            View::List(summary.processes.iter().map(process_memory_usage).collect()),
+        ),
+        ("process_count", View::Num(summary.process_count as u64)),
+        ("truncated", View::Bool(summary.truncated)),
+    ])
+}
+
+#[cfg(all(test, feature = "mcp"))]
+mod tests {
+    use super::memory_usage;
+    use crate::debugger_data::MetadataSource;
+    use crate::target::mm::SystemMemorySummary;
+    use crate::target::{DiagnosticMetric, DiagnosticValue};
+    use crate::view::to_json;
+
+    #[test]
+    fn diagnostic_memory_view_retains_values_errors_and_provenance() {
+        let available = DiagnosticMetric {
+            value: DiagnosticValue::Available(0x1234),
+            source: Some(MetadataSource::KernelSymbol),
+        };
+        let unavailable = DiagnosticMetric {
+            value: DiagnosticValue::Unavailable("missing MmAvailablePages".into()),
+            source: None,
+        };
+        let summary = SystemMemorySummary {
+            physical_pages: available.clone(),
+            available_pages: unavailable.clone(),
+            committed_pages: available.clone(),
+            commit_limit_pages: available.clone(),
+            paged_pool_pages: available.clone(),
+            nonpaged_pool_bytes: unavailable,
+            processes: Vec::new(),
+            process_count: 3,
+            truncated: true,
+        };
+
+        let json = to_json(&memory_usage(&summary));
+        assert_eq!(json["physical_pages"]["value"], 0x1234);
+        assert_eq!(json["physical_pages"]["source"], "kernel symbol");
+        assert_eq!(json["available_pages"]["available"], false);
+        assert_eq!(json["available_pages"]["error"], "missing MmAvailablePages");
+        assert_eq!(json["process_count"], 3);
+        assert_eq!(json["truncated"], true);
+    }
 }

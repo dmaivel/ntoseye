@@ -35,48 +35,48 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
     Some(match name {
         "!irp" | "irp" => args.addr(0).and_then(|address| {
             let irp = args.target().inspect_irp(address)?;
-            Ok(view::irp(&irp))
+            Ok(view::object::irp(&irp))
         }),
         "!drvobj" | "drvobj" => args.driver_object().and_then(|address| {
             let detail = args.target().inspect_driver_object(address)?;
-            Ok(view::driver_object(args.target(), &detail))
+            Ok(view::object::driver_object(args.target(), &detail))
         }),
         "!devobj" | "devobj" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_device_object(address)?;
-            Ok(view::device_object(&detail))
+            Ok(view::object::device_object(&detail))
         }),
         "!object" | "object" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_object_header(address)?;
-            Ok(view::object_header(&detail))
+            Ok(view::object::object_header(&detail))
         }),
         "!handle" => match args.opt_value(0) {
             Ok(Some(handle)) => args
                 .target()
                 .inspect_handle(handle)
-                .map(|detail| view::handle_entry(&detail)),
+                .map(|detail| view::object::handle_entry(&detail)),
             Ok(None) => args
                 .target()
                 .enumerate_handles(256)
-                .map(|summary| view::handle_table(&summary)),
+                .map(|summary| view::object::handle_table(&summary)),
             Err(error) => Err(error),
         },
         "!token" => args
             .target()
             .inspect_process_token()
-            .map(|token| view::token(&token)),
+            .map(|token| view::security::token(&token)),
         "!fileobj" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_file_object(address)?;
-            Ok(view::file_object(&detail))
+            Ok(view::object::file_object(&detail))
         }),
         "!locks" => match args.opt_addr(0) {
             Ok(Some(address)) => args
                 .target()
                 .inspect_resource(address)
-                .map(|resource| view::resource(&resource)),
+                .map(|resource| view::object::resource(&resource)),
             Ok(None) => args
                 .target()
                 .enumerate_resources(256)
-                .map(|list| view::resource_list(&list)),
+                .map(|list| view::object::resource_list(&list)),
             Err(error) => Err(error),
         },
         "callbacks" => args
@@ -92,7 +92,7 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
                             let symbol = target
                                 .symbols
                                 .format_closest_symbol_for_address(dtb, callback.function);
-                            view::notify_callback(callback, symbol)
+                            view::object::notify_callback(callback, symbol)
                         })
                         .collect(),
                 ))
@@ -100,24 +100,24 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
         "ssdt" => args
             .target()
             .dump_ssdt()
-            .map(|tables| View::List(tables.iter().map(view::ssdt_table).collect())),
+            .map(|tables| View::List(tables.iter().map(view::object::ssdt_table).collect())),
         "!memusage" => args.opt_value(0).and_then(|limit| {
             let summary = args
                 .target()
                 .memory_use_summary(limit.map_or(64, |limit| limit as usize))?;
-            Ok(view::memory_usage(&summary))
+            Ok(view::mm::memory_usage(&summary))
         }),
         "irps" => args
             .target()
             .discover_irps(argv.first().copied())
-            .map(|hits| View::List(hits.iter().map(view::irp_hit).collect())),
+            .map(|hits| View::List(hits.iter().map(view::object::irp_hit).collect())),
         "!pte" | "pte" => args.addr(0).and_then(|address| {
             let walk = args.target().pte_traverse(address)?;
-            Ok(view::pte_walk(&walk))
+            Ok(view::mm::pte_walk(&walk))
         }),
         "address" => args.addr(0).and_then(|address| {
             let description = args.target().describe_address(address)?;
-            Ok(view::address_description(&description))
+            Ok(view::mm::address_description(&description))
         }),
         "lm" => {
             let kernel_only = argv.contains(&"k");
@@ -126,26 +126,33 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
             } else {
                 args.target().modules_with_versions()
             };
-            modules.map(|modules| View::List(modules.iter().map(view::module).collect()))
+            modules.map(|modules| View::List(modules.iter().map(view::module::module).collect()))
         }
-        "drivers" => args
-            .target()
-            .enumerate_driver_objects()
-            .map(|drivers| View::List(drivers.iter().map(view::driver_object_info).collect())),
+        "drivers" => args.target().enumerate_driver_objects().map(|drivers| {
+            View::List(
+                drivers
+                    .iter()
+                    .map(view::object::driver_object_info)
+                    .collect(),
+            )
+        }),
         "ps" => args
             .target()
             .matching_processes(argv.first().copied())
-            .map(|processes| View::List(processes.iter().map(view::process).collect())),
+            .map(|processes| View::List(processes.iter().map(view::process::process).collect())),
         "!process" if argv.first().is_some_and(|arg| *arg == "0") => args
             .target()
             .matching_processes(argv.get(2).copied())
-            .map(|processes| View::List(processes.iter().map(view::process).collect())),
+            .map(|processes| View::List(processes.iter().map(view::process::process).collect())),
         "threads" => args.state.ctx.windows_threads().map(|(threads, active)| {
             View::List(
                 threads
                     .iter()
                     .map(|thread| {
-                        view::thread(thread, active.get(&thread.ethread.0).map(String::as_str))
+                        view::process::thread(
+                            thread,
+                            active.get(&thread.ethread.0).map(String::as_str),
+                        )
                     })
                     .collect(),
             )
@@ -154,13 +161,13 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
             .state
             .ctx
             .vcpus()
-            .map(|vcpus| View::List(vcpus.iter().map(view::vcpu).collect())),
+            .map(|vcpus| View::List(vcpus.iter().map(view::execution::vcpu).collect())),
         "bl" => Ok(View::List(
             args.state
                 .ctx
                 .list_breakpoints()
                 .into_iter()
-                .map(view::breakpoint)
+                .map(view::execution::breakpoint)
                 .collect(),
         )),
         "k" | "kn" | "kb" | "kp" | "kv" => args.opt_value(0).and_then(|count| {
@@ -169,7 +176,11 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
                 .ctx
                 .backtrace(count.map_or(64, |count| count as usize))?;
             Ok(View::List(
-                trace.frames.iter().map(view::stack_frame).collect(),
+                trace
+                    .frames
+                    .iter()
+                    .map(view::execution::stack_frame)
+                    .collect(),
             ))
         }),
         "u" | "disasm" => args.addr(0).and_then(|address| {
@@ -179,20 +190,22 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
                 .and_then(|count| usize::from_str_radix(count, 16).ok())
                 .unwrap_or(8);
             let rows = args.state.ctx.disassemble(address, count)?;
-            Ok(View::List(rows.iter().map(view::disasm_row).collect()))
+            Ok(View::List(
+                rows.iter().map(view::execution::disasm_row).collect(),
+            ))
         }),
         "dt" if argv.len() == 1 && !argv[0].starts_with('-') => {
             let target = args.target();
             let dtb = target.current_dtb();
             match target.symbols.find_type_across_modules(dtb, argv[0]) {
-                Some(info) => Ok(view::type_layout(argv[0], &info)),
+                Some(info) => Ok(view::symbols::type_layout(argv[0], &info)),
                 None => Err(Error::DebugInfo(
                     target.symbols.unresolved_type_message(dtb, argv[0]),
                 )),
             }
         }
         "ln" => args.addr(0).map(|address| {
-            view::nearest_symbol(
+            view::symbols::nearest_symbol(
                 address,
                 args.target().nearest_symbol_current_context(address),
             )
@@ -201,7 +214,7 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
             args.target()
                 .search_symbols(args.raw_tail, 50)
                 .iter()
-                .map(view::symbol_search_match)
+                .map(view::symbols::symbol_search_match)
                 .collect(),
         )),
         "?" | "ev" if !args.raw_tail.is_empty() => args.eval(args.raw_tail).map(|value| {
@@ -235,9 +248,11 @@ pub fn structured_command(state: &mut ReplState<'_>, line: &str) -> Option<Resul
         }),
         "!analyze" | "analyze" if !argv.iter().any(|arg| *arg == "-show" || *arg == "-hang") => {
             let report = TriageReport::build(args.state.ctx);
-            Ok(view::triage_report(&report, 64))
+            Ok(view::triage::triage_report(&report, 64))
         }
-        ".process" if argv.is_empty() => Ok(view::run_status(&args.state.ctx.run_status())),
+        ".process" if argv.is_empty() => {
+            Ok(view::execution::run_status(&args.state.ctx.run_status()))
+        }
 
         "!pcr" | "pcr" => args.processor(0).and_then(|processor| {
             let detail = args.state.ctx.inspect_pcr(processor)?;

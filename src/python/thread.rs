@@ -316,13 +316,13 @@ impl Thread {
     /// Thread summary and saved scheduling details (`!thread`).
     fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let active = self.cpu_id(py)?;
-        view_record(py, &view::thread(&self.info, active.as_deref()))
+        view_record(py, &view::process::thread(&self.info, active.as_deref()))
     }
 
     /// The thread as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let active = self.cpu_id(py)?;
-        view_dict(py, &view::thread(&self.info, active.as_deref()))
+        view_dict(py, &view::process::thread(&self.info, active.as_deref()))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -930,7 +930,7 @@ impl Cpu {
 
     /// The processor as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, &view::vcpu(&self.current_info(py)?))
+        view_dict(py, &view::execution::vcpu(&self.current_info(py)?))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -1011,7 +1011,7 @@ pub fn process_for_thread(session: &Session, thread: &ThreadInfo) -> PyResult<Op
 pub fn trap_frame_view(target: &Target, address: Option<VirtAddr>) -> PyResult<view::View> {
     let frame = read_ktrap_frame_at_or_current(target, address).map_err(err)?;
     let symbol = target.closest_symbol_current_context(VirtAddr(frame.instruction_pointer()));
-    Ok(view::trap_frame(&frame, symbol))
+    Ok(view::bugcheck::trap_frame(&frame, symbol))
 }
 
 /// A `u8` enum field as its PDB `IntEnum` member (an `int`), or `None`.

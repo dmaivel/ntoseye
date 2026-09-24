@@ -581,7 +581,10 @@ impl Breakpoint {
 
     /// The breakpoint's state as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, &view::breakpoint(&self.require_snapshot(py)?))
+        view_dict(
+            py,
+            &view::execution::breakpoint(&self.require_snapshot(py)?),
+        )
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -645,7 +648,7 @@ impl Exceptions {
             Ok(session
                 .exception_policies
                 .entries()
-                .map(|(code, policy)| view::exception_policy(code, policy))
+                .map(|(code, policy)| view::execution::exception_policy(code, policy))
                 .collect::<Vec<_>>())
         })?;
         let records = rows

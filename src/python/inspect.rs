@@ -57,7 +57,7 @@ impl Inspect {
     fn irp<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
         self.record(py, |session| {
             let detail = session.target.inspect_irp(VirtAddr(address)).map_err(err)?;
-            Ok(view::irp(&detail))
+            Ok(view::object::irp(&detail))
         })
     }
 
@@ -70,7 +70,7 @@ impl Inspect {
     ) -> PyResult<Vec<Bound<'py, Record>>> {
         self.list(py, |session| {
             let hits = session.target.discover_irps(filter).map_err(err)?;
-            Ok(View::List(hits.iter().map(view::irp_hit).collect()))
+            Ok(View::List(hits.iter().map(view::object::irp_hit).collect()))
         })
     }
 
@@ -81,7 +81,7 @@ impl Inspect {
                 .target
                 .inspect_object_header(VirtAddr(address))
                 .map_err(err)?;
-            Ok(view::object_header(&detail))
+            Ok(view::object::object_header(&detail))
         })
     }
 
@@ -92,7 +92,7 @@ impl Inspect {
                 .target
                 .inspect_file_object(VirtAddr(address))
                 .map_err(err)?;
-            Ok(view::file_object(&detail))
+            Ok(view::object::file_object(&detail))
         })
     }
 
@@ -103,7 +103,7 @@ impl Inspect {
                 .target
                 .inspect_resource(VirtAddr(address))
                 .map_err(err)?;
-            Ok(view::resource(&detail))
+            Ok(view::object::resource(&detail))
         })
     }
 
@@ -112,7 +112,7 @@ impl Inspect {
     fn resources<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Bound<'py, Record>> {
         self.record(py, |session| {
             let detail = session.target.enumerate_resources(limit).map_err(err)?;
-            Ok(view::resource_list(&detail))
+            Ok(view::object::resource_list(&detail))
         })
     }
 
@@ -124,7 +124,7 @@ impl Inspect {
                 .target
                 .memory_use_summary(process_limit)
                 .map_err(err)?;
-            Ok(view::memory_usage(&detail))
+            Ok(view::mm::memory_usage(&detail))
         })
     }
 
@@ -141,7 +141,7 @@ impl Inspect {
                             .target
                             .symbols
                             .format_closest_symbol_for_address(dtb, callback.function);
-                        view::notify_callback(callback, symbol)
+                        view::object::notify_callback(callback, symbol)
                     })
                     .collect(),
             ))
@@ -152,7 +152,9 @@ impl Inspect {
     fn ssdt<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, Record>>> {
         self.list(py, |session| {
             let tables = session.target.dump_ssdt().map_err(err)?;
-            Ok(View::List(tables.iter().map(view::ssdt_table).collect()))
+            Ok(View::List(
+                tables.iter().map(view::object::ssdt_table).collect(),
+            ))
         })
     }
 
@@ -378,7 +380,7 @@ impl Inspect {
             let record = session
                 .read_exception_record(VirtAddr(address))
                 .map_err(err)?;
-            Ok(view::exception_record(Some(address), &record))
+            Ok(view::bugcheck::exception_record(Some(address), &record))
         })
     }
 
@@ -599,7 +601,7 @@ impl Inspect {
         let detail = self.owner.with_in(py, &Context::default(), |session| {
             Ok(current_bugcheck(&session.target)
                 .or_else(|| bugcheck_from_dump_info(&session.target))
-                .map(|analysis| view::bugcheck(&analysis)))
+                .map(|analysis| view::bugcheck::bugcheck(&analysis)))
         })?;
         detail
             .as_ref()
@@ -611,7 +613,7 @@ impl Inspect {
     fn triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         self.record(py, |session| {
             let report = TriageReport::build(session);
-            Ok(view::triage_report(&report, usize::MAX))
+            Ok(view::triage::triage_report(&report, usize::MAX))
         })
     }
 }

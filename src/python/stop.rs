@@ -170,7 +170,7 @@ impl Stop {
             .record
             .as_ref()
             .ok_or_else(|| raise("no current exception record"))?;
-        view_record(py, &view::exception_record(None, record))
+        view_record(py, &view::bugcheck::exception_record(None, record))
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -350,7 +350,7 @@ pub fn from_outcome(
                     .map(|info| analyze_bugcheck(&session.target, info))
                     .or_else(|| current_bugcheck(&session.target))
                     .or_else(|| bugcheck_from_dump_info(&session.target));
-                Ok(analysis.map(|analysis| view::bugcheck(&analysis)))
+                Ok(analysis.map(|analysis| view::bugcheck::bugcheck(&analysis)))
             })?;
             let info = bugcheck
                 .as_ref()

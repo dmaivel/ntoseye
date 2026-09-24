@@ -412,7 +412,7 @@ impl CommandOutput {
             "ok": self.ok,
             "output": self.text,
             "result": self.result,
-            "target": view::to_json(&view::run_status(&self.status)),
+            "target": view::to_json(&view::execution::run_status(&self.status)),
             "debug_output": self.debug_output,
         });
         let mut result = CallToolResult::structured(value);
@@ -475,7 +475,7 @@ fn run_command(
     let debug_output = page
         .lines
         .iter()
-        .map(|line| view::to_json(&view::debug_log_line(line)))
+        .map(|line| view::to_json(&view::backend::debug_log_line(line)))
         .collect();
     CommandOutput {
         ok: remote.ok,

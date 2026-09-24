@@ -349,7 +349,7 @@ impl Memory {
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.describe_address(VirtAddr(addr)).map_err(err)
         })?;
-        view_record(py, &view::address_description(&detail))
+        view_record(py, &view::mm::address_description(&detail))
     }
 
     /// Disassemble `count` instructions at `addr` (`u`).
@@ -367,7 +367,7 @@ impl Memory {
         })?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::disasm_row).collect()),
+            &view::View::List(rows.iter().map(view::execution::disasm_row).collect()),
         )
     }
 
@@ -384,7 +384,7 @@ impl Memory {
         })?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::disasm_row).collect()),
+            &view::View::List(rows.iter().map(view::execution::disasm_row).collect()),
         )
     }
 
@@ -403,7 +403,7 @@ impl Memory {
         })?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::disasm_row).collect()),
+            &view::View::List(rows.iter().map(view::execution::disasm_row).collect()),
         )
     }
 }
@@ -506,7 +506,7 @@ impl AddressModule {
             size: self.size,
             offset: self.offset,
         };
-        view_dict(py, &view::address_module(&module))
+        view_dict(py, &view::mm::address_module(&module))
     }
 
     fn __repr__(&self) -> String {

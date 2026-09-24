@@ -275,7 +275,7 @@ impl Process {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_process_token().map_err(err)
         })?;
-        view_record(py, &view::token(&detail))
+        view_record(py, &view::security::token(&detail))
     }
 
     /// Decode a handle in this process's handle table.
@@ -283,7 +283,7 @@ impl Process {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_handle(value).map_err(err)
         })?;
-        view_record(py, &view::handle_entry(&detail))
+        view_record(py, &view::object::handle_entry(&detail))
     }
 
     /// Enumerate up to `limit` handles in this process's handle table.
@@ -292,7 +292,7 @@ impl Process {
         let summary = self.owner.with_in(py, &self.context(), |session| {
             session.target.enumerate_handles(limit).map_err(err)
         })?;
-        view_record(py, &view::handle_table(&summary))
+        view_record(py, &view::object::handle_table(&summary))
     }
 
     /// Decode kernel and user APC queues for this process (`!apc`).
@@ -314,7 +314,7 @@ impl Process {
     /// `eprocess`, `wow64`), the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::process(&self.info))
+        view_dict(py, &view::process::process(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
