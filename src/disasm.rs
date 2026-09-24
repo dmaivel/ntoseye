@@ -219,16 +219,21 @@ pub fn decode_rows(
     let mut rows = Vec::new();
 
     while decoder.can_decode() && limit.is_none_or(|n| rows.len() < n) {
+        let byte_start = decoder.position();
         decoder.decode_out(&mut instruction);
         if instruction.code() == Code::INVALID {
             continue;
         }
+        let Some(byte_end) = byte_start.checked_add(instruction.len()) else {
+            break;
+        };
+        let Some(instr_bytes) = bytes.get(byte_start..byte_end) else {
+            break;
+        };
         let mut tokens = Vec::new();
         formatter.format(&instruction, &mut TokenSink(&mut tokens));
 
         let ip = mask_code_address(bitness, instruction.ip());
-        let start_index = ip.wrapping_sub(start_ip) as usize;
-        let instr_bytes = &bytes[start_index..start_index + instruction.len()];
         let hex = instr_bytes
             .iter()
             .map(|b| format!("{:02x}", b))
@@ -753,6 +758,18 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(target.get(), 0);
+    }
+
+    #[test]
+    fn x86_rows_crossing_ip_wrap_keep_their_instruction_bytes() {
+        let mut formatter = disasm_formatter();
+        let rows = decode_rows(&[0x90, 0xc3], 0xffff_ffff, None, 32, &mut formatter, |_| {
+            String::new()
+        });
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].ip, rows[0].hex.as_str()), (0xffff_ffff, "90"));
+        assert_eq!((rows[1].ip, rows[1].hex.as_str()), (0, "c3"));
     }
 
     #[test]
