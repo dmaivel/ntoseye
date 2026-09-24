@@ -1,6 +1,7 @@
 //! Structured memory-manager inspectors shared by the REPL, Python SDK, and MCP.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::debugger_data::{
@@ -506,47 +507,16 @@ fn vm_processes(target: &Target, include: bool) -> Result<(Vec<ProcessMemoryUsag
     let all_processes = target.matching_processes(None)?;
     let process_count = all_processes.len();
     let process_limit = DEFAULT_MEMORY_PROCESS_LIMIT;
-    let layouts = (|| -> Result<(std::sync::Arc<TypeInfo>, std::sync::Arc<TypeInfo>)> {
-        let guest = target.guest()?;
-        let types = guest.ntoskrnl.types();
-        let eprocess_layout = types.layout("_EPROCESS")?;
-        let vm_field = eprocess_layout.field("Vm")?;
-        let vm_name = match &vm_field.type_data {
-            ParsedType::Struct(name) | ParsedType::Union(name) => name.clone(),
-            _ => {
-                return Err(Error::FieldTypeMismatch(
-                    "Vm".to_string(),
-                    "embedded struct".to_string(),
-                ));
-            }
-        };
-        Ok((eprocess_layout, types.layout(vm_name)?))
-    })();
+    let layouts = target.process_vm_layouts();
     let processes = all_processes
         .into_iter()
         .take(process_limit)
-        .map(|process| {
-            let unavailable = layouts.as_ref().err().map(ToString::to_string);
-            let field = |name: &str| match &layouts {
-                Ok((eprocess_layout, vm_layout)) => target.process_memory_counter(
-                    eprocess_layout,
-                    vm_layout,
-                    process.eprocess_va,
-                    name,
-                ),
-                Err(_) => diagnostic_unavailable(
-                    unavailable.as_deref().unwrap_or("VM layout unavailable"),
-                ),
-            };
-            ProcessMemoryUsage {
-                virtual_size: field("VirtualSize"),
-                peak_virtual_size: field("PeakVirtualSize"),
-                working_set_size: field("WorkingSetSize"),
-                peak_working_set_size: field("PeakWorkingSetSize"),
-                pagefile_usage: field("PagefileUsage"),
-                peak_pagefile_usage: field("PeakPagefileUsage"),
-                private_usage: field("PrivateUsage"),
-                process,
+        .map(|process| match &layouts {
+            Ok((eprocess_layout, vm_layout)) => {
+                target.process_memory_usage(eprocess_layout, vm_layout, process)
+            }
+            Err(error) => {
+                ProcessMemoryUsage::from_counters(process, |_| diagnostic_unavailable(error))
             }
         })
         .collect();
@@ -1938,6 +1908,21 @@ pub struct ProcessMemoryUsage {
     pub private_usage: DiagnosticValue<u64>,
 }
 
+impl ProcessMemoryUsage {
+    fn from_counters(process: ProcessInfo, counter: impl Fn(&str) -> DiagnosticValue<u64>) -> Self {
+        Self {
+            virtual_size: counter("VirtualSize"),
+            peak_virtual_size: counter("PeakVirtualSize"),
+            working_set_size: counter("WorkingSetSize"),
+            peak_working_set_size: counter("PeakWorkingSetSize"),
+            pagefile_usage: counter("PagefileUsage"),
+            peak_pagefile_usage: counter("PeakPagefileUsage"),
+            private_usage: counter("PrivateUsage"),
+            process,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SystemMemorySummary {
     pub physical_pages: DiagnosticMetric<u64>,
@@ -1969,6 +1954,34 @@ pub struct PteWalk {
 }
 
 impl Target {
+    /// `_EPROCESS` and the struct or union layout of its embedded `Vm`.
+    fn process_vm_layouts(&self) -> Result<(Arc<TypeInfo>, Arc<TypeInfo>)> {
+        let types = self.guest()?.ntoskrnl.types();
+        let eprocess_layout = types.layout("_EPROCESS")?;
+        let vm_layout = match &eprocess_layout.field("Vm")?.type_data {
+            ParsedType::Struct(name) | ParsedType::Union(name) => types.layout(name)?,
+            _ => {
+                return Err(Error::FieldTypeMismatch(
+                    "Vm".to_string(),
+                    "embedded struct".to_string(),
+                ));
+            }
+        };
+        Ok((eprocess_layout, vm_layout))
+    }
+
+    fn process_memory_usage(
+        &self,
+        eprocess_layout: &TypeInfo,
+        vm_layout: &TypeInfo,
+        process: ProcessInfo,
+    ) -> ProcessMemoryUsage {
+        let eprocess = process.eprocess_va;
+        ProcessMemoryUsage::from_counters(process, |field| {
+            self.process_memory_counter(eprocess_layout, vm_layout, eprocess, field)
+        })
+    }
+
     fn process_memory_counter(
         &self,
         eprocess_layout: &TypeInfo,
@@ -2088,68 +2101,11 @@ impl Target {
         let process_limit = process_limit.clamp(1, 256);
         let all_processes = self.matching_processes(None)?;
         let process_count = all_processes.len();
-        let guest = self.guest()?;
-        let types = guest.ntoskrnl.types();
-        let eprocess_layout = types.layout("_EPROCESS")?;
-        let vm_field = eprocess_layout.field("Vm")?;
-        let vm_name = match &vm_field.type_data {
-            ParsedType::Struct(name) | ParsedType::Union(name) => name,
-            _ => {
-                return Err(Error::FieldTypeMismatch(
-                    "Vm".to_string(),
-                    "embedded struct".to_string(),
-                ));
-            }
-        };
-        let vm_layout = types.layout(vm_name)?;
+        let (eprocess_layout, vm_layout) = self.process_vm_layouts()?;
         let processes = all_processes
             .into_iter()
             .take(process_limit)
-            .map(|process| ProcessMemoryUsage {
-                virtual_size: self.process_memory_counter(
-                    &eprocess_layout,
-                    &vm_layout,
-                    process.eprocess_va,
-                    "VirtualSize",
-                ),
-                peak_virtual_size: self.process_memory_counter(
-                    &eprocess_layout,
-                    &vm_layout,
-                    process.eprocess_va,
-                    "PeakVirtualSize",
-                ),
-                working_set_size: self.process_memory_counter(
-                    &eprocess_layout,
-                    &vm_layout,
-                    process.eprocess_va,
-                    "WorkingSetSize",
-                ),
-                peak_working_set_size: self.process_memory_counter(
-                    &eprocess_layout,
-                    &vm_layout,
-                    process.eprocess_va,
-                    "PeakWorkingSetSize",
-                ),
-                pagefile_usage: self.process_memory_counter(
-                    &eprocess_layout,
-                    &vm_layout,
-                    process.eprocess_va,
-                    "PagefileUsage",
-                ),
-                peak_pagefile_usage: self.process_memory_counter(
-                    &eprocess_layout,
-                    &vm_layout,
-                    process.eprocess_va,
-                    "PeakPagefileUsage",
-                ),
-                private_usage: self.process_memory_counter(
-                    &eprocess_layout,
-                    &vm_layout,
-                    process.eprocess_va,
-                    "PrivateUsage",
-                ),
-                process,
-            })
+            .map(|process| self.process_memory_usage(&eprocess_layout, &vm_layout, process))
             .collect();
         let debugger_data = self.debugger_data();
         Ok(SystemMemorySummary {
