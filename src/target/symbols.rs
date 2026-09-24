@@ -9,11 +9,9 @@ use super::{SymbolSearchMatch, Target, lookup_register};
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    guest::{
-        Guest, ModuleExportInfo, ModuleInfo, ModuleSymbolLoadReport, SessionSpace, read_pe_exports,
-        read_pe_image,
-    },
+    guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, SessionSpace},
     memory::AddressSpace,
+    pe::{ModuleExportInfo, read_pe_exports, read_pe_image},
     symbols::{
         LocalVariableLocation, ProcedureLocal, SourceLineExtent, SourceLocation, SymbolCandidate,
         SymbolIndex, SymbolStore, format_symbol_with_offset,

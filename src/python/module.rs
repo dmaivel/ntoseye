@@ -11,8 +11,9 @@ use super::iter::{DriverIterator, ModuleIterator};
 use super::record::{PlainDict, Record};
 use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict, view_record};
 use crate::error::Error;
-use crate::guest::{self, ModuleInfo, ProcessInfo};
+use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
+use crate::pe;
 use crate::target::object::DriverObjectInfo;
 use crate::types::VirtAddr;
 use crate::view::{self, View};
@@ -129,7 +130,7 @@ impl Module {
         self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
             let memory = session.target.address_space(dtb);
-            let headers = guest::read_pe_header_page(base, &memory).map_err(err)?;
+            let headers = pe::read_pe_header_page(base, &memory).map_err(err)?;
             let view = PeView::from_bytes(&headers).map_err(|error| err(Error::from(error)))?;
             Ok(view
                 .section_headers()

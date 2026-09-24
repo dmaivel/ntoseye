@@ -8,9 +8,10 @@ use crate::debugger_data::{
     DebuggerDataBlock, MetadataSource, MetadataValue, read_counter_from_getter,
 };
 use crate::error::{Error, Result};
-use crate::guest::{ModuleInfo, section_name_at};
+use crate::guest::ModuleInfo;
 use crate::layout::{ParsedType, TypeInfo, bitfield_value, le_uint};
 use crate::memory::{DTB_IDENTITY, PAGE_SIZE, PFN_MASK};
+use crate::pe::section_name_at;
 use crate::symbols::{format_symbol_with_offset, glob_matches};
 use crate::target::pool::{
     BigPoolEntry, PoolHeader, PoolUsageRow, big_pool_layout, classify_pool_region,

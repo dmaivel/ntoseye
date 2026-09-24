@@ -11,8 +11,9 @@ use super::{CachedModule, OwnedModule, StackTracer, ThreadTraceContext};
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    guest::{Image, ModuleInfo, PeImage, pe_headers_end, read_pe_image},
+    guest::{Image, ModuleInfo},
     memory::{AddressSpace, PAGE_SIZE},
+    pe::{PeImage, pe_headers_end, read_pe_image},
     symbols::ImageFetch,
     target::Target,
     types::VirtAddr,

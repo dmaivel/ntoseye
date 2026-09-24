@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     error::{Error, Result},
-    guest::PeImage,
+    pe::PeImage,
     target::Target,
     types::{Dtb, VirtAddr},
 };
@@ -609,7 +609,7 @@ mod tests {
         Lookup, ParsedUnwindInfo, RUNTIME_FUNCTION, frame_base, lookup_runtime_function,
         parse_unwind_info, unwind_slot_count,
     };
-    use crate::guest::PeImage;
+    use crate::pe::PeImage;
     use crate::unwind::RegisterContext;
 
     #[test]

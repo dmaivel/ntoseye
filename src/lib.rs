@@ -160,6 +160,7 @@ pub mod mcp;
 pub mod memory;
 pub mod memory_backend;
 pub mod ntstatus;
+pub mod pe;
 pub mod phys;
 #[cfg(feature = "python")]
 pub mod python;

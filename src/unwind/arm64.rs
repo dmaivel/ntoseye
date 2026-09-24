@@ -9,9 +9,7 @@ use super::{
     FrameSource, MAX_UNWIND_FRAMES, RecoveredFrame, RecoveredStackTrace, RegisterContext,
     StackFrame, format_symbol, frame_source_location, image_u32, resolve_thread_trace_context,
 };
-use crate::{
-    backend::MemoryOps, gdb::RegisterMap, guest::PeImage, target::Target, types::VirtAddr,
-};
+use crate::{backend::MemoryOps, gdb::RegisterMap, pe::PeImage, target::Target, types::VirtAddr};
 
 /// Decode an ARM64 `.pdata` entry's function length. Packed entries carry an
 /// 11-bit instruction count in the entry itself; unpacked entries point to an
@@ -161,7 +159,7 @@ pub(super) fn build_recovered_stacktrace_arm64(
 #[cfg(test)]
 mod tests {
     use super::lookup_arm64_runtime_function;
-    use crate::guest::PeImage;
+    use crate::pe::PeImage;
 
     #[test]
     fn lookup_arm64_runtime_function_decodes_packed_and_xdata_lengths() {

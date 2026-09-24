@@ -12,8 +12,9 @@ use crate::dbg_backend::{
 };
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
-use crate::guest::{ModuleInfo, ProcessInfo, read_pe_header_page};
+use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
+use crate::pe::read_pe_header_page;
 use crate::target::{Target, ThreadInfo};
 use crate::types::{Arch, Dtb, VirtAddr};
 

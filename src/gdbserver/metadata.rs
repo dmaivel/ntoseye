@@ -14,7 +14,8 @@ use gdbstub::target::ext::target_description_xml_override::TargetDescriptionXmlO
 use gdbstub::target::{TargetError, TargetResult};
 use pelite::PeView;
 
-use crate::guest::{ModuleInfo, image_base};
+use crate::guest::ModuleInfo;
+use crate::pe::image_base;
 use crate::session::VcpuInfo;
 use crate::types::Arch;
 

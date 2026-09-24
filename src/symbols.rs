@@ -1,11 +1,10 @@
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    guest::{
-        Image, ModuleInfo, PeImage, read_pe_header_page, read_pe_image_from_file, size_of_image,
-    },
+    guest::{Image, ModuleInfo},
     layout::{EnumDef, FieldInfo, ParsedType, TypeInfo},
     memory,
+    pe::{PeImage, read_pe_header_page, read_pe_image_from_file, size_of_image},
     types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
 use dashmap::DashMap;

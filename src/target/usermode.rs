@@ -2,9 +2,10 @@ use std::fs;
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::guest::{ModuleInfo, image_base, read_pe_header_page, size_of_image};
+use crate::guest::ModuleInfo;
 use crate::layout::StructRef;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
+use crate::pe::{image_base, read_pe_header_page, size_of_image};
 use crate::target::{DiagnosticValue, ListTermination, Target};
 use crate::types::{Arch, VirtAddr};
 use iced_x86::{Code, Decoder, DecoderOptions};
