@@ -1643,6 +1643,7 @@ dependencies = [
  "pdb2",
  "pelite",
  "pyo3",
+ "pyo3-build-config",
  "rayon",
  "reedline",
  "reqwest",

@@ -1,7 +1,8 @@
 //! Stamp the build with the git commit it came from (`NTOSEYE_BUILD`), so a
 //! long-lived interpreter can tell it is running a stale extension after a
 //! rebuild. `<commit>`, `<commit>-dirty` with uncommitted tracked changes, or
-//! `unknown` outside a git checkout (a crates.io or sdist build).
+//! `unknown` outside a git checkout (a crates.io or sdist build). With
+//! `python-embed`, also point the binary at a macOS framework Python.
 
 use std::path::Path;
 use std::process::Command;
@@ -48,4 +49,10 @@ fn main() {
         None => "unknown".to_string(),
     };
     println!("cargo:rustc-env=NTOSEYE_BUILD={stamp}");
+
+    // A macOS framework Python (Xcode's, python.org's, Homebrew's) is linked
+    // as `@rpath/Python3.framework`; without an rpath to the framework, a
+    // binary embedding the interpreter cannot start.
+    #[cfg(feature = "python-embed")]
+    pyo3_build_config::add_python_framework_link_args();
 }

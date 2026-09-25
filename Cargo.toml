@@ -89,11 +89,14 @@ mcp = ["repl", "dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:t
 dap = ["repl", "dep:serde_json", "dep:base64"]
 gdbserver = ["repl", "dep:gdbstub"]
 python = ["repl", "dep:pyo3", "dep:indexmap"]
-python-embed = ["python", "pyo3/auto-initialize"]
+python-embed = ["python", "pyo3/auto-initialize", "dep:pyo3-build-config"]
 python-extension = ["python", "pyo3/extension-module"]
 # Emit PyO3 introspection data, from which `maturin` generates the SDK's type
 # stubs (`python/ntoseye/_ntoseye.pyi`).
 python-stubs = ["python", "pyo3/experimental-inspect"]
+
+[build-dependencies]
+pyo3-build-config = { version = "0.29.2", optional = true }
 
 [dev-dependencies]
 parking_lot = "0.12"
