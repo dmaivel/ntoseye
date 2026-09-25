@@ -86,3 +86,7 @@ virt-manager: add the following to the XML configuration:
 ## Memory introspection
 
 No host or guest configuration needed; see [Choosing a backend](backends.md) for what the `memory` backend can and cannot do.
+
+## Virtualization-based security
+
+With VBS running, the GDB stub reports what each vCPU was executing when it halted, and an idle vCPU is usually inside the Windows hypervisor itself, with its own CR3. QEMU plants kernel breakpoints through the halted vCPU's page tables, which do not map NT there; `ntoseye` retries such a breakpoint through the NT kernel's page tables and restores the vCPU's CR3 afterwards, so `bp` and the bugcheck trap work whichever address space the vCPU stopped in.

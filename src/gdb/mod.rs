@@ -245,6 +245,10 @@ pub struct GdbClient {
     /// The thread the last `Hc` selected; `None` after a continue reset it
     /// to all threads.
     control_thread: Option<String>,
+    /// The NT kernel's page-table root, for planting breakpoints while the
+    /// halted vCPU is in another address space; see
+    /// [`GdbClient::software_breakpoint_packet`].
+    kernel_dtb: Option<u64>,
 }
 
 /// What a wait on an already halted target reports: a stop with no fields,
@@ -255,6 +259,9 @@ const HALTED_NO_NEW_STOP: &str = "S05";
 
 /// Why a request cannot be served right now, for [`Error::TargetRunning`].
 const GDB_STUB_NEEDS_HALT: &str = "the GDB stub serves no requests while the target runs.";
+
+/// The first canonical upper-half (kernel) address on AMD64.
+const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
 
 fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
     let message = match err.kind() {
@@ -296,6 +303,7 @@ impl GdbClient {
             extra_registers: Vec::new(),
             last_stop: String::new(),
             control_thread: None,
+            kernel_dtb: None,
         };
 
         client.force_stop_and_resync()?;
@@ -539,8 +547,7 @@ impl GdbClient {
     }
 
     fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let kind = self.arch.breakpoint_size();
-        let response = self.send_packet(&format!("Z0,{:x},{}", addr, kind))?;
+        let response = self.software_breakpoint_packet('Z', addr)?;
         if response == "OK" {
             Ok(())
         } else if response.starts_with('E') {
@@ -554,8 +561,7 @@ impl GdbClient {
     }
 
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let kind = self.arch.breakpoint_size();
-        let response = self.send_packet(&format!("z0,{:x},{}", addr, kind))?;
+        let response = self.software_breakpoint_packet('z', addr)?;
         if response == "OK" {
             Ok(())
         } else if response.starts_with('E') {
@@ -566,6 +572,77 @@ impl GdbClient {
         } else {
             Err(Error::NotSupported)
         }
+    }
+
+    /// Send `Z0`/`z0` (`op`) for a kernel code site, reaching it through the
+    /// NT kernel's page tables when the halted vCPU's own tables miss it.
+    ///
+    /// QEMU plants and lifts a software breakpoint by reading and writing the
+    /// site through the control vCPU's *current* CR3, and answers `E22` when
+    /// that translation fails. Under VBS an idle vCPU halts inside the
+    /// Windows hypervisor (or in VTL1), whose tables do not map NT, so the
+    /// same packet succeeded or failed depending on where the vCPU happened
+    /// to stop. The stub keys the site by virtual address alone, which is
+    /// what a later `#BP` in NT is matched against, so borrowing the kernel
+    /// root for this one packet plants exactly the breakpoint NT will hit.
+    fn software_breakpoint_packet(&mut self, op: char, addr: u64) -> Result<String> {
+        let packet = format!("{op}0,{addr:x},{}", self.arch.breakpoint_size());
+        let response = self.send_packet(&packet)?;
+        if !response.starts_with('E') || self.arch != Arch::Amd64 || addr < KERNEL_HALF {
+            return Ok(response);
+        }
+        let (Some(root), Some(regnum)) = (self.kernel_dtb, self.register_number("cr3")) else {
+            return Ok(response);
+        };
+        self.with_cr3(regnum, root, |client| client.send_packet(&packet))
+    }
+
+    /// Run `op` with the selected vCPU's CR3 temporarily set to `root`, as
+    /// the stub's own debugger memory walk sees it, and put it back.
+    fn with_cr3<T>(
+        &mut self,
+        regnum: usize,
+        root: u64,
+        op: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        // Breakpoints act on the control vCPU and `P` on the general one;
+        // pin both to the vCPU the debugger has selected.
+        if let Some(thread) = self
+            .control_thread
+            .clone()
+            .or_else(|| StopReply::parse(&self.last_stop).thread_id)
+        {
+            self.set_current_thread(&thread)?;
+        }
+        // `P`/`p` use QEMU's copy of the vCPU as-is; `g` is what pulls it in
+        // from the hypervisor and marks it for write-back on resume, so the
+        // restored value is the one the vCPU resumes with.
+        let synced = self.send_packet("g")?;
+        if synced.starts_with('E') {
+            return Err(Error::Rsp(format!("failed to read registers: {synced}")));
+        }
+        let original = self.read_register_bytes(regnum)?;
+        let mut borrowed = original.clone();
+        let width = borrowed.len().min(8);
+        borrowed[..width].copy_from_slice(&root.to_le_bytes()[..width]);
+        self.write_register_bytes(regnum, &borrowed)?;
+        let result = op(self);
+        if let Err(error) = self.write_register_bytes(regnum, &original) {
+            return Err(Error::Rsp(format!(
+                "failed to restore CR3 after planting a breakpoint through the kernel's page \
+                 tables ({error}); the vCPU would resume in the wrong address space, so do not \
+                 resume it"
+            )));
+        }
+        result
+    }
+
+    fn register_number(&self, name: &str) -> Option<usize> {
+        self.register_map
+            .registers()
+            .iter()
+            .find(|register| register.name == name)
+            .map(|register| register.regnum)
     }
 
     /// The slot's record, or an error naming the slot a caller invented.
@@ -915,17 +992,33 @@ impl GdbClient {
 
     /// Read one register by its target-description number.
     fn read_one_register(&mut self, regnum: usize) -> Result<[u8; 8]> {
+        let bytes = self.read_register_bytes(regnum)?;
+        let mut value = [0u8; 8];
+        let len = bytes.len().min(value.len());
+        value[..len].copy_from_slice(&bytes[..len]);
+        Ok(value)
+    }
+
+    /// One register's bytes at the width the stub reports it.
+    fn read_register_bytes(&mut self, regnum: usize) -> Result<Vec<u8>> {
         let response = self.send_packet(&format!("p{regnum:x}"))?;
         if response.is_empty() || response.starts_with('E') {
             return Err(Error::Rsp(format!(
                 "failed to read register {regnum}: {response}"
             )));
         }
-        let bytes = hex::decode(&response)?;
-        let mut value = [0u8; 8];
-        let len = bytes.len().min(value.len());
-        value[..len].copy_from_slice(&bytes[..len]);
-        Ok(value)
+        Ok(hex::decode(&response)?)
+    }
+
+    fn write_register_bytes(&mut self, regnum: usize, bytes: &[u8]) -> Result<()> {
+        let response = self.send_packet(&format!("P{regnum:x}={}", hex::encode(bytes)))?;
+        if response == "OK" {
+            Ok(())
+        } else {
+            Err(Error::Rsp(format!(
+                "failed to write register {regnum}: {response}"
+            )))
+        }
     }
 
     fn resolve_xml_includes(&mut self, xml: &str) -> Result<String> {
@@ -989,6 +1082,10 @@ impl DebugBackend for GdbClient {
     }
     fn name(&self) -> &'static str {
         "gdb"
+    }
+
+    fn set_kernel_dtb(&mut self, dtb: u64) {
+        self.kernel_dtb = Some(dtb);
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
@@ -1078,20 +1175,24 @@ impl DebugBackend for GdbClient {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    use parking_lot::Mutex;
 
     use super::{
         GdbClient, HW_BREAKPOINT_SLOTS, PacketReadState, RegisterMap, StopReply, StubFeatures,
         append_packet, description_arch,
     };
     use crate::dbg_backend::DebugBackend;
+    use crate::gdb::registers::RegisterInfo;
     use crate::types::Arch;
 
     /// A running target behind a stub that answers the break byte with a stop
-    /// on `p01.02` and records every packet it is sent.
-    fn running_client_over_recording_stub() -> (GdbClient, Arc<Mutex<Vec<String>>>) {
+    /// on `p01.02`, each packet with `answer(packet, times seen before)`, and
+    /// records every packet it is sent.
+    fn client_over_stub(answer: fn(&str, usize) -> String) -> (GdbClient, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -1113,13 +1214,13 @@ mod tests {
                         let mut checksum = [0u8; 2];
                         stream.read_exact(&mut checksum).unwrap();
                         let body = String::from_utf8(packet.clone()).unwrap();
-                        log.lock().unwrap().push(body.clone());
-                        let answer = match body.as_str() {
-                            "?" => "T05core:01;",
-                            "qC" => "QCp01.01",
-                            _ => "",
+                        let seen = {
+                            let mut log = log.lock();
+                            let seen = log.iter().filter(|previous| **previous == body).count();
+                            log.push(body.clone());
+                            seen
                         };
-                        reply(&mut stream, answer);
+                        reply(&mut stream, &answer(&body, seen));
                     }
                     other => packet.push(other),
                 }
@@ -1137,8 +1238,94 @@ mod tests {
             extra_registers: Vec::new(),
             last_stop: String::new(),
             control_thread: None,
+            kernel_dtb: None,
         };
         (client, received)
+    }
+
+    fn running_client_over_recording_stub() -> (GdbClient, Arc<Mutex<Vec<String>>>) {
+        client_over_stub(|packet, _| {
+            match packet {
+                "?" => "T05core:01;",
+                "qC" => "QCp01.01",
+                _ => "",
+            }
+            .to_string()
+        })
+    }
+
+    /// A halted client stopped on `p01.02` that knows the kernel root, with
+    /// `cr3` as register 0x43, as in QEMU's x86-64 description.
+    fn halted_client_over_stub(
+        answer: fn(&str, usize) -> String,
+    ) -> (GdbClient, Arc<Mutex<Vec<String>>>) {
+        let (mut client, received) = client_over_stub(answer);
+        client.is_running = false;
+        client.last_stop = "T05thread:p01.02;".to_string();
+        client.kernel_dtb = Some(0x1ae000);
+        client.register_map = RegisterMap::from_registers(vec![RegisterInfo {
+            name: "cr3".to_string(),
+            offset: 0,
+            size: 8,
+            regnum: 0x43,
+        }]);
+        (client, received)
+    }
+
+    /// Under VBS a vCPU can halt in the Windows hypervisor, whose page tables
+    /// do not map NT, and QEMU plants `Z0` through them. The retry has to go
+    /// through the kernel root on the selected vCPU and must always put that
+    /// vCPU's own CR3 back, or it resumes in the wrong address space.
+    #[test]
+    fn a_kernel_breakpoint_the_halted_vcpu_cannot_map_is_planted_through_the_kernel_root() {
+        let (mut client, received) = halted_client_over_stub(|packet, seen| {
+            match packet {
+                "Z0,fffff800e1a5d130,1" if seen == 0 => "E22",
+                "p43" => "00501f1501000000",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        client.set_breakpoint(0xfffff800e1a5d130).unwrap();
+        assert_eq!(
+            *received.lock(),
+            [
+                "Z0,fffff800e1a5d130,1",
+                "Hgp01.02",
+                "Hcp01.02",
+                "g",
+                "p43",
+                "P43=00e01a0000000000",
+                "Z0,fffff800e1a5d130,1",
+                "P43=00501f1501000000",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_retry_still_restores_cr3_and_reports_the_failure() {
+        let (mut client, received) = halted_client_over_stub(|packet, _| {
+            match packet {
+                "z0,fffff800e1a5d130,1" => "E22",
+                "p43" => "00501f1501000000",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        assert!(client.remove_breakpoint(0xfffff800e1a5d130).is_err());
+        assert_eq!(
+            received.lock().last().map(String::as_str),
+            Some("P43=00501f1501000000")
+        );
+    }
+
+    /// The kernel root cannot map a user-half address any better than the
+    /// vCPU's own tables, so the vCPU is left alone.
+    #[test]
+    fn a_user_address_failure_is_reported_without_touching_cr3() {
+        let (mut client, received) = halted_client_over_stub(|_, _| "E22".to_string());
+        assert!(client.set_breakpoint(0x7ff6_0000_1000).is_err());
+        assert_eq!(*received.lock(), ["Z0,7ff600001000,1"]);
     }
 
     /// QEMU answers `?` by removing every breakpoint, as for a debugger's
@@ -1162,7 +1349,7 @@ mod tests {
         assert!(halted.thread_id.is_none() && halted.watchpoint_address.is_none());
         DebugBackend::wait_for_stop(&mut client).unwrap();
 
-        assert!(!received.lock().unwrap().iter().any(|packet| packet == "?"));
+        assert!(!received.lock().iter().any(|packet| packet == "?"));
     }
 
     #[test]

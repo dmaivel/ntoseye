@@ -253,6 +253,9 @@ impl Session {
             ));
         }
         let breakpoint_error = if report.is_ok() {
+            // Before re-resolving breakpoints: a stub may plant them through
+            // this root, and the old boot's is gone.
+            backend.set_kernel_dtb(target.kernel_dtb());
             let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
             target.refresh_debugger_data(debugger_data_hint);
             breakpoints.resolve_symbolic(backend, target).err()
