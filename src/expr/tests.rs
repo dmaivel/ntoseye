@@ -110,6 +110,49 @@ fn test_pointer_fields_use_the_pdb_declared_width() {
 }
 
 #[test]
+fn test_module_qualified_pointer_casts_resolve_the_type_in_that_module() {
+    let mut bytes = [0u8; 8];
+    bytes[4..].copy_from_slice(&0x2au32.to_le_bytes());
+    let session = session_over_memory(0x1000, &bytes);
+    let dtb = session.target.current_dtb();
+    session.target.symbols.inject_module_for_test(
+        2,
+        vec![TypeInfo {
+            name: "_NODE".to_string(),
+            size: 8,
+            pointer_size: 8,
+            fields: [(
+                "Value".to_string(),
+                FieldInfo {
+                    offset: 4,
+                    size: 4,
+                    type_data: ParsedType::Primitive("ULONG".to_string()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }],
+        &[],
+    );
+    session
+        .target
+        .symbols
+        .register_module_for_test(2, "driver", dtb);
+
+    assert_eq!(
+        Expr::eval("((driver!_NODE*)0x1000)->Value", &session.target)
+            .unwrap()
+            .0,
+        0x2a
+    );
+    // A parenthesized qualified name without `*` stays a symbol, not a cast.
+    assert!(matches!(
+        Expr::parse("(driver!Routine)+8"),
+        Ok(Expr::Binary(_, ExprBinaryOp::Add, _))
+    ));
+}
+
+#[test]
 fn test_bitfields_read_only_the_declared_storage_and_have_no_address() {
     let session = session_over_memory(0x1000, &[0b10110100]);
     let field = ExprValue::Memory {

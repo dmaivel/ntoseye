@@ -16,13 +16,22 @@ use winnow::token::{literal, one_of, take_till, take_while};
 
 impl Expr {
     fn is_type_name(s: &str) -> bool {
+        fn is_identifier(s: &str) -> bool {
+            s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
         let mut s = s.trim();
+        let mut pointer = false;
         while let Some(stripped) = s.strip_suffix('*') {
             s = stripped.trim_end();
+            pointer = true;
         }
-        !s.is_empty()
-            && s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        match s.split_once('!') {
+            // `(nt!Symbol)` is a parenthesized symbol, so a module-qualified
+            // type is only taken as a cast when it is a pointer type.
+            Some((module, name)) => pointer && is_identifier(module) && is_identifier(name),
+            None => is_identifier(s),
+        }
     }
 
     fn parse_type(type_str: &str) -> Result<ExprType> {
