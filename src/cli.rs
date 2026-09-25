@@ -20,10 +20,8 @@ use crate::{
     symbols,
 };
 
-/// Windows kernel debugger for Linux (KVM/QEMU, VMware) and macOS (UTM) hosts
-/// running Windows. WinDbg for Linux and macOS.
 #[derive(Parser)]
-#[command(name = "ntoseye")]
+#[command(name = "ntoseye", about)]
 struct Cli {
     /// Print version information
     #[arg(short = 'v', long)]
