@@ -160,6 +160,9 @@ pub struct Guest {
     pub ntoskrnl: Image,
     memo: Mutex<HaltMemo>,
     secure_kernel: Mutex<Option<Arc<SecureKernel>>>,
+    /// Images found outside NT's address spaces (the Windows hypervisor), by
+    /// root. They stay mapped for the boot, and this `Guest` is the boot's.
+    foreign_images: Mutex<Vec<(Dtb, ModuleInfo)>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -185,7 +188,37 @@ impl Guest {
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
             secure_kernel: Mutex::new(None),
+            foreign_images: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The image mapped at `rip` in root `dtb`, found once with `find` and
+    /// remembered for the boot. Finding one walks down page by page to its
+    /// header, a read per page, on every stop and vCPU listing otherwise.
+    /// `mapped` confirms a remembered image is still there.
+    pub fn foreign_image(
+        &self,
+        dtb: Dtb,
+        rip: VirtAddr,
+        mapped: impl Fn(&ModuleInfo) -> bool,
+        find: impl FnOnce() -> Option<ModuleInfo>,
+    ) -> Option<ModuleInfo> {
+        let mut images = self
+            .foreign_images
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = images
+            .iter()
+            .position(|(root, image)| *root == dtb && image.contains_address(rip))
+        {
+            if mapped(&images[index].1) {
+                return Some(images[index].1.clone());
+            }
+            images.swap_remove(index);
+        }
+        let image = find()?;
+        images.push((dtb, image.clone()));
+        Some(image)
     }
 
     fn memo(&self) -> MutexGuard<'_, HaltMemo> {

@@ -123,7 +123,20 @@ impl Target {
     pub fn identify_foreign_code(&self, cr3: u64, rip: u64) -> Option<ForeignCode> {
         let dtb = cr3 & self.arch().dtb_page_mask();
         let secure_root = self.symbols.is_secure_root(dtb);
-        let image = image_containing(&self.address_space(dtb), rip);
+        let memory = self.address_space(dtb);
+        let find = || image_containing(&memory, rip);
+        let image = match &self.guest {
+            Some(guest) => guest.foreign_image(
+                dtb,
+                VirtAddr(rip),
+                |image| {
+                    let mut magic = [0u8; 2];
+                    memory.read_bytes(image.base_address, &mut magic).is_ok() && magic == *b"MZ"
+                },
+                find,
+            ),
+            None => find(),
+        };
         let context = match &image {
             Some(image) => match image.short_name.as_str() {
                 "hvix64" | "hvax64" | "hvaa64" => "hypervisor".to_string(),
