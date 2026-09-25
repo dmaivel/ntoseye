@@ -51,8 +51,6 @@ impl Session {
         self.backend.set_current_thread(id)?;
         self.target.selected_frame = None;
         self.current_thread = id.to_string();
-        self.parked_windows_thread = None;
-        self.target.clear_current_windows_thread_context();
         self.refresh_context_for_current_thread();
         Ok(())
     }
@@ -157,13 +155,10 @@ impl Session {
     }
 
     /// Drop any Windows-thread selection and return to the backend's current
-    /// vCPU context (`.thread` with no argument).
+    /// vCPU context and the thread it is running (`.thread` with no argument).
     pub fn reset_windows_thread(&mut self) -> Result<()> {
         let current = self.current_thread.clone();
-        self.set_current_thread(&current)?;
-        self.target.selected_frame = None;
-        self.target.clear_current_windows_thread_context();
-        Ok(())
+        self.set_current_thread(&current)
     }
 
     /// Move the whole inspection selection out (process scope, frame, parked
@@ -282,8 +277,11 @@ impl Session {
     /// an earlier stop on another thread. Called from the thread-selection entry
     /// points; `continue_until_break` establishes the same context inline. Best-
     /// effort and a no-op while the guest runs (no coherent register file).
+    /// Make the current vCPU the inspection context: its registers, and the
+    /// Windows thread it is running (what `!thread` and `$thread` read).
     pub(super) fn refresh_context_for_current_thread(&mut self) {
         self.parked_windows_thread = None;
+        self.target.clear_current_windows_thread_context();
         if self.backend.is_running() {
             return;
         }
@@ -292,6 +290,7 @@ impl Session {
             .set_current_thread(&self.current_thread)
             .and_then(|_| self.backend.read_registers());
         update_target_context_from_registers(&mut self.target, &self.register_map, registers);
+        refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
     }
 
     /// Best-effort current RIP of the selected thread (0 if unreadable).

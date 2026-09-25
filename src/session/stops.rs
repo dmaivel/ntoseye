@@ -55,6 +55,9 @@ impl Session {
         // `$exr_code` follows the same boundary as host-visible stop events;
         // absorbed transport noise must not overwrite it.
         self.target.last_exception_code = event.exception_code;
+        // Every host inspects the thread the stop landed on: `!thread`,
+        // `.thread` and `$thread` read this selection, and resuming cleared it.
+        refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
         self.current_stop = Some(self.continue_outcome_from_resolution(resolution.clone()));
     }
 

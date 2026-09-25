@@ -826,7 +826,6 @@ impl ReplState<'_> {
                 error!("failed to switch processor: {}", error);
             } else {
                 self.clear_selected_frame();
-                refresh_windows_thread_context_for_backend_thread(&mut self.ctx.target, &id);
                 self.caches.refresh_symbol_context(&self.ctx.target);
                 outln!("switched to processor {}\n", id);
             }
@@ -839,7 +838,6 @@ impl ReplState<'_> {
                 continue;
             }
             self.clear_selected_frame();
-            refresh_windows_thread_context_for_backend_thread(&mut self.ctx.target, &id);
             self.caches.refresh_symbol_context(&self.ctx.target);
             if let Err(error) = self.dispatch_line(if action == 'k' { "k" } else { "r" }) {
                 error!("processor {} command failed: {}", id, error);
@@ -849,7 +847,6 @@ impl ReplState<'_> {
             error!("failed to restore processor {}: {}", original, error);
         } else {
             self.clear_selected_frame();
-            refresh_windows_thread_context_for_backend_thread(&mut self.ctx.target, &original);
             self.caches.refresh_symbol_context(&self.ctx.target);
         }
         Ok(Flow::Continue)
@@ -941,11 +938,6 @@ impl ReplState<'_> {
         }
 
         self.clear_selected_frame();
-
-        refresh_windows_thread_context_for_backend_thread(
-            &mut self.ctx.target,
-            &self.ctx.current_thread,
-        );
         self.caches.refresh_symbol_context(&self.ctx.target);
         outln!("switched to vCPU {}\n", self.ctx.current_thread);
 
