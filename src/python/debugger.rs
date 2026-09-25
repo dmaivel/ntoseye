@@ -17,6 +17,7 @@ use super::memory::Memory;
 use super::module::{Drivers, Modules};
 use super::process::Processes;
 use super::record::Record;
+use super::secure::SecureKernel;
 use super::stop::Stop;
 use super::symbols::Location;
 use super::symbols::{self, Symbols};
@@ -64,6 +65,16 @@ impl Debugger {
     #[getter]
     fn modules(slf: &Bound<'_, Self>) -> Modules {
         Modules::kernel(namespace_owner(slf))
+    }
+
+    /// The VBS secure kernel (VTL1): read-only `memory`, `symbols`, `types`,
+    /// `modules`, and `trustlets`. Discovered on first use from host memory;
+    /// raises `NtoseyeError` when VBS is not running or the backend cannot
+    /// read host memory. Experimental.
+    #[getter]
+    fn secure_kernel(slf: &Bound<'_, Self>) -> PyResult<SecureKernel> {
+        let py = slf.py();
+        SecureKernel::discover(py, namespace_owner(slf).derive(py))
     }
 
     /// Running processes keyed by PID: `processes[4]`, `.find(name)`.

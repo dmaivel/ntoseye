@@ -307,6 +307,11 @@ impl Target {
     /// populated from either the live backend context or a selected frame, so
     /// expression evaluation does not need to know which one is active.
     pub fn register_value(&self, name: &str) -> Option<u64> {
+        // A VTL1 scope has no register file of its own; whatever is cached
+        // is VTL0 state (a host may lend the live file to a scoped call).
+        if self.in_secure_scope() {
+            return None;
+        }
         lookup_register(self.registers.as_ref()?, name)
     }
 

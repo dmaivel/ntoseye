@@ -22,9 +22,32 @@ pub enum Space {
     Process(ProcessInfo),
     /// Guest-physical memory (`dbg.physical`), untranslated.
     Physical,
+    /// A VTL1 root (`dbg.secure_kernel.memory`, `trustlet.memory`): the
+    /// secure kernel's system space or a trustlet's. It maps the secure
+    /// kernel and never NT's. Read-only.
+    Secure(Dtb),
 }
 
 impl Space {
+    /// Refuse a write: VTL1 is inspection-only, as in the REPL.
+    pub fn require_writable(&self) -> PyResult<()> {
+        if matches!(self, Space::Secure(_)) {
+            Err(raise("VTL1 memory is read-only"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Refuse an operation that reads NT's own state (memory manager, pager)
+    /// about an address: VTL1 memory is not NT's to describe.
+    pub fn require_nt(&self, operation: &str) -> PyResult<()> {
+        if matches!(self, Space::Secure(_)) {
+            Err(raise(format!("{operation} is not available in VTL1")))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn require_virtual(&self) -> PyResult<()> {
         if matches!(self, Space::Physical) {
             Err(raise("not available on physical memory"))
@@ -38,6 +61,7 @@ impl Space {
     pub fn context(&self) -> Context {
         match self {
             Space::Process(info) => Context::process(info.clone()),
+            Space::Secure(root) => Context::secure(*root),
             Space::Kernel | Space::Physical => Context::default(),
         }
     }
@@ -48,6 +72,7 @@ impl Space {
         match self {
             Space::Kernel => Ok(target.kernel_dtb()),
             Space::Process(info) => Ok(info.dtb),
+            Space::Secure(root) => Ok(*root),
             Space::Physical => unreachable!(),
         }
     }
@@ -57,8 +82,10 @@ impl Space {
 /// space on the backend's current vCPU.
 #[derive(Clone, Debug, Default)]
 pub struct Context {
-    /// Address space; `None` is the kernel.
+    /// Address space; `None` (with no `secure` root) is the kernel.
     pub process: Option<ProcessInfo>,
+    /// A VTL1 root to inspect instead of an NT address space.
+    pub secure: Option<Dtb>,
     /// Backend vCPU (registers, stepping); `None` keeps the backend's current.
     pub vcpu: Option<String>,
     /// Windows thread to inspect: one running on a vCPU switches to it, any
@@ -73,6 +100,14 @@ impl Context {
     pub fn process(info: ProcessInfo) -> Context {
         Context {
             process: Some(info),
+            ..Context::default()
+        }
+    }
+
+    /// The VTL1 address space rooted at `root`.
+    pub fn secure(root: Dtb) -> Context {
+        Context {
+            secure: Some(root),
             ..Context::default()
         }
     }
@@ -96,7 +131,9 @@ pub fn in_context<R>(
     let mut saved = session.take_selection();
     // Same vCPU, no thread/frame: lend the operation the live register file
     // rather than reading the registers again for every scoped call.
-    let same_vcpu = ctx.vcpu.is_none() && ctx.thread.is_none() && ctx.frame.is_none();
+    // A VTL1 scope gets none: the live file is VTL0 state.
+    let same_vcpu =
+        ctx.vcpu.is_none() && ctx.thread.is_none() && ctx.frame.is_none() && ctx.secure.is_none();
     if same_vcpu {
         session.target.registers = saved.take_live_registers();
     }
@@ -115,6 +152,9 @@ pub fn in_context<R>(
 fn apply(session: &mut Session, ctx: &Context) -> PyResult<()> {
     if let Some(process) = &ctx.process {
         session.target.enter_process_scope(process.clone());
+    }
+    if let Some(root) = ctx.secure {
+        session.target.enter_secure_scope(root);
     }
     if let Some(vcpu) = &ctx.vcpu {
         session.set_current_thread(vcpu).map_err(err)?;

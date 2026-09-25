@@ -85,19 +85,34 @@ impl Target {
             self.symbols.set_secure_roots(secure.image.dtb(), []);
             secure.image.dtb()
         };
+        let report = self.load_secure_kernel_symbols()?;
+        self.enter_secure_scope(root);
+        self.registers = None;
+        Ok(report)
+    }
+
+    /// Index the secure kernel's modules' symbols under its system root,
+    /// discovering it first. Modules already loaded are not fetched again.
+    pub fn load_secure_kernel_symbols(&self) -> Result<ModuleSymbolLoadReport> {
+        let secure = self.secure_kernel()?;
         let modules = secure.modules(self.guest()?)?;
-        let report = Guest::load_module_symbols(
+        Guest::load_module_symbols(
             &self.phys,
             &self.symbols,
             modules,
             secure.image.dtb(),
             SessionSpace::Load,
             self.arch(),
-        )?;
+        )
+    }
+
+    /// Scope reads and symbol lookups to a secure root already validated by
+    /// discovery or [`Self::trustlets`], as [`Self::enter_process_scope`]
+    /// does for a process. Nothing is loaded; see
+    /// [`Self::load_secure_kernel_symbols`].
+    pub fn enter_secure_scope(&mut self, root: Dtb) {
         self.detach();
-        self.registers = None;
         self.secure_root = Some(root);
-        Ok(report)
     }
 
     /// Name the code at `rip` in the address space `cr3` when that space is

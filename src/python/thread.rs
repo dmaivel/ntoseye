@@ -425,6 +425,7 @@ impl Frame {
     fn context(&self) -> Context {
         Context {
             process: self.process_info.clone(),
+            secure: None,
             vcpu: None,
             thread: self.thread_info.clone(),
             frame: (self.live_thread && self.thread_info.is_some()).then_some(self.index),

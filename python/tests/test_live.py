@@ -113,3 +113,26 @@ def test_ctrl_c_breaks_into_a_resuming_command(halted: Debugger) -> None:
         halted.command("g")
     # As in the REPL, Ctrl+C during `g` breaks in: the target is halted.
     assert halted.stop is not None
+
+
+def test_secure_kernel_views_are_isolated_from_vtl0(halted: Debugger) -> None:
+    try:
+        sk = halted.secure_kernel
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no VTL1 on this target: {error}")
+    assert sk.memory.read(sk.base, 2) == b"MZ"
+    assert sk.modules["securekernel"].base == sk.base
+    # Each kernel's symbols resolve only in its own address spaces.
+    head = sk.symbols["securekernel!SkpsProcessList"]
+    assert halted.symbols.get("securekernel!SkpsProcessList") is None
+    assert sk.symbols.get("nt!KeBugCheckEx") is None
+    # VTL1 is read-only, and the halted vCPU's registers are VTL0 state.
+    with pytest.raises(ntoseye.NtoseyeError):
+        sk.memory.write_u8(head, 0)
+    with pytest.raises(ntoseye.NtoseyeError):
+        sk.eval("@rip")
+    halted.eval("@rip")
+    for trustlet in sk.trustlets:
+        assert trustlet.memory.translate(sk.base) == sk.memory.translate(sk.base)
+        assert trustlet.symbols["securekernel!SkpsProcessList"] == head
+        assert trustlet.process is not None and trustlet.process.pid == trustlet.pid

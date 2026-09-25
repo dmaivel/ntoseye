@@ -42,6 +42,7 @@ A `Debugger` exposes namespaces rather than flat `inspect_*` methods:
 | `dbg.processes`, `dbg.threads`, `dbg.cpus` | Keyed processes, threads, and processors |
 | `dbg.breakpoints`, `dbg.exceptions` | Breakpoint handles and exception policies |
 | `dbg.inspect`, `dbg.drivers` | System-wide reports/decoders and driver objects |
+| `dbg.secure_kernel` | The VBS secure kernel and its trustlets (VTL1), read-only |
 
 Processes are keyed by PID: `dbg.processes[pid]` raises `KeyError` if absent, while `.get(pid)` returns `None`. `dbg.processes.find(name)` returns exact, case-insensitive image-name matches as a list. A process owns address-space-bound views: `proc.memory`, `proc.symbols`, `proc.types`, `proc.modules`, `proc.threads`, `proc.regions`, and `proc.heaps`. Use these views directly instead of selecting or attaching a global process.
 
@@ -70,6 +71,23 @@ if params is not None:
 ```
 
 PDB enum fields return cached `IntEnum` members when the value is defined; other values remain plain `int`. Use `cursor["Field"]` for collision-proof field access (and assignment); ordinary `cursor.Field` can resolve a cursor member first. `Struct` cursors are live reads tied to their original address space.
+
+## Secure kernel (VTL1)
+
+> [!IMPORTANT]
+> VTL1 inspection is experimental; see [Secure kernel (VTL1)](usage.md#secure-kernel-vtl1) for how it works and where it has been tested.
+
+With VBS running, `dbg.secure_kernel` is the secure kernel, discovered from host memory on first use (the `memory` and `gdb` backends, or `kd`/`kdnet` reading host memory). It raises `NtoseyeError` when VBS is not running or the backend cannot reach VTL1 memory. Its `memory`, `symbols`, `types`, and `modules` are bound to the secure kernel's system address space, as `proc.memory` is to a process's; `trustlets` lists the secure kernel's processes, each with the same views bound to its own address space and `process` naming its NT side.
+
+```python
+sk = dbg.secure_kernel
+head = sk.symbols["securekernel!SkpsProcessList"]
+print(sk.memory.read_u64(head), [m.name for m in sk.modules])
+for trustlet in sk.trustlets:                # LsaIso.exe, trustlet_id 1, ...
+    print(trustlet.pid, trustlet.name, trustlet.trustlet_id, hex(trustlet.dtb))
+```
+
+These views are read-only: writes, and operations that read NT's own state about an address (`describe`, `page_in`, `ptov`), raise `NtoseyeError`. Registers belong to VTL0, so `sk.eval("@rip")` raises too. Secure-kernel symbols resolve only in these views and NT's only outside them. The public `securekernel.pdb` has no types; name NT's explicitly (`sk.types["nt!_LIST_ENTRY"]`). A trustlet's own user-mode modules are not enumerated.
 
 ## Run control and breakpoints
 

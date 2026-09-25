@@ -15,22 +15,23 @@ use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
 use crate::pe;
 use crate::target::object::DriverObjectInfo;
-use crate::types::VirtAddr;
+use crate::types::{Dtb, VirtAddr};
 use crate::view::{self, View};
 use pelite::PeView;
 
-/// A module collection: `dbg.modules` (kernel) or `proc.modules` (loader lists).
+/// A module collection: `dbg.modules` (kernel), `proc.modules` (loader
+/// lists), or `dbg.secure_kernel.modules` (the secure kernel's).
 #[pyclass(module = "ntoseye")]
 pub struct Modules {
     pub owner: Owner,
-    pub process: Option<ProcessInfo>,
+    space: Space,
 }
 
 impl Modules {
     pub fn kernel(owner: Owner) -> Modules {
         Modules {
             owner,
-            process: None,
+            space: Space::Kernel,
         }
     }
 
@@ -38,21 +39,32 @@ impl Modules {
     pub fn process(owner: Owner, info: ProcessInfo) -> Modules {
         Modules {
             owner,
-            process: Some(info),
+            space: Space::Process(info),
+        }
+    }
+
+    /// The secure kernel's modules, registered under its system `root`.
+    /// `owner` should be the secure-kernel handle's (stamped) owner.
+    pub fn secure(owner: Owner, root: Dtb) -> Modules {
+        Modules {
+            owner,
+            space: Space::Secure(root),
         }
     }
 
     fn space(&self) -> Space {
-        self.process.clone().map_or(Space::Kernel, Space::Process)
+        self.space.clone()
     }
 
     fn infos(&self, py: Python<'_>) -> PyResult<Vec<ModuleInfo>> {
-        let process = self.process.is_some();
-        self.owner.with_in(py, &self.space().context(), |session| {
-            if process {
-                session.target.modules_with_versions()
-            } else {
+        let kernel = matches!(self.space, Space::Kernel);
+        self.owner.with_in(py, &self.space.context(), |session| {
+            if kernel {
                 session.target.kernel_modules_with_versions()
+            } else {
+                // The scope's own list: the process's loader lists, or the
+                // secure kernel's.
+                session.target.modules_with_versions()
             }
             .map_err(err)
         })
@@ -94,7 +106,7 @@ impl Module {
     fn process_key(&self) -> Option<VirtAddr> {
         match &self.space {
             Space::Process(info) => Some(info.eprocess_va),
-            Space::Kernel | Space::Physical => None,
+            Space::Kernel | Space::Physical | Space::Secure(_) => None,
         }
     }
 
@@ -476,7 +488,7 @@ impl Modules {
     /// list from a corrupt or truncated one; `None` for kernel modules.
     #[getter]
     fn termination<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
-        let Some(process) = &self.process else {
+        let Space::Process(process) = &self.space else {
             return Ok(None);
         };
         let detail = self

@@ -25,6 +25,23 @@ fn test_subregisters_read_their_parent_without_fabricating_storage() {
 }
 
 #[test]
+fn vtl1_scope_never_reads_a_cached_vtl0_register_file() {
+    // SDK calls lend the live register file to scoped work; in VTL1 scope it
+    // is still VTL0's and must not evaluate as secure-kernel state.
+    let mut session = session_over_memory(0x1000, &[0; 8]);
+    session.target.registers = Some(HashMap::from([("rip".into(), 0x1234)]));
+    assert_eq!(Expr::eval("@rip", &session.target).unwrap().0, 0x1234);
+    session.target.enter_secure_scope(0x4000);
+    assert!(matches!(
+        Expr::eval("@rip", &session.target),
+        Err(Error::InvalidExpression(_))
+    ));
+    assert_eq!(session.target.register_value("eax"), None);
+    session.target.leave_secure_scope();
+    assert_eq!(Expr::eval("@rip", &session.target).unwrap().0, 0x1234);
+}
+
+#[test]
 fn test_typed_reads_preserve_width_and_address_of_does_not_read_memory() {
     let bytes = [0x78, 0x56, 0x34, 0x12, 0xaa, 0xbb, 0xcc, 0xdd];
     let session = session_over_memory(0x1000, &bytes);

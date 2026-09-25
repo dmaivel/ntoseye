@@ -365,6 +365,7 @@ Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); 
 ## Secure kernel (VTL1)
 
 With virtualization-based security (VBS) running, Windows runs a second kernel, `securekernel.exe`, in Virtual Trust Level 1 alongside isolated user-mode processes (trustlets such as `LsaIso.exe`). `ntoseye` can inspect that memory on an AMD64 guest whose memory it reads directly from the host.
+The Python SDK exposes the same views as [`dbg.secure_kernel`](sdk.md#secure-kernel-vtl1).
 
 > [!IMPORTANT]
 > VTL1 inspection is experimental. It relies on undocumented secure-kernel structures, finds them heuristically, and has been tested live on a single configuration: a Windows 11 10.0.26100 guest under QEMU/KVM with HVCI off. It may fail on other builds or hosts, and it refuses rather than guesses when a structure is not recognized.

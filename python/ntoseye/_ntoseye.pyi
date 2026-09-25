@@ -455,6 +455,14 @@ class Debugger:
         (`pa`/`ta`). Other stops en route are returned as they are; with
         `timeout`, an unreached target is interrupted where it is.
         """
+    @property
+    def secure_kernel(self, /) -> SecureKernel:
+        """
+        The VBS secure kernel (VTL1): read-only `memory`, `symbols`, `types`,
+        `modules`, and `trustlets`. Discovered on first use from host memory;
+        raises `NtoseyeError` when VBS is not running or the backend cannot
+        read host memory. Experimental.
+        """
     def step(self, /, until: Literal["call", "ret", "branch"] |None = None) -> Stop:
         """
         Single-step one instruction, or with `until` ("call", "ret", "branch")
@@ -1156,7 +1164,8 @@ class MemorySearchMatch:
     @property
     def kind(self, /) -> str:
         """
-        What the address is: a module, a kernel region, a process VAD, or physical memory.
+        What the address is: a module, a kernel region, a process VAD,
+        physical memory, or `vtl1`.
         """
     @property
     def module(self, /) -> AddressModule |None:
@@ -1294,7 +1303,8 @@ class ModuleIterator:
 @final
 class Modules:
     """
-    A module collection: `dbg.modules` (kernel) or `proc.modules` (loader lists).
+    A module collection: `dbg.modules` (kernel), `proc.modules` (loader
+    lists), or `dbg.secure_kernel.modules` (the secure kernel's).
     """
     def __contains__(self, name: str, /) -> bool: ...
     def __getitem__(self, name: str, /) -> Module: ...
@@ -1584,6 +1594,60 @@ class Section:
         Its mapped size.
         """
     def to_dict(self, /) -> dict[str, Any]: ...
+
+@final
+class SecureKernel:
+    """
+    The secure kernel (`securekernel.exe`) running in VTL1, with views bound to
+    its system address space. Read-only: writes raise `NtoseyeError`.
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
+    def __repr__(self, /) -> str: ...
+    @property
+    def base(self, /) -> int:
+        """
+        Base address of `securekernel.exe`.
+        """
+    @property
+    def dtb(self, /) -> int:
+        """
+        The secure kernel's system page-table root.
+        """
+    def eval(self, /, expr: str) -> int:
+        """
+        Evaluate a debugger expression in the secure kernel's symbol scope.
+        Registers are VTL0 state and are refused.
+        """
+    @property
+    def memory(self, /) -> Memory:
+        """
+        Virtual memory through the secure kernel's system page tables.
+        """
+    @property
+    def modules(self, /) -> Modules:
+        """
+        Modules the secure kernel loaded (`securekernel.exe`, `skci.dll`, ...).
+        """
+    @property
+    def symbols(self, /) -> Symbols:
+        """
+        Symbols of the secure kernel's modules (`securekernel!...`). NT's
+        symbols do not resolve here.
+        """
+    @property
+    def trustlets(self, /) -> list[Trustlet]:
+        """
+        The secure kernel's processes (trustlets), walked afresh and validated
+        against the NT process list. Raises `NtoseyeError` when this build's
+        process layout is not recognized.
+        """
+    @property
+    def types(self, /) -> Types:
+        """
+        PDB types read through VTL1 memory. The public secure-kernel PDB
+        carries no types; name NT's explicitly (`nt!_LIST_ENTRY`).
+        """
 
 class Stop:
     """
@@ -1987,6 +2051,72 @@ class Threads:
     def get(self, /, tid: int) -> Thread |None:
         """
         Resolve a TID, returning `None` when it is not present.
+        """
+
+@final
+class Trustlet:
+    """
+    An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`.
+    Its views read through the trustlet's own page tables, which map its user
+    half and the secure kernel. Read-only.
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
+    def __repr__(self, /) -> str: ...
+    @property
+    def address(self, /) -> int:
+        """
+        Address of the secure kernel's process object for this trustlet.
+        """
+    @property
+    def dtb(self, /) -> int:
+        """
+        The trustlet's page-table root.
+        """
+    def eval(self, /, expr: str) -> int:
+        """
+        Evaluate a debugger expression in this trustlet's address space.
+        """
+    @property
+    def memory(self, /) -> Memory:
+        """
+        Virtual memory through the trustlet's page tables.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        The image name, from the NT process.
+        """
+    @property
+    def pid(self, /) -> int:
+        """
+        The NT process ID of the trustlet's VTL0 counterpart.
+        """
+    @property
+    def process(self, /) -> Process |None:
+        """
+        The NT process (VTL0 side), or `None` once it has exited.
+        """
+    @property
+    def symbols(self, /) -> Symbols:
+        """
+        The secure kernel's symbols, resolved in this trustlet's address space.
+        The trustlet's own user-mode modules are not enumerated.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        The trustlet's identity as a plain `dict` (`pid`, `name`,
+        `trustlet_id`, `dtb`, `address`), the shape `!trustlets` lists.
+        """
+    @property
+    def trustlet_id(self, /) -> int:
+        """
+        The trustlet ID from its creation attributes (1 for `LsaIso.exe`).
+        """
+    @property
+    def types(self, /) -> Types:
+        """
+        PDB types read through the trustlet's memory (`nt!` types by name).
         """
 
 @final

@@ -115,6 +115,7 @@ impl Types {
             Space::Kernel => "kernel",
             Space::Process(_) => "process",
             Space::Physical => "physical",
+            Space::Secure(_) => "secure",
         };
         format!("<Types space={space}>")
     }
@@ -494,6 +495,7 @@ impl Struct {
     }
 
     fn set_field(&self, py: Python<'_>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.space.require_writable()?;
         let field = lookup_field(&self.info, &self.name, name)?;
         let addr = self.field_address(field);
 

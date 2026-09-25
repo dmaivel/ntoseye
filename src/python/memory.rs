@@ -57,6 +57,7 @@ impl Memory {
     }
 
     fn write_bytes(&self, py: Python<'_>, addr: u64, data: &[u8]) -> PyResult<()> {
+        self.space.require_writable()?;
         check_read_len(data.len())?;
         let context = self.space.context();
         let physical = matches!(self.space, Space::Physical);
@@ -248,6 +249,7 @@ impl Memory {
         }
         let context = self.space.context();
         let physical = matches!(self.space, Space::Physical);
+        let secure = matches!(self.space, Space::Secure(_));
         self.owner.with_in(py, &context, move |session| {
             let mut bytes = vec![0; length];
             if physical {
@@ -265,6 +267,24 @@ impl Memory {
                 let hits = pattern_offsets(&bytes, pattern)
                     .map(|offset| start.wrapping_add(offset as u64))
                     .collect::<Vec<_>>();
+                if secure {
+                    // NT's region descriptions do not cover VTL1 addresses.
+                    return Ok(hits
+                        .into_iter()
+                        .map(|address| MemorySearchMatch {
+                            address,
+                            offset: address.wrapping_sub(start),
+                            symbol: session
+                                .target
+                                .closest_symbol_current_context(VirtAddr(address)),
+                            kind: "vtl1".to_string(),
+                            module: None,
+                            section: None,
+                            va_type: None,
+                            region: None,
+                        })
+                        .collect());
+                }
                 session
                     .target
                     .describe_search_matches(VirtAddr(start), &hits)
@@ -304,6 +324,7 @@ impl Memory {
     /// Reverse-map a physical address through this space's page tables (`!ptov`).
     fn ptov<'py>(&self, py: Python<'py>, physical: u64) -> PyResult<Bound<'py, Record>> {
         self.space.require_virtual()?;
+        self.space.require_nt("ptov")?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.ptov(physical).map_err(err)
@@ -325,10 +346,11 @@ impl Memory {
     fn page_in(&self, py: Python<'_>, addr: u64) -> PyResult<bool> {
         self.space.require_virtual()?;
         let context = self.space.context();
+        self.space.require_nt("page_in")?;
         let process = match &self.space {
             Space::Process(info) => Some(info.eprocess_va.0),
             Space::Kernel => None,
-            Space::Physical => unreachable!(),
+            Space::Physical | Space::Secure(_) => unreachable!(),
         };
         self.owner.with_in(py, &context, |session| {
             require_halted(session, "page_in")?;
@@ -345,6 +367,7 @@ impl Memory {
     /// Describe the loaded module, kernel region, or process VAD containing `addr`.
     fn describe<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         self.space.require_virtual()?;
+        self.space.require_nt("describe")?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.describe_address(VirtAddr(addr)).map_err(err)
@@ -524,7 +547,8 @@ pub struct MemorySearchMatch {
     offset: u64,
     /// The nearest symbol, if one resolved.
     symbol: Option<String>,
-    /// What the address is: a module, a kernel region, a process VAD, or physical memory.
+    /// What the address is: a module, a kernel region, a process VAD,
+    /// physical memory, or `vtl1`.
     kind: String,
     /// The module containing the match, if any.
     module: Option<AddressModule>,

@@ -38,6 +38,7 @@ pub mod process;
 pub mod record;
 pub mod runcontrol;
 pub mod runner;
+pub mod secure;
 pub mod stop;
 pub mod symbols;
 #[cfg(test)]
@@ -281,6 +282,8 @@ pub mod _ntoseye {
     use super::process::{Heap, Heaps, Process, Processes, Regions};
     #[pymodule_export]
     use super::record::{Diagnostic, Record};
+    #[pymodule_export]
+    use super::secure::{SecureKernel, Trustlet};
     #[pymodule_export]
     use super::stop::{Stop, StopContext};
     #[pymodule_export]
