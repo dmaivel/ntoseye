@@ -89,6 +89,9 @@ pub enum Error {
     #[error("Ntoskrnl not found")]
     NtoskrnlNotFound,
 
+    #[error("secure kernel (VTL1): {0}")]
+    SecureKernel(String),
+
     #[error("PE view failed")]
     ViewFailed,
 

@@ -163,6 +163,11 @@ pub struct SymbolStore {
     /// mapped into every process, so lookups scoped to a user DTB also see
     /// these modules (`bp nt!NtClose` from a process context).
     kernel_dtb: Mutex<Option<Dtb>>,
+    /// The secure kernel's (VTL1) address spaces, once discovered. VTL1 is a
+    /// second kernel: NT's modules are not mapped where NT maps them, so they
+    /// are invisible from these roots, and the secure kernel's modules are
+    /// invisible from everywhere else.
+    secure_roots: Mutex<Option<SecureRoots>>,
 
     /// PDBs of modules identified in earlier sessions; opened on first use so
     /// building a store touches no files.
@@ -562,6 +567,12 @@ impl LoadedModule {
     }
 }
 
+/// See [`SymbolStore::set_secure_roots`].
+struct SecureRoots {
+    kernel: Dtb,
+    roots: HashSet<Dtb>,
+}
+
 impl Default for SymbolStore {
     fn default() -> Self {
         Self::new()
@@ -599,6 +610,7 @@ impl SymbolStore {
             source_paths: RwLock::new(Vec::new()),
             kernel_guid: Mutex::new(None),
             kernel_dtb: Mutex::new(None),
+            secure_roots: Mutex::new(None),
             identities: OnceLock::new(),
             load_generation: AtomicU64::new(0),
             notices: Mutex::new(Vec::new()),
@@ -664,16 +676,49 @@ impl SymbolStore {
     pub fn set_kernel(&self, guid: Option<u128>, dtb: Dtb) {
         *self.kernel_guid.lock() = guid;
         *self.kernel_dtb.lock() = Some(dtb);
+        // A new NT kernel is a new boot; its secure kernel is rediscovered.
+        *self.secure_roots.lock() = None;
     }
 
     pub fn kernel_guid(&self) -> Option<u128> {
         *self.kernel_guid.lock()
     }
 
+    /// Record the secure kernel's system root (`kernel`, the address space its
+    /// modules are registered under) and its trustlets' roots, which map the
+    /// same kernel half. See [`Self::module_in_scope`].
+    pub fn set_secure_roots(&self, kernel: Dtb, processes: impl IntoIterator<Item = Dtb>) {
+        let mut secure = self.secure_roots.lock();
+        if secure.as_ref().is_none_or(|roots| roots.kernel != kernel) {
+            *secure = Some(SecureRoots {
+                kernel,
+                roots: HashSet::new(),
+            });
+        }
+        let roots = &mut secure.as_mut().unwrap().roots;
+        roots.insert(kernel);
+        roots.extend(processes);
+    }
+
+    /// Whether a root is known to map VTL1 rather than NT kernel space.
+    pub fn is_secure_root(&self, dtb: Dtb) -> bool {
+        self.secure_roots
+            .lock()
+            .as_ref()
+            .is_some_and(|secure| secure.roots.contains(&dtb))
+    }
+
     /// Whether `module` is visible from address space `dtb`: its own space, or
-    /// kernel space, which every process maps.
+    /// the kernel space that space maps. An NT process maps NT's kernel; a
+    /// VTL1 root maps the secure kernel and never NT's.
     fn module_in_scope(&self, module: &LoadedModule, dtb: Dtb) -> bool {
-        module.dtb == dtb || Some(module.dtb) == *self.kernel_dtb.lock()
+        if module.dtb == dtb {
+            return true;
+        }
+        match self.secure_roots.lock().as_ref() {
+            Some(secure) if secure.roots.contains(&dtb) => module.dtb == secure.kernel,
+            _ => Some(module.dtb) == *self.kernel_dtb.lock(),
+        }
     }
 
     /// Register a module's layouts and public symbol RVAs without a PDB, for

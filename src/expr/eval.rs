@@ -293,6 +293,11 @@ impl Expr {
                  evaluator; use `bl` to list breakpoints and their addresses"
             )));
         }
+        if context.in_secure_scope() {
+            return Err(Error::InvalidExpression(
+                "registers belong to the VTL0 context; use .vtl 0 first".into(),
+            ));
+        }
         if context.registers.is_none() {
             return Err(Error::InvalidExpression(
                 "registers unavailable while VM is running".into(),

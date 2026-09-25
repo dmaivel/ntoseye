@@ -18,6 +18,7 @@ pub mod security;
 mod symbols;
 pub mod usermode;
 mod variables;
+mod vtl;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
 
@@ -44,6 +45,8 @@ pub struct Target {
     /// scope. Its `dtb` roots the process address space; see
     /// [`Self::process_dtb`].
     process: Option<ProcessInfo>,
+    /// Secure-kernel or trustlet root selected for read-only inspection.
+    secure_root: Option<Dtb>,
     /// Explicit code-machine override (`32` or `64`); `None` follows context.
     pub effmach: Option<u32>,
     triage_modules_cache: Option<Vec<ModuleInfo>>,
@@ -91,6 +94,7 @@ pub struct Target {
 /// one operation in a scope of its own and put the user's selection back.
 pub struct TargetSelection {
     process: Option<ProcessInfo>,
+    secure_root: Option<Dtb>,
     context_dtb_override: Option<Dtb>,
     selected_frame: Option<SelectedFrame>,
     windows_thread_selection: Option<ThreadInfo>,

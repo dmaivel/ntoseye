@@ -11,7 +11,7 @@ use crate::{
     error::{Error, Result},
     guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, SessionSpace},
     memory::AddressSpace,
-    pe::{ModuleExportInfo, read_pe_exports, read_pe_image},
+    pe::{ModuleExportInfo, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
         LocalVariableLocation, ProcedureLocal, SourceLineExtent, SourceLocation, SymbolCandidate,
         SymbolIndex, SymbolStore, format_symbol_with_offset,
@@ -49,6 +49,9 @@ impl Target {
     /// user-mode modules when attached to a process, otherwise the kernel module
     /// list. Shared by the REPL `lm`, the SDK, and MCP.
     pub fn modules(&self) -> Result<Vec<ModuleInfo>> {
+        if self.in_secure_scope() {
+            return self.secure_kernel()?.modules(self.guest()?);
+        }
         match &self.process {
             Some(process) => self.guest()?.process_modules(process),
             None => self.kernel_modules(),
@@ -57,6 +60,16 @@ impl Target {
 
     pub fn modules_with_versions(&self) -> Result<Vec<ModuleInfo>> {
         let mut mods = self.modules()?;
+        if self.in_secure_scope() {
+            let memory = self.process_memory();
+            for module in &mut mods {
+                if let Some((file, product)) = read_pe_version_info(module.base_address, &memory) {
+                    module.file_version = Some(file);
+                    module.product_version = Some(product);
+                }
+            }
+            return Ok(mods);
+        }
         if let Ok(g) = self.guest() {
             match &self.process {
                 Some(info) => g.populate_process_module_versions(&mut mods, info),
@@ -214,6 +227,16 @@ impl Target {
             .collect::<Vec<_>>();
         self.symbols.invalidate_modules(dtb, &bases);
 
+        if self.in_secure_scope() {
+            return Guest::load_module_symbols(
+                &self.phys,
+                &self.symbols,
+                modules,
+                dtb,
+                SessionSpace::Load,
+                self.arch(),
+            );
+        }
         match self.guest.as_ref() {
             Some(guest) => guest.load_symbols_for_modules(&self.phys, &self.symbols, modules, dtb),
             None => Guest::load_module_symbols(

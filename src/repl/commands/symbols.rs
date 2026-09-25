@@ -805,11 +805,7 @@ impl ReplState<'_> {
         let dtb = if kernel {
             self.ctx.target.kernel_dtb()
         } else {
-            self.ctx
-                .target
-                .attached_process()
-                .map(|process| process.dtb)
-                .unwrap_or_else(|| self.ctx.target.kernel_dtb())
+            self.ctx.target.process_dtb()
         };
         let modules = if kernel {
             self.ctx.target.kernel_modules_with_versions()
@@ -975,12 +971,7 @@ impl ReplState<'_> {
 
     fn cmd_lmv(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let filter = invocation.arg(0);
-        let dtb = self
-            .ctx
-            .target
-            .attached_process()
-            .map(|process| process.dtb)
-            .unwrap_or_else(|| self.ctx.target.kernel_dtb());
+        let dtb = self.ctx.target.process_dtb();
         let modules = match self.ctx.target.modules() {
             Ok(modules) => modules,
             Err(err) => {

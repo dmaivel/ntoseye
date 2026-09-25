@@ -15,12 +15,15 @@ mod discovery;
 mod image;
 mod modules;
 mod process;
+mod secure_kernel;
 mod symbol_load;
+mod trustlet_layout;
 
 use discovery::{
     find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_arm64, find_ntoskrnl_va_triage,
 };
 pub use image::{Image, SymbolRef};
+pub use secure_kernel::{SecureKernel, TrustletInfo};
 
 /// A process's identity and the root (`dtb`) of its address space.
 #[derive(Debug, Clone)]
@@ -156,6 +159,7 @@ pub struct ModuleSymbolLoadReport {
 pub struct Guest {
     pub ntoskrnl: Image,
     memo: Mutex<HaltMemo>,
+    secure_kernel: Mutex<Option<Arc<SecureKernel>>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -180,6 +184,7 @@ impl Guest {
         Self {
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
+            secure_kernel: Mutex::new(None),
         }
     }
 

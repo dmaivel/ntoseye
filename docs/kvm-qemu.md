@@ -87,6 +87,20 @@ virt-manager: add the following to the XML configuration:
 
 No host or guest configuration needed; see [Choosing a backend](backends.md) for what the `memory` backend can and cannot do.
 
-## Virtualization-based security
+## Virtualization-based security (VTL1)
+
+[Secure-kernel inspection](usage.md#secure-kernel-vtl1) needs VBS running in the guest, which needs nested virtualization (`vmx`) exposed to the VM. `msinfo32` in the guest reports whether VBS is running. Memory integrity (HVCI) is not required.
+
+On the tested Core i9-14900F host with a Windows 11 guest, the guest's hypervisor failed to boot under `<cpu mode="host-passthrough"/>`. A custom Skylake model with `vmx` added works, keeping the existing Hyper-V enlightenments and CPU topology, with Secure Boot off:
+
+```xml
+<cpu mode="custom" match="exact">
+  <model fallback="forbid">Skylake-Client-v4</model>
+  <topology sockets="1" dies="1" cores="2" threads="2"/>  <!-- keep your existing topology -->
+  <feature policy="require" name="vmx"/>
+</cpu>
+```
+
+Plain QEMU: `-cpu Skylake-Client-v4,+vmx` plus the existing `hv_*` flags. Power the VM completely off and start it again after changing the CPU model. Other hosts may boot VBS with `host-passthrough`; this is only the configuration that was tested here.
 
 With VBS running, the GDB stub reports what each vCPU was executing when it halted, and an idle vCPU is usually inside the Windows hypervisor itself, with its own CR3. QEMU plants kernel breakpoints through the halted vCPU's page tables, which do not map NT there; `ntoseye` retries such a breakpoint through the NT kernel's page tables and restores the vCPU's CR3 afterwards, so `bp` and the bugcheck trap work whichever address space the vCPU stopped in.

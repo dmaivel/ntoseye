@@ -115,6 +115,7 @@ impl Target {
             guest,
             debugger_data: None,
             process: None,
+            secure_root: None,
             effmach: None,
             triage_modules_cache,
             context_dtb_override: None,
@@ -159,6 +160,7 @@ impl Target {
             guest: Some(guest),
             debugger_data: None,
             process: None,
+            secure_root: None,
             effmach: None,
             triage_modules_cache: None,
             context_dtb_override: None,
@@ -244,6 +246,11 @@ impl Target {
             .map(|g| g.ntoskrnl.base_address)
             .unwrap_or(VirtAddr(0));
         let previous_dtb = self.guest.as_ref().map(|g| g.ntoskrnl.dtb());
+        let previous_secure_dtb = self
+            .guest
+            .as_ref()
+            .and_then(|g| g.cached_secure_kernel())
+            .map(|s| s.image.dtb());
         let (phys, symbols) = (self.phys.clone(), self.symbols.clone());
         let guest = match location {
             Some(location) => Guest::at(phys, symbols, location)?,
@@ -252,6 +259,9 @@ impl Target {
         let new_dtb = guest.ntoskrnl.dtb();
 
         if let Some(prev_dtb) = previous_dtb {
+            self.symbols.clear_modules_for_dtb(prev_dtb);
+        }
+        if let Some(prev_dtb) = previous_secure_dtb {
             self.symbols.clear_modules_for_dtb(prev_dtb);
         }
         self.symbols.clear_modules_for_dtb(new_dtb);

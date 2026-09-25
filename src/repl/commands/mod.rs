@@ -30,6 +30,7 @@ mod thread;
 mod types;
 mod usermode;
 mod verifier;
+mod vtl;
 
 impl ReplState<'_> {
     pub fn dispatch_line(&mut self, line: &str) -> Result<Flow> {
@@ -229,6 +230,10 @@ impl ReplState<'_> {
     /// needs (against the target's state right now, so a `break` earlier on
     /// the line counts), then the run-state check. `None` means run it.
     fn admit(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
+        if self.ctx.target.in_secure_scope() && !vtl::secure_inspection_command(spec) {
+            error!("VTL1 is an inspection-only scope; use .vtl 0 before this command");
+            return Ok(Some(Flow::Denied));
+        }
         if let Some(reason) = self.run_control_denial(spec) {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
@@ -311,6 +316,10 @@ impl ReplState<'_> {
             }
         }
 
+        if self.ctx.target.in_secure_scope() {
+            error!("custom commands are not VTL1-scoped; use .vtl 0 first");
+            return Ok(Flow::Denied);
+        }
         self.cmd_user(invocation)?;
         Ok(Flow::Continue)
     }

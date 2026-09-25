@@ -92,6 +92,11 @@ impl Target {
     /// loader list [`Self::modules`] walks and whose symbols load; reads the
     /// user points at go through [`Self::current_dtb`] instead.
     pub fn process_dtb(&self) -> Dtb {
+        if self.secure_root.is_some()
+            && let Some(secure) = self.guest.as_ref().and_then(|g| g.cached_secure_kernel())
+        {
+            return secure.image.dtb();
+        }
         self.process
             .as_ref()
             .map_or_else(|| self.kernel_dtb(), |process| process.dtb)
@@ -101,6 +106,9 @@ impl Target {
     /// goes through: the attached process's, else the halted thread's (or
     /// selected context's) process, else the kernel's.
     pub fn current_dtb(&self) -> Dtb {
+        if let Some(root) = self.secure_root {
+            return root;
+        }
         match &self.process {
             Some(process) => process.dtb,
             None => self
@@ -133,6 +141,7 @@ impl Target {
             };
 
         self.process = Some(process_info);
+        self.secure_root = None;
         self.selected_frame = None;
         self.clear_context_dtb_override();
         self.clear_current_windows_thread_context();
@@ -143,6 +152,7 @@ impl Target {
     }
 
     pub fn detach(&mut self) {
+        self.secure_root = None;
         self.selected_frame = None;
         self.clear_context_dtb_override();
         self.clear_current_windows_thread_context();
@@ -172,6 +182,7 @@ impl Target {
     pub fn take_selection(&mut self) -> TargetSelection {
         TargetSelection {
             process: self.process.take(),
+            secure_root: self.secure_root.take(),
             context_dtb_override: self.context_dtb_override.take(),
             selected_frame: self.selected_frame.take(),
             windows_thread_selection: self.windows_thread_selection.take(),
@@ -182,6 +193,7 @@ impl Target {
     /// Put back a scope taken with [`Self::take_selection`].
     pub fn restore_selection(&mut self, selection: TargetSelection) {
         self.process = selection.process;
+        self.secure_root = selection.secure_root;
         self.context_dtb_override = selection.context_dtb_override;
         self.selected_frame = selection.selected_frame;
         self.windows_thread_selection = selection.windows_thread_selection;

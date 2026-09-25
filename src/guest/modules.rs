@@ -31,7 +31,7 @@ fn populate_module_versions<B: MemoryOps<PhysAddr>>(
 /// Read a loader-table record (`_LDR_DATA_TABLE_ENTRY` / `_KLDR_DATA_TABLE_ENTRY`)
 /// into a `ModuleInfo`, or `None` when it has no base address (skip it). Shared
 /// by the process- and kernel-module walks, which differ only in their list.
-fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>> {
+pub(super) fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<ModuleInfo>> {
     let dll_base = record.read_pointer("DllBase")?;
     if dll_base.is_zero() {
         return Ok(None);

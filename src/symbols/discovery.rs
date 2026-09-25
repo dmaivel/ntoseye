@@ -103,12 +103,12 @@ impl SymbolStore {
         Ok(entries)
     }
 
-    fn read_codeview_from_memory<B: MemoryOps<PhysAddr>>(
-        &self,
+    /// The raw CodeView record `entry` points at, bounded before the read.
+    fn read_codeview_bytes<B: MemoryOps<PhysAddr>>(
         memory: &memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
         entry: &IMAGE_DEBUG_DIRECTORY,
-    ) -> Result<(String, Option<(DownloadJob, u128)>)> {
+    ) -> Result<Vec<u8>> {
         if entry.AddressOfRawData == 0 || entry.SizeOfData < 4 {
             return Err(Error::DebugInfo(
                 "codeview entry is missing raw data".to_string(),
@@ -123,6 +123,44 @@ impl SymbolStore {
 
         let mut bytes = vec![0u8; entry.SizeOfData as usize];
         memory.read_bytes(base_address + entry.AddressOfRawData as u64, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// The PDB path in the RSDS CodeView record of the image mapped at
+    /// `base_address`, or `None` when it carries none. Identifies an image by
+    /// what it was built as, whatever the loader called it.
+    pub fn codeview_pdb_path<B: MemoryOps<PhysAddr>>(
+        memory: &memory::AddressSpace<'_, B>,
+        base_address: VirtAddr,
+    ) -> Result<Option<String>> {
+        let Some((debug_rva, debug_size)) =
+            Self::read_debug_directory_location(memory, base_address)?
+        else {
+            return Ok(None);
+        };
+        for entry in
+            Self::read_debug_directory_entries(memory, base_address, debug_rva, debug_size)?
+        {
+            if entry.Type != IMAGE_DEBUG_TYPE_CODEVIEW {
+                continue;
+            }
+            let bytes = Self::read_codeview_bytes(memory, base_address, &entry)?;
+            if bytes.starts_with(b"RSDS") && bytes.len() >= size_of::<IMAGE_DEBUG_CV_INFO_PDB70>() {
+                return Ok(Some(Self::read_c_string_lossy(
+                    &bytes[size_of::<IMAGE_DEBUG_CV_INFO_PDB70>()..],
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_codeview_from_memory<B: MemoryOps<PhysAddr>>(
+        &self,
+        memory: &memory::AddressSpace<'_, B>,
+        base_address: VirtAddr,
+        entry: &IMAGE_DEBUG_DIRECTORY,
+    ) -> Result<(String, Option<(DownloadJob, u128)>)> {
+        let bytes = Self::read_codeview_bytes(memory, base_address, entry)?;
         let signature = bytes
             .get(..4)
             .ok_or_else(|| Error::DebugInfo("codeview entry truncated".to_string()))?;

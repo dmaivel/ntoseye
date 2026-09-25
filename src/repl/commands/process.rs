@@ -398,6 +398,7 @@ impl ReplState<'_> {
             error!("no process matches '{}'", pid_str);
             return Ok(());
         };
+        self.leave_vtl1();
         match self.ctx.target.attach(process.pid) {
             Ok(AttachReport {
                 name,
@@ -432,6 +433,13 @@ impl ReplState<'_> {
         if selector == Some("0") {
             return self.cmd_detach();
         }
+        if selector.is_none() && self.ctx.target.in_secure_scope() {
+            outln!(
+                "process context: VTL1 inspection (DTB {})\n",
+                ui::addr(self.ctx.target.current_dtb())
+            );
+            return Ok(());
+        }
         let processes = match self.ctx.target.matching_processes(None) {
             Ok(processes) => processes,
             Err(error) => {
@@ -461,6 +469,7 @@ impl ReplState<'_> {
             error!("no process matches '{}'", selector);
             return Ok(());
         };
+        self.leave_vtl1();
         match self.ctx.target.attach_process_info(process.clone()) {
             Ok(AttachReport {
                 name,
@@ -491,6 +500,7 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
+        self.leave_vtl1();
         if self.ctx.target.attached_process().is_some() {
             self.ctx.target.detach();
         }
@@ -502,9 +512,10 @@ impl ReplState<'_> {
     }
 
     fn cmd_detach(&mut self) -> Result<()> {
-        if self.ctx.target.attached_process().is_none() {
+        if self.ctx.target.attached_process().is_none() && !self.ctx.target.in_secure_scope() {
             error!("not attached to any process");
         } else {
+            self.leave_vtl1();
             self.ctx.target.detach();
             self.caches.refresh_symbol_context(&self.ctx.target);
             self.clear_selected_frame();

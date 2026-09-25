@@ -121,6 +121,9 @@ impl Session {
     /// inspection one, for values that belong to a particular stack frame.
     pub fn read_masked_in(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
         self.target.address_space(dtb).read_bytes(addr, buf)?;
+        if self.target.symbols.is_secure_root(dtb) {
+            return Ok(());
+        }
         self.breakpoints
             .mask_breakpoint_bytes(&self.target, addr, buf, dtb);
         self.mask_bugcheck_trap(addr, buf);

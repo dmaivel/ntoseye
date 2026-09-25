@@ -362,6 +362,34 @@ Types follow the same rule: a bare name resolves the kernel's layout, `ntdll32!_
 
 Code in a 32-bit module disassembles as x86 (`u`, `ub`, `uf`, DAP disassembly); `.effmach x86|amd64|.` overrides the choice. `.effmach x86` also makes `ds`/`dS` decode 32-bit string descriptors with the `ntdll32` layout; the SDK's `read_unicode_string`/`read_ansi_string` take `bits=32` for the same. Not supported: walking the x86 user stack. `k` on a WOW64 thread ends at the `wow64cpu` transition frame; the 32-bit frames beyond it are not unwound.
 
+## Secure kernel (VTL1)
+
+With virtualization-based security (VBS) running, Windows runs a second kernel, `securekernel.exe`, in Virtual Trust Level 1 alongside isolated user-mode processes (trustlets such as `LsaIso.exe`). `ntoseye` can inspect that memory on an AMD64 guest whose memory it reads directly from the host.
+
+> [!IMPORTANT]
+> VTL1 inspection is experimental. It relies on undocumented secure-kernel structures, finds them heuristically, and has been tested live on a single configuration: a Windows 11 10.0.26100 guest under QEMU/KVM with HVCI off. It may fail on other builds or hosts, and it refuses rather than guesses when a structure is not recognized.
+
+- `.vtl [0|1 [pid]]` - Display or select the inspection scope. A bare `.vtl` prints the current scope, `0` returns to the NT kernel, `1` selects the secure kernel's system address space, and `1 <pid>` selects a trustlet's address space by its NT PID (always decimal).
+- `!trustlets` - List secure-kernel processes: the secure-kernel process object, NT PID and image name, trustlet ID, and address-space root.
+
+```text
+.vtl 1
+lm
+x securekernel!Skps*
+!trustlets
+.vtl 1 936
+.vtl 0
+```
+
+> [!WARNING]
+> `.vtl` changes what the debugger inspects, not the virtual trust level the CPU is executing. VTL0 registers are cleared on selection. The REPL rejects writes, register/stack commands, execution control, and NT-specific or custom extensions in VTL1 scope; use `.vtl 0` first. `.process`, `attach`, `detach`, and `.context` also leave VTL1 scope when selecting another context, as does any stop, which restores the halted vCPU's context. `lm k` explicitly lists NT modules; plain `lm` lists the selected secure kernel's modules.
+
+The first `.vtl 1` discovers the secure kernel by scanning guest RAM for its page tables and accepting an image only when its CodeView record names `securekernel.pdb`; the result is kept for the session. In VTL1 scope, `lm`, `x`, `ln`, `u`, `db`/`dq`, `dt`, and `.reload` operate on the secure kernel's modules (`securekernel.exe`, `skci.dll`, and the other modules it loaded). `nt!` types remain available (`dt nt!_KLDR_DATA_TABLE_ENTRY <address>`), but NT's address symbols are not resolved in VTL1 scope, and secure-kernel symbols are not resolved in VTL0, because each kernel's modules are mapped only in its own address spaces. Microsoft's public `securekernel.pdb` carries no types.
+
+VTL1 support is inspection only: VTL1 registers, stacks, breakpoints, and run control are not supported. It requires direct host memory, so it works with the `memory` and `gdb` backends; `kd` and `kdnet` can inspect VTL1 only while reads come from host memory (`--memory-source host`, or `auto` once the host mapping matched), and cannot control VTL1 execution. Crash dumps, `--memory-source kd`, and ARM64 targets are unsupported. Memory integrity (HVCI) is not required, and VTL1 inspection has been tested with it off.
+
+Trustlet enumeration reads secure-kernel process fields that public symbols do not describe. `ntoseye` recovers their offsets from the secure kernel's own code: the list link and NT PID from `SkpsInitializeProcess`, the address-space root from `SkeSelectProcessAddressSpace`, and the trustlet ID from the creation attributes `SkpsInitializeProcess` copies in. Every record is then validated: its root must map the secure kernel and its PID must match an NT process. This recognizes builds 10.0.22621 through 10.0.28000, whose offsets differ between releases. Older secure kernels (10.0.22000 and Windows 10) pass these values differently, so enumeration is refused there while secure-kernel/module inspection remains available. Modules loaded inside a trustlet are not enumerated. Live lists are not atomic snapshots; concurrent process exit or module unload can invalidate a walk.
+
 ## Security
 
 - `!sd <address> [1]` (`sd`) - Decode a SECURITY_DESCRIPTOR and its ACLs.

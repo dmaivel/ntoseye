@@ -743,6 +743,83 @@ fn merged_indexes_cover_the_selected_address_space_only() {
 }
 
 #[test]
+fn secure_roots_do_not_resolve_nt_symbols_at_colliding_addresses() {
+    let store = SymbolStore::new();
+    let base = VirtAddr(0xffff_f800_0000_0000);
+    for (guid, dtb, name, symbol) in [
+        (1, 0x1000, "nt", "NtOnly"),
+        (2, 0x2000, "securekernel", "SkOnly"),
+    ] {
+        store.inject_module_for_test(guid, vec![], &[(symbol, 0x100)]);
+        store.modules.insert(
+            (dtb, base.0),
+            LoadedModule {
+                name: name.to_string(),
+                short_name: name.to_string(),
+                guid,
+                base_address: base,
+                size: 0x1000,
+                dtb,
+            },
+        );
+    }
+    store.set_kernel(Some(1), 0x1000);
+    store.set_secure_roots(0x2000, [0x3000]);
+    assert_eq!(
+        store
+            .find_module_for_address(0x4000, base)
+            .unwrap()
+            .short_name,
+        "nt"
+    );
+    assert_eq!(
+        store
+            .find_module_for_address(0x3000, base)
+            .unwrap()
+            .short_name,
+        "securekernel"
+    );
+    assert!(
+        store
+            .find_symbol_across_modules(0x3000, "nt!NtOnly")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .find_symbol_across_modules(0x3000, "securekernel!SkOnly")
+            .unwrap(),
+        Some(base + 0x100u64)
+    );
+    assert!(
+        store
+            .find_symbol_across_modules(0x4000, "securekernel!SkOnly")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.find_closest_symbol_for_address(0x3000, base + 0x108u64),
+        Some(("securekernel".into(), "SkOnly".into(), 8))
+    );
+    // Selecting system scope must not reclassify a saved trustlet selection
+    // as NT; rebuilding the guest must discard that old classification.
+    store.set_secure_roots(0x2000, []);
+    assert!(
+        store
+            .find_symbol_across_modules(0x3000, "nt!NtOnly")
+            .unwrap()
+            .is_none()
+    );
+    store.set_kernel(Some(1), 0x1000);
+    assert_eq!(
+        store
+            .find_symbol_across_modules(0x3000, "nt!NtOnly")
+            .unwrap(),
+        Some(base + 0x100u64)
+    );
+}
+
+#[test]
 fn qualified_index_search_matches_bare_names_unless_query_names_a_module() {
     let index = SymbolIndex::from_names(vec![
         "nt!KeBugCheckEx".to_string(),
