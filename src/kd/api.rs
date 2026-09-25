@@ -619,11 +619,12 @@ pub fn continue_api2<T: Read + Write>(
     Ok(())
 }
 
-/// `DbgKdContinueApi2` for ARM64 targets. `ARM64_DBGKD_CONTROL_SET` packs
-/// { ContinueStatus u32, TraceFlag u32, CurrentSymbolStart u64,
-///   CurrentSymbolEnd u64 }. There is no Dr7 field (AArch64 uses its
-/// DBGBCR/DBGBVR and DBGWCR/DBGWVR state instead). The kernel performs
-/// single-stepping via MDSCR_EL1 when TraceFlag is set.
+/// `DbgKdContinueApi2` for ARM64 targets. After ContinueStatus,
+/// `ARM64_DBGKD_CONTROL_SET` packs { Continue u32, TraceFlag u32,
+/// CurrentSymbolStart u64, CurrentSymbolEnd u64 }. There is no Dr7 field
+/// (AArch64 uses its DBGBCR/DBGBVR and DBGWCR/DBGWVR state instead). The
+/// kernel single-steps via MDSCR_EL1 when TraceFlag is set; a flag in the
+/// Continue word resumes the target freely.
 pub fn continue_api2_arm64<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor: u16,
@@ -632,7 +633,7 @@ pub fn continue_api2_arm64<T: Read + Write>(
 ) -> Result<()> {
     let mut header = make_header(DBGKD_CONTINUE_API2, processor);
     write_u32(&mut header, UNION_OFFSET, continue_status);
-    write_u32(&mut header, UNION_OFFSET + 4, if trace { 1 } else { 0 });
+    write_u32(&mut header, UNION_OFFSET + 8, if trace { 1 } else { 0 });
     // CurrentSymbolStart/End stay zero.
     let payload_len = MANIPULATE_HEADER_SIZE;
     let mut payload = Vec::with_capacity(payload_len);
@@ -1087,6 +1088,28 @@ mod tests {
         let req_header = &out[16..16 + MANIPULATE_HEADER_SIZE];
         assert_eq!(read_u32(req_header, UNION_OFFSET + 4), 1);
         assert_eq!(read_u64(req_header, UNION_OFFSET + 8), 0xdead_beef);
+    }
+
+    /// ARM64 puts a Continue word ahead of TraceFlag; a flag written in its
+    /// place resumes the target instead of stepping it.
+    #[test]
+    fn arm64_continue_with_trace_sets_the_trace_flag_after_the_continue_word() {
+        let ack = {
+            let outbound_id = (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID;
+            let mut hdr = [0u8; 16];
+            hdr[0..4].copy_from_slice(&0x69696969u32.to_le_bytes());
+            hdr[4..6].copy_from_slice(&PACKET_TYPE_KD_ACKNOWLEDGE.to_le_bytes());
+            hdr[8..12].copy_from_slice(&outbound_id.to_le_bytes());
+            hdr.to_vec()
+        };
+        let mut framing = KdFraming::new(Loopback::new(ack));
+        continue_api2_arm64(&mut framing, 0, DBG_CONTINUE, true).unwrap();
+
+        let out = &framing.transport_ref().outbound;
+        let req_header = &out[16..16 + MANIPULATE_HEADER_SIZE];
+        assert_eq!(read_u32(req_header, UNION_OFFSET), DBG_CONTINUE);
+        assert_eq!(read_u32(req_header, UNION_OFFSET + 4), 0);
+        assert_eq!(read_u32(req_header, UNION_OFFSET + 8), 1);
     }
 
     #[test]
