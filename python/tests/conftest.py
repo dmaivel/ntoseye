@@ -5,6 +5,8 @@
 Without `NTOSEYE_TEST_BACKEND` they are skipped. The target is broken into
 and resumed; every breakpoint a test adds is removed afterwards.
 
+`NTOSEYE_TEST_KEY` is the KDNET key (`backend=kdnet`).
+
 `NTOSEYE_TEST_MEMORY_SOURCE` (`auto`, `host`, or `kd`; default `auto`) picks
 the KD/KDNET memory source. `kd` needs no access to the VM process, which
 is how to run these without root against UTM on macOS or against a remote
@@ -29,6 +31,7 @@ def dbg() -> Iterator[ntoseye.Debugger]:
     with ntoseye.attach(
         backend,  # type: ignore[arg-type]
         os.environ.get("NTOSEYE_TEST_CONNECT"),
+        key=os.environ.get("NTOSEYE_TEST_KEY"),
         memory_source=os.environ.get("NTOSEYE_TEST_MEMORY_SOURCE", "auto"),  # type: ignore[arg-type]
     ) as dbg:
         yield dbg

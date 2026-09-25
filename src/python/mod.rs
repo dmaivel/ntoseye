@@ -99,6 +99,12 @@ pub fn error(kind: ErrorKind, message: impl std::fmt::Display) -> PyErr {
     let message = message.to_string();
     Python::attach(|py| {
         let class = ERROR_TYPES[kind as usize].get_or_try_init(py, || {
+            // Embedded, `ntoseye` must be the binary's own package even when
+            // an error is raised before any script ran: importing it first
+            // would load whichever `ntoseye` is on `sys.path` (a checkout or
+            // wheel), whose exception classes scripts never see.
+            #[cfg(feature = "python-embed")]
+            embed::install_package(py)?;
             Ok::<_, PyErr>(
                 py.import("ntoseye")?
                     .getattr(kind.name())?

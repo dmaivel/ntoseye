@@ -103,7 +103,7 @@ fn register_command(
 /// others wait. Running the package's Python can switch threads, so a
 /// check-then-install would let a second thread replace a half-installed
 /// package, leaving two `ntoseye` modules with distinct exception classes.
-fn install_package(py: Python<'_>) -> PyResult<()> {
+pub fn install_package(py: Python<'_>) -> PyResult<()> {
     static INSTALLED: PyOnceLock<()> = PyOnceLock::new();
     INSTALLED
         .get_or_try_init(py, || {
