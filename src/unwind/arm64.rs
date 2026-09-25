@@ -799,6 +799,13 @@ impl StackTracer<'_> {
                 let Some(lr) = context.regs[LR] else {
                     return Unwound::Stop;
                 };
+                // A thread's initial frame saves a zero lr: the stack ends.
+                if lr == 0 {
+                    context.rip = 0;
+                    return Unwound::Frame {
+                        stack_switch: false,
+                    };
+                }
                 let return_address = strip_pac(lr);
                 if return_address == context.rip || !self.is_executable_address(return_address) {
                     return Unwound::Stop;

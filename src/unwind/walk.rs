@@ -33,6 +33,7 @@ pub(super) fn build_recovered_stacktrace_seeded(
 
     // RSP normally advances every step. A trap/interrupt frame can switch to a
     // different stack, so the hard frame cap remains the final corruption guard.
+    let mut reached_end = false;
     for _ in 0..MAX_UNWIND_FRAMES {
         if raw.len() >= limit {
             break;
@@ -45,7 +46,13 @@ pub(super) fn build_recovered_stacktrace_seeded(
             Unwound::Frame { stack_switch } => stack_switch,
         };
 
-        if context.rip == 0 || context.rip == previous_rip {
+        // A zero return address is the thread's initial frame: nothing above
+        // it belongs to the thread, so there is nothing to scan either.
+        if context.rip == 0 {
+            reached_end = true;
+            break;
+        }
+        if context.rip == previous_rip {
             break;
         }
         // An x64 return pops its address, so sp always climbs; an ARM64 leaf
@@ -65,7 +72,11 @@ pub(super) fn build_recovered_stacktrace_seeded(
         ));
     }
 
-    let remaining = limit.saturating_sub(raw.len());
+    let remaining = if reached_end {
+        0
+    } else {
+        limit.saturating_sub(raw.len())
+    };
     for (sp, ip) in tracer.scan_stack(context.rsp, &seen, remaining) {
         let mut scan_context = RegisterContext::new(ip, sp);
         // A scan only accepts slots holding return addresses.
