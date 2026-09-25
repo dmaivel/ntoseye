@@ -15,7 +15,7 @@ use gdbstub::target::{TargetError, TargetResult};
 use pelite::PeView;
 
 use crate::guest::ModuleInfo;
-use crate::pe::image_base;
+use crate::pe::{HeaderPage, image_base};
 use crate::session::VcpuInfo;
 use crate::types::Arch;
 
@@ -98,8 +98,8 @@ impl GdbTarget<'_> {
         let image = target
             .module_image_or_fetch_later(&self.kernel_image_name())
             .ok()??;
-        let mut headers = [0u8; 0x1000];
-        let read = File::open(image).ok()?.read_at(&mut headers, 0).ok()?;
+        let mut headers = HeaderPage::zeroed();
+        let read = File::open(image).ok()?.read_at(&mut headers[..], 0).ok()?;
         let view = PeView::from_bytes(&headers[..read]).ok()?;
         Some(base.0.wrapping_sub(image_base(&view)))
     }

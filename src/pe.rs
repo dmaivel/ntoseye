@@ -12,8 +12,42 @@ use crate::{
 use pelite::{PeFile, PeView, Wrap, image::IMAGE_DIRECTORY_ENTRY_EXPORT};
 use std::borrow::Cow;
 use std::collections::{HashMap, hash_map::Entry};
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
+
+/// A module's header page. `PeView` rejects bytes that are not 4-byte
+/// aligned, and a bare byte array has no alignment of its own, so a header
+/// page returned by value parsed or failed depending on where the compiler
+/// happened to place it.
+#[repr(C, align(8))]
+pub struct HeaderPage([u8; PAGE_SIZE]);
+
+impl HeaderPage {
+    pub fn zeroed() -> Self {
+        Self([0; PAGE_SIZE])
+    }
+}
+
+impl Deref for HeaderPage {
+    type Target = [u8; PAGE_SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for HeaderPage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl AsRef<[u8]> for HeaderPage {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 /// One export recovered from a module's mapped PE export directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +81,7 @@ type ImageReader = Box<dyn Fn(usize, &mut [u8]) -> Result<()> + Send + Sync>;
 
 struct LazyImage {
     /// The header page, read up front; what a `PeView` is built on.
-    headers: Box<[u8]>,
+    headers: Box<HeaderPage>,
     /// Reads `buf.len()` bytes of the image at an RVA.
     read: ImageReader,
     /// Blocks by index. A block the target refused (paged out) is not
@@ -79,7 +113,7 @@ impl PeImage {
     pub fn headers(&self) -> &[u8] {
         match &self.body {
             ImageBody::Complete(bytes) => bytes,
-            ImageBody::Lazy(lazy) => &lazy.headers,
+            ImageBody::Lazy(lazy) => &lazy.headers[..],
         }
     }
 
@@ -163,15 +197,13 @@ pub fn pe_headers_end(probe: &[u8]) -> Option<usize> {
 pub fn read_pe_header_page<B: MemoryOps<PhysAddr>>(
     base_address: VirtAddr,
     memory: &memory::AddressSpace<'_, B>,
-) -> Result<[u8; PAGE_SIZE]> {
+) -> Result<HeaderPage> {
     read_pe_header_page_with(&|address, buf| memory.read_bytes(base_address + address, buf))
 }
 
 /// [`read_pe_header_page`] over a reader addressed by RVA.
-fn read_pe_header_page_with(
-    read: &dyn Fn(u64, &mut [u8]) -> Result<()>,
-) -> Result<[u8; PAGE_SIZE]> {
-    let mut header_buf = [0u8; PAGE_SIZE];
+fn read_pe_header_page_with(read: &dyn Fn(u64, &mut [u8]) -> Result<()>) -> Result<HeaderPage> {
+    let mut header_buf = HeaderPage::zeroed();
     read(0, &mut header_buf[..PE_HEADER_PROBE])?;
     let end = pe_headers_end(&header_buf[..PE_HEADER_PROBE])
         .unwrap_or(PAGE_SIZE)

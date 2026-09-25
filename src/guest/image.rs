@@ -6,7 +6,7 @@ use crate::{
     error::{Error, Result},
     layout::Types,
     memory::AddressSpace,
-    pe::{PeImage, read_pe_header_page, read_pe_image, size_of_image},
+    pe::{HeaderPage, PeImage, read_pe_header_page, read_pe_image, size_of_image},
     phys::PhysMem,
     symbols::SymbolStore,
     types::*,
@@ -47,7 +47,7 @@ pub struct Image {
     /// and AMD64; process siblings keep the kernel root for kernel-VA reads.
     kernel_dtb: Dtb,
     /// Header page read at symbol load; nothing from the sections.
-    headers: Option<Box<[u8]>>,
+    headers: Option<Box<HeaderPage>>,
     /// Demand-read image shared across stack traces, so each block is
     /// fetched once per session.
     image: Mutex<Option<Arc<PeImage>>>,
