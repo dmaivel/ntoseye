@@ -106,7 +106,7 @@ finally:
     bp.delete()
 ```
 
-`stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. NT process/thread filters, software breakpoints, data watches in secure modules, and stepping are refused. See the [VTL1 limits and tested configuration](usage.md#secure-kernel-vtl1).
+`stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops: their temporary sites in secure-kernel code are debug-register breakpoints in free slots, never code patches. NT process/thread filters, software breakpoints, and data watches in secure modules are refused. See the [VTL1 limits and tested configuration](usage.md#secure-kernel-vtl1).
 
 ## Run control and breakpoints
 

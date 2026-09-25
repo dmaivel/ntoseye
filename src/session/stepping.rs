@@ -12,7 +12,8 @@ use iced_x86::{
 use crate::backend::MemoryOps;
 use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::{
-    ContinueDisposition, DebugBackend, STEP_UNDER_WINDOWS_HYPERVISOR, clear_trap_flag,
+    ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
+    clear_trap_flag,
 };
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
@@ -35,11 +36,6 @@ impl Session {
     /// The full "step one instruction", shared by the REPL (`si`) and the SDK.
     pub fn step(&mut self) -> Result<u64> {
         self.require_live_register_context()?;
-        // Refused before anything moves, even on a breakpoint site the
-        // run-past path could clear: a step is one instruction, not a run.
-        if self.backend.single_step_unsafe() {
-            return Err(Error::DebugInfo(STEP_UNDER_WINDOWS_HYPERVISOR.to_string()));
-        }
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).
@@ -52,7 +48,16 @@ impl Session {
             &self.target,
             &mut self.breakpoints,
         )? {
-            step_one_and_clear_tf(self.backend.as_mut(), &self.register_map)?;
+            if self.backend.single_step_unsafe() {
+                step_without_trap(
+                    self.backend.as_mut(),
+                    &self.register_map,
+                    &self.target,
+                    &self.breakpoints,
+                )?;
+            } else {
+                step_one_and_clear_tf(self.backend.as_mut(), &self.register_map)?;
+            }
         }
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints
@@ -523,8 +528,8 @@ pub fn step_over_current_breakpoint(
     stepped.map(|()| true)
 }
 
-/// How long a vCPU resumed alone gets to execute the one instruction under a
-/// breakpoint site before the others are broken in on. Measured under VBS
+/// How long a vCPU resumed alone gets to execute one instruction before the
+/// others are broken in on. Measured under VBS
 /// over 7761 run-pasts on hot kernel functions: every one that finished did
 /// so within 24 ms, and the rest (3-4%, waiting on a held vCPU) never
 /// finished alone.
@@ -544,10 +549,77 @@ fn run_past_site(
     cr3: Option<u64>,
 ) -> Result<()> {
     let successors = site_successors(debugger, register_map, regs, rip, cr3)?;
+    run_past(
+        backend,
+        register_map,
+        rip,
+        &successors,
+        &TemporarySites::Software,
+    )
+}
+
+/// A single step where the trap flag is unsafe: run the vCPU alone past the
+/// instruction at its PC, as for a breakpoint site. Secure-kernel code gets
+/// debug-register sites in slots no breakpoint holds, so no VTL1 code is
+/// written; elsewhere the sites are software, like run-past's.
+fn step_without_trap(
+    backend: &mut dyn DebugBackend,
+    register_map: &RegisterMap,
+    debugger: &Target,
+    breakpoints: &BreakpointManager,
+) -> Result<()> {
+    let regs = backend.read_registers()?;
+    let rip = register_map.read_u64("rip", &regs)?;
+    let cr3 = register_map
+        .read_u64(debugger.arch().dtb_register(), &regs)
+        .ok();
+    let successors = site_successors(debugger, register_map, &regs, rip, cr3)?;
+    let secure = debugger.is_secure_address(VirtAddr(rip))
+        || cr3.is_some_and(|cr3| debugger.recognize_secure_root(cr3))
+        || successors
+            .iter()
+            .any(|&address| debugger.is_secure_address(VirtAddr(address)));
+    let sites = if secure {
+        let slots = breakpoints.free_execute_slots(backend);
+        if slots.len() < successors.len() {
+            return Err(Error::Breakpoint(format!(
+                "a VTL1 step at {rip:#x} needs {} free hardware breakpoint slot(s) and {} are \
+                 free; clear a hardware breakpoint to step",
+                successors.len(),
+                slots.len()
+            )));
+        }
+        TemporarySites::Hardware(slots)
+    } else {
+        TemporarySites::Software
+    };
+    run_past(backend, register_map, rip, &successors, &sites)
+}
+
+/// How [`run_past`] marks an instruction's successors.
+enum TemporarySites {
+    /// `int3` sites, the target planting and lifting them.
+    Software,
+    /// Debug-register sites in these free slots, one per successor.
+    Hardware(Vec<u8>),
+}
+
+/// Plant `sites` on every successor, run the vCPU alone past the instruction
+/// at `rip`, and lift them again whatever happened.
+fn run_past(
+    backend: &mut dyn DebugBackend,
+    register_map: &RegisterMap,
+    rip: u64,
+    successors: &[u64],
+    sites: &TemporarySites,
+) -> Result<()> {
     let mut planted = Vec::with_capacity(successors.len());
-    let result = run_to_successors(backend, register_map, rip, &successors, &mut planted);
-    for address in planted {
-        let removed = backend.remove_breakpoint(address);
+    let result = run_to_successors(backend, register_map, rip, successors, sites, &mut planted);
+    for (address, slot) in planted {
+        let removed = match slot {
+            Some(slot) => backend.clear_hardware_breakpoint(slot),
+            None => backend.remove_breakpoint(address),
+        };
         if result.is_ok() {
             removed?;
         }
@@ -560,11 +632,22 @@ fn run_to_successors(
     register_map: &RegisterMap,
     rip: u64,
     successors: &[u64],
-    planted: &mut Vec<u64>,
+    sites: &TemporarySites,
+    planted: &mut Vec<(u64, Option<u8>)>,
 ) -> Result<()> {
-    for &address in successors {
-        backend.set_breakpoint(address)?;
-        planted.push(address);
+    for (index, &address) in successors.iter().enumerate() {
+        let slot = match sites {
+            TemporarySites::Software => {
+                backend.set_breakpoint(address)?;
+                None
+            }
+            TemporarySites::Hardware(slots) => {
+                let slot = slots[index];
+                backend.set_hardware_breakpoint(slot, address, HwBreakpointAccess::Execute, 1)?;
+                Some(slot)
+            }
+        };
+        planted.push((address, slot));
     }
     backend.continue_current_thread()?;
     let event = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
@@ -579,8 +662,9 @@ fn run_to_successors(
     let now = register_map.read_u64("rip", &backend.read_registers()?)?;
     if now == rip {
         return Err(Error::DebugInfo(format!(
-            "could not run past the breakpoint at {rip:#x}: its vCPU, resumed alone, did not \
-             execute it within {RUN_PAST_TIMEOUT:?}; disable the breakpoint to continue"
+            "could not execute the instruction at {rip:#x}: its vCPU, resumed alone, did not \
+             get past it within {RUN_PAST_TIMEOUT:?} (it is likely waiting on another vCPU); \
+             resume with g, disabling any breakpoint there first"
         )));
     }
     // Anywhere else is progress: most often an interrupt taken before the
@@ -630,7 +714,7 @@ pub fn site_successors(
     };
     let unsupported = || {
         Error::DebugInfo(format!(
-            "cannot run past the breakpoint at {rip:#x} without single-stepping: `{}` has no \
+            "cannot execute the instruction at {rip:#x} without single-stepping: `{}` has no \
              successor known from here; {STEP_UNDER_WINDOWS_HYPERVISOR}",
             format!("{:?}", instruction.mnemonic()).to_ascii_lowercase()
         ))

@@ -647,10 +647,9 @@ pub trait DebugBackend {
             BackendCapability::supported(DebugCapability::MemoryIntrospection),
             BackendCapability::supported(DebugCapability::ExecutionControl),
             BackendCapability::supported(DebugCapability::InterruptTarget),
-            BackendCapability {
-                capability: DebugCapability::SingleStep,
-                supported: !self.single_step_unsafe(),
-            },
+            // Where the trap flag is unsafe, the session steps by running the
+            // vCPU alone to the instruction's successors instead.
+            BackendCapability::supported(DebugCapability::SingleStep),
             BackendCapability::supported(DebugCapability::ReadRegisters),
             BackendCapability::supported(DebugCapability::WriteRegisters),
             BackendCapability::supported(DebugCapability::ThreadList),
@@ -733,8 +732,8 @@ pub trait DebugBackend {
     fn set_windows_hypervisor(&mut self, _running: bool) {}
 
     /// Whether a single step is unsafe on this target; see
-    /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]. Breakpoints are then run past with
-    /// [`Self::continue_current_thread`] instead.
+    /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]. Steps and breakpoints are then run
+    /// past with [`Self::continue_current_thread`] to temporary sites instead.
     fn single_step_unsafe(&self) -> bool {
         false
     }

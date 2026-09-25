@@ -175,6 +175,20 @@ impl BreakpointManager {
             .any(|bp| bp.enabled && bp.hardware.is_some())
     }
 
+    /// Execute slots no breakpoint holds (disabled ones keep theirs), for
+    /// sites the debugger plants and lifts within one operation.
+    pub fn free_execute_slots(&self, client: &dyn DebugBackend) -> Vec<u8> {
+        client
+            .hardware_slot_range(HwBreakpointAccess::Execute)
+            .filter(|slot| {
+                !self
+                    .breakpoints
+                    .values()
+                    .any(|bp| bp.hardware.is_some_and(|hw| hw.slot == *slot))
+            })
+            .collect()
+    }
+
     /// Map a DR6 status bit to the enabled breakpoint in DR slot `slot`.
     pub fn hardware_breakpoint_for_slot(&self, slot: u8) -> Option<Breakpoint> {
         self.breakpoints

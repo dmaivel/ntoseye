@@ -120,7 +120,16 @@ pub fn secure_scope_admits(spec: &CommandSpec) -> bool {
 /// Whether a live stop whose read root is a VTL1 root admits `spec`: what
 /// the explicit scope admits plus the real vCPU state.
 pub fn live_secure_admits(spec: &CommandSpec) -> bool {
-    secure_scope_admits(spec) || live_secure_vcpu_command(spec)
+    secure_scope_admits(spec) || live_secure_vcpu_command(spec) || secure_step_command(spec)
+}
+
+/// Run control a live VTL1 stop can take without writing secure-kernel code:
+/// steps run the vCPU alone to debug-register sites on an instruction's
+/// successors, and run-to targets (`p` over a call, `gu`, `g <address>`)
+/// in secure-kernel code take a debug-register site too. A software site
+/// anywhere in VTL1 is still refused by the breakpoint core.
+fn secure_step_command(spec: &CommandSpec) -> bool {
+    matches!(spec.names[0], "t" | "p" | "gu" | "pa" | "ta" | "wt")
 }
 
 impl ReplState<'_> {
@@ -141,7 +150,7 @@ impl ReplState<'_> {
         if target.in_secure_address_space() && !live_secure_admits(spec) {
             return Some(format!(
                 "'{name}' is unavailable while the vCPU is stopped in VTL1: it needs NT state, \
-                 writes VTL1, or steps (VTL1 supports reads, registers, stacks, `ba e1`, and plain g)"
+                 or writes VTL1 memory, registers, or code"
             ));
         }
         None
@@ -280,38 +289,43 @@ mod tests {
     }
 
     #[test]
-    fn live_vtl1_stop_admits_vcpu_state_but_not_nt_extensions_writes_or_steps() {
+    fn live_vtl1_stop_admits_vcpu_state_and_steps_but_not_nt_extensions_or_writes() {
         for name in [
             "r", "k", "kb", ".frame", "~", "vcpu", "break", "status", "ba", "bl", "g", "db", "u",
-            ".vtl",
+            ".vtl", "t", "p", "gu", "pa", "ta", "wt",
         ] {
             assert!(live_secure_admits(spec(name)), "'{name}' refused");
         }
         for name in [
-            "bp", "bu", "bm", "gh", "gn", "t", "p", "gu", "pa", "ta", "eb", "eq", "f", ".readmem",
-            "!eb", "wrmsr", "!process", "!thread", ".thread", "!pcr", "!prcb", "!irql", "!idt",
-            ".cxr", ".trap", "!peb", "!pte",
+            "bp", "bu", "bm", "gh", "gn", "eb", "eq", "f", ".readmem", "!eb", "wrmsr", "!process",
+            "!thread", ".thread", "!pcr", "!prcb", "!irql", "!idt", ".cxr", ".trap", "!peb",
+            "!pte",
         ] {
             assert!(!live_secure_admits(spec(name)), "'{name}' admitted");
         }
     }
 
-    /// Stepping and run-to plant software traps VTL1 cannot take; only a
-    /// plain resume may leave a VTL1 stop, so a new run command stays refused
+    /// Only run control whose temporary sites become debug-register sites
+    /// in VTL1 may leave a VTL1 stop, so a new run command stays refused
     /// until someone decides it is VTL1-safe.
     #[test]
-    fn only_g_moves_the_target_from_a_vtl1_address_space() {
+    fn only_g_and_hardware_steps_move_the_target_from_a_vtl1_address_space() {
         for spec in COMMANDS.iter() {
             if spec.run != RunEffect::None && live_secure_admits(spec) {
-                assert_eq!(spec.names[0], "g", "'{}' admitted", spec.names[0]);
+                assert!(
+                    matches!(spec.names[0], "g" | "t" | "p" | "gu" | "pa" | "ta" | "wt"),
+                    "'{}' admitted",
+                    spec.names[0]
+                );
             }
         }
     }
 
-    /// A stop whose root is a VTL1 root: run-to and writes leave the target
-    /// exactly as stopped, and plain `g` still resumes it.
+    /// A stop whose root is a VTL1 root: a run-to that would need a software
+    /// site in VTL1, and writes, leave the target exactly as stopped; plain
+    /// `g` still resumes it.
     #[test]
-    fn vtl1_stop_refuses_run_to_and_writes_but_resumes_on_plain_g() {
+    fn vtl1_stop_refuses_patching_run_to_and_writes_but_resumes_on_plain_g() {
         let mut session = session_with_mock(MockBackend::default());
         let root = session.target.current_dtb();
         session.target.symbols.set_secure_roots(root, []);
@@ -329,9 +343,9 @@ mod tests {
 
         let (result, _) = capture(|| state.dispatch_line("eb 1000 cc"));
         assert_eq!(result.unwrap(), Flow::Denied);
-        let (result, _) = capture(|| state.dispatch_line("t"));
+        let (result, _) = capture(|| state.dispatch_line("bp 1000"));
         assert_eq!(result.unwrap(), Flow::Denied);
-        assert!(!state.ctx.backend.is_running(), "t stepped");
+        assert!(!state.ctx.backend.is_running(), "bp resumed");
 
         let (result, _) = capture(|| state.dispatch_line("g"));
         result.unwrap();

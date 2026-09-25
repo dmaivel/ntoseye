@@ -253,6 +253,23 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
         };
     }
 
+    // A root mapping the secure kernel: its modules and system root, so code
+    // reads, symbols and unwinding use the secure kernel, never NT's.
+    if debugger.recognize_secure_root(cr3_masked)
+        && let Some(guest) = debugger.guest.as_ref()
+        && let Some(secure) = guest.cached_secure_kernel()
+    {
+        return ThreadTraceContext {
+            description: "VTL1".to_string(),
+            active_dtb: cr3_masked,
+            kernel_dtb: secure.image.dtb(),
+            process_dtb: None,
+            kernel_modules: secure.modules(guest).unwrap_or_default(),
+            process_modules: Vec::new(),
+            foreign_image: None,
+        };
+    }
+
     if let Some(proc_info) = debugger.process_for_cr3(cr3_masked) {
         let process_modules = debugger
             .guest
@@ -323,26 +340,6 @@ pub fn resolve_thread_trace_context_at(
     cr3: u64,
     rip: u64,
 ) -> ThreadTraceContext {
-    if debugger.recognize_secure_root(cr3)
-        && let Some(secure) = debugger
-            .guest
-            .as_ref()
-            .and_then(|guest| guest.cached_secure_kernel())
-    {
-        return ThreadTraceContext {
-            description: "VTL1".to_string(),
-            active_dtb: debugger.normalize_dtb(cr3),
-            kernel_dtb: secure.image.dtb(),
-            process_dtb: None,
-            kernel_modules: debugger
-                .guest
-                .as_ref()
-                .and_then(|guest| secure.modules(guest).ok())
-                .unwrap_or_default(),
-            process_modules: Vec::new(),
-            foreign_image: None,
-        };
-    }
     let mut trace = resolve_thread_trace_context(debugger, cr3);
     if trace.description != UNKNOWN_CONTEXT || try_format_symbol(debugger, &trace, rip).is_some() {
         return trace;

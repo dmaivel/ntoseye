@@ -10,7 +10,7 @@ use super::{Breakpoint, BreakpointConfig, BreakpointManager};
 #[cfg(test)]
 use super::{BreakpointScope, HardwareBreakpoint, install::BreakpointPatch};
 use crate::backend::MemoryOps;
-use crate::dbg_backend::DebugBackend;
+use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
 use crate::error::{Error, Result};
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
@@ -109,6 +109,23 @@ impl BreakpointManager {
         debugger: &Target,
         address: VirtAddr,
     ) -> Result<u32> {
+        // Secure-kernel code is never patched: a run-to there (`p` over a
+        // call, `gu`) takes a debug-register slot for the run instead.
+        if debugger.is_secure_address(address) {
+            let id = self.add_hardware_configured(
+                client,
+                debugger,
+                address,
+                HwBreakpointAccess::Execute,
+                1,
+                None,
+                BreakpointConfig::default(),
+            )?;
+            if let Some(bp) = self.breakpoints.get_mut(&id) {
+                bp.temporary = true;
+            }
+            return Ok(id);
+        }
         self.add_code_configured(
             client,
             debugger,

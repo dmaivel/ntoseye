@@ -29,6 +29,9 @@ const TF: u64 = 1 << 8;
 /// must survive every rewrite.
 const EFLAGS_BASE: u64 = 0x202;
 
+/// Hardware slot writes in order: `(slot, Some(address))` sets, `None` clears.
+type HardwareWrites = Arc<Mutex<Vec<(u8, Option<u64>)>>>;
+
 /// Minimal register-file backend: a KD-layout register buffer the map's
 /// offsets index into, plus a write counter for no-op assertions. Every
 /// non-register operation is out of scope for these tests.
@@ -58,6 +61,8 @@ pub struct MockBackend {
     /// Shared so a test can read it back after the backend moves into a
     /// session.
     site_writes: Arc<Mutex<Vec<(u64, bool)>>>,
+    /// `set_hardware_breakpoint` / `clear_hardware_breakpoint` calls.
+    hardware_writes: HardwareWrites,
     /// Register fetches, so a test can prove a path avoided one.
     reads: usize,
     /// TF and DR6 as a transport would report them with the stop.
@@ -67,6 +72,8 @@ pub struct MockBackend {
     single_step_unsafe: bool,
     /// Where the lone vCPU stops when resumed alone; `None` never stops.
     lands_at: Option<u64>,
+    /// Accept selecting (and report) one vCPU, as a stub does.
+    one_vcpu: bool,
 }
 
 impl Default for MockBackend {
@@ -89,10 +96,12 @@ impl Default for MockBackend {
             pending_stop: false,
             dropped_sites: Vec::new(),
             site_writes: Arc::new(Mutex::new(Vec::new())),
+            hardware_writes: Arc::new(Mutex::new(Vec::new())),
             reads: 0,
             reported_trap_state: None,
             single_step_unsafe: false,
             lands_at: None,
+            one_vcpu: false,
         }
     }
 }
@@ -195,6 +204,20 @@ impl DebugBackend for MockBackend {
     fn target_manages_breakpoint_sites(&self) -> bool {
         self.target_manages_sites
     }
+    fn set_hardware_breakpoint(
+        &mut self,
+        slot: u8,
+        addr: u64,
+        _access: HwBreakpointAccess,
+        _len: u8,
+    ) -> Result<()> {
+        self.hardware_writes.lock().push((slot, Some(addr)));
+        Ok(())
+    }
+    fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+        self.hardware_writes.lock().push((slot, None));
+        Ok(())
+    }
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
         self.dropped_sites.clone()
     }
@@ -258,10 +281,18 @@ impl DebugBackend for MockBackend {
         Err(Error::NotSupported)
     }
     fn set_current_thread(&mut self, _thread_id: &str) -> Result<()> {
-        Err(Error::NotSupported)
+        if self.one_vcpu {
+            Ok(())
+        } else {
+            Err(Error::NotSupported)
+        }
     }
     fn stopped_thread_id(&mut self) -> Result<String> {
-        Err(Error::NotSupported)
+        if self.one_vcpu {
+            Ok("p01.01".to_string())
+        } else {
+            Err(Error::NotSupported)
+        }
     }
     fn is_running(&self) -> bool {
         self.running
@@ -936,6 +967,90 @@ fn successors_cover_both_branch_arms_and_resolve_returns_and_indirect_calls() {
     assert_eq!(successors(0x1000), [0x1002, 0x1012]);
     assert_eq!(successors(0x1010), [0x2222]);
     assert_eq!(successors(0x1020), [0x3333]);
+}
+
+fn stepping_session(code: &[u8], backend: MockBackend) -> Session {
+    let mut session = session_over_memory(0x1000, code);
+    session.backend = Box::new(backend);
+    session.register_map = build_register_map();
+    session
+}
+
+/// Under the Windows hypervisor a step is this vCPU run alone to temporary
+/// sites on every successor (both arms of a branch), lifted afterwards.
+#[test]
+fn a_step_under_the_windows_hypervisor_runs_the_vcpu_alone_to_every_successor() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        lands_at: Some(0x1012),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
+    let mut session = stepping_session(&code, backend);
+
+    assert_eq!(session.step().unwrap(), 0x1012);
+    assert_eq!(
+        *sites.lock(),
+        [
+            (0x1002, true),
+            (0x1012, true),
+            (0x1002, false),
+            (0x1012, false)
+        ]
+    );
+    assert!(hardware.lock().is_empty());
+}
+
+/// Secure-kernel code is never patched: a step there marks its successors
+/// with debug-register sites in slots no breakpoint holds.
+#[test]
+fn a_secure_kernel_step_uses_free_debug_register_slots_and_writes_no_code() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    let mut backend = MockBackend {
+        single_step_unsafe: true,
+        lands_at: Some(0x1002),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
+    let mut session = stepping_session(&code, backend);
+    session.target.symbols.inject_source_lines_for_test(
+        2,
+        0x2000,
+        VirtAddr(0x1000),
+        0x100,
+        "secure.c",
+        &[],
+    );
+    session.target.symbols.set_secure_roots(0x2000, []);
+    // A user's `ba e1` holds slot 0.
+    session.breakpoints.insert_for_test(
+        7,
+        VirtAddr(0x1030),
+        true,
+        Some(HardwareBreakpoint {
+            access: HwBreakpointAccess::Execute,
+            len: 1,
+            slot: 0,
+        }),
+    );
+
+    assert_eq!(session.step().unwrap(), 0x1002);
+    assert!(
+        sites.lock().is_empty(),
+        "a software site was planted in VTL1"
+    );
+    assert_eq!(
+        hardware.lock()[..4],
+        [(1, Some(0x1002)), (2, Some(0x1012)), (1, None), (2, None)]
+    );
 }
 
 #[test]
