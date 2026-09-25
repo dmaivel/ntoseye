@@ -12,6 +12,7 @@ use crate::target::{SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
     RecoveredStackTrace, build_stacktrace_with_context, build_stacktrace_with_register_values,
+    resolve_thread_trace_context_at, try_format_symbol,
 };
 
 pub(super) fn update_target_context_from_registers(
@@ -447,11 +448,15 @@ impl Session {
                             .format_closest_symbol_for_address(proc.dtb, VirtAddr(rip));
                         (proc.name.clone(), sym)
                     }
-                    None => {
-                        let sym = self.target.closest_symbol_current_context(VirtAddr(rip));
-                        let ctx = if sym.is_some() { "kernel" } else { "unknown" };
-                        (ctx.to_string(), sym)
-                    }
+                    None => match self.target.closest_symbol_current_context(VirtAddr(rip)) {
+                        Some(sym) => ("kernel".to_string(), Some(sym)),
+                        // Outside NT under VBS: the hypervisor or VTL1.
+                        None => {
+                            let trace = resolve_thread_trace_context_at(&self.target, dtb, rip);
+                            let symbol = try_format_symbol(&self.target, &trace, rip);
+                            (trace.description, symbol)
+                        }
+                    },
                 }
             };
 

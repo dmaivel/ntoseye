@@ -1,13 +1,46 @@
-//! Explicit secure-kernel inspection. Selecting a VTL changes address-space
-//! reads and symbol scope, not the executing processor's VTL or registers.
+//! Explicit secure-kernel inspection, and naming code that runs outside NT's
+//! address spaces under VBS. Selecting a VTL changes address-space reads and
+//! symbol scope, not the executing processor's VTL or registers.
 
 use std::sync::Arc;
 
+use pelite::{PeView, image::IMAGE_FILE_DLL};
+
 use super::Target;
 use crate::{
+    backend::MemoryOps,
     error::{Error, Result},
-    guest::{Guest, ModuleSymbolLoadReport, SecureKernel, SessionSpace, TrustletInfo},
+    guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, SecureKernel, SessionSpace, TrustletInfo},
+    memory::{AddressSpace, PAGE_SIZE},
+    pe::{read_pe_header_page, size_of_image},
+    symbols::SymbolStore,
+    types::{Dtb, PhysAddr, VirtAddr},
 };
+
+/// How far below an instruction pointer to look for the header of the image
+/// it lies in. The Windows hypervisor and secure kernel are a few MiB.
+const IMAGE_SEARCH_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Code a vCPU was executing outside every NT address space, named by what
+/// it is rather than left `unknown`.
+#[derive(Debug, Clone)]
+pub struct ForeignCode {
+    /// `hypervisor`, `VTL1`, or the name of the image the code lies in.
+    pub context: String,
+    pub modules: ForeignModules,
+}
+
+/// The modules a trace of foreign code unwinds and symbolizes with.
+#[derive(Debug, Clone)]
+pub enum ForeignModules {
+    /// VTL1 with the secure kernel discovered: its loaded modules, whose
+    /// symbols are registered under its system root `root`.
+    SecureKernel { root: Dtb, modules: Vec<ModuleInfo> },
+    /// The image the code lies in, mapped in the stopped address space.
+    Image(ModuleInfo),
+    /// A known VTL1 root outside any image (trustlet heap or stack).
+    None,
+}
 
 impl Target {
     /// Whether inspection is rooted in the secure kernel or a trustlet.
@@ -65,5 +98,87 @@ impl Target {
         self.registers = None;
         self.secure_root = Some(root);
         Ok(report)
+    }
+
+    /// Name the code at `rip` in the address space `cr3` when that space is
+    /// none of NT's. Under VBS an idle or intercepted vCPU halts inside the
+    /// Windows hypervisor, and a vCPU can halt in VTL1; both are identified
+    /// by the image the code lies in (its CodeView PDB name), which needs no
+    /// prior discovery. `None` when `rip` lies in no image of an unknown root.
+    pub fn identify_foreign_code(&self, cr3: u64, rip: u64) -> Option<ForeignCode> {
+        let dtb = cr3 & self.arch().dtb_page_mask();
+        let secure_root = self.symbols.is_secure_root(dtb);
+        let image = image_containing(&self.address_space(dtb), rip);
+        let context = match &image {
+            Some(image) => match image.short_name.as_str() {
+                "hvix64" | "hvax64" | "hvaa64" => "hypervisor".to_string(),
+                "securekernel" => "VTL1".to_string(),
+                _ if secure_root => "VTL1".to_string(),
+                name => name.to_string(),
+            },
+            None if secure_root => "VTL1".to_string(),
+            None => return None,
+        };
+        // Every VTL1 root maps the secure kernel's modules, and their symbols
+        // live under its system root.
+        let secure = (context == "VTL1")
+            .then(|| self.guest.as_ref()?.cached_secure_kernel())
+            .flatten()
+            .and_then(|secure| {
+                let modules = secure.modules(self.guest.as_ref()?).ok()?;
+                Some(ForeignModules::SecureKernel {
+                    root: secure.image.dtb(),
+                    modules,
+                })
+            });
+        let modules = secure
+            .or_else(|| image.map(ForeignModules::Image))
+            .unwrap_or(ForeignModules::None);
+        Some(ForeignCode { context, modules })
+    }
+}
+
+/// The image mapped at `rip`, named by its CodeView PDB and found by walking
+/// down page by page to its header. Unmapped pages are skipped (images drop
+/// discardable sections); a header whose image ends below `rip` means `rip`
+/// lies in no image.
+fn image_containing<B: MemoryOps<PhysAddr>>(
+    memory: &AddressSpace<'_, B>,
+    rip: u64,
+) -> Option<ModuleInfo> {
+    let page_mask = PAGE_SIZE as u64 - 1;
+    let top = rip & !page_mask;
+    let floor = top.saturating_sub(IMAGE_SEARCH_BYTES);
+    let mut page = top;
+    loop {
+        let mut magic = [0u8; 2];
+        if memory.read_bytes(VirtAddr(page), &mut magic).is_ok()
+            && magic == *b"MZ"
+            && let Ok(headers) = read_pe_header_page(VirtAddr(page), memory)
+            && let Ok(view) = PeView::from_bytes(&headers)
+        {
+            let size = size_of_image(&view);
+            if rip - page >= u64::from(size) {
+                return None;
+            }
+            let path = SymbolStore::codeview_pdb_path(memory, VirtAddr(page))
+                .ok()
+                .flatten()?;
+            let file = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+            // The loader's name is not in memory; the PDB's stem is the
+            // image's, and the header says which kind of file it was.
+            let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+            let extension = if view.file_header().Characteristics & IMAGE_FILE_DLL != 0 {
+                "dll"
+            } else {
+                "exe"
+            };
+            let name = format!("{stem}.{extension}");
+            return Some(ModuleInfo::new(name, VirtAddr(page), size));
+        }
+        if page <= floor {
+            return None;
+        }
+        page -= PAGE_SIZE as u64;
     }
 }

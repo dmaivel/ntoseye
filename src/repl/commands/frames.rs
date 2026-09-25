@@ -11,7 +11,7 @@ use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 use crate::unwind::{
-    RecoveredStackTrace, StackTrace, build_stacktrace_with_context,
+    RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_context,
     build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context,
     try_format_symbol,
 };
@@ -698,7 +698,7 @@ impl ReplState<'_> {
         }
         let space = match trace.description.as_str() {
             "kernel" => "the kernel address space".to_string(),
-            "unknown" => "the selected address space".to_string(),
+            UNKNOWN_CONTEXT => "the selected address space".to_string(),
             process => process.to_string(),
         };
         diagnostics::print_warning(format!(

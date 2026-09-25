@@ -148,6 +148,13 @@ pub(super) fn ensure_frame_module_symbols(
         let Some(module) = trace.module_for_address(ip) else {
             continue;
         };
+        if trace
+            .foreign_image
+            .as_ref()
+            .is_some_and(|image| image.base_address == module.info.base_address)
+        {
+            continue;
+        }
         let key = (module.dtb, module.info.base_address.0);
         if seen.insert(key)
             && debugger

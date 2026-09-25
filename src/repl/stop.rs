@@ -10,7 +10,7 @@ use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::target::{Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
-use crate::unwind::{format_symbol, resolve_thread_trace_context};
+use crate::unwind::{format_symbol, resolve_thread_trace_context_at};
 
 use crate::repl::*;
 
@@ -432,7 +432,7 @@ pub fn print_break_context_at(
         .unwrap_or(0);
     let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
     let windows_thread = refresh_windows_thread_context_for_backend_thread(debugger, thread_id);
-    let trace = resolve_thread_trace_context(debugger, cr3);
+    let trace = resolve_thread_trace_context_at(debugger, cr3, rip);
     let context_rip = display_rip.unwrap_or(rip);
     let symbol = format_symbol(debugger, &trace, context_rip);
 

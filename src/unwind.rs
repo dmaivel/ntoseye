@@ -16,7 +16,10 @@ use crate::{
     pe::PeImage,
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
-    target::{KTHREAD_STATE_TERMINATED, SavedThreadRegisters, Target, ThreadInfo, lookup_register},
+    target::{
+        ForeignModules, KTHREAD_STATE_TERMINATED, SavedThreadRegisters, Target, ThreadInfo,
+        lookup_register,
+    },
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
     types::{Arch, Dtb, VirtAddr},
 };
@@ -75,6 +78,11 @@ pub struct ThreadTraceContext {
     pub process_dtb: Option<Dtb>,
     pub kernel_modules: Vec<ModuleInfo>,
     pub process_modules: Vec<ModuleInfo>,
+    /// An image named from memory in a root none of NT's (the hypervisor),
+    /// mapped in `active_dtb`. Its frames are labeled and unwound like any
+    /// module's, but it is never symbol-fetched: it has no loader entry, and
+    /// every vCPU has its own root, so a fetch would repeat per vCPU.
+    pub foreign_image: Option<ModuleInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +249,7 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
             process_dtb: None,
             kernel_modules: debugger.kernel_modules().unwrap_or_default(),
             process_modules: Vec::new(),
+            foreign_image: None,
         };
     }
 
@@ -257,16 +266,18 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
             process_dtb: Some(proc_info.dtb),
             kernel_modules: debugger.kernel_modules().unwrap_or_default(),
             process_modules,
+            foreign_image: None,
         };
     }
 
     ThreadTraceContext {
-        description: "unknown".to_string(),
+        description: UNKNOWN_CONTEXT.to_string(),
         active_dtb: cr3_masked,
         kernel_dtb,
         process_dtb: None,
         kernel_modules: debugger.kernel_modules().unwrap_or_default(),
         process_modules: Vec::new(),
+        foreign_image: None,
     }
 }
 
@@ -297,6 +308,38 @@ pub fn try_format_symbol(
     }
 
     try_format(trace.kernel_dtb)
+}
+
+/// The context description for a root that is none of NT's.
+pub const UNKNOWN_CONTEXT: &str = "unknown";
+
+/// [`resolve_thread_trace_context`] for a thread stopped at `rip`. A root
+/// that is none of NT's is named for the code at `rip` (the Windows
+/// hypervisor or VTL1), and that code's modules join the trace, so its
+/// frames read `module+offset` (or symbols, for VTL1) rather than raw
+/// addresses among NT-looking stack values.
+pub fn resolve_thread_trace_context_at(
+    debugger: &Target,
+    cr3: u64,
+    rip: u64,
+) -> ThreadTraceContext {
+    let mut trace = resolve_thread_trace_context(debugger, cr3);
+    if trace.description != UNKNOWN_CONTEXT || try_format_symbol(debugger, &trace, rip).is_some() {
+        return trace;
+    }
+    let Some(code) = debugger.identify_foreign_code(cr3, rip) else {
+        return trace;
+    };
+    trace.description = code.context;
+    match code.modules {
+        ForeignModules::SecureKernel { root, modules } => {
+            trace.kernel_dtb = root;
+            trace.kernel_modules = modules;
+        }
+        ForeignModules::Image(image) => trace.foreign_image = Some(image),
+        ForeignModules::None => {}
+    }
+    trace
 }
 
 pub fn format_symbol(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> String {
@@ -417,13 +460,14 @@ pub fn build_stacktrace_with_context(
     let cr3 = register_map
         .read_u64(debugger.arch().dtb_register(), regs)
         .unwrap_or(0);
-    let trace = resolve_thread_trace_context(debugger, cr3);
+    let context = RegisterContext::from_lookup(debugger.arch(), |name| {
+        register_map.read_u64(name, regs).ok()
+    });
+    let trace = resolve_thread_trace_context_at(debugger, cr3, context.rip);
     build_recovered_stacktrace_seeded(
         debugger,
         &trace,
-        RegisterContext::from_lookup(debugger.arch(), |name| {
-            register_map.read_u64(name, regs).ok()
-        }),
+        context,
         FrameSource::Current,
         limit,
         register_map.to_hashmap(regs),
@@ -839,6 +883,15 @@ impl ThreadTraceContext {
                     .map(|info| OwnedModule {
                         info,
                         dtb: self.dtb(),
+                    })
+            })
+            .or_else(|| {
+                self.foreign_image
+                    .as_ref()
+                    .filter(|image| image.contains_address(VirtAddr(address)))
+                    .map(|info| OwnedModule {
+                        info: info.clone(),
+                        dtb: self.active_dtb,
                     })
             })
     }

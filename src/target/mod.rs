@@ -21,6 +21,7 @@ mod variables;
 mod vtl;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
+pub use vtl::{ForeignCode, ForeignModules};
 
 use self::mm::AddressDescription;
 use crate::{
