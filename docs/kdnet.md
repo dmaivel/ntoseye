@@ -12,7 +12,7 @@ Pick the host address the target can reach. Hypervisors `ntoseye` integrates wit
 - [VMware Workstation](vmware.md#kdnet): no additional virtual hardware configuration is needed, but the guest's bridged, NAT, or host-only NIC must be able to reach the selected host address.
 - [UTM](utm.md#kdnet): disable Secure Boot before changing the Windows BCD debug settings and ensure the guest NIC can reach the selected macOS address.
 
-Any other hypervisor, cloud VM, or physical machine needs nothing on the host side; a physical machine's NIC must be one `kdnet.exe` accepts (Microsoft's supported list). If a host firewall filters inbound UDP, allow the selected port (50000 by default).
+Any other target that Windows can debug over KDNET needs nothing on the host side. If a host firewall filters inbound UDP, allow the selected port (50000 by default).
 
 ## 2. Guest
 

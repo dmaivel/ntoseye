@@ -34,7 +34,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 
 ### Supported hypervisors
 
-`ntoseye` supports any hypervisor, cloud VM, or physical machine reachable over [KDNET](docs/kdnet.md). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](docs/backends.md).
+`ntoseye` supports any target that Windows can debug over [KDNET](docs/kdnet.md). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](docs/backends.md).
 
 ### Files and network access
 
@@ -115,7 +115,7 @@ Run `ntoseye status` at any time to inspect configured transports, assigned gues
 
 `ntoseye configure` handles automatic setup for supported libvirt, VMware Workstation, and UTM guests. For plain QEMU or manual configuration, see the [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md) setup guides.
 
-For any other hypervisor, a cloud VM, or a physical machine, follow the [KDNET guide](docs/kdnet.md) instead; `configure` is not needed.
+For any other target, follow the [KDNET guide](docs/kdnet.md) instead; `configure` is not needed.
 
 ### Not sure which backend to use?
 
