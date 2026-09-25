@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::dbg_backend::DebugCapability;
 use crate::error::{Error, Result};
 use crate::kd::KdMemorySource;
 use crate::layout::ParsedType;
@@ -452,8 +453,16 @@ impl Server {
         let Some(mut session) = self.session.take() else {
             return;
         };
+        // A dump or passive memory view was never halted, so nothing resumes.
+        let resumable = session
+            .capabilities()
+            .iter()
+            .any(|entry| entry.capability == DebugCapability::ExecutionControl && entry.supported);
         match session.cleanup_for_exit() {
-            Ok(()) => self.emit_output("console", "ntoseye: detached; guest resumed\n"),
+            Ok(()) if resumable => {
+                self.emit_output("console", "ntoseye: detached; guest resumed\n")
+            }
+            Ok(()) => self.emit_output("console", "ntoseye: detached\n"),
             Err(error) => {
                 let message = format!("ntoseye: detach failed, guest may still be halted: {error}");
                 eprintln!("{message}");
