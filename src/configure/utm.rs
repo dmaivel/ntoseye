@@ -135,7 +135,11 @@ impl Configurator for Utm {
                 } => {
                     vec!["remove UTM KD serial socket; KDNET uses the virtual NIC".to_string()]
                 }
-                ConfigureRequest::Configure { .. } => Vec::new(),
+                #[cfg(any(target_os = "linux", test))]
+                ConfigureRequest::Configure {
+                    backend: ConfigureBackend::Gdb | ConfigureBackend::KdAndGdb,
+                    ..
+                } => Vec::new(),
                 ConfigureRequest::Remove => {
                     vec!["remove ntoseye KD arguments from UTM".to_string()]
                 }
