@@ -56,6 +56,8 @@ pub(super) fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!list"
             | "x"
             | "ln"
+            // An explicit root and a page walk; no NT state.
+            | "!vtop"
             | "?"
             | "set"
             | "vars"

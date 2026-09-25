@@ -372,8 +372,14 @@ impl SecureKernel {
     fn trustlet_layout(&self) -> Result<TrustletLayout> {
         let (select, select_ip) = self.function_code("SkeSelectProcessAddressSpace")?;
         let (initialize, initialize_ip) = self.function_code("SkpsInitializeProcess")?;
+        let (policy, policy_ip) = self.function_code("SkpsReadPolicyMetadata")?;
         let list = self.image.symbol("SkpsProcessList")?.address();
-        TrustletLayout::derive((&select, select_ip), (&initialize, initialize_ip), list.0)
+        TrustletLayout::derive(
+            (&select, select_ip),
+            (&initialize, initialize_ip),
+            (&policy, policy_ip),
+            list.0,
+        )
     }
 
     pub fn trustlets(&self, guest: &Guest) -> Result<Vec<TrustletInfo>> {

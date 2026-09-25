@@ -24,21 +24,31 @@ pub struct TrustletLayout {
     pub pid: u64,
     /// Address-space root loaded into CR3.
     pub dtb: u64,
-    /// First qword of the trustlet creation attributes.
+    /// The trustlet ID: stored from the creation attributes, and checked
+    /// against the image's policy metadata.
     pub trustlet_id: u64,
 }
 
 impl TrustletLayout {
     /// `select` is `SkeSelectProcessAddressSpace`; `initialize` is
     /// `SkpsInitializeProcess`, which links new processes onto
-    /// `process_list`.
+    /// `process_list`; `policy` is `SkpsReadPolicyMetadata`. The trustlet ID
+    /// has no value to validate against at runtime, so the two functions
+    /// that use it must agree on where it is: the policy check must read the
+    /// field process creation stores it in.
     pub fn derive(
         select: (&[u8], u64),
         initialize: (&[u8], u64),
+        policy: (&[u8], u64),
         process_list: u64,
     ) -> Result<Self> {
         let dtb = cr3_offset(select.0, select.1)?;
         let (links, pid, trustlet_id) = process_offsets(initialize.0, initialize.1, process_list)?;
+        if !policy_process_reads(policy.0, policy.1).contains(&trustlet_id) {
+            return Err(layout_error(format!(
+                "the policy check never reads the trustlet ID stored at {trustlet_id:#x}"
+            )));
+        }
         let layout = Self {
             links,
             pid,
@@ -269,6 +279,24 @@ pub fn cr3_offset(code: &[u8], ip: u64) -> Result<u64> {
     }
 }
 
+/// The qword fields `SkpsReadPolicyMetadata(process)` reads from its process
+/// argument. It compares the image's policy trustlet ID with the process's
+/// (some builds also fill the field when it is zero), so the identity is
+/// among them.
+pub fn policy_process_reads(code: &[u8], ip: u64) -> Vec<u64> {
+    let mut reads = Vec::new();
+    walk(code, ip, &[Register::RCX], 0, |instruction, state| {
+        if instruction.code() == Code::Mov_r64_rm64
+            && instruction.op1_kind() == OpKind::Memory
+            && instruction.memory_index() == Register::None
+            && get(state, instruction.memory_base()) == Some(Value::Argument(Register::RCX))
+        {
+            reads.push(instruction.memory_displacement64());
+        }
+    });
+    reads
+}
+
 /// `(links, pid, trustlet_id)` from `SkpsInitializeProcess`: the list entry
 /// stored into `process_list`, the third argument stored into the process,
 /// and the process field filled from a dereferenced attribute buffer.
@@ -415,16 +443,36 @@ mod tests {
         assert!(process_offsets(&code, 0x1400a4000, list).is_err());
     }
 
+    // SkpsReadPolicyMetadata, 10.0.26100.9457: the process argument moved to
+    // rbx, another field read, then the identity read, compared, and filled.
+    const POLICY: &str = "48 8b d9 48 8b 8b a0 00 00 00 e8 00 00 00 00 \
+                          4c 8b 83 a0 01 00 00 48 89 83 a0 01 00 00 c3";
+
     #[test]
-    fn derived_layout_rejects_overlapping_fields() {
-        let (code, list) = initialize("");
-        let select = bytes(&SELECT.replace("4c8b4140", "4c8b4138"));
-        assert!(
-            TrustletLayout::derive((&select, 0x1400e75e0), (&code, 0x1400a4000), list).is_err()
-        );
-        let select = bytes(SELECT);
+    fn policy_reads_follow_the_process_argument() {
+        // rbx holds the argument after `mov rbx, rcx`; the call clobbers rcx
+        // but not rbx.
         assert_eq!(
-            TrustletLayout::derive((&select, 0x1400e75e0), (&code, 0x1400a4000), list).unwrap(),
+            policy_process_reads(&bytes(POLICY), 0x1400a8feb),
+            [0xa0, 0x1a0]
+        );
+    }
+
+    #[test]
+    fn derived_layout_requires_both_identity_sites_to_agree() {
+        let (code, list) = initialize("");
+        let select = bytes(SELECT);
+        let policy = bytes(POLICY);
+        let derive = |select: &[u8], policy: &[u8]| {
+            TrustletLayout::derive(
+                (select, 0x1400e75e0),
+                (&code, 0x1400a4000),
+                (policy, 0x1400a8feb),
+                list,
+            )
+        };
+        assert_eq!(
+            derive(&select, &policy).unwrap(),
             TrustletLayout {
                 links: 0xe8,
                 pid: 0x38,
@@ -432,5 +480,10 @@ mod tests {
                 trustlet_id: 0x1a0,
             }
         );
+        let elsewhere = bytes(&POLICY.replace("a0 01 00 00", "a8 01 00 00"));
+        assert!(derive(&select, &elsewhere).is_err());
+        // A root at the PID's offset overlaps it.
+        let overlapping = bytes(&SELECT.replace("4c8b4140", "4c8b4138"));
+        assert!(derive(&overlapping, &policy).is_err());
     }
 }
