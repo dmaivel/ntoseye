@@ -29,7 +29,14 @@ def ctrl_c_after(seconds: float) -> Iterator[None]:
         timer.cancel()
 
 
+def require_single_step(dbg: Debugger) -> None:
+    # Refused over the GDB stub while Windows runs its own hypervisor.
+    if not any(row.capability == "single_step" and row.supported for row in dbg.capabilities):
+        pytest.skip("this target refuses single steps")
+
+
 def test_current_stop_is_read_not_consumed(halted: Debugger) -> None:
+    require_single_step(halted)
     stop = halted.step()
     assert isinstance(stop, Stop.Step)
     # Every read of a halted target reports the stop it is halted at.
@@ -63,6 +70,7 @@ def test_failing_predicate_surfaces_with_its_error(halted: Debugger) -> None:
 
 
 def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
+    require_single_step(halted)
     halted.breakpoints.add(HOT, when=lambda stop: False)
     # A hit en route is resumed like under run(); the step still completes.
     assert isinstance(halted.step_over(until="call"), Stop.Step)
@@ -76,6 +84,7 @@ def test_run_to_symbol_stops_there(halted: Debugger) -> None:
 
 
 def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
+    require_single_step(halted)
     # gdb single-steps at a few hundred instructions a second.
     trace = halted.trace_calls(limit=2_000)
     assert trace.end in ("returned", "limit")

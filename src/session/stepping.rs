@@ -5,11 +5,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use iced_x86::{Code, Decoder, DecoderOptions, Mnemonic};
+use iced_x86::{
+    Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
+};
 
 use crate::backend::MemoryOps;
 use crate::breakpoints::BreakpointManager;
-use crate::dbg_backend::{ContinueDisposition, DebugBackend, clear_trap_flag};
+use crate::dbg_backend::{
+    ContinueDisposition, DebugBackend, STEP_UNDER_WINDOWS_HYPERVISOR, clear_trap_flag,
+};
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
@@ -31,6 +35,11 @@ impl Session {
     /// The full "step one instruction", shared by the REPL (`si`) and the SDK.
     pub fn step(&mut self) -> Result<u64> {
         self.require_live_register_context()?;
+        // Refused before anything moves, even on a breakpoint site the
+        // run-past path could clear: a step is one instruction, not a run.
+        if self.backend.single_step_unsafe() {
+            return Err(Error::DebugInfo(STEP_UNDER_WINDOWS_HYPERVISOR.to_string()));
+        }
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).
@@ -495,7 +504,11 @@ pub fn step_over_current_breakpoint(
         (Err(err), _) => return Err(err),
     }
 
-    let stepped = step_one_and_clear_tf(backend, register_map);
+    let stepped = if backend.single_step_unsafe() {
+        run_past_site(backend, register_map, debugger, &regs, rip, cr3)
+    } else {
+        step_one_and_clear_tf(backend, register_map)
+    };
 
     // Re-arm whether or not the step worked: a failed step must not leave the
     // site unpatched with the manager still believing it is enabled.
@@ -508,4 +521,168 @@ pub fn step_over_current_breakpoint(
         Err(err) => return stepped.and(Err(err)),
     }
     stepped.map(|()| true)
+}
+
+/// How long a vCPU resumed alone gets to execute the one instruction under a
+/// breakpoint site. Kernel code finishes it in microseconds; a vCPU that
+/// waits on a held one (an IPI, a spinlock) never will.
+const RUN_PAST_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Execute the instruction under the (already lifted) breakpoint site at
+/// `rip` without a single step, which is unsafe on this backend (see
+/// [`STEP_UNDER_WINDOWS_HYPERVISOR`]): plant temporary breakpoints on every
+/// address it can continue at, resume this vCPU alone, and take the stop.
+/// Other vCPUs stay held, so none can run through the lifted site.
+fn run_past_site(
+    backend: &mut dyn DebugBackend,
+    register_map: &RegisterMap,
+    debugger: &Target,
+    regs: &[u8],
+    rip: u64,
+    cr3: Option<u64>,
+) -> Result<()> {
+    let successors = site_successors(debugger, register_map, regs, rip, cr3)?;
+    let mut planted = Vec::with_capacity(successors.len());
+    let result = run_to_successors(backend, register_map, rip, &successors, &mut planted);
+    for address in planted {
+        let removed = backend.remove_breakpoint(address);
+        if result.is_ok() {
+            removed?;
+        }
+    }
+    result
+}
+
+fn run_to_successors(
+    backend: &mut dyn DebugBackend,
+    register_map: &RegisterMap,
+    rip: u64,
+    successors: &[u64],
+    planted: &mut Vec<u64>,
+) -> Result<()> {
+    for &address in successors {
+        backend.set_breakpoint(address)?;
+        planted.push(address);
+    }
+    backend.continue_current_thread()?;
+    let event = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
+        Some(event) => event,
+        None => backend.interrupt()?,
+    };
+    if event.is_bugcheck {
+        return Err(Error::DebugInfo(format!(
+            "target bugchecked while running past the breakpoint at {rip:#x}"
+        )));
+    }
+    let now = register_map.read_u64("rip", &backend.read_registers()?)?;
+    if now == rip {
+        return Err(Error::DebugInfo(format!(
+            "could not run past the breakpoint at {rip:#x}: its vCPU, resumed alone, did not \
+             execute it within {RUN_PAST_TIMEOUT:?}; disable the breakpoint to continue"
+        )));
+    }
+    // Anywhere else (an interrupt taken first, another breakpoint) is
+    // progress: the site is armed again and hits on the way back.
+    Ok(())
+}
+
+/// Every address execution can continue at after the instruction at `rip`,
+/// decoded from the guest (the site is already lifted) and resolved against
+/// the stopped vCPU's registers and memory.
+pub fn site_successors(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    rip: u64,
+    cr3: Option<u64>,
+) -> Result<Vec<u64>> {
+    // As `current_instruction` reads it: CR3 carries PCID and flush bits,
+    // and a module's own root serves its code.
+    let trace = resolve_thread_trace_context(debugger, cr3.unwrap_or(0));
+    let memory = debugger.address_space(preferred_code_dtb(&trace, rip));
+    let mut bytes = [0u8; 16];
+    memory.read_bytes(VirtAddr(rip), &mut bytes)?;
+    let bitness = debugger.code_bitness(VirtAddr(rip));
+    let instruction = Decoder::with_ip(bitness, &bytes, rip, DecoderOptions::NONE).decode();
+    if instruction.is_invalid() {
+        return Err(Error::DebugInfo(format!(
+            "failed to decode instruction at {rip:#x}"
+        )));
+    }
+    let width = if bitness == 32 { 4 } else { 8 };
+    let pointer = |address: u64| -> Result<u64> {
+        let mut value = [0u8; 8];
+        memory.read_bytes(VirtAddr(address), &mut value[..width])?;
+        Ok(u64::from_le_bytes(value))
+    };
+    let register = |register: Register| -> Result<u64> {
+        let name = format!("{:?}", register.full_register()).to_ascii_lowercase();
+        let value = register_map.read_u64(&name, regs)?;
+        Ok(if bitness == 32 {
+            value & 0xffff_ffff
+        } else {
+            value
+        })
+    };
+    let unsupported = || {
+        Error::DebugInfo(format!(
+            "cannot run past the breakpoint at {rip:#x} without single-stepping: `{}` has no \
+             successor known from here; {STEP_UNDER_WINDOWS_HYPERVISOR}",
+            format!("{:?}", instruction.mnemonic()).to_ascii_lowercase()
+        ))
+    };
+    let successors = match instruction.flow_control() {
+        FlowControl::Next => vec![instruction.next_ip()],
+        FlowControl::ConditionalBranch => {
+            vec![instruction.next_ip(), instruction.near_branch_target()]
+        }
+        FlowControl::UnconditionalBranch | FlowControl::Call
+            if instruction.op0_kind() != OpKind::FarBranch16
+                && instruction.op0_kind() != OpKind::FarBranch32 =>
+        {
+            vec![instruction.near_branch_target()]
+        }
+        FlowControl::IndirectBranch | FlowControl::IndirectCall => {
+            vec![indirect_target(&instruction, &register, &pointer).ok_or_else(unsupported)??]
+        }
+        FlowControl::Return => vec![pointer(register(Register::RSP)?)?],
+        _ => return Err(unsupported()),
+    };
+    let mut successors = successors;
+    successors.dedup();
+    Ok(successors)
+}
+
+/// Where an indirect `jmp`/`call` goes: a register, or a pointer in memory
+/// without a segment override. `None` for forms this does not evaluate.
+fn indirect_target(
+    instruction: &Instruction,
+    register: &impl Fn(Register) -> Result<u64>,
+    pointer: &impl Fn(u64) -> Result<u64>,
+) -> Option<Result<u64>> {
+    match instruction.op0_kind() {
+        OpKind::Register => Some(register(instruction.op0_register())),
+        OpKind::Memory if !matches!(instruction.segment_prefix(), Register::FS | Register::GS) => {
+            let address = (|| {
+                let base = match instruction.memory_base() {
+                    Register::None => 0,
+                    // The decoder already folded RIP into the displacement.
+                    Register::RIP | Register::EIP => 0,
+                    base => register(base)?,
+                };
+                let index = match instruction.memory_index() {
+                    Register::None => 0,
+                    index => {
+                        register(index)?.wrapping_mul(u64::from(instruction.memory_index_scale()))
+                    }
+                };
+                pointer(
+                    base.wrapping_add(index)
+                        .wrapping_add(instruction.memory_displacement64()),
+                )
+            })();
+            Some(address)
+        }
+        _ => None,
+    }
 }

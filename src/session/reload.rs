@@ -256,6 +256,8 @@ impl Session {
             // Before re-resolving breakpoints: a stub may plant them through
             // this root, and the old boot's is gone.
             backend.set_kernel_dtb(target.kernel_dtb());
+            // A reboot may have turned the Windows hypervisor on or off.
+            backend.set_windows_hypervisor(target.windows_hypervisor_running());
             let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
             target.refresh_debugger_data(debugger_data_hint);
             breakpoints.resolve_symbolic(backend, target).err()

@@ -3,7 +3,7 @@ use super::hits::{
 };
 use super::inspection::DBG_STATUS_WORKER;
 use super::lifecycle::prepare_backend_after_cleanup;
-use super::stepping::step_over_current_breakpoint;
+use super::stepping::{site_successors, step_over_current_breakpoint};
 use super::*;
 use crate::breakpoints::{Breakpoint, BreakpointConfig, HardwareBreakpoint};
 use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
@@ -62,6 +62,11 @@ pub struct MockBackend {
     reads: usize,
     /// TF and DR6 as a transport would report them with the stop.
     reported_trap_state: Option<TrapState>,
+    /// Single steps are unsafe (the Windows hypervisor); `step()` then fails
+    /// the test, and `continue_current_thread` lands on `lands_at`.
+    single_step_unsafe: bool,
+    /// Where the lone vCPU stops when resumed alone; `None` never stops.
+    lands_at: Option<u64>,
 }
 
 impl Default for MockBackend {
@@ -86,6 +91,8 @@ impl Default for MockBackend {
             site_writes: Arc::new(Mutex::new(Vec::new())),
             reads: 0,
             reported_trap_state: None,
+            single_step_unsafe: false,
+            lands_at: None,
         }
     }
 }
@@ -196,8 +203,24 @@ impl DebugBackend for MockBackend {
         self.running = true;
         Ok(())
     }
+    fn single_step_unsafe(&self) -> bool {
+        self.single_step_unsafe
+    }
+    /// The lone vCPU reaches `lands_at` and reports a breakpoint there.
+    fn continue_current_thread(&mut self) -> Result<()> {
+        self.running = true;
+        if let Some(address) = self.lands_at {
+            self.set("rip", address);
+            self.interrupt_events.push_back(breakpoint_event(address));
+        }
+        Ok(())
+    }
     /// A step lands one byte on, reported by the queued single-step event.
     fn step(&mut self) -> Result<()> {
+        assert!(
+            !self.single_step_unsafe,
+            "single-stepped where it is unsafe"
+        );
         let rip = self.get("rip");
         self.set("rip", rip + 1);
         self.interrupt_events.push_back(single_step_event());
@@ -819,6 +842,100 @@ fn a_target_owned_breakpoint_is_stepped_over_and_written_back() {
         *backend.site_writes.lock(),
         [(0x1000, false), (0x1000, true)]
     );
+}
+
+/// Under the Windows hypervisor a single step can finish inside the
+/// hypervisor and leak its trap into Windows, so continuing from a hit is a
+/// run of this vCPU alone to a temporary breakpoint on the next instruction.
+#[test]
+fn a_site_under_the_windows_hypervisor_is_run_past_without_a_step() {
+    // mov rax, rbx (3 bytes) at the site.
+    let mut code = [0x90u8; 0x20];
+    code[..3].copy_from_slice(&[0x48, 0x89, 0xd8]);
+    let session = session_over_memory(0x1000, &code);
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        lands_at: Some(0x1003),
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let mut manager = BreakpointManager::new();
+    manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+    let register_map = backend.register_map().clone();
+
+    let passed =
+        step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
+            .unwrap();
+
+    assert!(passed);
+    assert_eq!(backend.get("rip"), 0x1003);
+    assert!(manager.list()[0].enabled);
+    assert_eq!(
+        *backend.site_writes.lock(),
+        [
+            (0x1000, false),
+            (0x1003, true),
+            (0x1003, false),
+            (0x1000, true)
+        ]
+    );
+}
+
+/// A vCPU that never executes the instruction (it waits on a held one) must
+/// not leave the temporary sites behind or the user's site lifted.
+#[test]
+fn a_site_that_cannot_be_run_past_is_rearmed_and_reported() {
+    let mut code = [0x90u8; 0x20];
+    code[..3].copy_from_slice(&[0x48, 0x89, 0xd8]);
+    let session = session_over_memory(0x1000, &code);
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    backend.queue_interrupt(breakpoint_event(0x1000));
+    let mut manager = BreakpointManager::new();
+    manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+    let register_map = backend.register_map().clone();
+
+    assert!(
+        step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
+            .is_err()
+    );
+    assert!(manager.list()[0].enabled);
+    assert_eq!(
+        *backend.site_writes.lock(),
+        [
+            (0x1000, false),
+            (0x1003, true),
+            (0x1003, false),
+            (0x1000, true)
+        ]
+    );
+}
+
+#[test]
+fn successors_cover_both_branch_arms_and_resolve_returns_and_indirect_calls() {
+    let mut memory = vec![0u8; 0x80];
+    memory[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    memory[0x10] = 0xc3; // ret
+    memory[0x20..0x23].copy_from_slice(&[0xff, 0x53, 0x08]); // call [rbx+8]
+    memory[0x40..0x48].copy_from_slice(&0x2222u64.to_le_bytes());
+    memory[0x58..0x60].copy_from_slice(&0x3333u64.to_le_bytes());
+    let session = session_over_memory(0x1000, &memory);
+    let mut backend = MockBackend::default();
+    backend.set("rsp", 0x1040);
+    backend.set("rbx", 0x1050);
+    let register_map = backend.register_map().clone();
+    let regs = backend.read_registers().unwrap();
+    let successors =
+        |rip| site_successors(&session.target, &register_map, &regs, rip, None).unwrap();
+
+    assert_eq!(successors(0x1000), [0x1002, 0x1012]);
+    assert_eq!(successors(0x1010), [0x2222]);
+    assert_eq!(successors(0x1020), [0x3333]);
 }
 
 #[test]

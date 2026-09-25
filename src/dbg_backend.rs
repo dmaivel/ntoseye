@@ -515,6 +515,14 @@ pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
     u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
 }
 
+/// Why a host single step is refused while Windows runs its own hypervisor.
+/// KVM steps the vCPU, not Windows: the step can complete inside the
+/// hypervisor with the trap flag still set in Windows, which then takes the
+/// trap itself (a kernel debugger freezes the guest waiting for its host).
+pub const STEP_UNDER_WINDOWS_HYPERVISOR: &str = "single-stepping is unsafe over the GDB stub while \
+     Windows runs its own hypervisor (VBS, Hyper-V): a step can complete inside the hypervisor and \
+     leave its trap to Windows. Use the kd or kdnet backend to step";
+
 /// Debug transport abstraction; guest memory access is provided separately by
 /// [`crate::phys::PhysMem`].
 pub trait DebugBackend {
@@ -639,7 +647,10 @@ pub trait DebugBackend {
             BackendCapability::supported(DebugCapability::MemoryIntrospection),
             BackendCapability::supported(DebugCapability::ExecutionControl),
             BackendCapability::supported(DebugCapability::InterruptTarget),
-            BackendCapability::supported(DebugCapability::SingleStep),
+            BackendCapability {
+                capability: DebugCapability::SingleStep,
+                supported: !self.single_step_unsafe(),
+            },
             BackendCapability::supported(DebugCapability::ReadRegisters),
             BackendCapability::supported(DebugCapability::WriteRegisters),
             BackendCapability::supported(DebugCapability::ThreadList),
@@ -716,6 +727,23 @@ pub trait DebugBackend {
         }
     }
     fn step(&mut self) -> Result<()>;
+
+    /// Tell a backend whose single steps the host performs (a hypervisor's
+    /// GDB stub) whether Windows runs nested under its own hypervisor.
+    fn set_windows_hypervisor(&mut self, _running: bool) {}
+
+    /// Whether a single step is unsafe on this target; see
+    /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]. Breakpoints are then run past with
+    /// [`Self::continue_current_thread`] instead.
+    fn single_step_unsafe(&self) -> bool {
+        false
+    }
+
+    /// Resume only the selected thread, with every other one held.
+    fn continue_current_thread(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
     fn interrupt(&mut self) -> Result<StopEvent>;
 
     /// Block until the target stops

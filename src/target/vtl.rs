@@ -43,6 +43,18 @@ pub enum ForeignModules {
 }
 
 impl Target {
+    /// Whether Windows runs as the root partition of its own hypervisor
+    /// (`hvix64`: VBS, Hyper-V, WSL2) rather than directly on the host's.
+    /// NT records it in `HvlHyperVRootPartition`; a kernel without the symbol
+    /// or an unreadable byte counts as not.
+    pub fn windows_hypervisor_running(&self) -> bool {
+        self.guest
+            .as_ref()
+            .and_then(|guest| guest.ntoskrnl.symbol("HvlHyperVRootPartition").ok())
+            .and_then(|flag| flag.read::<u8>().ok())
+            .is_some_and(|flag| flag != 0)
+    }
+
     /// Whether inspection is rooted in the secure kernel or a trustlet.
     pub fn in_secure_scope(&self) -> bool {
         self.secure_root.is_some()

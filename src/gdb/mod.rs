@@ -4,7 +4,9 @@ use std::net::TcpStream;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use crate::dbg_backend::{DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent};
+use crate::dbg_backend::{
+    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
+};
 use crate::error::{Error, Result};
 use crate::types::Arch;
 
@@ -68,6 +70,8 @@ struct StubFeatures {
     qxfer_features_read: bool,
     /// `vCont;s:<thread>` is supported (`vCont?` lists `s`).
     thread_step: bool,
+    /// `vCont;c:<thread>` is supported (`vCont?` lists `c`).
+    thread_continue: bool,
 }
 
 #[derive(Debug, Default)]
@@ -249,6 +253,9 @@ pub struct GdbClient {
     /// halted vCPU is in another address space; see
     /// [`GdbClient::software_breakpoint_packet`].
     kernel_dtb: Option<u64>,
+    /// Windows runs nested under its own hypervisor, so single steps are
+    /// refused; see [`STEP_UNDER_WINDOWS_HYPERVISOR`].
+    windows_hypervisor: bool,
 }
 
 /// What a wait on an already halted target reports: a stop with no fields,
@@ -304,6 +311,7 @@ impl GdbClient {
             last_stop: String::new(),
             control_thread: None,
             kernel_dtb: None,
+            windows_hypervisor: false,
         };
 
         client.force_stop_and_resync()?;
@@ -311,10 +319,9 @@ impl GdbClient {
         let supported =
             client.send_packet("qSupported:multiprocess+;swbreak+;qRelocInsn+;vContSupported+")?;
         client.features = StubFeatures::parse(&supported);
-        client.features.thread_step = client
-            .send_packet("vCont?")?
-            .split(';')
-            .any(|action| action == "s");
+        let actions = client.send_packet("vCont?")?;
+        client.features.thread_step = actions.split(';').any(|action| action == "s");
+        client.features.thread_continue = actions.split(';').any(|action| action == "c");
 
         if client.features.no_ack_mode {
             let _ = client.enable_no_ack_mode();
@@ -787,6 +794,9 @@ impl GdbClient {
     /// `s` resumes all of QEMU's vCPUs (only the selected one steps), so
     /// another vCPU's breakpoint hit could be reported as the step.
     fn step(&mut self) -> Result<()> {
+        if self.windows_hypervisor {
+            return Err(Error::DebugInfo(STEP_UNDER_WINDOWS_HYPERVISOR.to_string()));
+        }
         match &self.control_thread {
             Some(thread) if self.features.thread_step => {
                 let packet = format!("vCont;s:{thread}");
@@ -794,6 +804,22 @@ impl GdbClient {
             }
             _ => self.send_command_no_reply("s")?,
         }
+        self.is_running = true;
+        Ok(())
+    }
+
+    /// Resume the selected thread alone; QEMU leaves every vCPU a `vCont`
+    /// names no action for stopped.
+    fn continue_current_thread(&mut self) -> Result<()> {
+        let Some(thread) = self.control_thread.clone() else {
+            return Err(Error::DebugInfo(
+                "no vCPU is selected to resume on its own".to_string(),
+            ));
+        };
+        if !self.features.thread_continue {
+            return Err(Error::NotSupported);
+        }
+        self.send_command_no_reply(&format!("vCont;c:{thread}"))?;
         self.is_running = true;
         Ok(())
     }
@@ -1128,6 +1154,18 @@ impl DebugBackend for GdbClient {
         self.kernel_dtb = Some(dtb);
     }
 
+    fn set_windows_hypervisor(&mut self, running: bool) {
+        self.windows_hypervisor = running;
+    }
+
+    fn single_step_unsafe(&self) -> bool {
+        self.windows_hypervisor
+    }
+
+    fn continue_current_thread(&mut self) -> Result<()> {
+        GdbClient::continue_current_thread(self)
+    }
+
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         GdbClient::read_registers(self)
     }
@@ -1279,6 +1317,7 @@ mod tests {
             last_stop: String::new(),
             control_thread: None,
             kernel_dtb: None,
+            windows_hypervisor: false,
         };
         (client, received)
     }
@@ -1392,6 +1431,23 @@ mod tests {
             received.lock().last().map(String::as_str),
             Some("P43=00501f1501000000")
         );
+    }
+
+    /// Under the Windows hypervisor a KVM step can finish inside it and leave
+    /// the trap to Windows, so no step packet may reach the stub; running
+    /// past a breakpoint resumes the selected vCPU alone instead.
+    #[test]
+    fn under_the_windows_hypervisor_steps_are_refused_and_one_vcpu_resumes_alone() {
+        let (mut client, received) = halted_client_over_stub(|_, _| "OK".to_string());
+        client.features.thread_continue = true;
+        client.control_thread = Some("p01.02".to_string());
+        client.set_windows_hypervisor(true);
+        assert!(DebugBackend::single_step_unsafe(&client));
+        assert!(DebugBackend::step(&mut client).is_err());
+        DebugBackend::continue_current_thread(&mut client).unwrap();
+        // The continue is fire-and-forget; give the stub a moment to log it.
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(*received.lock(), ["vCont;c:p01.02"]);
     }
 
     /// The kernel root cannot map a user-half address any better than the
