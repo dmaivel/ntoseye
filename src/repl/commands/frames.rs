@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use owo_colors::OwoColorize;
 
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
+use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::session::ExceptionRecord;
 use crate::target::{SavedThreadRegisters, SelectedFrame, lookup_register};
@@ -12,6 +13,7 @@ use crate::types::VirtAddr;
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, build_stacktrace_with_context,
     build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context,
+    try_format_symbol,
 };
 
 use crate::repl::*;
@@ -671,6 +673,7 @@ impl ReplState<'_> {
                 let registers = registers_from_trap_frame(&frame);
                 let selected = self.select_register_values(0, registers);
                 outln!("selected trap context frame 00 at {}", ui::addr(selected));
+                self.warn_if_user_frame_is_out_of_view(frame.instruction_pointer());
                 outln!();
             }
             Err(e) => {
@@ -679,6 +682,31 @@ impl ReplState<'_> {
         }
 
         Ok(())
+    }
+
+    /// A trap frame names no process, so its user-mode program counter is
+    /// resolved and unwound in the selected address space, which need not be
+    /// the one the thread ran in. Say so when nothing there covers it.
+    fn warn_if_user_frame_is_out_of_view(&self, pc: u64) {
+        let target = &self.ctx.target;
+        if pc >> 63 != 0 {
+            return;
+        }
+        let trace = resolve_thread_trace_context(target, target.current_dtb());
+        if try_format_symbol(target, &trace, pc).is_some() {
+            return;
+        }
+        let space = match trace.description.as_str() {
+            "kernel" => "the kernel address space".to_string(),
+            "unknown" => "the selected address space".to_string(),
+            process => process.to_string(),
+        };
+        diagnostics::print_warning(format!(
+            "{pc:#x} is a user-mode address outside every module of {}; user-mode frames \
+             resolve in the thread's own process, so select it first with .thread <ethread> \
+             or .process /p <pid>",
+            space
+        ));
     }
 }
 

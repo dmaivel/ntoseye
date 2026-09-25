@@ -153,7 +153,7 @@ Earlier releases used `(TYPE)address->field` to compute a field address. Aggrega
 - `.cxr [address]` - Select a CONTEXT record, or reset the selected context.
 - `.ecxr` - Select the current exception context.
 - `.exr <address|-1>` - Display an `EXCEPTION_RECORD64`.
-- `.trap [address-expression]` (`trap`) - Decode and display a `_KTRAP_FRAME`, defaulting to the current thread's saved frame.
+- `.trap [address-expression]` (`trap`) - Decode and display a `_KTRAP_FRAME`, defaulting to the current thread's saved frame. A trap frame names no process, so a user-mode frame resolves in the selected process; `.trap` warns when its address lies outside every module there. Select the owning thread or process first (`.thread`, `.process /p`).
 - `.thread [ethread|tid]` - Switch the register and stack context to a Windows thread.
 - `.process [/i] [/p] [/r] [eprocess|pid]` - Select a process address space for inspection.
 - `.context <dtb>` - Set the translation base used for inspection.
