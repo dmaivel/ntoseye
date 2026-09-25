@@ -435,7 +435,14 @@ impl ReplState<'_> {
         }
         if selector.is_none() && self.ctx.target.in_secure_scope() {
             outln!(
-                "process context: VTL1 inspection (DTB {})\n",
+                "process context: VTL1 memory view (DTB {})\n",
+                ui::addr(self.ctx.target.current_dtb())
+            );
+            return Ok(());
+        }
+        if selector.is_none() && self.ctx.target.in_secure_address_space() {
+            outln!(
+                "process context: VTL1 live stop (DTB {})\n",
                 ui::addr(self.ctx.target.current_dtb())
             );
             return Ok(());
@@ -500,6 +507,16 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
+        // A VTL1 root outside `.vtl 1` would pair it with a VTL0 register
+        // file; only a live VTL1 stop may do that, with its own registers.
+        let target = &self.ctx.target;
+        if target.symbols.is_secure_root(target.normalize_dtb(dtb.0)) {
+            error!(
+                "{} is a VTL1 root; use .vtl 1 [pid] to inspect it",
+                ui::addr(dtb.0)
+            );
+            return Ok(());
+        }
         self.leave_vtl1();
         if self.ctx.target.attached_process().is_some() {
             self.ctx.target.detach();

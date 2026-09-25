@@ -708,6 +708,18 @@ impl SymbolStore {
             .is_some_and(|secure| secure.roots.contains(&dtb))
     }
 
+    /// Whether an address belongs to a registered secure-kernel module.
+    /// Independent of the caller's selected NT or secure address space.
+    pub fn is_secure_address(&self, address: VirtAddr) -> bool {
+        let root = self
+            .secure_roots
+            .lock()
+            .as_ref()
+            .map(|secure| secure.kernel);
+        root.and_then(|root| self.find_module_for_address(root, address))
+            .is_some()
+    }
+
     /// Whether `module` is visible from address space `dtb`: its own space, or
     /// the kernel space that space maps. An NT process maps NT's kernel; a
     /// VTL1 root maps the secure kernel and never NT's.

@@ -183,6 +183,7 @@ impl Session {
             .read_registers()
             .ok()
             .and_then(|regs| self.register_map.read_u64(dtb_register, &regs).ok())
+            .filter(|cr3| !self.target.recognize_secure_root(*cr3))
             .and_then(|cr3| self.target.process_for_cr3(cr3 & mask));
         let current_thread = self.current_thread.clone();
         let stopped_thread =
@@ -238,6 +239,9 @@ impl Session {
     /// `int3` rewind, conditions, and auto-resume behavior cannot drift.
     pub fn classify_stop_event(&mut self, mut event: StopEvent) -> Result<StopResolution> {
         self.target.selected_frame = None;
+        // Conditions and stop presentation use the CPU that actually stopped,
+        // not a read-only memory scope selected before execution resumed.
+        self.target.leave_secure_scope();
         set_current_thread_from_stop(self.backend.as_mut(), &event, &mut self.current_thread);
         // A GDB stop reply names the thread but not its PC. Without one the
         // reboot heuristic cannot tell a stop in a relocated kernel from an

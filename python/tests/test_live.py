@@ -145,3 +145,30 @@ def test_secure_kernel_views_are_isolated_from_vtl0(halted: Debugger) -> None:
         assert trustlet.memory.translate(sk.base) == sk.memory.translate(sk.base)
         assert trustlet.symbols["securekernel!SkpsProcessList"] == head
         assert trustlet.process is not None and trustlet.process.pid == trustlet.pid
+
+
+def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
+    if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
+        pytest.skip("VTL1 hardware execution requires the host GDB backend")
+    try:
+        sk = halted.secure_kernel
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no VTL1 on this target: {error}")
+    address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
+    before = sk.memory.read(address, 32)
+    with pytest.raises(ntoseye.NtoseyeError):
+        halted.breakpoints.add(address)
+    bp = halted.breakpoints.add(address, hardware=True)
+    try:
+        for _ in range(2):
+            stop = halted.run(timeout=10.0)
+            assert isinstance(stop, Stop.Breakpoint)
+            assert stop.rip == address and bp in stop.breakpoints
+            assert stop.symbol == "securekernel!SkeSelectProcessAddressSpace"
+            assert stop.thread is None and stop.process is None
+            assert stop.cpu.thread is None and stop.cpu.process is None
+            assert stop.cpu.registers["rip"] == address
+            assert sk.memory.read(address, 32) == before
+    finally:
+        halted.interrupt()
+        bp.delete()

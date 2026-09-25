@@ -188,9 +188,15 @@ class Breakpoints:
         """
         Number of live breakpoints.
         """
-    def add(self, /, target: int |str, condition: str |None = None, *, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
+    def add(self, /, target: int |str, condition: str |None = None, *, hardware: bool = False, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
         """
         Add a code breakpoint at an address or symbolic spec.
+        
+        `hardware=True` arms a debug-register execute breakpoint instead of
+        patching code: the target resolves to an address once, now, and the
+        site does not re-resolve after a module reload or reboot. It is the
+        only kind the secure kernel (VTL1) accepts, e.g.
+        `add(dbg.secure_kernel.symbols["securekernel!Func"], hardware=True)`.
         """
     def add_pattern(self, /, pattern: str, condition: str |None = None, *, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None, limit: int = 256) -> list[Breakpoint]:
         """
@@ -259,7 +265,8 @@ class Cpu:
     @property
     def registers(self, /) -> Registers:
         """
-        This processor's live register file (writable while halted).
+        This processor's live register file (writable while halted in NT;
+        read-only at a recognized VTL1 stop).
         """
     @property
     def rip(self, /) -> int |None:

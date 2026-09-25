@@ -1288,6 +1288,21 @@ impl Session {
         if self.backend.is_running() {
             return Err(Error::TargetRunning(MSRS_NEED_HALT));
         }
+        // Hosts write the selected vCPU's MSRs; a vCPU stopped in VTL1 is
+        // inspection-only, like its register file.
+        if processor_index_from_backend_thread_id(&self.current_thread) == Some(processor)
+            && self
+                .read_registers()
+                .ok()
+                .and_then(|regs| {
+                    self.register_map
+                        .read_u64(self.target.arch().dtb_register(), &regs)
+                        .ok()
+                })
+                .is_some_and(|dtb| self.target.recognize_secure_root(dtb))
+        {
+            return Err(Error::DebugInfo("VTL1 MSRs are read-only".into()));
+        }
         if !self
             .backend
             .capabilities()

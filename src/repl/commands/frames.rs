@@ -64,7 +64,7 @@ repl_command! {
     names: ["r", "registers"],
     usage: "r [register[=expression]]",
     summary: "Display CPU registers or assign one register.",
-    details: "A 128-bit register (xmm0, ARM64 v0) displays at full width; assign its 64-bit halves (xmm0l/xmm0h, v0l/v0h).",
+    details: "A 128-bit register (xmm0, ARM64 v0) displays at full width; assign its 64-bit halves (xmm0l/xmm0h, v0l/v0h). A vCPU stopped in VTL1 shows its VTL1 registers read-only; the .vtl 1 memory view has none.",
     run_state: Halted,
 }
 
@@ -401,6 +401,12 @@ impl ReplState<'_> {
             error!(
                 "selected Windows thread is parked and has no coherent register context; use `vcpu <id>`"
             );
+            return Ok(());
+        }
+        // A VTL1 stop is observed, never altered: the vCPU resumes VTL1 code
+        // exactly as it was trapped.
+        if self.ctx.target.in_secure_address_space() && invocation.raw_tail.contains('=') {
+            error!("VTL1 registers are read-only; the vCPU is stopped in VTL1");
             return Ok(());
         }
         if let Err(e) = self

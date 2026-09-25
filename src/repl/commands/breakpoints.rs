@@ -51,7 +51,7 @@ repl_command! {
     names: ["ba"],
     usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a hardware (debug-register) breakpoint.",
-    details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). e.g. ba w4 nt!MyGlobal",
+    details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). e.g. ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped there) only `ba e1` on GDB backends is accepted, and it is global: no /p or /t, which name NT processes and threads. e.g. .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g",
     completion: [None, Expression],
     run_state: Halted,
 }
@@ -698,6 +698,16 @@ impl ReplState<'_> {
             error!("ba: missing access/size");
             return Ok(());
         };
+        // Resolving these walks NT's process and thread lists, which say
+        // nothing about which VTL1 context executes the address.
+        if self.ctx.target.in_secure_address_space()
+            && (parsed.pid.is_some() || parsed.thread.is_some())
+        {
+            error!(
+                "ba: /p and /t name NT processes and threads; a VTL1 hardware breakpoint is global"
+            );
+            return Ok(());
+        }
         let addr_str = parsed.target.as_str();
 
         let (access, len) = match parse_hw_breakpoint_spec(spec_str) {

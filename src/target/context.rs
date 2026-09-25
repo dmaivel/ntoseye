@@ -92,7 +92,7 @@ impl Target {
     /// loader list [`Self::modules`] walks and whose symbols load; reads the
     /// user points at go through [`Self::current_dtb`] instead.
     pub fn process_dtb(&self) -> Dtb {
-        if self.secure_root.is_some()
+        if self.in_secure_address_space()
             && let Some(secure) = self.guest.as_ref().and_then(|g| g.cached_secure_kernel())
         {
             return secure.image.dtb();
@@ -107,6 +107,13 @@ impl Target {
     /// selected context's) process, else the kernel's.
     pub fn current_dtb(&self) -> Dtb {
         if let Some(root) = self.secure_root {
+            return root;
+        }
+        // An NT process selection cannot provide memory for a VTL1 CPU stop.
+        // Keep the selection for the next NT stop, but do not apply it here.
+        if let Some(root) = self.context_dtb_override
+            && self.symbols.is_secure_root(root)
+        {
             return root;
         }
         match &self.process {
@@ -213,6 +220,9 @@ impl Target {
     /// is. The probe is a read, not a walk, so a backend that serves kernel
     /// reads itself (KD) keeps the root it was given.
     fn full_root(&self, dtb: Dtb) -> Dtb {
+        if self.symbols.is_secure_root(dtb) {
+            return dtb;
+        }
         let Some(guest) = &self.guest else {
             return dtb;
         };
@@ -284,6 +294,9 @@ impl Target {
     /// first: at a stop that is almost always the answer and costs one
     /// EPROCESS read, where the fallback walks the process list.
     pub fn process_for_cr3(&self, cr3_masked: u64) -> Option<ProcessInfo> {
+        if self.recognize_secure_root(cr3_masked) {
+            return None;
+        }
         let guest = self.guest.as_ref()?;
         let mask = self.arch().dtb_page_mask();
         if let Some(eprocess) = self
@@ -463,6 +476,7 @@ impl Target {
 mod tests {
     use super::{decide_bitness, select_thread_process_dtb, thread_owner_matches};
     use crate::guest::{ModuleInfo, ProcessInfo};
+    use crate::session::session_over_memory;
     use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, sample_thread};
     use crate::types::VirtAddr;
 
@@ -498,6 +512,32 @@ mod tests {
             decide_bitness(None, None, false, &[], VirtAddr(0x7fff_0000)),
             CODE_BITNESS_AMD64
         );
+    }
+
+    #[test]
+    fn secure_stop_uses_its_root_without_lending_registers_to_a_manual_view() {
+        let mut session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let target = &mut session.target;
+        target.enter_process_scope(ProcessInfo {
+            pid: 42,
+            name: "nt-process.exe".into(),
+            dtb: 0x3000,
+            eprocess_va: VirtAddr(0xffff800000004000),
+            wow64_peb: None,
+        });
+        target.symbols.set_secure_roots(0x5000, [0x6000]);
+        target.set_context_dtb_override(0x6002);
+        target.registers = Some([("rip".into(), 0xffff800000005000)].into());
+        assert_eq!(target.current_dtb(), 0x6000);
+        assert_eq!(target.register_value("rip"), Some(0xffff800000005000));
+        assert!(target.in_secure_address_space());
+        assert!(!target.in_secure_scope());
+        // Returning to NT restores the user's process memory selection.
+        target.set_context_dtb_override(0x7000);
+        assert_eq!(target.current_dtb(), 0x3000);
+        target.enter_secure_scope(0x5000);
+        assert_eq!(target.current_dtb(), 0x5000);
+        assert_eq!(target.register_value("rip"), None);
     }
 
     #[test]

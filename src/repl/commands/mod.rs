@@ -230,8 +230,8 @@ impl ReplState<'_> {
     /// needs (against the target's state right now, so a `break` earlier on
     /// the line counts), then the run-state check. `None` means run it.
     fn admit(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
-        if self.ctx.target.in_secure_scope() && !vtl::secure_inspection_command(spec) {
-            error!("VTL1 is an inspection-only scope; use .vtl 0 before this command");
+        if let Some(reason) = self.secure_denial(spec) {
+            error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
         if let Some(reason) = self.run_control_denial(spec) {
@@ -316,8 +316,8 @@ impl ReplState<'_> {
             }
         }
 
-        if self.ctx.target.in_secure_scope() {
-            error!("custom commands are not VTL1-scoped; use .vtl 0 first");
+        if self.ctx.target.in_secure_address_space() {
+            error!("custom commands are not VTL1-aware; they need a VTL0 address space");
             return Ok(Flow::Denied);
         }
         self.cmd_user(invocation)?;

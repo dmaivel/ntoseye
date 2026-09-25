@@ -87,7 +87,26 @@ for trustlet in sk.trustlets:                # LsaIso.exe, trustlet_id 1, ...
     print(trustlet.pid, trustlet.name, trustlet.trustlet_id, hex(trustlet.dtb))
 ```
 
-These views are read-only: writes, and operations that read NT's own state about an address (`describe`, `page_in`, `ptov`), raise `NtoseyeError`. Registers belong to VTL0, so `sk.eval("@rip")` raises too. Secure-kernel symbols resolve only in these views and NT's only outside them. The public `securekernel.pdb` has no types; name NT's explicitly (`sk.types["nt!_LIST_ENTRY"]`). A trustlet's own user-mode modules are not enumerated.
+These views are read-only: writes, and operations that read NT's own state about an address (`describe`, `page_in`, `ptov`), raise `NtoseyeError`. A memory view does not own CPU registers, so `sk.eval("@rip")` always raises, even at a VTL1 stop. Secure-kernel symbols resolve in these views and at live VTL1 stops, not in NT address spaces. The public `securekernel.pdb` has no types; name NT's explicitly (`sk.types["nt!_LIST_ENTRY"]`). A trustlet's own user-mode modules are not enumerated.
+
+With `backend="gdb"` on AMD64 QEMU/KVM, use a hardware execution breakpoint to stop inside a loaded secure-kernel module without modifying its code:
+
+```python
+dbg.interrupt()
+sk = dbg.secure_kernel
+address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
+bp = dbg.breakpoints.add(address, hardware=True)
+try:
+    stop = dbg.run(timeout=10.0)
+    if isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
+        print(stop.symbol, stop.cpu.registers["rip"], stop.cpu.registers["cr3"])
+        print(dbg.command("k"))
+finally:
+    dbg.interrupt()
+    bp.delete()
+```
+
+`stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. NT process/thread filters, software breakpoints, data watches in secure modules, and stepping are refused. See the [VTL1 limits and tested configuration](usage.md#secure-kernel-vtl1).
 
 ## Run control and breakpoints
 

@@ -18,7 +18,7 @@ use super::symbols::Location;
 use super::thread::Thread;
 use super::{err, raise, symbol_not_found, view_dict, view_record};
 use crate::breakpoints::{Breakpoint as CoreBreakpoint, BreakpointConfig, BreakpointScope};
-use crate::dbg_backend::WatchpointAccess;
+use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::exception_policy::{ExceptionPolicyFinalAction, parse_exception_code};
 use crate::session::Session;
 use crate::target::Target;
@@ -153,12 +153,19 @@ impl Breakpoints {
     }
 
     /// Add a code breakpoint at an address or symbolic spec.
-    #[pyo3(signature = (target, condition=None, *, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
+    ///
+    /// `hardware=True` arms a debug-register execute breakpoint instead of
+    /// patching code: the target resolves to an address once, now, and the
+    /// site does not re-resolve after a module reload or reboot. It is the
+    /// only kind the secure kernel (VTL1) accepts, e.g.
+    /// `add(dbg.secure_kernel.symbols["securekernel!Func"], hardware=True)`.
+    #[pyo3(signature = (target, condition=None, *, hardware=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn add(
         &self,
         py: Python<'_>,
         target: Location,
         condition: Option<String>,
+        hardware: bool,
         when: Option<WhenCallback>,
         pass_count: u64,
         one_shot: bool,
@@ -183,6 +190,7 @@ impl Breakpoints {
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.add")?;
             let id = match target {
+                target if hardware => add_hardware_execute(session, target, config.clone())?,
                 Location::Address(address) => session
                     .add_breakpoint(VirtAddr(address), None, config.clone())
                     .map_err(err)?,
@@ -800,6 +808,34 @@ fn scope_dtb(target: &Target, scope: Option<&BreakpointScope>) -> Dtb {
         Some(BreakpointScope::Kernel) => target.kernel_dtb(),
         None => target.current_dtb(),
     }
+}
+
+/// Arm a one-byte debug-register execute breakpoint at `target`, resolved in
+/// the breakpoint's scope. A hardware site is an address, not a symbol
+/// identity, so a spec is kept only as its display symbol.
+fn add_hardware_execute(
+    session: &mut Session,
+    target: Location,
+    config: BreakpointConfig,
+) -> PyResult<u32> {
+    let dtb = scope_dtb(&session.target, config.scope.as_ref());
+    let address = target.resolve(session, dtb)?;
+    let symbol = match target {
+        Location::Symbol(spec) => Some(spec),
+        Location::Address(_) => None,
+    };
+    session
+        .breakpoints
+        .add_hardware_configured(
+            session.backend.as_mut(),
+            &session.target,
+            VirtAddr(address),
+            HwBreakpointAccess::Execute,
+            1,
+            symbol,
+            config,
+        )
+        .map_err(err)
 }
 
 fn store_condition(py: Python<'_>, dbg: &Py<Debugger>, id: u32, callback: Option<Py<PyAny>>) {

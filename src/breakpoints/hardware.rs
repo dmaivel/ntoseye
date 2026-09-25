@@ -2,7 +2,7 @@
 //! lookup by the slot a stop reports, and their data-watch semantics.
 
 use super::install::BreakpointBackend;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, HardwareBreakpoint};
+use super::{Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HardwareBreakpoint};
 use crate::dbg_backend::{
     DebugBackend, HwBreakpointAccess, WatchpointAccess, validate_hw_breakpoint,
 };
@@ -75,6 +75,25 @@ impl BreakpointManager {
     ) -> Result<u32> {
         if !client.supports_watchpoints() {
             return Err(Error::NotSupported);
+        }
+        if debugger.in_secure_address_space() || debugger.is_secure_address(address) {
+            if client.name() != "gdb" || access != HwBreakpointAccess::Execute || len != 1 {
+                return Err(Error::Breakpoint(
+                    "VTL1 debugging requires a GDB hardware execution breakpoint (ba e1); data watches and code patching are not supported".into(),
+                ));
+            }
+            if !debugger.is_secure_address(address) {
+                return Err(Error::Breakpoint(
+                    "VTL1 execution breakpoints must name a loaded secure-kernel module; trustlet user-code breakpoints are not supported".into(),
+                ));
+            }
+            if config.thread.is_some()
+                || matches!(config.scope, Some(BreakpointScope::Process { .. }))
+            {
+                return Err(Error::Breakpoint(
+                    "NT process/thread filters do not describe VTL1 execution; use a processor filter or a register condition".into(),
+                ));
+            }
         }
         let condition_expr = Self::configured_condition(&config)?;
         validate_hw_breakpoint(access, len, address.0)?;

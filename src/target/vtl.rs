@@ -60,6 +60,54 @@ impl Target {
         self.secure_root.is_some()
     }
 
+    /// An explicit VTL1 memory view or the address space of a live VTL1 stop.
+    /// Unlike `in_secure_scope`, this does not imply that registers are hidden.
+    pub fn in_secure_address_space(&self) -> bool {
+        self.in_secure_scope() || self.symbols.is_secure_root(self.current_dtb())
+    }
+
+    /// Recognize a halted CPU's root by the secure kernel's physical image,
+    /// including trustlets not yet listed by `!trustlets`. No discovery scan.
+    pub fn recognize_secure_root(&self, dtb: Dtb) -> bool {
+        let dtb = self.normalize_dtb(dtb);
+        if self.symbols.is_secure_root(dtb) {
+            return true;
+        }
+        if dtb == self.kernel_dtb() {
+            return false;
+        }
+        let Some(secure) = self
+            .guest
+            .as_ref()
+            .and_then(|guest| guest.cached_secure_kernel())
+        else {
+            return false;
+        };
+        let base = secure.image.base_address;
+        let physical = |root| {
+            self.address_space(root)
+                .virt_to_phys(base)
+                .ok()
+                .flatten()
+                .map(|page| page.address)
+        };
+        let Some(expected) = physical(secure.image.dtb()) else {
+            return false;
+        };
+        if physical(dtb) != Some(expected) {
+            return false;
+        }
+        self.symbols.set_secure_roots(secure.image.dtb(), [dtb]);
+        true
+    }
+
+    /// A loaded secure-kernel module, even when the caller is inspecting NT.
+    /// Used to reject code patching through numeric SDK addresses as well as
+    /// through the explicit VTL1 symbol scope.
+    pub fn is_secure_address(&self, address: VirtAddr) -> bool {
+        self.symbols.is_secure_address(address)
+    }
+
     /// Return inspection to VTL0 without touching the process or register
     /// selection, for a stop whose context now belongs to the halted vCPU.
     pub fn leave_secure_scope(&mut self) {
@@ -107,6 +155,7 @@ impl Target {
     /// discovering it first. Modules already loaded are not fetched again.
     pub fn load_secure_kernel_symbols(&self) -> Result<ModuleSymbolLoadReport> {
         let secure = self.secure_kernel()?;
+        self.symbols.set_secure_roots(secure.image.dtb(), []);
         let modules = secure.modules(self.guest()?)?;
         Guest::load_module_symbols(
             &self.phys,
@@ -166,6 +215,7 @@ impl Target {
             .flatten()
             .and_then(|secure| {
                 let modules = secure.modules(self.guest.as_ref()?).ok()?;
+                self.symbols.set_secure_roots(secure.image.dtb(), [dtb]);
                 Some(ForeignModules::SecureKernel {
                     root: secure.image.dtb(),
                     modules,

@@ -847,7 +847,8 @@ impl Cpu {
         Ok(info.map(|info| Thread::from_owner(self.owner.derive(py), info)))
     }
 
-    /// This processor's live register file (writable while halted).
+    /// This processor's live register file (writable while halted in NT;
+    /// read-only at a recognized VTL1 stop).
     #[getter]
     fn registers(&self, py: Python<'_>) -> PyResult<Registers> {
         self.owner.check(py)?;

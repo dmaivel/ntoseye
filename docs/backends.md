@@ -113,3 +113,5 @@ Execution control, registers, execution-context selection, breakpoints, debug ou
 ## Secure kernel (VTL1)
 
 `.vtl 1` and `!trustlets` inspect the VBS secure kernel and its trustlets on AMD64 guests (see [REPL usage](usage.md#secure-kernel-vtl1)). The NT kernel's debugger interface cannot read VTL1 memory, so this needs direct host memory: the `memory` and `gdb` backends, or `kd`/`kdnet` while reads come from host memory. KD sessions can inspect VTL1 but not control its execution. `--memory-source kd` and crash dumps are unsupported.
+
+On AMD64 QEMU/KVM, `gdb` additionally supports nonpatching hardware execution breakpoints (`ba e1`) in secure-kernel modules, real VTL1 register/stack inspection at those stops, and continue. Explicit `.vtl` memory selection alone supplies no register context. Software breakpoints, secure writes, and single-stepping remain unsupported; see the linked usage section for the tested HVCI configuration and limits.

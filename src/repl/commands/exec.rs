@@ -21,6 +21,7 @@ repl_command! {
     names: ["g", "continue"],
     usage: "g [address]",
     summary: "Resume VM execution.",
+    details: "An address runs to a temporary software breakpoint. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1) only plain g is accepted; stop in VTL1 with `ba e1` instead. Plain g leaves the .vtl 1 view before resuming.",
     completion: Expression,
     run: Run,
 }
@@ -330,6 +331,19 @@ impl ReplState<'_> {
         disposition: ContinueDisposition,
     ) -> Result<()> {
         let expression = invocation.raw_tail.trim();
+        // A run-to address is a temporary software breakpoint, which VTL1
+        // code cannot take. Refused before anything leaves the VTL1 scope.
+        if !expression.is_empty() && self.ctx.target.in_secure_address_space() {
+            error!(
+                "'{} <address>' runs to a software breakpoint, which VTL1 cannot take; \
+                 set `ba e1 <address>` and resume with plain {}",
+                invocation.name, invocation.name
+            );
+            return Ok(());
+        }
+        // `.vtl 1` is a memory view, not the vCPU's context: resume from the
+        // live context so the stop that follows is rendered as itself.
+        self.leave_vtl1();
         if expression.is_empty() {
             return self.continue_vm_with_disposition(disposition);
         }

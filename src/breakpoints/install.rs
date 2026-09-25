@@ -211,6 +211,7 @@ impl BreakpointManager {
         address: VirtAddr,
         scope: &BreakpointScope,
     ) -> Result<BreakpointBackend> {
+        Self::require_patchable_address(debugger, address)?;
         if Self::install_is_target_owned(debugger.arch(), Some(address), scope) {
             // Capture the displaced instruction before the kernel writes
             // the breakpoint, so display paths can mask it back out. x86
@@ -344,6 +345,7 @@ impl BreakpointManager {
         address: VirtAddr,
         scope: &BreakpointScope,
     ) -> Result<()> {
+        Self::require_patchable_address(debugger, address)?;
         let module = Self::find_kernel_module_containing_address(debugger, address);
         let dtb = match scope {
             BreakpointScope::Kernel => debugger.kernel_dtb(),
@@ -410,6 +412,18 @@ impl BreakpointManager {
             }
         }
 
+        Ok(())
+    }
+
+    fn require_patchable_address(debugger: &Target, address: VirtAddr) -> Result<()> {
+        if debugger.is_secure_address(address)
+            || (debugger.in_secure_address_space()
+                && Self::find_kernel_module_containing_address(debugger, address).is_none())
+        {
+            return Err(Error::Breakpoint(
+                "software breakpoints in VTL1 are refused to avoid modifying integrity-protected code; use a GDB hardware execution breakpoint (ba e1)".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -558,6 +572,43 @@ mod tests {
             session.target.current_dtb(),
         );
         assert_eq!(buffer, [0xcc; 4], "masked bytes it never read");
+    }
+
+    #[test]
+    fn secure_code_is_never_patched_from_an_nt_scope() {
+        let session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let address = VirtAddr(0xfffff80000001000);
+        session.target.symbols.inject_source_lines_for_test(
+            2,
+            0x2000,
+            address,
+            0x1000,
+            "secure.c",
+            &[],
+        );
+        session.target.symbols.set_secure_roots(0x2000, []);
+        assert!(!session.target.in_secure_address_space());
+        let mut manager = BreakpointManager::new();
+        let mut client = SlotRecorder::accepting();
+        assert!(
+            manager
+                .add_configured(
+                    &mut client,
+                    &session.target,
+                    address,
+                    None,
+                    BreakpointConfig::default(),
+                )
+                .is_err()
+        );
+        assert!(
+            client.installed.is_empty(),
+            "must refuse before issuing a code patch"
+        );
+        assert!(
+            manager.list().is_empty(),
+            "a refused patch must not leave a breakpoint behind"
+        );
     }
 
     #[test]

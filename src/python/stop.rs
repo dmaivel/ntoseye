@@ -13,6 +13,7 @@ use crate::guest::ProcessInfo;
 use crate::session::{ContinueOutcome, ExceptionRecord};
 use crate::target::ThreadInfo;
 use crate::types::VirtAddr;
+use crate::unwind::{resolve_thread_trace_context_at, try_format_symbol};
 use crate::view;
 
 /// Rust-only snapshot backing the shared properties of a typed stop.
@@ -300,7 +301,18 @@ pub fn from_outcome(
         let (process, thread) = session.stopped_context();
         let rip = rip_hint.or_else(|| Some(session.current_rip()).filter(|rip| *rip != 0));
         let symbol = symbol_hint.or_else(|| {
-            rip.and_then(|ip| session.target.closest_symbol_current_context(VirtAddr(ip)))
+            rip.and_then(|ip| {
+                session
+                    .target
+                    .closest_symbol_current_context(VirtAddr(ip))
+                    .or_else(|| {
+                        let root = session
+                            .target
+                            .register_value(session.target.arch().dtb_register())?;
+                        let trace = resolve_thread_trace_context_at(&session.target, root, ip);
+                        try_format_symbol(&session.target, &trace, ip)
+                    })
+            })
         });
         let breakpoints = breakpoint_id
             .and_then(|id| session.breakpoints.get(id).cloned())

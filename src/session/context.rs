@@ -35,6 +35,7 @@ pub(super) fn update_target_context_from_registers(
         // mismatch that makes symbol lookup, type resolution, and eval
         // fail.
         Ok(dtb) if dtb != 0 && target.guest.is_some() && target.kernel_dtb() != DTB_IDENTITY => {
+            target.recognize_secure_root(dtb);
             target.set_context_dtb_override(dtb)
         }
         _ => target.clear_context_dtb_override(),
@@ -346,6 +347,13 @@ impl Session {
             return Err(Error::RegisterWriteUnsupported);
         }
         let mut regs = self.read_registers()?;
+        if self
+            .register_map
+            .read_u64(self.target.arch().dtb_register(), &regs)
+            .is_ok_and(|dtb| self.target.recognize_secure_root(dtb))
+        {
+            return Err(Error::DebugInfo("VTL1 registers are read-only".into()));
+        }
         patch(&self.register_map, &mut regs)?;
         self.backend.write_registers(&regs)?;
         let values = self.register_map.to_hashmap(&regs);
@@ -431,7 +439,13 @@ impl Session {
             }
 
             let dtb_masked = dtb & dtb_mask;
-            let (context, symbol) = if kernel_dtb_masked.is_some_and(|k| dtb_masked == k) {
+            let (context, symbol) = if self.target.recognize_secure_root(dtb_masked) {
+                let trace = resolve_thread_trace_context_at(&self.target, dtb, rip);
+                (
+                    trace.description.clone(),
+                    try_format_symbol(&self.target, &trace, rip),
+                )
+            } else if kernel_dtb_masked.is_some_and(|k| dtb_masked == k) {
                 let sym = self
                     .target
                     .guest
@@ -448,7 +462,11 @@ impl Session {
                             .format_closest_symbol_for_address(proc.dtb, VirtAddr(rip));
                         (proc.name.clone(), sym)
                     }
-                    None => match self.target.closest_symbol_current_context(VirtAddr(rip)) {
+                    None => match self
+                        .target
+                        .symbols
+                        .format_closest_symbol_for_address(dtb_masked, VirtAddr(rip))
+                    {
                         Some(sym) => ("kernel".to_string(), Some(sym)),
                         // Outside NT under VBS: the hypervisor or VTL1.
                         None => {
@@ -489,6 +507,25 @@ impl Session {
         let mut active = HashMap::new();
         for vcpu in &vcpus {
             if self.backend.set_current_thread(vcpu).is_err() {
+                continue;
+            }
+            if self
+                .target
+                .guest
+                .as_ref()
+                .and_then(|guest| guest.cached_secure_kernel())
+                .is_some()
+                && self
+                    .backend
+                    .read_registers()
+                    .ok()
+                    .and_then(|regs| {
+                        self.register_map
+                            .read_u64(self.target.arch().dtb_register(), &regs)
+                            .ok()
+                    })
+                    .is_some_and(|dtb| self.target.recognize_secure_root(dtb))
+            {
                 continue;
             }
             let Some(processor) = processor_index_from_backend_thread_id(vcpu) else {
@@ -539,6 +576,17 @@ pub fn refresh_windows_thread_context_for_backend_thread(
     debugger: &mut Target,
     thread_id: &str,
 ) -> Option<ThreadInfo> {
+    // NT's per-CPU current thread is suspended while that CPU runs VTL1.
+    // Presenting it as the secure thread gives false IDs, stacks and filters.
+    if debugger
+        .registers
+        .as_ref()
+        .and_then(|registers| registers.get(debugger.arch().dtb_register()))
+        .is_some_and(|dtb| debugger.recognize_secure_root(*dtb))
+    {
+        debugger.clear_current_windows_thread_context();
+        return None;
+    }
     let thread = processor_index_from_backend_thread_id(thread_id).and_then(|processor| {
         debugger
             .current_windows_thread_for_processor(processor)

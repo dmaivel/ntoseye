@@ -383,11 +383,28 @@ x securekernel!Skps*
 ```
 
 > [!WARNING]
-> `.vtl` changes what the debugger inspects, not the virtual trust level the CPU is executing. VTL0 registers are cleared on selection. The REPL rejects writes, register/stack commands, execution control, and NT-specific or custom extensions in VTL1 scope; use `.vtl 0` first. `.process`, `attach`, `detach`, and `.context` also leave VTL1 scope when selecting another context, as does any stop, which restores the halted vCPU's context. `lm k` explicitly lists NT modules; plain `lm` lists the selected secure kernel's modules.
+> `.vtl` changes what the debugger inspects, not the virtual trust level the CPU is executing. Cached registers are cleared on selection. The explicit VTL1 memory view rejects writes, register/stack commands, and NT-specific or custom extensions. Hardware execution breakpoints and plain `g` are allowed; `g` leaves the memory view before resuming. Any stop restores the actual halted vCPU's context. At a real VTL1 stop, `r`, `k`, `.frame`, `u`, and memory reads inspect VTL1 state, not the suspended NT thread. `lm k` explicitly lists NT modules; plain `lm` lists the selected secure kernel's modules.
 
 The first `.vtl 1` discovers the secure kernel by scanning guest RAM for its page tables and accepting an image only when its CodeView record names `securekernel.pdb`; the result is kept for the session. When NT reports that VSM never started (`nt!VslVsmEnabled` is 0), it fails at once instead of scanning. In VTL1 scope, `lm`, `x`, `ln`, `u`, `db`/`dq`, `dt`, `!vtop`, and `.reload` operate on the secure kernel's modules (`securekernel.exe`, `skci.dll`, and the other modules it loaded). `nt!` types remain available (`dt nt!_KLDR_DATA_TABLE_ENTRY <address>`), but NT's address symbols are not resolved in VTL1 scope, and secure-kernel symbols are not resolved in VTL0, because each kernel's modules are mapped only in its own address spaces. Microsoft's public `securekernel.pdb` carries no types.
 
-VTL1 support is inspection only: VTL1 registers, stacks, breakpoints, and run control are not supported. It requires direct host memory, so it works with the `memory` and `gdb` backends; `kd` and `kdnet` can inspect VTL1 only while reads come from host memory (`--memory-source host`, or `auto` once the host mapping matched), and cannot control VTL1 execution. Crash dumps, `--memory-source kd`, and ARM64 targets are unsupported. Memory integrity (HVCI) is not required; VTL1 inspection has been tested with it off and on.
+VTL1 requires direct host memory. Inspection works with the `memory` and `gdb` backends; `kd` and `kdnet` can inspect VTL1 only while reads come from host memory (`--memory-source host`, or `auto` once the host mapping matched), and cannot control VTL1 execution. Crash dumps, `--memory-source kd`, and ARM64 targets are unsupported. Memory integrity (HVCI) is not required.
+
+The AMD64 QEMU/KVM `gdb` backend supports hardware execution breakpoints in loaded secure-kernel modules, followed by inspection and continue:
+
+```text
+.vtl 1
+ba e1 securekernel!SkeSelectProcessAddressSpace
+g
+r
+k
+.vtl
+g
+bc *
+```
+
+`ba e1` uses QEMU's host debug-register breakpoint (`Z1`), without patching secure code. Breakpoints apply to all vCPUs and share the four hardware slots with other hardware breakpoints. `/c` and register conditions can filter hits; NT `/p` and `/t` filters cannot describe secure-kernel execution and are refused. Secure-system and trustlet roots are recognized by their mapping of the secure kernel. Stops show `VTL1`, real CPU registers, and secure-kernel stack frames; no NT thread is attributed to that CPU. `.vtl 0` leaves an explicit memory view; it does not move a CPU stopped in VTL1 back into NT.
+
+Software breakpoints in known secure modules, secure memory/register writes, data watches, trustlet user-code breakpoints, single-stepping, and software run-to are not supported. Hardware sites resolve once and must be recreated after a reboot. Avoid stopping for long periods: the whole VM is halted. This path was exercised on the same Windows 11 QEMU/KVM guest with HVCI on and off; that is not a guarantee against integrity checks or different nested-virtualization behavior on other hosts.
 
 Trustlet enumeration reads secure-kernel process fields that public symbols do not describe. `ntoseye` recovers their offsets from the secure kernel's own code: the list link from where `SkpsInitializeProcess` links a new process onto `SkpsProcessList`, the NT PID and trustlet ID from the `IumProcessStartFailed` event it reports them with, and the address-space root from `SkeSelectProcessAddressSpace`. The trustlet ID must also be a field `SkpsReadPolicyMetadata` checks against the image's policy. Every record is then validated: its root must map the secure kernel and its PID must match an NT process. This recognizes every build examined from 10.0.19041 (Windows 10 20H1) through 10.0.28000, whose offsets differ between releases. Older secure kernels lack these routines under these names, so enumeration is refused there while secure-kernel/module inspection remains available. Modules loaded inside a trustlet are not enumerated. Live lists are not atomic snapshots; concurrent process exit or module unload can invalidate a walk.
 
