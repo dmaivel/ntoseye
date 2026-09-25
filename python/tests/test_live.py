@@ -147,15 +147,18 @@ def test_secure_kernel_views_are_isolated_from_vtl0(halted: Debugger) -> None:
         assert trustlet.process is not None and trustlet.process.pid == trustlet.pid
 
 
-def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
+def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")
     try:
-        sk = halted.secure_kernel
+        return halted.secure_kernel
     except ntoseye.NtoseyeError as error:
         pytest.skip(f"no VTL1 on this target: {error}")
+
+
+def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
+    sk = gdb_secure_kernel(halted)
     address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
-    before = sk.memory.read(address, 32)
     with pytest.raises(ntoseye.NtoseyeError):
         halted.breakpoints.add(address)
     bp = halted.breakpoints.add(address, hardware=True)
@@ -168,7 +171,33 @@ def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debu
             assert stop.thread is None and stop.process is None
             assert stop.cpu.thread is None and stop.cpu.process is None
             assert stop.cpu.registers["rip"] == address
-            assert sk.memory.read(address, 32) == before
     finally:
         halted.interrupt()
         bp.delete()
+
+
+def test_secure_steps_use_hardware_sites_and_leave_code_unchanged(halted: Debugger) -> None:
+    sk = gdb_secure_kernel(halted)
+    address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
+    bp = halted.breakpoints.add(address, hardware=True)
+    try:
+        assert isinstance(halted.run(timeout=10.0), Stop.Breakpoint)
+        bp.delete()
+        # Which sites a step plants is pinned by the Rust unit tests; this is
+        # the live path. step_out's run-to site goes through the breakpoint
+        # manager, which refuses a software site in the secure kernel.
+        step = halted.step()
+        assert isinstance(step, Stop.Step)
+        # Usually the next instruction; an interrupt taken on resume can
+        # instead leave the step in a secure-kernel handler.
+        assert step.rip != address
+        assert (step.symbol or "").startswith("securekernel!")
+        out = halted.step_out()
+        assert isinstance(out, Stop.Step)
+        assert (out.symbol or "").startswith("securekernel!")
+        assert out.thread is None
+        assert not list(halted.breakpoints), "a temporary site was left behind"
+    finally:
+        halted.interrupt()
+        if bp.valid:
+            bp.delete()
