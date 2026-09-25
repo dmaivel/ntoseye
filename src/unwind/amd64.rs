@@ -9,16 +9,8 @@ use pelite::pe64::image::{
     UWOP_SAVE_XMM128_FAR, UWOP_SET_FPREG,
 };
 
-use super::{
-    RegisterContext, StackTracer, ThreadTraceContext, exception_directory, function_range,
-    image_u32, resolve_thread_trace_context,
-};
-use crate::{
-    error::{Error, Result},
-    pe::PeImage,
-    target::Target,
-    types::{Dtb, VirtAddr},
-};
+use super::{RegisterContext, StackTracer, Unwound, exception_directory, image_u32};
+use crate::pe::PeImage;
 
 // cap on chained unwind entries followed per frame, guarding against cyclic or
 // corrupt unwind data
@@ -55,16 +47,6 @@ enum UnwindStep {
     Continue,
     /// A hardware trap/interrupt frame set rip+rsp directly; the frame is complete
     MachineFrame,
-}
-
-/// Outcome of unwinding one frame to its caller
-pub(super) enum Unwound {
-    /// Could not unwind further; the caller falls back to a stack scan
-    Stop,
-    /// Advanced to the caller. `stack_switch` is set when we crossed a hardware
-    /// trap/interrupt frame, where rsp may move to a different stack (e.g. an IST
-    /// or the idle stack) and so need not be greater than the previous rsp.
-    Frame { stack_switch: bool },
 }
 
 /// How an epilog starts to release the frame before its pops.
@@ -159,98 +141,37 @@ fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option<Epi
     }
 }
 
-fn function_body_address(
-    debugger: &Target,
-    trace: &ThreadTraceContext,
-    address: u64,
-) -> Option<u64> {
-    let (_, end) = function_range(debugger, trace, address)?;
-    let mut tracer = StackTracer::new(debugger, trace);
-    let base = tracer.module_containing(address)?.info.base_address.0;
-    let mut image = tracer.module_image(address)?;
-    let mut resolved = resolve_function(&image, base, address);
-    if matches!(resolved, Resolve::Holed)
-        && !image.is_complete()
-        && tracer.upgrade_module_image(address)
-    {
-        image = tracer.module_image(address)?;
-        resolved = resolve_function(&image, base, address);
-    }
-
-    let Resolve::Function {
-        unwind_data, begin, ..
-    } = resolved
-    else {
-        return None;
-    };
-    let unwind = parse_unwind_info(&image, unwind_data)?;
-    let body = base
-        .checked_add(u64::from(begin))?
-        .checked_add(u64::from(unwind.size_of_prolog))?;
-    (body < end).then_some(body)
-}
-
-/// Recover the build-specific context-switch frame using the matching image's
-/// x64 unwind metadata. `KTHREAD.KernelStack` is the RSP saved inside
-/// `SwapContext`; no private `_KSWITCH_FRAME` layout or build table is needed.
-pub(super) fn recover_context_switch_seed(
-    debugger: &Target,
-    process_dtb: Dtb,
-    kernel_stack: VirtAddr,
-) -> Result<RegisterContext> {
-    let ntoskrnl = &debugger.guest()?.ntoskrnl;
-    let swap_context = ntoskrnl.symbol("SwapContext")?.address().0;
-    let ki_swap_context = ntoskrnl.symbol("KiSwapContext")?.address().0;
-    let trace = resolve_thread_trace_context(debugger, process_dtb);
-    let body_rip = function_body_address(debugger, &trace, swap_context)
-        .ok_or_else(|| Error::DebugInfo("SwapContext has no usable PE unwind metadata".into()))?;
-    let ki_swap_range = function_range(debugger, &trace, ki_swap_context)
-        .ok_or_else(|| Error::DebugInfo("KiSwapContext has no usable PE unwind metadata".into()))?;
-
-    let mut tracer = StackTracer::new(debugger, &trace);
-    let mut seed = RegisterContext {
-        rip: body_rip,
-        rsp: kernel_stack.0,
-        regs: [None; 16],
-    };
-    if !matches!(
-        tracer.unwind_once(&mut seed),
-        Unwound::Frame {
-            stack_switch: false
+impl StackTracer<'_> {
+    /// The first instruction after the prolog of the function containing
+    /// `address`.
+    pub fn function_body_amd64(&mut self, address: u64) -> Option<u64> {
+        let base = self.module_containing(address)?.info.base_address.0;
+        let mut image = self.module_image(address)?;
+        let mut resolved = resolve_function(&image, base, address);
+        if matches!(resolved, Resolve::Holed)
+            && !image.is_complete()
+            && self.upgrade_module_image(address)
+        {
+            image = self.module_image(address)?;
+            resolved = resolve_function(&image, base, address);
         }
-    ) {
-        return Err(Error::DebugInfo(
-            "failed to unwind the saved SwapContext frame".into(),
-        ));
-    }
-    if seed.rsp <= kernel_stack.0 || !(ki_swap_range.0..ki_swap_range.1).contains(&seed.rip) {
-        return Err(Error::DebugInfo(format!(
-            "SwapContext returned outside KiSwapContext ({:#x}, RSP {:#x})",
-            seed.rip, seed.rsp
-        )));
-    }
 
-    // `seed` stays private to the stack walker: it is not a complete register
-    // context (volatile registers and RFLAGS are never preserved).
-    let mut caller = seed.clone();
-    if !matches!(
-        tracer.unwind_once(&mut caller),
-        Unwound::Frame {
-            stack_switch: false
-        }
-    ) || caller.rsp <= seed.rsp
-        || !tracer.is_executable_address(caller.rip)
-    {
-        return Err(Error::DebugInfo(
-            "failed to validate the saved KiSwapContext frame".into(),
-        ));
+        let Resolve::Function {
+            unwind_data,
+            begin,
+            end,
+        } = resolved
+        else {
+            return None;
+        };
+        let unwind = parse_unwind_info(&image, unwind_data)?;
+        let body = u64::from(begin) + u64::from(unwind.size_of_prolog);
+        (body < u64::from(end)).then_some(base + body)
     }
-
-    Ok(seed)
 }
 
 impl StackTracer<'_> {
-    pub(super) fn unwind_once(&mut self, context: &mut RegisterContext) -> Unwound {
+    pub fn unwind_once_amd64(&mut self, context: &mut RegisterContext) -> Unwound {
         unwind_trace!("unwind: rip={:#x} rsp={:#x}", context.rip, context.rsp);
         let Some(base_address) = self
             .module_containing(context.rip)
@@ -550,7 +471,7 @@ impl StackTracer<'_> {
     /// Resolve the stack base used by frame-pointer-relative PDB locations for
     /// the function containing `context.rip`. A missing or unreadable unwind
     /// record degrades to the recovered RSP rather than aborting the walk.
-    pub(super) fn frame_base_for(&mut self, context: &RegisterContext) -> Option<u64> {
+    pub fn frame_base_for_amd64(&mut self, context: &RegisterContext) -> Option<u64> {
         let fallback = (context.rsp != 0).then_some(context.rsp);
         let Some(base_address) = self
             .module_containing(context.rip)
@@ -895,13 +816,8 @@ mod tests {
 
     #[test]
     fn frame_base_uses_frame_register_when_present() {
-        let mut regs = [None; 16];
-        regs[5] = Some(0x2000);
-        let context = RegisterContext {
-            rip: 0,
-            rsp: 0x1800,
-            regs,
-        };
+        let mut context = RegisterContext::new(0, 0x1800);
+        context.regs[5] = Some(0x2000);
         let unwind = ParsedUnwindInfo {
             size_of_prolog: 0,
             frame_register: 5,

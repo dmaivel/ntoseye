@@ -1,4 +1,3 @@
-use std::array::from_fn;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -7,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
 use crate::{
+    backend::MemoryOps,
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
@@ -42,20 +42,30 @@ mod arm64;
 mod tracer;
 mod walk;
 
-use amd64::{
-    Lookup, RUNTIME_FUNCTION_SIZE, Unwound, lookup_runtime_function, recover_context_switch_seed,
-    runtime_function_at,
-};
-use arm64::{build_recovered_stacktrace_arm64, lookup_arm64_runtime_function};
+use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
+use arm64::{Arm64Lookup, call_return_address, lookup_arm64_runtime_function};
 use walk::build_recovered_stacktrace_seeded;
 
 // hard cap on frames walked, so a stack switch (which relaxes the rsp-advances
 // guard) can't let a cyclic/corrupt stack spin forever
 const MAX_UNWIND_FRAMES: usize = 1024;
-const UNWIND_REG_NAMES: [&str; 16] = [
+/// x64 general registers in their encoding order, the order unwind codes
+/// number them in.
+const AMD64_REGISTER_NAMES: [&str; 16] = [
     "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
     "r14", "r15",
 ];
+/// Registers a call clobbers on x64: rax, rcx, rdx, r8–r11.
+const AMD64_VOLATILE: [usize; 7] = [0, 1, 2, 8, 9, 10, 11];
+const ARM64_REGISTER_NAMES: [&str; 31] = [
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
+    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
+    "x28", "x29", "x30",
+];
+/// ABI names for ARM64 registers, which a frame answers to as well.
+const ARM64_REGISTER_ALIASES: [(&str, usize); 2] = [("fp", 29), ("lr", 30)];
+/// Register slots a walk tracks: the most any architecture numbers.
+const REGISTER_SLOTS: usize = ARM64_REGISTER_NAMES.len();
 
 #[derive(Debug, Clone)]
 pub struct ThreadTraceContext {
@@ -162,11 +172,27 @@ pub struct ThreadRecoveredStack {
     pub stacktrace: RecoveredStackTrace,
 }
 
+/// A frame's registers during a walk. `regs` is indexed by architectural
+/// number: x64 encoding order (see [`AMD64_REGISTER_NAMES`]) or ARM64 x0–x30.
+/// `rip` and `rsp` are the program counter and stack pointer on either.
 #[derive(Clone, Debug)]
 struct RegisterContext {
     rip: u64,
     rsp: u64,
-    regs: [Option<u64>; 16],
+    regs: [Option<u64>; REGISTER_SLOTS],
+    /// `rip` is a return address rather than where the frame was stopped or
+    /// interrupted.
+    after_call: bool,
+}
+
+/// Outcome of unwinding one frame to its caller
+enum Unwound {
+    /// Could not unwind further; the caller falls back to a stack scan
+    Stop,
+    /// Advanced to the caller. `stack_switch` is set when we crossed a hardware
+    /// trap/interrupt frame, where rsp may move to a different stack (e.g. an IST
+    /// or the idle stack) and so need not be greater than the previous rsp.
+    Frame { stack_switch: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +211,7 @@ struct OwnedModule {
 }
 
 struct StackTracer<'a> {
+    target: &'a Target,
     trace: &'a ThreadTraceContext,
     phys: &'a Arc<PhysMem>,
     symbols: &'a SymbolStore,
@@ -336,7 +363,10 @@ pub fn function_range(
                 };
                 (function.BeginAddress, function.EndAddress)
             }
-            Arch::Arm64 => lookup_arm64_runtime_function(image, pdata, rva)?,
+            Arch::Arm64 => match lookup_arm64_runtime_function(image, pdata, rva) {
+                Arm64Lookup::Found(function) => (function.begin, function.end),
+                Arm64Lookup::Missing | Arm64Lookup::Unreadable => return None,
+            },
         };
         Some((base + u64::from(begin), base + u64::from(end)))
     }
@@ -384,9 +414,6 @@ pub fn build_stacktrace_with_context(
     regs: &[u8],
     limit: usize,
 ) -> RecoveredStackTrace {
-    if debugger.arch() == Arch::Arm64 {
-        return build_recovered_stacktrace_arm64(debugger, register_map, regs, limit);
-    }
     let cr3 = register_map
         .read_u64(debugger.arch().dtb_register(), regs)
         .unwrap_or(0);
@@ -394,7 +421,9 @@ pub fn build_stacktrace_with_context(
     build_recovered_stacktrace_seeded(
         debugger,
         &trace,
-        RegisterContext::from_registers(register_map, regs),
+        RegisterContext::from_lookup(debugger.arch(), |name| {
+            register_map.read_u64(name, regs).ok()
+        }),
         FrameSource::Current,
         limit,
         register_map.to_hashmap(regs),
@@ -438,11 +467,7 @@ pub fn frame_base_for_register_values(
     values: &HashMap<String, u64>,
 ) -> Option<u64> {
     let lookup = |name: &str| lookup_register(values, name);
-    let context = RegisterContext {
-        rip: lookup("rip").or_else(|| lookup("pc")).unwrap_or(0),
-        rsp: lookup("rsp").or_else(|| lookup("sp")).unwrap_or(0),
-        regs: from_fn(|index| lookup(UNWIND_REG_NAMES[index])),
-    };
+    let context = RegisterContext::from_lookup(debugger.arch(), lookup);
     let dtb = lookup(debugger.arch().dtb_register())
         .filter(|dtb| *dtb != 0)
         .unwrap_or_else(|| debugger.current_dtb());
@@ -460,11 +485,8 @@ pub fn return_address_for_register_values(
     values: &HashMap<String, u64>,
 ) -> Option<u64> {
     let lookup = |name: &str| lookup_register(values, name);
-    let mut context = RegisterContext {
-        rip: lookup("rip").or_else(|| lookup("pc"))?,
-        rsp: lookup("rsp").or_else(|| lookup("sp")).unwrap_or(0),
-        regs: from_fn(|index| lookup(UNWIND_REG_NAMES[index])),
-    };
+    lookup("rip").or_else(|| lookup("pc"))?;
+    let mut context = RegisterContext::from_lookup(debugger.arch(), lookup);
     let dtb = lookup(debugger.arch().dtb_register())
         .filter(|dtb| *dtb != 0)
         .unwrap_or_else(|| debugger.current_dtb());
@@ -474,6 +496,86 @@ pub fn return_address_for_register_values(
         Unwound::Frame { .. } => (context.rip != 0).then_some(context.rip),
         Unwound::Stop => None,
     }
+}
+
+/// Recover the build-specific context-switch frame using the matching image's
+/// unwind metadata. `KTHREAD.KernelStack` is the stack pointer the switch
+/// saved; no private `_KSWITCH_FRAME` layout or build table is needed.
+fn recover_context_switch_seed(
+    debugger: &Target,
+    process_dtb: Dtb,
+    kernel_stack: VirtAddr,
+) -> Result<RegisterContext> {
+    let ntoskrnl = &debugger.guest()?.ntoskrnl;
+    let swap_context = ntoskrnl.symbol("SwapContext")?.address().0;
+    let ki_swap_context = ntoskrnl.symbol("KiSwapContext")?.address().0;
+    let trace = resolve_thread_trace_context(debugger, process_dtb);
+    let mut tracer = StackTracer::new(debugger, &trace);
+    let (ki_swap_start, ki_swap_end) = function_range(debugger, &trace, ki_swap_context)
+        .ok_or_else(|| Error::DebugInfo("KiSwapContext has no usable PE unwind metadata".into()))?;
+
+    let seed = match debugger.arch() {
+        // KernelStack is rsp inside SwapContext's body, so one unwind step
+        // from there lands in KiSwapContext.
+        Arch::Amd64 => {
+            let body = tracer.function_body_amd64(swap_context).ok_or_else(|| {
+                Error::DebugInfo("SwapContext has no usable PE unwind metadata".into())
+            })?;
+            let mut seed = RegisterContext::new(body, kernel_stack.0);
+            if !matches!(
+                tracer.unwind_once(&mut seed),
+                Unwound::Frame {
+                    stack_switch: false
+                }
+            ) {
+                return Err(Error::DebugInfo(
+                    "failed to unwind the saved SwapContext frame".into(),
+                ));
+            }
+            if seed.rsp <= kernel_stack.0 || !(ki_swap_start..ki_swap_end).contains(&seed.rip) {
+                return Err(Error::DebugInfo(format!(
+                    "SwapContext returned outside KiSwapContext ({:#x}, RSP {:#x})",
+                    seed.rip, seed.rsp
+                )));
+            }
+            seed
+        }
+        // KernelStack is sp in KiSwapContext's body, where its prolog saved
+        // the nonvolatile registers before it called SwapContext; the thread
+        // resumes at that call's return.
+        Arch::Arm64 => {
+            let mut code = vec![0u8; (ki_swap_end - ki_swap_start) as usize];
+            debugger
+                .address_space(trace.kernel_dtb)
+                .read_bytes(VirtAddr(ki_swap_start), &mut code)?;
+            let resume =
+                call_return_address(&code, ki_swap_start, swap_context).ok_or_else(|| {
+                    Error::DebugInfo("KiSwapContext does not call SwapContext".into())
+                })?;
+            let mut seed = RegisterContext::new(resume, kernel_stack.0);
+            seed.after_call = true;
+            seed.regs[29] = tracer.frame_pointer_at_body_arm64(resume - 4, kernel_stack.0);
+            seed
+        }
+    };
+
+    // `seed` stays private to the stack walker: it is not a complete register
+    // context (volatile registers and flags are never preserved).
+    let mut caller = seed.clone();
+    if !matches!(
+        tracer.unwind_once(&mut caller),
+        Unwound::Frame {
+            stack_switch: false
+        }
+    ) || caller.rsp <= seed.rsp
+        || !tracer.is_executable_address(caller.rip)
+    {
+        return Err(Error::DebugInfo(
+            "failed to validate the saved KiSwapContext frame".into(),
+        ));
+    }
+
+    Ok(seed)
 }
 
 fn switch_seed_is_plausible(thread: &ThreadInfo, seed: &RegisterContext) -> bool {
@@ -606,44 +708,95 @@ pub fn build_parked_thread_stack(
 }
 
 impl RegisterContext {
-    fn from_registers(register_map: &RegisterMap, regs: &[u8]) -> Self {
-        let mut register_values = [None; 16];
-        for (index, name) in UNWIND_REG_NAMES.iter().enumerate() {
-            register_values[index] = register_map.read_u64(*name, regs).ok();
-        }
-
+    fn new(rip: u64, rsp: u64) -> Self {
         Self {
-            rip: register_map.read_u64("rip", regs).unwrap_or(0),
-            rsp: register_map.read_u64("rsp", regs).unwrap_or(0),
-            regs: register_values,
+            rip,
+            rsp,
+            regs: [None; REGISTER_SLOTS],
+            after_call: false,
         }
+    }
+
+    /// The context of a stopped frame whose registers `lookup` answers by
+    /// name.
+    fn from_lookup(arch: Arch, lookup: impl Fn(&str) -> Option<u64>) -> Self {
+        let mut context = Self::new(
+            lookup("rip").or_else(|| lookup("pc")).unwrap_or(0),
+            lookup("rsp").or_else(|| lookup("sp")).unwrap_or(0),
+        );
+        match arch {
+            Arch::Amd64 => {
+                for (slot, name) in context.regs.iter_mut().zip(AMD64_REGISTER_NAMES) {
+                    *slot = lookup(name);
+                }
+            }
+            Arch::Arm64 => {
+                for (slot, name) in context.regs.iter_mut().zip(ARM64_REGISTER_NAMES) {
+                    *slot = lookup(name);
+                }
+                for (alias, index) in ARM64_REGISTER_ALIASES {
+                    if context.regs[index].is_none() {
+                        context.regs[index] = lookup(alias);
+                    }
+                }
+            }
+        }
+        context
+    }
+
+    /// Every register the context knows, under each name a host may ask for
+    /// it by.
+    fn named_values(&self, arch: Arch) -> Vec<(&'static str, u64)> {
+        let mut values = Vec::new();
+        match arch {
+            Arch::Amd64 => {
+                for (register, name) in AMD64_REGISTER_NAMES.iter().enumerate() {
+                    if let Some(value) = self.get(register as u8) {
+                        values.push((*name, value));
+                    }
+                }
+                values.extend([("rip", self.rip), ("rsp", self.rsp)]);
+            }
+            Arch::Arm64 => {
+                for (value, name) in self.regs.iter().zip(ARM64_REGISTER_NAMES) {
+                    if let Some(value) = value {
+                        values.push((name, *value));
+                    }
+                }
+                for (alias, index) in ARM64_REGISTER_ALIASES {
+                    if let Some(value) = self.regs[index] {
+                        values.push((alias, value));
+                    }
+                }
+                values.extend([
+                    ("pc", self.rip),
+                    ("sp", self.rsp),
+                    ("rip", self.rip),
+                    ("rsp", self.rsp),
+                ]);
+            }
+        }
+        values
     }
 
     fn from_saved(registers: &SavedThreadRegisters) -> Option<Self> {
         if let Some(arm64) = registers.arm64.as_ref() {
-            let rip = arm64.pc?;
-            let rsp = arm64.sp?;
-            let mut values = [None; 16];
-            values[5] = arm64.fp;
-            return Some(Self {
-                rip,
-                rsp,
-                regs: values,
-            });
+            let mut context = Self::new(arm64.pc?, arm64.sp?);
+            for (slot, value) in context.regs.iter_mut().zip(arm64.x) {
+                *slot = value;
+            }
+            context.regs[29] = context.regs[29].or(arm64.fp);
+            context.regs[30] = context.regs[30].or(arm64.lr);
+            return Some(context);
         }
-        let rip = registers.rip?;
-        let rsp = registers.rsp?;
-        let mut values = [None; 16];
-        for (index, name) in UNWIND_REG_NAMES.iter().enumerate() {
-            values[index] = registers.get(name);
+        let mut context = Self::new(registers.rip?, registers.rsp?);
+        for (slot, name) in context.regs.iter_mut().zip(AMD64_REGISTER_NAMES) {
+            *slot = registers.get(name);
         }
-        Some(Self {
-            rip,
-            rsp,
-            regs: values,
-        })
+        Some(context)
     }
 
+    /// An x64 register by encoding number; 4 is rsp.
     fn get(&self, register: u8) -> Option<u64> {
         match register {
             4 => Some(self.rsp),
@@ -688,6 +841,34 @@ impl ThreadTraceContext {
                         dtb: self.dtb(),
                     })
             })
+    }
+}
+
+impl StackTracer<'_> {
+    /// Step `context` to its caller's frame. Registers the caller cannot
+    /// rely on (volatile across a call) come back unknown.
+    fn unwind_once(&mut self, context: &mut RegisterContext) -> Unwound {
+        match self.target.arch() {
+            Arch::Amd64 => {
+                let unwound = self.unwind_once_amd64(context);
+                if matches!(unwound, Unwound::Frame { .. }) {
+                    for index in AMD64_VOLATILE {
+                        context.regs[index] = None;
+                    }
+                }
+                unwound
+            }
+            Arch::Arm64 => self.unwind_once_arm64(context),
+        }
+    }
+
+    /// Resolve the stack base PDB frame-relative locations are addressed from
+    /// for the function containing `context.rip`.
+    fn frame_base_for(&mut self, context: &RegisterContext) -> Option<u64> {
+        match self.target.arch() {
+            Arch::Amd64 => self.frame_base_for_amd64(context),
+            Arch::Arm64 => self.frame_base_for_arm64(context),
+        }
     }
 }
 

@@ -24,6 +24,7 @@ const STACK_SCAN_BYTES: usize = 0x1000;
 impl<'a> StackTracer<'a> {
     pub(super) fn new(debugger: &'a Target, trace: &'a ThreadTraceContext) -> Self {
         Self {
+            target: debugger,
             trace,
             phys: &debugger.phys,
             symbols: &debugger.symbols,

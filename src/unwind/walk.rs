@@ -3,16 +3,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::amd64::Unwound;
 use super::{
     FrameSource, MAX_UNWIND_FRAMES, RecoveredFrame, RecoveredStackTrace, RegisterContext,
-    StackFrame, StackTracer, ThreadTraceContext, UNWIND_REG_NAMES, format_symbol,
-    frame_source_location,
+    StackFrame, StackTracer, ThreadTraceContext, Unwound, format_symbol, frame_source_location,
 };
 use crate::{
     guest::{Guest, ModuleInfo},
     target::Target,
-    types::Dtb,
+    types::{Arch, Dtb},
 };
 
 pub(super) fn build_recovered_stacktrace_seeded(
@@ -50,15 +48,14 @@ pub(super) fn build_recovered_stacktrace_seeded(
         if context.rip == 0 || context.rip == previous_rip {
             break;
         }
-        if !stack_switch && context.rsp <= previous_rsp {
+        // An x64 return pops its address, so sp always climbs; an ARM64 leaf
+        // returns through lr and leaves sp where it was.
+        let stack_regressed = match debugger.arch() {
+            Arch::Amd64 => context.rsp <= previous_rsp,
+            Arch::Arm64 => context.rsp < previous_rsp,
+        };
+        if !stack_switch && stack_regressed {
             break;
-        }
-
-        // Volatile registers are not recoverable at a normal call boundary;
-        // clear them before exposing the caller frame. Nonvolatile values
-        // modified by unwind codes remain in the context.
-        for index in [0usize, 1, 2, 8, 9, 10, 11] {
-            context.regs[index] = None;
         }
         seen.insert(context.rip);
         raw.push((
@@ -70,11 +67,9 @@ pub(super) fn build_recovered_stacktrace_seeded(
 
     let remaining = limit.saturating_sub(raw.len());
     for (sp, ip) in tracer.scan_stack(context.rsp, &seen, remaining) {
-        let scan_context = RegisterContext {
-            rip: ip,
-            rsp: sp,
-            regs: [None; 16],
-        };
+        let mut scan_context = RegisterContext::new(ip, sp);
+        // A scan only accepts slots holding return addresses.
+        scan_context.after_call = true;
         raw.push((
             scan_context.clone(),
             FrameSource::Scan,
@@ -100,13 +95,9 @@ pub(super) fn build_recovered_stacktrace_seeded(
                 registers.insert(name.to_string(), *dtb);
             }
         }
-        for (register, name) in UNWIND_REG_NAMES.iter().enumerate() {
-            if let Some(value) = context.get(register as u8) {
-                registers.insert((*name).to_string(), value);
-            }
+        for (name, value) in context.named_values(debugger.arch()) {
+            registers.insert(name.to_string(), value);
         }
-        registers.insert("rip".to_string(), context.rip);
-        registers.insert("rsp".to_string(), context.rsp);
 
         let frame = StackFrame {
             sp: context.rsp,
