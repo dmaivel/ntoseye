@@ -97,6 +97,12 @@ impl DebugBackend for KdBackendHandle {
     }
 
     fn revalidate_host_memory(&mut self, phys: &PhysMem) -> Result<()> {
+        // Target-mediated memory is the target itself: there is no host
+        // mapping to check, and reading it here would wait on the backend
+        // lock this holds.
+        if !matches!(phys, PhysMem::Live { .. }) {
+            return Ok(());
+        }
         let mut backend = self.lock();
         let hints = backend.target_hints()?;
         backend.validate_host_memory(phys, hints)

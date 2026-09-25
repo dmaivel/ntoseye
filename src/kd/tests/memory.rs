@@ -80,6 +80,29 @@ fn kd_memory_reads_physical_bytes_through_shared_backend() {
     assert_eq!(actual, expected);
 }
 
+/// A reload revalidates host memory while holding the backend lock. With KD
+/// as the memory source, a read through it needed that same lock and the
+/// reload never returned.
+#[test]
+fn a_reload_over_kd_memory_does_not_wait_on_its_own_backend() {
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    let (mut handle, memory) = backend.into_remote_memory();
+    let phys = PhysMem::remote(memory);
+
+    let (done, finished) = std::sync::mpsc::channel();
+    spawn(move || {
+        let result = handle.revalidate_host_memory(&phys);
+        let _ = done.send(result.is_ok());
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(true)
+    );
+}
+
 #[test]
 fn kd_memory_rejects_reads_while_target_runs() {
     let (_kernel, host) = UnixStream::pair().unwrap();
