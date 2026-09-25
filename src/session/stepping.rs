@@ -524,9 +524,11 @@ pub fn step_over_current_breakpoint(
 }
 
 /// How long a vCPU resumed alone gets to execute the one instruction under a
-/// breakpoint site. Kernel code finishes it in microseconds; a vCPU that
-/// waits on a held one (an IPI, a spinlock) never will.
-const RUN_PAST_TIMEOUT: Duration = Duration::from_secs(1);
+/// breakpoint site before the others are broken in on. Measured under VBS
+/// over 7761 run-pasts on hot kernel functions: every one that finished did
+/// so within 24 ms, and the rest (3-4%, waiting on a held vCPU) never
+/// finished alone.
+const RUN_PAST_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Execute the instruction under the (already lifted) breakpoint site at
 /// `rip` without a single step, which is unsafe on this backend (see
@@ -581,8 +583,10 @@ fn run_to_successors(
              execute it within {RUN_PAST_TIMEOUT:?}; disable the breakpoint to continue"
         )));
     }
-    // Anywhere else (an interrupt taken first, another breakpoint) is
-    // progress: the site is armed again and hits on the way back.
+    // Anywhere else is progress: most often an interrupt taken before the
+    // instruction, whose handler waits on a held vCPU. The site is armed
+    // again, so when the handler returns to it that same execution hits a
+    // second time.
     Ok(())
 }
 
