@@ -70,6 +70,9 @@ NTOSEYE_TEST_BACKEND=kd NTOSEYE_TEST_CONNECT=/tmp/ntoseye-kd.sock pytest tests
 
 The last line also runs `tests/test_live.py` against a guest: it breaks in,
 steps, sets breakpoints on hot kernel functions, and resumes the guest.
+Add `NTOSEYE_TEST_MEMORY_SOURCE=kd` to read guest memory over KD instead of
+from the VM process: no root needed for UTM on macOS, and required for a
+remote target.
 
 ## Releasing portable wheels
 Release wheels are built by `.github/workflows/release.yml` with `PyO3/maturin-action` on native GitHub runners:
