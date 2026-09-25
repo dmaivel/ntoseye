@@ -484,6 +484,15 @@ impl Guest {
             }
             return Ok(Arc::clone(secure));
         }
+        // NT records whether VSM started. Scanning all of RAM for a kernel
+        // that never loaded takes seconds; kernels without the symbol scan.
+        if let Ok(enabled) = self.ntoskrnl.symbol("VslVsmEnabled")
+            && enabled.read::<u8>().is_ok_and(|value| value == 0)
+        {
+            return Err(Error::SecureKernel(
+                "VBS is not running in the guest (nt!VslVsmEnabled is 0)".to_string(),
+            ));
+        }
         let secure = Arc::new(SecureKernel::load(
             Arc::clone(phys),
             Arc::clone(symbols),
