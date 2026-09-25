@@ -21,7 +21,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 - Public and private PDB symbols, source lines, and local variables
 - Conditional and deferred breakpoints, hardware watchpoints, and breakpoint commands
 - [KD/KDNET, QEMU GDB, and passive memory backends](docs/backends.md)
-- Experimental [VBS secure-kernel (VTL1) and trustlet memory inspection](docs/usage.md#secure-kernel-vtl1) on AMD64 VMs read through host memory
+- [VBS secure-kernel (VTL1) and trustlet memory inspection](docs/usage.md#secure-kernel-vtl1)
 - [Host-served driver images for driver development](docs/kdfiles.md)
 - [Python SDK and custom commands](docs/sdk.md)
 - [Editor integration over DAP](docs/dap.md)
