@@ -19,3 +19,4 @@ Standalone [Python SDK](../../docs/sdk.md) scripts. Run one directly, e.g. `pyth
 | `call_trace.py` | `step(until="call")` and a bounded `trace_calls()` call tree. |
 | `crash_triage.py` | Offline dump stop context, triage report, and an available thread backtrace. |
 | `thread_stacks.py` | Process-bound thread and frame handles, including parked-thread stacks; `--backend memory` reads a paused VM passively, while the default `kd` also reports a running thread's CPU. |
+| `secure_kernel.py` | The VBS secure kernel's modules walked with `nt!` types in VTL1 memory, and its trustlets' address spaces (read-only, experimental; needs VBS). |
