@@ -448,10 +448,8 @@ impl Session {
             } else if kernel_dtb_masked.is_some_and(|k| dtb_masked == k) {
                 let sym = self
                     .target
-                    .guest
-                    .as_ref()
-                    .and_then(|g| g.ntoskrnl.closest_symbol(VirtAddr(rip)).ok())
-                    .map(|(s, o)| format!("{s}+{o:#x}"));
+                    .symbols
+                    .format_closest_symbol_for_address(self.target.kernel_dtb(), VirtAddr(rip));
                 ("kernel".to_string(), sym)
             } else {
                 match processes.iter().find(|p| (p.dtb & dtb_mask) == dtb_masked) {
