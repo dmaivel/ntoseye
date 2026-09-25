@@ -374,11 +374,13 @@ impl SecureKernel {
         let (initialize, initialize_ip) = self.function_code("SkpsInitializeProcess")?;
         let (policy, policy_ip) = self.function_code("SkpsReadPolicyMetadata")?;
         let list = self.image.symbol("SkpsProcessList")?.address();
+        let start_failed = self.image.symbol("IumProcessStartFailed")?.address();
         TrustletLayout::derive(
             (&select, select_ip),
             (&initialize, initialize_ip),
             (&policy, policy_ip),
             list.0,
+            start_failed.0,
         )
     }
 

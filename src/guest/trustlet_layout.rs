@@ -20,30 +20,32 @@ const MAX_FIELD_OFFSET: u64 = 0x1000;
 pub struct TrustletLayout {
     /// `SkpsProcessList` entry inside the process.
     pub links: u64,
-    /// NT process ID (`SkpsInitializeProcess`'s third argument).
+    /// NT process ID.
     pub pid: u64,
     /// Address-space root loaded into CR3.
     pub dtb: u64,
-    /// The trustlet ID: stored from the creation attributes, and checked
-    /// against the image's policy metadata.
+    /// The trustlet ID, checked against the image's policy metadata.
     pub trustlet_id: u64,
 }
 
 impl TrustletLayout {
     /// `select` is `SkeSelectProcessAddressSpace`; `initialize` is
     /// `SkpsInitializeProcess`, which links new processes onto
-    /// `process_list`; `policy` is `SkpsReadPolicyMetadata`. The trustlet ID
-    /// has no value to validate against at runtime, so the two functions
-    /// that use it must agree on where it is: the policy check must read the
-    /// field process creation stores it in.
+    /// `process_list` and reports failures with the `start_failed` event;
+    /// `policy` is `SkpsReadPolicyMetadata`. The trustlet ID has no value to
+    /// validate against at runtime, so the two functions that use it must
+    /// agree on where it is: the policy check must read the field the event
+    /// reports.
     pub fn derive(
         select: (&[u8], u64),
         initialize: (&[u8], u64),
         policy: (&[u8], u64),
         process_list: u64,
+        start_failed: u64,
     ) -> Result<Self> {
         let dtb = cr3_offset(select.0, select.1)?;
-        let (links, pid, trustlet_id) = process_offsets(initialize.0, initialize.1, process_list)?;
+        let (links, pid, trustlet_id) =
+            process_offsets(initialize.0, initialize.1, process_list, start_failed)?;
         if !policy_process_reads(policy.0, policy.1).contains(&trustlet_id) {
             return Err(layout_error(format!(
                 "the policy check never reads the trustlet ID stored at {trustlet_id:#x}"
@@ -80,12 +82,13 @@ enum Value {
     Argument(Register),
     /// `lea reg, [base + offset]` with a tracked or untracked base.
     FieldAddress { base: Register, offset: u64 },
-    /// A qword loaded from `[argument + offset]`.
+    /// A value loaded from `[argument + offset]`.
     ArgumentField { argument: Register, offset: u64 },
-    /// A qword loaded from `[pointer]`, excluding stack slots.
-    Dereferenced,
-    /// The address of the process list head.
-    ListHead,
+    /// A value loaded from `[base + offset]`, `base` an untracked register
+    /// (the process object, in `SkpsInitializeProcess`).
+    Loaded { base: Register, offset: u64 },
+    /// A `lea` of a global: `[rip + displacement]`.
+    Global(u64),
 }
 
 const VOLATILE: [Register; 7] = [
@@ -106,25 +109,27 @@ fn get(state: &State, register: Register) -> Option<Value> {
 
 /// Value produced by `instruction` into its destination register, from the
 /// state before it executes.
-fn produced(state: &State, instruction: &Instruction, list: u64) -> Option<Value> {
+fn produced(state: &State, instruction: &Instruction) -> Option<Value> {
     let simple_memory =
         instruction.op1_kind() == OpKind::Memory && instruction.memory_index() == Register::None;
     match instruction.code() {
         Code::Mov_r64_rm64 if instruction.op1_kind() == OpKind::Register => {
             get(state, instruction.op1_register())
         }
-        Code::Mov_r64_rm64 if simple_memory => {
+        Code::Mov_r64_rm64 | Code::Mov_r32_rm32 if simple_memory => {
             let base = instruction.memory_base();
             let offset = instruction.memory_displacement64();
             match get(state, base) {
                 Some(Value::Argument(argument)) => Some(Value::ArgumentField { argument, offset }),
-                _ if offset == 0
-                    && !matches!(
-                        base,
-                        Register::None | Register::RSP | Register::RBP | Register::RIP
-                    ) =>
+                None if !matches!(
+                    base,
+                    Register::None | Register::RSP | Register::RBP | Register::RIP
+                ) =>
                 {
-                    Some(Value::Dereferenced)
+                    Some(Value::Loaded {
+                        base: base.full_register(),
+                        offset,
+                    })
                 }
                 _ => None,
             }
@@ -132,23 +137,18 @@ fn produced(state: &State, instruction: &Instruction, list: u64) -> Option<Value
         Code::Lea_r64_m if simple_memory => {
             let base = instruction.memory_base();
             let offset = instruction.memory_displacement64();
-            if base == Register::RIP {
-                (offset == list).then_some(Value::ListHead)
+            Some(if base == Register::RIP {
+                Value::Global(offset)
             } else {
-                Some(Value::FieldAddress { base, offset })
-            }
+                Value::FieldAddress { base, offset }
+            })
         }
         _ => None,
     }
 }
 
-fn step(
-    state: &mut State,
-    info: &mut InstructionInfoFactory,
-    instruction: &Instruction,
-    list: u64,
-) {
-    let produced = produced(state, instruction, list);
+fn step(state: &mut State, info: &mut InstructionInfoFactory, instruction: &Instruction) {
+    let produced = produced(state, instruction);
     for used in info.info(instruction).used_registers() {
         if matches!(
             used.access(),
@@ -193,13 +193,7 @@ fn ends_path(instruction: &Instruction) -> bool {
 /// forward branch carries its state to the target, where it is joined with
 /// the fall-through state. Loops are not iterated; the walk stops at padding
 /// or when no path reaches the remaining bytes.
-fn walk(
-    code: &[u8],
-    ip: u64,
-    arguments: &[Register],
-    list: u64,
-    mut visit: impl FnMut(&Instruction, &State),
-) {
+fn walk(code: &[u8], ip: u64, arguments: &[Register], mut visit: impl FnMut(&Instruction, &State)) {
     let mut decoder = Decoder::with_ip(64, code, ip, DecoderOptions::NONE);
     let mut info = InstructionInfoFactory::new();
     let mut pending: HashMap<u64, State> = HashMap::new();
@@ -229,7 +223,7 @@ fn walk(
             continue;
         };
         visit(&instruction, current);
-        step(current, &mut info, &instruction, list);
+        step(current, &mut info, &instruction);
         if matches!(
             instruction.flow_control(),
             FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
@@ -263,7 +257,7 @@ fn qword_store(instruction: &Instruction) -> Option<(Register, u64, Register)> {
 /// The process field `SkeSelectProcessAddressSpace(process)` loads into CR3.
 pub fn cr3_offset(code: &[u8], ip: u64) -> Result<u64> {
     let mut found = Vec::new();
-    walk(code, ip, &[Register::RCX], 0, |instruction, state| {
+    walk(code, ip, &[Register::RCX], |instruction, state| {
         if instruction.code() == Code::Mov_cr_r64 && instruction.op0_register() == Register::CR3 {
             found.push(get(state, instruction.op1_register()));
         }
@@ -279,15 +273,21 @@ pub fn cr3_offset(code: &[u8], ip: u64) -> Result<u64> {
     }
 }
 
-/// The qword fields `SkpsReadPolicyMetadata(process)` reads from its process
-/// argument. It compares the image's policy trustlet ID with the process's
-/// (some builds also fill the field when it is zero), so the identity is
-/// among them.
+/// The fields `SkpsReadPolicyMetadata(process)` loads from or compares in
+/// its process argument. It compares the image's policy trustlet ID with the
+/// process's (loaded for the comparison in newer builds, compared in place
+/// in 10.0.19041), so the identity is among them.
 pub fn policy_process_reads(code: &[u8], ip: u64) -> Vec<u64> {
     let mut reads = Vec::new();
-    walk(code, ip, &[Register::RCX], 0, |instruction, state| {
-        if instruction.code() == Code::Mov_r64_rm64
-            && instruction.op1_kind() == OpKind::Memory
+    walk(code, ip, &[Register::RCX], |instruction, state| {
+        let reads_memory = match instruction.mnemonic() {
+            Mnemonic::Mov => instruction.op1_kind() == OpKind::Memory,
+            Mnemonic::Cmp => {
+                instruction.op0_kind() == OpKind::Memory || instruction.op1_kind() == OpKind::Memory
+            }
+            _ => false,
+        };
+        if reads_memory
             && instruction.memory_index() == Register::None
             && get(state, instruction.memory_base()) == Some(Value::Argument(Register::RCX))
         {
@@ -298,54 +298,70 @@ pub fn policy_process_reads(code: &[u8], ip: u64) -> Vec<u64> {
 }
 
 /// `(links, pid, trustlet_id)` from `SkpsInitializeProcess`: the list entry
-/// stored into `process_list`, the third argument stored into the process,
-/// and the process field filled from a dereferenced attribute buffer.
-pub fn process_offsets(code: &[u8], ip: u64, process_list: u64) -> Result<(u64, u64, u64)> {
+/// it links onto `process_list`, and the two process fields it reports with
+/// the `start_failed` ETW event (`IumProcessStartFailed`). Every examined
+/// build, 10.0.19041 through 10.0.28000, loads the trustlet ID into `r9` and
+/// the NT PID into the fifth argument (`[rsp+20h]`) for that event, although
+/// the function itself receives them differently across releases.
+pub fn process_offsets(
+    code: &[u8],
+    ip: u64,
+    process_list: u64,
+    start_failed: u64,
+) -> Result<(u64, u64, u64)> {
     let mut links = Vec::new();
-    let mut pid = Vec::new();
-    let mut identity = Vec::new();
-    walk(
-        code,
-        ip,
-        &[Register::R8],
-        process_list,
-        |instruction, state| {
-            if let Some((base, offset, source)) = qword_store(instruction) {
-                match (get(state, source), get(state, base)) {
-                    (Some(Value::Argument(Register::R8)), _) => pid.push((base, offset)),
-                    (Some(Value::Dereferenced), _) => identity.push((base, offset)),
-                    (
-                        Some(Value::ListHead),
-                        Some(Value::FieldAddress {
-                            base: process,
-                            offset: field,
-                        }),
-                    ) if offset == 0 => links.push((process.full_register(), field)),
-                    _ => {}
-                }
+    let mut events = Vec::new();
+    // What the last `mov dword [rsp+20h], reg` stored: the fifth argument.
+    let mut fifth: Option<Value> = None;
+    walk(code, ip, &[], |instruction, state| {
+        if let Some((base, offset, source)) = qword_store(instruction)
+            && offset == 0
+            && get(state, source) == Some(Value::Global(process_list))
+            && let Some(Value::FieldAddress {
+                base: process,
+                offset: field,
+            }) = get(state, base)
+        {
+            links.push((process.full_register(), field));
+        }
+        if instruction.code() == Code::Mov_rm32_r32
+            && instruction.memory_base() == Register::RSP
+            && instruction.memory_index() == Register::None
+            && instruction.memory_displacement64() == 0x20
+        {
+            fifth = get(state, instruction.op1_register());
+        }
+        if instruction.mnemonic() == Mnemonic::Call {
+            if get(state, Register::RDX) == Some(Value::Global(start_failed)) {
+                events.push((get(state, Register::R9), fifth));
             }
-        },
-    );
+            fifth = None;
+        }
+    });
     let [(process, links)] = links[..] else {
         return Err(layout_error("process-list insertion"));
     };
-    let in_process = |stores: &[(Register, u64)], what: &str| {
-        let mut offsets = stores
-            .iter()
-            .filter(|(base, _)| *base == process)
-            .map(|&(_, offset)| offset);
-        let first = offsets.next().ok_or_else(|| layout_error(what))?;
-        if offsets.all(|offset| offset == first) {
-            Ok(first)
-        } else {
-            Err(layout_error(format!("{what} is ambiguous")))
-        }
+    let [
+        (
+            Some(Value::Loaded {
+                base: id_base,
+                offset: trustlet_id,
+            }),
+            Some(Value::Loaded {
+                base: pid_base,
+                offset: pid,
+            }),
+        ),
+    ] = events[..]
+    else {
+        return Err(layout_error("process start failure event"));
     };
-    Ok((
-        links,
-        in_process(&pid, "process ID store")?,
-        in_process(&identity, "trustlet identity store")?,
-    ))
+    if id_base != process || pid_base != process {
+        return Err(layout_error(
+            "the start failure event reports another object than the one linked",
+        ));
+    }
+    Ok((links, pid, trustlet_id))
 }
 
 #[cfg(test)]
@@ -372,37 +388,43 @@ mod tests {
         assert!(cr3_offset(&bytes(&clobbered), 0x1400e75e0).is_err());
     }
 
-    /// Key instructions of SkpsInitializeProcess, 10.0.26100.9457, with the
-    /// list-head `lea` placed so that it targets `LIST`.
-    fn initialize(extra: &str) -> (Vec<u8>, u64) {
-        initialize_with(extra, "cd 29")
+    /// Key instructions of SkpsInitializeProcess, 10.0.26100.9457: the
+    /// start-failure event's arguments and the list insertion, with the
+    /// `lea`s of the event and the list head placed to target the returned
+    /// `(code, list, event)` addresses.
+    fn initialize(event_args: &str) -> (Vec<u8>, u64, u64) {
+        initialize_with(event_args, "cd 29")
     }
+
+    /// The event's `mov r9, [rdi+0x1a0]`, in `initialize`'s `event_args`.
+    const IDENTITY: &str = "4c 8b 8f a0 01 00 00";
 
     /// `guard` follows the list-head check's `mov ecx, 3` on the path the
     /// check's `je` skips.
-    fn initialize_with(extra: &str, guard: &str) -> (Vec<u8>, u64) {
+    fn initialize_with(identity: &str, guard: &str) -> (Vec<u8>, u64, u64) {
+        let ip = 0x1400a4000;
+        let before_event = [
+            "48 8b 7d d0",    // mov rdi, [rbp-0x30]
+            "48 8b cf",       // mov rcx, rdi
+            "e8 00 00 00 00", // call (clobbers volatile registers)
+            "8b 47 38",       // mov eax, [rdi+0x38]
+        ]
+        .concat();
+        let event = ip + bytes(&before_event).len() as u64 + 7;
         let prefix = [
-            "49 8b d8",             // mov rbx, r8
-            "41 b0 01",             // mov r8b, 1
-            "48 8b 7d d0",          // mov rdi, [rbp-0x30]
-            "48 8b cf",             // mov rcx, rdi
-            "e8 00 00 00 00",       // call (clobbers volatile registers)
-            "48 89 5f 38",          // mov [rdi+0x38], rbx
-            "48 8b 5d 60",          // mov rbx, [rbp+0x60]
-            "48 8b 45 58",          // mov rax, [rbp+0x58]
-            "48 8b 08",             // mov rcx, [rax]
-            "48 89 8f a0 01 00 00", // mov [rdi+0x1a0], rcx
-            "48 8b 06",             // mov rax, [rsi]
-            "48 89 87 a0 01 00 00", // mov [rdi+0x1a0], rax
-            extra,
+            before_event.as_str(),
+            "48 8d 15 00 00 00 00", // lea rdx, [rip+0] = IumProcessStartFailed
+            identity,               // mov r9, [rdi+0x1a0]
+            "89 5c 24 28",          // mov [rsp+0x28], ebx
+            "89 44 24 20",          // mov [rsp+0x20], eax
+            "e8 00 00 00 00",       // call McTemplateK0xqq_EtwWriteTransfer
             "48 8b 15 b2 f0 08 00", // mov rdx, [rip+...]
         ]
         .concat();
-        let ip = 0x1400a4000;
-        let lea_end = ip + bytes(&prefix).len() as u64 + 7;
+        let list = ip + bytes(&prefix).len() as u64 + 7;
         let code = [
             prefix,
-            "4c 8d 05 00 00 00 00".to_string(), // lea r8, [rip+0] = LIST
+            "4c 8d 05 00 00 00 00".to_string(), // lea r8, [rip+0] = SkpsProcessList
             "48 8d 8f e8 00 00 00".to_string(), // lea rcx, [rdi+0xe8]
             "4c 39 02".to_string(),             // cmp [rdx], r8
             "74 07".to_string(),                // je past the guard
@@ -414,33 +436,35 @@ mod tests {
             "c3".to_string(),
         ]
         .concat();
-        (bytes(&code), lea_end)
+        (bytes(&code), list, event)
     }
 
     #[test]
     fn process_offsets_match_the_examined_build() {
-        let (code, list) = initialize("");
+        let (code, list, event) = initialize(IDENTITY);
         assert_eq!(
-            process_offsets(&code, 0x1400a4000, list).unwrap(),
+            process_offsets(&code, 0x1400a4000, list, event).unwrap(),
             (0xe8, 0x38, 0x1a0)
         );
-        // A different list head is not an insertion into SkpsProcessList.
-        assert!(process_offsets(&code, 0x1400a4000, list + 8).is_err());
+        // Another list head is not SkpsProcessList, another event not the
+        // start-failure report.
+        assert!(process_offsets(&code, 0x1400a4000, list + 8, event).is_err());
+        assert!(process_offsets(&code, 0x1400a4000, list, event + 8).is_err());
     }
 
     #[test]
     fn branch_joins_keep_only_values_both_paths_agree_on() {
         // Without the fast-fail, `mov ecx, 3` falls through into the list
         // insertion, so rcx no longer holds the entry address there.
-        let (code, list) = initialize_with("", "90 90");
-        assert!(process_offsets(&code, 0x1400a4000, list).is_err());
+        let (code, list, event) = initialize_with(IDENTITY, "90 90");
+        assert!(process_offsets(&code, 0x1400a4000, list, event).is_err());
     }
 
     #[test]
-    fn conflicting_identity_stores_are_rejected() {
-        // mov rcx, [rax]; mov [rdi+0x1a8], rcx
-        let (code, list) = initialize("48 8b 08 48 89 8f a8 01 00 00");
-        assert!(process_offsets(&code, 0x1400a4000, list).is_err());
+    fn an_event_about_another_object_is_rejected() {
+        // mov r9, [rsi+0x1a0]: not the object linked onto the list.
+        let (code, list, event) = initialize("4c 8b 8e a0 01 00 00");
+        assert!(process_offsets(&code, 0x1400a4000, list, event).is_err());
     }
 
     // SkpsReadPolicyMetadata, 10.0.26100.9457: the process argument moved to
@@ -456,11 +480,18 @@ mod tests {
             policy_process_reads(&bytes(POLICY), 0x1400a8feb),
             [0xa0, 0x1a0]
         );
+        // 10.0.19041 compares the identity in place instead of loading it.
+        let compared = "48 8b d9 e8 00 00 00 00 48 83 bb f0 00 00 00 00 \
+                        48 3b 83 f0 00 00 00 c3";
+        assert_eq!(
+            policy_process_reads(&bytes(compared), 0x14002df4f),
+            [0xf0, 0xf0]
+        );
     }
 
     #[test]
     fn derived_layout_requires_both_identity_sites_to_agree() {
-        let (code, list) = initialize("");
+        let (code, list, event) = initialize(IDENTITY);
         let select = bytes(SELECT);
         let policy = bytes(POLICY);
         let derive = |select: &[u8], policy: &[u8]| {
@@ -469,6 +500,7 @@ mod tests {
                 (&code, 0x1400a4000),
                 (policy, 0x1400a8feb),
                 list,
+                event,
             )
         };
         assert_eq!(
