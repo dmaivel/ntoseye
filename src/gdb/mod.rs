@@ -583,18 +583,58 @@ impl GdbClient {
     /// Windows hypervisor (or in VTL1), whose tables do not map NT, so the
     /// same packet succeeded or failed depending on where the vCPU happened
     /// to stop. The stub keys the site by virtual address alone, which is
-    /// what a later `#BP` in NT is matched against, so borrowing the kernel
-    /// root for this one packet plants exactly the breakpoint NT will hit.
+    /// what a later `#BP` in NT is matched against, and its software
+    /// breakpoints are global to the VM. So the packet is first retried
+    /// through another vCPU that halted in NT, which writes no register;
+    /// only when every vCPU is outside NT does it borrow the kernel root.
     fn software_breakpoint_packet(&mut self, op: char, addr: u64) -> Result<String> {
         let packet = format!("{op}0,{addr:x},{}", self.arch.breakpoint_size());
         let response = self.send_packet(&packet)?;
         if !response.starts_with('E') || self.arch != Arch::Amd64 || addr < KERNEL_HALF {
             return Ok(response);
         }
+        if let Some(response) = self.through_another_vcpu(&packet)? {
+            return Ok(response);
+        }
         let (Some(root), Some(regnum)) = (self.kernel_dtb, self.register_number("cr3")) else {
             return Ok(response);
         };
         self.with_cr3(regnum, root, |client| client.send_packet(&packet))
+    }
+
+    /// Send `packet` with each other vCPU as the control vCPU until one's
+    /// page tables serve it, then make the selected vCPU the control vCPU
+    /// again (a plain `s` steps the control vCPU). `None` when none did.
+    fn through_another_vcpu(&mut self, packet: &str) -> Result<Option<String>> {
+        let Some(selected) = self
+            .control_thread
+            .clone()
+            .or_else(|| StopReply::parse(&self.last_stop).thread_id)
+        else {
+            return Ok(None);
+        };
+        let Ok(threads) = self.thread_list() else {
+            return Ok(None);
+        };
+        let mut planted = None;
+        for thread in threads.iter().filter(|thread| **thread != selected) {
+            if self.send_packet(&format!("Hc{thread}"))? != "OK" {
+                continue;
+            }
+            let response = self.send_packet(packet)?;
+            if !response.starts_with('E') {
+                planted = Some(response);
+                break;
+            }
+        }
+        let restored = self.send_packet(&format!("Hc{selected}"))?;
+        if restored != "OK" {
+            return Err(Error::Rsp(format!(
+                "failed to reselect vCPU {selected} after planting a breakpoint through \
+                 another vCPU: {restored}"
+            )));
+        }
+        Ok(planted)
     }
 
     /// Run `op` with the selected vCPU's CR3 temporarily set to `root`, as
@@ -1273,14 +1313,44 @@ mod tests {
     }
 
     /// Under VBS a vCPU can halt in the Windows hypervisor, whose page tables
-    /// do not map NT, and QEMU plants `Z0` through them. The retry has to go
-    /// through the kernel root on the selected vCPU and must always put that
-    /// vCPU's own CR3 back, or it resumes in the wrong address space.
+    /// do not map NT, and QEMU plants `Z0` through them. Another vCPU halted
+    /// in NT plants the same (VM-wide) breakpoint without any register
+    /// write, and the selected vCPU must be the control vCPU again after.
     #[test]
-    fn a_kernel_breakpoint_the_halted_vcpu_cannot_map_is_planted_through_the_kernel_root() {
+    fn a_kernel_breakpoint_is_planted_through_a_vcpu_halted_in_nt() {
         let (mut client, received) = halted_client_over_stub(|packet, seen| {
             match packet {
                 "Z0,fffff800e1a5d130,1" if seen == 0 => "E22",
+                "qfThreadInfo" => "mp01.01,p01.02",
+                "qsThreadInfo" => "l",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        client.set_breakpoint(0xfffff800e1a5d130).unwrap();
+        assert_eq!(
+            *received.lock(),
+            [
+                "Z0,fffff800e1a5d130,1",
+                "qfThreadInfo",
+                "qsThreadInfo",
+                "Hcp01.01",
+                "Z0,fffff800e1a5d130,1",
+                "Hcp01.02",
+            ]
+        );
+    }
+
+    /// With every vCPU outside NT, the retry goes through the kernel root on
+    /// the selected vCPU and must always put that vCPU's own CR3 back, or it
+    /// resumes in the wrong address space.
+    #[test]
+    fn a_kernel_breakpoint_no_vcpu_can_map_is_planted_through_the_kernel_root() {
+        let (mut client, received) = halted_client_over_stub(|packet, seen| {
+            match packet {
+                "Z0,fffff800e1a5d130,1" if seen < 2 => "E22",
+                "qfThreadInfo" => "mp01.01,p01.02",
+                "qsThreadInfo" => "l",
                 "p43" => "00501f1501000000",
                 _ => "OK",
             }
@@ -1291,6 +1361,11 @@ mod tests {
             *received.lock(),
             [
                 "Z0,fffff800e1a5d130,1",
+                "qfThreadInfo",
+                "qsThreadInfo",
+                "Hcp01.01",
+                "Z0,fffff800e1a5d130,1",
+                "Hcp01.02",
                 "Hgp01.02",
                 "Hcp01.02",
                 "g",
