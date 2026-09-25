@@ -1,6 +1,8 @@
 //! AMD64 exception-directory unwinding: `.pdata` lookup, `UNWIND_INFO`
 //! parsing, and applying unwind codes to step a frame to its caller.
 
+use std::ops::Range;
+
 use pelite::pe64::image::{
     RUNTIME_FUNCTION, UNW_FLAG_CHAININFO, UWOP_ALLOC_LARGE, UWOP_ALLOC_SMALL, UWOP_PUSH_MACHFRAME,
     UWOP_PUSH_NONVOL, UWOP_SAVE_NONVOL, UWOP_SAVE_NONVOL_FAR, UWOP_SAVE_XMM128,
@@ -65,6 +67,98 @@ pub(super) enum Unwound {
     Frame { stack_switch: bool },
 }
 
+/// How an epilog starts to release the frame before its pops.
+#[derive(Debug, PartialEq, Eq)]
+enum EpilogRelease {
+    /// Already at the pops (or the return).
+    None,
+    /// `add rsp, imm`.
+    AddRsp(u32),
+    /// `lea rsp, [base + disp]`, restoring a frame-pointer frame.
+    LeaRsp { base: usize, disp: i32 },
+}
+
+/// The rest of an x64 epilog starting at the current instruction, in the
+/// only shape the Windows ABI allows: an optional `add rsp` / `lea rsp`,
+/// 8-byte register pops, then a return or a tail-call jump. Unwind codes
+/// describe the prolog, so a pc inside an epilog has already undone part of
+/// what they would undo again; the unwinder runs the remaining epilog
+/// instead, as `RtlVirtualUnwind` does.
+#[derive(Debug, PartialEq, Eq)]
+struct Epilog {
+    release: EpilogRelease,
+    /// Registers popped, in order, by unwind register number.
+    pops: Vec<usize>,
+}
+
+fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option<Epilog> {
+    let mut at = 0usize;
+    let release = match code {
+        [0x48, 0x83, 0xc4, imm, ..] => {
+            at = 4;
+            EpilogRelease::AddRsp(u32::from(*imm))
+        }
+        [0x48, 0x81, 0xc4, a, b, c, d, ..] => {
+            at = 7;
+            EpilogRelease::AddRsp(u32::from_le_bytes([*a, *b, *c, *d]))
+        }
+        [rex @ (0x48 | 0x49), 0x8d, modrm, rest @ ..] if modrm & 0x38 == 0x20 => {
+            let base = usize::from(modrm & 7) + if *rex == 0x49 { 8 } else { 0 };
+            // rsp/r12 bases need a SIB byte, which an epilog never uses.
+            if modrm & 7 == 4 {
+                return None;
+            }
+            match (modrm >> 6, rest) {
+                (1, [disp, ..]) => {
+                    at = 4;
+                    EpilogRelease::LeaRsp {
+                        base,
+                        disp: i32::from(*disp as i8),
+                    }
+                }
+                (2, [a, b, c, d, ..]) => {
+                    at = 7;
+                    EpilogRelease::LeaRsp {
+                        base,
+                        disp: i32::from_le_bytes([*a, *b, *c, *d]),
+                    }
+                }
+                _ => return None,
+            }
+        }
+        _ => EpilogRelease::None,
+    };
+    let mut pops = Vec::new();
+    loop {
+        // A jump ends an epilog only as a tail call: after the frame is
+        // released, and (when direct) to somewhere outside this function. A
+        // bare jump at the pc is ordinary control flow.
+        let tail_call = release != EpilogRelease::None || !pops.is_empty();
+        match code.get(at..)? {
+            [op @ 0x58..=0x5f, ..] => {
+                pops.push(usize::from(op - 0x58));
+                at += 1;
+            }
+            [0x41, op @ 0x58..=0x5f, ..] => {
+                pops.push(usize::from(op - 0x58) + 8);
+                at += 2;
+            }
+            [0xc3, ..] | [0xc2, _, _, ..] | [0xf3, 0xc3, ..] => {
+                return Some(Epilog { release, pops });
+            }
+            [0xe9, a, b, c, d, ..] if tail_call => {
+                let next = code_rva.checked_add(u32::try_from(at).ok()? + 5)?;
+                let target = next.wrapping_add_signed(i32::from_le_bytes([*a, *b, *c, *d]));
+                return (!function.contains(&target)).then_some(Epilog { release, pops });
+            }
+            [0x48, 0xff, 0x25, ..] | [0xff, 0x25, ..] if tail_call => {
+                return Some(Epilog { release, pops });
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn function_body_address(
     debugger: &Target,
     trace: &ThreadTraceContext,
@@ -83,7 +177,10 @@ fn function_body_address(
         resolved = resolve_function(&image, base, address);
     }
 
-    let Resolve::Function { unwind_data, begin } = resolved else {
+    let Resolve::Function {
+        unwind_data, begin, ..
+    } = resolved
+    else {
         return None;
     };
     let unwind = parse_unwind_info(&image, unwind_data)?;
@@ -181,8 +278,12 @@ impl StackTracer<'_> {
             resolved = resolve_function(&image, base_address, context.rip);
         }
 
-        let (mut unwind_data, begin) = match resolved {
-            Resolve::Function { unwind_data, begin } => (unwind_data, begin),
+        let (mut unwind_data, begin, end) = match resolved {
+            Resolve::Function {
+                unwind_data,
+                begin,
+                end,
+            } => (unwind_data, begin, end),
             Resolve::Leaf => {
                 unwind_trace!("unwind: no unwind info for rip -> leaf (true leaf)");
                 return self.unwind_leaf(context);
@@ -219,6 +320,15 @@ impl StackTracer<'_> {
             );
 
             let in_prolog = primary && rip_offset < unwind_info.size_of_prolog as u32;
+            if primary
+                && !in_prolog
+                && let Some(epilog) = image
+                    .read(rva as usize, 32)
+                    .or_else(|| image.read(rva as usize, 16))
+                    .and_then(|code| decode_epilog(&code, rva, begin..end))
+            {
+                return self.unwind_epilog(context, &epilog);
+            }
             match self.apply_unwind_codes(context, &unwind_info, in_prolog, rip_offset) {
                 Some(UnwindStep::Continue) => {}
                 Some(UnwindStep::MachineFrame) => {
@@ -263,6 +373,38 @@ impl StackTracer<'_> {
 
         // chain too deep or cyclic (corrupt unwind data); let the scan take over
         Unwound::Stop
+    }
+
+    /// Run the remainder of `epilog` against `context`: release the frame,
+    /// restore the popped registers, and return to the caller.
+    fn unwind_epilog(&self, context: &mut RegisterContext, epilog: &Epilog) -> Unwound {
+        let mut rsp = match epilog.release {
+            EpilogRelease::None => context.rsp,
+            EpilogRelease::AddRsp(imm) => context.rsp.wrapping_add(u64::from(imm)),
+            EpilogRelease::LeaRsp { base, disp } => match context.regs[base] {
+                Some(base) => base.wrapping_add_signed(i64::from(disp)),
+                None => return Unwound::Stop,
+            },
+        };
+        for &register in &epilog.pops {
+            let Ok(value) = self.stack_u64(rsp) else {
+                return Unwound::Stop;
+            };
+            context.regs[register] = Some(value);
+            rsp = rsp.wrapping_add(8);
+        }
+        let Ok(return_address) = self.stack_u64(rsp) else {
+            return Unwound::Stop;
+        };
+        unwind_trace!(
+            "unwind: epilog -> rip={return_address:#x} rsp={:#x}",
+            rsp + 8
+        );
+        context.rip = return_address;
+        context.rsp = rsp.wrapping_add(8);
+        Unwound::Frame {
+            stack_switch: false,
+        }
     }
 
     /// Apply one frame's unwind codes to `context`, undoing the prolog. Returns
@@ -442,7 +584,11 @@ enum Resolve {
     /// the rip (a function with no prologue to undo).
     Leaf,
     /// An entry was found and its unwind data is resident.
-    Function { unwind_data: u32, begin: u32 },
+    Function {
+        unwind_data: u32,
+        begin: u32,
+        end: u32,
+    },
     /// The lookup was blocked by a paged-out hole in `.pdata` or `.xdata`; an
     /// on-disk image could recover it.
     Holed,
@@ -466,6 +612,7 @@ fn resolve_function(image: &PeImage, base_address: u64, rip: u64) -> Resolve {
             Resolve::Function {
                 unwind_data: function.UnwindData,
                 begin: function.BeginAddress,
+                end: function.EndAddress,
             }
         }
         // the entry exists but its unwind info is paged out, or the table
@@ -606,11 +753,78 @@ fn slot_u16(codes: &[UnwindCodeSlot], index: usize) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Lookup, ParsedUnwindInfo, RUNTIME_FUNCTION, frame_base, lookup_runtime_function,
-        parse_unwind_info, unwind_slot_count,
+        Epilog, EpilogRelease, Lookup, ParsedUnwindInfo, RUNTIME_FUNCTION, decode_epilog,
+        frame_base, lookup_runtime_function, parse_unwind_info, unwind_slot_count,
     };
     use crate::pe::PeImage;
     use crate::unwind::RegisterContext;
+
+    #[test]
+    fn epilogs_decode_from_any_point_up_to_the_return() {
+        let function = 0x1000..0x1100;
+        // add rsp, 0x28; pop rbx; pop r12; ret
+        let code = [0x48, 0x83, 0xc4, 0x28, 0x5b, 0x41, 0x5c, 0xc3];
+        let decode = |at: usize| decode_epilog(&code[at..], 0x1080 + at as u32, function.clone());
+        assert_eq!(
+            decode(0),
+            Some(Epilog {
+                release: EpilogRelease::AddRsp(0x28),
+                pops: vec![3, 12],
+            })
+        );
+        assert_eq!(
+            decode(5),
+            Some(Epilog {
+                release: EpilogRelease::None,
+                pops: vec![12],
+            })
+        );
+        assert_eq!(
+            decode(7),
+            Some(Epilog {
+                release: EpilogRelease::None,
+                pops: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn a_jump_ends_an_epilog_only_as_a_tail_call_out_of_the_function() {
+        let function = 0x1000..0x1100;
+        // lea rsp, [rbp+0x10]; pop rbp; jmp +0x100 (past the function's end)
+        let tail_call = [0x48, 0x8d, 0x65, 0x10, 0x5d, 0xe9, 0x00, 0x01, 0, 0];
+        assert_eq!(
+            decode_epilog(&tail_call, 0x1010, function.clone()),
+            Some(Epilog {
+                release: EpilogRelease::LeaRsp {
+                    base: 5,
+                    disp: 0x10
+                },
+                pops: vec![5],
+            })
+        );
+        // The same pop then a jump back into the function is a loop.
+        let back_edge = [0x5d, 0xe9, 0xf0, 0xff, 0xff, 0xff];
+        assert_eq!(decode_epilog(&back_edge, 0x1010, function.clone()), None);
+        // A jump at the pc with nothing released is not an epilog either.
+        assert_eq!(
+            decode_epilog(&[0xe9, 0x00, 0x10, 0, 0], 0x1010, function.clone()),
+            None
+        );
+        // Body code: add rsp followed by a call, or a pop followed by a move.
+        assert_eq!(
+            decode_epilog(
+                &[0x48, 0x83, 0xc4, 0x28, 0xe8, 0, 0, 0, 0],
+                0x1010,
+                function.clone()
+            ),
+            None
+        );
+        assert_eq!(
+            decode_epilog(&[0x5b, 0x48, 0x89, 0xc8], 0x1010, function),
+            None
+        );
+    }
 
     #[test]
     fn lookup_runtime_function_resolves_across_a_large_sorted_table() {
