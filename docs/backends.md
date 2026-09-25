@@ -74,6 +74,8 @@ A software breakpoint is an `int3` written into a physical frame, and an image p
 
 No view shows the injected byte. A site is masked out of any read reaching the frame it was written into, so the original instruction appears under every process mapping a shared page, while a process that merely has its own memory at the same address is left alone. Only the debugger's views hide the `int3`; the guest still executes it.
 
+The target's own breakpoint table knows nothing of these bytes, so `ntoseye` records each one in `~/.ntoseye/sites/` before writing it: the frame, the kernel base of the boot, and the original bytes. Exiting, detaching, or a terminating signal removes the byte and the record. A session that dies without that cleanup (killed, crashed) leaves both behind, and the next attach to the same target in the same boot writes the original bytes back and says how many it restored. It restores a site only while the frame still holds the breakpoint followed by the recorded bytes; a frame the guest has since restored or reused is left alone.
+
 An absorb halts every vCPU, so a breakpoint on a busy shared symbol costs the absorb rate times the absorb cost whether or not the scoped process ever runs. Measured on a 4-vCPU Windows 11 guest, breakpoint on `nt!NtCreateFile`, file-enumeration loop running:
 
 | Transport | Host service per absorb | Absorbs/s sustained | Guest speed |

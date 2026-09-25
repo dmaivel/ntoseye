@@ -238,6 +238,12 @@ impl Session {
         // The attach-time identity check only proved the host mapping matched the
         // kernel that was running then. Re-check it against the rebuilt target
         // before anything reads through it again.
+        // A reboot took every patched site with the old memory.
+        if report.is_ok()
+            && let (Some(journal), Some(kernel_base)) = (&target.site_journal, target.kernel_base())
+        {
+            journal.rebase(kernel_base.0);
+        }
         if report.is_ok()
             && let Err(error) = backend.revalidate_host_memory(&target.phys)
         {

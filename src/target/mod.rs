@@ -23,6 +23,7 @@ pub use list::{ListCursor, ListTermination, bounded_list_walk};
 
 use self::mm::AddressDescription;
 use crate::{
+    breakpoints::SiteJournal,
     debugger_data::{DebuggerDataBlock, MetadataSource, MetadataValue},
     dmp::DmpInfo,
     error::{Error, Result},
@@ -79,6 +80,10 @@ pub struct Target {
     /// the handles they hand out with it, so an address from before a reboot
     /// is refused instead of read through the new kernel's layout.
     generation: Arc<AtomicU64>,
+    /// The on-disk record of breakpoint instructions this session patched
+    /// into guest memory itself, so a session that dies with them in place is
+    /// repaired by the next; `None` for targets nothing is patched into.
+    pub site_journal: Option<SiteJournal>,
 }
 
 /// The inspection scope a host has selected (`.process`, `.context`, `.frame`,

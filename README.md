@@ -43,6 +43,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 - `~/.ntoseye/symbols/` for PDBs and images, a symbol store in the `symstore` layout that WinDbg, IDA, Ghidra, and rizin read
 - `~/.ntoseye/aliases` for command aliases
 - `~/.ntoseye/history` for persistent REPL history
+- `~/.ntoseye/sites/` for user-mode breakpoint bytes a session has written, restored by the next attach if that session dies
 
 # Getting started
 

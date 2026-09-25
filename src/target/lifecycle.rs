@@ -128,6 +128,7 @@ impl Target {
             interrupt: Arc::new(AtomicBool::new(false)),
             notices,
             generation: Arc::new(AtomicU64::new(0)),
+            site_journal: None,
         })
     }
 
@@ -171,6 +172,7 @@ impl Target {
             interrupt: Arc::new(AtomicBool::new(false)),
             notices: Vec::new(),
             generation: Arc::new(AtomicU64::new(0)),
+            site_journal: None,
         })
     }
 

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::install::BreakpointBackend;
+use super::install::{BreakpointBackend, forget_site};
 use super::spec::CodeSite;
 use super::{Breakpoint, BreakpointConfig, BreakpointManager};
 #[cfg(test)]
@@ -393,6 +393,7 @@ impl BreakpointManager {
             BreakpointBackend::GuestMemoryPatch { original } => {
                 let memory = debugger.address_space(dtb);
                 memory.write_bytes(bp.address, original.as_slice())?;
+                forget_site(debugger, &memory, bp.address);
                 client.note_breakpoint_uninstalled(bp.address.0);
                 bp.enabled = false;
                 Ok(())

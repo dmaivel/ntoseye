@@ -15,6 +15,7 @@ mod config;
 mod hardware;
 mod hits;
 mod install;
+mod journal;
 mod manager;
 mod resolve;
 mod spec;
@@ -22,6 +23,8 @@ mod spec;
 mod test_backend;
 
 use install::BreakpointBackend;
+pub use install::breakpoint_opcode;
+pub use journal::{Repair, SiteJournal};
 
 /// A hardware (debug-register) breakpoint's parameters: the access it traps on,
 /// the watch width in bytes, and which physical debug slot it occupies.

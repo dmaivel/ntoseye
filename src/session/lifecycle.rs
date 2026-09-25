@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use single_instance::SingleInstance;
 
-use crate::breakpoints::BreakpointManager;
+use crate::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
 use crate::bugchecks::plausible_bugcheck_code;
 use crate::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
 use crate::dmp::DmpBackend;
@@ -18,6 +18,7 @@ use crate::kd::{KdBackend, KdMemorySource};
 use crate::memory_backend::MemoryBackend;
 use crate::phys::PhysMem;
 use crate::session::{ContinueOutcome, Session, StopResolution};
+use crate::symbols::ntoseye_home;
 use crate::target::Target;
 use crate::{Backend, TargetSpec};
 
@@ -116,6 +117,9 @@ impl Session {
         let backend = make_backend()?;
         let mut session = Self::new(phys, backend)?;
         session._instance_guard = guard;
+        if let Some(target) = target {
+            session.open_site_journal(target);
+        }
         Ok(session)
     }
 
@@ -205,7 +209,40 @@ impl Session {
         };
         let mut session = Self::new_with_target(target, backend)?;
         session._instance_guard = guard;
+        session.open_site_journal(resource);
         Ok(session)
+    }
+
+    /// Take over the breakpoint-site journal of `resource`, whose instance
+    /// lock this session holds, and put back every breakpoint instruction a
+    /// previous session left patched into guest memory in this boot.
+    fn open_site_journal(&mut self, resource: &str) {
+        let Some(kernel_base) = self.target.kernel_base() else {
+            return;
+        };
+        let Some(dir) = ntoseye_home()
+            .map(|home| home.join("sites"))
+            .filter(|dir| std::fs::create_dir_all(dir).is_ok())
+        else {
+            return;
+        };
+        let journal = SiteJournal::open(&dir, &instance_key(resource), kernel_base.0);
+        let opcode = breakpoint_opcode(self.target.arch());
+        let repair = journal.repair(self.target.phys.as_ref(), opcode);
+        if repair.restored != 0 {
+            self.notices.push(format!(
+                "restored {} breakpoint instruction(s) a previous session left in guest memory",
+                repair.restored
+            ));
+        }
+        if repair.failed != 0 {
+            self.notices.push(format!(
+                "{} breakpoint instruction(s) a previous session left in guest memory could not \
+                 be restored; they are retried on the next attach",
+                repair.failed
+            ));
+        }
+        self.target.site_journal = Some(journal);
     }
 
     /// Build a session around an already-connected backend and physical-memory
@@ -348,7 +385,7 @@ pub(super) struct InstanceGuard(#[allow(dead_code)] SingleInstance);
 /// handshake.
 fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
     let canonical = canonicalize_target(target);
-    let key = format!("ntoseye-{:016x}", fnv1a_64(canonical.as_bytes()));
+    let key = instance_key(target);
     // macOS backs the lock with a flock file at this path; keep it out of cwd.
     #[cfg(target_os = "macos")]
     let key = std::env::temp_dir().join(&key).display().to_string();
@@ -359,6 +396,15 @@ fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
         return Err(Error::AlreadyRunning(canonical));
     }
     Ok(InstanceGuard(instance))
+}
+
+/// The name a target is known by across sessions: its instance lock, and
+/// the file its breakpoint-site journal lives in.
+fn instance_key(target: &str) -> String {
+    format!(
+        "ntoseye-{:016x}",
+        fnv1a_64(canonicalize_target(target).as_bytes())
+    )
 }
 
 /// Normalize a target identifier for lock-key stability: equivalent targets

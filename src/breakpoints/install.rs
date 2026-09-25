@@ -4,14 +4,16 @@
 
 use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
+use super::journal::site_window;
 use super::{Breakpoint, BreakpointManager, BreakpointScope};
 use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::{DebugBackend, DebugCapability};
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
-use crate::memory::PAGE_SIZE;
+use crate::memory::{AddressSpace, PAGE_SIZE};
 use crate::pe::read_pe_header_page;
+use crate::phys::PhysMem;
 use crate::target::Target;
 use crate::types::{Arch, Dtb, VirtAddr};
 
@@ -84,11 +86,47 @@ pub(super) enum BreakpointBackend {
 /// The software breakpoint instruction we patch into guest code: x86 `int3`
 /// (one byte) or AArch64 `brk #0xF000` (four bytes, little-endian), the same
 /// opcode the kernel debugger uses so the guest reports it as a KD break.
-const fn breakpoint_opcode(arch: Arch) -> &'static [u8] {
+/// The breakpoint instruction a software site holds on `arch`.
+pub const fn breakpoint_opcode(arch: Arch) -> &'static [u8] {
     match arch {
         Arch::Amd64 => &[0xcc],
         // 0xD43E0000 little-endian.
         Arch::Arm64 => &[0x00, 0x00, 0x3E, 0xD4],
+    }
+}
+
+/// Record a host-patched site in the target's journal before its breakpoint
+/// instruction is written: `original` is the instruction it displaces, and
+/// the bytes after it come from memory. Recording first means a session that
+/// dies at any point leaves nothing patched that the journal does not know.
+fn journal_site(
+    debugger: &Target,
+    memory: &AddressSpace<'_, PhysMem>,
+    address: VirtAddr,
+    original: &[u8],
+) {
+    let Some(journal) = debugger.site_journal.as_ref() else {
+        return;
+    };
+    let Ok(Some(translation)) = memory.virt_to_phys(address) else {
+        return;
+    };
+    let mut bytes = [0u8; 8];
+    let len = site_window(translation.address, &bytes).len();
+    if len < original.len() || memory.read_bytes(address, &mut bytes[..len]).is_err() {
+        return;
+    }
+    bytes[..original.len()].copy_from_slice(original);
+    journal.record(translation.address, &bytes[..len]);
+}
+
+/// Drop a host-patched site from the journal once its original instruction
+/// is back in guest memory.
+pub fn forget_site(debugger: &Target, memory: &AddressSpace<'_, PhysMem>, address: VirtAddr) {
+    if let Some(journal) = debugger.site_journal.as_ref()
+        && let Ok(Some(translation)) = memory.virt_to_phys(address)
+    {
+        journal.forget(translation.address);
     }
 }
 
@@ -211,6 +249,7 @@ impl BreakpointManager {
             }
             Err(error) => return Err(error),
         }
+        journal_site(debugger, &memory, address, original.as_slice());
         memory.write_bytes(address, opcode)?;
         // The kernel does not know about a breakpoint patched through
         // host memory, so update the backend's stop bookkeeping.
@@ -226,8 +265,12 @@ impl BreakpointManager {
         match (&bp.scope, &bp.backend) {
             // The target owns the byte whatever the scope filters hits on.
             (_, BreakpointBackend::Kernel { .. }) => client.set_breakpoint(bp.address.0),
-            (BreakpointScope::Process { dtb, .. }, BreakpointBackend::GuestMemoryPatch { .. }) => {
+            (
+                BreakpointScope::Process { dtb, .. },
+                BreakpointBackend::GuestMemoryPatch { original },
+            ) => {
                 let memory = debugger.address_space(*dtb);
+                journal_site(debugger, &memory, bp.address, original.as_slice());
                 memory.write_bytes(bp.address, breakpoint_opcode(debugger.arch()))?;
                 client.note_breakpoint_installed(bp.address.0);
                 Ok(())
@@ -259,6 +302,7 @@ impl BreakpointManager {
             ) => {
                 let memory = debugger.address_space(*dtb);
                 memory.write_bytes(bp.address, original.as_slice())?;
+                forget_site(debugger, &memory, bp.address);
                 client.note_breakpoint_uninstalled(bp.address.0);
                 Ok(())
             }
