@@ -65,6 +65,8 @@ For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`; add `[
 
 Use an absolute path for `command` (e.g. `../target/release/ntoseye`) if `ntoseye` isn't within `PATH`.
 
+Closing stdin, `SIGINT`, `SIGTERM`, and `SIGHUP` detach like `close`: installed breakpoints are removed and the guest resumes before the server exits. `SIGKILL` prevents cleanup and leaves breakpoint entries installed; see [breakpoint recovery](usage.md#breakpoints-and-watchpoints).
+
 ## Streamable HTTP
 
 For web MCP clients that connect over the network instead of spawning a subprocess, use `--http`:

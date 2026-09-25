@@ -875,17 +875,17 @@ pub fn run(
         };
 
         // Serve until the client disconnects (or the server errors), or until
-        // Ctrl+C; either way fall through to teardown.
+        // a termination signal; either way fall through to teardown.
         let result = tokio::select! {
             r = serve => r,
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("ntoseye-mcp: interrupted");
+            signal = termination_signal() => {
+                eprintln!("ntoseye-mcp: {signal} received");
                 Ok(())
             }
         };
 
         // Ask the actor to remove our breakpoints and resume the VM before we
-        // exit, so Ctrl+C doesn't leave a live guest frozen with int3s
+        // exit, so a signal doesn't leave a live guest frozen with int3s
         // installed (a no-op for dumps). Set the interrupt first so any
         // in-flight wait returns and the actor is free to process the Shutdown.
         eprintln!("ntoseye-mcp: cleaning up...");
@@ -905,6 +905,34 @@ pub fn run(
     });
     runtime.shutdown_background();
     result
+}
+
+/// Resolves on SIGINT, SIGTERM, or SIGHUP (the signals the REPL and DAP server
+/// also detach on) with the signal's name. Clients and process managers stop a
+/// stdio server with SIGTERM, whose default action would skip the cleanup.
+async fn termination_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        async fn recv(kind: SignalKind) {
+            match signal(kind) {
+                Ok(mut stream) => {
+                    stream.recv().await;
+                }
+                Err(_) => std::future::pending().await,
+            }
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = recv(SignalKind::terminate()) => "SIGTERM",
+            _ = recv(SignalKind::hangup()) => "SIGHUP",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl+C"
+    }
 }
 
 /// Background servicing ticker: periodically nudge the actor to service the
