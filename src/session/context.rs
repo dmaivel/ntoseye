@@ -512,7 +512,8 @@ impl Session {
                 threads.push(thread.clone());
             }
         }
-        threads.sort_by_key(|thread| (thread.pid.unwrap_or(u64::MAX), thread.tid));
+        threads
+            .sort_by_key(|thread| (thread.pid.unwrap_or(u64::MAX), thread.tid, thread.ethread.0));
         let active_vcpus = active
             .into_iter()
             .map(|(ethread, (vcpu, _))| (ethread, vcpu))
