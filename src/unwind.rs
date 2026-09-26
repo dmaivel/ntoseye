@@ -984,8 +984,168 @@ impl StackTracer<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::RegisterContext;
+    use std::collections::HashMap;
+
+    use super::{FrameSource, RegisterContext, build_stacktrace_with_register_values};
+    use crate::guest::ModuleInfo;
+    use crate::kd::context::build_register_map;
+    use crate::session::{Session, session_over_memory};
     use crate::target::SavedThreadRegisters;
+    use crate::types::VirtAddr;
+
+    /// Where the fixture image is loaded, and the stack page after it.
+    const IMAGE: u64 = 0x1_4000_0000;
+    const IMAGE_SIZE: usize = 0x3000;
+    const STACK: u64 = IMAGE + IMAGE_SIZE as u64;
+    /// A function that sets up `rbp` as its frame pointer, and its caller.
+    const FRAMED: u32 = 0x1100;
+    const CALLER: u32 = 0x1200;
+    /// Inside `FRAMED`'s body, past its prolog.
+    const FRAMED_RIP: u64 = IMAGE + FRAMED as u64 + 0x10;
+    /// The call site in `CALLER` that `FRAMED` returns to.
+    const RETURN_ADDRESS: u64 = IMAGE + CALLER as u64 + 0x10;
+    const FRAMED_RSP: u64 = STACK + 0x800;
+    const FRAMED_RBP: u64 = STACK + 0x820;
+    /// What `FRAMED` pushed from its caller's `rbp`.
+    const CALLER_RBP: u64 = STACK + 0x900;
+
+    /// An AMD64 image whose `.pdata` covers `FRAMED` (prolog `push rbp; mov
+    /// rbp, rsp`, unwound through `UWOP_SET_FPREG`) and `CALLER` (no prolog).
+    fn frame_pointer_image() -> Vec<u8> {
+        let mut image = vec![0u8; IMAGE_SIZE];
+        let mut put = |offset: usize, bytes: &[u8]| {
+            image[offset..offset + bytes.len()].copy_from_slice(bytes);
+        };
+        let pe = 0x80;
+        put(0, b"MZ");
+        put(0x3c, &(pe as u32).to_le_bytes());
+        put(pe, b"PE\0\0");
+        put(pe + 4, &0x8664u16.to_le_bytes());
+        put(pe + 6, &2u16.to_le_bytes());
+        put(pe + 20, &240u16.to_le_bytes());
+        let optional = pe + 24;
+        put(optional, &0x20bu16.to_le_bytes());
+        put(optional + 32, &0x1000u32.to_le_bytes());
+        put(optional + 36, &0x200u32.to_le_bytes());
+        put(optional + 56, &(IMAGE_SIZE as u32).to_le_bytes());
+        put(optional + 60, &0x1000u32.to_le_bytes());
+        put(optional + 108, &16u32.to_le_bytes());
+        // Data directory 3: the exception table (two RUNTIME_FUNCTIONs).
+        put(optional + 112 + 3 * 8, &0x2000u32.to_le_bytes());
+        put(optional + 112 + 3 * 8 + 4, &24u32.to_le_bytes());
+        let sections = optional + 240;
+        for (index, (name, rva, characteristics)) in [
+            (b".text\0\0\0", 0x1000u32, 0x6000_0020u32),
+            (b".rdata\0\0", 0x2000, 0x4000_0040),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let header = sections + 40 * index;
+            put(header, name);
+            put(header + 8, &0x1000u32.to_le_bytes());
+            put(header + 12, &rva.to_le_bytes());
+            put(header + 16, &0x1000u32.to_le_bytes());
+            put(header + 20, &rva.to_le_bytes());
+            put(header + 36, &characteristics.to_le_bytes());
+        }
+        put(0x1000, &[0xcc; 0x1000]);
+        for (index, (begin, unwind_info)) in [(FRAMED, 0x2100u32), (CALLER, 0x2110)]
+            .into_iter()
+            .enumerate()
+        {
+            let entry = 0x2000 + 12 * index;
+            put(entry, &begin.to_le_bytes());
+            put(entry + 4, &(begin + 0x80).to_le_bytes());
+            put(entry + 8, &unwind_info.to_le_bytes());
+        }
+        // Version 1, a 4-byte prolog, two codes, frame register rbp at
+        // offset 0; codes: UWOP_SET_FPREG at 4, UWOP_PUSH_NONVOL rbp at 1.
+        put(0x2100, &[0x01, 0x04, 0x02, 0x05, 0x04, 0x03, 0x01, 0x50]);
+        put(0x2110, &[0x01, 0x00, 0x00, 0x00]);
+        image
+    }
+
+    /// The fixture image and a stack where `FRAMED` runs with its frame at
+    /// `FRAMED_RBP`, called from `CALLER`, which is the thread's first frame.
+    fn frame_pointer_session() -> Session {
+        let mut memory = frame_pointer_image();
+        memory.resize(IMAGE_SIZE + 0x2000, 0);
+        let stack = |address: u64| (address - IMAGE) as usize;
+        memory[stack(FRAMED_RBP)..stack(FRAMED_RBP) + 8].copy_from_slice(&CALLER_RBP.to_le_bytes());
+        memory[stack(FRAMED_RBP) + 8..stack(FRAMED_RBP) + 16]
+            .copy_from_slice(&RETURN_ADDRESS.to_le_bytes());
+        let mut session = session_over_memory(IMAGE, &memory);
+        session
+            .target
+            .set_kernel_modules_for_test(vec![ModuleInfo::new(
+                "fixture.sys".to_string(),
+                VirtAddr(IMAGE),
+                IMAGE_SIZE as u32,
+            )]);
+        session.register_map = build_register_map();
+        session
+    }
+
+    fn registers(values: &[(&str, u64)]) -> HashMap<String, u64> {
+        values
+            .iter()
+            .map(|(name, value)| (name.to_string(), *value))
+            .collect()
+    }
+
+    #[test]
+    fn a_known_frame_pointer_unwinds_its_frame() {
+        let session = frame_pointer_session();
+        let seed = registers(&[
+            ("rip", FRAMED_RIP),
+            ("rsp", FRAMED_RSP),
+            ("rbp", FRAMED_RBP),
+        ]);
+
+        let trace =
+            build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 8);
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (FRAMED_RIP, FrameSource::Current),
+                (RETURN_ADDRESS, FrameSource::Unwind)
+            ]
+        );
+        assert_eq!(trace.frames[1].registers.get("rbp"), Some(&CALLER_RBP));
+        assert_eq!(trace.frames[1].frame.sp, FRAMED_RBP + 16);
+    }
+
+    /// A context without `rbp` (the VTL0 state the Windows hypervisor saves)
+    /// cannot unwind a frame-pointer frame; the caller is found by scanning,
+    /// rather than lost to a frame pointer taken as zero.
+    #[test]
+    fn an_unknown_frame_pointer_falls_back_to_scanning() {
+        let session = frame_pointer_session();
+        let seed = registers(&[("rip", FRAMED_RIP), ("rsp", FRAMED_RSP)]);
+
+        let trace =
+            build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 8);
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (FRAMED_RIP, FrameSource::Current),
+                (RETURN_ADDRESS, FrameSource::Scan)
+            ]
+        );
+    }
 
     #[test]
     fn saved_register_context_preserves_missing_values() {

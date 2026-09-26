@@ -85,6 +85,13 @@ impl Target {
             .ok_or(Error::NtoskrnlNotFound)
     }
 
+    /// Stand in for the kernel module list of a target with no kernel found
+    /// (a test session over bare memory), as a triage dump's driver list does.
+    #[cfg(test)]
+    pub fn set_kernel_modules_for_test(&mut self, modules: Vec<ModuleInfo>) {
+        self.triage_modules_cache = Some(modules);
+    }
+
     /// A loaded module's PE file in the symbol cache, downloaded when absent.
     /// Blocks for the download; see `Self::module_image_key` for the lookup.
     pub fn fetch_module_image(&self, name: &str) -> Result<PathBuf> {
