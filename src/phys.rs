@@ -1,4 +1,6 @@
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::backend::MemoryOps;
 use crate::dmp::{DmpInfo, DmpMem};
@@ -27,9 +29,42 @@ pub enum PhysMem {
     Live {
         host: VmHandle,
         mediated: Option<KdMemory>,
+        /// Halts of the GDB stub controlling the VM, when it is the one.
+        halts: Option<Arc<HaltClock>>,
     },
     Dmp(Box<DmpMem>),
     Remote(KdMemory),
+}
+
+/// Whether a backend that controls a live VM has it halted, and which halt
+/// this is: the resume signal host memory lacks. Shared between the backend,
+/// which reports every resume and halt, and [`PhysMem::halt_epoch`].
+#[derive(Debug, Default)]
+pub struct HaltClock {
+    epoch: AtomicU64,
+    running: AtomicBool,
+}
+
+impl HaltClock {
+    /// Record a resume (a new epoch begins) or a halt.
+    pub fn set_running(&self, running: bool) {
+        if running {
+            if !self.running.swap(true, Ordering::AcqRel) {
+                self.epoch.fetch_add(1, Ordering::AcqRel);
+            }
+        } else {
+            self.running.store(false, Ordering::Release);
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+
+    /// The current halt's epoch; `None` while the target runs.
+    fn epoch(&self) -> Option<u64> {
+        (!self.is_running()).then(|| self.epoch.load(Ordering::Acquire))
+    }
 }
 
 impl PhysMem {
@@ -37,6 +72,7 @@ impl PhysMem {
         Ok(Self::Live {
             host: VmHandle::new()?,
             mediated: None,
+            halts: None,
         })
     }
 
@@ -44,9 +80,24 @@ impl PhysMem {
     /// mapping. A no-op for sources that have no host mapping.
     pub fn with_mediated_writes(self, memory: KdMemory) -> Self {
         match self {
-            Self::Live { host, .. } => Self::Live {
+            Self::Live { host, halts, .. } => Self::Live {
                 host,
                 mediated: Some(memory),
+                halts,
+            },
+            other => other,
+        }
+    }
+
+    /// Take halts from the backend controlling the VM, so guest-derived lists
+    /// can be memoized per halt. A no-op for sources that have no host
+    /// mapping.
+    pub fn with_halt_clock(self, clock: Arc<HaltClock>) -> Self {
+        match self {
+            Self::Live { host, mediated, .. } => Self::Live {
+                host,
+                mediated,
+                halts: Some(clock),
             },
             other => other,
         }
@@ -104,12 +155,25 @@ impl PhysMem {
     }
 
     /// Identity of the current halt, for memoizing guest-derived lists: equal
-    /// values mean the guest has not run in between. `None` when this memory
-    /// has no resume signal (a live VM process), so nothing may be memoized.
-    /// A dump never changes, so it is one epoch forever.
+    /// values mean the guest has not run in between. A live VM process has no
+    /// resume signal of its own; while KD or the GDB stub controls execution
+    /// its halts serve, and while the target runs, or with nothing controlling
+    /// it, this is `None` and nothing may be memoized. A dump never changes, so
+    /// it is one epoch forever.
     pub fn halt_epoch(&self) -> Option<u64> {
         match self {
             Self::Remote(kd) => kd.translation_cache().map(TranslationCache::halt_epoch),
+            // KD bumps the epoch when the target resumes, and host reads keep
+            // working while it runs: a walk then must not be memoized under
+            // the new epoch and served after the next halt.
+            Self::Live {
+                mediated: Some(kd), ..
+            } if kd.can_mediate_writes() => {
+                kd.translation_cache().map(TranslationCache::halt_epoch)
+            }
+            Self::Live {
+                halts: Some(clock), ..
+            } => clock.epoch(),
             Self::Dmp(_) => Some(0),
             Self::Live { .. } => None,
         }
@@ -183,5 +247,30 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Self::Remote(kd) => kd.read_page_table_bytes(addr, buf),
             Self::Live { .. } | Self::Dmp(_) => self.read_bytes(addr, buf),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HaltClock;
+
+    /// Guest lists are memoized under an epoch; one served after the guest
+    /// ran would be stale.
+    #[test]
+    fn a_halt_clock_has_no_epoch_while_running_and_a_new_one_after() {
+        let clock = HaltClock::default();
+        let first = clock.epoch().expect("halted at attach");
+
+        clock.set_running(true);
+        assert_eq!(clock.epoch(), None);
+        // A second report of the same run is not another resume.
+        clock.set_running(true);
+        clock.set_running(false);
+        let second = clock.epoch().expect("halted again");
+        assert_eq!(second, first + 1);
+
+        // Halting again without running keeps the epoch.
+        clock.set_running(false);
+        assert_eq!(clock.epoch(), Some(second));
     }
 }

@@ -1,13 +1,14 @@
 use std::io::{self, Read, Write};
 use std::mem;
 use std::net::TcpStream;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crate::dbg_backend::{
     DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
 };
 use crate::error::{Error, Result};
+use crate::phys::HaltClock;
 use crate::types::Arch;
 
 pub mod registers;
@@ -237,7 +238,9 @@ pub struct GdbClient {
     no_ack_mode: bool,
     arch: Arch,
     register_map: RegisterMap,
-    is_running: bool,
+    /// Whether the target runs, shared with the host memory this client's
+    /// session reads, which memoizes guest lists per halt.
+    halts: Arc<HaltClock>,
     hardware_sites: [Option<HardwareSite>; HW_BREAKPOINT_SLOTS as usize],
     extra_registers: Vec<ExtraRegister>,
     /// The stop reply that left the target halted: the one to the initial
@@ -291,7 +294,7 @@ fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
 }
 
 impl GdbClient {
-    pub fn connect(addr: &str) -> Result<Self> {
+    pub fn connect(addr: &str, halts: Arc<HaltClock>) -> Result<Self> {
         let stream = TcpStream::connect(addr).map_err(|err| gdb_connect_error(addr, err))?;
         // Every exchange is a small request, a one-byte ack, and a small
         // reply; with Nagle on, each ack waits out the peer's delayed ACK
@@ -305,7 +308,8 @@ impl GdbClient {
             no_ack_mode: false,
             arch: Arch::default(),
             register_map: RegisterMap::default(),
-            is_running: false, // NOTE if the user toys with VM via GUI, this value goes bad
+            // Resuming the VM from outside (a hypervisor GUI) goes unseen here.
+            halts,
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
             extra_registers: Vec::new(),
             last_stop: String::new(),
@@ -353,7 +357,7 @@ impl GdbClient {
         self.stream.set_read_timeout(None)?;
         self.rx_state = PacketReadState::default();
 
-        self.is_running = false;
+        self.halts.set_running(false);
 
         Ok(())
     }
@@ -366,7 +370,7 @@ impl GdbClient {
     /// debugger; `Self::interrupt` is the way through, and it writes the
     /// break byte directly rather than through here.
     pub fn send_packet(&mut self, data: &str) -> Result<String> {
-        if self.is_running {
+        if self.halts.is_running() {
             return Err(Error::TargetRunning(GDB_STUB_NEEDS_HALT));
         }
         self.send_raw_command(data)?;
@@ -786,7 +790,7 @@ impl GdbClient {
         let _ = self.send_packet("Hc-1")?;
         self.control_thread = None;
         self.send_command_no_reply("c")?;
-        self.is_running = true;
+        self.halts.set_running(true);
         Ok(())
     }
 
@@ -804,7 +808,7 @@ impl GdbClient {
             }
             _ => self.send_command_no_reply("s")?,
         }
-        self.is_running = true;
+        self.halts.set_running(true);
         Ok(())
     }
 
@@ -820,28 +824,28 @@ impl GdbClient {
             return Err(Error::NotSupported);
         }
         self.send_command_no_reply(&format!("vCont;c:{thread}"))?;
-        self.is_running = true;
+        self.halts.set_running(true);
         Ok(())
     }
 
     fn wait_for_stop(&mut self) -> Result<String> {
-        if !self.is_running {
+        if !self.halts.is_running() {
             return Ok(HALTED_NO_NEW_STOP.to_string());
         }
 
         let response = self.read_stop_reply()?;
-        self.is_running = false;
+        self.halts.set_running(false);
         Ok(response)
     }
 
     fn try_wait_for_stop(&mut self) -> Result<Option<String>> {
-        if !self.is_running {
+        if !self.halts.is_running() {
             return Ok(Some(HALTED_NO_NEW_STOP.to_string()));
         }
 
         match self.read_stop_reply() {
             Ok(response) => {
-                self.is_running = false;
+                self.halts.set_running(false);
                 Ok(Some(response))
             }
             Err(Error::Io(ref e))
@@ -884,7 +888,7 @@ impl GdbClient {
     }
 
     fn interrupt(&mut self) -> Result<String> {
-        if !self.is_running {
+        if !self.halts.is_running() {
             return Ok(String::new());
         }
 
@@ -894,7 +898,7 @@ impl GdbClient {
 
         let stop = self.read_stop_reply()?;
 
-        self.is_running = false;
+        self.halts.set_running(false);
 
         Ok(stop)
     }
@@ -1245,7 +1249,7 @@ impl DebugBackend for GdbClient {
     }
 
     fn is_running(&self) -> bool {
-        self.is_running
+        self.halts.is_running()
     }
 }
 
@@ -1265,6 +1269,7 @@ mod tests {
     };
     use crate::dbg_backend::DebugBackend;
     use crate::gdb::registers::RegisterInfo;
+    use crate::phys::HaltClock;
     use crate::types::Arch;
 
     /// A running target behind a stub that answers the break byte with a stop
@@ -1304,6 +1309,8 @@ mod tests {
                 }
             }
         });
+        let halts = Arc::new(HaltClock::default());
+        halts.set_running(true);
         let client = GdbClient {
             stream: TcpStream::connect(addr).unwrap(),
             features: StubFeatures::default(),
@@ -1311,7 +1318,7 @@ mod tests {
             no_ack_mode: true,
             arch: Arch::Amd64,
             register_map: RegisterMap::default(),
-            is_running: true,
+            halts,
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
             extra_registers: Vec::new(),
             last_stop: String::new(),
@@ -1339,7 +1346,7 @@ mod tests {
         answer: fn(&str, usize) -> String,
     ) -> (GdbClient, Arc<Mutex<Vec<String>>>) {
         let (mut client, received) = client_over_stub(answer);
-        client.is_running = false;
+        client.halts.set_running(false);
         client.last_stop = "T05thread:p01.02;".to_string();
         client.kernel_dtb = Some(0x1ae000);
         client.register_map = RegisterMap::from_registers(vec![RegisterInfo {

@@ -16,7 +16,7 @@ use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::GdbClient;
 use crate::kd::{KdBackend, KdMemorySource};
 use crate::memory_backend::MemoryBackend;
-use crate::phys::PhysMem;
+use crate::phys::{HaltClock, PhysMem};
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::symbols::ntoseye_home;
 use crate::target::Target;
@@ -91,12 +91,19 @@ impl Session {
                 )
             }
             TargetSpec::Live { backend, .. } => {
-                let phys = Arc::new(PhysMem::live()?);
+                // The GDB stub halts and resumes the VM; the passive memory
+                // backend never does, so its memory stays unmemoized.
+                let halts = Arc::new(HaltClock::default());
+                let phys = match backend {
+                    Backend::Gdb => PhysMem::live()?.with_halt_clock(Arc::clone(&halts)),
+                    _ => PhysMem::live()?,
+                };
                 let endpoint = spec.endpoint();
-                Self::connect(phys, endpoint, || {
+                Self::connect(Arc::new(phys), endpoint, || {
                     Ok(match backend {
                         Backend::Gdb => Box::new(GdbClient::connect(
                             endpoint.expect("gdb always has an endpoint"),
+                            halts,
                         )?),
                         Backend::Memory => Box::new(MemoryBackend::new()),
                         Backend::Kd | Backend::KdNet => unreachable!("matched above"),
