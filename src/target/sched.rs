@@ -693,6 +693,11 @@ impl Target {
             .fields
             .get("DpcList")
             .ok_or_else(|| Error::FieldNotFound(format!("{data_type_name}.DpcList")))?;
+        // Newer builds queue DPCs on a `_KDPC_LIST`, a singly linked list
+        // that ends at a null link; only a `_LIST_ENTRY` queue returns to its
+        // head, and a null link there is damage.
+        let singly_linked =
+            !matches!(&dpc_list.type_data, ParsedType::Struct(name) if name == "_LIST_ENTRY");
         let dpc_link_offset = link_offset(self, "_KDPC", &["DpcListEntry", "ListEntry", "SLink"]);
         let dpc_layout = layout_for(self, "_KDPC").ok();
         let routine_field = dpc_layout.as_ref().and_then(|layout| {
@@ -743,6 +748,10 @@ impl Target {
                 let head = data + u64::from(dpc_list.offset);
                 let remaining = MAX_LIST_ENTRIES - total;
                 let (nodes, termination) = walk_list_nodes(self, head, remaining);
+                let termination = match termination {
+                    ListTermination::Null if singly_linked => ListTermination::Head,
+                    other => other,
+                };
                 let mut entries = Vec::with_capacity(nodes.len());
                 for node in nodes {
                     let dpc = dpc_link_offset.map(|offset| node - offset).unwrap_or(node);

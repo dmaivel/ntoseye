@@ -164,8 +164,9 @@ repl_command! {
 repl_command! {
     cmd_lmv;
     names: ["lmv"],
-    usage: "lmv [module]",
+    usage: "lmv [m <pattern>|<name>] [u|k] [t]",
     summary: "Display detailed per-module symbol status and PDB identity.",
+    details: "The same as `lm v`, with the same filters: `lmv m nt`.",
 }
 
 impl ReplState<'_> {
@@ -777,8 +778,16 @@ impl ReplState<'_> {
     }
 
     fn cmd_lm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.list_modules(invocation, false)
+    }
+
+    /// `lmv`: `lm v`, so it takes the same filters (`lmv m nt`).
+    fn cmd_lmv(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.list_modules(invocation, true)
+    }
+
+    fn list_modules(&mut self, invocation: CommandInvocation<'_>, mut verbose: bool) -> Result<()> {
         let mut pattern = None;
-        let mut verbose = false;
         let mut user = false;
         let mut kernel = false;
         let mut timestamp = false;
@@ -966,75 +975,6 @@ impl ReplState<'_> {
             }
         }
 
-        Ok(())
-    }
-
-    fn cmd_lmv(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let filter = invocation.arg(0);
-        let dtb = self.ctx.target.process_dtb();
-        let modules = match self.ctx.target.modules() {
-            Ok(modules) => modules,
-            Err(err) => {
-                error!("failed to enumerate modules: {}", err);
-                return Ok(());
-            }
-        };
-        let mut shown = 0;
-        for module in modules {
-            if filter.is_some_and(|filter| {
-                !module.short_name.eq_ignore_ascii_case(filter)
-                    && !module.name.eq_ignore_ascii_case(filter)
-            }) {
-                continue;
-            }
-            shown += 1;
-            let status = self
-                .ctx
-                .target
-                .symbols
-                .module_symbol_status(dtb, module.base_address);
-            let source = self
-                .ctx
-                .target
-                .symbols
-                .module_symbol_source(dtb, module.base_address);
-            let identity = self
-                .ctx
-                .target
-                .symbols
-                .module_pdb_identity(dtb, module.base_address);
-            outln!("{} ({})", module.name, module.short_name);
-            outln!(
-                "  range   : {} - {}",
-                ui::addr(module.base_address.0),
-                ui::addr(module.end_address().0)
-            );
-            outln!(
-                "  symbols : {}",
-                status
-                    .as_ref()
-                    .map(|status| status.label())
-                    .unwrap_or("unknown")
-            );
-            outln!(
-                "  source  : {}",
-                source.as_ref().map(|source| source.label()).unwrap_or("-")
-            );
-            match identity {
-                Some(identity) => {
-                    outln!("  pdb guid: {:032X}", identity.guid);
-                    outln!("  pdb age : {}", identity.age);
-                }
-                None => outln!("  pdb     : -"),
-            }
-            if let Some(ModuleSymbolStatus::Failed(reason)) = status {
-                outln!("  error   : {}", reason);
-            }
-            outln!();
-        }
-        if shown == 0 {
-            outln!("no matching modules\n");
-        }
         Ok(())
     }
 }
