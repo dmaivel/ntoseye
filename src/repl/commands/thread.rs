@@ -11,12 +11,14 @@ use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::Result;
 use crate::expr::Expr;
+use crate::session::ThreadContext;
 use crate::target::{Target, ThreadInfo, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
 use crate::ui;
 
 use crate::repl::*;
 
+use super::frames::print_sparse_registers;
 use super::process::{display_decimal, display_pointer};
 
 pub enum ThreadResolution {
@@ -27,6 +29,9 @@ pub enum ThreadResolution {
 
 pub(super) const THREAD_STACK_LIMIT: usize = 32;
 const DEFAULT_THREAD_FRAME_LIMIT: usize = 16;
+/// Where a running thread's stack starts when its processor is halted in the
+/// Windows hypervisor.
+const SAVED_VTL0_SOURCE: &str = "saved VTL0 context";
 
 repl_command! {
     cmd_threads;
@@ -42,7 +47,7 @@ repl_command! {
     names: ["!thread", "thread"],
     usage: "!thread [ethread|tid] [flags] [count]",
     summary: "Display a Windows thread and optionally its kernel stack.",
-    details: "The legacy `thread <tid> k|r [count]` forms remain available. A numeric flags value selects detail/stack output; unavailable fields are shown as `-`.",
+    details: "The legacy `thread <tid> k|r [count]` forms remain available. A numeric flags value selects detail/stack output; unavailable fields are shown as `-`. A running thread whose vCPU is halted in the Windows hypervisor (VBS) is shown from the VTL0 state the hypervisor saved, as `.thread` selects it.",
     completion: [Thread, None, None],
     run_state: Halted,
 }
@@ -52,6 +57,7 @@ repl_command! {
     names: [".thread"],
     usage: ".thread [ethread|tid]",
     summary: "Switch the register and stack context to a Windows thread.",
+    details: "A running thread switches to its vCPU. When that vCPU is halted in the Windows hypervisor (VBS), the context is the VTL0 state the hypervisor saved, where NT left off, as `.vtlcxr` selects it; without it (no hv-evmcs) the vCPU's registers are the context. A thread not running is selected stack only. With no argument, returns to the current vCPU's registers.",
     completion: Thread,
     run_state: Halted,
 }
@@ -409,14 +415,13 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        if let Err(e) = self.ctx.set_current_thread(vcpu) {
-            error!("failed to switch to vCPU {}: {:?}", vcpu, e);
-            return Ok(());
-        }
-        self.clear_selected_frame();
-        self.ctx
-            .target
-            .set_current_windows_thread_context((*thread).clone());
+        let selection = match self.ctx.select_running_windows_thread(vcpu, thread) {
+            Ok(selection) => selection,
+            Err(e) => {
+                error!("failed to switch to vCPU {}: {:?}", vcpu, e);
+                return Ok(());
+            }
+        };
         self.caches.refresh_symbol_context(&self.ctx.target);
         outln!(
             "switched to {} running ETHREAD {}\n",
@@ -424,37 +429,36 @@ impl ReplState<'_> {
             ui::addr(thread.ethread.0)
         );
         print_thread_extended_detail(&self.ctx.target, thread);
+        let source = match selection {
+            ThreadContext::SavedVtl0(_) => SAVED_VTL0_SOURCE,
+            _ => "live",
+        };
 
         if default_stack {
-            self.print_live_kstack();
+            self.print_running_kstack(source);
         } else {
             match action {
-                Some("k") => {
-                    let regs = match self.ctx.read_registers() {
-                        Ok(regs) => regs,
-                        Err(e) => {
-                            error!("failed to read registers: {:?}", e);
-                            return Ok(());
-                        }
-                    };
-                    print_stacktrace(
-                        &self.ctx.target,
-                        &self.ctx.register_map,
-                        &regs,
-                        frame_limit,
-                        frame_limit,
-                        false,
-                    );
-                }
+                Some("k") => match self.ctx.backtrace(frame_limit) {
+                    Ok(trace) => print_stacktrace_data(&trace, frame_limit, false),
+                    Err(error) => error!("failed to unwind thread stack: {}", error),
+                },
                 Some("r" | "registers") => {
-                    let regs = match self.ctx.read_registers() {
-                        Ok(regs) => regs,
-                        Err(e) => {
-                            error!("failed to read registers: {:?}", e);
-                            return Ok(());
-                        }
-                    };
-                    print_registers(&self.ctx.register_map, &regs, false);
+                    if let Some(frame) = self.ctx.target.selected_frame.as_ref() {
+                        print_sparse_registers(
+                            &frame.registers,
+                            Some(&format!("registers ({source}):")),
+                            4,
+                        );
+                    } else {
+                        let regs = match self.ctx.read_registers() {
+                            Ok(regs) => regs,
+                            Err(e) => {
+                                error!("failed to read registers: {:?}", e);
+                                return Ok(());
+                            }
+                        };
+                        print_registers(&self.ctx.register_map, &regs, false);
+                    }
                 }
                 Some(_) if numeric_action.is_some() => {}
                 Some(other) => error!("unknown thread action '{}': expected k or r", other),
@@ -465,10 +469,10 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn print_live_kstack(&mut self) {
+    fn print_running_kstack(&mut self, source: &str) {
         match self.ctx.backtrace(THREAD_STACK_LIMIT) {
             Ok(trace) => {
-                outln!("k-stack (live):");
+                outln!("k-stack ({source}):");
                 print_stacktrace_data(&trace, THREAD_STACK_LIMIT, false);
             }
             Err(error) => error!("failed to unwind thread stack: {}", error),
@@ -522,16 +526,21 @@ impl ReplState<'_> {
 
         let thread = thread.clone();
         match self.ctx.select_windows_thread(&thread) {
-            Ok(Some(vcpu)) => {
-                self.clear_selected_frame();
+            Ok(ThreadContext::Live(vcpu)) => {
                 outln!(
                     "switched register context to {} (ETHREAD {})\n",
                     vcpu,
                     ui::addr(thread.ethread.0)
                 );
             }
-            Ok(None) => {
-                self.clear_selected_frame();
+            Ok(ThreadContext::SavedVtl0(vcpu)) => {
+                outln!(
+                    "switched register context to the VTL0 state the hypervisor saved for {} (ETHREAD {})\n",
+                    vcpu,
+                    ui::addr(thread.ethread.0)
+                );
+            }
+            Ok(ThreadContext::Parked) => {
                 outln!(
                     "selected parked thread context ETHREAD {} (stack only)\n",
                     ui::addr(thread.ethread.0)

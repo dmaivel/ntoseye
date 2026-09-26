@@ -170,7 +170,7 @@ When the command line already pinned a target (`ntoseye dap --dump crash.dmp`), 
 
 DAP threads are backend execution contexts (vCPUs), as listed by {command}`~`. Stops halt the whole target and set `allThreadsStopped`. Inspect Windows threads with {command}`!process`, {command}`!stacks`, and {command}`!thread`; parked `_ETHREAD`s cannot be stepped or resumed.
 
-The call stack uses {command}`k`, with source lines from private PDBs. Frame names and source lines retain the address space used to recover each frame, including a parked thread's process address space. `.thread <ethread>` selects a parked Windows thread’s saved context. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
+The call stack uses {command}`k`, with source lines from private PDBs. Frame names and source lines retain the address space used to recover each frame, including a parked thread's process address space. The stack starts from the console's context: `.thread <ethread>` selects a parked Windows thread’s saved context, or, for a thread whose vCPU is halted in the Windows hypervisor, the VTL0 state the hypervisor saved; {command}`.cxr` selects a context record. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
 
 ### Locals, registers, and watches
 
@@ -178,7 +178,7 @@ Locals and parameters use PDB locations, as in {command}`dv`. Caller frames cont
 
 Structs, unions, arrays, and pointers expand through {command}`dt` decoding. Null pointers and unresolved or zero-sized types cannot expand. Use console {command}`dt` to inspect the raw layout.
 
-The Registers scope is {command}`r`. Frame 0 is the live register file and is writable, while caller frames show the sparse recovered context. Under a parked Windows thread every frame is recovered, so none is writable.
+The Registers scope is {command}`r`. Frame 0 is the live register file and is writable, while caller frames show the sparse recovered context. A stack walked from a saved context (a parked thread, {command}`.cxr`, the hypervisor's saved VTL0 state) is recovered in every frame, so none is writable.
 
 Watch and hover use [core expressions](../reference/expressions.md), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Expressions see the selected frame's registers and read the address space its stack was recovered in, as its locals do. The Debug Console evaluates in the console's inspection context instead, so a {command}`.process` scope applies there. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
 

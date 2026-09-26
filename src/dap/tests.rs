@@ -320,6 +320,7 @@ fn a_console_context_change_invalidates_the_clients_view() {
         frame_base: None,
         registers: HashMap::new(),
         seed_registers: HashMap::new(),
+        seed_live: true,
         dtb: 0,
     });
     server.vars.push(VarRef::Locals(0));
@@ -358,6 +359,7 @@ fn stack_frames_use_recovered_symbol_and_source_metadata() {
         frame_base: None,
         registers: HashMap::new(),
         seed_registers: HashMap::new(),
+        seed_live: true,
         dtb: 0,
     });
 
@@ -411,6 +413,7 @@ fn locals_come_from_the_address_space_the_frame_was_recovered_in() {
         frame_base: None,
         registers: HashMap::from([("rip".to_string(), ip), ("rbx".to_string(), 0x2a)]),
         seed_registers: HashMap::new(),
+        seed_live: true,
         dtb: process_dtb,
     });
 
@@ -468,6 +471,7 @@ fn watches_evaluate_in_the_address_space_the_frame_was_recovered_in() {
         frame_base: None,
         registers: HashMap::from([("rip".to_string(), ip), ("rbx".to_string(), 0x2a)]),
         seed_registers: HashMap::new(),
+        seed_live: true,
         dtb: process_dtb,
     });
 

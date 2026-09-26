@@ -109,12 +109,14 @@ finally:
 
 `stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops: their temporary sites in secure-kernel code are debug-register breakpoints in free slots, never code patches. NT process/thread filters, software breakpoints, and data watches in secure modules are refused. See the [VTL1 limits and tested configuration](../platforms/vbs.md).
 
-A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, reports where its VTLs left off in `cpu.saved_vtl`, read from the hypervisor's saved state: `["VTL0 nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered from it. It needs the VM's `hv-evmcs` enlightenment and is empty otherwise; see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor). To walk NT's stack from there, select the saved context with {command}`.vtlcxr` in the same `command()` line as what uses it, since the next call starts from the live registers again:
+A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, reports where its VTLs left off in `cpu.saved_vtl`, read from the hypervisor's saved state: `["VTL0 nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered from it. It needs the VM's `hv-evmcs` enlightenment and is empty otherwise; see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor). The NT thread on that vCPU unwinds from the saved VTL0 state, so `backtrace()` walks NT's stack while `cpu.symbol` still names the hypervisor:
 
 ```python
 for cpu in dbg.cpus:
     print(cpu.id, cpu.symbol, cpu.saved_vtl)   # p01.01 hvix64+0x3a6bde ['VTL0 nt!HalProcessorIdle+0xf']
-print(dbg.command(".vtlcxr; k 5"))
+    if cpu.thread:
+        for frame in cpu.thread.backtrace(limit=5):
+            print("   ", frame.symbol)              # nt!HalProcessorIdle+0xf, nt!PpmIdleDefaultExecute+0x2b, ...
 ```
 
 ## Run control and breakpoints

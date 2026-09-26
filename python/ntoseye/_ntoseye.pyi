@@ -1971,6 +1971,8 @@ class Thread:
     def backtrace(self, /, limit: int = 64) -> list[Frame]:
         """
         Recover this thread's stack from live registers or its parked context.
+        A thread whose processor is halted in the Windows hypervisor unwinds
+        from the VTL0 state the hypervisor saved, where NT left off.
         """
     @property
     def cpu(self, /) -> Cpu |None:

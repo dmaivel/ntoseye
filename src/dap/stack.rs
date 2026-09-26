@@ -143,7 +143,7 @@ impl Server {
         // Goes through the session so a Windows thread selected in the console
         // (`.thread`) is the stack the client sees, instead of whatever the
         // vCPU is running.
-        let (recovered, seed) = session
+        let (recovered, seed, seed_live) = session
             .recovered_backtrace(STACK_FRAME_LIMIT)
             .map_err(|error| error.to_string())?;
         for (index, frame) in recovered.frames.iter().enumerate() {
@@ -157,6 +157,7 @@ impl Server {
                 frame_base: frame.frame_base,
                 registers: frame.registers.clone(),
                 seed_registers: seed.clone(),
+                seed_live,
                 dtb: recovered.dtb,
             });
         }
@@ -212,10 +213,10 @@ impl Server {
     /// Re-read the live register file into a frame-0 handle, so the frame
     /// context this adapter installs for locals and expressions matches the
     /// target after a write (`setVariable`, or `r rax=...` in the console).
-    /// Caller frames keep their recovered snapshot, and so does a parked
-    /// Windows thread, whose `read_registers` is refused.
+    /// Caller frames keep their recovered snapshot, and so does a walk not
+    /// seeded from the vCPU (a parked thread, a console-selected context).
     pub(super) fn refresh_live_frame(&mut self, handle: usize) {
-        if self.frames[handle].index != 0 {
+        if self.frames[handle].index != 0 || !self.frames[handle].seed_live {
             return;
         }
         let Some(session) = self.session.as_mut() else {
@@ -236,12 +237,6 @@ impl Server {
     pub(super) fn select_frame(&mut self, handle: usize) -> result::Result<(), String> {
         self.select_thread(self.frames[handle].thread)?;
         self.refresh_live_frame(handle);
-        // The walk was seeded from the vCPU unless a parked Windows thread
-        // supplied its saved context.
-        let seed_live = self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.parked_windows_thread().is_none());
         let frame = &self.frames[handle];
         let selected = SelectedFrame {
             index: frame.index,
@@ -250,7 +245,7 @@ impl Server {
             frame_base: frame.frame_base,
             registers: frame.registers.clone(),
             seed_registers: frame.seed_registers.clone(),
-            seed_live,
+            seed_live: frame.seed_live,
             dtb: Some(frame.dtb),
         };
         if let Some(session) = self.session.as_mut() {

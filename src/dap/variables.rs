@@ -135,9 +135,9 @@ impl Server {
         // snapshot taken when the stack was walked: a write (`setVariable`, or
         // `r rax=...` in the console) then shows up immediately. Caller frames
         // keep their recovered snapshot, which is all unwind metadata
-        // justifies, and so does a parked Windows thread, which has no live
-        // file at all.
-        let live_context = frame.index == 0 && session.parked_windows_thread().is_none();
+        // justifies, and so does a walk not seeded from the vCPU (a parked
+        // thread, `.cxr`, a thread's saved VTL0 state).
+        let live_context = frame.index == 0 && frame.seed_live;
         let live = live_context
             .then(|| session.read_registers().ok())
             .flatten();
@@ -332,14 +332,15 @@ impl Server {
                             .to_string(),
                     );
                 }
-                let session = self.session()?;
-                if session.parked_windows_thread().is_some() {
+                if !self.frames[handle].seed_live {
                     return Err(
-                        "a parked Windows thread's registers are recovered from its saved context \
-                         and are not writable; select a vCPU with `.thread` first"
+                        "this stack was walked from a saved context (a parked thread, `.cxr`, or \
+                         the VTL0 state the hypervisor saved), not the vCPU's registers, so they \
+                         are not writable"
                             .to_string(),
                     );
                 }
+                let session = self.session()?;
                 session
                     .write_register(&name, value)
                     .map_err(|error| error.to_string())?;
@@ -349,7 +350,7 @@ impl Server {
             VarRef::Locals(handle) => {
                 let ip = self.frames[handle].ip;
                 let dtb = self.frames[handle].dtb;
-                let live_frame = self.frames[handle].index == 0;
+                let live_frame = self.frames[handle].index == 0 && self.frames[handle].seed_live;
                 let session = self.session()?;
                 let locals = session
                     .target
@@ -372,8 +373,8 @@ impl Server {
                     LocalVariableLocation::Register { register } => {
                         if !live_frame {
                             return Err(format!(
-                                "'{name}' lives in a register recovered from unwind metadata for a \
-                                 caller frame; writing it would change the live register instead"
+                                "'{name}' lives in a register recovered for this frame, not the \
+                                 vCPU's; writing it would change the vCPU's register instead"
                             ));
                         }
                         let register = register.clone();

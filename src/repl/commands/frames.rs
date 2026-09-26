@@ -828,7 +828,11 @@ pub fn registers_from_trap_frame(frame: &KtrapFrame) -> HashMap<String, u64> {
 
 /// Print a recovered (partial) register set sorted by name, one row per
 /// register at `indent` columns, under an optional heading line.
-fn print_sparse_registers(registers: &HashMap<String, u64>, heading: Option<&str>, indent: usize) {
+pub(super) fn print_sparse_registers(
+    registers: &HashMap<String, u64>,
+    heading: Option<&str>,
+    indent: usize,
+) {
     let mut names: Vec<_> = registers.keys().collect();
     names.sort();
     if let Some(heading) = heading {

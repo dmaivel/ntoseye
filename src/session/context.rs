@@ -7,7 +7,7 @@ use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::memory::DTB_IDENTITY;
-use crate::session::{Selection, Session, VcpuInfo};
+use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
@@ -135,25 +135,59 @@ impl Session {
     }
 
     /// Make `thread` the inspection context (`.thread`): a thread that is on
-    /// a vCPU switches the live register context to that vCPU; any other
-    /// thread is parked (stack-only, no coherent register file). Returns the
-    /// vCPU id when the selection is live.
-    pub fn select_windows_thread(&mut self, thread: &ThreadInfo) -> Result<Option<String>> {
+    /// a vCPU switches to that vCPU (see [`Self::select_running_windows_thread`]);
+    /// any other thread is parked (stack-only, no coherent register file).
+    pub fn select_windows_thread(&mut self, thread: &ThreadInfo) -> Result<ThreadContext> {
         let active = self.active_thread_map();
         match active.get(&thread.ethread.0) {
             Some((vcpu, _)) => {
                 let vcpu = vcpu.clone();
-                self.set_current_thread(&vcpu)?;
-                self.target.selected_frame = None;
-                self.target
-                    .set_current_windows_thread_context(thread.clone());
-                Ok(Some(vcpu))
+                self.select_running_windows_thread(&vcpu, thread)
             }
             None => {
                 self.select_parked_windows_thread(thread);
-                Ok(None)
+                Ok(ThreadContext::Parked)
             }
         }
+    }
+
+    /// Switch to `vcpu` with `thread`, the Windows thread it runs, as the
+    /// inspection context. A vCPU halted in the Windows hypervisor holds the
+    /// hypervisor's registers, not the thread's: there the VTL0 state the
+    /// hypervisor saved becomes the selected context, so registers, `k`, and
+    /// expressions see where NT left off. Without a saved state (no eVMCS)
+    /// the vCPU's own registers stay the context.
+    pub fn select_running_windows_thread(
+        &mut self,
+        vcpu: &str,
+        thread: &ThreadInfo,
+    ) -> Result<ThreadContext> {
+        self.set_current_thread(vcpu)?;
+        self.target
+            .set_current_windows_thread_context(thread.clone());
+        match self.saved_vtl0_context() {
+            Some(saved) => {
+                self.select_frame(saved);
+                Ok(ThreadContext::SavedVtl0(vcpu.to_string()))
+            }
+            None => Ok(ThreadContext::Live(vcpu.to_string())),
+        }
+    }
+
+    /// The VTL0 state the Windows hypervisor saved for the current vCPU, when
+    /// that vCPU is halted in the hypervisor and the state is found.
+    fn saved_vtl0_context(&self) -> Option<SelectedFrame> {
+        let registers = self.target.registers.as_ref()?;
+        let cr3 = *registers.get(self.target.arch().dtb_register())?;
+        let rip = *registers.get("rip")?;
+        if resolve_thread_trace_context_at(&self.target, cr3, rip).description != HYPERVISOR_CONTEXT
+        {
+            return None;
+        }
+        let processor = processor_index_from_backend_thread_id(&self.current_thread);
+        let saved = self.target.saved_vtl_contexts(cr3, processor).ok()?;
+        let vtl0 = saved.into_iter().find(|context| context.vtl == 0)?;
+        Some(SelectedFrame::from_registers(0, vtl0.registers()))
     }
 
     /// Drop any Windows-thread selection and return to the backend's current
@@ -335,6 +369,20 @@ impl Session {
         patch: impl FnOnce(&RegisterMap, &mut [u8]) -> Result<()>,
     ) -> Result<()> {
         self.require_live_register_context()?;
+        // A recovered context (a caller frame, `.cxr`, a thread's saved VTL0
+        // state) is not the vCPU's register file; writing would change the
+        // vCPU's instead.
+        if self
+            .target
+            .selected_frame
+            .as_ref()
+            .is_some_and(|frame| !frame.is_live())
+        {
+            return Err(Error::DebugInfo(
+                "the selected context's registers are recovered, not the vCPU's, and are read-only"
+                    .into(),
+            ));
+        }
         if self.backend.is_running() {
             return Err(Error::TargetRunning(REGISTERS_NEED_HALT));
         }

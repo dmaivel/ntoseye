@@ -400,6 +400,19 @@ impl Selection {
     }
 }
 
+/// Where a selected Windows thread's register context comes from, as
+/// [`Session::select_windows_thread`] installed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadContext {
+    /// Running on this vCPU, whose live register file is the thread's.
+    Live(String),
+    /// Running on this vCPU, which is halted in the Windows hypervisor: the
+    /// context is the VTL0 state the hypervisor saved, where NT left off.
+    SavedVtl0(String),
+    /// Not running: stack only, no register file.
+    Parked,
+}
+
 /// The root owner of a live debugging session: the introspection context, the
 /// backend that drives the target, and the session state layered on top.
 pub struct Session {

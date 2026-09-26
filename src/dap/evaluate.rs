@@ -181,8 +181,10 @@ impl Server {
     /// Tell the client its frames and variables are stale after a console
     /// command moved the inspection context. Frame ids and variable references
     /// belong to the context they were built in, so they are dropped here too.
+    /// The session's selected context is the console's new one (`.cxr`, a
+    /// thread's saved VTL0 state) and stays: the next stack walk starts there.
     pub(super) fn invalidate_context(&mut self) {
-        self.invalidate_stop_state();
+        self.forget_handles();
         if self.supports_invalidated {
             self.send_event(
                 "invalidated",

@@ -256,15 +256,17 @@ impl Thread {
     }
 
     /// Recover this thread's stack from live registers or its parked context.
+    /// A thread whose processor is halted in the Windows hypervisor unwinds
+    /// from the VTL0 state the hypervisor saved, where NT left off.
     #[pyo3(signature = (limit=64))]
     fn backtrace(&self, py: Python<'_>, limit: usize) -> PyResult<Vec<Frame>> {
         let process = self.process_info(py)?;
         let context = self.context(process.clone());
         let (frames, live_thread) = self.owner.with_in(py, &context, |session| {
-            let (trace, _) = session
+            let (trace, _, live) = session
                 .recovered_backtrace(limit.clamp(1, 4096))
                 .map_err(err)?;
-            Ok((trace.frames, session.parked_windows_thread().is_none()))
+            Ok((trace.frames, live))
         })?;
         let owner = self.owner.derive(py);
         Ok(frames

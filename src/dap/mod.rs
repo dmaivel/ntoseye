@@ -69,6 +69,10 @@ struct FrameRef {
     frame_base: Option<u64>,
     registers: HashMap<String, u64>,
     seed_registers: HashMap<String, u64>,
+    /// Whether the walk was seeded from the vCPU's live register file, as
+    /// opposed to a parked thread's saved context or a console-selected one
+    /// (`.cxr`, a thread's saved VTL0 state).
+    seed_live: bool,
     /// The address space the frame was recovered in, where its locals live.
     /// A parked thread's frames belong to its own process, whatever the
     /// console's inspection context is.
@@ -596,12 +600,17 @@ impl Server {
     /// Frame ids, variable references and the selected frame are only valid
     /// within one stop.
     fn invalidate_stop_state(&mut self) {
-        self.frames.clear();
-        self.vars.clear();
-        self.var_refs.clear();
+        self.forget_handles();
         if let Some(session) = self.session.as_mut() {
             session.target.selected_frame = None;
         }
+    }
+
+    /// Drop the frame ids and variable references handed to the client.
+    fn forget_handles(&mut self) {
+        self.frames.clear();
+        self.vars.clear();
+        self.var_refs.clear();
     }
 
     fn on_modules(&mut self, args: &Value) -> Handled {
