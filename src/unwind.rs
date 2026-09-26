@@ -703,8 +703,11 @@ fn switch_seed_is_plausible(thread: &ThreadInfo, seed: &RegisterContext) -> bool
 
 /// Build a non-running Windows thread's kernel stack, keeping the sparse
 /// registers recovered for each frame, without manufacturing a persistent
-/// register context. A real KTRAP_FRAME is preferred; otherwise the
-/// context-switch bootstrap remains private to this stack walk.
+/// register context. The walk starts where the thread was switched out (its
+/// `KernelStack` context-switch frame), its most recent state; it unwinds
+/// through a system call into user mode. `KTHREAD.TrapFrame` is only the
+/// fallback: it is older (the system call's entry, or an interrupt taken
+/// since), so a walk from it skips the frames above it.
 ///
 /// A host that only renders frames wants [`build_parked_thread_stack`]; a host
 /// that also selects frames and resolves their locals (the DAP call stack)
@@ -732,30 +735,6 @@ pub fn build_parked_thread_recovered_stack(
         ));
     }
     let mut failures = Vec::new();
-
-    if let Some(address) = thread.trap_frame {
-        match decode_ktrap_frame_for_thread(debugger, process_dtb, address)
-            .ok()
-            .and_then(|registers| RegisterContext::from_saved(&registers))
-        {
-            Some(seed) if seed.rip != 0 && seed.rsp != 0 => {
-                return Ok(ThreadRecoveredStack {
-                    source: ThreadStackSource::TrapFrame { address },
-                    stacktrace: build_recovered_stacktrace_seeded(
-                        debugger,
-                        &trace,
-                        seed,
-                        FrameSource::Seed,
-                        limit,
-                        HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
-                    ),
-                });
-            }
-            _ => failures.push("KTHREAD.TrapFrame is absent or unusable".to_string()),
-        }
-    } else {
-        failures.push("KTHREAD.TrapFrame is not present".to_string());
-    }
 
     if let Some(kernel_stack) = thread.kernel_stack {
         let pdb_seed = decode_kswitch_frame_seed(debugger, process_dtb, kernel_stack)
@@ -786,6 +765,30 @@ pub fn build_parked_thread_recovered_stack(
         }
     } else {
         failures.push("KTHREAD.KernelStack is not present".to_string());
+    }
+
+    if let Some(address) = thread.trap_frame {
+        match decode_ktrap_frame_for_thread(debugger, process_dtb, address)
+            .ok()
+            .and_then(|registers| RegisterContext::from_saved(&registers))
+        {
+            Some(seed) if seed.rip != 0 && seed.rsp != 0 => {
+                return Ok(ThreadRecoveredStack {
+                    source: ThreadStackSource::TrapFrame { address },
+                    stacktrace: build_recovered_stacktrace_seeded(
+                        debugger,
+                        &trace,
+                        seed,
+                        FrameSource::Seed,
+                        limit,
+                        HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
+                    ),
+                });
+            }
+            _ => failures.push("KTHREAD.TrapFrame is absent or unusable".to_string()),
+        }
+    } else {
+        failures.push("KTHREAD.TrapFrame is not present".to_string());
     }
 
     Err(Error::DebugInfo(format!(
