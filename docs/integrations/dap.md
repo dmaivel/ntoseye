@@ -170,7 +170,7 @@ When the command line already pinned a target (`ntoseye dap --dump crash.dmp`), 
 
 DAP threads are backend execution contexts (vCPUs), as listed by {command}`~`. Stops halt the whole target and set `allThreadsStopped`. Inspect Windows threads with {command}`!process`, {command}`!stacks`, and {command}`!thread`; parked `_ETHREAD`s cannot be stepped or resumed.
 
-The call stack uses {command}`k`, with source lines from private PDBs. Frame names and source lines retain the address space used to recover each frame, including a parked thread's process address space. The stack starts from the console's context: `.thread <ethread>` selects a parked Windows thread’s saved context, or, for a thread whose vCPU is halted in the Windows hypervisor, the VTL0 state the hypervisor saved; {command}`.cxr` selects a context record. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
+The call stack uses {command}`k`, with source lines from private PDBs. Frame names and source lines retain the address space used to recover each frame, including a parked thread's process address space. The current vCPU's stack starts from the console's context: `.thread <ethread>` selects a parked Windows thread’s saved context, or, for a thread whose vCPU is halted in the Windows hypervisor, the VTL0 state the hypervisor saved; {command}`.cxr` and {command}`.trap` select a context record or trap frame. Other vCPUs' stacks start from their own registers, and showing them leaves the console's context in place; selecting one of their frames switches the console to that vCPU. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
 
 ### Locals, registers, and watches
 

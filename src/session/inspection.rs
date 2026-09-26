@@ -389,13 +389,9 @@ impl Session {
         build_parked_thread_stack(&self.target, thread, limit)
     }
 
-    /// The stack of the thread `vcpu` runs, from that vCPU's context; `None`
-    /// when its registers cannot be read (the target runs).
-    fn running_thread_stack(
-        &mut self,
-        vcpu: &str,
-        limit: usize,
-    ) -> Result<Option<ThreadStackTrace>> {
+    /// `vcpu`'s register file, read without making it the current vCPU;
+    /// `None` while the target runs or when the backend cannot read it.
+    fn read_vcpu_registers(&mut self, vcpu: &str) -> Result<Option<Vec<u8>>> {
         if self.backend.is_running() {
             return Ok(None);
         }
@@ -404,7 +400,39 @@ impl Session {
             .set_current_thread(vcpu)
             .and_then(|()| self.backend.read_registers());
         self.backend.set_current_thread(&self.current_thread)?;
-        let Ok(registers) = registers else {
+        Ok(registers.ok())
+    }
+
+    /// [`Self::recovered_backtrace`] for `vcpu` without selecting it: the
+    /// current vCPU's stack is the inspection context's (a parked thread,
+    /// `.cxr`, `.trap`), any other vCPU's starts from its own registers. A
+    /// host showing every vCPU's stack (a DAP client) walks them this way, so
+    /// looking at one does not move the context the console selected.
+    pub fn recovered_vcpu_backtrace(
+        &mut self,
+        vcpu: &str,
+        limit: usize,
+    ) -> Result<(RecoveredStackTrace, HashMap<String, u64>, bool)> {
+        if vcpu == self.current_thread {
+            return self.recovered_backtrace(limit);
+        }
+        let registers = self
+            .read_vcpu_registers(vcpu)?
+            .ok_or_else(|| Error::DebugInfo(format!("{vcpu}'s registers are unavailable")))?;
+        let seed = self.register_map.to_hashmap(&registers);
+        let trace =
+            build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit);
+        Ok((trace, seed, true))
+    }
+
+    /// The stack of the thread `vcpu` runs, from that vCPU's context; `None`
+    /// when its registers cannot be read (the target runs).
+    fn running_thread_stack(
+        &mut self,
+        vcpu: &str,
+        limit: usize,
+    ) -> Result<Option<ThreadStackTrace>> {
+        let Some(registers) = self.read_vcpu_registers(vcpu)? else {
             return Ok(None);
         };
         let values = self.register_map.to_hashmap(&registers);

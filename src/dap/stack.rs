@@ -47,7 +47,8 @@ impl Server {
         }
     }
 
-    pub(super) fn select_thread(&mut self, thread: i64) -> result::Result<(), String> {
+    /// The backend vCPU the client's `thread` id names.
+    fn resolve_thread(&mut self, thread: i64) -> result::Result<String, String> {
         // Report a missing target before a missing thread: without a session
         // the thread table is empty for that reason, not because the client
         // named a stale id.
@@ -55,9 +56,12 @@ impl Server {
         if self.threads.is_empty() {
             self.sync_threads();
         }
-        let Some(backend_id) = self.backend_thread_id(thread) else {
-            return Err(format!("unknown thread id {thread}"));
-        };
+        self.backend_thread_id(thread)
+            .ok_or_else(|| format!("unknown thread id {thread}"))
+    }
+
+    pub(super) fn select_thread(&mut self, thread: i64) -> result::Result<(), String> {
+        let backend_id = self.resolve_thread(thread)?;
         let session = self.session()?;
         if session.current_thread == backend_id {
             return Ok(());
@@ -108,11 +112,11 @@ impl Server {
 
     pub(super) fn on_stack_trace(&mut self, args: &Value) -> Handled {
         let thread = arg_i64(args, "threadId").unwrap_or(1);
-        self.select_thread(thread)?;
+        let vcpu = self.resolve_thread(thread)?;
         // Clients walk every stopped thread before asking for scopes, so a
         // thread already walked in this stop keeps the handles it was given.
         if !self.frames.iter().any(|frame| frame.thread == thread) {
-            self.build_frames(thread)?;
+            self.build_frames(thread, &vcpu)?;
         }
 
         let start = arg_i64(args, "startFrame").unwrap_or(0).max(0) as usize;
@@ -137,14 +141,14 @@ impl Server {
         Ok(Some(json!({"stackFrames": frames, "totalFrames": total})))
     }
 
-    /// Walk the selected thread's stack and publish one handle per frame.
-    fn build_frames(&mut self, thread: i64) -> result::Result<(), String> {
+    /// Walk `vcpu`'s stack, the client's `thread`, and publish one handle per
+    /// frame. Walking does not select it: the current vCPU shows the console's
+    /// context (a `.thread`, `.cxr`, or `.trap` selection), and a client
+    /// walking every thread leaves that context where the console put it.
+    fn build_frames(&mut self, thread: i64, vcpu: &str) -> result::Result<(), String> {
         let session = self.session()?;
-        // Goes through the session so a Windows thread selected in the console
-        // (`.thread`) is the stack the client sees, instead of whatever the
-        // vCPU is running.
         let (recovered, seed, seed_live) = session
-            .recovered_backtrace(STACK_FRAME_LIMIT)
+            .recovered_vcpu_backtrace(vcpu, STACK_FRAME_LIMIT)
             .map_err(|error| error.to_string())?;
         for (index, frame) in recovered.frames.iter().enumerate() {
             self.frames.push(FrameRef {

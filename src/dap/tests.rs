@@ -10,7 +10,9 @@ use crate::guest::ProcessInfo;
 use crate::kd::context::{OFFSET_RIP, OFFSET_RSP};
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::session::session_over_memory;
+use crate::session::tests::{MockBackend, session_with_mock};
 use crate::symbols::{LocalVariableLocation, ProcedureLocal};
+use crate::target::SelectedFrame;
 
 #[test]
 fn a_disassembly_request_cannot_ask_for_unbounded_work() {
@@ -368,6 +370,35 @@ fn a_console_cxr_invalidates_the_clients_view() {
             .iter()
             .any(|message| message["event"] == "invalidated"),
         "{messages:?}"
+    );
+}
+
+/// A client walks every stopped thread. Showing another vCPU's stack must not
+/// select that vCPU, which would drop the context the console selected.
+#[test]
+fn walking_another_vcpu_keeps_the_consoles_context() {
+    let mut session = session_with_mock(MockBackend::default().one_vcpu());
+    session.current_thread = "p01.01".to_string();
+    session.select_frame(SelectedFrame::from_registers(
+        0,
+        HashMap::from([("rip".to_string(), 0x1010), ("rsp".to_string(), 0x1080)]),
+    ));
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    server.threads = vec!["p01.01".to_string(), "p01.02".to_string()];
+
+    server.on_stack_trace(&json!({"threadId": 2})).unwrap();
+
+    let session = server.session.as_ref().unwrap();
+    assert_eq!(session.current_thread, "p01.01");
+    assert!(session.target.selected_frame.is_some());
+    let body = server
+        .on_stack_trace(&json!({"threadId": 1}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        body["stackFrames"][0]["instructionPointerReference"],
+        "0x1010"
     );
 }
 

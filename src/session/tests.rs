@@ -113,6 +113,12 @@ impl MockBackend {
         self
     }
 
+    /// Model a backend that selects vCPU `p01.01` (and accepts any id).
+    pub fn one_vcpu(mut self) -> Self {
+        self.one_vcpu = true;
+        self
+    }
+
     /// Model a transport that reports TF and DR6 with the stop, as KD's
     /// state-change control report does.
     fn reporting_trap_state(mut self, eflags: u64, dr6: u64) -> Self {
