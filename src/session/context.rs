@@ -11,7 +11,7 @@ use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
-    RecoveredStackTrace, build_stacktrace_with_context, build_stacktrace_with_register_values,
+    RecoveredStackTrace, build_stacktrace_with_register_values, build_thread_stacktrace,
     resolve_thread_trace_context_at, saved_vtl_summary, try_format_symbol,
 };
 
@@ -304,8 +304,13 @@ impl Session {
         }
         let registers = self.read_registers()?;
         let seed = self.register_map.to_hashmap(&registers);
-        let trace =
-            build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit);
+        let trace = build_thread_stacktrace(
+            &self.target,
+            &self.register_map,
+            &registers,
+            self.target.windows_thread_selection.as_ref(),
+            limit,
+        );
         Ok((trace, seed, true))
     }
 

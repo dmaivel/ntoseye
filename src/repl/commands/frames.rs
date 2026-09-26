@@ -12,8 +12,8 @@ use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_ri
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
-    RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_context,
-    build_stacktrace_with_register_values, describe_saved_vtl, resolve_thread_trace_context,
+    RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_register_values,
+    build_thread_stacktrace, describe_saved_vtl, resolve_thread_trace_context,
     resolve_thread_trace_context_at, try_format_symbol,
 };
 
@@ -709,10 +709,11 @@ impl ReplState<'_> {
                     return Ok(());
                 }
             };
-            build_stacktrace_with_context(
+            build_thread_stacktrace(
                 &self.ctx.target,
                 &self.ctx.register_map,
                 &regs,
+                self.ctx.target.windows_thread_selection.as_ref(),
                 frame_limit,
             )
         };

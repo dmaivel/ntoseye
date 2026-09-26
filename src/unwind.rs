@@ -43,6 +43,7 @@ mod amd64;
 mod arm64;
 mod tracer;
 mod walk;
+mod wow64;
 
 use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
 use arm64::{Arm64Lookup, call_return_address, lookup_arm64_runtime_function};
@@ -547,6 +548,24 @@ pub fn build_stacktrace_with_context(
     build_stacktrace_from_values(debugger, register_map.to_hashmap(regs), limit)
 }
 
+/// [`build_stacktrace_with_context`] for the registers of `thread`, the
+/// Windows thread they belong to: a WOW64 thread's walk goes on into its x86
+/// frames where it left x86 code (see [`wow64`]).
+pub fn build_thread_stacktrace(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    thread: Option<&ThreadInfo>,
+    limit: usize,
+) -> RecoveredStackTrace {
+    let mut stack = build_stacktrace_with_context(debugger, register_map, regs, limit);
+    if let Some(thread) = thread {
+        let trace = resolve_thread_trace_context(debugger, stack.dtb);
+        wow64::add_x86_frames(debugger, &trace, thread, &mut stack, limit);
+    }
+    stack
+}
+
 /// Build a recovered trace from a sparse selected-frame register map. This is
 /// used after `.frame`, `.cxr`, `.trap`, or a saved VTL0 state, where there is
 /// no backend packet to provide the original register byte layout. A register
@@ -767,16 +786,18 @@ pub fn build_parked_thread_recovered_stack(
         };
         match seed {
             Ok(seed) if switch_seed_is_plausible(thread, &seed) => {
+                let mut stacktrace = build_recovered_stacktrace_seeded(
+                    debugger,
+                    &trace,
+                    seed,
+                    FrameSource::Seed,
+                    limit,
+                    HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
+                );
+                wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::ContextSwitch { kernel_stack },
-                    stacktrace: build_recovered_stacktrace_seeded(
-                        debugger,
-                        &trace,
-                        seed,
-                        FrameSource::Seed,
-                        limit,
-                        HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
-                    ),
+                    stacktrace,
                 });
             }
             Ok(_) => failures.push(
@@ -794,16 +815,18 @@ pub fn build_parked_thread_recovered_stack(
             .and_then(|registers| RegisterContext::from_saved(&registers))
         {
             Some(seed) if seed.rip != 0 && seed.rsp != 0 => {
+                let mut stacktrace = build_recovered_stacktrace_seeded(
+                    debugger,
+                    &trace,
+                    seed,
+                    FrameSource::Seed,
+                    limit,
+                    HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
+                );
+                wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::TrapFrame { address },
-                    stacktrace: build_recovered_stacktrace_seeded(
-                        debugger,
-                        &trace,
-                        seed,
-                        FrameSource::Seed,
-                        limit,
-                        HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
-                    ),
+                    stacktrace,
                 });
             }
             _ => failures.push("KTHREAD.TrapFrame is absent or unusable".to_string()),

@@ -11,14 +11,15 @@ use crate::disasm::{DisasmRow, decode_code, decode_preceding};
 use crate::error::{Error, Result};
 use crate::kd::{context, context_arm64};
 use crate::memory::{PAGE_SIZE, read_page_chunks};
+use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead};
 use crate::target::ThreadInfo;
 use crate::target::usermode::ImageCheckDetail;
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
-    build_parked_thread_recovered_stack, build_parked_thread_stack, build_stacktrace_with_context,
-    build_stacktrace_with_register_values, format_symbol, function_range,
+    build_parked_thread_recovered_stack, build_parked_thread_stack,
+    build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_range,
     resolve_thread_trace_context,
 };
 
@@ -366,7 +367,7 @@ impl Session {
         limit: usize,
     ) -> Result<ThreadStackTrace> {
         if let Some(vcpu) = running_on
-            && let Some(trace) = self.running_thread_stack(vcpu, limit)?
+            && let Some(trace) = self.running_thread_stack(vcpu, thread, limit)?
         {
             return Ok(trace);
         }
@@ -414,8 +415,14 @@ impl Session {
             );
             return Ok((trace, saved, false));
         }
-        let trace =
-            build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit);
+        let thread = windows_thread_on_backend_thread(&self.target, vcpu);
+        let trace = build_thread_stacktrace(
+            &self.target,
+            &self.register_map,
+            &registers,
+            thread.as_ref(),
+            limit,
+        );
         Ok((trace, live, true))
     }
 
@@ -424,6 +431,7 @@ impl Session {
     fn running_thread_stack(
         &mut self,
         vcpu: &str,
+        thread: &ThreadInfo,
         limit: usize,
     ) -> Result<Option<ThreadStackTrace>> {
         let Some(registers) = self.read_vcpu_registers(vcpu)? else {
@@ -450,7 +458,13 @@ impl Session {
             ),
             None => (
                 ThreadStackSource::Live,
-                build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit),
+                build_thread_stacktrace(
+                    &self.target,
+                    &self.register_map,
+                    &registers,
+                    Some(thread),
+                    limit,
+                ),
             ),
         };
         Ok(Some(ThreadStackTrace {

@@ -12,7 +12,7 @@ use crate::target::Target;
 use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
 use crate::unwind::{
-    FrameSource, StackTrace, ThreadTraceContext, build_stacktrace, format_symbol,
+    FrameSource, StackTrace, ThreadTraceContext, build_thread_stacktrace, format_symbol,
     preferred_code_dtb,
 };
 
@@ -410,7 +410,14 @@ pub fn print_stacktrace(
     display_limit: usize,
     embedded: bool,
 ) {
-    let stacktrace = build_stacktrace(debugger, register_map, regs, build_limit);
+    let stacktrace = build_thread_stacktrace(
+        debugger,
+        register_map,
+        regs,
+        debugger.windows_thread_selection.as_ref(),
+        build_limit,
+    )
+    .into_stacktrace();
     print_stacktrace_data(&stacktrace, display_limit, embedded);
 }
 
