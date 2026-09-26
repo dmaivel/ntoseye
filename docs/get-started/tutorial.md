@@ -23,7 +23,7 @@ target
 kdnet:p1.1>
 ```
 
-Attaching halts the VM. `ntoseye` finds the kernel, loads its symbols from Microsoft's symbol server (cached under `~/.ntoseye/symbols` after the first time), and prints a *stop header*: the processor (`p1.1`), what it was running, and where. Below the header come the registers, a few instructions of disassembly, and the top of the stack.
+Attaching halts the VM. `ntoseye` finds the kernel, loads its symbols from Microsoft's symbol server (cached under `~/.ntoseye/symbols` after the first time), and prints a *stop header*: the processor (`p1.1`), what it was running, and where. Below the header come the registers, a few instructions of disassembly, and the top of the stack; the breakpoint [below](#stop-on-a-kernel-function) shows a whole stop.
 
 The first stop is Windows answering the break-in: its debugger code stops in `nt!DbgBreakPointWithStatus`, here on a `System` thread that was receiving KDNET's packets. With the `gdb` backend, which halts the vCPUs from outside, the first stop is wherever each one happened to be.
 
@@ -98,12 +98,37 @@ VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  p1.1 svchost.exe (5904) at nt!NtCreateFile
  ├─ breakpoint #0
  ╰─ thread svchost.exe  state Running  ethread ffffe70fb673c080  pid 5904  tid 5932
-...
+
+registers
+  rax fffff80797ac7930   rbx ffffe70fb673c080   rcx 000000a460bfeb70
+  rdx 0000000080100080   rsi 000000a460bfeb28   rdi fffffd86b4006a88
+  rsp fffffd86b4006a68   rbp fffffd86b4006b60   rip fffff80797ac7930
+  r8  000000a460bfeb88   r9  000000a460bfebb8   r10 fffff80797ac7930
+  r11 fffff807978c1cf8   r12 0000000000000000   r13 000000a460bff2c0
+  r14 000000a460bff178   r15 000000a460bfec60   rfl 0000000000040246 [PF ZF IF AC]
+
+disasm
+ > fffff80797ac7930  48 81 ec 88 00 00 00     sub  rsp, 0x88
+   fffff80797ac7937  33 c0                    xor  eax, eax
+   fffff80797ac7939  48 89 44 24 78           mov  qword [rsp+0x78], rax
+   fffff80797ac793e  c7 44 24 70 20 00 00 00  mov  dword [rsp+0x70], 0x20
+   fffff80797ac7946  89 44 24 68              mov  dword [rsp+0x68], eax
+   fffff80797ac794a  48 89 44 24 60           mov  qword [rsp+0x60], rax
+   fffff80797ac794f  89 44 24 58              mov  dword [rsp+0x58], eax
+
+stack
+  #0  fffff80797ac7930  nt!NtCreateFile
+  #1  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
+  #2  00007ff855661864  ntdll!NtCreateFile+0x14
+  #3  00007ff83803bc41  inventorysvc!AslFileMappingCreate+0x1a5
+  #4  00007ff838036be6  inventorysvc!AslFileGetVersionForPath+0x46
+  #5  00007ff8380e82aa  inventorysvc!?IsValidFromOneSettings@TelemetryProvider@@CAJPEBG0_KAEA_N2@Z+0x1de
+  ... 7 more frames
 ```
 
-The header now names the process and thread that called into the kernel. Ctrl+C breaks in at any time while the VM runs.
+The header now names the process and thread that called into the kernel. The disassembly starts at `NtCreateFile`'s first instruction, and `r8` holds its third argument, which the next section reads. The stack is a summary; its `... 7 more frames` is `ntoseye`'s own. Ctrl+C breaks in at any time while the VM runs.
 
-{command}`k` shows the stack. It crosses from the kernel into the calling process's user-mode code, and resolves that too:
+{command}`k` walks the whole stack and adds each frame's stack pointer. It crosses from the kernel into the calling process's user-mode code, and resolves that too:
 
 ```text
 kdnet:p1.1> k
