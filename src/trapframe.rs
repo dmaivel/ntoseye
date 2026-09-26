@@ -37,32 +37,73 @@ pub struct Arm64TrapFrame {
     pub previous_irql: Option<u8>,
 }
 
+/// Which kind of entry built an x64 `_KTRAP_FRAME` (its `ExceptionActive`),
+/// which decides the registers it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrapKind {
+    Interrupt,
+    Exception,
+    SystemCall,
+}
+
+impl TrapKind {
+    fn from_exception_active(value: u64) -> Option<Self> {
+        match value {
+            0 => Some(Self::Interrupt),
+            1 => Some(Self::Exception),
+            2 => Some(Self::SystemCall),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interrupt => "interrupt",
+            Self::Exception => "exception",
+            Self::SystemCall => "system call",
+        }
+    }
+}
+
 /// The x64 state saved by a `_KTRAP_FRAME`. The nonvolatile r12-r15 live in
 /// the accompanying `_KEXCEPTION_FRAME`, not the trap frame.
+///
+/// What a frame holds depends on the entry that built it, `kind`: every
+/// entry saves the volatile registers and rbp, but only a system call saves
+/// rbx, rsi, and rdi, and it stores r10 in the r11 slot (`syscall` keeps the
+/// flags in r11) and writes no error code; only interrupt dispatch keeps the
+/// previous IRQL. A register
+/// the entry does not save is `None` rather than whatever the slot held.
 #[derive(Clone, Debug)]
 pub struct Amd64TrapFrame {
+    /// `None` when the PDB has no `ExceptionActive` or it holds an unknown
+    /// value; then only the registers every entry saves are trusted.
+    pub kind: Option<TrapKind>,
     pub rax: u64,
-    pub rbx: u64,
+    pub rbx: Option<u64>,
     pub rcx: u64,
     pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
+    pub rsi: Option<u64>,
+    pub rdi: Option<u64>,
     pub rbp: u64,
     pub rsp: u64,
     pub r8: u64,
     pub r9: u64,
     pub r10: u64,
-    pub r11: u64,
+    pub r11: Option<u64>,
     pub rip: u64,
     pub cs: u16,
     pub ss: u16,
     pub eflags: u32,
     /// Hardware error code pushed by the CPU for faults that carry one
     /// (page fault, GP fault, ...); otherwise whatever the trap handler wrote.
-    pub error_code: u64,
-    /// `KPROCESSOR_MODE` the trap came from (0 = kernel, 1 = user).
+    /// `None` for a system call, whose entry writes none.
+    pub error_code: Option<u64>,
+    /// `KPROCESSOR_MODE` the trap came from (0 = kernel, 1 = user), from the
+    /// saved `cs` as Windows reads it: the `PreviousMode` field is set only
+    /// by a system call.
     pub previous_mode: u8,
-    pub previous_irql: u8,
+    pub previous_irql: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,28 +162,38 @@ impl KtrapFrame {
         if layout.fields.contains_key("Pc") && !layout.fields.contains_key("Rip") {
             return Self::decode_arm64(layout, address, buf);
         }
+        let kind = field("ExceptionActive")
+            .ok()
+            .and_then(TrapKind::from_exception_active);
+        let system_call = kind == Some(TrapKind::SystemCall);
+        let saved_if = |saved: bool, name: &str| -> Result<Option<u64>> {
+            saved.then(|| field(name)).transpose()
+        };
+        let cs = field("SegCs")? as u16;
         Ok(Self {
             address,
             data: KtrapFrameData::Amd64(Amd64TrapFrame {
+                kind,
                 rax: field("Rax")?,
-                rbx: field("Rbx")?,
+                rbx: saved_if(system_call, "Rbx")?,
                 rcx: field("Rcx")?,
                 rdx: field("Rdx")?,
-                rsi: field("Rsi")?,
-                rdi: field("Rdi")?,
+                rsi: saved_if(system_call, "Rsi")?,
+                rdi: saved_if(system_call, "Rdi")?,
                 rbp: field("Rbp")?,
                 rsp: field("Rsp")?,
                 r8: field("R8")?,
                 r9: field("R9")?,
                 r10: field("R10")?,
-                r11: field("R11")?,
+                r11: saved_if(!system_call, "R11")?,
                 rip: field("Rip")?,
-                cs: field("SegCs")? as u16,
+                cs,
                 ss: field("SegSs")? as u16,
                 eflags: field("EFlags")? as u32,
-                error_code: field("ErrorCode")?,
-                previous_mode: field("PreviousMode")? as u8,
-                previous_irql: field("PreviousIrql")? as u8,
+                error_code: saved_if(!system_call, "ErrorCode")?,
+                previous_mode: (cs & 1) as u8,
+                previous_irql: saved_if(kind == Some(TrapKind::Interrupt), "PreviousIrql")?
+                    .map(|irql| irql as u8),
             }),
         })
     }
@@ -231,14 +282,14 @@ impl From<&KtrapFrame> for SavedThreadRegisters {
                 rax: Some(frame.rax),
                 rcx: Some(frame.rcx),
                 rdx: Some(frame.rdx),
-                rbx: Some(frame.rbx),
+                rbx: frame.rbx,
                 rbp: Some(frame.rbp),
-                rsi: Some(frame.rsi),
-                rdi: Some(frame.rdi),
+                rsi: frame.rsi,
+                rdi: frame.rdi,
                 r8: Some(frame.r8),
                 r9: Some(frame.r9),
                 r10: Some(frame.r10),
-                r11: Some(frame.r11),
+                r11: frame.r11,
                 // These registers live in a KEXCEPTION_FRAME, not KTRAP_FRAME.
                 r12: None,
                 r13: None,
@@ -419,6 +470,7 @@ mod tests {
         };
         add("PreviousMode", 0x00, 1);
         add("PreviousIrql", 0x01, 1);
+        add("ExceptionActive", 0x02, 1);
         add("Rax", 0x08, 8);
         add("Rcx", 0x10, 8);
         add("Rdx", 0x18, 8);
@@ -448,7 +500,7 @@ mod tests {
     fn decodes_fields_at_pdb_offsets() {
         let layout = test_layout();
         let mut buf = vec![0u8; layout.size];
-        buf[0x00] = 1; // PreviousMode = user
+        buf[0x02] = 0; // ExceptionActive: an interrupt
         buf[0x01] = 2; // PreviousIrql
         buf[0x08..0x10].copy_from_slice(&0x1111u64.to_le_bytes()); // Rax
         buf[0x60..0x68].copy_from_slice(&0x2u64.to_le_bytes()); // ErrorCode
@@ -467,9 +519,73 @@ mod tests {
         assert_eq!(amd64.cs, 0x10);
         assert_eq!(amd64.ss, 0x18);
         assert_eq!(amd64.eflags, 0x0004_0246);
-        assert_eq!(amd64.error_code, 2);
-        assert_eq!(amd64.previous_mode, 1);
-        assert_eq!(amd64.previous_irql, 2);
+        assert_eq!(amd64.error_code, Some(2));
+        assert_eq!(amd64.previous_irql, Some(2));
+    }
+
+    /// Only the entry that built a frame decides what it holds: a register
+    /// that entry does not save must read as unknown, not as the stale slot.
+    #[test]
+    fn a_trap_frame_holds_only_what_its_entry_saved() {
+        let layout = test_layout();
+        let decode = |exception_active: Option<u8>, cs: u16| {
+            let mut layout = layout.clone();
+            let mut buf = vec![0u8; layout.size];
+            match exception_active {
+                Some(value) => buf[0x02] = value,
+                None => {
+                    layout.fields.remove("ExceptionActive");
+                }
+            }
+            buf[0x00] = 1; // PreviousMode: stale unless a system call wrote it
+            buf[0x01] = 0x50; // PreviousIrql
+            buf[0x38..0x40].copy_from_slice(&0x1b1bu64.to_le_bytes()); // R11
+            buf[0x40..0x48].copy_from_slice(&0xb0b0u64.to_le_bytes()); // Rbx
+            buf[0x48..0x50].copy_from_slice(&0xd1d1u64.to_le_bytes()); // Rdi
+            buf[0x50..0x58].copy_from_slice(&0x5151u64.to_le_bytes()); // Rsi
+            buf[0x70..0x72].copy_from_slice(&cs.to_le_bytes());
+            KtrapFrame::decode(&layout, 0, &buf)
+                .unwrap()
+                .amd64()
+                .unwrap()
+                .clone()
+        };
+
+        let interrupt = decode(Some(0), 0x10);
+        assert_eq!(interrupt.kind, Some(TrapKind::Interrupt));
+        assert_eq!(
+            (interrupt.rbx, interrupt.rsi, interrupt.rdi),
+            (None, None, None)
+        );
+        assert_eq!(interrupt.r11, Some(0x1b1b));
+        assert_eq!(interrupt.previous_irql, Some(0x50));
+        assert_eq!(interrupt.previous_mode, 0, "from cs, not the stale field");
+
+        let exception = decode(Some(1), 0x10);
+        assert_eq!(exception.kind, Some(TrapKind::Exception));
+        assert_eq!(
+            (exception.rbx, exception.rsi, exception.rdi),
+            (None, None, None)
+        );
+        assert_eq!(exception.r11, Some(0x1b1b));
+        assert_eq!(exception.previous_irql, None);
+
+        let system_call = decode(Some(2), 0x33);
+        assert_eq!(system_call.kind, Some(TrapKind::SystemCall));
+        assert_eq!(
+            (system_call.rbx, system_call.rsi, system_call.rdi),
+            (Some(0xb0b0), Some(0x5151), Some(0xd1d1))
+        );
+        assert_eq!(system_call.r11, None, "the slot holds r10");
+        assert_eq!(system_call.error_code, None);
+        assert_eq!(system_call.previous_irql, None);
+        assert_eq!(system_call.previous_mode, 1);
+
+        let unknown = decode(None, 0x10);
+        assert_eq!(unknown.kind, None);
+        assert_eq!((unknown.rbx, unknown.rsi, unknown.rdi), (None, None, None));
+        assert_eq!(unknown.r11, Some(0x1b1b));
+        assert_eq!(unknown.previous_irql, None);
     }
 
     #[test]
@@ -606,6 +722,7 @@ mod tests {
     fn trap_frame_conversion_reports_unsaved_nonvolatile_registers() {
         let layout = test_layout();
         let mut buf = vec![0u8; layout.size];
+        buf[0x02] = 2; // ExceptionActive: a system call, which saves rbx
         buf[0x40..0x48].copy_from_slice(&0x44u64.to_le_bytes());
         buf[0x58..0x60].copy_from_slice(&0x55u64.to_le_bytes());
         buf[0x68..0x70].copy_from_slice(&0xffff_f800_0000_1000u64.to_le_bytes());

@@ -46,25 +46,32 @@ pub fn bugcheck(a: &BugcheckAnalysis) -> View {
 fn ktrap_frame_registers(frame: &KtrapFrame) -> View {
     match &frame.data {
         KtrapFrameData::Amd64(frame) => View::Object(vec![
+            (
+                "kind",
+                View::OptStr(frame.kind.map(|kind| kind.as_str().to_string())),
+            ),
             ("rax", View::Hex(frame.rax)),
-            ("rbx", View::Hex(frame.rbx)),
+            ("rbx", View::OptHex(frame.rbx)),
             ("rcx", View::Hex(frame.rcx)),
             ("rdx", View::Hex(frame.rdx)),
-            ("rsi", View::Hex(frame.rsi)),
-            ("rdi", View::Hex(frame.rdi)),
+            ("rsi", View::OptHex(frame.rsi)),
+            ("rdi", View::OptHex(frame.rdi)),
             ("rbp", View::Hex(frame.rbp)),
             ("rsp", View::Hex(frame.rsp)),
             ("r8", View::Hex(frame.r8)),
             ("r9", View::Hex(frame.r9)),
             ("r10", View::Hex(frame.r10)),
-            ("r11", View::Hex(frame.r11)),
+            ("r11", View::OptHex(frame.r11)),
             ("rip", View::Hex(frame.rip)),
             ("cs", View::Hex(frame.cs as u64)),
             ("ss", View::Hex(frame.ss as u64)),
             ("eflags", View::Hex(frame.eflags as u64)),
-            ("error_code", View::Hex(frame.error_code)),
+            ("error_code", View::OptHex(frame.error_code)),
             ("previous_mode", View::Num(frame.previous_mode as u64)),
-            ("previous_irql", View::Num(frame.previous_irql as u64)),
+            (
+                "previous_irql",
+                View::OptNum(frame.previous_irql.map(u64::from)),
+            ),
         ]),
         KtrapFrameData::Arm64(frame) => {
             const X_NAMES: [&str; 31] = [

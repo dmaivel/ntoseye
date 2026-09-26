@@ -160,20 +160,32 @@ pub fn print_bugcheck_trap_frame(trap_frame: &BugcheckTrapFrame) {
 /// Render a decoded [`KtrapFrame`] in the register-grid house style
 /// ([`super::disasm::print_registers`]).
 pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
-    outln!("{} @ {}", "trap frame".bold(), ui::addr(frame.address));
+    let kind = frame
+        .amd64()
+        .and_then(|frame| frame.kind)
+        .map(|kind| format!(" {}", ui::muted(&format!("({})", kind.as_str()))))
+        .unwrap_or_default();
+    outln!(
+        "{} @ {}{kind}",
+        "trap frame".bold(),
+        ui::addr(frame.address)
+    );
+    // A register the entry that built the frame does not save: its slot
+    // holds whatever was there before.
+    let saved = |value: Option<u64>| value.map_or_else(|| format!("{:16}", "-"), ui::addr);
     match &frame.data {
         KtrapFrameData::Amd64(frame) => {
             outln!(
                 "  rax {}   rbx {}   rcx {}",
                 ui::addr(frame.rax),
-                ui::addr(frame.rbx),
+                saved(frame.rbx),
                 ui::addr(frame.rcx)
             );
             outln!(
                 "  rdx {}   rsi {}   rdi {}",
                 ui::addr(frame.rdx),
-                ui::addr(frame.rsi),
-                ui::addr(frame.rdi)
+                saved(frame.rsi),
+                saved(frame.rdi)
             );
             outln!(
                 "  rsp {}   rbp {}   rip {}",
@@ -189,16 +201,22 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
             );
             outln!(
                 "  r11 {}   rfl {}{}",
-                ui::addr(frame.r11),
+                saved(frame.r11),
                 ui::addr(frame.eflags as u64),
                 format_rflags(frame.eflags as u64)
             );
+            let irql = frame
+                .previous_irql
+                .map(|irql| format!("  irql {irql}"))
+                .unwrap_or_default();
+            let error_code = frame
+                .error_code
+                .map(|code| format!("  error code {code:#x}"))
+                .unwrap_or_default();
             outln!(
-                "  cs  {:04x}  ss  {:04x}  error code {:#x}  irql {}  previous mode {}",
+                "  cs  {:04x}  ss  {:04x}{error_code}{irql}  previous mode {}",
                 frame.cs,
                 frame.ss,
-                frame.error_code,
-                frame.previous_irql,
                 if frame.previous_mode == 0 {
                     "kernel"
                 } else {
@@ -208,10 +226,6 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
             if let Some(symbol) = rip_symbol {
                 outln!("  rip => {}", ui::symbol(symbol));
             }
-            outln!(
-                "  {}",
-                ui::muted("rbx, rsi, and rdi are saved only in system-call trap frames")
-            );
         }
         KtrapFrameData::Arm64(frame) => {
             for (index, registers) in frame.x.chunks(3).enumerate() {
