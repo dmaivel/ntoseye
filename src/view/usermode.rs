@@ -417,6 +417,7 @@ fn self_patch_counts(detail: &SelfPatchCounts) -> View {
         ("import_optimization", View::Num(detail.import_optimization)),
         ("retpoline", View::Num(detail.retpoline)),
         ("ki_patch_self", View::Num(detail.ki_patch_self)),
+        ("region_rebase", View::Num(detail.region_rebase)),
         ("total", View::Num(detail.total())),
     ])
 }

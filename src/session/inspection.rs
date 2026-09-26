@@ -16,6 +16,7 @@ use crate::kd::{context, context_arm64};
 use crate::memory::{PAGE_SIZE, read_page_chunks};
 use crate::session::{ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead};
 use crate::target::ThreadInfo;
+use crate::target::usermode::ImageCheckDetail;
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
@@ -129,6 +130,17 @@ impl Session {
             .mask_breakpoint_bytes(&self.target, addr, buf, dtb);
         self.mask_bugcheck_trap(addr, buf);
         Ok(())
+    }
+
+    /// Compare `module`'s executable sections against its cached image
+    /// (`!chkimg`), with this session's own breakpoints (and the bugcheck
+    /// trap) masked back to the code they replaced.
+    pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheckDetail> {
+        let dtb = self.target.process_dtb();
+        self.target
+            .check_image(module, include_diffs, &|address, buf| {
+                self.read_masked_in(dtb, address, buf)
+            })
     }
 
     /// Read up to `max_units` NUL-terminated 1- or 2-byte units. The returned

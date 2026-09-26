@@ -178,14 +178,26 @@ pub enum SelfPatchKind {
     ImportOptimization,
     Retpoline,
     KiPatchSelf,
+    /// A relocated address of a kernel VA region (the PFN database, the
+    /// page tables, ...) the kernel moved to a randomized top-level slot at
+    /// boot: the image holds the region's old fixed base.
+    RegionRebase,
 }
 
 impl SelfPatchKind {
+    pub const ALL: [Self; 4] = [
+        Self::ImportOptimization,
+        Self::Retpoline,
+        Self::KiPatchSelf,
+        Self::RegionRebase,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Self::ImportOptimization => "import optimization",
             Self::Retpoline => "retpoline",
             Self::KiPatchSelf => "KiPatchSelf/JMP thunk",
+            Self::RegionRebase => "kernel VA region rebase",
         }
     }
 }
@@ -196,27 +208,38 @@ pub struct SelfPatchCounts {
     pub import_optimization: u64,
     pub retpoline: u64,
     pub ki_patch_self: u64,
+    pub region_rebase: u64,
 }
 
 impl SelfPatchCounts {
-    pub fn add(&mut self, kind: SelfPatchKind, count: u64) {
+    fn slot(&mut self, kind: SelfPatchKind) -> &mut u64 {
         match kind {
-            SelfPatchKind::ImportOptimization => self.import_optimization += count,
-            SelfPatchKind::Retpoline => self.retpoline += count,
-            SelfPatchKind::KiPatchSelf => self.ki_patch_self += count,
+            SelfPatchKind::ImportOptimization => &mut self.import_optimization,
+            SelfPatchKind::Retpoline => &mut self.retpoline,
+            SelfPatchKind::KiPatchSelf => &mut self.ki_patch_self,
+            SelfPatchKind::RegionRebase => &mut self.region_rebase,
         }
     }
 
+    pub fn get(mut self, kind: SelfPatchKind) -> u64 {
+        *self.slot(kind)
+    }
+
+    pub fn add(&mut self, kind: SelfPatchKind, count: u64) {
+        let slot = self.slot(kind);
+        *slot = slot.saturating_add(count);
+    }
+
     pub fn total(self) -> u64 {
-        self.import_optimization
-            .saturating_add(self.retpoline)
-            .saturating_add(self.ki_patch_self)
+        SelfPatchKind::ALL
+            .into_iter()
+            .fold(0u64, |total, kind| total.saturating_add(self.get(kind)))
     }
 
     fn add_counts(&mut self, other: Self) {
-        self.add(SelfPatchKind::ImportOptimization, other.import_optimization);
-        self.add(SelfPatchKind::Retpoline, other.retpoline);
-        self.add(SelfPatchKind::KiPatchSelf, other.ki_patch_self);
+        for kind in SelfPatchKind::ALL {
+            self.add(kind, other.get(kind));
+        }
     }
 }
 
@@ -800,7 +823,16 @@ impl Target {
     /// genuine mismatches and recognized kernel self-patches are returned;
     /// `include_diffs` controls only the bounded byte-diff collection, while
     /// unavailable/paged-out sections retain their reason in the result.
-    pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheckDetail> {
+    /// Compare `module`'s executable sections against its cached image
+    /// (`!chkimg`), reading live code with `read_code`, which should mask the
+    /// debugger's own breakpoints so they are not reported as tampering (see
+    /// [`crate::session::Session::check_image`]).
+    pub fn check_image(
+        &self,
+        module: &str,
+        include_diffs: bool,
+        read_code: &dyn Fn(VirtAddr, &mut [u8]) -> Result<()>,
+    ) -> Result<ImageCheckDetail> {
         let mut modules = self.modules()?;
         if find_module(&modules, module).is_none()
             && self.attached_process().is_some()
@@ -875,6 +907,7 @@ impl Target {
                 &module_info,
                 allow_kernel_self_patches,
                 include_diffs,
+                read_code,
             );
             let section_total = result.genuine.saturating_add(result.self_patches.total());
             genuine_total = genuine_total.saturating_add(result.genuine);
@@ -949,6 +982,7 @@ impl Target {
         module: &ModuleInfo,
         allow_kernel_self_patches: bool,
         include_diffs: bool,
+        read_code: &dyn Fn(VirtAddr, &mut [u8]) -> Result<()>,
     ) -> SectionCheckResult {
         let base = module.base_address;
         if section.discardable {
@@ -959,11 +993,10 @@ impl Target {
             };
         }
         let mut actual = vec![0u8; section.expected.len()];
-        let memory = self.process_memory();
         for offset in (0..section.expected.len()).step_by(SECTION_READ_CHUNK) {
             let take = (section.expected.len() - offset).min(SECTION_READ_CHUNK);
             let address = base + section.rva as u64 + offset as u64;
-            if let Err(error) = memory.read_bytes(address, &mut actual[offset..offset + take]) {
+            if let Err(error) = read_code(address, &mut actual[offset..offset + take]) {
                 if is_skippable_section_read_error(&error) {
                     return SectionCheckResult {
                         skipped: true,
@@ -993,7 +1026,15 @@ impl Target {
             let expected = &section.expected[offset..end];
             let actual = &actual[offset..end];
             if expected != actual {
-                let patch = if allow_kernel_self_patches {
+                let patch = if allow_kernel_self_patches
+                    && self.arch() == Arch::Amd64
+                    && is_region_rebase(expected, actual)
+                {
+                    Some(SelfPatchMatch {
+                        kind: SelfPatchKind::RegionRebase,
+                        function: self.self_patch_function_note(base, section.rva, offset),
+                    })
+                } else if allow_kernel_self_patches {
                     self.classify_self_patch(
                         section,
                         offset,
@@ -1500,5 +1541,87 @@ fn apply_relocations(
             }
         }
         cursor += block_size;
+    }
+}
+
+/// Whether kernel address `live` is `disk` moved to another top-level (PML4)
+/// slot: bits 39-47 change from slot `a` to `b`, and every lower 9-bit field
+/// that named `a` names `b`. That is how a region base moves (only the top
+/// field) and how every address derived from the page-table self-map does,
+/// since the self-map's slot recurs in each field (its PXE entry
+/// `0xFFFFF6FB7DBEDF68` becomes `0xFFFFA6D369B4DA68` for slot 0x14D).
+fn moved_with_top_level_slot(disk: u64, live: u64) -> bool {
+    let field = |value: u64, shift: u32| (value >> shift) & 0x1ff;
+    let (old, new) = (field(disk, 39), field(live, 39));
+    disk >> 48 == 0xffff
+        && live >> 48 == 0xffff
+        && disk & 7 == live & 7
+        && old != new
+        && [30, 21, 12, 3].into_iter().all(|shift| {
+            let (disk, live) = (field(disk, shift), field(live, shift));
+            disk == live || (disk == old && live == new)
+        })
+}
+
+/// Whether `actual` is the instruction `expected` with the kernel's boot-time
+/// VA region randomization applied: a `mov r64, imm64` loading an address in
+/// a region it moves (the PFN database, the page tables, ...) whose immediate
+/// moved with the region's top-level slot, and nothing else changed.
+fn is_region_rebase(expected: &[u8], actual: &[u8]) -> bool {
+    let decode = |bytes: &[u8]| Decoder::new(64, bytes, DecoderOptions::NONE).decode();
+    let (disk, live) = (decode(expected), decode(actual));
+    let (Some(disk_len), Some(live_len)) = (
+        (!disk.is_invalid()).then_some(disk.len()),
+        (!live.is_invalid()).then_some(live.len()),
+    ) else {
+        return false;
+    };
+    disk.code() == Code::Mov_r64_imm64
+        && live.code() == Code::Mov_r64_imm64
+        && disk_len == expected.len()
+        && live_len == actual.len()
+        && disk.op0_register() == live.op0_register()
+        && moved_with_top_level_slot(disk.immediate64(), live.immediate64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_region_rebase;
+
+    /// `mov rax, imm64`.
+    fn mov_rax(value: u64) -> Vec<u8> {
+        let mut bytes = vec![0x48, 0xb8];
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes
+    }
+
+    /// Windows moves the PFN database (and the page tables, ...) to a
+    /// randomized top-level slot at boot and rewrites the `mov r64, imm64`
+    /// that loads its base; anything else is a real difference.
+    #[test]
+    fn only_a_top_level_slot_move_of_a_loaded_region_base_is_a_region_rebase() {
+        let disk = mov_rax(0xffff_de00_0000_0000);
+        assert!(is_region_rebase(&disk, &mov_rax(0xffff_de80_0000_0000)));
+        assert!(!is_region_rebase(&disk, &mov_rax(0xffff_de00_0000_1000)));
+        assert!(!is_region_rebase(&disk, &disk));
+
+        let mut other_register = mov_rax(0xffff_de80_0000_0000);
+        other_register[1] = 0xb9;
+        assert!(!is_region_rebase(&disk, &other_register));
+
+        let user = mov_rax(0x0000_5e00_0000_0000);
+        assert!(!is_region_rebase(&user, &mov_rax(0x0000_5e80_0000_0000)));
+
+        // The self-map's slot recurs in every field of an address derived
+        // from it, down to its PXE entry's byte offset.
+        let pxe_entry = mov_rax(0xffff_f6fb_7dbe_df68);
+        assert!(is_region_rebase(
+            &pxe_entry,
+            &mov_rax(0xffff_a6d3_69b4_da68)
+        ));
+        assert!(!is_region_rebase(
+            &pxe_entry,
+            &mov_rax(0xffff_a6d3_69b4_da00)
+        ));
     }
 }

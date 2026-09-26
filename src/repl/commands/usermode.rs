@@ -5,7 +5,8 @@ use crate::repl::*;
 use crate::target::usermode::{
     ByteDiff, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
     LoaderListHead, LoaderListHeads, LoaderModulesDetail, MismatchRange, Peb32Detail, PebDetail,
-    ProcessParametersDetail, SelfPatchCounts, SelfPatchRange, Teb32Detail, TebDetail,
+    ProcessParametersDetail, SelfPatchCounts, SelfPatchKind, SelfPatchRange, Teb32Detail,
+    TebDetail,
 };
 use crate::target::{DiagnosticValue, ListTermination};
 use crate::types::VirtAddr;
@@ -52,7 +53,7 @@ repl_command! {
     names: ["!chkimg", "chkimg"],
     usage: "!chkimg [-d] [-v] [-nospec] <module>",
     summary: "Compare executable module sections with the cached on-disk image.",
-    details: "Compares .text, PAGE*, and INIT executable sections after applying DIR64/HIGHLOW relocations. Discardable or paged-out sections are skipped. Known kernel self-patches (import optimization, retpoline, KiPatchSelf retargets) are counted separately unless -nospec is given, which drops that breakdown and reports them as ordinary mismatches. -d prints bounded byte diffs; -v prints per-section results.",
+    details: "Compares .text, PAGE*, and INIT executable sections after applying DIR64/HIGHLOW relocations. Discardable or paged-out sections are skipped. Known kernel self-patches (import optimization, retpoline, KiPatchSelf retargets, and the addresses of kernel VA regions the kernel moves at boot) are counted separately unless -nospec is given, which drops that breakdown and reports them as ordinary mismatches. -d prints bounded byte diffs; -v prints per-section results.",
     completion: [None, None, None, Symbol],
 }
 
@@ -491,21 +492,12 @@ fn print_self_patch_counts(counts: &SelfPatchCounts) {
     if counts.total() == 0 {
         return;
     }
-    outln!(
-        "  {} bytes in known kernel self-patches (import optimization/retpoline)",
-        counts.total()
-    );
-    if counts.import_optimization != 0 {
-        outln!(
-            "    {} bytes: import optimization",
-            counts.import_optimization
-        );
-    }
-    if counts.retpoline != 0 {
-        outln!("    {} bytes: retpoline", counts.retpoline);
-    }
-    if counts.ki_patch_self != 0 {
-        outln!("    {} bytes: KiPatchSelf/JMP thunk", counts.ki_patch_self);
+    outln!("  {} bytes in known kernel self-patches", counts.total());
+    for kind in SelfPatchKind::ALL {
+        let count = counts.get(kind);
+        if count != 0 {
+            outln!("    {count} bytes: {}", kind.name());
+        }
     }
 }
 
@@ -741,7 +733,7 @@ impl ReplState<'_> {
             outln!("{}\n", command_help("!chkimg"));
             return Ok(());
         };
-        match self.ctx.target.check_image(module_name, show_diffs) {
+        match self.ctx.check_image(module_name, show_diffs) {
             Ok(detail) => print_image_check(&detail, no_spec, verbose),
             Err(error) => error!("{error}"),
         }

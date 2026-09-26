@@ -37,7 +37,8 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let include_diffs = argv.contains(&"-d");
             match argv.iter().find(|arg| !arg.starts_with('-')) {
                 Some(module) => args
-                    .target()
+                    .state
+                    .ctx
                     .check_image(module, include_diffs)
                     .map(|detail| view::usermode::image_check(&detail)),
                 None => Err(Error::DebugInfo("missing module name".into())),

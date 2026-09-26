@@ -351,10 +351,7 @@ impl Module {
     ) -> PyResult<Bound<'py, Record>> {
         let name = self.info.short_name.clone();
         let detail = self.owner.with_in(py, &self.context(), |session| {
-            session
-                .target
-                .check_image(&name, include_diffs)
-                .map_err(err)
+            session.check_image(&name, include_diffs).map_err(err)
         })?;
         view_record(py, &view::usermode::image_check(&detail))
     }
