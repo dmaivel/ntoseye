@@ -428,6 +428,41 @@ fn a_sparse_context_walks_with_its_missing_registers_unknown() {
     }
 }
 
+/// The status snapshot MCP, the SDK, and DAP take after every call reports
+/// where the target is; it must not move what the user selected to inspect,
+/// or `.frame`, `.cxr`, and `.thread` would not last until the next call.
+#[test]
+fn a_status_snapshot_keeps_the_selected_thread_and_frame() {
+    let mut session = session_with_mock(MockBackend {
+        one_vcpu: true,
+        ..MockBackend::default()
+    });
+    session.current_thread = "p1.1".to_string();
+    let thread = crate::target::sample_thread();
+    session.target.set_parked_windows_thread(thread.clone());
+    session.parked_windows_thread = Some(thread.ethread);
+    session.select_frame(SelectedFrame::from_registers(
+        2,
+        HashMap::from([("rip".to_string(), 0x1010), ("rsp".to_string(), 0x1080)]),
+    ));
+
+    let status = session.run_status();
+
+    assert!(!status.running);
+    assert_eq!(
+        session.parked_windows_thread().map(|thread| thread.ethread),
+        Some(thread.ethread)
+    );
+    assert_eq!(
+        session
+            .target
+            .selected_frame
+            .as_ref()
+            .map(|frame| frame.index),
+        Some(2)
+    );
+}
+
 fn session_over_arm64_memory(base: u64, memory: &[u8]) -> Session {
     let block = TriageBlock {
         address: base,

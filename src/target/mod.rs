@@ -363,7 +363,7 @@ pub struct ThreadInfo {
 }
 
 #[cfg(test)]
-fn sample_thread() -> ThreadInfo {
+pub(crate) fn sample_thread() -> ThreadInfo {
     ThreadInfo {
         ethread: VirtAddr(0xffff_8000_0000_1000),
         kthread: VirtAddr(0xffff_8000_0000_1100),

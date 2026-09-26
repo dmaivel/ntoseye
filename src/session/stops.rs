@@ -14,6 +14,7 @@ use crate::guest::ProcessInfo;
 use crate::kd::trace_enabled;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
+    windows_thread_on_backend_thread,
 };
 use crate::session::hits::{resolve_watchpoint_stop, rewind_thread_off_breakpoint};
 use crate::session::reload::ReloadDisposition;
@@ -174,9 +175,10 @@ impl Session {
         self.parked_stop.take()
     }
 
-    /// Resolve the stopped vCPU's process and Windows thread from the target.
-    /// Select that thread for inspection. The attached process scope is separate
-    /// and persists across resumes.
+    /// Resolve the stopped vCPU's process and Windows thread from the target,
+    /// leaving the inspection context (the selected thread, frame, and
+    /// process scope) as it is: a stop selected that thread already, and the
+    /// user may have moved on since.
     pub fn stopped_context(&mut self) -> (Option<ProcessInfo>, Option<ThreadInfo>) {
         let mask = self.target.arch().dtb_page_mask();
         let dtb_register = self.target.arch().dtb_register();
@@ -187,15 +189,14 @@ impl Session {
             .and_then(|regs| self.register_map.read_u64(dtb_register, &regs).ok())
             .filter(|cr3| !self.target.recognize_secure_root(*cr3))
             .and_then(|cr3| self.target.process_for_cr3(cr3 & mask));
-        let current_thread = self.current_thread.clone();
-        let stopped_thread =
-            refresh_windows_thread_context_for_backend_thread(&mut self.target, &current_thread);
+        let stopped_thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
         (stopped_process, stopped_thread)
     }
 
     /// A read-only run-control snapshot for the "where am I" surface (see
-    /// [`RunStatus`]). When halted, selects the current thread and resolves
-    /// rip+symbol (best-effort); while running, leaves those None. Reports
+    /// [`RunStatus`]). When halted, resolves the current vCPU's rip+symbol and
+    /// thread (best-effort) without changing the inspection context; while
+    /// running, leaves those None. Reports
     /// `coherent: false` while a post-reboot rediscovery is still pending so a
     /// host waits instead of enumerating stale state.
     pub fn run_status(&mut self) -> RunStatus {

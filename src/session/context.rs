@@ -696,25 +696,31 @@ pub fn refresh_windows_thread_context_for_backend_thread(
     debugger: &mut Target,
     thread_id: &str,
 ) -> Option<ThreadInfo> {
-    // NT's per-CPU current thread is suspended while that CPU runs VTL1.
-    // Presenting it as the secure thread gives false IDs, stacks and filters.
+    let thread = windows_thread_on_backend_thread(debugger, thread_id);
+    match thread.clone() {
+        Some(thread) => debugger.set_current_windows_thread_context(thread),
+        None => debugger.clear_current_windows_thread_context(),
+    }
+    thread
+}
+
+/// The Windows thread a backend vCPU is running, walked from that
+/// processor's KPRCB, without selecting it. `None` when the id is not a
+/// processor context, the walk fails, or the vCPU runs VTL1: NT's per-CPU
+/// current thread is suspended then, and presenting it as the secure thread
+/// gives false IDs, stacks, and filters.
+pub fn windows_thread_on_backend_thread(debugger: &Target, thread_id: &str) -> Option<ThreadInfo> {
     if debugger
         .registers
         .as_ref()
         .and_then(|registers| registers.get(debugger.arch().dtb_register()))
         .is_some_and(|dtb| debugger.recognize_secure_root(*dtb))
     {
-        debugger.clear_current_windows_thread_context();
         return None;
     }
-    let thread = processor_index_from_backend_thread_id(thread_id).and_then(|processor| {
+    processor_index_from_backend_thread_id(thread_id).and_then(|processor| {
         debugger
             .current_windows_thread_for_processor(processor)
             .ok()
-    });
-    match thread.clone() {
-        Some(thread) => debugger.set_current_windows_thread_context(thread),
-        None => debugger.clear_current_windows_thread_context(),
-    }
-    thread
+    })
 }
