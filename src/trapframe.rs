@@ -8,6 +8,7 @@
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{FieldInfo, TypeInfo, le_uint};
+use crate::target::pool::kernel_symbol_address;
 use crate::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use std::sync::Arc;
@@ -37,22 +38,64 @@ pub struct Arm64TrapFrame {
     pub previous_irql: Option<u8>,
 }
 
-/// Which kind of entry built an x64 `_KTRAP_FRAME` (its `ExceptionActive`),
-/// which decides the registers it holds.
+/// Which kind of entry built an x64 `_KTRAP_FRAME`, which decides the slots
+/// it wrote; the others hold whatever the stack held before.
+///
+/// From the entry code of builds 10240 through 28000, identical in each:
+///
+/// | kind        | rax-r10 | r11 | rbx rdi | rsi | ss | error code | IRQL |
+/// |-------------|---------|-----|---------|-----|----|------------|------|
+/// | interrupt   | yes     | yes | -       | yes | yes| -          | yes  |
+/// | exception   | yes     | yes | -       | -   | yes| yes        | -    |
+/// | system call | yes     | -   | yes     | yes | yes| -          | -    |
+/// | `Zw` call   | -       | -   | yes     | yes | -  | -          | -    |
+///
+/// Every entry writes the machine frame (rip, cs, rflags, rsp) and rbp.
+/// `syscall` leaves the flags in r11, so a system call stores r10 in that
+/// slot. The interrupt dispatchers record the previous IRQL; no other entry
+/// does. The error code is written by the CPU for the exceptions that carry
+/// one (#DF, #TS, #NP, #SS, #GP, #PF, #AC, #CP); entries for the others
+/// reserve the slot unwritten, and the frame does not record the vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrapKind {
+    /// A hardware or software interrupt (`ExceptionActive` 0).
     Interrupt,
+    /// A processor exception (`ExceptionActive` 1).
     Exception,
+    /// A `syscall` from user mode (`ExceptionActive` 2).
     SystemCall,
+    /// A kernel-mode `Zw*` call into the system service dispatcher. Every
+    /// `Zw*` stub builds the machine frame with rip `nt!KiServiceLinkage` and
+    /// enters `KiServiceInternal`, which leaves `ExceptionActive` unwritten.
+    ZwCall,
 }
 
 impl TrapKind {
-    fn from_exception_active(value: u64) -> Option<Self> {
+    /// The kind of the frame whose `ExceptionActive` is `value`, entered
+    /// from `cs`. Only a user-mode `syscall` writes 2, and a `cs` that is no
+    /// Windows code selector (`KGDT64_R0_CODE`, `KGDT64_R3_CMCODE | 3`,
+    /// `KGDT64_R3_CODE | 3`) means no trap built the frame: a thread's
+    /// `TrapFrame` can outlive the trap.
+    fn from_exception_active(value: u64, cs: u16) -> Option<Self> {
+        if !matches!(cs, 0x10 | 0x23 | 0x33) {
+            return None;
+        }
         match value {
             0 => Some(Self::Interrupt),
             1 => Some(Self::Exception),
-            2 => Some(Self::SystemCall),
+            2 if cs & 1 == 1 => Some(Self::SystemCall),
             _ => None,
+        }
+    }
+
+    /// Whether this entry writes `slot`; see the table on [`TrapKind`].
+    fn writes(self, slot: Slot) -> bool {
+        use Slot::*;
+        match self {
+            Self::Interrupt => !matches!(slot, Rbx | Rdi | ErrorCode),
+            Self::Exception => !matches!(slot, Rbx | Rdi | Rsi | PreviousIrql),
+            Self::SystemCall => !matches!(slot, R11 | ErrorCode | PreviousIrql),
+            Self::ZwCall => matches!(slot, Rbx | Rdi | Rsi),
         }
     }
 
@@ -61,47 +104,58 @@ impl TrapKind {
             Self::Interrupt => "interrupt",
             Self::Exception => "exception",
             Self::SystemCall => "system call",
+            Self::ZwCall => "Zw call",
         }
     }
+}
+
+/// The `_KTRAP_FRAME` slots only some entries write.
+#[derive(Clone, Copy)]
+enum Slot {
+    Volatile,
+    R11,
+    Rbx,
+    Rdi,
+    Rsi,
+    SegSs,
+    ErrorCode,
+    PreviousIrql,
 }
 
 /// The x64 state saved by a `_KTRAP_FRAME`. The nonvolatile r12-r15 live in
 /// the accompanying `_KEXCEPTION_FRAME`, not the trap frame.
 ///
-/// What a frame holds depends on the entry that built it, `kind`: every
-/// entry saves the volatile registers and rbp, but only a system call saves
-/// rbx, rsi, and rdi, and it stores r10 in the r11 slot (`syscall` keeps the
-/// flags in r11) and writes no error code; only interrupt dispatch keeps the
-/// previous IRQL. A register
-/// the entry does not save is `None` rather than whatever the slot held.
+/// What a frame holds depends on the entry that built it, `kind` (see
+/// [`TrapKind`]). A slot that entry does not write is `None` rather than
+/// whatever it held.
 #[derive(Clone, Debug)]
 pub struct Amd64TrapFrame {
-    /// `None` when the PDB has no `ExceptionActive` or it holds an unknown
-    /// value; then only the registers every entry saves are trusted.
+    /// `None` when the frame names no entry this decoder knows (no or an
+    /// unknown `ExceptionActive`); then only the machine frame and rbp,
+    /// which every entry writes, are trusted.
     pub kind: Option<TrapKind>,
-    pub rax: u64,
+    pub rax: Option<u64>,
     pub rbx: Option<u64>,
-    pub rcx: u64,
-    pub rdx: u64,
+    pub rcx: Option<u64>,
+    pub rdx: Option<u64>,
     pub rsi: Option<u64>,
     pub rdi: Option<u64>,
     pub rbp: u64,
     pub rsp: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
+    pub r8: Option<u64>,
+    pub r9: Option<u64>,
+    pub r10: Option<u64>,
     pub r11: Option<u64>,
     pub rip: u64,
     pub cs: u16,
-    pub ss: u16,
+    pub ss: Option<u16>,
     pub eflags: u32,
-    /// Hardware error code pushed by the CPU for faults that carry one
-    /// (page fault, GP fault, ...); otherwise whatever the trap handler wrote.
-    /// `None` for a system call, whose entry writes none.
+    /// The exception's error code; stale for an exception whose vector
+    /// carries none (#DE, #BP, #UD, ...), which the frame cannot tell apart.
     pub error_code: Option<u64>,
     /// `KPROCESSOR_MODE` the trap came from (0 = kernel, 1 = user), from the
     /// saved `cs` as Windows reads it: the `PreviousMode` field is set only
-    /// by a system call.
+    /// by system calls.
     pub previous_mode: u8,
     pub previous_irql: Option<u8>,
 }
@@ -156,44 +210,56 @@ impl KtrapFrame {
 
 impl KtrapFrame {
     /// Decode a frame at `address` out of `buf` (which must cover the whole
-    /// struct) using the PDB-described `layout`.
-    pub fn decode(layout: &TypeInfo, address: u64, buf: &[u8]) -> Result<Self> {
+    /// struct) using the PDB-described `layout`. `service_linkage` is the
+    /// address of `nt!KiServiceLinkage`, which marks a [`TrapKind::ZwCall`].
+    pub fn decode(
+        layout: &TypeInfo,
+        address: u64,
+        buf: &[u8],
+        service_linkage: Option<u64>,
+    ) -> Result<Self> {
         let field = |name: &str| field_uint(buf, name, layout.field(name)?);
         if layout.fields.contains_key("Pc") && !layout.fields.contains_key("Rip") {
             return Self::decode_arm64(layout, address, buf);
         }
-        let kind = field("ExceptionActive")
-            .ok()
-            .and_then(TrapKind::from_exception_active);
-        let system_call = kind == Some(TrapKind::SystemCall);
-        let saved_if = |saved: bool, name: &str| -> Result<Option<u64>> {
-            saved.then(|| field(name)).transpose()
-        };
+        let rip = field("Rip")?;
         let cs = field("SegCs")? as u16;
+        let kind = if service_linkage == Some(rip) {
+            Some(TrapKind::ZwCall)
+        } else {
+            field("ExceptionActive")
+                .ok()
+                .and_then(|value| TrapKind::from_exception_active(value, cs))
+        };
+        let written = |slot: Slot, name: &str| -> Result<Option<u64>> {
+            kind.is_some_and(|kind| kind.writes(slot))
+                .then(|| field(name))
+                .transpose()
+        };
+        let volatile = |name: &str| written(Slot::Volatile, name);
         Ok(Self {
             address,
             data: KtrapFrameData::Amd64(Amd64TrapFrame {
                 kind,
-                rax: field("Rax")?,
-                rbx: saved_if(system_call, "Rbx")?,
-                rcx: field("Rcx")?,
-                rdx: field("Rdx")?,
-                rsi: saved_if(system_call, "Rsi")?,
-                rdi: saved_if(system_call, "Rdi")?,
+                rax: volatile("Rax")?,
+                rbx: written(Slot::Rbx, "Rbx")?,
+                rcx: volatile("Rcx")?,
+                rdx: volatile("Rdx")?,
+                rsi: written(Slot::Rsi, "Rsi")?,
+                rdi: written(Slot::Rdi, "Rdi")?,
                 rbp: field("Rbp")?,
                 rsp: field("Rsp")?,
-                r8: field("R8")?,
-                r9: field("R9")?,
-                r10: field("R10")?,
-                r11: saved_if(!system_call, "R11")?,
-                rip: field("Rip")?,
+                r8: volatile("R8")?,
+                r9: volatile("R9")?,
+                r10: volatile("R10")?,
+                r11: written(Slot::R11, "R11")?,
+                rip,
                 cs,
-                ss: field("SegSs")? as u16,
+                ss: written(Slot::SegSs, "SegSs")?.map(|ss| ss as u16),
                 eflags: field("EFlags")? as u32,
-                error_code: saved_if(!system_call, "ErrorCode")?,
+                error_code: written(Slot::ErrorCode, "ErrorCode")?,
                 previous_mode: (cs & 1) as u8,
-                previous_irql: saved_if(kind == Some(TrapKind::Interrupt), "PreviousIrql")?
-                    .map(|irql| irql as u8),
+                previous_irql: written(Slot::PreviousIrql, "PreviousIrql")?.map(|irql| irql as u8),
             }),
         })
     }
@@ -279,16 +345,16 @@ impl From<&KtrapFrame> for SavedThreadRegisters {
             KtrapFrameData::Amd64(frame) => Self {
                 rip: Some(frame.rip),
                 rsp: Some(frame.rsp),
-                rax: Some(frame.rax),
-                rcx: Some(frame.rcx),
-                rdx: Some(frame.rdx),
+                rax: frame.rax,
+                rcx: frame.rcx,
+                rdx: frame.rdx,
                 rbx: frame.rbx,
                 rbp: Some(frame.rbp),
                 rsi: frame.rsi,
                 rdi: frame.rdi,
-                r8: Some(frame.r8),
-                r9: Some(frame.r9),
-                r10: Some(frame.r10),
+                r8: frame.r8,
+                r9: frame.r9,
+                r10: frame.r10,
                 r11: frame.r11,
                 // These registers live in a KEXCEPTION_FRAME, not KTRAP_FRAME.
                 r12: None,
@@ -336,14 +402,23 @@ fn read_frame_bytes(
     Ok((layout, buf))
 }
 
+/// Read and decode the `_KTRAP_FRAME` at `addr` in `dtb`.
+fn read_ktrap_frame_in(debugger: &Target, dtb: Dtb, addr: VirtAddr) -> Result<KtrapFrame> {
+    let (layout, buf) = read_frame_bytes(debugger, dtb, KTRAP_FRAME_TYPE, addr)?;
+    let service_linkage = kernel_symbol_address(debugger, "KiServiceLinkage")
+        .ok()
+        .map(|address| address.0);
+    KtrapFrame::decode(&layout, addr.0, &buf, service_linkage)
+}
+
 pub fn decode_ktrap_frame_for_thread(
     debugger: &Target,
     dtb: Dtb,
     addr: VirtAddr,
 ) -> Result<SavedThreadRegisters> {
-    let (layout, buf) = read_frame_bytes(debugger, dtb, KTRAP_FRAME_TYPE, addr)?;
-    let frame = KtrapFrame::decode(&layout, addr.0, &buf)?;
-    Ok(SavedThreadRegisters::from(&frame))
+    Ok(SavedThreadRegisters::from(&read_ktrap_frame_in(
+        debugger, dtb, addr,
+    )?))
 }
 
 fn decode_kswitch_frame(
@@ -401,9 +476,7 @@ pub fn decode_kswitch_frame_seed(
 /// Read and decode an `_KTRAP_FRAME` at a kernel address. Fails when the
 /// type is not in the loaded symbols or the memory is unreadable.
 pub fn read_ktrap_frame(debugger: &Target, addr: VirtAddr) -> Result<KtrapFrame> {
-    let dtb = debugger.current_dtb();
-    let (layout, buf) = read_frame_bytes(debugger, dtb, KTRAP_FRAME_TYPE, addr)?;
-    KtrapFrame::decode(&layout, addr.0, &buf)
+    read_ktrap_frame_in(debugger, debugger.current_dtb(), addr)
 }
 
 /// The `_KTRAP_FRAME` a Windows trap handler built around the machine frame
@@ -500,8 +573,7 @@ mod tests {
     fn decodes_fields_at_pdb_offsets() {
         let layout = test_layout();
         let mut buf = vec![0u8; layout.size];
-        buf[0x02] = 0; // ExceptionActive: an interrupt
-        buf[0x01] = 2; // PreviousIrql
+        buf[0x02] = 1; // ExceptionActive: an exception
         buf[0x08..0x10].copy_from_slice(&0x1111u64.to_le_bytes()); // Rax
         buf[0x60..0x68].copy_from_slice(&0x2u64.to_le_bytes()); // ErrorCode
         buf[0x68..0x70].copy_from_slice(&0xffff_f800_1234_5678u64.to_le_bytes()); // Rip
@@ -510,25 +582,25 @@ mod tests {
         buf[0x78..0x80].copy_from_slice(&0xffff_b001_0000_0000u64.to_le_bytes()); // Rsp
         buf[0x80..0x82].copy_from_slice(&0x18u16.to_le_bytes()); // SegSs
 
-        let frame = KtrapFrame::decode(&layout, 0xffff_b000_dead_0000, &buf).unwrap();
+        let frame = KtrapFrame::decode(&layout, 0xffff_b000_dead_0000, &buf, None).unwrap();
         assert_eq!(frame.address, 0xffff_b000_dead_0000);
         let amd64 = frame.amd64().unwrap();
-        assert_eq!(amd64.rax, 0x1111);
+        assert_eq!(amd64.rax, Some(0x1111));
         assert_eq!(amd64.rip, 0xffff_f800_1234_5678);
         assert_eq!(amd64.rsp, 0xffff_b001_0000_0000);
         assert_eq!(amd64.cs, 0x10);
-        assert_eq!(amd64.ss, 0x18);
+        assert_eq!(amd64.ss, Some(0x18));
         assert_eq!(amd64.eflags, 0x0004_0246);
         assert_eq!(amd64.error_code, Some(2));
-        assert_eq!(amd64.previous_irql, Some(2));
     }
 
-    /// Only the entry that built a frame decides what it holds: a register
-    /// that entry does not save must read as unknown, not as the stale slot.
+    /// Only the entry that built a frame decides what it holds: a slot that
+    /// entry does not write must read as unknown, not as its stale value.
     #[test]
-    fn a_trap_frame_holds_only_what_its_entry_saved() {
+    fn a_trap_frame_holds_only_what_its_entry_wrote() {
+        const SERVICE_LINKAGE: u64 = 0xffff_f800_0000_7000;
         let layout = test_layout();
-        let decode = |exception_active: Option<u8>, cs: u16| {
+        let decode = |exception_active: Option<u8>, cs: u16, rip: u64| {
             let mut layout = layout.clone();
             let mut buf = vec![0u8; layout.size];
             match exception_active {
@@ -539,53 +611,78 @@ mod tests {
             }
             buf[0x00] = 1; // PreviousMode: stale unless a system call wrote it
             buf[0x01] = 0x50; // PreviousIrql
+            buf[0x08..0x10].copy_from_slice(&0xaaaau64.to_le_bytes()); // Rax
             buf[0x38..0x40].copy_from_slice(&0x1b1bu64.to_le_bytes()); // R11
             buf[0x40..0x48].copy_from_slice(&0xb0b0u64.to_le_bytes()); // Rbx
             buf[0x48..0x50].copy_from_slice(&0xd1d1u64.to_le_bytes()); // Rdi
             buf[0x50..0x58].copy_from_slice(&0x5151u64.to_le_bytes()); // Rsi
+            buf[0x58..0x60].copy_from_slice(&0xbbbbu64.to_le_bytes()); // Rbp
+            buf[0x60..0x68].copy_from_slice(&0xecu64.to_le_bytes()); // ErrorCode
+            buf[0x68..0x70].copy_from_slice(&rip.to_le_bytes());
             buf[0x70..0x72].copy_from_slice(&cs.to_le_bytes());
-            KtrapFrame::decode(&layout, 0, &buf)
+            buf[0x80..0x82].copy_from_slice(&0x18u16.to_le_bytes()); // SegSs
+            KtrapFrame::decode(&layout, 0, &buf, Some(SERVICE_LINKAGE))
                 .unwrap()
                 .amd64()
                 .unwrap()
                 .clone()
         };
+        let nonvolatile = |frame: &Amd64TrapFrame| (frame.rbx, frame.rsi, frame.rdi);
+        let kernel_rip = 0xffff_f800_0000_1000;
 
-        let interrupt = decode(Some(0), 0x10);
+        let interrupt = decode(Some(0), 0x10, kernel_rip);
         assert_eq!(interrupt.kind, Some(TrapKind::Interrupt));
-        assert_eq!(
-            (interrupt.rbx, interrupt.rsi, interrupt.rdi),
-            (None, None, None)
-        );
-        assert_eq!(interrupt.r11, Some(0x1b1b));
+        assert_eq!(nonvolatile(&interrupt), (None, Some(0x5151), None));
+        assert_eq!((interrupt.rax, interrupt.r11), (Some(0xaaaa), Some(0x1b1b)));
+        assert_eq!(interrupt.error_code, None);
         assert_eq!(interrupt.previous_irql, Some(0x50));
         assert_eq!(interrupt.previous_mode, 0, "from cs, not the stale field");
 
-        let exception = decode(Some(1), 0x10);
+        let exception = decode(Some(1), 0x10, kernel_rip);
         assert_eq!(exception.kind, Some(TrapKind::Exception));
-        assert_eq!(
-            (exception.rbx, exception.rsi, exception.rdi),
-            (None, None, None)
-        );
-        assert_eq!(exception.r11, Some(0x1b1b));
+        assert_eq!(nonvolatile(&exception), (None, None, None));
+        assert_eq!((exception.rax, exception.r11), (Some(0xaaaa), Some(0x1b1b)));
+        assert_eq!(exception.error_code, Some(0xec));
         assert_eq!(exception.previous_irql, None);
 
-        let system_call = decode(Some(2), 0x33);
+        let system_call = decode(Some(2), 0x33, 0x7ff8_0000_1000);
         assert_eq!(system_call.kind, Some(TrapKind::SystemCall));
         assert_eq!(
-            (system_call.rbx, system_call.rsi, system_call.rdi),
+            nonvolatile(&system_call),
             (Some(0xb0b0), Some(0x5151), Some(0xd1d1))
         );
+        assert_eq!(system_call.rax, Some(0xaaaa));
         assert_eq!(system_call.r11, None, "the slot holds r10");
         assert_eq!(system_call.error_code, None);
         assert_eq!(system_call.previous_irql, None);
         assert_eq!(system_call.previous_mode, 1);
 
-        let unknown = decode(None, 0x10);
-        assert_eq!(unknown.kind, None);
-        assert_eq!((unknown.rbx, unknown.rsi, unknown.rdi), (None, None, None));
-        assert_eq!(unknown.r11, Some(0x1b1b));
-        assert_eq!(unknown.previous_irql, None);
+        // KiServiceInternal leaves ExceptionActive stale; the rip decides.
+        for stale in [0, 1, 2, 0x5a] {
+            let zw_call = decode(Some(stale), 0x10, SERVICE_LINKAGE);
+            assert_eq!(zw_call.kind, Some(TrapKind::ZwCall));
+            assert_eq!(
+                nonvolatile(&zw_call),
+                (Some(0xb0b0), Some(0x5151), Some(0xd1d1))
+            );
+            assert_eq!((zw_call.rax, zw_call.r11, zw_call.ss), (None, None, None));
+            assert_eq!((zw_call.error_code, zw_call.previous_irql), (None, None));
+            assert_eq!(zw_call.previous_mode, 0);
+        }
+
+        // Only user-mode syscall entry writes 2: from kernel mode it is stale,
+        // as is any kind in a frame whose cs no trap could have saved.
+        for unknown in [
+            decode(Some(2), 0x10, kernel_rip),
+            decode(Some(0), 0x4470, kernel_rip),
+            decode(None, 0x10, kernel_rip),
+        ] {
+            assert_eq!(unknown.kind, None);
+            assert_eq!(nonvolatile(&unknown), (None, None, None));
+            assert_eq!((unknown.rax, unknown.r11, unknown.ss), (None, None, None));
+            assert_eq!((unknown.error_code, unknown.previous_irql), (None, None));
+            assert_eq!((unknown.rip, unknown.rbp), (kernel_rip, 0xbbbb));
+        }
     }
 
     #[test]
@@ -632,7 +729,7 @@ mod tests {
         buf[0xc4..0xc8].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         buf[0xc8..0xd0].copy_from_slice(&0x4000u64.to_le_bytes());
 
-        let frame = KtrapFrame::decode(&layout, 0xffff_0000_ffff_0000, &buf).unwrap();
+        let frame = KtrapFrame::decode(&layout, 0xffff_0000_ffff_0000, &buf, None).unwrap();
         let arm = frame.arm64().unwrap();
         assert_eq!(arm.x[0], 0x1122);
         assert_eq!(arm.x[18], 0x3344);
@@ -662,7 +759,7 @@ mod tests {
         layout.fields.remove("Rip");
         let buf = vec![0u8; layout.size];
         assert!(matches!(
-            KtrapFrame::decode(&layout, 0, &buf),
+            KtrapFrame::decode(&layout, 0, &buf, None),
             Err(Error::FieldNotFound(name)) if name == "Rip"
         ));
     }
@@ -697,7 +794,7 @@ mod tests {
         let mut buf = vec![0u8; layout.size];
         buf[0xb8..0xbc].copy_from_slice(&0x1e5u32.to_le_bytes());
 
-        let frame = KtrapFrame::decode(&layout, 0, &buf).unwrap();
+        let frame = KtrapFrame::decode(&layout, 0, &buf, None).unwrap();
         let arm = frame.arm64().unwrap();
         assert_eq!(arm.cpsr, None);
         assert_eq!(arm.esr, None);
@@ -715,7 +812,7 @@ mod tests {
     fn short_buffer_is_an_error() {
         let layout = test_layout();
         let buf = vec![0u8; 0x70];
-        assert!(KtrapFrame::decode(&layout, 0, &buf).is_err());
+        assert!(KtrapFrame::decode(&layout, 0, &buf, None).is_err());
     }
 
     #[test]
@@ -723,12 +820,13 @@ mod tests {
         let layout = test_layout();
         let mut buf = vec![0u8; layout.size];
         buf[0x02] = 2; // ExceptionActive: a system call, which saves rbx
+        buf[0x70..0x72].copy_from_slice(&0x33u16.to_le_bytes()); // SegCs: user
         buf[0x40..0x48].copy_from_slice(&0x44u64.to_le_bytes());
         buf[0x58..0x60].copy_from_slice(&0x55u64.to_le_bytes());
         buf[0x68..0x70].copy_from_slice(&0xffff_f800_0000_1000u64.to_le_bytes());
         buf[0x78..0x80].copy_from_slice(&0xffff_a000_0000_2000u64.to_le_bytes());
 
-        let frame = KtrapFrame::decode(&layout, 0xffff_a000_0000_1800, &buf).unwrap();
+        let frame = KtrapFrame::decode(&layout, 0xffff_a000_0000_1800, &buf, None).unwrap();
         let registers = SavedThreadRegisters::from(&frame);
         assert_eq!(registers.rip, Some(0xffff_f800_0000_1000));
         assert_eq!(registers.rsp, Some(0xffff_a000_0000_2000));

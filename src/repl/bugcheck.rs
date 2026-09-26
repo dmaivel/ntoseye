@@ -177,13 +177,13 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
         KtrapFrameData::Amd64(frame) => {
             outln!(
                 "  rax {}   rbx {}   rcx {}",
-                ui::addr(frame.rax),
+                saved(frame.rax),
                 saved(frame.rbx),
-                ui::addr(frame.rcx)
+                saved(frame.rcx)
             );
             outln!(
                 "  rdx {}   rsi {}   rdi {}",
-                ui::addr(frame.rdx),
+                saved(frame.rdx),
                 saved(frame.rsi),
                 saved(frame.rdi)
             );
@@ -195,9 +195,9 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
             );
             outln!(
                 "  r8  {}   r9  {}   r10 {}",
-                ui::addr(frame.r8),
-                ui::addr(frame.r9),
-                ui::addr(frame.r10)
+                saved(frame.r8),
+                saved(frame.r9),
+                saved(frame.r10)
             );
             outln!(
                 "  r11 {}   rfl {}{}",
@@ -213,10 +213,12 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
                 .error_code
                 .map(|code| format!("  error code {code:#x}"))
                 .unwrap_or_default();
+            let ss = frame
+                .ss
+                .map_or_else(|| "-   ".to_string(), |ss| format!("{ss:04x}"));
             outln!(
-                "  cs  {:04x}  ss  {:04x}{error_code}{irql}  previous mode {}",
+                "  cs  {:04x}  ss  {ss}{error_code}{irql}  previous mode {}",
                 frame.cs,
-                frame.ss,
                 if frame.previous_mode == 0 {
                     "kernel"
                 } else {
