@@ -116,6 +116,7 @@ pub(super) fn build_recovered_stacktrace_seeded(
             symbol: format_symbol(debugger, trace, context.rip),
             source,
             source_location: frame_source_location(debugger, trace, context.rip),
+            machine_frame: context.machine_frame,
         };
         record_recovered_frame(
             &mut stacktrace,

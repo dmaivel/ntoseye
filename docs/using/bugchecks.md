@@ -80,7 +80,7 @@ loaded modules
   174 loaded modules total
 ```
 
-`!analyze -v` adds the bugcheck block, the stopped processor, the whole stack, and every loaded module.
+`!analyze -v` adds the bugcheck block, the whole stack, and every loaded module, and finds the trap frame Windows built when the driver faulted, here by `nt!KiPageFault`: it prints the registers as they were at the faulting instruction, and its faulting context names `myfault+0x1730` and the trap frame's address. {command}`.trap` with that address selects it, so {command}`k` and the register commands start at the fault instead of at `nt!DbgBreakPointWithStatus`.
 
 {command}`k` shows how the driver got there. Reading up from the bottom: NotMyFault asked its driver for the crash with `DeviceIoControl`, the driver faulted at `myfault+0x1730`, and the page fault handler raised the bugcheck:
 

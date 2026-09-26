@@ -355,6 +355,28 @@ pub fn read_ktrap_frame(debugger: &Target, addr: VirtAddr) -> Result<KtrapFrame>
     KtrapFrame::decode(&layout, addr.0, &buf)
 }
 
+/// The `_KTRAP_FRAME` a Windows trap handler built around the machine frame
+/// at `machine_frame`, the hardware-pushed tail a stack walk crossed
+/// ([`crate::unwind::StackFrame::machine_frame`]), when its saved `Rip` is
+/// `interrupted`, where the walk resumed: a machine frame that ends no trap
+/// frame is not misread as one. AMD64 only.
+pub fn ktrap_frame_at_machine_frame(
+    debugger: &Target,
+    machine_frame: u64,
+    interrupted: u64,
+) -> Option<KtrapFrame> {
+    if debugger.arch() != Arch::Amd64 {
+        return None;
+    }
+    let layout = debugger
+        .symbols
+        .find_type_across_modules(debugger.kernel_dtb(), KTRAP_FRAME_TYPE)?;
+    let rip = layout.field("Rip").ok()?.offset;
+    let address = machine_frame.checked_sub(u64::from(rip))?;
+    let frame = read_ktrap_frame(debugger, VirtAddr(address)).ok()?;
+    (frame.instruction_pointer() == interrupted).then_some(frame)
+}
+
 /// Read an explicitly addressed trap frame, or the current Windows thread's
 /// saved `KTHREAD.TrapFrame` when `addr` is `None`.
 pub fn read_ktrap_frame_at_or_current(

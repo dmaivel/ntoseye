@@ -250,7 +250,33 @@ fn print_triage_report(report: &TriageReport, verbose: bool) {
             ui::muted("thread "),
             ui::thread_id(&report.status.current_thread)
         );
-        if let Some(rip) = report.status.rip {
+        // Where the fault happened, from its trap frame, rather than where
+        // the processor stopped (the debugger break the bugcheck ended in).
+        let trap = report.bugcheck.as_ref().and_then(|analysis| {
+            analysis
+                .trap_frames
+                .iter()
+                .find_map(|trap| Some((trap, trap.frame.as_ref()?)))
+        });
+        if let Some((trap, frame)) = trap {
+            let symbol = trap
+                .rip_symbol
+                .as_deref()
+                .map(|symbol| format!("  {}", ui::symbol(symbol)))
+                .unwrap_or_default();
+            outln!(
+                "  {} {}{}",
+                ui::muted("rip    "),
+                ui::addr(frame.instruction_pointer()),
+                symbol
+            );
+            outln!(
+                "  {} {}  {}",
+                ui::muted("trap   "),
+                ui::addr(trap.address),
+                ui::muted("(.trap selects it)")
+            );
+        } else if let Some(rip) = report.status.rip {
             let symbol = report
                 .status
                 .symbol

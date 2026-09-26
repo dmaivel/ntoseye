@@ -6,9 +6,9 @@ use crate::backend::MemoryOps;
 use crate::dbg_backend::BugcheckInfo;
 use crate::error::Result;
 use crate::target::Target;
-use crate::trapframe::{KtrapFrame, read_ktrap_frame};
+use crate::trapframe::{KtrapFrame, ktrap_frame_at_machine_frame, read_ktrap_frame};
 use crate::types::VirtAddr;
-use crate::unwind::{ThreadTraceContext, format_symbol, resolve_thread_trace_context};
+use crate::unwind::{StackTrace, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BugcheckDescriptor {
@@ -175,6 +175,24 @@ pub fn bugcheck_trap_frame_address(info: &BugcheckInfo) -> Option<u64> {
         _ => return None,
     };
     looks_like_kernel_pointer(addr).then_some(addr)
+}
+
+/// The trap frame of the innermost trap on a bugcheck's stack, for a
+/// bugcheck whose parameters name none (0xD1 raised from `nt!KiPageFault`):
+/// where the fault happened, and the registers it happened with.
+pub fn bugcheck_trap_frame_on_stack(
+    debugger: &Target,
+    stack: &StackTrace,
+) -> Option<BugcheckTrapFrame> {
+    stack.frames.iter().find_map(|frame| {
+        let trap = ktrap_frame_at_machine_frame(debugger, frame.machine_frame?, frame.ip)?;
+        Some(BugcheckTrapFrame {
+            address: trap.address,
+            frame: Some(trap),
+            rip_symbol: Some(frame.symbol.clone()),
+            error: None,
+        })
+    })
 }
 
 /// Resolve parameter meanings that vary by bugcheck parameter values.

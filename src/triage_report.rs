@@ -8,7 +8,8 @@ mod verifier;
 mod whea;
 
 use crate::bugchecks::{
-    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck, module_filename,
+    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, bugcheck_trap_frame_on_stack,
+    current_bugcheck, module_filename,
 };
 use crate::dmp::{DmpException, DmpInfo, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
 use crate::guest::ModuleInfo;
@@ -219,7 +220,7 @@ impl TriageReport {
             .last_event
             .as_ref()
             .and_then(|event| event.stop.bugcheck.clone());
-        let bugcheck = reported
+        let mut bugcheck = reported
             .map(|info| analyze_bugcheck(&session.target, &info))
             .or_else(|| current_bugcheck(&session.target))
             .or_else(|| bugcheck_from_dump_info(&session.target));
@@ -235,6 +236,14 @@ impl TriageReport {
                 }
             }
         };
+        // A bugcheck raised from a trap handler names no trap frame; the stack
+        // crossed it on the way to the fault.
+        if let (Some(analysis), Some(trace)) = (bugcheck.as_mut(), backtrace.as_ref())
+            && analysis.trap_frames.is_empty()
+            && let Some(trap_frame) = bugcheck_trap_frame_on_stack(&session.target, trace)
+        {
+            analysis.trap_frames.push(trap_frame);
+        }
         let modules = match session.target.kernel_modules() {
             Ok(modules) => modules,
             Err(error) => {
@@ -520,6 +529,7 @@ mod tests {
                 symbol: "fault!dispatch".into(),
                 source: FrameSource::Current,
                 source_location: None,
+                machine_frame: None,
             }],
             truncated: 0,
         };
@@ -616,6 +626,7 @@ mod tests {
                 symbol: "nt!DbgBreakPointWithStatus".into(),
                 source: FrameSource::Current,
                 source_location: None,
+                machine_frame: None,
             }],
             truncated: 0,
         };
@@ -657,6 +668,7 @@ mod tests {
                     symbol: "nt!KiPageFault+0x10".into(),
                     source: FrameSource::Current,
                     source_location: None,
+                    machine_frame: None,
                 },
                 StackFrame {
                     sp: 0x8100,
@@ -664,6 +676,7 @@ mod tests {
                     symbol: "thirdparty!Worker+0x20".into(),
                     source: FrameSource::Unwind,
                     source_location: None,
+                    machine_frame: None,
                 },
             ],
             truncated: 0,
@@ -716,6 +729,7 @@ mod tests {
                 symbol: "nt!KiPageFault".into(),
                 source: FrameSource::Current,
                 source_location: None,
+                machine_frame: None,
             }],
             truncated: 0,
         };

@@ -113,6 +113,11 @@ pub struct StackFrame {
     pub symbol: String,
     pub source: FrameSource,
     pub source_location: Option<SourceLocation>,
+    /// The hardware-pushed machine frame the walk crossed to reach this
+    /// frame: the trap or interrupt that stopped it here. On Windows it is the
+    /// tail of the handler's `_KTRAP_FRAME` (see
+    /// [`crate::trapframe::ktrap_frame_at_machine_frame`]).
+    pub machine_frame: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -209,6 +214,10 @@ struct RegisterContext {
     /// `rip` is a return address rather than where the frame was stopped or
     /// interrupted.
     after_call: bool,
+    /// The hardware-pushed machine frame the last unwind step crossed to
+    /// reach this frame (AMD64 `UWOP_PUSH_MACHFRAME`): this frame was
+    /// interrupted there rather than called.
+    machine_frame: Option<u64>,
 }
 
 /// Outcome of unwinding one frame to its caller
@@ -818,6 +827,7 @@ impl RegisterContext {
             rsp,
             regs: [None; REGISTER_SLOTS],
             after_call: false,
+            machine_frame: None,
         }
     }
 
@@ -961,6 +971,7 @@ impl StackTracer<'_> {
     /// Step `context` to its caller's frame. Registers the caller cannot
     /// rely on (volatile across a call) come back unknown.
     fn unwind_once(&mut self, context: &mut RegisterContext) -> Unwound {
+        context.machine_frame = None;
         match self.target.arch() {
             Arch::Amd64 => {
                 let unwound = self.unwind_once_amd64(context);

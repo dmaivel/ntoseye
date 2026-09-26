@@ -460,6 +460,7 @@ impl StackTracer<'_> {
                 let return_rsp = self.stack_u64(base.saturating_add(24)).ok()?;
                 context.rip = return_rip;
                 context.rsp = return_rsp;
+                context.machine_frame = Some(base);
                 return Some(UnwindStep::MachineFrame);
             }
             _ => return None,

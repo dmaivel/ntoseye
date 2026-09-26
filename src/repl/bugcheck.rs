@@ -208,6 +208,10 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
             if let Some(symbol) = rip_symbol {
                 outln!("  rip => {}", ui::symbol(symbol));
             }
+            outln!(
+                "  {}",
+                ui::muted("rbx, rsi, and rdi are saved only in system-call trap frames")
+            );
         }
         KtrapFrameData::Arm64(frame) => {
             for (index, registers) in frame.x.chunks(3).enumerate() {
