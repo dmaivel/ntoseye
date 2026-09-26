@@ -258,10 +258,21 @@ impl Target {
 
     pub fn set_parked_windows_thread(&mut self, thread: ThreadInfo) {
         self.selected_frame = None;
-        self.windows_thread_selection = Some(thread);
         // A parked thread has no coherent register file. In particular, do not
         // let expressions reuse registers cached from the still-selected vCPU.
         self.registers = None;
+        // Nor is the vCPU's address space the thread's: at a stop in the
+        // hypervisor or VTL1 it maps no NT memory at all. Reads follow the
+        // owning process, as a running thread's follow its vCPU's root.
+        let kernel = self.kernel_dtb();
+        match self
+            .thread_process_dtb(&thread)
+            .filter(|dtb| *dtb != kernel)
+        {
+            Some(dtb) => self.set_context_dtb_override(dtb),
+            None => self.clear_context_dtb_override(),
+        }
+        self.windows_thread_selection = Some(thread);
     }
 
     pub fn clear_current_windows_thread_context(&mut self) {
@@ -568,5 +579,23 @@ mod tests {
             ),
             Some(0x2222_0000)
         );
+    }
+
+    /// At a stop in the hypervisor the vCPU's root maps no NT memory, so a
+    /// parked thread's reads must not go through it.
+    #[test]
+    fn a_parked_thread_does_not_read_through_the_vcpus_root() {
+        let mut session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let target = &mut session.target;
+        let kernel = target.kernel_dtb();
+        let hypervisor_root = 0x9000;
+        for pid in [Some(0), Some(0x4d2)] {
+            target.set_context_dtb_override(hypervisor_root);
+            let mut thread = sample_thread();
+            thread.pid = pid;
+            thread.eprocess = None;
+            target.set_parked_windows_thread(thread);
+            assert_eq!(target.current_dtb(), kernel, "pid {pid:?}");
+        }
     }
 }

@@ -338,14 +338,17 @@ impl Session {
     /// The current inspection context's call stack with the sparse registers
     /// recovered for every frame, the seed register file the walk started
     /// from, and whether that seed is the vCPU's live register file. A
-    /// selected context (`.cxr`, a thread's saved VTL0 state) seeds the walk
-    /// in place of the vCPU; a parked Windows thread is walked from its saved
-    /// context without touching the backend vCPU.
+    /// selected context (`.cxr`, `.trap`, a thread's saved VTL0 state) seeds
+    /// the walk in place of the vCPU or a parked thread; otherwise a parked
+    /// Windows thread is walked from its saved context without touching the
+    /// backend vCPU.
     pub fn recovered_backtrace(
         &mut self,
         limit: usize,
     ) -> Result<(RecoveredStackTrace, HashMap<String, u64>, bool)> {
-        if let Some(thread) = self.parked_windows_thread() {
+        if self.target.selected_frame.is_none()
+            && let Some(thread) = self.parked_windows_thread()
+        {
             let recovered = build_parked_thread_recovered_stack(&self.target, thread, limit)?;
             // The walk's own first frame is the only register context a parked
             // thread has; there is no live file to seed from.

@@ -653,7 +653,7 @@ impl ReplState<'_> {
             },
             None => 64,
         };
-        if self.ctx.parked_windows_thread().is_some() {
+        if self.ctx.parked_windows_thread().is_some() && self.ctx.target.selected_frame.is_none() {
             let trace = match self.ctx.backtrace(frame_limit) {
                 Ok(trace) => trace,
                 Err(error) => {
@@ -754,12 +754,17 @@ impl ReplState<'_> {
         }
         match read_ktrap_frame_at_or_current(&self.ctx.target, address) {
             Ok(frame) => {
-                // Trap frames are kernel structures; resolve the interrupted
-                // rip against the kernel address space like the bugcheck
-                // analysis does.
-                let trace =
-                    resolve_thread_trace_context(&self.ctx.target, self.ctx.target.kernel_dtb());
-                let symbol = format_symbol(&self.ctx.target, &trace, frame.instruction_pointer());
+                // A kernel rip resolves in the kernel address space, which any
+                // scope (even the hypervisor's) leaves reachable; a user rip
+                // only in the selected thread's process.
+                let target = &self.ctx.target;
+                let pc = frame.instruction_pointer();
+                let dtb = if pc >> 63 != 0 {
+                    target.kernel_dtb()
+                } else {
+                    target.current_dtb()
+                };
+                let symbol = format_symbol(target, &resolve_thread_trace_context(target, dtb), pc);
                 print_ktrap_frame(&frame, Some(&symbol));
                 let registers = registers_from_trap_frame(&frame);
                 let selected = self.select_register_values(0, registers);

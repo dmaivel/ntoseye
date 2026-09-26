@@ -55,7 +55,7 @@ repl_command! {
     names: [".thread"],
     usage: ".thread [ethread|tid]",
     summary: "Switch the register and stack context to a Windows thread.",
-    details: "A running thread switches to its vCPU. When that vCPU is halted in the Windows hypervisor (VBS), the context is the VTL0 state the hypervisor saved, where NT left off, as `.vtlcxr` selects it; without it (no hv-evmcs) the vCPU's registers are the context. A thread not running is selected stack only. With no argument, returns to the current vCPU's registers.",
+    details: "A running thread switches to its vCPU. When that vCPU is halted in the Windows hypervisor (VBS), the context is the VTL0 state the hypervisor saved, where NT left off, as `.vtlcxr` selects it; without it (no hv-evmcs) the vCPU's registers are the context. A thread not running is selected stack only, with its process's address space as the memory scope, so `.trap` and `.cxr` on it read and walk that process. With no argument, returns to the current vCPU's registers.",
     completion: Thread,
     run_state: Halted,
 }

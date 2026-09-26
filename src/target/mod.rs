@@ -147,7 +147,7 @@ pub struct SelectedFrame {
     pub seed_live: bool,
     /// The address space the stack walk recovered this frame in. A context
     /// with no walk behind it (`.cxr`, `.trap`) takes its root from its
-    /// registers instead.
+    /// registers instead, and without one keeps the current scope.
     pub dtb: Option<Dtb>,
 }
 

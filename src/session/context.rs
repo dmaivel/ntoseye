@@ -78,9 +78,10 @@ impl Session {
                 *dtb != 0 && self.target.guest.is_some() && self.target.kernel_dtb() != DTB_IDENTITY
             })
         });
-        match dtb {
-            Some(dtb) => self.target.set_context_dtb_override(dtb),
-            None => self.target.clear_context_dtb_override(),
+        // A context with no root of its own (a trap frame, a context record)
+        // is the selected thread's: its address space stays the scope.
+        if let Some(dtb) = dtb {
+            self.target.set_context_dtb_override(dtb);
         }
         self.target.selected_frame = Some(selected);
     }
