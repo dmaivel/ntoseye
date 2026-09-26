@@ -188,6 +188,11 @@ pub struct SymbolStore {
     /// fetch. One download at a time: a gdb connecting asks for every loaded
     /// module's image at once.
     image_queue: Mutex<Option<mpsc::Sender<DownloadJob>>>,
+    /// PDBs and images no source had, by cache path, with why. A module
+    /// every process loads (`xtajit.dll` under x64 emulation on ARM64) would
+    /// otherwise be fetched again for each process a stack walk meets.
+    /// Forgotten when the sources change or `.reload` asks again.
+    unavailable: Mutex<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -616,7 +621,26 @@ impl SymbolStore {
             notices: Mutex::new(Vec::new()),
             image_fetches: Mutex::new(HashSet::new()),
             image_queue: Mutex::new(None),
+            unavailable: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Remember that no source had `job`'s file, so it is not fetched again
+    /// this session.
+    pub fn remember_unavailable(&self, job: &DownloadJob, error: &str) {
+        self.unavailable
+            .lock()
+            .insert(job.path.clone(), error.to_string());
+    }
+
+    /// Why `job`'s file was unavailable earlier this session, if it was.
+    pub fn unavailable(&self, job: &DownloadJob) -> Option<String> {
+        self.unavailable.lock().get(&job.path).cloned()
+    }
+
+    /// Let every file that was unavailable be fetched again.
+    pub fn forget_unavailable(&self) {
+        self.unavailable.lock().clear();
     }
 
     /// See [`SymbolStore::load_generation`] field docs.
@@ -645,14 +669,17 @@ impl SymbolStore {
 
     pub fn set_symbol_sources(&self, sources: Vec<SymbolSource>) {
         *self.sources.write() = sources;
+        self.forget_unavailable();
     }
 
     pub fn append_symbol_source(&self, source: SymbolSource) {
         self.sources.write().push(source);
+        self.forget_unavailable();
     }
 
     pub fn reset_symbol_sources(&self) {
         *self.sources.write() = DEFAULT_SYMBOL_SOURCES.clone();
+        self.forget_unavailable();
     }
 
     pub fn source_paths(&self) -> Vec<SourcePathMapping> {

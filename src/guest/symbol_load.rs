@@ -93,13 +93,17 @@ struct ModuleSymbolPlan {
 
 impl ModuleSymbolPlan {
     fn queue(&mut self, symbols: &SymbolStore, load: ModuleSymbolLoad) {
-        // Parsed already, or on disk with the right identity: no source to
-        // consult, so it is never a fetch (which the stop render defers).
-        if symbols.has_matching_pdb(&load.job) || load.job.cached_pdb_matches() {
+        if self.is_ready(symbols, &load) {
             self.ready.push(load);
         } else {
             self.downloads.push(load);
         }
+    }
+
+    /// Parsed already, or on disk with the right identity: no source to
+    /// consult, so it is never a fetch (which the stop render defers).
+    fn is_ready(&self, symbols: &SymbolStore, load: &ModuleSymbolLoad) -> bool {
+        symbols.has_matching_pdb(&load.job) || load.job.cached_pdb_matches()
     }
 
     /// Split off everything that needs the network, leaving `ready`.
@@ -353,20 +357,46 @@ impl Guest {
                 continue;
             }
 
+            // A file no source had earlier this session is not asked for
+            // again: the same image in the next process would fail the same way.
+            let unavailable = |job: &DownloadJob| {
+                symbols.unavailable(job).map(|error| {
+                    ModuleSymbolStatus::Failed(format!(
+                        "{error} (not retried this session; .reload retries)"
+                    ))
+                })
+            };
             match symbols.extract_download_job(phys, dtb, &module, arch) {
                 Ok(ModuleSymbolDiscovery::Ready { job, guid, source }) => {
-                    plan.queue(
-                        symbols,
-                        ModuleSymbolLoad::new(job, guid, source, module, dtb),
-                    );
+                    let load = ModuleSymbolLoad::new(job, guid, source, module, dtb);
+                    match unavailable(&load.job).filter(|_| !plan.is_ready(symbols, &load)) {
+                        Some(status) => Self::apply_module_symbol_status(
+                            symbols,
+                            report,
+                            dtb,
+                            &load.module,
+                            status,
+                        ),
+                        None => plan.queue(symbols, load),
+                    }
                 }
                 Ok(ModuleSymbolDiscovery::NeedsImage { image_job }) => {
-                    plan.image_jobs.push((image_job, module));
+                    match unavailable(&image_job) {
+                        Some(status) => {
+                            Self::apply_module_symbol_status(symbols, report, dtb, &module, status)
+                        }
+                        None => plan.image_jobs.push((image_job, module)),
+                    }
                 }
                 Err(_e) if module.time_date_stamp.is_some() => {
                     let tds = module.time_date_stamp.unwrap();
                     match SymbolStore::build_image_download_job(&module.name, tds, module.size) {
-                        Ok(image_job) => plan.image_jobs.push((image_job, module)),
+                        Ok(image_job) => match unavailable(&image_job) {
+                            Some(status) => Self::apply_module_symbol_status(
+                                symbols, report, dtb, &module, status,
+                            ),
+                            None => plan.image_jobs.push((image_job, module)),
+                        },
                         Err(e) => Self::apply_module_symbol_status(
                             symbols,
                             report,
@@ -449,6 +479,7 @@ impl Guest {
                     }
                 },
                 Err(e) => {
+                    symbols.remember_unavailable(&image_job, &e.to_string());
                     Self::apply_module_symbol_status(
                         symbols,
                         report,
@@ -472,6 +503,7 @@ impl Guest {
                     stale_identities.push(load.module);
                 }
                 Err(e) => {
+                    symbols.remember_unavailable(&load.job, &e.to_string());
                     Self::apply_module_symbol_status(
                         symbols,
                         report,

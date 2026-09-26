@@ -233,6 +233,8 @@ impl Target {
             .map(|module| module.base_address)
             .collect::<Vec<_>>();
         self.symbols.invalidate_modules(dtb, &bases);
+        // An explicit reload asks the sources again, whatever failed before.
+        self.symbols.forget_unavailable();
 
         if self.in_secure_scope() {
             return Guest::load_module_symbols(
