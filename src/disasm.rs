@@ -299,8 +299,34 @@ pub fn decode_rows_arm64(
         if limit.is_some_and(|n| rows.len() >= n) {
             break;
         }
-        let Ok(instruction) = result else {
-            break;
+        // A word that encodes no instruction (a literal, a data slot) is
+        // shown as the word, as objdump does; the next one starts 4 bytes on.
+        let instruction = match result {
+            Ok(instruction) => instruction,
+            Err(error) => {
+                let ip = error.address();
+                let start_index = (ip - start_addr) as usize;
+                let Some(word) = bytes.get(start_index..start_index + 4) else {
+                    break;
+                };
+                let value = u32::from_le_bytes(word.try_into().expect("4-byte slice"));
+                rows.push(DisasmRow {
+                    ip,
+                    hex: hex_bytes(word),
+                    tokens: vec![
+                        AsmToken {
+                            text: ".inst".to_string(),
+                            kind: AsmKind::Keyword,
+                        },
+                        AsmToken {
+                            text: format!(" {value:#010x}"),
+                            kind: AsmKind::Number,
+                        },
+                    ],
+                    comment: None,
+                });
+                continue;
+            }
         };
         let ip = instruction.address();
         let start_index = (ip - start_addr) as usize;
@@ -735,6 +761,26 @@ fn preceding_start_offset(
 mod tests {
     use super::*;
 
+    /// A data word among ARM64 code (the HAL's EL2 init slot, a literal)
+    /// shows as the word and decoding carries on after it, so `u Ln` still
+    /// lists n rows.
+    #[test]
+    fn an_undecodable_arm64_word_is_shown_and_skipped() {
+        // ret; a word no instruction encodes; nop.
+        let bytes = [
+            0xc0, 0x03, 0x5f, 0xd6, 0x6c, 0x68, 0x14, 0x40, 0x1f, 0x20, 0x03, 0xd5,
+        ];
+        let rows = decode_rows_arm64(&bytes, 0x1000, None, |_| String::new());
+        let listed: Vec<(u64, String)> = rows.iter().map(|row| (row.ip, row.asm())).collect();
+        assert_eq!(
+            listed,
+            [
+                (0x1000, "ret".to_string()),
+                (0x1004, ".inst 0x4014686c".to_string()),
+                (0x1008, "nop".to_string()),
+            ]
+        );
+    }
     use std::cell::Cell;
 
     #[test]
