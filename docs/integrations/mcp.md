@@ -1,11 +1,15 @@
 # MCP integration
 
-`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server. Agents may use either this, for WinDbg syntax with bounded run-control, or the [Python SDK](../scripting/sdk.md), for structured values and scripted loops (conditional stops, bulk enumeration); both drive the same debugger.
+`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server, which gives an agent WinDbg syntax with bounded run control.
+
+:::{tip}
+If the agent's harness keeps a Python kernel alive between calls (oh-my-pi's `eval`, a Jupyter kernel), have it use the [Python SDK](../scripting/sdk.md) instead. The SDK runs the same WinDbg-style commands (`dbg.command("!process 0 0")`) and also returns structured values (`dbg.processes`, `dbg.types`, `dbg.memory`), so a script can filter or walk them and give the agent only the result. The SDK and this server each attach the target themselves, so use one at a time.
+:::
 
 | Tool | Purpose |
 | --- | --- |
-| `command` | Run one REPL line in ntoseye's WinDbg-style syntax (`!process 0 0`, `dt nt!_EPROCESS <addr>`, {command}`k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, {command}`lm`, {command}`g`, {command}`p`, {command}`break`, ...) with REPL semantics (`;` separates commands on one line) and return its text, styling stripped, followed by a one-line `[target ...]` trailer. {command}`help` lists every command. Arguments: `line`, `timeout_ms` (default 10 s, max 5 min), `format` (`text` or `json`). |
-| `open` / `close` | Attach to a target (`backend: kd \| kdnet \| gdb \| memory \| dump`, plus `connect` and, for kdnet, `key`) or release it. One session at a time. The KD memory source is an operator setting (`--memory-source` on the command line), not a tool argument. |
+| `command` | Run one REPL line (`;` separates commands; {command}`help` lists them) and return its text and a `[target ...]` trailer. Arguments: `line`, `timeout_ms` (default 10 s, max 5 min), `format` (`text` or [`json`](#structured-results)). |
+| `open` / `close` | Attach to a target (`backend`, `connect`, and `key` for `kdnet`; a crash dump is `backend: dump` with its path as `connect`) or release it. One session at a time. |
 
 ## Run control
 
