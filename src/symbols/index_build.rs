@@ -150,6 +150,8 @@ impl SymbolStore {
         let mut diagnostics = Vec::new();
         let string_table = match pdb_lock.string_table() {
             Ok(table) => Some(table),
+            // A public PDB has no source-file names: nothing to report.
+            Err(pdb2::Error::StreamNameNotFound) => None,
             Err(error) => {
                 record_index_diagnostic(
                     &mut diagnostics,
@@ -290,15 +292,9 @@ fn parse_module_streams(
                 let compiland = module.module_name().into_owned();
                 let module_info = match pdb.module_info(&module) {
                     Ok(Some(module_info)) => module_info,
-                    Ok(None) => {
-                        record_index_diagnostic(
-                            diagnostics,
-                            "module info",
-                            Some(&compiland),
-                            "module information is absent",
-                        );
-                        continue;
-                    }
+                    // Public PDBs strip most compilands' module streams, so
+                    // an absent one is the norm there, not a problem.
+                    Ok(None) => continue,
                     Err(error) => {
                         record_index_diagnostic(
                             diagnostics,
