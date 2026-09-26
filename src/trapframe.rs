@@ -11,6 +11,7 @@ use crate::layout::{FieldInfo, TypeInfo, le_uint};
 use crate::target::pool::kernel_symbol_address;
 use crate::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
+use crate::unwind::{resolve_thread_trace_context, try_format_symbol};
 use std::sync::Arc;
 
 pub const KTRAP_FRAME_TYPE: &str = "_KTRAP_FRAME";
@@ -515,6 +516,20 @@ pub fn ktrap_frame_at_machine_frame(
     let address = machine_frame.checked_sub(u64::from(rip))?;
     let frame = read_ktrap_frame(debugger, VirtAddr(address)).ok()?;
     (frame.instruction_pointer() == interrupted).then_some(frame)
+}
+
+/// The symbol at `frame`'s interrupted instruction. A kernel rip resolves in
+/// the kernel address space, which any scope (even the hypervisor's) leaves
+/// reachable; a user rip only in the selected scope, the thread's process
+/// once `.thread` selected it.
+pub fn trap_frame_rip_symbol(debugger: &Target, frame: &KtrapFrame) -> Option<String> {
+    let pc = frame.instruction_pointer();
+    let dtb = if pc >> 63 != 0 {
+        debugger.kernel_dtb()
+    } else {
+        debugger.current_dtb()
+    };
+    try_format_symbol(debugger, &resolve_thread_trace_context(debugger, dtb), pc)
 }
 
 /// Read an explicitly addressed trap frame, or the current Windows thread's

@@ -77,7 +77,10 @@ impl BreakpointManager {
             return Err(Error::NotSupported);
         }
         if debugger.in_secure_address_space() || debugger.is_secure_address(address) {
-            if client.name() != "gdb" || access != HwBreakpointAccess::Execute || len != 1 {
+            if !client.hardware_breakpoints_trap_in_host()
+                || access != HwBreakpointAccess::Execute
+                || len != 1
+            {
                 return Err(Error::Breakpoint(
                     "VTL1 debugging requires a GDB hardware execution breakpoint (ba e1); data watches and code patching are not supported".into(),
                 ));

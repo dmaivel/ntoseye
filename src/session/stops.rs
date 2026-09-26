@@ -23,7 +23,7 @@ use crate::session::{
 };
 use crate::target::ThreadInfo;
 use crate::types::VirtAddr;
-use crate::unwind::{resolve_thread_trace_context_at, try_format_symbol};
+use crate::unwind::try_format_symbol_at;
 
 /// The low bits of a CR3/DTB that select the page-directory base physical
 /// frame (PCID and reserved/canonical bits masked out), for comparing the
@@ -224,8 +224,7 @@ impl Session {
                     .register_map
                     .read_u64(self.target.arch().dtb_register(), regs)
                     .unwrap_or(0);
-                let trace = resolve_thread_trace_context_at(&self.target, cr3, rip);
-                try_format_symbol(&self.target, &trace, rip)
+                try_format_symbol_at(&self.target, cr3, rip)
             });
             // Where the hypervisor's VTLs left off, for a vCPU halted in it.
             let saved_vtl = registers

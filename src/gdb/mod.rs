@@ -1195,6 +1195,12 @@ impl DebugBackend for GdbClient {
         false
     }
 
+    /// KVM takes a guest-debug breakpoint's `#DB` itself and reports it here,
+    /// whatever VTL the vCPU was running.
+    fn hardware_breakpoints_trap_in_host(&self) -> bool {
+        true
+    }
+
     /// A stub programs these with the processor's debug registers, so they
     /// trap on every processor and leave guest memory untouched.
     fn supports_watchpoints(&self) -> bool {

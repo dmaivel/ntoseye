@@ -389,6 +389,17 @@ pub fn resolve_thread_trace_context_at(
     trace
 }
 
+/// [`try_format_symbol`] for code a vCPU runs at `rip` with root `cr3`,
+/// named in that vCPU's own address space (code outside NT, such as the
+/// Windows hypervisor, for what it is) whatever the inspection scope is.
+pub fn try_format_symbol_at(debugger: &Target, cr3: u64, rip: u64) -> Option<String> {
+    try_format_symbol(
+        debugger,
+        &resolve_thread_trace_context_at(debugger, cr3, rip),
+        rip,
+    )
+}
+
 pub fn format_symbol(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> String {
     try_format_symbol(debugger, trace, addr).unwrap_or_else(|| format!("{addr:#x}"))
 }

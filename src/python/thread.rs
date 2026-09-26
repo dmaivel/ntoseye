@@ -20,7 +20,7 @@ use crate::guest::ProcessInfo;
 use crate::session::{Session, VcpuInfo};
 use crate::target::sched::ApcSelector;
 use crate::target::{SelectedFrame, Target, ThreadInfo, cpu};
-use crate::trapframe::read_ktrap_frame_at_or_current;
+use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::types::VirtAddr;
 use crate::unwind::{RecoveredFrame, StackFrame};
 use crate::view;
@@ -1025,8 +1025,10 @@ pub fn process_for_thread(session: &Session, thread: &ThreadInfo) -> PyResult<Op
 
 pub fn trap_frame_view(target: &Target, address: Option<VirtAddr>) -> PyResult<view::View> {
     let frame = read_ktrap_frame_at_or_current(target, address).map_err(err)?;
-    let symbol = target.closest_symbol_current_context(VirtAddr(frame.instruction_pointer()));
-    Ok(view::bugcheck::trap_frame(&frame, symbol))
+    Ok(view::bugcheck::trap_frame(
+        &frame,
+        trap_frame_rip_symbol(target, &frame),
+    ))
 }
 
 /// A `u8` enum field as its PDB `IntEnum` member (an `int`), or `None`.

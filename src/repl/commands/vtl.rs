@@ -2,14 +2,16 @@ use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
 use crate::repl::*;
+use crate::target::HYPERVISOR_CONTEXT;
 use crate::ui;
+use crate::unwind::resolve_thread_trace_context_at;
 
 repl_command! {
     cmd_vtl;
     names: [".vtl"],
     usage: ".vtl [0|1 [pid]]",
     summary: "Select NT (VTL0) or secure-kernel (VTL1) memory inspection, or show which is active.",
-    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes reads and symbol scope, not the CPU's VTL. With no argument `.vtl` prints the current scope; `.vtl 0` returns to the NT kernel, `.vtl 1` selects the secure kernel's system address space, and `.vtl 1 <pid>` a trustlet's address space by its NT PID (always decimal). The VTL1 scope is a read-only memory view: registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends) and resume with plain `g`, which returns to the live context first. A vCPU stopped in VTL1 shows its real registers, stack, and memory; with no argument `.vtl` reports whether reads follow such a live stop or the manual view.",
+    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes reads and symbol scope, not the CPU's VTL. With no argument `.vtl` prints the current scope; `.vtl 0` returns to the NT kernel (at a stop in VTL1 or the Windows hypervisor, to the vCPU's own address space; `.vtlcxr` or `.thread` selects NT there), `.vtl 1` selects the secure kernel's system address space, and `.vtl 1 <pid>` a trustlet's address space by its NT PID (always decimal). The VTL1 scope is a read-only memory view: registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends) and resume with plain `g`, which returns to the live context first. A vCPU stopped in VTL1 shows its real registers, stack, and memory; with no argument `.vtl` reports whether reads follow such a live stop or the manual view.",
 }
 
 repl_command! {
@@ -231,6 +233,21 @@ impl ReplState<'_> {
                 );
             }
             outln!();
+        } else if let Some(rip) = target.register_value("rip")
+            && resolve_thread_trace_context_at(target, target.current_dtb(), rip).description
+                == HYPERVISOR_CONTEXT
+        {
+            // Not VTL0: the vCPU halted in the Windows hypervisor, whose root
+            // maps no NT memory.
+            outln!(
+                "hypervisor stop on vCPU {}: DTB {} is the Windows hypervisor's and maps no NT memory",
+                self.ctx.current_thread,
+                ui::addr(target.current_dtb())
+            );
+            outln!(
+                "{}\n",
+                ui::muted(".vtlcxr selects where VTL0 left off; .thread <tid> a Windows thread")
+            );
         } else {
             outln!("VTL0 inspection: DTB {}\n", ui::addr(target.current_dtb()));
         }

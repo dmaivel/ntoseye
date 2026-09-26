@@ -15,7 +15,7 @@ VBS itself needs nested virtualization exposed to the VM; the [KVM/QEMU setup](.
 
 ## Inspecting VTL1 memory
 
-- {command}`.vtl` `[0|1 [pid]]`: Display or select the inspection scope. A bare {command}`.vtl` prints the current scope, `0` returns to the NT kernel, `1` selects the secure kernel's system address space, and `1 <pid>` selects a trustlet's address space by its NT PID (always decimal).
+- {command}`.vtl` `[0|1 [pid]]`: Display or select the inspection scope. A bare {command}`.vtl` prints the current scope, `0` returns to the NT kernel (at a stop in VTL1 or the Windows hypervisor, to the vCPU's own address space; {command}`.vtlcxr` or {command}`.thread` selects NT there), `1` selects the secure kernel's system address space, and `1 <pid>` selects a trustlet's address space by its NT PID (always decimal).
 - {command}`!trustlets`: List secure-kernel processes: the secure-kernel process object, NT PID and image name, trustlet ID, and address-space root.
 
 ```text

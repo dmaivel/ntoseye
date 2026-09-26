@@ -583,6 +583,14 @@ pub trait DebugBackend {
         false
     }
 
+    /// Whether this backend's hardware breakpoints trap in the host, before
+    /// a hypervisor inside the guest sees the `#DB`, so they can stop code
+    /// Windows' hypervisor isolates (VTL1). Debug registers Windows programs
+    /// for its own debugger (KD) trap inside the guest and cannot.
+    fn hardware_breakpoints_trap_in_host(&self) -> bool {
+        false
+    }
+
     /// Whether the backend can install global data watchpoints. KD implements
     /// these with x86 debug registers; other transports report `false`.
     fn supports_watchpoints(&self) -> bool {

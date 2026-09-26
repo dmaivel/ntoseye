@@ -8,13 +8,13 @@ use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::session::ExceptionRecord;
 use crate::target::{HYPERVISOR_CONTEXT, SavedThreadRegisters, SelectedFrame, lookup_register};
-use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
+use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_context,
-    build_stacktrace_with_register_values, describe_saved_vtl, format_symbol,
-    resolve_thread_trace_context, resolve_thread_trace_context_at, try_format_symbol,
+    build_stacktrace_with_register_values, describe_saved_vtl, resolve_thread_trace_context,
+    resolve_thread_trace_context_at, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -754,17 +754,8 @@ impl ReplState<'_> {
         }
         match read_ktrap_frame_at_or_current(&self.ctx.target, address) {
             Ok(frame) => {
-                // A kernel rip resolves in the kernel address space, which any
-                // scope (even the hypervisor's) leaves reachable; a user rip
-                // only in the selected thread's process.
-                let target = &self.ctx.target;
-                let pc = frame.instruction_pointer();
-                let dtb = if pc >> 63 != 0 {
-                    target.kernel_dtb()
-                } else {
-                    target.current_dtb()
-                };
-                let symbol = format_symbol(target, &resolve_thread_trace_context(target, dtb), pc);
+                let symbol = trap_frame_rip_symbol(&self.ctx.target, &frame)
+                    .unwrap_or_else(|| format!("{:#x}", frame.instruction_pointer()));
                 print_ktrap_frame(&frame, Some(&symbol));
                 let registers = registers_from_trap_frame(&frame);
                 let selected = self.select_register_values(0, registers);
