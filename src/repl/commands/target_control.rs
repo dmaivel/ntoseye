@@ -3,7 +3,6 @@ use crate::diagnostics::print_warning;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::error::{Error, Result};
 use crate::kd::{KdFileMapping, kd_files, load_map_file};
-use crate::phys::PhysMem;
 use crate::repl::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -227,7 +226,7 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        if matches!(&*self.ctx.target.phys, PhysMem::Dmp(_)) {
+        if self.ctx.target.phys.is_dump() {
             error!(".dump is not applicable to a static crash dump");
             return Ok(());
         }

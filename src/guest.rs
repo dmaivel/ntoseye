@@ -1,3 +1,4 @@
+use crate::backend::MemoryOps;
 use crate::{
     dmp::DmpInfo,
     error::{Error, Result},
@@ -188,6 +189,10 @@ struct HaltMemo {
 
 impl Guest {
     pub fn from_kernel(ntoskrnl: Image) -> Self {
+        // Builds before the L1TF mitigation have no mask to undo.
+        ntoskrnl
+            .phys
+            .set_invalid_pte_mask(invalid_pte_mask(&ntoskrnl).unwrap_or(0));
         Self {
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
@@ -378,4 +383,23 @@ impl Guest {
         ntoskrnl.register_as_kernel();
         Ok(Self::from_kernel(ntoskrnl))
     }
+}
+
+/// The kernel's `MiState.Hardware.InvalidPteMask`: the bits it sets in a
+/// non-present PTE's frame so a speculative load through it reaches no real
+/// memory (the L1TF mitigation). `None` on a build without one.
+fn invalid_pte_mask(kernel: &Image) -> Option<u64> {
+    let state = kernel.symbol("MiState").ok()?.address();
+    let types = kernel.types();
+    let hardware = types
+        .layout("_MI_SYSTEM_INFORMATION")
+        .ok()?
+        .field_offset("Hardware")
+        .ok()?;
+    let mask = types
+        .layout("_MI_HARDWARE_STATE")
+        .ok()?
+        .field_offset("InvalidPteMask")
+        .ok()?;
+    kernel.memory().read::<u64>(state + hardware + mask).ok()
 }

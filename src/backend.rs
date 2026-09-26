@@ -51,6 +51,13 @@ pub trait MemoryOps<A> {
         self.read_bytes(addr, buf)
     }
 
+    /// The bits the guest sets in a non-present page-table entry to point it
+    /// at no real memory (Windows' L1TF mitigation, `InvalidPteMask`), which
+    /// a transition entry's frame must have cleared; 0 when there are none.
+    fn invalid_pte_mask(&self) -> u64 {
+        0
+    }
+
     fn read<T: Copy + FromZeros + FromBytes + IntoBytes>(&self, addr: A) -> Result<T> {
         let mut obj = T::new_zeroed();
 
@@ -96,5 +103,9 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn read_page_table_bytes(&self, addr: A, buf: &mut [u8]) -> Result<()> {
         (**self).read_page_table_bytes(addr, buf)
+    }
+
+    fn invalid_pte_mask(&self) -> u64 {
+        (**self).invalid_pte_mask()
     }
 }

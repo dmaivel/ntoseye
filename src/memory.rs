@@ -469,6 +469,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             // refusing them here would report memory as gone that the target
             // can still show.
             if pte.is_transition() {
+                let pte = pte.unswizzled(self.backend.invalid_pte_mask());
                 return Ok(Some(Translation::new_transition(pte, va)));
             }
             return Ok(None);
@@ -566,6 +567,7 @@ mod tests {
 
     struct FakePhysMem {
         data: Vec<u8>,
+        invalid_pte_mask: u64,
     }
 
     impl MemoryOps<PhysAddr> for FakePhysMem {
@@ -581,6 +583,10 @@ mod tests {
 
         fn write_bytes(&self, _addr: PhysAddr, _buf: &[u8]) -> Result<()> {
             Err(Error::BadPhysicalAddress(0))
+        }
+
+        fn invalid_pte_mask(&self) -> u64 {
+            self.invalid_pte_mask
         }
     }
 
@@ -599,7 +605,13 @@ mod tests {
         let at = 0x4000 + va.pt_index() * 8;
         data[at..at + 8].copy_from_slice(&leaf.to_le_bytes());
         data[0x5000..0x5008].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-        (FakePhysMem { data }, va)
+        (
+            FakePhysMem {
+                data,
+                invalid_pte_mask: 0,
+            },
+            va,
+        )
     }
 
     /// A trimmed page keeps its frame on the standby list with the valid bit
@@ -622,6 +634,29 @@ mod tests {
             matches!(error, Error::DebugInfo(_)),
             "a standby frame is not mapped here and must not be written"
         );
+    }
+
+    /// Windows' L1TF mitigation sets a high bit (`InvalidPteMask`) in a
+    /// non-present PTE's frame, recording that with `SwizzleBit` (bit 4)
+    /// clear. A trimmed kernel stack's transition PTE read as-is points past
+    /// RAM; its frame is the one with the mask cleared.
+    #[test]
+    fn a_swizzled_transition_pte_reads_its_real_frame() {
+        const MASK: u64 = 1 << 45;
+        let read = |leaf: u64| {
+            let (mut mem, va) = amd64_space(leaf);
+            mem.invalid_pte_mask = MASK;
+            let mut buf = [0u8; 8];
+            AddressSpace::new(&mem, 0x1000)
+                .read_bytes(va, &mut buf)
+                .map(|()| u64::from_le_bytes(buf))
+        };
+        assert_eq!(
+            read(0x5000 | MASK | (1 << 11)).unwrap(),
+            0x1122_3344_5566_7788
+        );
+        // With SwizzleBit set the entry was stored as-is: the bit is its own.
+        assert!(read(0x5000 | MASK | (1 << 11) | (1 << 4)).is_err());
     }
 
     /// The other invalid forms store a prototype-PTE pointer or a page-file
@@ -658,7 +693,10 @@ mod tests {
         data.resize(0x0060_0000, 0);
         data[0x0040_1008..0x0040_1010].copy_from_slice(&0xfeed_faceu64.to_le_bytes());
         data[0x0040_2008..0x0040_2010].copy_from_slice(&0xbad_f00du64.to_le_bytes());
-        let mem = FakePhysMem { data };
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
 
         let value: u64 = AddressSpace::new(&mem, 0x1000).read(va).unwrap();
 
@@ -702,7 +740,10 @@ mod tests {
     fn identity_dtb_skips_page_table_walk() {
         let mut data = vec![0u8; 0x2000];
         data[0x1000..0x1008].copy_from_slice(&0xDEADBEEFCAFEBABEu64.to_le_bytes());
-        let mem = FakePhysMem { data };
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
         let space = AddressSpace::new(&mem, DTB_IDENTITY);
 
         let mut buf = [0u8; 8];
@@ -716,7 +757,10 @@ mod tests {
         for (i, byte) in data[0xFF0..0x1010].iter_mut().enumerate() {
             *byte = ((0xFF0 + i) & 0xFF) as u8;
         }
-        let mem = FakePhysMem { data };
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
         let space = AddressSpace::new(&mem, DTB_IDENTITY);
 
         let mut buf = [0u8; 0x20];
@@ -738,7 +782,10 @@ mod tests {
         data[0x3000..0x3008].copy_from_slice(&(0x4000u64 | 0b11).to_le_bytes());
         data[0x4000..0x4008].copy_from_slice(&(0x5000u64 | 0b11).to_le_bytes());
         data[0x5000..0x5008].copy_from_slice(&0xDEAD_BEEF_CAFE_BABEu64.to_le_bytes());
-        let mem = FakePhysMem { data };
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
         let space = AddressSpace::new_arm64(&mem, root_page, root_page);
 
         let value: u64 = space.read(kernel_va).unwrap();
@@ -810,7 +857,10 @@ mod tests {
         data[0x5000..0x5008].copy_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes());
         data[0x5010..0x5018].copy_from_slice(&0x5555_6666_7777_8888u64.to_le_bytes());
         let mem = CachingPhysMem {
-            inner: FakePhysMem { data },
+            inner: FakePhysMem {
+                data,
+                invalid_pte_mask: 0,
+            },
             reads: std::cell::Cell::new(0),
             cache: TranslationCache::default(),
         };

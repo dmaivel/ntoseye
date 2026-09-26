@@ -2,6 +2,7 @@ use tabled::builder::Builder;
 use tabled::settings::object::Rows;
 use tabled::settings::{Alignment, Modify, Panel};
 
+use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::memory::DTB_IDENTITY;
@@ -533,15 +534,25 @@ fn print_lookaside_lists(detail: &LookasideListsDetail) {
 }
 
 /// One `!pte` column: where the level's entry lives, its raw value, and the
-/// decoded PFN and flags.
-fn pte_level_cell(level: &PteLevel) -> String {
+/// decoded PFN and flags. A non-present entry has no flags; a transition one
+/// names its frame with `invalid_pte_mask` (the L1TF swizzle) cleared.
+fn pte_level_cell(level: &PteLevel, invalid_pte_mask: u64) -> String {
+    let value = level.value;
+    let decoded = if value.is_present() {
+        format!("pfn {:<5x} {:>11}", value.pfn(), value.flags())
+    } else if value.is_transition() {
+        format!(
+            "transition pfn {:x}",
+            value.unswizzled(invalid_pte_mask).pfn()
+        )
+    } else {
+        "not present".to_string()
+    };
     format!(
-        "{} at {:X}\ncontains {:016X}\npfn {:<5x} {:>11}",
+        "{} at {:X}\ncontains {:016X}\n{decoded}",
         level.level.name(),
         level.address,
-        ui::Value(level.value.0),
-        level.value.pfn(),
-        level.value.flags()
+        ui::Value(value.0),
     )
 }
 
@@ -710,7 +721,11 @@ impl ReplState<'_> {
                 );
                 let mut builder = Builder::default();
 
-                let row_strings: Vec<String> = levels.iter().map(pte_level_cell).collect();
+                let mask = self.ctx.target.phys.invalid_pte_mask();
+                let row_strings: Vec<String> = levels
+                    .iter()
+                    .map(|level| pte_level_cell(level, mask))
+                    .collect();
                 builder.push_record(row_strings);
 
                 let mut table = builder.build();

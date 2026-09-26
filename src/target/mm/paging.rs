@@ -160,12 +160,25 @@ impl Target {
         })
     }
 
+    /// The page-table entries mapping `address`, read through NT's
+    /// self-map in the inspection address space, so user VAs resolve through
+    /// the selected process's tables. Every NT root maps the self-map; a root
+    /// that does not (a stop in the Windows hypervisor or VTL1) is not NT's,
+    /// and the walk uses the kernel's instead.
     pub fn pte_traverse(&self, address: VirtAddr) -> Result<PteWalk> {
-        // Walk through the current inspection address space so user VAs resolve
-        // through the attached process's tables (not the kernel's). MmPteBase is
-        // a kernel VA valid in any process context (the recursive PML4 slot).
-        let memory = self.context_memory();
-        let dtb = self.current_dtb();
+        let current = self.current_dtb();
+        match self.pte_traverse_in(current, address) {
+            Err(error) if current != self.kernel_dtb() => self
+                .pte_traverse_in(self.kernel_dtb(), address)
+                .map_err(|_| error),
+            walk => walk,
+        }
+    }
+
+    fn pte_traverse_in(&self, dtb: Dtb, address: VirtAddr) -> Result<PteWalk> {
+        // MmPteBase is a kernel VA valid in any NT root (the recursive PML4
+        // slot).
+        let memory = self.address_space(dtb);
 
         let pte_base: VirtAddr = self.guest()?.ntoskrnl.symbol("MmPteBase")?.read()?;
         let pde_base = pte_base + (pte_base.0 >> 9 & 0x7FFFFFFFFF);
@@ -350,7 +363,14 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         address: va,
         dtb,
         levels,
-        physical: (pte.is_present() || transition).then(|| pte.page_frame() + va.page_offset()),
+        physical: if pte.is_present() {
+            Some(pte.page_frame() + va.page_offset())
+        } else if transition {
+            let pte = pte.unswizzled(target.phys.invalid_pte_mask());
+            Some(pte.page_frame() + va.page_offset())
+        } else {
+            None
+        },
         large: false,
         transition,
     })

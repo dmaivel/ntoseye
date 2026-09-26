@@ -26,7 +26,6 @@ use super::types::Types;
 use super::{err, raise, runcontrol, runner, view_record, view_records};
 use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
-use crate::phys::PhysMem;
 use crate::view;
 
 fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
@@ -260,7 +259,7 @@ impl Debugger {
     fn write_dump(&self, path: &str) -> PyResult<u64> {
         self.with_session(|session| {
             require_halted(session, "write_dump")?;
-            if matches!(&*session.target.phys, PhysMem::Dmp(_)) {
+            if session.target.phys.is_dump() {
                 return Err(raise("write_dump is not applicable to a static crash dump"));
             }
             let metadata = collect_dump_metadata(session).map_err(err)?;

@@ -271,6 +271,17 @@ impl PageTableEntry {
     /// stores a pointer to a prototype entry, and a page-file PTE stores an
     /// offset. Reading either as a frame would return unrelated memory, so
     /// both must be excluded.
+    /// This non-present entry with Windows' L1TF swizzle undone: an entry
+    /// whose `SwizzleBit` (bit 4) is clear has `mask` set to point it at no
+    /// real memory, and its frame is the one with `mask` cleared.
+    pub const fn unswizzled(self, mask: u64) -> Self {
+        if self.0 & (1 << 4) == 0 {
+            Self(self.0 & !mask)
+        } else {
+            self
+        }
+    }
+
     pub const fn is_transition(self) -> bool {
         !self.is_present() && self.0 & (1 << 11) != 0 && self.0 & (1 << 10) == 0
     }
