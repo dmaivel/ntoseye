@@ -1095,12 +1095,20 @@ mod tests {
     /// The fixture image and a stack where `FRAMED` runs with its frame at
     /// `FRAMED_RBP`, called from `CALLER`, which is the thread's first frame.
     fn frame_pointer_session() -> Session {
+        frame_pointer_session_with(&[(8, RETURN_ADDRESS)])
+    }
+
+    /// [`frame_pointer_session`] with `slots` (offset from `FRAMED_RBP`,
+    /// value) written above the saved `rbp` instead of the return address.
+    fn frame_pointer_session_with(slots: &[(usize, u64)]) -> Session {
         let mut memory = frame_pointer_image();
         memory.resize(IMAGE_SIZE + 0x2000, 0);
         let stack = |address: u64| (address - IMAGE) as usize;
         memory[stack(FRAMED_RBP)..stack(FRAMED_RBP) + 8].copy_from_slice(&CALLER_RBP.to_le_bytes());
-        memory[stack(FRAMED_RBP) + 8..stack(FRAMED_RBP) + 16]
-            .copy_from_slice(&RETURN_ADDRESS.to_le_bytes());
+        for &(offset, value) in slots {
+            let at = stack(FRAMED_RBP) + offset;
+            memory[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
         let mut session = session_over_memory(IMAGE, &memory);
         session
             .target
@@ -1155,6 +1163,35 @@ mod tests {
     fn an_unknown_frame_pointer_falls_back_to_scanning() {
         let session = frame_pointer_session();
         let seed = registers(&[("rip", FRAMED_RIP), ("rsp", FRAMED_RSP)]);
+
+        let trace =
+            build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 8);
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (FRAMED_RIP, FrameSource::Current),
+                (RETURN_ADDRESS, FrameSource::Scan)
+            ]
+        );
+    }
+
+    /// An unwind that lands on a value no code can sit at (the null page, a
+    /// non-canonical address) went wrong: it is not listed as a frame, and
+    /// the caller is found by scanning above it.
+    #[test]
+    fn a_return_address_in_the_null_page_is_not_a_frame() {
+        let session = frame_pointer_session_with(&[(8, 0x288), (0x18, RETURN_ADDRESS)]);
+        let seed = registers(&[
+            ("rip", FRAMED_RIP),
+            ("rsp", FRAMED_RSP),
+            ("rbp", FRAMED_RBP),
+        ]);
 
         let trace =
             build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 8);

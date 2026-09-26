@@ -55,6 +55,13 @@ pub(super) fn build_recovered_stacktrace_seeded(
         if context.rip == previous_rip {
             break;
         }
+        // Nothing runs in the never-mapped first 64 KiB or at a non-canonical
+        // address, so a value there is no return address: the unwind went
+        // wrong (a context short of registers, a stale slot), and the stack is
+        // scanned from here instead of listing it as a frame.
+        if !could_be_return_address(context.rip, debugger.arch()) {
+            break;
+        }
         // An x64 return pops its address, so sp always climbs; an ARM64 leaf
         // returns through lr and leaves sp where it was.
         let stack_regressed = match debugger.arch() {
@@ -177,6 +184,16 @@ pub(super) fn ensure_module_symbols(
             debugger.arch(),
         );
     }
+}
+
+/// Whether `address` could hold code: above the first 64 KiB, which Windows
+/// never maps, and, on AMD64, canonical.
+fn could_be_return_address(address: u64, arch: Arch) -> bool {
+    address >= 0x1_0000
+        && match arch {
+            Arch::Amd64 => matches!(address >> 47, 0 | 0x1_ffff),
+            Arch::Arm64 => true,
+        }
 }
 
 pub(super) fn record_recovered_frame(
