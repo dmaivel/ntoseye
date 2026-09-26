@@ -40,6 +40,7 @@ repl_command! {
     names: [".cxr"],
     usage: ".cxr [address]",
     summary: "Select a CONTEXT record, or reset the selected context.",
+    details: "Without an address, returns to the vCPU's own registers: at a stop in the Windows hypervisor, the hypervisor's, instead of where NT left off.",
     completion: Expression,
     run_state: Halted,
 }
@@ -57,7 +58,7 @@ repl_command! {
     names: [".vtlcxr"],
     usage: ".vtlcxr",
     summary: "Select the VTL0 context the Windows hypervisor saved for the vCPU halted in it.",
-    details: "For a vCPU stopped in the Windows hypervisor (VBS), reads what its virtual processor's VTLs were doing from their Enlightened VMCS pages, lists them, and selects VTL0's, so r, k, and u show where NT left off. The VM must expose hv-evmcs; the first use per boot scans host RAM for the pages. The context has RIP, RSP, flags, control, and segment registers, but no other general-purpose registers: the hypervisor keeps those in undocumented state. VTL1's saved state is listed, not selected. .cxr resets. See 'Where NT left off under the hypervisor' in the VBS guide.",
+    details: "For a vCPU stopped in the Windows hypervisor (VBS), reads what its virtual processor's VTLs were doing from their Enlightened VMCS pages, lists them, and selects VTL0's, so r, k, and u show where NT left off. The VM must expose hv-evmcs; the first use per boot scans host RAM for the pages. The context has RIP, RSP, flags, control, and segment registers, but no other general-purpose registers: the hypervisor keeps those in undocumented state. VTL1's saved state is listed, not selected. A stop in the hypervisor selects VTL0's by itself; .vtlcxr selects it again after .cxr, which returns to the hypervisor's registers. See 'Where NT left off under the hypervisor' in the VBS guide.",
     run_state: Halted,
 }
 
@@ -99,8 +100,13 @@ impl ReplState<'_> {
     /// Drop any `.frame`/`.cxr`/`.trap` context selection. Called by every
     /// command that changes the execution context (`~Ns`, `vcpu`, `.thread`,
     /// `.process`, run control) so a stale frame never shadows live registers.
+    /// Drop a selected frame or context for the stop's default: the vCPU's
+    /// registers, or where NT left off when it is halted in the Windows
+    /// hypervisor. `.cxr` and `.trap` without an argument go to the vCPU's own
+    /// registers instead
+    /// ([`crate::session::Session::clear_selected_frame`]).
     pub fn clear_selected_frame(&mut self) {
-        self.ctx.clear_selected_frame();
+        self.ctx.reset_to_stop_context();
     }
 
     fn set_selected_frame(&mut self, selected: SelectedFrame) {
@@ -202,7 +208,7 @@ impl ReplState<'_> {
 
     fn cmd_cxr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let Some(text) = invocation.arg(0) else {
-            self.clear_selected_frame();
+            self.ctx.clear_selected_frame();
             outln!("selected context reset\n");
             return Ok(());
         };
@@ -748,7 +754,7 @@ impl ReplState<'_> {
                 .current_thread_pseudo_register("trapframe")
                 .is_none()
         {
-            self.clear_selected_frame();
+            self.ctx.clear_selected_frame();
             outln!("selected context reset\n");
             return Ok(());
         }
@@ -820,23 +826,6 @@ pub fn registers_from_trap_frame(frame: &KtrapFrame) -> HashMap<String, u64> {
         }
     }
     registers
-}
-
-/// Print a recovered (partial) register set sorted by name, one row per
-/// register at `indent` columns, under an optional heading line.
-pub(super) fn print_sparse_registers(
-    registers: &HashMap<String, u64>,
-    heading: Option<&str>,
-    indent: usize,
-) {
-    let mut names: Vec<_> = registers.keys().collect();
-    names.sort();
-    if let Some(heading) = heading {
-        outln!("{heading}");
-    }
-    for name in names {
-        outln!("{:indent$}{:<8} {}", "", name, ui::addr(registers[name]));
-    }
 }
 
 fn print_exception_record(address: u64, record: &ExceptionRecord) {

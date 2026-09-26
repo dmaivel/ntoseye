@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
@@ -152,6 +154,23 @@ fn format_cpsr(flags: u64) -> String {
 /// break/status dump (`registers` section header, 2-space indent); standalone
 /// `registers` passes false so it reads flush-left with no header, matching
 /// `disasm`. The row layout follows the register map's architecture.
+/// Print a recovered (partial) register set sorted by name, one row per
+/// register at `indent` columns, under an optional heading line.
+pub fn print_sparse_registers(
+    registers: &HashMap<String, u64>,
+    heading: Option<&str>,
+    indent: usize,
+) {
+    let mut names: Vec<_> = registers.keys().collect();
+    names.sort();
+    if let Some(heading) = heading {
+        outln!("{heading}");
+    }
+    for name in names {
+        outln!("{:indent$}{:<8} {}", "", name, ui::addr(registers[name]));
+    }
+}
+
 pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) {
     let read_reg_value = |name: &str| register_map.read_u64(name, regs);
     let styled_value = |name: &str| -> String {

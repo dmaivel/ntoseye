@@ -417,9 +417,10 @@ impl Session {
 
     /// [`Self::recovered_backtrace`] for `vcpu` without selecting it: the
     /// current vCPU's stack is the inspection context's (a parked thread,
-    /// `.cxr`, `.trap`), any other vCPU's starts from its own registers. A
-    /// host showing every vCPU's stack (a DAP client) walks them this way, so
-    /// looking at one does not move the context the console selected.
+    /// `.cxr`, `.trap`), any other vCPU's starts from its default context, its
+    /// own registers or, halted in the Windows hypervisor, where NT left off.
+    /// A host showing every vCPU's stack (a DAP client) walks them this way,
+    /// so looking at one does not move the context the console selected.
     pub fn recovered_vcpu_backtrace(
         &mut self,
         vcpu: &str,
@@ -431,10 +432,19 @@ impl Session {
         let registers = self
             .read_vcpu_registers(vcpu)?
             .ok_or_else(|| Error::DebugInfo(format!("{vcpu}'s registers are unavailable")))?;
-        let seed = self.register_map.to_hashmap(&registers);
+        let live = self.register_map.to_hashmap(&registers);
+        if let Some(saved) = self.target.saved_vtl0_registers(vcpu, &live) {
+            let trace = build_stacktrace_with_register_values(
+                &self.target,
+                &self.register_map,
+                &saved,
+                limit,
+            );
+            return Ok((trace, saved, false));
+        }
         let trace =
             build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit);
-        Ok((trace, seed, true))
+        Ok((trace, live, true))
     }
 
     /// The stack of the thread `vcpu` runs, from that vCPU's context; `None`
@@ -456,7 +466,7 @@ impl Session {
                 "{vcpu} is running VTL1; NT's thread there is suspended in a VTL call"
             )));
         }
-        let (source, recovered) = match self.saved_vtl0_registers(vcpu, &values) {
+        let (source, recovered) = match self.target.saved_vtl0_registers(vcpu, &values) {
             Some(saved) => (
                 ThreadStackSource::SavedVtl0,
                 build_stacktrace_with_register_values(

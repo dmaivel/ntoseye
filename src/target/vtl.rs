@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use pelite::{PeView, image::IMAGE_FILE_DLL};
 
-use super::Target;
+use super::{SelectedFrame, Target};
 use crate::{
     backend::MemoryOps,
     cpu_state::kpcr_for_processor,
+    dbg_backend::processor_index_from_backend_thread_id,
     error::{Error, Result},
     guest::{
         EvmcsState, Guest, ModuleInfo, ModuleSymbolLoadReport, SecureKernel, SessionSpace,
@@ -20,6 +21,7 @@ use crate::{
     pe::{read_pe_header_page, size_of_image},
     symbols::SymbolStore,
     types::{Arch, Dtb, PhysAddr, VirtAddr},
+    unwind::resolve_thread_trace_context_at,
 };
 
 /// How far below an instruction pointer to look for the header of the image
@@ -231,6 +233,45 @@ impl Target {
             }
         }
         Ok(vtl0.into_iter().chain(one(vtl1, 1)?).collect())
+    }
+
+    /// The VTL0 state the Windows hypervisor saved for `vcpu`, whose registers
+    /// are `registers`, when it is halted in the hypervisor and the state is
+    /// found and validates (see [`Self::saved_vtl_contexts`]).
+    pub fn saved_vtl0_registers(
+        &self,
+        vcpu: &str,
+        registers: &HashMap<String, u64>,
+    ) -> Option<HashMap<String, u64>> {
+        let cr3 = *registers.get(self.arch().dtb_register())?;
+        let rip = *registers.get("rip")?;
+        if resolve_thread_trace_context_at(self, cr3, rip).description != HYPERVISOR_CONTEXT {
+            return None;
+        }
+        let processor = processor_index_from_backend_thread_id(vcpu);
+        let saved = self.saved_vtl_contexts(cr3, processor).ok()?;
+        let vtl0 = saved.into_iter().find(|context| context.vtl == 0)?;
+        Some(vtl0.registers())
+    }
+
+    /// Make where NT left off the inspection context of `vcpu`, whose live
+    /// registers are [`Self::registers`], when it is halted in the Windows
+    /// hypervisor and nothing else is selected: NT is what a stop there is
+    /// inspected for, and the hypervisor's registers, stack, and address space
+    /// map no NT memory. `.cxr` returns to them. Whether it was selected.
+    pub fn select_saved_vtl0(&mut self, vcpu: &str) -> bool {
+        if self.selected_frame.is_some() {
+            return false;
+        }
+        let Some(saved) = self
+            .registers
+            .as_ref()
+            .and_then(|registers| self.saved_vtl0_registers(vcpu, registers))
+        else {
+            return false;
+        };
+        self.select_frame(SelectedFrame::from_registers(0, saved));
+        true
     }
 
     /// Whether this boot's eVMCS scan found any page; `None` before a scan.

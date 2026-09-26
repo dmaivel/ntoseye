@@ -99,7 +99,7 @@ repl_command! {
     names: ["~", "vcpus"],
     usage: "~",
     summary: "List vCPU contexts and their RIP values.",
-    details: "A vCPU halted in the Windows hypervisor (VBS) also shows where its VTL0 left off, from the hypervisor's saved state; `.vtlcxr` selects that context.",
+    details: "A vCPU halted in the Windows hypervisor (VBS) also shows where its VTL0 left off, from the hypervisor's saved state; `~Ns` on it selects that context, and `.cxr` the hypervisor's registers.",
     run_state: Halted,
 }
 
@@ -826,7 +826,6 @@ impl ReplState<'_> {
             if let Err(error) = self.ctx.set_current_thread(&id) {
                 error!("failed to switch processor: {}", error);
             } else {
-                self.clear_selected_frame();
                 self.caches.refresh_symbol_context(&self.ctx.target);
                 outln!("switched to processor {}\n", id);
             }
@@ -838,7 +837,6 @@ impl ReplState<'_> {
                 error!("failed to switch processor {}: {}", id, error);
                 continue;
             }
-            self.clear_selected_frame();
             self.caches.refresh_symbol_context(&self.ctx.target);
             if let Err(error) = self.dispatch_line(if action == 'k' { "k" } else { "r" }) {
                 error!("processor {} command failed: {}", id, error);
@@ -847,7 +845,6 @@ impl ReplState<'_> {
         if let Err(error) = self.ctx.set_current_thread(&original) {
             error!("failed to restore processor {}: {}", original, error);
         } else {
-            self.clear_selected_frame();
             self.caches.refresh_symbol_context(&self.ctx.target);
         }
         Ok(Flow::Continue)

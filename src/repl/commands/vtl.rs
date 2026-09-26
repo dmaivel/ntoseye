@@ -197,7 +197,7 @@ impl ReplState<'_> {
                     .transpose()?;
                 let report = self.ctx.target.select_secure_scope(pid)?;
                 print_module_symbol_report(&report);
-                self.clear_selected_frame();
+                self.ctx.clear_selected_frame();
                 self.caches.refresh_symbol_context(&self.ctx.target);
             }
             _ => {

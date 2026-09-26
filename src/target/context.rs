@@ -2,14 +2,15 @@
 //! thread and its registers, and the process and code bitness they imply.
 
 use super::{
-    AttachReport, CODE_BITNESS_AMD64, CODE_BITNESS_X86, Target, TargetSelection, ThreadInfo,
-    lookup_register, process_matches,
+    AttachReport, CODE_BITNESS_AMD64, CODE_BITNESS_X86, SelectedFrame, Target, TargetSelection,
+    ThreadInfo, lookup_register, process_matches,
 };
 use crate::{
     backend::MemoryOps,
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo},
+    memory::DTB_IDENTITY,
     types::{Dtb, VirtAddr},
 };
 
@@ -249,6 +250,26 @@ impl Target {
     /// page-table base frame: a PCID on AMD64, an ASID on ARM64.
     pub fn normalize_dtb(&self, dtb: u64) -> Dtb {
         dtb & self.arch().dtb_page_mask()
+    }
+
+    /// Install a debugger-selected frame/context as the inspection context:
+    /// its recovered registers shadow the live ones and its address space
+    /// becomes the expression/memory scope. Shared by `.frame`, `.cxr`,
+    /// `.trap`, `.vtlcxr`, and the DAP frame selection so they can't drift.
+    pub fn select_frame(&mut self, selected: SelectedFrame) {
+        self.registers = Some(selected.registers.clone());
+        let dtb_register = self.arch().dtb_register();
+        let dtb = selected.dtb.or_else(|| {
+            selected.registers.get(dtb_register).copied().filter(|dtb| {
+                *dtb != 0 && self.guest.is_some() && self.kernel_dtb() != DTB_IDENTITY
+            })
+        });
+        // A context with no root of its own (a trap frame, a context record)
+        // is the selected thread's: its address space stays the scope.
+        if let Some(dtb) = dtb {
+            self.set_context_dtb_override(dtb);
+        }
+        self.selected_frame = Some(selected);
     }
 
     pub fn set_current_windows_thread_context(&mut self, thread: ThreadInfo) {

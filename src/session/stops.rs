@@ -62,6 +62,7 @@ impl Session {
         // Every host inspects the thread the stop landed on: `!thread`,
         // `.thread` and `$thread` read this selection, and resuming cleared it.
         refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
+        self.select_stop_context_default();
         self.current_stop = Some(self.continue_outcome_from_resolution(resolution.clone()));
     }
 

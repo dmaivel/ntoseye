@@ -35,7 +35,7 @@ impl Session {
     /// stub can drop non-hit ones on a stop) and re-select the landed-on thread.
     /// The full "step one instruction", shared by the REPL (`si`) and the SDK.
     pub fn step(&mut self) -> Result<u64> {
-        self.require_live_register_context()?;
+        self.require_steppable_vcpu()?;
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).
@@ -87,7 +87,7 @@ impl Session {
     /// any software-breakpoint patch and reading through the thread's preferred
     /// code DTB. Selects the current thread first; the VM must be halted.
     pub fn current_instruction(&mut self) -> Result<CurrentInstruction> {
-        self.require_live_register_context()?;
+        self.require_steppable_vcpu()?;
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
         self.target.registers = Some(self.register_map.to_hashmap(&regs));
@@ -159,7 +159,7 @@ impl Session {
     /// few frames of the current thread's stack and returns the second frame's
     /// IP. Shared by the REPL `gu` and [`Self::step_out`].
     pub fn step_out_target(&mut self) -> Result<VirtAddr> {
-        self.require_live_register_context()?;
+        self.require_steppable_vcpu()?;
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
         let trace = build_stacktrace(&self.target, &self.register_map, &regs, 4);
@@ -239,7 +239,7 @@ impl Session {
         timeout: Option<Duration>,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
-        self.require_live_register_context()?;
+        self.require_steppable_vcpu()?;
         self.clear_selected_frame();
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let cancel = Arc::clone(&self.target.interrupt);
@@ -307,6 +307,7 @@ impl Session {
                 "the instruction limit must be greater than zero".into(),
             ));
         }
+        self.require_steppable_vcpu()?;
         let name = |target: &Target, state: &ControlState| {
             let trace = resolve_thread_trace_context(target, state.dtb);
             format_symbol(target, &trace, state.ip)

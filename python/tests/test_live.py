@@ -30,9 +30,11 @@ def ctrl_c_after(seconds: float) -> Iterator[None]:
 
 
 def require_single_step(dbg: Debugger) -> None:
-    # Refused over the GDB stub while Windows runs its own hypervisor.
+    """Skip unless the target steps, and halt it in NT code: under VBS a
+    break-in usually lands in the Windows hypervisor, which is not stepped."""
     if not any(row.capability == "single_step" and row.supported for row in dbg.capabilities):
         pytest.skip("this target refuses single steps")
+    dbg.run_to("nt!NtClose", timeout=10.0)
 
 
 def test_current_stop_is_read_not_consumed(halted: Debugger) -> None:

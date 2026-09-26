@@ -682,7 +682,6 @@ impl ReplState<'_> {
     }
 
     fn single_step_checked(&mut self) -> Result<()> {
-        self.clear_selected_frame();
         self.ctx.step()?;
 
         if self.quiet_stops {
@@ -825,7 +824,6 @@ impl ReplState<'_> {
         mode: StepMode,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<()> {
-        self.clear_selected_frame();
         match self.ctx.step_until(mode, STEP_UNTIL_LIMIT, None, stop) {
             Ok(ContinueOutcome::Step { .. }) => self.print_current_stop(),
             Ok(outcome) => print_parked_outcome(self.ctx, &self.caches, outcome),
@@ -892,7 +890,6 @@ impl ReplState<'_> {
     }
 
     fn cmd_wt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.clear_selected_frame();
         let limit = match invocation.arg(0) {
             None => WATCH_TRACE_DEFAULT_LIMIT,
             Some(expression) => match self.eval_or_report(expression) {
@@ -932,7 +929,6 @@ impl ReplState<'_> {
     }
 
     fn cmd_gu(&mut self) -> Result<()> {
-        self.clear_selected_frame();
         match self.ctx.step_out_target() {
             Ok(target) => self.run_to_temporary_code_breakpoint(target).map(|_| ()),
             Err(e) => {

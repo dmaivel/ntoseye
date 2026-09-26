@@ -602,7 +602,7 @@ impl Server {
     fn invalidate_stop_state(&mut self) {
         self.forget_handles();
         if let Some(session) = self.session.as_mut() {
-            session.target.selected_frame = None;
+            session.reset_to_stop_context();
         }
     }
 

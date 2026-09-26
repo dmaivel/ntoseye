@@ -71,19 +71,7 @@ impl Session {
     /// becomes the expression/memory scope. Shared by the REPL's `.frame` /
     /// `.cxr` / `.trap` and the DAP frame selection so the two can't drift.
     pub fn select_frame(&mut self, selected: SelectedFrame) {
-        self.target.registers = Some(selected.registers.clone());
-        let dtb_register = self.target.arch().dtb_register();
-        let dtb = selected.dtb.or_else(|| {
-            selected.registers.get(dtb_register).copied().filter(|dtb| {
-                *dtb != 0 && self.target.guest.is_some() && self.target.kernel_dtb() != DTB_IDENTITY
-            })
-        });
-        // A context with no root of its own (a trap frame, a context record)
-        // is the selected thread's: its address space stays the scope.
-        if let Some(dtb) = dtb {
-            self.target.set_context_dtb_override(dtb);
-        }
-        self.target.selected_frame = Some(selected);
+        self.target.select_frame(selected);
     }
 
     pub fn parked_windows_thread(&self) -> Option<&ThreadInfo> {
@@ -154,8 +142,9 @@ impl Session {
 
     /// Switch to `vcpu` with `thread`, the Windows thread it runs, as the
     /// inspection context. A vCPU halted in the Windows hypervisor holds the
-    /// hypervisor's registers, not the thread's: there the VTL0 state the
-    /// hypervisor saved becomes the selected context, so registers, `k`, and
+    /// hypervisor's registers, not the thread's: switching to it selects the
+    /// VTL0 state the hypervisor saved (see
+    /// [`Self::select_stop_context_default`]), so registers, `k`, and
     /// expressions see where NT left off. Without a saved state (no eVMCS)
     /// the vCPU's own registers stay the context.
     pub fn select_running_windows_thread(
@@ -166,38 +155,35 @@ impl Session {
         self.set_current_thread(vcpu)?;
         self.target
             .set_current_windows_thread_context(thread.clone());
-        let saved = self
-            .target
-            .registers
-            .as_ref()
-            .and_then(|registers| self.saved_vtl0_registers(vcpu, registers));
-        match saved {
-            Some(saved) => {
-                self.select_frame(SelectedFrame::from_registers(0, saved));
-                Ok(ThreadContext::SavedVtl0(vcpu.to_string()))
-            }
-            None => Ok(ThreadContext::Live(vcpu.to_string())),
+        // Switching vCPUs drops any selection, so a selected context now is
+        // the saved VTL0 state the switch installed.
+        Ok(if self.target.selected_frame.is_some() {
+            ThreadContext::SavedVtl0(vcpu.to_string())
+        } else {
+            ThreadContext::Live(vcpu.to_string())
+        })
+    }
+
+    /// The default inspection context of the current vCPU at a stop: its own
+    /// registers, or, when it is halted in the Windows hypervisor, where NT
+    /// left off (the saved VTL0 state; `.cxr` returns to the hypervisor's).
+    /// Leaves an existing selection or a parked thread alone.
+    pub(super) fn select_stop_context_default(&mut self) {
+        if self.parked_windows_thread.is_none() && !self.backend.is_running() {
+            self.target.select_saved_vtl0(&self.current_thread);
         }
     }
 
-    /// The VTL0 state the Windows hypervisor saved for `vcpu`, whose registers
-    /// are `registers`, when it is halted in the hypervisor and the state is
-    /// found.
-    pub(super) fn saved_vtl0_registers(
-        &self,
-        vcpu: &str,
-        registers: &HashMap<String, u64>,
-    ) -> Option<HashMap<String, u64>> {
-        let cr3 = *registers.get(self.target.arch().dtb_register())?;
-        let rip = *registers.get("rip")?;
-        if resolve_thread_trace_context_at(&self.target, cr3, rip).description != HYPERVISOR_CONTEXT
-        {
-            return None;
-        }
-        let processor = processor_index_from_backend_thread_id(vcpu);
-        let saved = self.target.saved_vtl_contexts(cr3, processor).ok()?;
-        let vtl0 = saved.into_iter().find(|context| context.vtl == 0)?;
-        Some(vtl0.registers())
+    /// Drop any selected frame or context and return to the stop's default
+    /// ([`Self::select_stop_context_default`]). A host that forgets its frame
+    /// handles at a stop (DAP) resets through this, so it lands where the
+    /// console does.
+    pub fn reset_to_stop_context(&mut self) {
+        // Whatever dropped the selection (`.process` attaching drops it too)
+        // may have left its registers behind: start from the vCPU's own.
+        self.target.selected_frame = None;
+        self.restore_live_register_cache();
+        self.select_stop_context_default();
     }
 
     /// The backend vCPU of each NT processor, by processor index. Empty when
@@ -323,6 +309,41 @@ impl Session {
         Ok((trace, seed, true))
     }
 
+    /// Whether the current vCPU is halted in the Windows hypervisor's code.
+    fn vcpu_halted_in_hypervisor(&mut self) -> Result<bool> {
+        if self.backend.is_running() {
+            return Ok(false);
+        }
+        let registers = self
+            .backend
+            .set_current_thread(&self.current_thread)
+            .and_then(|()| self.backend.read_registers())?;
+        let value = |name| self.register_map.read_u64(name, &registers).ok();
+        let (Some(cr3), Some(rip)) = (value(self.target.arch().dtb_register()), value("rip"))
+        else {
+            return Ok(false);
+        };
+        Ok(
+            resolve_thread_trace_context_at(&self.target, cr3, rip).description
+                == HYPERVISOR_CONTEXT,
+        )
+    }
+
+    /// Refuse to step a vCPU halted in the Windows hypervisor: the step would
+    /// run hypervisor code, not the NT code the stop shows, and plant its
+    /// temporary sites in the hypervisor's image.
+    pub(super) fn require_steppable_vcpu(&mut self) -> Result<()> {
+        self.require_live_register_context()?;
+        if self.vcpu_halted_in_hypervisor()? {
+            return Err(Error::DebugInfo(format!(
+                "{} is halted in the Windows hypervisor: a step would run hypervisor code, not \
+                 the NT code shown. Resume with g, or stop in NT with a breakpoint",
+                self.current_thread
+            )));
+        }
+        Ok(())
+    }
+
     pub(super) fn require_live_register_context(&self) -> Result<()> {
         if self.parked_windows_thread().is_some() {
             return Err(Error::DebugInfo(
@@ -354,6 +375,7 @@ impl Session {
             .and_then(|_| self.backend.read_registers());
         update_target_context_from_registers(&mut self.target, &self.register_map, registers);
         refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
+        self.select_stop_context_default();
     }
 
     /// Best-effort current RIP of the selected thread (0 if unreadable).
@@ -412,6 +434,14 @@ impl Session {
         }
         if self.backend.is_running() {
             return Err(Error::TargetRunning(REGISTERS_NEED_HALT));
+        }
+        // The hypervisor's own registers: changing them would corrupt it,
+        // and it is not what a Windows debugger is editing.
+        if self.vcpu_halted_in_hypervisor()? {
+            return Err(Error::DebugInfo(format!(
+                "{} is halted in the Windows hypervisor, whose registers are read-only",
+                self.current_thread
+            )));
         }
         if !self
             .backend

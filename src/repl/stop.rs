@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use owo_colors::OwoColorize;
@@ -12,7 +13,10 @@ use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
-use crate::unwind::{format_symbol, resolve_thread_trace_context_at, saved_vtl_summary};
+use crate::unwind::{
+    build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context_at,
+    saved_vtl_summary,
+};
 
 use crate::repl::*;
 
@@ -396,6 +400,37 @@ pub fn print_break_context_for_bugcheck(
     );
 }
 
+/// The stop display for the saved VTL0 state selected at a stop in the
+/// Windows hypervisor: its registers (the hypervisor keeps no general-purpose
+/// ones there), the NT code it left off at, and its stack.
+fn print_saved_vtl0_context(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    breakpoints: &BreakpointManager,
+    saved: &HashMap<String, u64>,
+) {
+    print_section("registers (saved VTL0)");
+    print_sparse_registers(saved, None, 2);
+    let rip = saved.get("rip").copied().unwrap_or(0);
+    let cr3 = saved
+        .get(debugger.arch().dtb_register())
+        .copied()
+        .unwrap_or(0);
+    let trace = resolve_thread_trace_context_at(debugger, cr3, rip);
+    print_disasm_context(debugger, breakpoints, &trace, rip);
+    let stack = build_stacktrace_with_register_values(
+        debugger,
+        register_map,
+        saved,
+        BREAK_STACKTRACE_PROBE_LIMIT,
+    );
+    print_stacktrace_data(
+        &stack.into_stacktrace(),
+        BREAK_STACKTRACE_DISPLAY_LIMIT,
+        true,
+    );
+}
+
 /// `cause` is an optional pre-styled tree child naming why execution stopped
 /// (e.g. `breakpoint #3`), rendered first.
 pub fn print_break_context_at(
@@ -466,7 +501,10 @@ pub fn print_break_context_at(
     if let Some(thread) = windows_thread {
         children.push(format_windows_thread(&thread));
     }
-    // Where NT left off on a vCPU the hypervisor holds (.vtlcxr selects it).
+    // At a stop in the Windows hypervisor NT is what is inspected: where it
+    // left off becomes the context, `.cxr` returns to the hypervisor's.
+    let saved_context = debugger.select_saved_vtl0(thread_id);
+    // Where NT left off on a vCPU the hypervisor holds.
     if trace.description == HYPERVISOR_CONTEXT {
         let processor = processor_index_from_backend_thread_id(thread_id);
         match saved_vtl_summary(debugger, cr3, processor) {
@@ -477,8 +515,24 @@ pub fn print_break_context_at(
             ),
             Err(error) => children.push(ui::muted(&format!("saved VTL state: {error}"))),
         }
+        if saved_context {
+            children.push(ui::muted(
+                "inspecting saved VTL0 (.cxr shows the hypervisor's registers)",
+            ));
+        }
     }
     print_event_children(" ", &children);
+
+    if saved_context
+        && let Some(saved) = debugger
+            .selected_frame
+            .as_ref()
+            .map(|frame| frame.registers.clone())
+    {
+        print_saved_vtl0_context(debugger, register_map, breakpoints, &saved);
+        outln!();
+        return;
+    }
 
     print_registers(register_map, &regs, true);
     print_disasm_context(debugger, breakpoints, &trace, context_rip);
