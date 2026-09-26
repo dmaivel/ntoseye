@@ -807,85 +807,91 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         stop_wait: None,
         unseen_stop_rendered: false,
     };
-    if plain {
-        let stdin = io::stdin();
-        let mut input = stdin.lock();
-        let mut buffer = String::new();
+    // An error ends the prompt, not the cleanup below: breakpoints left
+    // planted in a guest that resumes without a debugger crash it.
+    let prompt: Result<()> = (|| {
+        if plain {
+            let stdin = io::stdin();
+            let mut input = stdin.lock();
+            let mut buffer = String::new();
 
-        loop {
-            if termination_requested() {
-                break;
-            }
-            let prompt = if state.ctx.current_thread.is_empty() {
-                "ntoseye>".to_string()
-            } else {
-                format!("{backend_label}:{}>", state.ctx.current_thread)
-            };
-            outln!("{prompt}");
-            io::stdout().flush()?;
-
-            buffer.clear();
-            match read_line_interruptible(&mut input, &mut buffer) {
-                // A termination signal, or end of input.
-                Ok(None) | Ok(Some(0)) => break,
-                Ok(Some(_)) => {}
-                Err(error) => return Err(error.into()),
-            }
-            let command = buffer.trim();
-            if command.is_empty() {
-                continue;
-            }
-
-            log_input_line(command);
-            state.line = command.to_string();
-            if state.dispatch_line(command)? == Flow::Quit {
-                break;
-            }
-        }
-    } else {
-        loop {
-            if termination_requested() {
-                break;
-            }
-            let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
-            let sig = match target_loan.lend(&state.ctx.target, || line_editor.read_line(&prompt)) {
-                Ok(sig) => sig,
-                Err(_) if termination_requested() => break,
-                Err(error) => return Err(error.into()),
-            };
-            if termination_requested() {
-                break;
-            }
-            match sig {
-                Signal::Success(buffer) => {
-                    if !buffer.trim().is_empty() {
-                        log_input_line(buffer.trim());
-                        state.line = buffer.trim().to_string();
-                        match state.dispatch_line(&buffer)? {
-                            Flow::Quit => break,
-                            Flow::Continue | Flow::Denied => {}
-                        }
-                    }
-                }
-                Signal::CtrlD => {
+            loop {
+                if termination_requested() {
                     break;
                 }
-                Signal::CtrlC => {
-                    if had_content.load(Ordering::Relaxed) {
-                        had_content.store(false, Ordering::Relaxed);
-                        continue;
-                    }
+                let prompt = if state.ctx.current_thread.is_empty() {
+                    "ntoseye>".to_string()
+                } else {
+                    format!("{backend_label}:{}>", state.ctx.current_thread)
+                };
+                outln!("{prompt}");
+                io::stdout().flush()?;
 
-                    if state.ctx.backend.is_running() {
-                        state.interrupt_running_vm()?;
-                    } else {
-                        error!("VM is already paused");
-                    }
+                buffer.clear();
+                match read_line_interruptible(&mut input, &mut buffer) {
+                    // A termination signal, or end of input.
+                    Ok(None) | Ok(Some(0)) => break,
+                    Ok(Some(_)) => {}
+                    Err(error) => return Err(error.into()),
                 }
-                _ => {}
+                let command = buffer.trim();
+                if command.is_empty() {
+                    continue;
+                }
+
+                log_input_line(command);
+                state.line = command.to_string();
+                if state.dispatch_line(command)? == Flow::Quit {
+                    break;
+                }
+            }
+        } else {
+            loop {
+                if termination_requested() {
+                    break;
+                }
+                let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
+                let sig =
+                    match target_loan.lend(&state.ctx.target, || line_editor.read_line(&prompt)) {
+                        Ok(sig) => sig,
+                        Err(_) if termination_requested() => break,
+                        Err(error) => return Err(error.into()),
+                    };
+                if termination_requested() {
+                    break;
+                }
+                match sig {
+                    Signal::Success(buffer) => {
+                        if !buffer.trim().is_empty() {
+                            log_input_line(buffer.trim());
+                            state.line = buffer.trim().to_string();
+                            match state.dispatch_line(&buffer)? {
+                                Flow::Quit => break,
+                                Flow::Continue | Flow::Denied => {}
+                            }
+                        }
+                    }
+                    Signal::CtrlD => {
+                        break;
+                    }
+                    Signal::CtrlC => {
+                        if had_content.load(Ordering::Relaxed) {
+                            had_content.store(false, Ordering::Relaxed);
+                            continue;
+                        }
+
+                        if state.ctx.backend.is_running() {
+                            state.interrupt_running_vm()?;
+                        } else {
+                            error!("VM is already paused");
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-    }
+        Ok(())
+    })();
 
     let was_running_on_exit = state.ctx.backend.is_running();
     let mut resume_on_exit = !was_running_on_exit;
@@ -922,7 +928,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         error!("failed to prepare backend for exit: {:?}", e);
     }
 
-    Ok(())
+    prompt
 }
 
 #[cfg(test)]
