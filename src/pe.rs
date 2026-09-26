@@ -242,13 +242,17 @@ const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
 /// `CHPEMetadataPointer` in `IMAGE_LOAD_CONFIG_DIRECTORY64`: a virtual
 /// address, relocated like the image.
 const LOAD_CONFIG_CHPE_METADATA: usize = 0xc8;
+/// The same pointer in `IMAGE_LOAD_CONFIG_DIRECTORY32`, 4 bytes wide.
+const LOAD_CONFIG32_CHPE_METADATA: usize = 0x7c;
 /// More range entries than any image has; bounds a corrupt count.
 const MAX_CODE_RANGES: u32 = 1 << 16;
 
 /// Which instruction set each part of an image holds: the header's machine,
-/// and for a hybrid ARM64X or ARM64EC image, the code-range map in its load
-/// config (`IMAGE_ARM64EC_METADATA`). An ARM64EC image's header says AMD64
-/// though most of its code is ARM64, so the map decides wherever it covers.
+/// and for a hybrid image, the code-range map in its load config. An ARM64X
+/// or ARM64EC image's map (`IMAGE_ARM64EC_METADATA`) types each range ARM64,
+/// ARM64EC, or AMD64; an ARM64EC image's header says AMD64 though most of its
+/// code is ARM64. A CHPE x86 image (`IMAGE_CHPE_METADATA_X86`, the x86 system
+/// DLLs of ARM64 Windows) marks the ranges compiled to native ARM64 code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeLayout {
     machine: CodeMachine,
@@ -286,26 +290,26 @@ pub fn read_code_layout(
         machine,
         ranges: Vec::new(),
     };
-    // Only 64-bit images carry the ARM64EC metadata.
-    let config = match view.optional_header() {
-        Wrap::T64(_) => view
-            .data_directory()
-            .get(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
-            .copied(),
-        Wrap::T32(_) => None,
+    let (field, width) = match view.optional_header() {
+        Wrap::T64(_) => (LOAD_CONFIG_CHPE_METADATA, 8),
+        Wrap::T32(_) => (LOAD_CONFIG32_CHPE_METADATA, 4),
     };
+    let config = view
+        .data_directory()
+        .get(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
+        .copied();
     let Some(config) = config.filter(|config| config.VirtualAddress != 0) else {
         return Ok(Some(layout));
     };
     let mut size = [0u8; 4];
     read(u64::from(config.VirtualAddress), &mut size)?;
-    if (u32::from_le_bytes(size) as usize) < LOAD_CONFIG_CHPE_METADATA + 8 {
+    if (u32::from_le_bytes(size) as usize) < field + width {
         return Ok(Some(layout));
     }
     let mut pointer = [0u8; 8];
     read(
-        u64::from(config.VirtualAddress) + LOAD_CONFIG_CHPE_METADATA as u64,
-        &mut pointer,
+        u64::from(config.VirtualAddress) + field as u64,
+        &mut pointer[..width],
     )?;
     let metadata = u64::from_le_bytes(pointer);
     let Some(metadata_rva) = metadata.checked_sub(base).filter(|_| metadata != 0) else {
@@ -325,12 +329,25 @@ pub fn read_code_layout(
         .iter()
         .filter_map(|entry| {
             let (offset, length) = (read_u32(entry, 0), read_u32(entry, 4));
-            let start = offset & !3;
-            // The low two bits type the range: ARM64, ARM64EC, or AMD64.
-            let machine = match offset & 3 {
-                0 | 1 => CodeMachine::Arm64,
-                2 => CodeMachine::Amd64,
-                _ => return None,
+            let (start, machine) = if machine == CodeMachine::X86 {
+                // Bit 0 marks native code; the rest of the offset is the start.
+                let native = offset & 1 != 0;
+                (
+                    offset & !1,
+                    if native {
+                        CodeMachine::Arm64
+                    } else {
+                        CodeMachine::X86
+                    },
+                )
+            } else {
+                // The low two bits type the range: ARM64, ARM64EC, or AMD64.
+                let machine = match offset & 3 {
+                    0 | 1 => CodeMachine::Arm64,
+                    2 => CodeMachine::Amd64,
+                    _ => return None,
+                };
+                (offset & !3, machine)
             };
             Some((start, start.saturating_add(length), machine))
         })
@@ -815,6 +832,46 @@ mod tests {
         image
     }
 
+    /// A PE32 x86 image at `base` whose CHPE map marks 0x1000..0x1100 native
+    /// and 0x1100..0x1200 x86. The 32-bit optional header keeps its data
+    /// directories at +96 and the load config's CHPEMetadataPointer at 0x7c.
+    fn chpe_x86_image(base: u32) -> Vec<u8> {
+        let mut image = vec![0u8; 0x3000];
+        let mut put = |at: usize, bytes: &[u8]| image[at..at + bytes.len()].copy_from_slice(bytes);
+        let pe = 0x80;
+        put(0, b"MZ");
+        put(0x3c, &(pe as u32).to_le_bytes());
+        put(pe, b"PE\0\0");
+        put(pe + 4, &0x14cu16.to_le_bytes());
+        put(pe + 6, &1u16.to_le_bytes());
+        put(pe + 20, &224u16.to_le_bytes());
+        let opt = pe + 24;
+        put(opt, &0x10bu16.to_le_bytes());
+        put(opt + 28, &base.to_le_bytes());
+        put(opt + 32, &0x1000u32.to_le_bytes());
+        put(opt + 36, &0x200u32.to_le_bytes());
+        put(opt + 56, &0x3000u32.to_le_bytes());
+        put(opt + 60, &0x1000u32.to_le_bytes());
+        put(opt + 92, &16u32.to_le_bytes());
+        put(opt + 96 + 10 * 8, &0x2000u32.to_le_bytes());
+        put(opt + 96 + 10 * 8 + 4, &0x80u32.to_le_bytes());
+        let section = opt + 224;
+        put(section, b".text\0\0\0");
+        put(section + 8, &0x2000u32.to_le_bytes());
+        put(section + 12, &0x1000u32.to_le_bytes());
+        put(section + 16, &0x2000u32.to_le_bytes());
+        put(section + 20, &0x1000u32.to_le_bytes());
+        put(0x2000, &0x80u32.to_le_bytes());
+        put(0x2000 + 0x7c, &(base + 0x2100).to_le_bytes());
+        put(0x2104, &0x2200u32.to_le_bytes());
+        put(0x2108, &2u32.to_le_bytes());
+        put(0x2200, &(0x1000u32 | 1).to_le_bytes());
+        put(0x2204, &0x100u32.to_le_bytes());
+        put(0x2208, &0x1100u32.to_le_bytes());
+        put(0x220c, &0x100u32.to_le_bytes());
+        image
+    }
+
     fn layout_of(image: &[u8], base: u64) -> super::CodeLayout {
         let read = |rva: u64, buf: &mut [u8]| {
             let start = rva as usize;
@@ -842,6 +899,12 @@ mod tests {
         let layout = layout_of(&arm64x, BASE);
         assert_eq!(layout.machine_at(0x1080), CodeMachine::Amd64);
         assert_eq!(layout.machine_at(0x1100), CodeMachine::Arm64);
+
+        // A CHPE x86 image: bit 0 of an entry marks native ARM64 code.
+        let layout = layout_of(&chpe_x86_image(0x70_0000), 0x70_0000);
+        assert_eq!(layout.machine_at(0x1080), CodeMachine::Arm64);
+        assert_eq!(layout.machine_at(0x1180), CodeMachine::X86);
+        assert_eq!(layout.machine_at(0x2400), CodeMachine::X86);
 
         // No metadata: the header decides everywhere.
         let mut plain = synthetic_image();

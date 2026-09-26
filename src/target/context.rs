@@ -505,15 +505,19 @@ impl Target {
         else {
             return CodeMachine::Arm64;
         };
-        if module.is_32bit {
-            return CodeMachine::X86;
-        }
+        // A 32-bit module is x86, except where a CHPE image's map marks
+        // ARM64 code (the x86 system DLLs of ARM64 Windows).
+        let fallback = if module.is_32bit {
+            CodeMachine::X86
+        } else {
+            CodeMachine::Arm64
+        };
         let memory = self.context_memory();
         let base = module.base_address;
         let layout = read_code_layout(base.0, &|rva, buf| memory.read_bytes(base + rva, buf));
         match layout {
             Ok(Some(layout)) => layout.machine_at((address.0 - base.0) as u32),
-            _ => CodeMachine::Arm64,
+            _ => fallback,
         }
     }
 
