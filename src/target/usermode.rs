@@ -992,11 +992,11 @@ impl Target {
                 ..SectionCheckResult::default()
             };
         }
-        let mut actual = vec![0u8; section.expected.len()];
+        let mut live = vec![0u8; section.expected.len()];
         for offset in (0..section.expected.len()).step_by(SECTION_READ_CHUNK) {
             let take = (section.expected.len() - offset).min(SECTION_READ_CHUNK);
             let address = base + section.rva as u64 + offset as u64;
-            if let Err(error) = read_code(address, &mut actual[offset..offset + take]) {
+            if let Err(error) = read_code(address, &mut live[offset..offset + take]) {
                 if is_skippable_section_read_error(&error) {
                     return SectionCheckResult {
                         skipped: true,
@@ -1024,12 +1024,13 @@ impl Target {
             };
             let end = (offset + instruction_len.max(1)).min(section.expected.len());
             let expected = &section.expected[offset..end];
-            let actual = &actual[offset..end];
+            let actual = &live[offset..end];
             if expected != actual {
-                let patch = if allow_kernel_self_patches
-                    && self.arch() == Arch::Amd64
-                    && is_region_rebase(expected, actual)
-                {
+                let region_rebase = match self.arch() {
+                    Arch::Amd64 => is_region_rebase(expected, actual),
+                    Arch::Arm64 => is_region_rebase_literal(&section.expected, &live, offset),
+                };
+                let patch = if allow_kernel_self_patches && region_rebase {
                     Some(SelfPatchMatch {
                         kind: SelfPatchKind::RegionRebase,
                         function: self.self_patch_function_note(base, section.rva, offset),
@@ -1584,9 +1585,27 @@ fn is_region_rebase(expected: &[u8], actual: &[u8]) -> bool {
         && moved_with_top_level_slot(disk.immediate64(), live.immediate64())
 }
 
+/// Whether the 8-byte literal holding `offset` moved with a region's
+/// top-level slot: ARM64 code loads a region's address from a literal pool
+/// next to the function (`ldr x0, =MmPteBase`-style), not from an immediate,
+/// so the kernel's boot-time region move rewrites that aligned doubleword.
+/// Sections start page-aligned, so section offsets align like addresses.
+fn is_region_rebase_literal(expected: &[u8], live: &[u8], offset: usize) -> bool {
+    let start = offset & !7;
+    let doubleword = |bytes: &[u8]| {
+        bytes
+            .get(start..start + 8)
+            .map(|word| u64::from_le_bytes(word.try_into().expect("8-byte slice")))
+    };
+    matches!(
+        (doubleword(expected), doubleword(live)),
+        (Some(disk), Some(live)) if moved_with_top_level_slot(disk, live)
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_region_rebase;
+    use super::{is_region_rebase, is_region_rebase_literal};
 
     /// `mov rax, imm64`.
     fn mov_rax(value: u64) -> Vec<u8> {
@@ -1623,5 +1642,40 @@ mod tests {
             &pxe_entry,
             &mov_rax(0xffff_a6d3_69b4_da00)
         ));
+    }
+
+    /// Doublewords from an ARM64 ntoskrnl (build 22631) literal pool, on disk
+    /// and after boot: the self-map's PXE entry and the PFN database base.
+    #[test]
+    fn a_literal_moved_with_its_top_level_slot_is_a_region_rebase() {
+        let code = |value: u64| {
+            // ldr x0, #8; ret; then the aligned literal.
+            let mut bytes = vec![0x40, 0x00, 0x00, 0x58, 0xc0, 0x03, 0x5f, 0xd6];
+            bytes.extend_from_slice(&value.to_le_bytes());
+            bytes.extend_from_slice(&[0xc0, 0x03, 0x5f, 0xd6]); // ret
+            bytes
+        };
+        let pxe_entry = code(0xffff_f6fb_7dbe_df68);
+        let pfn_database = code(0xffff_de00_0000_0000);
+        // Both halves of the doubleword are the literal.
+        for offset in [8, 12] {
+            assert!(is_region_rebase_literal(
+                &pxe_entry,
+                &code(0xffff_ddee_f77b_bdd8),
+                offset
+            ));
+            assert!(is_region_rebase_literal(
+                &pfn_database,
+                &code(0xffff_ee80_0000_0000),
+                offset
+            ));
+        }
+        assert!(!is_region_rebase_literal(
+            &pfn_database,
+            &code(0xffff_ee80_0000_1000),
+            8
+        ));
+        // The HAL's EL2 init slot, a physical address written at boot.
+        assert!(!is_region_rebase_literal(&code(0), &code(0x4014_686c), 8));
     }
 }
