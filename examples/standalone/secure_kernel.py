@@ -37,7 +37,9 @@ def main() -> None:
         for entry in entries:
             print(f"  {entry.DllBase:#18x}  {entry.SizeOfImage:>9}  {entry.BaseDllName}")
 
-        # A trustlet's root maps the secure kernel at the same physical page.
+        # Reads translate through each view's page tables on their own;
+        # translate() only shows that step. Here it shows that every
+        # trustlet's root maps the secure kernel at the same physical page.
         header = sk.memory.translate(sk.base)
         print(f"\n  {'NT PID':>6}  {'ID':>3}  {'DTB':>18}  Image")
         for trustlet in sk.trustlets:
