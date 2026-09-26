@@ -17,13 +17,13 @@ target
   base   fffff80797200000
   psmods ffffe70faa662830
 
- BREAK  p1.1 kernel at nt!DbgBreakPointWithStatus
+ BREAK  p1.2 kernel at nt!DbgBreakPointWithStatus
  ╰─ thread System  state Running  ethread ffffe70fb1986040  pid 4  tid 588
 ...
-kdnet:p1.1>
+kdnet:p1.2>
 ```
 
-Attaching halts the VM. `ntoseye` finds the kernel, loads its symbols from Microsoft's symbol server (cached under `~/.ntoseye/symbols` after the first time), and prints a *stop header*: the processor (`p1.1`), what it was running, and where. Below the header come the registers, a few instructions of disassembly, and the top of the stack; the breakpoint [below](#stop-on-a-kernel-function) shows a whole stop.
+Attaching halts the VM. `ntoseye` finds the kernel, loads its symbols from Microsoft's symbol server (cached under `~/.ntoseye/symbols` after the first time), and prints a *stop header*: the processor (`p1.2`), what it was running, and where. Below the header come the registers, a few instructions of disassembly, and the top of the stack; the breakpoint [below](#stop-on-a-kernel-function) shows a whole stop.
 
 The first stop is Windows answering the break-in: its debugger code stops in `nt!DbgBreakPointWithStatus`, here on a `System` thread that was receiving KDNET's packets. With the `gdb` backend, which halts the vCPUs from outside, the first stop is wherever each one happened to be.
 
@@ -34,7 +34,7 @@ The prompt names the backend and the selected processor.
 {command}`vertarget` describes the target:
 
 ```text
-kdnet:p1.1> vertarget
+kdnet:p1.2> vertarget
 target version
   target Windows 10.0 build 26200 (26100.ge_release.240331-1435)
   arch AMD64
@@ -42,7 +42,7 @@ target version
   pdb ntoskrnl.pdb GUID C29EBFB06B78B3C020DCA66D99713F9E age 6
   processors 4
   product Workstation
-  uptime 0d 08:44:13
+  uptime 0d 08:51:37
   backend kdnet
   ...
 ```
@@ -50,7 +50,7 @@ target version
 {command}`lm` lists loaded kernel modules and whether their symbols loaded. `kdcom` and `kdstub` are the KDNET transport this session talks to:
 
 ```text
-kdnet:p1.1> lm
+kdnet:p1.2> lm
 Start             End               Module                 Version          Symbols  Source  Image
 fffff80797200000  fffff80798650000  nt                     -                loaded   cached  ntoskrnl.exe
 fffff80798660000  fffff80798666000  hal                    -                loaded   cached  hal.dll
@@ -62,7 +62,7 @@ fffff807286c0000  fffff80728726000  kdstub                 -                load
 {command}`ps` lists processes with the address of each `_EPROCESS` and its page-table root:
 
 ```text
-kdnet:p1.1> ps
+kdnet:p1.2> ps
 Name            PID   EPROCESS          DTB               Wow64
 System          4     ffffe70faa6df040  00000000001ae000  -
 ...
@@ -78,7 +78,7 @@ services.exe    932   ffffe70fb2e1b1c0  000000010ec46000  -
 Symbols are searched with {command}`x`; `*` and `?` are wildcards:
 
 ```text
-kdnet:p1.1> x nt!NtCreateFi*
+kdnet:p1.2> x nt!NtCreateFi*
 fffff80797ac7930  nt!NtCreateFile
 
 1 symbol (in $0..$0)
@@ -89,23 +89,23 @@ fffff80797ac7930  nt!NtCreateFile
 Set a breakpoint with {command}`bp` and resume with {command}`g`. `NtCreateFile` runs whenever any process opens a file, so it hits almost at once:
 
 ```text
-kdnet:p1.1> bp nt!NtCreateFile
+kdnet:p1.2> bp nt!NtCreateFile
 breakpoint #0 set at fffff80797ac7930 (nt!NtCreateFile) (global)
 
-kdnet:p1.1> g
+kdnet:p1.2> g
 VM running, waiting for stop (Ctrl+C to pause)...
 
- BREAK  p1.1 svchost.exe (5904) at nt!NtCreateFile
+ BREAK  p1.1 svchost.exe (468) at nt!NtCreateFile
  ├─ breakpoint #0
- ╰─ thread svchost.exe  state Running  ethread ffffe70fb673c080  pid 5904  tid 5932
+ ╰─ thread svchost.exe  state Running  ethread ffffe70fb280f080  pid 468  tid 4076
 
 registers
-  rax fffff80797ac7930   rbx ffffe70fb673c080   rcx 000000a460bfeb70
-  rdx 0000000080100080   rsi 000000a460bfeb28   rdi fffffd86b4006a88
-  rsp fffffd86b4006a68   rbp fffffd86b4006b60   rip fffff80797ac7930
-  r8  000000a460bfeb88   r9  000000a460bfebb8   r10 fffff80797ac7930
-  r11 fffff807978c1cf8   r12 0000000000000000   r13 000000a460bff2c0
-  r14 000000a460bff178   r15 000000a460bfec60   rfl 0000000000040246 [PF ZF IF AC]
+  rax fffff80797ac7930   rbx ffffe70fb280f080   rcx 000000ef8a37ee60
+  rdx 0000000000100080   rsi 000000ef8a37ee08   rdi fffffd86b6413a88
+  rsp fffffd86b6413a68   rbp fffffd86b6413b60   rip fffff80797ac7930
+  r8  000000ef8a37eee8   r9  000000ef8a37ee90   r10 fffff80797ac7930
+  r11 fffff807978c1cf8   r12 00007ff8555c7600   r13 0000000000000000
+  r14 0000000000000000   r15 0000000000000003   rfl 0000000000040246 [PF ZF IF AC]
 
 disasm
  > fffff80797ac7930  48 81 ec 88 00 00 00     sub  rsp, 0x88
@@ -120,24 +120,26 @@ stack
   #0  fffff80797ac7930  nt!NtCreateFile
   #1  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
   #2  00007ff855661864  ntdll!NtCreateFile+0x14
-  #3  00007ff83803bc41  inventorysvc!AslFileMappingCreate+0x1a5
-  #4  00007ff838036be6  inventorysvc!AslFileGetVersionForPath+0x46
-  #5  00007ff8380e82aa  inventorysvc!?IsValidFromOneSettings@TelemetryProvider@@CAJPEBG0_KAEA_N2@Z+0x1de
-  ... 7 more frames
+  #3  00007ff852e36217  kernelbase!CreateFileInternal+0x373
+  #4  00007ff852e37887  kernelbase!CreateFileW+0x97
+  #5  00007ff84fbf0c85  psmserviceexthost!CrmStateMonitorSystemDiskUsageTimerCallback+0xa5
+  ... 4 more frames
 ```
-
-The header now names the process and thread that called into the kernel. The disassembly starts at `NtCreateFile`'s first instruction, and `r8` holds its third argument, which the next section reads. The stack is a summary; its `... 7 more frames` is `ntoseye`'s own. Ctrl+C breaks in at any time while the VM runs.
 
 {command}`k` walks the whole stack and adds each frame's stack pointer. It crosses from the kernel into the calling process's user-mode code, and resolves that too:
 
 ```text
 kdnet:p1.1> k
- 00 fffffd86b4006a68  fffff80797ac7930  nt!NtCreateFile
- 01 fffffd86b4006a70  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
- 02 000000a460bfeb08  00007ff855661864  ntdll!NtCreateFile+0x14
- 03 000000a460bfeb10  00007ff83803bc41  inventorysvc!AslFileMappingCreate+0x1a5
- 04 000000a460bfec30  00007ff838036be6  inventorysvc!AslFileGetVersionForPath+0x46
-...
+ 00 fffffd86b6413a68  fffff80797ac7930  nt!NtCreateFile
+ 01 fffffd86b6413a70  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
+ 02 000000ef8a37ede8  00007ff855661864  ntdll!NtCreateFile+0x14
+ 03 000000ef8a37edf0  00007ff852e36217  kernelbase!CreateFileInternal+0x373
+ 04 000000ef8a37ef70  00007ff852e37887  kernelbase!CreateFileW+0x97
+ 05 000000ef8a37efd0  00007ff84fbf0c85  psmserviceexthost!CrmStateMonitorSystemDiskUsageTimerCallback+0xa5
+ 06 000000ef8a37f310  00007ff8555808ea  ntdll!TppTimerpExecuteCallback+0x2ba
+ 07 000000ef8a37f410  00007ff85551aaed  ntdll!TppWorkerThread+0x80d
+ 08 000000ef8a37f770  00007ff853afcd87  kernel32!BaseThreadInitThunk+0x17
+ 09 000000ef8a37f7a0  00007ff8555acaec  ntdll!RtlUserThreadStart+0x2c
 ```
 
 A module seen for the first time shows `module+offset` for a moment while its symbols download in the background; {command}`lm` shows it as `fetching` meanwhile.
@@ -148,15 +150,15 @@ A module seen for the first time shows `module+offset` for a moment while its sy
 
 ```text
 kdnet:p1.1> dS ((nt!_OBJECT_ATTRIBUTES*)@r8)->ObjectName
-000000a460bfeb78  Length=66 MaximumLength=68 Buffer=0000023a3a163370  "\\??\\C:\\WINDOWS\\system32\\aeinv.dll"
+000000ef8a37eea8  Length=36 MaximumLength=38 Buffer=000002276cb50ac0  "\\??\\PhysicalDrive0"
 ```
 
 {command}`dt` displays a structure, optionally only the named fields. `$proc` is the current process's `_EPROCESS`:
 
 ```text
 kdnet:p1.1> dt nt!_EPROCESS @$proc UniqueProcessId ImageFileName
-_EPROCESS (2112 bytes) @ ffffe70fb6199080
-  +0x1d0 UniqueProcessId : void* = 0x1710
+_EPROCESS (2112 bytes) @ ffffe70fb2ed3080
+  +0x1d0 UniqueProcessId : void* = 0x1d4
   +0x338 ImageFileName : UCHAR[15] = "svchost.exe"
 ```
 
@@ -169,12 +171,12 @@ _EPROCESS (2112 bytes) @ ffffe70fb6199080
 ```text
 kdnet:p1.1> p
 
- BREAK  p1.1 svchost.exe (5904) at nt!NtCreateFile+0x7
+ BREAK  p1.1 svchost.exe (468) at nt!NtCreateFile+0x7
 ...
 kdnet:p1.1> gu
 VM running, waiting for stop (Ctrl+C to pause)...
 
- BREAK  p1.1 svchost.exe (5904) at nt!KiSystemServiceCopyEnd+0x25
+ BREAK  p1.1 svchost.exe (468) at nt!KiSystemServiceCopyEnd+0x25
 ...
 ```
 
