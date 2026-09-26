@@ -103,7 +103,7 @@ pub struct TargetSelection {
 }
 
 impl TargetSelection {
-    fn holds_live_registers(&self) -> bool {
+    pub(crate) fn holds_live_registers(&self) -> bool {
         self.selected_frame
             .as_ref()
             .is_none_or(SelectedFrame::is_live)

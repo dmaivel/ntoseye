@@ -384,6 +384,14 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Whether the selection is a recovered register context (a caller frame,
+    /// a `.cxr`/`.trap` record, the saved VTL0 state at a stop in the
+    /// hypervisor) rather than the vCPU's own file or a parked thread, which
+    /// has none.
+    pub fn is_recovered_context(&self) -> bool {
+        self.parked_windows_thread.is_none() && !self.target.holds_live_registers()
+    }
+
     /// Move out the cached register file when it is the current vCPU's live
     /// one (no parked thread, no `.frame`/`.cxr` context), so a scoped
     /// operation on the same vCPU uses it instead of reading the registers

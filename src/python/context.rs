@@ -135,7 +135,12 @@ pub fn in_context<R>(
     let same_vcpu =
         ctx.vcpu.is_none() && ctx.thread.is_none() && ctx.frame.is_none() && ctx.secure.is_none();
     if same_vcpu {
-        session.target.registers = saved.take_live_registers();
+        if saved.is_recovered_context() {
+            // The cache holds that context's registers, not the vCPU's.
+            session.restore_live_register_cache();
+        } else {
+            session.target.registers = saved.take_live_registers();
+        }
     }
     let result = apply(session, ctx).and_then(|()| f(session));
     if same_vcpu {
