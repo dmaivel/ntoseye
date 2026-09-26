@@ -6,6 +6,7 @@ use crate::backend::MemoryOps;
 use crate::breakpoints::BreakpointManager;
 use crate::error::Error;
 use crate::gdb::RegisterMap;
+use crate::gdb::registers::repeats_another_register;
 use crate::symbols::SourceLocation;
 use crate::target::Target;
 use crate::types::{Arch, VirtAddr};
@@ -161,7 +162,10 @@ pub fn print_sparse_registers(
     heading: Option<&str>,
     indent: usize,
 ) {
-    let mut names: Vec<_> = registers.keys().collect();
+    let mut names: Vec<_> = registers
+        .keys()
+        .filter(|name| !repeats_another_register(name, registers))
+        .collect();
     names.sort();
     if let Some(heading) = heading {
         outln!("{heading}");

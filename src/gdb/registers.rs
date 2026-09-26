@@ -15,6 +15,25 @@ const ARM64_ALIASES: [(&str, &str); 5] = [
     ("pstate", "cpsr"),
 ];
 
+/// A name in a recovered register set that repeats another register, which
+/// a listing shows once under the name `r` uses: `rip`/`rsp` repeat `pc`/`sp`,
+/// and `x29`, `x30`, `pstate` are shown as `fp`, `lr`, `cpsr`.
+pub fn repeats_another_register(name: &str, registers: &HashMap<String, u64>) -> bool {
+    const SHOWN_AS: [(&str, &str); 5] = [
+        ("rip", "pc"),
+        ("rsp", "sp"),
+        ("x29", "fp"),
+        ("x30", "lr"),
+        ("pstate", "cpsr"),
+    ];
+    SHOWN_AS.iter().any(|(repeat, shown)| {
+        *repeat == name
+            && registers
+                .get(*shown)
+                .is_some_and(|value| registers.get(name) == Some(value))
+    })
+}
+
 /// Append every ARM64 alias to `registers`, each reading the same bytes as
 /// the register it names. Fails with the architectural name `registers`
 /// does not carry.
