@@ -447,130 +447,131 @@ impl Session {
     pub fn vcpus(&mut self) -> Result<Vec<VcpuInfo>> {
         let original = self.backend.stopped_thread_id()?;
         let threads = self.backend.thread_list()?;
-        let processes = self
-            .target
-            .guest
-            .as_ref()
-            .and_then(|g| g.enumerate_processes().ok())
-            .unwrap_or_default();
-        let dtb_mask = self.target.arch().dtb_page_mask();
-        let kernel_dtb_masked = self
-            .target
-            .guest
-            .as_ref()
-            .map(|g| g.ntoskrnl.dtb() & dtb_mask);
-
         let mut out = Vec::with_capacity(threads.len());
         for thread in &threads {
             let regs = self
                 .backend
                 .set_current_thread(thread)
                 .and_then(|_| self.backend.read_registers());
-            let regs = match regs {
-                Ok(regs) => regs,
-                Err(e) => {
-                    out.push(VcpuInfo {
-                        id: thread.clone(),
-                        rip: None,
-                        context: String::new(),
-                        symbol: None,
-                        saved_vtl: Vec::new(),
-                        error: Some(e.to_string()),
-                    });
-                    continue;
-                }
-            };
-            let (Ok(rip), Ok(dtb)) = (
-                self.register_map.read_u64("rip", &regs),
-                self.register_map
-                    .read_u64(self.target.arch().dtb_register(), &regs),
-            ) else {
-                out.push(VcpuInfo {
+            out.push(match regs {
+                Ok(regs) => self.describe_vcpu(thread, &regs),
+                Err(e) => VcpuInfo {
                     id: thread.clone(),
                     rip: None,
                     context: String::new(),
                     symbol: None,
                     saved_vtl: Vec::new(),
-                    error: None,
-                });
-                continue;
-            };
-
-            // RIP=0 means the dump did not capture this CPU's context
-            if rip == 0 {
-                out.push(VcpuInfo {
-                    id: thread.clone(),
-                    rip: Some(0),
-                    context: "no context".to_string(),
-                    symbol: None,
-                    saved_vtl: Vec::new(),
-                    error: None,
-                });
-                continue;
-            }
-
-            let dtb_masked = dtb & dtb_mask;
-            let (context, symbol) = if self.target.recognize_secure_root(dtb_masked) {
-                let trace = resolve_thread_trace_context_at(&self.target, dtb, rip);
-                (
-                    trace.description.clone(),
-                    try_format_symbol(&self.target, &trace, rip),
-                )
-            } else if kernel_dtb_masked.is_some_and(|k| dtb_masked == k) {
-                let sym = self
-                    .target
-                    .symbols
-                    .format_closest_symbol_for_address(self.target.kernel_dtb(), VirtAddr(rip));
-                ("kernel".to_string(), sym)
-            } else {
-                match processes.iter().find(|p| (p.dtb & dtb_mask) == dtb_masked) {
-                    Some(proc) => {
-                        let sym = self
-                            .target
-                            .symbols
-                            .format_closest_symbol_for_address(proc.dtb, VirtAddr(rip));
-                        (proc.name.clone(), sym)
-                    }
-                    None => match self
-                        .target
-                        .symbols
-                        .format_closest_symbol_for_address(dtb_masked, VirtAddr(rip))
-                    {
-                        Some(sym) => ("kernel".to_string(), Some(sym)),
-                        // Outside NT under VBS: the hypervisor or VTL1.
-                        None => {
-                            let trace = resolve_thread_trace_context_at(&self.target, dtb, rip);
-                            let symbol = try_format_symbol(&self.target, &trace, rip);
-                            (trace.description, symbol)
-                        }
-                    },
-                }
-            };
-
-            // A refused state is reported by the stop header and .vtlcxr;
-            // listed here it would read as a saved state.
-            let saved_vtl = if context == HYPERVISOR_CONTEXT {
-                saved_vtl_summary(
-                    &self.target,
-                    dtb,
-                    processor_index_from_backend_thread_id(thread),
-                )
-                .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            out.push(VcpuInfo {
-                id: thread.clone(),
-                rip: Some(rip),
-                context,
-                symbol,
-                saved_vtl,
-                error: None,
+                    error: Some(e.to_string()),
+                },
             });
         }
 
         let _ = self.backend.set_current_thread(&original);
         Ok(out)
+    }
+
+    /// What vCPU `id`, whose register file is `regs`, is running: the address
+    /// space, the nearest symbol (code outside NT named for what it is, such
+    /// as the Windows hypervisor), and, in the hypervisor, where its VTLs left
+    /// off.
+    pub(super) fn describe_vcpu(&self, id: &str, regs: &[u8]) -> VcpuInfo {
+        let (Ok(rip), Ok(dtb)) = (
+            self.register_map.read_u64("rip", regs),
+            self.register_map
+                .read_u64(self.target.arch().dtb_register(), regs),
+        ) else {
+            return VcpuInfo {
+                id: id.to_string(),
+                rip: None,
+                context: String::new(),
+                symbol: None,
+                saved_vtl: Vec::new(),
+                error: None,
+            };
+        };
+
+        // RIP=0 means the dump did not capture this CPU's context
+        if rip == 0 {
+            return VcpuInfo {
+                id: id.to_string(),
+                rip: Some(0),
+                context: "no context".to_string(),
+                symbol: None,
+                saved_vtl: Vec::new(),
+                error: None,
+            };
+        }
+
+        let dtb_mask = self.target.arch().dtb_page_mask();
+        let dtb_masked = dtb & dtb_mask;
+        let kernel_dtb_masked = self
+            .target
+            .guest
+            .as_ref()
+            .map(|g| g.ntoskrnl.dtb() & dtb_mask);
+        let (context, symbol) = if self.target.recognize_secure_root(dtb_masked) {
+            let trace = resolve_thread_trace_context_at(&self.target, dtb, rip);
+            (
+                trace.description.clone(),
+                try_format_symbol(&self.target, &trace, rip),
+            )
+        } else if kernel_dtb_masked.is_some_and(|k| dtb_masked == k) {
+            let sym = self
+                .target
+                .symbols
+                .format_closest_symbol_for_address(self.target.kernel_dtb(), VirtAddr(rip));
+            ("kernel".to_string(), sym)
+        } else {
+            let processes = self
+                .target
+                .guest
+                .as_ref()
+                .and_then(|g| g.enumerate_processes().ok())
+                .unwrap_or_default();
+            match processes.iter().find(|p| (p.dtb & dtb_mask) == dtb_masked) {
+                Some(proc) => {
+                    let sym = self
+                        .target
+                        .symbols
+                        .format_closest_symbol_for_address(proc.dtb, VirtAddr(rip));
+                    (proc.name.clone(), sym)
+                }
+                None => match self
+                    .target
+                    .symbols
+                    .format_closest_symbol_for_address(dtb_masked, VirtAddr(rip))
+                {
+                    Some(sym) => ("kernel".to_string(), Some(sym)),
+                    // Outside NT under VBS: the hypervisor or VTL1.
+                    None => {
+                        let trace = resolve_thread_trace_context_at(&self.target, dtb, rip);
+                        let symbol = try_format_symbol(&self.target, &trace, rip);
+                        (trace.description, symbol)
+                    }
+                },
+            }
+        };
+
+        // A refused state is reported by the stop header and .vtlcxr;
+        // listed here it would read as a saved state.
+        let saved_vtl = if context == HYPERVISOR_CONTEXT {
+            saved_vtl_summary(
+                &self.target,
+                dtb,
+                processor_index_from_backend_thread_id(id),
+            )
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        VcpuInfo {
+            id: id.to_string(),
+            rip: Some(rip),
+            context,
+            symbol,
+            saved_vtl,
+            error: None,
+        }
     }
 
     /// Map each *active* Windows thread (one currently scheduled on a vCPU) to

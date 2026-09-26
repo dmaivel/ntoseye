@@ -434,6 +434,7 @@ mod tests {
             current_thread: "p0.1".into(),
             rip,
             symbol: rip.map(|_| "sample!fault".into()),
+            saved_vtl: Vec::new(),
             attached_process: Some(ProcessInfo {
                 pid: 4,
                 name: "System".into(),

@@ -144,8 +144,12 @@ pub struct RunStatus {
     pub current_thread: String,
     /// Current instruction pointer when halted (None while running).
     pub rip: Option<u64>,
-    /// Nearest symbol to `rip` when halted.
+    /// Nearest symbol to `rip` when halted; code outside NT is named for what
+    /// it is (`hvix64+0x3a6bde` in the Windows hypervisor).
     pub symbol: Option<String>,
+    /// For a vCPU halted in the Windows hypervisor, where its VTLs left off
+    /// (`VTL0 nt!HalProcessorIdle+0xf`), from the hypervisor's saved state.
+    pub saved_vtl: Vec<String>,
     /// Attached process inspection scope, if any. This is where `dt`, `dq` and
     /// friends read from; it is chosen with `.process` and survives resumes,
     /// so it is not necessarily what the guest is executing.

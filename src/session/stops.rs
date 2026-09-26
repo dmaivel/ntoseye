@@ -206,23 +206,32 @@ impl Session {
         self.clear_deferred_reload_surface();
         let pending_stop = self.backend.has_pending_stop();
         let running = self.backend.is_running() && !pending_stop;
-        let (rip, symbol, stopped_process, stopped_thread) = if running || pending_stop {
-            (None, None, None, None)
+        let (rip, symbol, saved_vtl, stopped_process, stopped_thread) = if running || pending_stop {
+            (None, None, Vec::new(), None, None)
         } else {
             let _ = self.backend.set_current_thread(&self.current_thread);
             let registers = self.backend.read_registers().ok();
             let rip = registers
                 .as_ref()
                 .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
-            let symbol = rip.and_then(|r| self.target.closest_symbol_current_context(VirtAddr(r)));
+            // The vCPU's own description names code outside NT (the Windows
+            // hypervisor, VTL1) and where the hypervisor's VTLs left off.
+            let vcpu = registers
+                .as_ref()
+                .map(|regs| self.describe_vcpu(&self.current_thread, regs));
+            let symbol = rip
+                .and_then(|r| self.target.closest_symbol_current_context(VirtAddr(r)))
+                .or_else(|| vcpu.as_ref().and_then(|vcpu| vcpu.symbol.clone()));
+            let saved_vtl = vcpu.map(|vcpu| vcpu.saved_vtl).unwrap_or_default();
             let (stopped_process, stopped_thread) = self.stopped_context();
-            (rip, symbol, stopped_process, stopped_thread)
+            (rip, symbol, saved_vtl, stopped_process, stopped_thread)
         };
         RunStatus {
             running,
             current_thread: self.current_thread.clone(),
             rip,
             symbol,
+            saved_vtl,
             attached_process: self.target.attached_process().cloned(),
             stopped_process,
             stopped_thread,

@@ -366,6 +366,9 @@ fn status_trailer(status: &RunStatus) -> String {
         (Some(rip), None) => line.push_str(&format!(" {rip:#x}")),
         (None, _) => {}
     }
+    for saved in &status.saved_vtl {
+        line.push_str(&format!(" | saved {saved}"));
+    }
     if let Some(process) = &status.stopped_process {
         line.push_str(&format!(" | process {} ({})", process.name, process.pid));
     }

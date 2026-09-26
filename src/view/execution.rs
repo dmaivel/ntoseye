@@ -74,6 +74,10 @@ pub fn run_status(status: &RunStatus) -> View {
         ("rip", View::OptHex(status.rip)),
         ("symbol", View::OptStr(status.symbol.clone())),
         (
+            "saved_vtl",
+            View::List(status.saved_vtl.iter().cloned().map(View::Str).collect()),
+        ),
+        (
             "attached_process",
             status.attached_process.as_ref().map_or(View::Null, process),
         ),
