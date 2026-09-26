@@ -92,6 +92,9 @@ pub enum Error {
     #[error("secure kernel (VTL1): {0}")]
     SecureKernel(String),
 
+    #[error("hypervisor-saved VTL state: {0}")]
+    SavedVtlState(String),
+
     #[error("PE view failed")]
     ViewFailed,
 

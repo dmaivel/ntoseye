@@ -8,11 +8,11 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::memory::DTB_IDENTITY;
 use crate::session::{Selection, Session, VcpuInfo};
-use crate::target::{SelectedFrame, Target, ThreadInfo};
+use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
     RecoveredStackTrace, build_stacktrace_with_context, build_stacktrace_with_register_values,
-    resolve_thread_trace_context_at, try_format_symbol,
+    resolve_thread_trace_context_at, saved_vtl_summary, try_format_symbol,
 };
 
 pub(super) fn update_target_context_from_registers(
@@ -406,6 +406,7 @@ impl Session {
                         rip: None,
                         context: String::new(),
                         symbol: None,
+                        saved_vtl: Vec::new(),
                         error: Some(e.to_string()),
                     });
                     continue;
@@ -421,6 +422,7 @@ impl Session {
                     rip: None,
                     context: String::new(),
                     symbol: None,
+                    saved_vtl: Vec::new(),
                     error: None,
                 });
                 continue;
@@ -433,6 +435,7 @@ impl Session {
                     rip: Some(0),
                     context: "no context".to_string(),
                     symbol: None,
+                    saved_vtl: Vec::new(),
                     error: None,
                 });
                 continue;
@@ -476,11 +479,24 @@ impl Session {
                 }
             };
 
+            // A refused state is reported by the stop header and .vtlcxr;
+            // listed here it would read as a saved state.
+            let saved_vtl = if context == HYPERVISOR_CONTEXT {
+                saved_vtl_summary(
+                    &self.target,
+                    dtb,
+                    processor_index_from_backend_thread_id(thread),
+                )
+                .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             out.push(VcpuInfo {
                 id: thread.clone(),
                 rip: Some(rip),
                 context,
                 symbol,
+                saved_vtl,
                 error: None,
             });
         }

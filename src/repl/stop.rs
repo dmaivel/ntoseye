@@ -3,14 +3,16 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 
 use crate::breakpoints::BreakpointManager;
-use crate::dbg_backend::{BugcheckInfo, DebugBackend, StopEvent};
+use crate::dbg_backend::{
+    BugcheckInfo, DebugBackend, StopEvent, processor_index_from_backend_thread_id,
+};
 use crate::error::Result;
 use crate::gdb::RegisterMap;
 use crate::session::{ContinueOutcome, Session, StopResolution};
-use crate::target::{Target, ThreadInfo, kthread_state_name};
+use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
-use crate::unwind::{format_symbol, resolve_thread_trace_context_at};
+use crate::unwind::{format_symbol, resolve_thread_trace_context_at, saved_vtl_summary};
 
 use crate::repl::*;
 
@@ -463,6 +465,18 @@ pub fn print_break_context_at(
     }
     if let Some(thread) = windows_thread {
         children.push(format_windows_thread(&thread));
+    }
+    // Where NT left off on a vCPU the hypervisor holds (.vtlcxr selects it).
+    if trace.description == HYPERVISOR_CONTEXT {
+        let processor = processor_index_from_backend_thread_id(thread_id);
+        match saved_vtl_summary(debugger, cr3, processor) {
+            Ok(saved) => children.extend(
+                saved
+                    .iter()
+                    .map(|saved| format!("{} {}", ui::muted("saved"), ui::symbol(saved))),
+            ),
+            Err(error) => children.push(ui::muted(&format!("saved VTL state: {error}"))),
+        }
     }
     print_event_children(" ", &children);
 

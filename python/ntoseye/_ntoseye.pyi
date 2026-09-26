@@ -274,6 +274,15 @@ class Cpu:
         The instruction pointer (needs a halted target).
         """
     @property
+    def saved_vtl(self, /) -> list[str]:
+        """
+        For a vCPU halted in the Windows hypervisor (VBS), where its VTLs
+        left off, from the hypervisor's saved state: `["VTL0
+        nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered
+        from it or is about to enter it. Needs the VM's `hv-evmcs`; empty
+        otherwise, or when the saved state fails validation.
+        """
+    @property
     def symbol(self, /) -> str |None:
         """
         The symbol at `rip`, if one resolved.

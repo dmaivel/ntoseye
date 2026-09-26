@@ -152,12 +152,13 @@ Earlier releases used `(TYPE)address->field` to compute a field address. Aggrega
 - `.frame [/r] [N]` (`frame`) - Select or display a zero-based stack frame; `/r` also displays recovered registers.
 - `.cxr [address]` - Select a CONTEXT record, or reset the selected context.
 - `.ecxr` - Select the current exception context.
+- `.vtlcxr` - For a vCPU halted in the Windows hypervisor (VBS), list what its VTLs were doing as the hypervisor saved it, and select VTL0's context so `r`, `k`, and `u` show where NT left off. It has RIP, RSP, flags, control, and segment registers only. Needs the VM's `hv-evmcs` enlightenment; see [where NT left off under the hypervisor](kvm-qemu.md#where-nt-left-off-under-the-hypervisor).
 - `.exr <address|-1>` - Display an `EXCEPTION_RECORD64`.
 - `.trap [address-expression]` (`trap`) - Decode and display a `_KTRAP_FRAME`, defaulting to the current thread's saved frame. A trap frame names no process, so a user-mode frame resolves in the selected process; `.trap` warns when its address lies outside every module there. Select the owning thread or process first (`.thread`, `.process /p`).
 - `.thread [ethread|tid]` - Switch the register and stack context to a Windows thread.
 - `.process [/i] [/p] [/r] [eprocess|pid]` - Select a process address space for inspection.
 - `.context <dtb>` - Set the translation base used for inspection.
-- `~` (`vcpus`) - List vCPU contexts and their RIP values.
+- `~` (`vcpus`) - List vCPU contexts and their RIP values; a vCPU halted in the Windows hypervisor also shows where its VTL0 left off.
 - `vcpu <id>` - Switch to a different vCPU context.
 - `address <address-expression>` - Describe what an address belongs to (a module section or VAD region).
 
@@ -407,6 +408,8 @@ bc *
 At a VTL1 stop, `t`, `p`, `gu`, `pa`/`ta`, `wt`, and `g <address>` run through secure-kernel code using free debug-register slots: a step takes one per place the instruction can continue at, a run-to one for its target (see [stepping under the Windows hypervisor](kvm-qemu.md#virtualization-based-security-vtl1)). The `.vtl 1` memory view accepts only plain `g`. Software breakpoints in known secure modules, secure memory/register writes, data watches, and trustlet user-code breakpoints are not supported. Hardware sites resolve once and must be recreated after a reboot. Avoid stopping for long periods: the whole VM is halted. This path was exercised on the same Windows 11 QEMU/KVM guest with HVCI on and off; that is not a guarantee against integrity checks or different nested-virtualization behavior on other hosts.
 
 Trustlet enumeration reads secure-kernel process fields that public symbols do not describe. `ntoseye` recovers their offsets from the secure kernel's own code: the list link from where `SkpsInitializeProcess` links a new process onto `SkpsProcessList`, the NT PID and trustlet ID from the `IumProcessStartFailed` event it reports them with, and the address-space root from `SkeSelectProcessAddressSpace`. The trustlet ID must also be a field `SkpsReadPolicyMetadata` checks against the image's policy. Every record is then validated: its root must map the secure kernel and its PID must match an NT process. This recognizes every build examined from 10.0.19041 (Windows 10 20H1) through 10.0.28000, whose offsets differ between releases. Older secure kernels lack these routines under these names, so enumeration is refused there while secure-kernel/module inspection remains available. Modules loaded inside a trustlet are not enumerated. Live lists are not atomic snapshots; concurrent process exit or module unload can invalidate a walk.
+
+A vCPU halted in the Windows hypervisor rather than in either kernel shows where each VTL left off, from the hypervisor's saved state, in its stop header and `~`; `.vtlcxr` selects VTL0's (see [where NT left off under the hypervisor](kvm-qemu.md#where-nt-left-off-under-the-hypervisor)).
 
 ## Security
 

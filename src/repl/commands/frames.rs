@@ -3,17 +3,18 @@ use std::collections::HashMap;
 use owo_colors::OwoColorize;
 
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::session::ExceptionRecord;
-use crate::target::{SavedThreadRegisters, SelectedFrame, lookup_register};
+use crate::target::{HYPERVISOR_CONTEXT, SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_context,
-    build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context,
-    try_format_symbol,
+    build_stacktrace_with_register_values, describe_saved_vtl, format_symbol,
+    resolve_thread_trace_context, resolve_thread_trace_context_at, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -48,6 +49,15 @@ repl_command! {
     names: [".ecxr"],
     usage: ".ecxr",
     summary: "Select the current exception context.",
+    run_state: Halted,
+}
+
+repl_command! {
+    cmd_vtlcxr();
+    names: [".vtlcxr"],
+    usage: ".vtlcxr",
+    summary: "Select the VTL0 context the Windows hypervisor saved for the vCPU halted in it.",
+    details: "For a vCPU stopped in the Windows hypervisor (VBS), reads what its virtual processor's VTLs were doing from their Enlightened VMCS pages, lists them, and selects VTL0's, so r, k, and u show where NT left off. The VM must expose hv-evmcs; the first use per boot scans host RAM for the pages. The context has RIP, RSP, flags, control, and segment registers, but no other general-purpose registers: the hypervisor keeps those in undocumented state. VTL1's saved state is listed, not selected. .cxr resets.",
     run_state: Halted,
 }
 
@@ -215,6 +225,80 @@ impl ReplState<'_> {
         let selected = SelectedFrame::from_registers(0, registers);
         self.set_selected_frame(selected.clone());
         outln!("selected context {}", ui::addr(address.0));
+        self.print_selected_frame(&selected, false);
+        Ok(())
+    }
+
+    fn cmd_vtlcxr(&mut self) -> Result<()> {
+        if let Err(error) = self
+            .ctx
+            .backend
+            .set_current_thread(&self.ctx.current_thread)
+        {
+            error!("failed to select execution context: {error}");
+            return Ok(());
+        }
+        let regs = match self.ctx.read_registers() {
+            Ok(regs) => regs,
+            Err(error) => {
+                error!("failed to read registers: {error}");
+                return Ok(());
+            }
+        };
+        let target = &self.ctx.target;
+        let map = &self.ctx.register_map;
+        let (Ok(cr3), Ok(rip)) = (
+            map.read_u64(target.arch().dtb_register(), &regs),
+            map.read_u64("rip", &regs),
+        ) else {
+            error!("the vCPU's CR3 and RIP are unavailable");
+            return Ok(());
+        };
+        if resolve_thread_trace_context_at(target, cr3, rip).description != HYPERVISOR_CONTEXT {
+            error!(
+                "{} is not halted in the Windows hypervisor",
+                ui::thread_id(&self.ctx.current_thread)
+            );
+            return Ok(());
+        }
+        let processor = processor_index_from_backend_thread_id(&self.ctx.current_thread);
+        let saved = match target.saved_vtl_contexts(cr3, processor) {
+            Ok(saved) => saved,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        if target.evmcs_found() == Some(false) {
+            error!(
+                "no Enlightened VMCS in guest RAM: the VM must expose hv-evmcs (libvirt <evmcs state=\"on\"/>) for the Windows hypervisor to use one"
+            );
+            return Ok(());
+        }
+        for context in &saved {
+            let state = &context.state;
+            let exit = state
+                .exit_reason_name()
+                .map_or_else(|| format!("exit {:#x}", state.exit_reason), str::to_string);
+            outln!(
+                "{}  rsp {}  last exit: {}{}",
+                ui::symbol(&describe_saved_vtl(target, context)),
+                ui::addr(state.rsp),
+                exit,
+                if state.current {
+                    ui::muted("  (current)")
+                } else {
+                    String::new()
+                }
+            );
+        }
+        let Some(vtl0) = saved.iter().find(|context| context.vtl == 0) else {
+            error!("no saved VTL0 state belongs to this vCPU's virtual processor");
+            return Ok(());
+        };
+        let selected = SelectedFrame::from_registers(0, vtl0.registers());
+        self.set_selected_frame(selected.clone());
+        outln!("selected the VTL0 context the hypervisor saved");
         self.print_selected_frame(&selected, false);
         Ok(())
     }

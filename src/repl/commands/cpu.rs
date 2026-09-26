@@ -878,13 +878,16 @@ impl ReplState<'_> {
         let mut builder = Builder::default();
         builder.push_record(vec!["vCPU", "RIP", "Context", "Symbol"]);
         for vcpu in vcpus {
-            let (rip_cell, symbol_cell) = match vcpu.rip {
+            let (rip_cell, mut symbol_cell) = match vcpu.rip {
                 Some(rip) => (
                     ui::addr(rip),
                     vcpu.symbol.unwrap_or_else(|| format!("{rip:#x}")),
                 ),
                 None => (ui::muted("unavailable"), vcpu.error.unwrap_or_default()),
             };
+            for saved in &vcpu.saved_vtl {
+                symbol_cell.push_str(&ui::muted(&format!("  saved {saved}")));
+            }
             builder.push_record(vec![
                 vcpu.id.to_string(),
                 rip_cell.to_string(),

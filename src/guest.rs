@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 mod discovery;
+mod evmcs;
 mod image;
 mod modules;
 mod process;
@@ -22,6 +23,7 @@ mod trustlet_layout;
 use discovery::{
     find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_arm64, find_ntoskrnl_va_triage,
 };
+pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState};
 pub use image::{Image, SymbolRef};
 pub use secure_kernel::{SecureKernel, TrustletInfo};
 
@@ -163,6 +165,8 @@ pub struct Guest {
     /// Images found outside NT's address spaces (the Windows hypervisor), by
     /// root. They stay mapped for the boot, and this `Guest` is the boot's.
     foreign_images: Mutex<Vec<(Dtb, ModuleInfo)>>,
+    /// Where the Windows hypervisor's eVMCS pages are, once scanned for.
+    evmcs_pages: Mutex<EvmcsCache>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -189,6 +193,7 @@ impl Guest {
             memo: Mutex::new(HaltMemo::default()),
             secure_kernel: Mutex::new(None),
             foreign_images: Mutex::new(Vec::new()),
+            evmcs_pages: Mutex::new(EvmcsCache::default()),
         }
     }
 

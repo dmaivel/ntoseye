@@ -17,6 +17,10 @@ pub fn vcpu(v: &VcpuInfo) -> View {
         ("rip", View::OptHex(v.rip)),
         ("context", View::Str(v.context.clone())),
         ("symbol", View::OptStr(v.symbol.clone())),
+        (
+            "saved_vtl",
+            View::List(v.saved_vtl.iter().cloned().map(View::Str).collect()),
+        ),
         ("error", View::OptStr(v.error.clone())),
     ])
 }

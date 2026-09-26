@@ -108,6 +108,14 @@ finally:
 
 `stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops: their temporary sites in secure-kernel code are debug-register breakpoints in free slots, never code patches. NT process/thread filters, software breakpoints, and data watches in secure modules are refused. See the [VTL1 limits and tested configuration](usage.md#secure-kernel-vtl1).
 
+A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, reports where its VTLs left off in `cpu.saved_vtl`, read from the hypervisor's saved state: `["VTL0 nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered from it. It needs the VM's `hv-evmcs` enlightenment and is empty otherwise; see [where NT left off under the hypervisor](kvm-qemu.md#where-nt-left-off-under-the-hypervisor). To walk NT's stack from there, select the saved context with `.vtlcxr` in the same `command()` line as what uses it, since the next call starts from the live registers again:
+
+```python
+for cpu in dbg.cpus:
+    print(cpu.id, cpu.symbol, cpu.saved_vtl)   # p01.01 hvix64+0x3a6bde ['VTL0 nt!HalProcessorIdle+0xf']
+print(dbg.command(".vtlcxr; k 5"))
+```
+
 ## Run control and breakpoints
 
 `run(timeout=None)` resumes and waits; `wait(timeout=None)` waits without resuming. Both return a `Stop` when one is observed, or `None` when the timeout expires; timeouts are in seconds, and `None` waits indefinitely. `cont()` resumes without waiting; `interrupt()` breaks in and returns a `Stop`. `step()`, `step_over()`, `step_out()`, and `run_to()` provide synchronous run control; `step(until="call")` (and `"ret"`, `"branch"`) steps to the next such instruction, and `run_to(addr, step="over")` single-steps to an address instead of running there. `trace_calls()` records the call tree up to the current function's return (`wt`).

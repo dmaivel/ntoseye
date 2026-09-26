@@ -815,6 +815,16 @@ impl Cpu {
         Ok(self.current_info(py)?.symbol)
     }
 
+    /// For a vCPU halted in the Windows hypervisor (VBS), where its VTLs
+    /// left off, from the hypervisor's saved state: `["VTL0
+    /// nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered
+    /// from it or is about to enter it. Needs the VM's `hv-evmcs`; empty
+    /// otherwise, or when the saved state fails validation.
+    #[getter]
+    fn saved_vtl(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        Ok(self.current_info(py)?.saved_vtl)
+    }
+
     /// The process whose page tables are loaded on this processor.
     #[getter]
     fn process(&self, py: Python<'_>) -> PyResult<Option<Process>> {

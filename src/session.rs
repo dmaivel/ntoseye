@@ -324,6 +324,9 @@ pub struct VcpuInfo {
     pub context: String,
     /// Nearest symbol to `rip` (`module!name+0x..`), if one resolved.
     pub symbol: Option<String>,
+    /// For a vCPU halted in the Windows hypervisor, where its VTLs left off
+    /// (`VTL0 nt!HalProcessorIdle+0xf`), from the hypervisor's saved state.
+    pub saved_vtl: Vec<String>,
     /// Why the vCPU context was unavailable, if it was.
     pub error: Option<String>,
 }
@@ -342,6 +345,9 @@ impl VcpuInfo {
             (None, None, Some(error)) => write!(label, " <{error}>"),
             _ => Ok(()),
         };
+        for saved in &self.saved_vtl {
+            let _ = write!(label, " ({saved})");
+        }
         label
     }
 }

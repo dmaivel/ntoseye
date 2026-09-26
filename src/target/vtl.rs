@@ -2,6 +2,7 @@
 //! address spaces under VBS. Selecting a VTL changes address-space reads and
 //! symbol scope, not the executing processor's VTL or registers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pelite::{PeView, image::IMAGE_FILE_DLL};
@@ -9,17 +10,24 @@ use pelite::{PeView, image::IMAGE_FILE_DLL};
 use super::Target;
 use crate::{
     backend::MemoryOps,
+    cpu_state::kpcr_for_processor,
     error::{Error, Result},
-    guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, SecureKernel, SessionSpace, TrustletInfo},
+    guest::{
+        EvmcsState, Guest, ModuleInfo, ModuleSymbolLoadReport, SecureKernel, SessionSpace,
+        TrustletInfo,
+    },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
     symbols::SymbolStore,
-    types::{Dtb, PhysAddr, VirtAddr},
+    types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
 
 /// How far below an instruction pointer to look for the header of the image
 /// it lies in. The Windows hypervisor and secure kernel are a few MiB.
 const IMAGE_SEARCH_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The context of code in the Windows hypervisor's image.
+pub const HYPERVISOR_CONTEXT: &str = "hypervisor";
 
 /// Code a vCPU was executing outside every NT address space, named by what
 /// it is rather than left `unknown`.
@@ -40,6 +48,43 @@ pub enum ForeignModules {
     Image(ModuleInfo),
     /// A known VTL1 root outside any image (trustlet heap or stack).
     None,
+}
+
+/// One VTL of the virtual processor a vCPU halted in the Windows hypervisor
+/// runs, as the hypervisor last saved it in the VTL's Enlightened VMCS.
+#[derive(Debug, Clone)]
+pub struct SavedVtlContext {
+    pub vtl: u8,
+    pub state: EvmcsState,
+}
+
+impl SavedVtlContext {
+    /// The saved registers under the names the register display and the
+    /// unwinder use. A VMCS holds no general-purpose register but RSP: the
+    /// hypervisor keeps the rest in its own undocumented VP state.
+    pub fn registers(&self) -> HashMap<String, u64> {
+        let state = &self.state;
+        [
+            ("rip", state.rip),
+            ("rsp", state.rsp),
+            ("eflags", state.rflags),
+            ("cr0", state.cr0),
+            ("cr3", state.cr3),
+            ("cr4", state.cr4),
+            ("dr7", state.dr7),
+            ("cs", u64::from(state.cs)),
+            ("ss", u64::from(state.ss)),
+            ("ds", u64::from(state.ds)),
+            ("es", u64::from(state.es)),
+            ("fs", u64::from(state.fs)),
+            ("gs", u64::from(state.gs)),
+            ("fs_base", state.fs_base),
+            ("gs_base", state.gs_base),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect()
+    }
 }
 
 impl Target {
@@ -130,6 +175,70 @@ impl Target {
         Ok(processes)
     }
 
+    /// The VTL states the Windows hypervisor saved for the virtual processor
+    /// a vCPU halted in the hypervisor runs: `cr3` is that vCPU's (the
+    /// hypervisor's root for the VP) and `processor` the NT processor it is.
+    /// VTL0 first, then VTL1 when the secure kernel is already discovered.
+    ///
+    /// The states come from Enlightened VMCS pages, which exist only when the
+    /// VM exposes `hv-evmcs`. The first call of a boot scans host RAM for
+    /// them (about 0.6 s for 8 GiB). Empty when this VP has no eVMCS; see
+    /// [`Self::evmcs_found`] for whether any exists.
+    ///
+    /// A state counts as VTL0 only in an NT root, and, in kernel mode, only
+    /// with `processor`'s KPCR as its GS base; as VTL1 only in a secure-kernel
+    /// root. States of other partitions' VPs sharing the root are skipped.
+    pub fn saved_vtl_contexts(
+        &self,
+        cr3: u64,
+        processor: Option<u16>,
+    ) -> Result<Vec<SavedVtlContext>> {
+        if self.arch() != Arch::Amd64 {
+            return Ok(Vec::new());
+        }
+        let mask = self.arch().dtb_page_mask();
+        let pages = self
+            .guest()?
+            .evmcs_pages(&self.phys, &self.interrupt, cr3, mask)?;
+        let kernel = self.kernel_dtb() & mask;
+        let (mut vtl0, mut vtl1) = (Vec::new(), Vec::new());
+        for state in pages.states_for_root(&*self.phys, cr3, mask) {
+            let root = state.cr3 & mask;
+            if root == kernel || self.process_for_cr3(root).is_some() {
+                vtl0.push(state);
+            } else if self.recognize_secure_root(root) {
+                vtl1.push(state);
+            }
+        }
+        let one = |states: Vec<EvmcsState>, vtl: u8| match states.as_slice() {
+            [] => Ok(None),
+            [state] => Ok(Some(SavedVtlContext { vtl, state: *state })),
+            many => Err(Error::SavedVtlState(format!(
+                "{} eVMCS pages of this virtual processor hold VTL{vtl} state",
+                many.len()
+            ))),
+        };
+        let vtl0 = one(vtl0, 0)?;
+        if let (Some(saved), Some(processor)) = (&vtl0, processor)
+            && saved.state.cs & 3 == 0
+        {
+            let kpcr = kpcr_for_processor(self, processor)?;
+            if saved.state.gs_base != kpcr.0 {
+                return Err(Error::SavedVtlState(format!(
+                    "the saved VTL0 GS base {:#x} is not NT processor {processor}'s KPCR {:#x}",
+                    saved.state.gs_base, kpcr.0
+                )));
+            }
+        }
+        Ok(vtl0.into_iter().chain(one(vtl1, 1)?).collect())
+    }
+
+    /// Whether this boot's eVMCS scan found any page; `None` before a scan.
+    pub fn evmcs_found(&self) -> Option<bool> {
+        let pages = self.guest.as_ref()?.cached_evmcs_pages()?;
+        Some(!pages.is_empty())
+    }
+
     /// Enter VTL1's system space, or a trustlet by its NT PID. The selection
     /// commits only after discovery and module loading succeed. Register and
     /// thread selections are cleared: VTL0 context is not VTL1 context.
@@ -200,7 +309,7 @@ impl Target {
         };
         let context = match &image {
             Some(image) => match image.short_name.as_str() {
-                "hvix64" | "hvax64" | "hvaa64" => "hypervisor".to_string(),
+                "hvix64" | "hvax64" | "hvaa64" => HYPERVISOR_CONTEXT.to_string(),
                 "securekernel" => "VTL1".to_string(),
                 _ if secure_root => "VTL1".to_string(),
                 name => name.to_string(),

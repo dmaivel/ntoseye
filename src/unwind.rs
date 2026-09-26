@@ -17,8 +17,8 @@ use crate::{
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
     target::{
-        ForeignModules, KTHREAD_STATE_TERMINATED, SavedThreadRegisters, Target, ThreadInfo,
-        lookup_register,
+        ForeignModules, KTHREAD_STATE_TERMINATED, SavedThreadRegisters, SavedVtlContext, Target,
+        ThreadInfo, lookup_register,
     },
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
     types::{Arch, Dtb, VirtAddr},
@@ -361,6 +361,35 @@ pub fn resolve_thread_trace_context_at(
 
 pub fn format_symbol(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> String {
     try_format_symbol(debugger, trace, addr).unwrap_or_else(|| format!("{addr:#x}"))
+}
+
+/// Where a VTL state the Windows hypervisor saved left off, as `VTL0
+/// nt!HalProcessorIdle+0xf`, resolved in that state's own address space.
+pub fn describe_saved_vtl(debugger: &Target, saved: &SavedVtlContext) -> String {
+    let trace = resolve_thread_trace_context_at(debugger, saved.state.cr3, saved.state.rip);
+    format!(
+        "VTL{} {}",
+        saved.vtl,
+        format_symbol(debugger, &trace, saved.state.rip)
+    )
+}
+
+/// Where the VTLs of the virtual processor a vCPU halted in the Windows
+/// hypervisor left off: VTL0, and VTL1 too when its eVMCS is the current one
+/// (the hypervisor was entered from VTL1, or is about to enter it). `cr3` is
+/// the vCPU's and `processor` its NT processor, as in
+/// [`Target::saved_vtl_contexts`].
+pub fn saved_vtl_summary(
+    debugger: &Target,
+    cr3: u64,
+    processor: Option<u16>,
+) -> Result<Vec<String>> {
+    Ok(debugger
+        .saved_vtl_contexts(cr3, processor)?
+        .iter()
+        .filter(|saved| saved.vtl == 0 || saved.state.current)
+        .map(|saved| describe_saved_vtl(debugger, saved))
+        .collect())
 }
 
 pub fn preferred_code_dtb(trace: &ThreadTraceContext, addr: u64) -> Dtb {
