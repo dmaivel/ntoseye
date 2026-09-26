@@ -190,6 +190,43 @@ impl RegisterMap {
             .collect()
     }
 
+    /// A sparse register context (`.cxr`, `.trap`, a saved VTL state) named
+    /// the way [`Self::to_hashmap`] names it, so an alias also yields the
+    /// register it aliases (ARM64 `rip` gives `pc`). Only registers whose
+    /// every byte `values` supplies are kept: a register the context lacks
+    /// stays unknown instead of reading zero. Names the map does not carry
+    /// are dropped.
+    pub fn supplied_values(&self, values: &HashMap<String, u64>) -> HashMap<String, u64> {
+        let size = self
+            .by_name
+            .values()
+            .map(|reg| reg.offset + reg.size)
+            .max()
+            .unwrap_or(0);
+        let mut data = vec![0u8; size];
+        let mut supplied = vec![false; size];
+        for (name, value) in values {
+            let Ok(info) = self.scalar(name) else {
+                continue;
+            };
+            let range = info.offset..info.offset + info.size;
+            if self.write_u64(name.as_str(), &mut data, *value).is_ok() {
+                supplied[range].fill(true);
+            }
+        }
+        self.to_hashmap(&data)
+            .into_iter()
+            .filter(|(name, _)| {
+                self.by_name.get(name).is_some_and(|reg| {
+                    reg.size > 0
+                        && supplied[reg.offset..reg.offset + reg.size]
+                            .iter()
+                            .all(|b| *b)
+                })
+            })
+            .collect()
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.ordered.iter().map(|reg| reg.name.clone()).collect()
     }

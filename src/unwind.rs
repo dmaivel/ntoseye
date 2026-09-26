@@ -11,7 +11,6 @@ use crate::{
     error::{Error, Result},
     gdb::RegisterMap,
     guest::{Image, ModuleInfo},
-    kd::{context, context_arm64},
     memory::{AddressSpace, DTB_IDENTITY},
     pe::PeImage,
     phys::PhysMem,
@@ -503,12 +502,41 @@ pub fn build_stacktrace_with_context(
     regs: &[u8],
     limit: usize,
 ) -> RecoveredStackTrace {
-    let cr3 = register_map
-        .read_u64(debugger.arch().dtb_register(), regs)
+    build_stacktrace_from_values(debugger, register_map.to_hashmap(regs), limit)
+}
+
+/// Build a recovered trace from a sparse selected-frame register map. This is
+/// used after `.frame`, `.cxr`, `.trap`, or a saved VTL0 state, where there is
+/// no backend packet to provide the original register byte layout. A register
+/// the context lacks stays unknown to the unwinder and absent from frame 0,
+/// rather than reading zero: a frame that unwinds through an unknown frame
+/// pointer falls back to scanning instead of following a false one.
+pub fn build_stacktrace_with_register_values(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    values: &HashMap<String, u64>,
+    limit: usize,
+) -> RecoveredStackTrace {
+    let mut values = register_map.supplied_values(values);
+    let dtb_name = debugger.arch().dtb_register();
+    if values.get(dtb_name).is_none_or(|dtb| *dtb == 0) && register_map.contains(dtb_name) {
+        values.insert(dtb_name.to_string(), debugger.current_dtb());
+    }
+    build_stacktrace_from_values(debugger, values, limit)
+}
+
+/// Walk from `values`, the registers known at the innermost frame, named as
+/// [`RegisterMap::to_hashmap`] names them; absent registers are unknown.
+fn build_stacktrace_from_values(
+    debugger: &Target,
+    values: HashMap<String, u64>,
+    limit: usize,
+) -> RecoveredStackTrace {
+    let cr3 = values
+        .get(debugger.arch().dtb_register())
+        .copied()
         .unwrap_or(0);
-    let context = RegisterContext::from_lookup(debugger.arch(), |name| {
-        register_map.read_u64(name, regs).ok()
-    });
+    let context = RegisterContext::from_lookup(debugger.arch(), |name| values.get(name).copied());
     let trace = resolve_thread_trace_context_at(debugger, cr3, context.rip);
     build_recovered_stacktrace_seeded(
         debugger,
@@ -516,36 +544,8 @@ pub fn build_stacktrace_with_context(
         context,
         FrameSource::Current,
         limit,
-        register_map.to_hashmap(regs),
+        values,
     )
-}
-
-/// Build a recovered trace from a sparse selected-frame register map. This is
-/// used after `.frame`, `.cxr`, or `.trap`, where there is no backend packet to
-/// provide the original register byte layout. The fixed scratch buffer covers
-/// both architecture-specific CONTEXT maps and their synthetic control slots.
-pub fn build_stacktrace_with_register_values(
-    debugger: &Target,
-    register_map: &RegisterMap,
-    values: &HashMap<String, u64>,
-    limit: usize,
-) -> RecoveredStackTrace {
-    let register_buffer_size = match debugger.arch() {
-        Arch::Amd64 => context::REGISTER_BUFFER_SIZE,
-        Arch::Arm64 => context_arm64::REGISTER_BUFFER_SIZE,
-    };
-    let mut bytes = vec![0u8; register_buffer_size];
-    for (name, value) in values {
-        let _ = register_map.write_u64(name, &mut bytes, *value);
-    }
-    let dtb_name = debugger.arch().dtb_register();
-    if lookup_register(values, dtb_name)
-        .filter(|dtb| *dtb != 0)
-        .is_none()
-    {
-        let _ = register_map.write_u64(dtb_name, &mut bytes, debugger.current_dtb());
-    }
-    build_stacktrace_with_context(debugger, register_map, &bytes, limit)
 }
 
 /// Resolve the frame-relative local base for a sparse register context. This

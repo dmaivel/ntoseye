@@ -11,6 +11,7 @@ use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
 use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
+use crate::target::SelectedFrame;
 use crate::types::{Arch, VirtAddr};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -388,6 +389,37 @@ fn bugcheck_exception_record_uses_bugcheck_code() {
         session.current_exception_record().unwrap().code,
         0xdead_beef
     );
+}
+
+/// A context that holds only some registers (a trap frame, the VTL0 state the
+/// Windows hypervisor saves) walks with the rest unknown: frame 0 reports what
+/// the context holds and never a zero for a register it lacks, and the stack
+/// is not the vCPU's writable register file.
+#[test]
+fn a_sparse_context_walks_with_its_missing_registers_unknown() {
+    let mut session = session_over_memory(0x1000, &[0; 0x100]);
+    session.register_map = build_register_map();
+    let supplied = HashMap::from([
+        ("rip".to_string(), 0x1010),
+        ("rsp".to_string(), 0x1080),
+        ("cs".to_string(), 0x10),
+    ]);
+    session.select_frame(SelectedFrame::from_registers(0, supplied));
+
+    let (trace, _, live) = session.recovered_backtrace(4).unwrap();
+
+    assert!(!live);
+    let frame = &trace.frames[0].registers;
+    assert_eq!(frame.get("rip"), Some(&0x1010));
+    assert_eq!(frame.get("rsp"), Some(&0x1080));
+    assert_eq!(frame.get("cs"), Some(&0x10));
+    for missing in ["rax", "rbx", "rbp", "rsi", "rdi", "r12", "r15", "eflags"] {
+        assert!(
+            !frame.contains_key(missing),
+            "{missing} = {:?}",
+            frame.get(missing)
+        );
+    }
 }
 
 fn session_over_arm64_memory(base: u64, memory: &[u8]) -> Session {
