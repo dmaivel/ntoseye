@@ -391,6 +391,13 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         };
         // At L3 only 0b11 is a page descriptor; 0b01 is reserved.
         if l3.0 & 0b11 != 0b11 {
+            // A trimmed page (a swapped-out kernel stack among them) keeps its
+            // frame: ARM64's software PTEs lay out valid, prototype,
+            // transition, and the frame in the bits AMD64's do.
+            if l3.is_transition() {
+                let pte = l3.unswizzled(self.backend.invalid_pte_mask());
+                return Ok(Some(Translation::new_transition(pte, va)));
+            }
             return Ok(None);
         }
         Ok(Some(Translation::arm64_page(l0, l1, l2, l3, va)))
@@ -792,6 +799,32 @@ mod tests {
 
         assert_eq!(value, 0xDEAD_BEEF_CAFE_BABE);
     }
+    /// ARM64 Windows trims a page as AMD64 Windows does, into an
+    /// `_MMPTE_TRANSITION` with the same bit layout; a swapped-out kernel
+    /// stack is read through one.
+    #[test]
+    fn arm64_transition_pte_reads_the_frame_it_still_owns() {
+        let read = |leaf: u64| {
+            let mut data = vec![0u8; 0x7000];
+            for (table, next) in [(0x1000usize, 0x2000u64), (0x2000, 0x3000), (0x3000, 0x4000)] {
+                data[table..table + 8].copy_from_slice(&(next | 0b11).to_le_bytes());
+            }
+            data[0x4000..0x4008].copy_from_slice(&leaf.to_le_bytes());
+            data[0x6000..0x6008].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+            let mem = FakePhysMem {
+                data,
+                invalid_pte_mask: 0,
+            };
+            AddressSpace::new_arm64(&mem, 0x1000, 0x1000)
+                .read::<u64>(VirtAddr(0))
+                .ok()
+        };
+        assert_eq!(read(0x6000 | (1 << 11)), Some(0x1122_3344_5566_7788));
+        // A prototype or page-file entry holds no frame.
+        assert_eq!(read(0x6000 | (1 << 11) | (1 << 10)), None);
+        assert_eq!(read(0x6000), None);
+    }
+
     #[test]
     fn arm64_translation_applies_table_attribute_restrictions() {
         let l0 = PageTableEntry(0b11 | (1 << 61) | (1 << 62) | (1 << 60));
