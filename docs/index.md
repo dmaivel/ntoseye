@@ -80,6 +80,7 @@ using/repl
 using/breakpoints
 using/memory
 using/symbols
+using/bugchecks
 using/dumps
 using/kdfiles
 ```
