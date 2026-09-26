@@ -8,14 +8,14 @@
 | --- | --- | --- |
 | IDA | Supported | Thread names stay as they were when IDA first saw each thread |
 | gdb, lldb | Supported | |
-| Ghidra | Best effort | Runs through gdb and needs [`ntoseye_regions.py`](../examples/ghidra/ntoseye_regions.py), which depends on the internals of Ghidra's gdb agent |
+| Ghidra | Best effort | Runs through gdb and needs [`ntoseye_regions.py`](https://github.com/dmaivel/ntoseye/blob/master/examples/ghidra/ntoseye_regions.py), which depends on the internals of Ghidra's gdb agent |
 | Binja | Best effort | No stack view; may exit on disconnect |
 
 Best-effort clients work as described below, but their remaining limits are in the client, and no client-specific support beyond what is here is planned.
 
 ## Quickstart
 
-Configure the VM as described in [Choosing a backend](backends.md). The protocol has no attach request, so the command line names the target:
+Configure the VM as described in [Choosing a backend](../setup/backends.md). The protocol has no attach request, so the command line names the target:
 
 ```bash
 ntoseye gdbserver --connect /tmp/ntoseye-kd.sock
@@ -42,7 +42,7 @@ To attach from a database you already have:
 3. In **Debugger > Process options**, set the host to `127.0.0.1` and the port to `2345`.
 4. Use **Debugger > Attach to process**.
 
-IDA reads the memory map from the server, so no manual memory regions are needed. The server reports `ntoskrnl.exe` as the program and every loaded driver as a library, which IDA uses to rebase the database. Text typed at IDA's `GDB` command line runs as an ntoseye command, for example `!process 0 0` or `lm`.
+IDA reads the memory map from the server, so no manual memory regions are needed. The server reports `ntoskrnl.exe` as the program and every loaded driver as a library, which IDA uses to rebase the database. Text typed at IDA's `GDB` command line runs as an ntoseye command, for example `!process 0 0` or {command}`lm`.
 
 ### gdb and lldb
 
@@ -59,15 +59,15 @@ In gdb, run ntoseye commands with `monitor`, for example `monitor k` or `monitor
 
 Ghidra's debugger drives a local gdb, which connects to the server:
 
-1. Import and analyze `ntoskrnl.exe` (or a driver; `.fetchimage` gets the running build), and open it in the **Debugger** tool.
+1. Import and analyze `ntoskrnl.exe` (or a driver; {command}`.fetchimage` gets the running build), and open it in the **Debugger** tool.
 2. Choose **Debugger > Configure and Launch ... using > gdb remote**. Set **Host** to `127.0.0.1`, **Port** to `2345`, and **gdb cmd args** to `-x /path/to/ntoseye/examples/ghidra/ntoseye_regions.py`.
 3. Launch.
 
-Ghidra maps the program onto the module with the same name, so listings, decompilation, and breakpoints follow the live kernel. Its gdb agent learns memory regions only from `info proc mappings`, which gdb does not offer for a PE target; without [`ntoseye_regions.py`](../examples/ghidra/ntoseye_regions.py), which reads the server's generated `/proc/<pid>/maps` instead, every module is based at its first section and the program maps a page off. Run ntoseye commands in the gdb terminal pane with `monitor`.
+Ghidra maps the program onto the module with the same name, so listings, decompilation, and breakpoints follow the live kernel. Its gdb agent learns memory regions only from `info proc mappings`, which gdb does not offer for a PE target; without [`ntoseye_regions.py`](https://github.com/dmaivel/ntoseye/blob/master/examples/ghidra/ntoseye_regions.py), which reads the server's generated `/proc/<pid>/maps` instead, every module is based at its first section and the program maps a page off. Run ntoseye commands in the gdb terminal pane with `monitor`.
 
 ### Binary Ninja
 
-Open `ntoskrnl.exe` (or a driver; `.fetchimage` gets the running build), choose the **GDB RSP** debug adapter, and use **Connect to Remote Process** (the adapter does not support **Connect to Debug Server**). The adapter reads its module list and memory map from a Linux `/proc/<pid>/maps` file, which the server generates from the loaded modules, so the database rebases onto the live module and addresses resolve to module names. Registers, memory, breakpoints, stepping, and `monitor` commands in the debugger console work. The adapter has no stack walk of its own, so the stack view stays empty; use `monitor k`.
+Open `ntoskrnl.exe` (or a driver; {command}`.fetchimage` gets the running build), choose the **GDB RSP** debug adapter, and use **Connect to Remote Process** (the adapter does not support **Connect to Debug Server**). The adapter reads its module list and memory map from a Linux `/proc/<pid>/maps` file, which the server generates from the loaded modules, so the database rebases onto the live module and addresses resolve to module names. Registers, memory, breakpoints, stepping, and `monitor` commands in the debugger console work. The adapter has no stack walk of its own, so the stack view stays empty; use `monitor k`.
 
 Do not use **Restart**: it kills the connection (the server detaches and the guest keeps running) and then tries to relaunch a process, which a kernel target cannot do. Disconnect and connect again instead. Binary Ninja may exit when it disconnects while it is still reading memory; the server has detached cleanly by then and the guest keeps running.
 
@@ -75,7 +75,7 @@ Do not use **Restart**: it kills the connection (the server detaches and the gue
 
 | Protocol surface | ntoseye |
 | --- | --- |
-| Threads | backend execution contexts (vCPUs), as listed by `~`, each named by the process and symbol it is running at every stop (IDA keeps the name from when it first saw the thread, so there only the vCPU part stays current) |
+| Threads | backend execution contexts (vCPUs), as listed by {command}`~`, each named by the process and symbol it is running at every stop (IDA keeps the name from when it first saw the thread, so there only the vCPU part stays current) |
 | Registers | the AMD64 or AArch64 register file under GDB's standard names; registers gdb requires that the transport lacks (x87 over KD) read as unavailable, and optional ones it lacks (segment bases over KD, debug registers over QEMU's stub) are not described |
 | Memory | virtual reads and writes in the current inspection context |
 | Software breakpoints (`Z0`) | `bp <address>` |
@@ -84,7 +84,7 @@ Do not use **Restart**: it kills the connection (the server detaches and the gue
 | Step and continue | single-step of the selected vCPU; continue resumes every vCPU |
 | Interrupt | break-in, reported as `SIGINT` |
 | `monitor` | any ntoseye command that does not move the target |
-| Library list | kernel modules, plus the current process's modules after `.process`, each named `/` and its file name |
+| Library list | kernel modules, plus the current process's modules after {command}`.process`, each named `/` and its file name |
 | Program | `/ntoskrnl.exe`, with the kernel's relocation from its file's preferred base (`qOffsets`) |
 | Memory map | the user and kernel halves of the address space, each library image a region of its own |
 | Console output | guest `DbgPrint` output and stop details, while the target runs |
@@ -100,11 +100,11 @@ Every stop halts the whole target. A stop on a breakpoint the client planted is 
 | Integer or floating-point fault | `SIGFPE` |
 | Bugcheck | `SIGABRT` |
 
-Hardware breakpoints and watchpoints need KD or KDNET, and take the same four debug-register slots `ba` uses.
+Hardware breakpoints and watchpoints need KD or KDNET, and take the same four debug-register slots {command}`ba` uses.
 
 ## Remote file access
 
-A client that opens a file through the server gets the PE file of the loaded module with that file name, whatever directory the path names: `ntoskrnl.exe`, `C:\Windows\System32\ntdll.dll`, and `/anything/mydriver.sys` all resolve by file name, case-insensitively, first in the current scope and then among kernel modules. The file comes from the symbol cache, keyed exactly as [`.fetchimage`](usage.md#symbols) keys it, so it is the build that is running. Opening for writing is refused.
+A client that opens a file through the server gets the PE file of the loaded module with that file name, whatever directory the path names: `ntoskrnl.exe`, `C:\Windows\System32\ntdll.dll`, and `/anything/mydriver.sys` all resolve by file name, case-insensitively, first in the current scope and then among kernel modules. The file comes from the symbol cache, keyed exactly as [`.fetchimage`](../reference/commands/symbols-types-and-expressions.md) keys it, so it is the build that is running. Opening for writing is refused.
 
 An open never waits on the network, because clients time out quickly (IDA after one second) and a late reply desynchronizes the rest of the session. An image that is not cached yet is downloaded in the background, one at a time, and opens fail until it arrives; run `.fetchimage <module>` to wait for it instead. The server starts fetching the kernel's image when it attaches, since IDA opens it on every attach. A gdb connecting opens every module's image, so its first connection queues all of them.
 
@@ -112,13 +112,13 @@ An open never waits on the network, because clients time out quickly (IDA after 
 
 ## Process context
 
-Memory reads and new breakpoints follow ntoseye's inspection context, not the client's selected thread. Switch it with `monitor .process <eprocess>` to read a process's user space, and new breakpoints are scoped to that process, as with `bp` in the REPL. The client caches memory and does not know the context changed, so refresh its views afterwards (in IDA, **Debugger > Refresh memory**).
+Memory reads and new breakpoints follow ntoseye's inspection context, not the client's selected thread. Switch it with `monitor .process <eprocess>` to read a process's user space, and new breakpoints are scoped to that process, as with {command}`bp` in the REPL. The client caches memory and does not know the context changed, so refresh its views afterwards (in IDA, **Debugger > Refresh memory**).
 
 Reading another thread's registers does not change ntoseye's current vCPU; `monitor` commands keep acting on the stopped vCPU, or on the one selected with `monitor ~<n>s`.
 
 ## Run control belongs to the client
 
-`monitor` commands that resume or step the target (`g`, `p`, `t`, `gu`, ...) are refused, because the client caches registers and memory for the stop it last saw. Breakpoints set with `monitor bp ... do "..."` still run their actions, and a trailing `gc` continues without reporting a stop.
+`monitor` commands that resume or step the target ({command}`g`, {command}`p`, {command}`t`, {command}`gu`, ...) are refused, because the client caches registers and memory for the stop it last saw. Breakpoints set with `monitor bp ... do "..."` still run their actions, and a trailing `gc` continues without reporting a stop.
 
 ## Sessions
 

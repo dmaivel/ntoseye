@@ -20,13 +20,13 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 - WinDbg-style commands and expressions
 - Public and private PDB symbols, source lines, and local variables
 - Conditional and deferred breakpoints, hardware watchpoints, and breakpoint commands
-- [KD/KDNET, QEMU GDB, and passive memory backends](docs/backends.md)
-- [VBS secure-kernel (VTL1) and trustlet memory inspection](docs/usage.md#secure-kernel-vtl1)
-- [Host-served driver images for driver development](docs/kdfiles.md)
-- [Python SDK and custom commands](docs/sdk.md)
-- [Editor integration over DAP](docs/dap.md)
-- [IDA, Binja, Ghidra over the GDB remote protocol](docs/gdbserver.md)
-- [Agent integration over MCP](docs/mcp.md)
+- [KD/KDNET, QEMU GDB, and passive memory backends](docs/setup/backends.md)
+- [VBS secure-kernel (VTL1) and trustlet memory inspection](docs/platforms/vbs.md)
+- [Host-served driver images for driver development](docs/using/kdfiles.md)
+- [Python SDK](docs/scripting/sdk.md) and [custom commands](docs/scripting/commands.md)
+- [Editor integration over DAP](docs/integrations/dap.md)
+- [IDA, Binja, Ghidra over the GDB remote protocol](docs/integrations/gdbserver.md)
+- [Agent integration over MCP](docs/integrations/mcp.md)
 
 ### Supported Windows
 
@@ -34,7 +34,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 
 ### Supported hypervisors
 
-`ntoseye` supports any target that Windows can debug over [KDNET](docs/kdnet.md). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](docs/backends.md).
+`ntoseye` supports any target that Windows can debug over [KDNET](docs/setup/kdnet.md). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](docs/setup/backends.md).
 
 ### Files and network access
 
@@ -56,7 +56,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dmaivel/ntoseye/releases/latest/download/ntoseye-installer.sh | sh
 ```
 
-The prebuilt binaries have no Python, so they cannot run [custom commands](docs/sdk.md#repl-custom-commands).
+The prebuilt binaries have no Python, so they cannot run [custom commands](docs/scripting/commands.md).
 
 ### uv or pipx
 
@@ -82,7 +82,7 @@ To drive the debugger from your own Python code, install the same package into y
 pip install ntoseye
 ```
 
-This also puts the `ntoseye` command in that environment. See the [Python SDK documentation](docs/sdk.md).
+This also puts the `ntoseye` command in that environment. See the [Python SDK documentation](docs/scripting/sdk.md).
 
 ## Building
 
@@ -98,11 +98,20 @@ To build without embedded Python:
 cargo build --release --no-default-features --features cli,mcp,dap,gdbserver
 ```
 
+To build the documentation site, whose command and SDK references are generated from the source (this runs `cargo`):
+
+```bash
+pip install -r docs/requirements.txt
+sphinx-build -n -W docs docs/_build/html
+```
+
+For a live preview that rebuilds as you edit, `pip install sphinx-autobuild` and run `sphinx-autobuild docs docs/_build/html` (served at `http://127.0.0.1:8000`).
+
 # Usage
 
 ## Quickstart
 
-If you are using QEMU/KVM, VMware, or UTM, you can use `ntoseye configure` for easy setup. Otherwise, look at [KDNET](docs/kdnet.md) instructions.
+If you are using QEMU/KVM, VMware, or UTM, you can use `ntoseye configure` for easy setup. Otherwise, look at [KDNET](docs/setup/kdnet.md) instructions.
 
 1. Power off the Windows VM.
 2. Run `ntoseye configure` and select the hypervisor, virtual machine, and debugger backend. Note the `Run` command it prints.
@@ -113,28 +122,36 @@ Run `ntoseye status` at any time to inspect configured transports, assigned gues
 
 ### Hypervisor setup
 
-`ntoseye configure` handles automatic setup for supported libvirt, VMware Workstation, and UTM guests. For plain QEMU or manual configuration, see the [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md) setup guides.
+`ntoseye configure` handles automatic setup for supported libvirt, VMware Workstation, and UTM guests. For plain QEMU or manual configuration, see the [KVM/QEMU](docs/setup/kvm-qemu.md), [VMware](docs/setup/vmware.md), and [UTM](docs/setup/utm.md) setup guides.
 
-For any other target, follow the [KDNET guide](docs/kdnet.md) instead; `configure` is not needed.
+For any other target, follow the [KDNET guide](docs/setup/kdnet.md) instead; `configure` is not needed.
 
 ### Not sure which backend to use?
 
-See the [backend comparison table](docs/backends.md).
+See the [backend comparison table](docs/setup/backends.md).
 
 # Documentation
 
-The debugger is self-documented: run `ntoseye --help` for command-line arguments, and press tab in the REPL for completions and descriptions of commands, symbols, and types.
+The debugger is self-documented: run `ntoseye --help` for command-line arguments, press tab in the REPL for completions and descriptions of commands, symbols, and types, and run `.hh <command>` for a command's full help. The documentation site's command reference is built from that same help.
 
-- [REPL usage](docs/usage.md): expressions, radix, breakpoints, watchpoints, aliases, VTL1 inspection
-- [Symbols and source](docs/symbols.md): private PDBs, `.sympath`/`.srcpath`, source breakpoints
-- [Choosing a backend](docs/backends.md): kd/kdnet/gdb/memory comparison, per-hypervisor setup for [KVM/QEMU](docs/kvm-qemu.md), [VMware](docs/vmware.md), and [UTM](docs/utm.md)
-- [KDNET](docs/kdnet.md): `kdnet.exe` guest setup, host launch, reboot behavior
-- [Crash dumps](docs/dumps.md): offline dump analysis, generating dumps, guest tweaks
-- [Driver replacement map](docs/kdfiles.md): `.kdfiles`, loading a driver from the host instead of the guest
-- [Python SDK and custom commands](docs/sdk.md)
-- [MCP integration](docs/mcp.md)
-- [Editor integration (DAP)](docs/dap.md): source-level debugging from VS Code, Emacs (dape), or nvim-dap
-- [Disassembler integration (GDB remote protocol)](docs/gdbserver.md): debugging from IDA, Binary Ninja, Ghidra, gdb, or lldb
+- [Tutorial](docs/get-started/tutorial.md): a first session, from attaching to stepping
+- [Coming from WinDbg](docs/get-started/windbg.md): what carries over and what differs
+- [Troubleshooting](docs/get-started/troubleshooting.md)
+- [Using the REPL](docs/using/repl.md): command names, aliases
+- [Expressions](docs/reference/expressions.md): numbers and radix, operators, registers and pseudo-registers, symbols, types, locals
+- [Breakpoints and watchpoints](docs/using/breakpoints.md): the breakpoint grammar, conditions, scoping
+- [VBS and the Windows hypervisor](docs/platforms/vbs.md): VTL1 and trustlet inspection, stops in the hypervisor
+- [WOW64 processes](docs/platforms/wow64.md)
+- [Memory and paging](docs/using/memory.md): memory sources, writes, paged-out memory
+- [Symbols and source](docs/using/symbols.md): private PDBs, `.sympath`/`.srcpath`, source breakpoints
+- [Choosing a backend](docs/setup/backends.md): kd/kdnet/gdb/memory comparison, per-hypervisor setup for [KVM/QEMU](docs/setup/kvm-qemu.md), [VMware](docs/setup/vmware.md), and [UTM](docs/setup/utm.md)
+- [KDNET](docs/setup/kdnet.md): `kdnet.exe` guest setup, host launch, reboot behavior
+- [Crash dumps](docs/using/dumps.md): offline dump analysis, generating dumps, guest tweaks
+- [Driver replacement map](docs/using/kdfiles.md): `.kdfiles`, loading a driver from the host instead of the guest
+- [Python SDK](docs/scripting/sdk.md) and [custom REPL commands](docs/scripting/commands.md)
+- [MCP integration](docs/integrations/mcp.md)
+- [Editor integration (DAP)](docs/integrations/dap.md): source-level debugging from VS Code, Emacs (dape), or nvim-dap
+- [Disassembler integration (GDB remote protocol)](docs/integrations/gdbserver.md): debugging from IDA, Binary Ninja, Ghidra, gdb, or lldb
 
 # Credits
 

@@ -74,8 +74,9 @@ PDB enum fields return cached `IntEnum` members when the value is defined; other
 
 ## Secure kernel (VTL1)
 
-> [!IMPORTANT]
-> VTL1 inspection is experimental; see [Secure kernel (VTL1)](usage.md#secure-kernel-vtl1) for how it works and where it has been tested.
+:::{important}
+VTL1 inspection is experimental; see [Secure kernel (VTL1)](../platforms/vbs.md) for how it works and where it has been tested.
+:::
 
 With VBS running, `dbg.secure_kernel` is the secure kernel, discovered from host memory on first use (the `memory` and `gdb` backends, or `kd`/`kdnet` reading host memory). It raises `NtoseyeError` when VBS is not running or the backend cannot reach VTL1 memory. Its `memory`, `symbols`, `types`, and `modules` are bound to the secure kernel's system address space, as `proc.memory` is to a process's; `trustlets` lists the secure kernel's processes, each with the same views bound to its own address space and `process` naming its NT side.
 
@@ -106,9 +107,9 @@ finally:
     bp.delete()
 ```
 
-`stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops: their temporary sites in secure-kernel code are debug-register breakpoints in free slots, never code patches. NT process/thread filters, software breakpoints, and data watches in secure modules are refused. See the [VTL1 limits and tested configuration](usage.md#secure-kernel-vtl1).
+`stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops: their temporary sites in secure-kernel code are debug-register breakpoints in free slots, never code patches. NT process/thread filters, software breakpoints, and data watches in secure modules are refused. See the [VTL1 limits and tested configuration](../platforms/vbs.md).
 
-A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, reports where its VTLs left off in `cpu.saved_vtl`, read from the hypervisor's saved state: `["VTL0 nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered from it. It needs the VM's `hv-evmcs` enlightenment and is empty otherwise; see [where NT left off under the hypervisor](kvm-qemu.md#where-nt-left-off-under-the-hypervisor). To walk NT's stack from there, select the saved context with `.vtlcxr` in the same `command()` line as what uses it, since the next call starts from the live registers again:
+A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, reports where its VTLs left off in `cpu.saved_vtl`, read from the hypervisor's saved state: `["VTL0 nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered from it. It needs the VM's `hv-evmcs` enlightenment and is empty otherwise; see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor). To walk NT's stack from there, select the saved context with {command}`.vtlcxr` in the same `command()` line as what uses it, since the next call starts from the live registers again:
 
 ```python
 for cpu in dbg.cpus:
@@ -118,7 +119,7 @@ print(dbg.command(".vtlcxr; k 5"))
 
 ## Run control and breakpoints
 
-`run(timeout=None)` resumes and waits; `wait(timeout=None)` waits without resuming. Both return a `Stop` when one is observed, or `None` when the timeout expires; timeouts are in seconds, and `None` waits indefinitely. `cont()` resumes without waiting; `interrupt()` breaks in and returns a `Stop`. `step()`, `step_over()`, `step_out()`, and `run_to()` provide synchronous run control; `step(until="call")` (and `"ret"`, `"branch"`) steps to the next such instruction, and `run_to(addr, step="over")` single-steps to an address instead of running there. `trace_calls()` records the call tree up to the current function's return (`wt`).
+`run(timeout=None)` resumes and waits; `wait(timeout=None)` waits without resuming. Both return a `Stop` when one is observed, or `None` when the timeout expires; timeouts are in seconds, and `None` waits indefinitely. `cont()` resumes without waiting; `interrupt()` breaks in and returns a `Stop`. `step()`, `step_over()`, `step_out()`, and `run_to()` provide synchronous run control; `step(until="call")` (and `"ret"`, `"branch"`) steps to the next such instruction, and `run_to(addr, step="over")` single-steps to an address instead of running there. `trace_calls()` records the call tree up to the current function's return ({command}`wt`).
 
 While the target is halted, the stop it is halted at stays current until it moves again: `dbg.stop`, `wait()`, and `interrupt()` all return it, and reading it consumes nothing.
 
@@ -160,31 +161,4 @@ All SDK exceptions derive from `ntoseye.NtoseyeError`. `MemoryAccessError` repor
 
 ## REPL custom commands
 
-Custom commands run inside the CLI's REPL session rather than attaching a second debugger. Put a `*.py` file in `~/.ntoseye/commands/`; scripts are loaded at startup, and `reload-scripts` picks up edits. They run in the `ntoseye` command the Python package installs (`uv tool install ntoseye` or `pipx install ntoseye`) and in `cargo install` builds, which embed Python. The prebuilt release archives have no Python: they list the scripts they skipped and how to get a build that runs them. `ntoseye.repl` provides command decorators, completion markers, and the borrowed `Debugger` type.
-
-```python
-import ntoseye.repl as repl
-
-@repl.command("pscount", "Count processes.")
-def pscount(dbg: repl.Debugger):
-    print(f"{len(dbg.processes)} processes")
-    for proc in dbg.processes:
-        print(f"  {proc.pid:>6}  {proc.name}")
-```
-
-See [`examples/commands/`](../examples/commands/) for custom command scripts. The Python package/build details are in [`python/README.md`](../python/README.md).
-
-## 0.36 → 0.37 quick migration
-
-| 0.36 | 0.37 |
-| --- | --- |
-| `processes()` / `process(pid)` | `dbg.processes`, `dbg.processes[pid]`, `.find(name)` |
-| `attach_process(pid)` / `detach()` | Use `proc.memory`, `proc.modules`, and other process-bound views |
-| `read(addr, n)` / `write(addr, data)` | `dbg.memory.read/write(...)`; use `proc.memory` or `dbg.physical` for other spaces |
-| `type(name)`, `read_struct(...)`, `offset_of(...)` | `dbg.types[name]`, `.at(addr).read()`, and `.fields[name].offset` |
-| `kernel_modules()` / `search_details(...)` | `dbg.modules` / `dbg.memory.search(pattern, start, length)` |
-| `breakpoint(...)`, `clear_breakpoint(...)`, `disable_breakpoint(...)` | `dbg.breakpoints.add(...)`, `bp.delete()`, `bp.enabled = False` |
-| `run(timeout_ms=...)` / `wait_for_stop(...)` | `run(timeout=seconds)` / `wait(timeout=seconds)`; both return `Stop \| None` |
-| `StopOutcome` flags and reason strings | Test `isinstance(stop, ntoseye.Stop.Breakpoint)` (or another stop class); inspect that kind's fields |
-| `run_command(line)` | `dbg.command(line, timeout=None)` |
-| flat `inspect_*()` reports | `dbg.inspect.*()` or the owning process/thread/CPU/module method |
+Scripts can also add commands to the REPL itself, using the same API through a borrowed `Debugger`; see [custom REPL commands](commands.md).

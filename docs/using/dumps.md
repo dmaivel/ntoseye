@@ -8,7 +8,7 @@ ntoseye --dump /path/to/MEMORY.DMP
 
 Full and kernel dumps, plus kernel triage (small/minidump) dumps, are supported. BSOD dumps give you the crash registers, stack trace, and bugcheck analysis automatically; live system dumps (bugcheck 0x161) have memory but no exception context.
 
-Available commands include `ps`, `lm`, `dt`, `dq`/`db`/`dd`, `dqs`, `da`/`du`, `analyze`, `trap`, `x`, `ev`, `drivers`, and `s`. Execution control, breakpoints, and register/memory writes are not available (the dump is read-only).
+Available commands include {command}`ps`, {command}`lm`, {command}`dt`, {command}`dq`/{command}`db`/{command}`dd`, {command}`dqs`, {command}`da`/{command}`du`, {command}`analyze`, {command}`trap`, {command}`x`, {command}`ev`, {command}`drivers`, and {command}`s`. Execution control, breakpoints, and register/memory writes are not available (the dump is read-only).
 
 The Python SDK supports dump analysis as well:
 
@@ -46,7 +46,7 @@ From a real BSOD, Windows writes `C:\Windows\MEMORY.DMP` on the boot after the c
 - keep a page file on `C:` at least as large as the dump (in the Virtual Memory dialog, click **Set** before OK, or it silently discards the change), or
 - keep paging disabled (see [Recommended guest tweaks](#recommended-guest-tweaks)) and configure a dedicated dump file instead, under `HKLM\SYSTEM\CurrentControlSet\Control\CrashControl`: `DedicatedDumpFile` (REG_SZ, e.g. `C:\dedicated.sys`) and `DumpFileSize` (DWORD, MB).
 
-Force the crash with Sysinternals NotMyFault or the `CrashOnCtrlScroll` registry switch. If the guest is booted in debug mode with a debugger attached, continue past the bugcheck (`g`), otherwise Windows waits in the debugger instead of writing the dump.
+Force the crash with Sysinternals NotMyFault or the `CrashOnCtrlScroll` registry switch. If the guest is booted in debug mode with a debugger attached, continue past the bugcheck ({command}`g`), otherwise Windows waits in the debugger instead of writing the dump.
 
 Copy the dump out to the host with [guestfs-tools](https://libguestfs.org/) while the guest is shut off:
 

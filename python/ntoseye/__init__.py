@@ -11,7 +11,7 @@
         if stop is not None and bp in stop.breakpoints:
             print(stop.thread.backtrace())
 
-See `docs/sdk.md` and `examples/` for more.
+See `docs/scripting/sdk.md` and `examples/` for more.
 """
 
 from ._ntoseye import *  # noqa: F403 (every class and function the extension exports)

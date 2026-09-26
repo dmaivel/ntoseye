@@ -1,0 +1,7 @@
+# WOW64 processes
+
+A 32-bit process on an x64 kernel (`_EPROCESS.WoW64Process` set) is marked `WOW64` by {command}`.process`, in the `Wow64` column of {command}`!process`/{command}`ps`, and by its `Wow64Peb` in process detail. Attaching to one loads both loader lists: the native `ntdll` and `wow64*.dll`, and the 32-bit modules, whose symbols come from their x86 PDBs. The 32-bit ntdll is addressed as `ntdll32` (`x ntdll32!Rtl*`, `bu ntdll32!RtlAllocateHeap`); every other 32-bit module keeps its name. x86 public symbols are shown undecorated (`RtlAllocateHeap`, not `_RtlAllocateHeap@12`).
+
+Types follow the same rule: a bare name resolves the kernel's layout, `ntdll32!_PEB` the 32-bit one, and the nested types of a 32-bit layout stay 32-bit (`dt ntdll32!_LDR_DATA_TABLE_ENTRY <address>` reads 4-byte pointers and `_UNICODE_STRING`s). {command}`!peb` adds the `PEB32` block and its process parameters, {command}`!teb` the `TEB32` behind `WowTebOffset`, {command}`!gle` the 32-bit TEB's last error, and {command}`!heap` walks the 32-bit heaps.
+
+Code in a 32-bit module disassembles as x86 ({command}`u`, {command}`ub`, {command}`uf`, DAP disassembly); `.effmach x86|amd64|.` overrides the choice. `.effmach x86` also makes {command}`ds`/{command}`dS` decode 32-bit string descriptors with the `ntdll32` layout; the SDK's `read_unicode_string`/`read_ansi_string` take `bits=32` for the same. Not supported: walking the x86 user stack. {command}`k` on a WOW64 thread ends at the `wow64cpu` transition frame; the 32-bit frames beyond it are not unwound.

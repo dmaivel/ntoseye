@@ -1,10 +1,10 @@
 # Editor integration (DAP)
 
-`ntoseye dap` exposes a debugger session over the [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/). Editors provide source and disassembly views, breakpoints, stacks, registers, and watches. The Debug Console accepts inspection commands; use the editor’s controls to step and continue.
+`ntoseye dap` exposes a debugger session over the [Debug Adapter Protocol](https://github.com/microsoft/debug-adapter-protocol). Editors provide source and disassembly views, breakpoints, stacks, registers, and watches. The Debug Console accepts inspection commands; use the editor’s controls to step and continue.
 
 ## Quickstart
 
-Configure the VM as described in [Choosing a backend](backends.md). Use one client per target.
+Configure the VM as described in [Choosing a backend](../setup/backends.md). Use one client per target.
 
 The target can be named on the command line, or in the client's own launch configuration.
 
@@ -130,8 +130,8 @@ Kernel debugging has no process to start, so `launch` and `attach` behave identi
 | `kdnetKey` | KDNET encryption key (four base-36 components). |
 | `memorySource` | `auto` (default), `host`, or `kd`; KD and KDNET only. |
 | `dump` | Open a crash dump instead of attaching to a live VM. Takes precedence over the live options. |
-| `symbolPath` | Directories or symbol servers appended to the symbol path, in `.sympath` syntax. |
-| `sourcePath` | Source-path mappings appended to the source path, in `.srcpath` syntax. |
+| `symbolPath` | Directories or symbol servers appended to the symbol path, in {command}`.sympath` syntax. |
+| `sourcePath` | Source-path mappings appended to the source path, in {command}`.srcpath` syntax. |
 
 `symbolPath` accepts a local directory, a symbol server (`https://...`, `srv*a*b`), a `;`-separated list, or a JSON array. Entries are appended to the managed cache and Microsoft server. Symbols are reloaded at attach.
 
@@ -143,58 +143,58 @@ When the command line already pinned a target (`ntoseye dap --dump crash.dmp`), 
 
 | DAP surface | ntoseye |
 | --- | --- |
-| Threads | backend execution contexts, as listed by `~` |
-| Call stack | `k` |
-| Locals scope | `dv` |
-| Variable expansion | `dt` |
-| Registers scope | `r` |
+| Threads | backend execution contexts, as listed by {command}`~` |
+| Call stack | {command}`k` |
+| Locals scope | {command}`dv` |
+| Variable expansion | {command}`dt` |
+| Registers scope | {command}`r` |
 | Watch and hover | the shared core expression grammar |
 | Debug Console | any command that inspects state |
 | Breakpoints | `bu file:line` |
 | Function breakpoints | `bu <symbol>` |
 | Instruction breakpoints | `bp <address>` |
-| Data breakpoints | `ba` hardware watchpoints |
-| Exception breakpoints | none, use the console's `sx` |
+| Data breakpoints | {command}`ba` hardware watchpoints |
+| Exception breakpoints | none, use the console's {command}`sx` |
 | Condition and hit count | breakpoint condition and WinDbg pass count |
 | Log points | a `.printf "..."; gc` breakpoint action |
 | Step over and into | one source line, or one instruction |
-| Step out | `gu` |
-| Disassembly view | `u` and `ub` |
+| Step out | {command}`gu` |
+| Disassembly view | {command}`u` and {command}`ub` |
 | Variable writes | in-place scalar writes |
 | Memory view | virtual reads and writes |
-| Modules view | `lm` |
+| Modules view | {command}`lm` |
 | Exception info | the stop's NTSTATUS, or the bugcheck code and its four parameters |
 | Output console | guest `DbgPrint` output over KD and KDNET, streamed as it arrives |
 
 ### Threads and stacks
 
-DAP threads are backend execution contexts (vCPUs), as listed by `~`. Stops halt the whole target and set `allThreadsStopped`. Inspect Windows threads with `!process`, `!stacks`, and `!thread`; parked `_ETHREAD`s cannot be stepped or resumed.
+DAP threads are backend execution contexts (vCPUs), as listed by {command}`~`. Stops halt the whole target and set `allThreadsStopped`. Inspect Windows threads with {command}`!process`, {command}`!stacks`, and {command}`!thread`; parked `_ETHREAD`s cannot be stepped or resumed.
 
-The call stack uses `k`, with source lines from private PDBs. Frame names and source lines retain the address space used to recover each frame, including a parked thread's process address space. `.thread <ethread>` selects a parked Windows thread’s saved context. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
+The call stack uses {command}`k`, with source lines from private PDBs. Frame names and source lines retain the address space used to recover each frame, including a parked thread's process address space. `.thread <ethread>` selects a parked Windows thread’s saved context. Clients supporting `supportsInvalidatedEvent` refresh their panes automatically; others need a manual refresh.
 
 ### Locals, registers, and watches
 
-Locals and parameters use PDB locations, as in `dv`. Caller frames contain only registers recovered by unwinding; other values are unavailable. A frame's locals, their values, and what they expand into come from the address space its stack was recovered in, so a parked thread's frames show its own process's locals whatever `.process` selects.
+Locals and parameters use PDB locations, as in {command}`dv`. Caller frames contain only registers recovered by unwinding; other values are unavailable. A frame's locals, their values, and what they expand into come from the address space its stack was recovered in, so a parked thread's frames show its own process's locals whatever {command}`.process` selects.
 
-Structs, unions, arrays, and pointers expand through `dt` decoding. Null pointers and unresolved or zero-sized types cannot expand. Use console `dt` to inspect the raw layout.
+Structs, unions, arrays, and pointers expand through {command}`dt` decoding. Null pointers and unresolved or zero-sized types cannot expand. Use console {command}`dt` to inspect the raw layout.
 
-The Registers scope is `r`. Frame 0 is the live register file and is writable, while caller frames show the sparse recovered context. Under a parked Windows thread every frame is recovered, so none is writable.
+The Registers scope is {command}`r`. Frame 0 is the live register file and is writable, while caller frames show the sparse recovered context. Under a parked Windows thread every frame is recovered, so none is writable.
 
-Watch and hover use [core expressions](usage.md#expressions), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Expressions see the selected frame's registers and read the address space its stack was recovered in, as its locals do. The Debug Console evaluates in the console's inspection context instead, so a `.process` scope applies there. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
+Watch and hover use [core expressions](../reference/expressions.md), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Expressions see the selected frame's registers and read the address space its stack was recovered in, as its locals do. The Debug Console evaluates in the console's inspection context instead, so a {command}`.process` scope applies there. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
 
-Scalar registers, locals, struct fields, and array elements can be written in place. Bitfields and values wider than 8 bytes require console commands such as `eb` or `ed`.
+Scalar registers, locals, struct fields, and array elements can be written in place. Bitfields and values wider than 8 bytes require console commands such as {command}`eb` or {command}`ed`.
 
 ### Breakpoints
 
 Source breakpoints use `bu file:line`. Unresolved lines remain unverified until their module loads, when a `breakpoint` event updates the client. Breakpoints can be edited while running; the adapter pauses and resumes the target.
 
-Function breakpoints use `bu <symbol>` but skip the prologue so parameters are available. Console `bu` stops at the symbol itself.
+Function breakpoints use `bu <symbol>` but skip the prologue so parameters are available. Console {command}`bu` stops at the symbol itself.
 
 Instruction breakpoints, set from the disassembly view, are `bp <address>`.
 
-Data breakpoints use `ba` on variable storage, including fields and array elements. Register-held locals and bitfields have no separately watchable address. Only KD and KDNET support them.
+Data breakpoints use {command}`ba` on variable storage, including fields and array elements. Register-held locals and bitfields have no separately watchable address. Only KD and KDNET support them.
 
-Exception breakpoints are unsupported. Configure exception policy with console `sx` commands.
+Exception breakpoints are unsupported. Configure exception policy with console {command}`sx` commands.
 
 All breakpoint kinds accept conditions and hit counts. `hitCondition` must be a decimal pass count, not `>5` or `0x10`. Editor breakpoint conditions also use decimal literals; console conditions use the session radix.
 
@@ -202,15 +202,15 @@ All breakpoint kinds accept conditions and hit counts. `hitCondition` must be a 
 
 A log point is a breakpoint whose action prints and continues, `.printf "..."; gc`. `{...}` placeholders hold core expressions, including locals such as `{index}`, and render their values in hexadecimal. The surrounding text is literal.
 
-Log placeholders cannot contain quotes or semicolons. Whitespace is removed because `.printf` separates arguments on whitespace. Successful log actions continue without stopping the client; conditions and hit counts still apply.
+Log placeholders cannot contain quotes or semicolons. Whitespace is removed because {command}`.printf` separates arguments on whitespace. Successful log actions continue without stopping the client; conditions and hit counts still apply.
 
 ### Stepping
 
 Step over and step into advance one source line when line records exist, or one instruction otherwise. `instruction` granularity always steps one instruction. Straight-line instruction ranges are covered in one run.
 
-Step out uses `gu` and stops at the return address for every granularity.
+Step out uses {command}`gu` and stops at the return address for every granularity.
 
-The disassembly view uses `u` and `ub` to scroll forward and backward.
+The disassembly view uses {command}`u` and {command}`ub` to scroll forward and backward.
 
 ### Memory
 
@@ -218,11 +218,11 @@ The memory view reads and writes virtual memory in the current process context. 
 
 ### Paging
 
-Stack and variable requests support paging (`startFrame`/`levels`, `start`/`count`). Arrays are decoded per window, up to 1024 elements per request. Stack pages slice a single bounded walk per stop. Console `dt` displays 16 elements by default; use `dt -a` or `dq` for more.
+Stack and variable requests support paging (`startFrame`/`levels`, `start`/`count`). Arrays are decoded per window, up to 1024 elements per request. Stack pages slice a single bounded walk per stop. Console {command}`dt` displays 16 elements by default; use `dt -a` or {command}`dq` for more.
 
 ## Run control belongs to the client
 
-The Debug Console uses the same remote dispatch context as MCP. Commands that resume the target (`g`, `p`, `gu`, `wt`, `.reboot`, ...) are refused. Use the editor’s step and continue controls.
+The Debug Console uses the same remote dispatch context as MCP. Commands that resume the target ({command}`g`, {command}`p`, {command}`gu`, {command}`wt`, {command}`.reboot`, ...) are refused. Use the editor’s step and continue controls.
 
 Breakpoint actions still run. A breakpoint created with `bp nt!NtCreateFile do "k; gc"` executes its action on each hit, prints into the console, and continues if the action ends in `gc`.
 
@@ -230,4 +230,4 @@ Pause also interrupts a step over a long-running call.
 
 Disconnect, terminate, `SIGTERM`, `SIGHUP`, and `SIGINT` detach like `qd`: remove installed breakpoints and resume the guest. Cleanup precedes the disconnect response because clients may immediately kill the adapter. If the target cannot halt for cleanup, the adapter reports the failure and does not issue a resume.
 
-`SIGKILL` prevents cleanup and leaves breakpoint entries installed. See [breakpoint recovery](usage.md#breakpoints-and-watchpoints).
+`SIGKILL` prevents cleanup and leaves breakpoint entries installed. See [breakpoint recovery](../using/breakpoints.md).

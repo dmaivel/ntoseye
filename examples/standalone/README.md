@@ -1,6 +1,6 @@
 # Examples
 
-Standalone [Python SDK](../../docs/sdk.md) scripts. Run one directly, e.g. `python list_processes.py`. Most read-only scripts default to the passive `memory` backend and never pause the guest. `kernel_snapshot.py` and `thread_stacks.py` keep the `kd` default for CPU views but accept `--backend memory` for passive inspection. Scripts that control execution default to `kd` and require `gdb` or `kd`; timeouts are in seconds (`--timeout 0` means wait indefinitely where supported).
+Standalone [Python SDK](../../docs/scripting/sdk.md) scripts. Run one directly, e.g. `python list_processes.py`. Most read-only scripts default to the passive `memory` backend and never pause the guest. `kernel_snapshot.py` and `thread_stacks.py` keep the `kd` default for CPU views but accept `--backend memory` for passive inspection. Scripts that control execution default to `kd` and require `gdb` or `kd`; timeouts are in seconds (`--timeout 0` means wait indefinitely where supported).
 
 | Script | Shows |
 | --- | --- |

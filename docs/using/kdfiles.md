@@ -1,10 +1,10 @@
 # Driver replacement map (`.kdfiles`)
 
-`.kdfiles` makes the target load a driver image **from the host filesystem** instead of from its own disk, so a driver can be rebuilt and reloaded without copying the `.sys` into the VM on every iteration.
+{command}`.kdfiles` makes the target load a driver image **from the host filesystem** instead of from its own disk, so a driver can be rebuilt and reloaded without copying the `.sys` into the VM on every iteration.
 
 When the kernel debugger is enabled, `nt!MmLoadSystemImage` asks the debugger for the image before falling back to the copy on the target's disk. `ntoseye` answers that request from the map; an unmapped name is refused, and the target silently uses its own copy.
 
-This feature works over KDCOM and KDNET. The `capabilities` command reports it as `host-served target files`. On the GDB, memory, and dump backends `.kdfiles` warns that the map will never be consulted.
+This feature works over KDCOM and KDNET. The {command}`capabilities` command reports it as `host-served target files`. On the GDB, memory, and dump backends {command}`.kdfiles` warns that the map will never be consulted.
 
 ## Usage
 
@@ -30,7 +30,7 @@ note: kdfiles: target opened \??\C:\Users\me\source\repos\mydriver\x64\Debug\myd
       -> /home/me/build/mydriver.sys (7920 bytes)
 ```
 
-`.kdfiles` with no argument shows the map and serving totals. Use these to check whether the mapping matched and served the image.
+{command}`.kdfiles` with no argument shows the map and serving totals. Use these to check whether the mapping matched and served the image.
 
 ```
 kd:p1.1> .kdfiles

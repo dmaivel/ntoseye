@@ -52,7 +52,7 @@ Start `ntoseye` with the printed key:
 ntoseye --backend kdnet --kdnet-key 1.2.3.4
 ```
 
-KDNET listens on `0.0.0.0:50000` by default. Use `--connect <listen-address>:<port>` to select another listener. Memory comes from the VM process when it is local and matches the target (`--memory-source auto`); add `--memory-source kd` for a fully remote session, which is also the mode for ARM64 guests under UTM. See [memory sources](backends.md#kd-and-kdnet-memory-sources).
+KDNET listens on `0.0.0.0:50000` by default. Use `--connect <listen-address>:<port>` to select another listener. Memory comes from the VM process when it is local and matches the target (`--memory-source auto`); add `--memory-source kd` for a fully remote session, which is also the mode for ARM64 guests under UTM. See [memory sources](../using/memory.md#where-reads-come-from).
 
 ## Attach and reboot behavior
 
