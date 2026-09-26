@@ -33,7 +33,11 @@ impl Target {
                 address.0 >= m.base_address.0 && address.0 < m.base_address.0 + m.size as u64
             })
         {
-            let memory = self.context_memory();
+            let memory = if is_kernel {
+                self.kernel_address_space()
+            } else {
+                self.context_memory()
+            };
             let section = section_name_at(&memory, m.base_address, address);
             return Ok(AddressDescription {
                 address,

@@ -702,7 +702,7 @@ impl Target {
         index: usize,
         entry_size: usize,
     ) -> Result<VirtAddr> {
-        let memory = self.context_memory();
+        let memory = self.kernel_address_space();
         let leaf_entries = PAGE_SIZE / entry_size;
         match level {
             0 => Ok(table_base + (index * entry_size) as u64),
@@ -748,14 +748,15 @@ impl Target {
     ) -> HandleEntryDetail {
         let object = (|| -> Result<VirtAddr> {
             if entry_layout.fields.contains_key("ObjectPointerBits") {
-                let bits = self.extract_layout_bits(entry_layout, entry, "ObjectPointerBits")?;
+                let bits =
+                    self.extract_kernel_layout_bits(entry_layout, entry, "ObjectPointerBits")?;
                 let mut pointer = bits << 4;
                 if pointer & (1 << 47) != 0 {
                     pointer |= 0xffff_0000_0000_0000;
                 }
                 return Ok(VirtAddr(pointer));
             }
-            let raw = self.extract_layout_bits(entry_layout, entry, "Object")?;
+            let raw = self.extract_kernel_layout_bits(entry_layout, entry, "Object")?;
             Ok(VirtAddr(raw & !0xf))
         })();
 
@@ -765,7 +766,7 @@ impl Target {
                 entry_layout
                     .fields
                     .contains_key(name)
-                    .then(|| self.extract_layout_bits(entry_layout, entry, name))
+                    .then(|| self.extract_kernel_layout_bits(entry_layout, entry, name))
             })
             .unwrap_or_else(|| Err(Error::FieldNotFound("GrantedAccessBits".to_string())))
             .map(|value| value as u32);
@@ -775,7 +776,7 @@ impl Target {
                 entry_layout
                     .fields
                     .contains_key(name)
-                    .then(|| self.extract_layout_bits(entry_layout, entry, name))
+                    .then(|| self.extract_kernel_layout_bits(entry_layout, entry, name))
             })
             .unwrap_or_else(|| Err(Error::FieldNotFound("ObAttributes".to_string())))
             .map(|value| value as u32);
@@ -823,7 +824,7 @@ impl Target {
             ));
         }
         let table_layout = types.layout("_HANDLE_TABLE")?;
-        let table_code: u64 = self.read_layout_field(&table_layout, table, "TableCode")?;
+        let table_code: u64 = self.read_kernel_layout_field(&table_layout, table, "TableCode")?;
         let level = (table_code & 3) as u8;
         if level > 2 {
             return Err(Error::DebugInfo(format!(
@@ -831,7 +832,7 @@ impl Target {
             )));
         }
         let next_handle: u64 =
-            self.read_layout_field(&table_layout, table, "NextHandleNeedingPool")?;
+            self.read_kernel_layout_field(&table_layout, table, "NextHandleNeedingPool")?;
         let entry_layout = types.layout("_HANDLE_TABLE_ENTRY")?;
         Ok((
             process,
@@ -902,18 +903,19 @@ impl Target {
 
     /// Decode a `_FILE_OBJECT` strictly from the loaded kernel PDB layout.
     pub fn inspect_file_object(&self, address: VirtAddr) -> Result<FileObjectDetail> {
-        let types = self.guest()?.ntoskrnl.types_in(self.current_dtb());
+        let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_FILE_OBJECT")?;
-        let read_ptr =
-            |name| DiagnosticValue::from_result(self.read_layout_field(&layout, address, name));
+        let read_ptr = |name| {
+            DiagnosticValue::from_result(self.read_kernel_layout_field(&layout, address, name))
+        };
         let read_bool = |name| {
             DiagnosticValue::from_result(
-                self.read_layout_field::<u8>(&layout, address, name)
+                self.read_kernel_layout_field::<u8>(&layout, address, name)
                     .map(|value| value != 0),
             )
         };
         let device_object: Result<VirtAddr> =
-            self.read_layout_field(&layout, address, "DeviceObject");
+            self.read_kernel_layout_field(&layout, address, "DeviceObject");
         let device_type = match &device_object {
             Ok(device) if !device.is_zero() => DiagnosticValue::from_result(
                 self.inspect_device_object(*device)
@@ -934,9 +936,11 @@ impl Target {
         Ok(FileObjectDetail {
             address,
             file_type: DiagnosticValue::from_result(
-                self.read_layout_field(&layout, address, "Type"),
+                self.read_kernel_layout_field(&layout, address, "Type"),
             ),
-            size: DiagnosticValue::from_result(self.read_layout_field(&layout, address, "Size")),
+            size: DiagnosticValue::from_result(
+                self.read_kernel_layout_field(&layout, address, "Size"),
+            ),
             device_object: DiagnosticValue::from_result(device_object),
             device_type,
             device_name,
@@ -946,8 +950,10 @@ impl Target {
                     .unicode_string("FileName"),
             ),
             related_file_object: read_ptr("RelatedFileObject"),
-            flags: DiagnosticValue::from_result(self.read_layout_field(&layout, address, "Flags")),
-            current_byte_offset: DiagnosticValue::from_result(self.read_layout_field(
+            flags: DiagnosticValue::from_result(
+                self.read_kernel_layout_field(&layout, address, "Flags"),
+            ),
+            current_byte_offset: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
                 address,
                 "CurrentByteOffset",
@@ -956,7 +962,7 @@ impl Target {
             fs_context2: read_ptr("FsContext2"),
             section_object_pointer: read_ptr("SectionObjectPointer"),
             private_cache_map: read_ptr("PrivateCacheMap"),
-            final_status: DiagnosticValue::from_result(self.read_layout_field(
+            final_status: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
                 address,
                 "FinalStatus",
@@ -975,14 +981,16 @@ impl Target {
     /// Decode one executive resource at an explicit address.
     pub fn inspect_resource(&self, address: VirtAddr) -> Result<ResourceDetail> {
         const MAX_RESOURCE_OWNERS: usize = 64;
-        let types = self.guest()?.ntoskrnl.types_in(self.current_dtb());
+        let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_ERESOURCE")?;
         let owner_layout = types.layout("_OWNER_ENTRY")?;
         let owners = DiagnosticValue::from_result((|| -> Result<Vec<ResourceOwner>> {
             let mut owners = Vec::new();
             let owner_entry = address + layout.field_offset("OwnerEntry")?;
-            let thread: u64 = self.read_layout_field(&owner_layout, owner_entry, "OwnerThread")?;
-            let count: i32 = self.read_layout_field(&owner_layout, owner_entry, "OwnerCount")?;
+            let thread: u64 =
+                self.read_kernel_layout_field(&owner_layout, owner_entry, "OwnerThread")?;
+            let count: i32 =
+                self.read_kernel_layout_field(&owner_layout, owner_entry, "OwnerCount")?;
             if thread & !3 != 0 && count != 0 {
                 owners.push(ResourceOwner {
                     thread: VirtAddr(thread & !3),
@@ -990,11 +998,12 @@ impl Target {
                 });
             }
 
-            let table: VirtAddr = self.read_layout_field(&layout, address, "OwnerTable")?;
+            let table: VirtAddr = self.read_kernel_layout_field(&layout, address, "OwnerTable")?;
             if table.is_zero() {
                 return Ok(owners);
             }
-            let table_size: u32 = self.read_layout_field(&owner_layout, table, "TableSize")?;
+            let table_size: u32 =
+                self.read_kernel_layout_field(&owner_layout, table, "TableSize")?;
             if table_size as usize > MAX_RESOURCE_OWNERS {
                 return Err(Error::DebugInfo(format!(
                     "_OWNER_ENTRY.TableSize {table_size} exceeds bound {MAX_RESOURCE_OWNERS}"
@@ -1002,8 +1011,10 @@ impl Target {
             }
             for index in 1..table_size as usize {
                 let entry = table + (index * owner_layout.size) as u64;
-                let thread: u64 = self.read_layout_field(&owner_layout, entry, "OwnerThread")?;
-                let count: i32 = self.read_layout_field(&owner_layout, entry, "OwnerCount")?;
+                let thread: u64 =
+                    self.read_kernel_layout_field(&owner_layout, entry, "OwnerThread")?;
+                let count: i32 =
+                    self.read_kernel_layout_field(&owner_layout, entry, "OwnerCount")?;
                 if thread & !3 != 0 && count != 0 {
                     owners.push(ResourceOwner {
                         thread: VirtAddr(thread & !3),
@@ -1016,23 +1027,25 @@ impl Target {
 
         Ok(ResourceDetail {
             address,
-            active_count: DiagnosticValue::from_result(self.read_layout_field(
+            active_count: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
                 address,
                 "ActiveCount",
             )),
-            flags: DiagnosticValue::from_result(self.read_layout_field(&layout, address, "Flag")),
-            contention_count: DiagnosticValue::from_result(self.read_layout_field(
+            flags: DiagnosticValue::from_result(
+                self.read_kernel_layout_field(&layout, address, "Flag"),
+            ),
+            contention_count: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
                 address,
                 "ContentionCount",
             )),
-            shared_waiters: DiagnosticValue::from_result(self.read_layout_field(
+            shared_waiters: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
                 address,
                 "NumberOfSharedWaiters",
             )),
-            exclusive_waiters: DiagnosticValue::from_result(self.read_layout_field(
+            exclusive_waiters: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
                 address,
                 "NumberOfExclusiveWaiters",
@@ -1050,7 +1063,7 @@ impl Target {
         let head = guest.ntoskrnl.symbol("ExpSystemResourcesList")?.address();
         let layout = guest.ntoskrnl.types().layout("_ERESOURCE")?;
         let link_offset = layout.field_offset("SystemResourcesList")?;
-        let memory = self.context_memory();
+        let memory = self.kernel_address_space();
         let (links, termination) =
             bounded_list_walk(head, limit, |link| memory.read::<VirtAddr>(link));
         let resources = links

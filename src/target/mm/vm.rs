@@ -245,10 +245,10 @@ impl Target {
         DiagnosticValue::from_result((|| -> Result<u64> {
             let vm = eprocess + eprocess_layout.field_offset("Vm")?;
 
-            if let Ok(value) = self.read_layout_field(vm_layout, vm, field) {
+            if let Ok(value) = self.read_kernel_layout_field(vm_layout, vm, field) {
                 return Ok(value);
             }
-            if let Ok(value) = self.read_layout_field(eprocess_layout, eprocess, field) {
+            if let Ok(value) = self.read_kernel_layout_field(eprocess_layout, eprocess, field) {
                 return Ok(value);
             }
 
@@ -265,9 +265,11 @@ impl Target {
                 let Ok(layout) = types.layout(layout_name) else {
                     continue;
                 };
-                if let Ok(value) =
-                    self.read_layout_field(&layout, vm + u64::from(container_field.offset), field)
-                {
+                if let Ok(value) = self.read_kernel_layout_field(
+                    &layout,
+                    vm + u64::from(container_field.offset),
+                    field,
+                ) {
                     return Ok(value);
                 }
             }
@@ -279,7 +281,8 @@ impl Target {
                 _ => None,
             };
             if let Some(page_field) = page_field {
-                let pages: u64 = self.read_layout_field(eprocess_layout, eprocess, page_field)?;
+                let pages: u64 =
+                    self.read_kernel_layout_field(eprocess_layout, eprocess, page_field)?;
                 return pages.checked_mul(PAGE_SIZE as u64).ok_or_else(|| {
                     Error::DebugInfo(format!("_EPROCESS.{page_field} overflows a byte count"))
                 });
@@ -294,7 +297,7 @@ impl Target {
         address: Option<MetadataValue<VirtAddr>>,
     ) -> Option<Result<MetadataValue<u64>>> {
         address.map(|address| {
-            self.context_memory()
+            self.kernel_address_space()
                 .read::<u64>(address.value)
                 .map(|value| MetadataValue {
                     value,
@@ -337,7 +340,7 @@ impl Target {
                 let guest = self.guest()?;
                 let getter = guest.ntoskrnl.symbol(getter_name)?.address();
                 let system_partition = guest.ntoskrnl.symbol("MiSystemPartition")?.address();
-                read_counter_from_getter(&self.context_memory(), getter, system_partition)
+                read_counter_from_getter(&self.kernel_address_space(), getter, system_partition)
             })() {
                 Ok(value) => return DiagnosticMetric::available(value),
                 Err(error) => errors.push(error.to_string()),

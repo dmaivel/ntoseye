@@ -191,4 +191,35 @@ impl Target {
         let raw: u64 = self.context_memory().read(base + field.offset as u64)?;
         Ok(field.decode(raw))
     }
+
+    /// [`Self::read_layout_field`] of a kernel structure, read through the
+    /// kernel's root: every NT root maps kernel space alike, and one halted
+    /// outside NT (the Windows hypervisor, VTL1) maps none of it.
+    pub fn read_kernel_layout_field<T>(
+        &self,
+        layout: &TypeInfo,
+        base: VirtAddr,
+        name: &str,
+    ) -> Result<T>
+    where
+        T: Copy + zerocopy::FromZeros + zerocopy::FromBytes + zerocopy::IntoBytes,
+    {
+        self.kernel_address_space()
+            .read(base + layout.field_offset(name)?)
+    }
+
+    /// [`Self::extract_layout_bits`] of a kernel structure; see
+    /// [`Self::read_kernel_layout_field`].
+    pub fn extract_kernel_layout_bits(
+        &self,
+        layout: &TypeInfo,
+        base: VirtAddr,
+        name: &str,
+    ) -> Result<u64> {
+        let field = layout.field(name)?;
+        let raw: u64 = self
+            .kernel_address_space()
+            .read(base + field.offset as u64)?;
+        Ok(field.decode(raw))
+    }
 }
