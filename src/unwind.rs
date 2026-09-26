@@ -716,8 +716,7 @@ fn switch_seed_is_plausible(thread: &ThreadInfo, seed: &RegisterContext) -> bool
     else {
         return false;
     };
-    thread.kernel_stack_resident != Some(false)
-        && looks_like_kernel_pointer(seed.rip)
+    looks_like_kernel_pointer(seed.rip)
         && kernel_stack >= stack_limit
         && kernel_stack < stack_base
         && seed.rsp >= stack_limit.0
@@ -745,19 +744,18 @@ pub fn build_parked_thread_recovered_stack(
     })?;
     let trace = resolve_thread_trace_context(debugger, process_dtb);
     // The trap frame and the context-switch frame both live on the kernel
-    // stack: a terminated thread has freed it, and a long wait gets it
-    // swapped out. Either way there is nothing to walk.
+    // stack, which a terminated thread has freed. One a long wait swapped out
+    // (`KernelStackResident` clear) usually still sits in RAM on the standby
+    // list, readable through its transition PTEs, so it is walked anyway.
     if thread.state == Some(KTHREAD_STATE_TERMINATED) {
         return Err(Error::DebugInfo(
             "parked thread stack unavailable: the thread has terminated".into(),
         ));
     }
-    if thread.kernel_stack_resident == Some(false) {
-        return Err(Error::DebugInfo(
-            "parked thread stack unavailable: kernel stack is not resident (swapped out)".into(),
-        ));
-    }
     let mut failures = Vec::new();
+    if thread.kernel_stack_resident == Some(false) {
+        failures.push("kernel stack is swapped out".to_string());
+    }
 
     if let Some(kernel_stack) = thread.kernel_stack {
         let pdb_seed = decode_kswitch_frame_seed(debugger, process_dtb, kernel_stack)

@@ -1412,7 +1412,7 @@ impl Target {
             wait_irql: read_kthread_u8("WaitIrql"),
             // A one-bit field inside `MiscFlags`: the whole byte is never zero.
             kernel_stack_resident: self
-                .extract_layout_bits(&kthread_layout, kthread, "KernelStackResident")
+                .extract_kernel_layout_bits(&kthread_layout, kthread, "KernelStackResident")
                 .ok()
                 .map(|value| value != 0),
             start_address: read_ethread_ptr("StartAddress"),
