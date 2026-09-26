@@ -4,6 +4,8 @@
 {
   "name": "ntoseye-docs",
   "compatibility_date": "2026-09-26",
+  // Served only at ntoseye.com: no second copy at ntoseye-docs.<account>.workers.dev.
+  "workers_dev": false,
   "assets": {
     "directory": "./_build/html",
     // Missing pages get the site's 404.html (see notfound_* in conf.py).
