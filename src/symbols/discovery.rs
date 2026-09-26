@@ -18,6 +18,7 @@ use crate::{
 use dashmap::mapref::entry::Entry;
 use indicatif::ProgressBar;
 use memmap2::Mmap;
+use pdb2::{FallibleIterator, TypeData};
 use pelite::{
     PeFile, PeView, Wrap,
     image::{
@@ -51,6 +52,25 @@ const MAX_DEBUG_DIRECTORY_BYTES: usize = 0x1000;
 /// Largest CodeView record read from a guest image (a GUID, an age, and a
 /// PDB path).
 const MAX_CODEVIEW_BYTES: usize = 0x1000;
+
+/// The pointer width a PDB's own pointer records state, for one whose DBI
+/// header names no machine: the x86 ntdll WOW64 runs on ARM64 Windows is
+/// such a build, and taken as 64-bit its nested 32-bit layouts come out
+/// wrong. 8 when no record says.
+fn pointer_size_from_types(pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>) -> u8 {
+    let Ok(types) = pdb.type_information() else {
+        return 8;
+    };
+    let mut iter = types.iter();
+    while let Ok(Some(item)) = iter.next() {
+        if let Ok(TypeData::Pointer(pointer)) = item.parse()
+            && matches!(pointer.attributes.size(), 4 | 8)
+        {
+            return pointer.attributes.size();
+        }
+    }
+    8
+}
 
 impl SymbolStore {
     fn read_debug_directory_location<B: MemoryOps<PhysAddr>>(
@@ -489,6 +509,7 @@ impl SymbolStore {
         expected.matches(actual).map_err(Error::DebugInfo)?;
         let pointer_size = match pdb.debug_information().and_then(|dbi| dbi.machine_type()) {
             Ok(pdb2::MachineType::X86 | pdb2::MachineType::Arm | pdb2::MachineType::ArmNT) => 4,
+            Ok(pdb2::MachineType::Unknown) | Err(_) => pointer_size_from_types(&mut pdb),
             _ => 8,
         };
 
