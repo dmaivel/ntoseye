@@ -122,11 +122,8 @@ impl Session {
     {
         let guard = target.map(acquire_instance_guard).transpose()?;
         let backend = make_backend()?;
-        let mut session = Self::new(phys, backend)?;
+        let mut session = Self::new_with_target(Target::with_phys(phys)?, backend, target)?;
         session._instance_guard = guard;
-        if let Some(target) = target {
-            session.open_site_journal(target);
-        }
         Ok(session)
     }
 
@@ -214,15 +211,16 @@ impl Session {
                 )
             }
         };
-        let mut session = Self::new_with_target(target, backend)?;
+        let mut session = Self::new_with_target(target, backend, Some(resource))?;
         session._instance_guard = guard;
-        session.open_site_journal(resource);
         Ok(session)
     }
 
     /// Take over the breakpoint-site journal of `resource`, whose instance
     /// lock this session holds, and put back every breakpoint instruction a
-    /// previous session left patched into guest memory in this boot.
+    /// previous session left patched into guest memory in this boot: through
+    /// this endpoint, or through another whose session is gone (its instance
+    /// lock is free, and held here while its journal is repaired).
     fn open_site_journal(&mut self, resource: &str) {
         let Some(kernel_base) = self.target.kernel_base() else {
             return;
@@ -233,9 +231,29 @@ impl Session {
         else {
             return;
         };
-        let journal = SiteJournal::open(&dir, &instance_key(resource), kernel_base.0);
+        let key = instance_key(resource);
+        let journal = SiteJournal::open(&dir, &key, kernel_base.0);
         let opcode = breakpoint_opcode(self.target.arch());
-        let repair = journal.repair(self.target.phys.as_ref(), opcode);
+        let mut repair = journal.repair(self.target.phys.as_ref(), opcode);
+        let orphaned = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| *name != key && !name.ends_with(".tmp"));
+        for other in orphaned {
+            let Some(_lock) = instance_lock(&other).ok().filter(SingleInstance::is_single) else {
+                continue;
+            };
+            let found = SiteJournal::repair_orphaned(
+                &dir,
+                &other,
+                kernel_base.0,
+                self.target.phys.as_ref(),
+                opcode,
+            );
+            repair.restored += found.restored;
+            repair.failed += found.failed;
+        }
         if repair.restored != 0 {
             self.notices.push(format!(
                 "restored {} breakpoint instruction(s) a previous session left in guest memory",
@@ -256,10 +274,16 @@ impl Session {
     /// source. Hosts normally use [`Self::connect`] or [`Self::connect_kd`].
     pub fn new(phys: Arc<PhysMem>, backend: Box<dyn DebugBackend>) -> Result<Self> {
         let target = Target::with_phys(phys)?;
-        Self::new_with_target(target, backend)
+        Self::new_with_target(target, backend, None)
     }
 
-    fn new_with_target(mut target: Target, mut backend: Box<dyn DebugBackend>) -> Result<Self> {
+    /// `journal` is the endpoint whose breakpoint-site journal the session
+    /// takes over, when it holds that endpoint's instance lock.
+    fn new_with_target(
+        mut target: Target,
+        mut backend: Box<dyn DebugBackend>,
+        journal: Option<&str>,
+    ) -> Result<Self> {
         let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
         target.refresh_debugger_data(debugger_data_hint);
         backend.initialize_from_target(&target);
@@ -319,6 +343,11 @@ impl Session {
             session.refresh_context_for_current_thread();
         }
 
+        // Repair what a dead session left before planting anything: a trap
+        // armed over a leftover breakpoint would save it as the code.
+        if let Some(resource) = journal {
+            session.open_site_journal(resource);
+        }
         // Arm here rather than at the first resume, so the operator reads
         // about it in the attach output alongside the capability warning that
         // explains why it is needed, instead of beside an unrelated stop.
@@ -392,18 +421,22 @@ pub(super) struct InstanceGuard(#[allow(dead_code)] SingleInstance);
 /// a backend so a second instance fails fast rather than racing on the transport
 /// handshake.
 fn acquire_instance_guard(target: &str) -> Result<InstanceGuard> {
-    let canonical = canonicalize_target(target);
-    let key = instance_key(target);
-    // macOS backs the lock with a flock file at this path; keep it out of cwd.
-    #[cfg(target_os = "macos")]
-    let key = std::env::temp_dir().join(&key).display().to_string();
-    let instance = SingleInstance::new(&key).map_err(|err| {
-        Error::DebugInfo(format!("failed to create single-instance guard: {err:?}"))
-    })?;
+    let instance = instance_lock(&instance_key(target))?;
     if !instance.is_single() {
-        return Err(Error::AlreadyRunning(canonical));
+        return Err(Error::AlreadyRunning(canonicalize_target(target)));
     }
     Ok(InstanceGuard(instance))
+}
+
+/// The single-instance lock named `key`; held when [`SingleInstance::is_single`].
+fn instance_lock(key: &str) -> Result<SingleInstance> {
+    // macOS backs the lock with a flock file at this path; keep it out of cwd.
+    #[cfg(target_os = "macos")]
+    let key = std::env::temp_dir().join(key).display().to_string();
+    #[cfg(target_os = "macos")]
+    let key = key.as_str();
+    SingleInstance::new(key)
+        .map_err(|err| Error::DebugInfo(format!("failed to create single-instance guard: {err:?}")))
 }
 
 /// The name a target is known by across sessions: its instance lock, and

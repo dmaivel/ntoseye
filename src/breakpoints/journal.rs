@@ -1,11 +1,13 @@
-//! A record of the breakpoint instructions this debugger wrote into guest
-//! memory itself (host-patched user-space sites), kept on disk so a session
-//! that dies without restoring them, killed or crashed, is repaired by the
-//! next attach to the same target instead of leaving a trap in code every
-//! process shares.
+//! A record of the breakpoint instructions in guest memory that nothing else
+//! would take out if this session died: sites this debugger patched itself
+//! (user space), and sites planted through a backend whose target does not
+//! reclaim them (a GDB stub; see
+//! [`DebugBackend::reclaims_abandoned_breakpoints`]). Kept on disk, one file
+//! per target endpoint, so a session that dies without restoring them, killed
+//! or crashed, is repaired by the next attach to the same boot, through that
+//! endpoint or another, instead of leaving a trap in code the guest runs.
 //!
-//! Target-owned sites need none of this: the target keeps its own table and
-//! a later session reclaims it.
+//! [`DebugBackend::reclaims_abandoned_breakpoints`]: crate::dbg_backend::DebugBackend::reclaims_abandoned_breakpoints
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -122,49 +124,111 @@ impl SiteJournal {
             .map(|(address, site)| (*address, site.clone()))
             .collect();
         for (address, site) in sites {
-            let mut current = vec![0u8; site.original.len()];
-            let still_patched = site.original.len() >= opcode.len()
-                && memory.read_bytes(address, &mut current).is_ok()
-                && current[..opcode.len()] == *opcode
-                && current[opcode.len()..] == site.original[opcode.len()..];
-            if !still_patched {
-                state.sites.remove(&address);
-                continue;
-            }
-            match memory.write_bytes(address, &site.original[..opcode.len()]) {
-                Ok(()) => {
+            match restore(memory, opcode, address, &site) {
+                Restore::Restored => {
                     state.sites.remove(&address);
                     repair.restored += 1;
                 }
-                Err(_) => repair.failed += 1,
+                Restore::NotPatched => {
+                    state.sites.remove(&address);
+                }
+                Restore::Failed => repair.failed += 1,
             }
         }
         self.persist(&state);
         repair
     }
 
-    /// Mirror the state to disk, replacing the file in one rename so a crash
-    /// mid-write leaves the previous record rather than a torn one. An empty
-    /// journal removes the file. Persistence is best effort: a journal that
-    /// cannot be written costs the repair after a crash, not the breakpoint.
-    fn persist(&self, state: &State) {
-        if state.sites.is_empty() {
-            let _ = fs::remove_file(&self.path);
-            return;
+    /// Put back the sites a dead session left in this boot through another
+    /// endpoint, `key` (a KD attach after a GDB session died). The caller
+    /// holds that endpoint's instance lock, so no session owns the file. Only
+    /// sites still patched here are touched: the file may also hold another
+    /// boot's, or another VM's, which stay as they are.
+    pub fn repair_orphaned(
+        dir: &Path,
+        key: &str,
+        kernel_base: u64,
+        memory: &impl MemoryOps<PhysAddr>,
+        opcode: &[u8],
+    ) -> Repair {
+        let path = dir.join(key);
+        let Ok(text) = fs::read_to_string(&path) else {
+            return Repair::default();
+        };
+        let mut repair = Repair::default();
+        let mut kept = String::new();
+        for line in text.lines() {
+            let Some((base, address, site)) = parse_line(line) else {
+                continue;
+            };
+            if base == kernel_base && restore(memory, opcode, address, &site) == Restore::Restored {
+                repair.restored += 1;
+                continue;
+            }
+            kept.push_str(line);
+            kept.push('\n');
         }
+        if repair.restored != 0 {
+            write_atomically(&path, &kept);
+        }
+        repair
+    }
+
+    /// Mirror the state to disk. An empty journal removes the file.
+    /// Persistence is best effort: a journal that cannot be written costs the
+    /// repair after a crash, not the breakpoint.
+    fn persist(&self, state: &State) {
         let mut text = String::new();
         for (address, site) in &state.sites {
             let bytes: String = site.original.iter().map(|b| format!("{b:02x}")).collect();
             text.push_str(&format!("{:x} {address:x} {bytes}\n", state.kernel_base));
         }
-        let staging = self.path.with_extension("tmp");
-        let written = fs::File::create(&staging).and_then(|mut file| {
-            file.write_all(text.as_bytes())
-                .and_then(|()| file.sync_all())
-        });
-        if written.is_ok() {
-            let _ = fs::rename(&staging, &self.path);
-        }
+        write_atomically(&self.path, &text);
+    }
+}
+
+/// What restoring one journaled site found.
+#[derive(Debug, PartialEq, Eq)]
+enum Restore {
+    Restored,
+    /// Its frame no longer holds the breakpoint and the recorded bytes after
+    /// it: the guest restored it or reused the frame.
+    NotPatched,
+    /// Still patched, but the write failed.
+    Failed,
+}
+
+/// Write `site`'s displaced instruction back at `address` if the frame still
+/// holds `opcode` followed by exactly the bytes recorded after it.
+fn restore(memory: &impl MemoryOps<PhysAddr>, opcode: &[u8], address: u64, site: &Site) -> Restore {
+    let mut current = vec![0u8; site.original.len()];
+    let still_patched = site.original.len() >= opcode.len()
+        && memory.read_bytes(address, &mut current).is_ok()
+        && current[..opcode.len()] == *opcode
+        && current[opcode.len()..] == site.original[opcode.len()..];
+    if !still_patched {
+        return Restore::NotPatched;
+    }
+    match memory.write_bytes(address, &site.original[..opcode.len()]) {
+        Ok(()) => Restore::Restored,
+        Err(_) => Restore::Failed,
+    }
+}
+
+/// Replace `path` with `text` in one rename, so a crash mid-write leaves the
+/// previous record rather than a torn one; empty `text` removes the file.
+fn write_atomically(path: &Path, text: &str) {
+    if text.is_empty() {
+        let _ = fs::remove_file(path);
+        return;
+    }
+    let staging = path.with_extension("tmp");
+    let written = fs::File::create(&staging).and_then(|mut file| {
+        file.write_all(text.as_bytes())
+            .and_then(|()| file.sync_all())
+    });
+    if written.is_ok() {
+        let _ = fs::rename(&staging, path);
     }
 }
 
@@ -179,18 +243,23 @@ pub fn site_window(address: PhysAddr, bytes: &[u8]) -> &[u8] {
 /// the sites of the boot at `kernel_base`.
 fn parse(text: &str, kernel_base: u64) -> BTreeMap<u64, Site> {
     text.lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let base = u64::from_str_radix(fields.next()?, 16).ok()?;
-            let address = u64::from_str_radix(fields.next()?, 16).ok()?;
-            let hex = fields.next()?;
-            let original = (0..hex.len())
-                .step_by(2)
-                .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
-                .collect::<Option<Vec<u8>>>()?;
-            (base == kernel_base && !original.is_empty()).then_some((address, Site { original }))
-        })
+        .filter_map(parse_line)
+        .filter(|(base, _, _)| *base == kernel_base)
+        .map(|(_, address, site)| (address, site))
         .collect()
+}
+
+/// One `<kernel base> <physical address> <original bytes>` line.
+fn parse_line(line: &str) -> Option<(u64, u64, Site)> {
+    let mut fields = line.split_whitespace();
+    let base = u64::from_str_radix(fields.next()?, 16).ok()?;
+    let address = u64::from_str_radix(fields.next()?, 16).ok()?;
+    let hex = fields.next()?;
+    let original = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    (!original.is_empty()).then_some((base, address, Site { original }))
 }
 
 #[cfg(test)]
@@ -376,6 +445,42 @@ mod tests {
         assert_eq!(journal.repair(&frames, INT3).restored, 1);
         assert_eq!(frames.get(0x1000, 8), patched());
         assert_eq!(frames.get(0x2000, 8), NTCLOSE);
+    }
+
+    /// Another endpoint's journal, left by a dead session (a GDB session, now
+    /// a KD attach to the same VM): only sites of this boot that are still
+    /// patched are written back; everything else in the file stays.
+    #[test]
+    fn an_orphaned_journal_is_repaired_only_where_this_boot_still_holds_its_sites() {
+        let dir = Dir::new("orphaned");
+        let bytes: String = NTCLOSE.iter().map(|b| format!("{b:02x}")).collect();
+        let other_boot = BASE + 0x200000;
+        fs::write(
+            dir.0.join("other"),
+            format!("{BASE:x} 1000 {bytes}\n{BASE:x} 2000 {bytes}\n{other_boot:x} 3000 {bytes}\n"),
+        )
+        .unwrap();
+        // 0x1000 is still patched; 0x2000 was put back since; 0x3000 holds a
+        // breakpoint, but its entry is from another boot (or VM).
+        let frames = Frames::with(0x1000, &patched());
+        frames.put(0x2000, &NTCLOSE);
+        frames.put(0x3000, &patched());
+
+        let repair = SiteJournal::repair_orphaned(&dir.0, "other", BASE, &frames, INT3);
+
+        assert_eq!(
+            repair,
+            Repair {
+                restored: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(frames.get(0x1000, 8), NTCLOSE);
+        assert_eq!(frames.get(0x3000, 8), patched());
+        assert_eq!(
+            fs::read_to_string(dir.0.join("other")).unwrap(),
+            format!("{BASE:x} 2000 {bytes}\n{other_boot:x} 3000 {bytes}\n")
+        );
     }
 
     #[test]

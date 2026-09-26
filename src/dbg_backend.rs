@@ -570,6 +570,15 @@ pub trait DebugBackend {
     fn set_breakpoint(&mut self, addr: u64) -> Result<()>;
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()>;
 
+    /// Whether a breakpoint planted with [`Self::set_breakpoint`] is taken
+    /// out by the target when the session that planted it dies without
+    /// removing it. KD's live in Windows' own breakpoint table, which the next
+    /// session releases. A backend that answers `false` has its sites
+    /// journaled, so the next attach to the same boot restores them.
+    fn reclaims_abandoned_breakpoints(&self) -> bool {
+        true
+    }
+
     fn supports_user_mode_breakpoints(&self) -> bool {
         false
     }

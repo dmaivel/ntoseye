@@ -1186,6 +1186,15 @@ impl DebugBackend for GdbClient {
         GdbClient::remove_breakpoint(self, addr)
     }
 
+    /// A dead session's `int3` in kernel code survives the next client's
+    /// connect under VBS, although QEMU drops its breakpoints then: it most
+    /// likely writes the original back through the halted vCPU's page tables,
+    /// the Windows hypervisor's, which do not map NT (as `Z0` does; see
+    /// [`GdbClient::software_breakpoint_packet`]).
+    fn reclaims_abandoned_breakpoints(&self) -> bool {
+        false
+    }
+
     /// A stub programs these with the processor's debug registers, so they
     /// trap on every processor and leave guest memory untouched.
     fn supports_watchpoints(&self) -> bool {

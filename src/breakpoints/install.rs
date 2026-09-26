@@ -130,6 +130,46 @@ pub fn forget_site(debugger: &Target, memory: &AddressSpace<'_, PhysMem>, addres
     }
 }
 
+/// Plant a breakpoint through the backend at kernel `address`, whose
+/// displaced instruction is `original` (`None` when its page is not resident
+/// and the target writes the site later). A backend that does not reclaim
+/// what a dead session abandons has the site journaled first, and forgotten
+/// again if the backend refuses it.
+pub fn plant_target_site(
+    client: &mut dyn DebugBackend,
+    debugger: &Target,
+    address: VirtAddr,
+    original: Option<&[u8]>,
+) -> Result<()> {
+    let journaled = !client.reclaims_abandoned_breakpoints();
+    let memory = debugger.address_space(debugger.kernel_dtb());
+    if journaled && let Some(original) = original {
+        journal_site(debugger, &memory, address, original);
+    }
+    let planted = client.set_breakpoint(address.0);
+    if planted.is_err() && journaled {
+        forget_site(debugger, &memory, address);
+    }
+    planted
+}
+
+/// Take out a breakpoint [`plant_target_site`] planted, and its journal entry.
+pub fn lift_target_site(
+    client: &mut dyn DebugBackend,
+    debugger: &Target,
+    address: VirtAddr,
+) -> Result<()> {
+    client.remove_breakpoint(address.0)?;
+    if !client.reclaims_abandoned_breakpoints() {
+        forget_site(
+            debugger,
+            &debugger.address_space(debugger.kernel_dtb()),
+            address,
+        );
+    }
+    Ok(())
+}
+
 impl BreakpointBackend {
     /// The instruction bytes we displaced with the breakpoint, so display
     /// paths can overlay them and never show our own patch (1 byte for an
@@ -229,7 +269,12 @@ impl BreakpointManager {
                 Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => None,
                 Err(error) => return Err(error),
             };
-            client.set_breakpoint(address.0)?;
+            plant_target_site(
+                client,
+                debugger,
+                address,
+                original.as_ref().map(BreakpointPatch::as_slice),
+            )?;
             return Ok(BreakpointBackend::Kernel { original });
         }
         let dtb = match scope {
@@ -265,7 +310,12 @@ impl BreakpointManager {
     ) -> Result<()> {
         match (&bp.scope, &bp.backend) {
             // The target owns the byte whatever the scope filters hits on.
-            (_, BreakpointBackend::Kernel { .. }) => client.set_breakpoint(bp.address.0),
+            (_, BreakpointBackend::Kernel { original }) => plant_target_site(
+                client,
+                debugger,
+                bp.address,
+                original.as_ref().map(BreakpointPatch::as_slice),
+            ),
             (
                 BreakpointScope::Process { dtb, .. },
                 BreakpointBackend::GuestMemoryPatch { original },
@@ -296,7 +346,7 @@ impl BreakpointManager {
         bp: &Breakpoint,
     ) -> Result<()> {
         match (&bp.scope, &bp.backend) {
-            (_, BreakpointBackend::Kernel { .. }) => client.remove_breakpoint(bp.address.0),
+            (_, BreakpointBackend::Kernel { .. }) => lift_target_site(client, debugger, bp.address),
             (
                 BreakpointScope::Process { dtb, .. },
                 BreakpointBackend::GuestMemoryPatch { original },
@@ -534,10 +584,50 @@ impl BreakpointManager {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use crate::breakpoints::test_backend::SlotRecorder;
-    use crate::breakpoints::{BreakpointConfig, BreakpointManager, BreakpointScope};
+    use crate::breakpoints::{BreakpointConfig, BreakpointManager, BreakpointScope, SiteJournal};
     use crate::session::session_over_memory;
     use crate::types::{Arch, VirtAddr};
+
+    /// A backend whose target does not take out what a dead session planted
+    /// (a GDB stub) has each kernel site journaled from before it is planted
+    /// until it is lifted, so the next attach can restore it; one whose
+    /// target does (KD) leaves the journal alone.
+    #[test]
+    fn kernel_sites_a_backend_does_not_reclaim_are_journaled_until_lifted() {
+        let address = VirtAddr(0xfffff80000001000);
+        let dir = std::env::temp_dir().join(format!("ntoseye-plant-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for (mut client, journaled) in [
+            (SlotRecorder::unreclaimed(), true),
+            (SlotRecorder::accepting(), false),
+        ] {
+            let mut session = session_over_memory(address.0, &[0x48, 0x89, 0x4c, 0x24, 8, 0, 0, 0]);
+            session.target.site_journal = Some(SiteJournal::open(&dir, "target", 0xfffff800));
+            let mut manager = BreakpointManager::new();
+
+            let id = manager
+                .add_configured(
+                    &mut client,
+                    &session.target,
+                    address,
+                    None,
+                    BreakpointConfig::default(),
+                )
+                .unwrap();
+            assert_eq!(client.installed, vec![address.0]);
+            assert_eq!(dir.join("target").exists(), journaled);
+
+            manager.remove(&mut client, &session.target, id).unwrap();
+            assert!(
+                !dir.join("target").exists(),
+                "a lifted site stays journaled"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_unreadable_kernel_site_installs_and_reports_the_owed_write() {

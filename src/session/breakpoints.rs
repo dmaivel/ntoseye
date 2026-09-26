@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
-use crate::breakpoints::{Breakpoint, BreakpointConfig, BreakpointScope, ThreadScope};
+use crate::breakpoints::{
+    Breakpoint, BreakpointConfig, BreakpointScope, ThreadScope, lift_target_site, plant_target_site,
+};
 use crate::dbg_backend::{BugcheckInfo, DebugCapability, WatchpointAccess};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -157,7 +159,12 @@ impl Session {
             original.clear();
         }
 
-        match self.backend.set_breakpoint(address.0) {
+        match plant_target_site(
+            self.backend.as_mut(),
+            &self.target,
+            address,
+            (!original.is_empty()).then_some(original.as_slice()),
+        ) {
             Ok(()) => {
                 self.bugcheck_trap = Some(address);
                 self.bugcheck_trap_original = original;
@@ -313,15 +320,15 @@ impl Session {
 
     /// Take the automatic bugcheck trap back out of the guest.
     ///
-    /// Nothing else does: it is not one of the manager's breakpoints, and a
-    /// GDB stub leaves the `int3` it wrote in guest memory when the
-    /// connection closes. Left behind, it is executed by the next thread to
-    /// reach `nt!KeBugCheckEx` with no debugger attached.
+    /// Nothing else does while the session lives: it is not one of the
+    /// manager's breakpoints. Left behind, it is executed by the next thread
+    /// to reach `nt!KeBugCheckEx` with no debugger attached; if the session
+    /// dies first, the site journal covers it.
     pub fn disarm_bugcheck_trap(&mut self) -> Result<()> {
         let Some(address) = self.bugcheck_trap else {
             return Ok(());
         };
-        self.backend.remove_breakpoint(address.0)?;
+        lift_target_site(self.backend.as_mut(), &self.target, address)?;
         self.bugcheck_trap = None;
         self.bugcheck_trap_original.clear();
         Ok(())

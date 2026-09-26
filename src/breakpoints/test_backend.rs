@@ -15,6 +15,8 @@ pub(super) struct SlotRecorder {
     /// discarded `INIT` section.
     refused: Option<u64>,
     pub(super) installed: Vec<u64>,
+    /// See [`DebugBackend::reclaims_abandoned_breakpoints`].
+    reclaims: bool,
 }
 
 impl SlotRecorder {
@@ -24,11 +26,21 @@ impl SlotRecorder {
             cleared: Vec::new(),
             refused: None,
             installed: Vec::new(),
+            reclaims: true,
         }
     }
 
     pub(super) fn accepting() -> Self {
         Self::refusing(u64::MAX)
+    }
+
+    /// Accepts every breakpoint, like a GDB stub, whose target does not
+    /// take out what a dead session planted.
+    pub(super) fn unreclaimed() -> Self {
+        Self {
+            reclaims: false,
+            ..Self::accepting()
+        }
     }
 
     pub(super) fn refusing(address: u64) -> Self {
@@ -65,8 +77,15 @@ impl DebugBackend for SlotRecorder {
         self.installed.push(addr);
         Ok(())
     }
-    fn remove_breakpoint(&mut self, _addr: u64) -> Result<()> {
-        Err(Error::NotSupported)
+    fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
+        if self.refused.is_none() {
+            return Err(Error::NotSupported);
+        }
+        self.installed.retain(|installed| *installed != addr);
+        Ok(())
+    }
+    fn reclaims_abandoned_breakpoints(&self) -> bool {
+        self.reclaims
     }
     fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
         self.cleared.push(slot);
