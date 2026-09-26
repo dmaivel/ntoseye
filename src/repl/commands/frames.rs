@@ -10,7 +10,7 @@ use crate::session::ExceptionRecord;
 use crate::target::{HYPERVISOR_CONTEXT, SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::triage_report::exception_code_name;
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_context,
     build_stacktrace_with_register_values, describe_saved_vtl, resolve_thread_trace_context,
@@ -590,6 +590,13 @@ impl ReplState<'_> {
         };
 
         outln!();
+        // The ARM64 maps answer `cr3` with TTBR1_EL1, the kernel's root.
+        if self.ctx.target.arch() == Arch::Arm64 {
+            outln!("  ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
+            outln!("  esr   {}   far   {}", read_cr("esr"), read_cr("far"));
+            outln!();
+            return Ok(());
+        }
         outln!(
             "  cr0 {}   cr2 {}   cr3 {}",
             read_cr("cr0"),
