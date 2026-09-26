@@ -159,6 +159,7 @@ repl_command! {
     names: ["u", "disasm"],
     usage: "u <address> [L<count>|length|end]",
     summary: "Disassemble memory at a symbol or address.",
+    details: "`L<count>` counts instructions (default 8); an end address bounds the range in bytes.",
     completion: Expression,
 }
 

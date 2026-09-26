@@ -99,6 +99,7 @@ repl_command! {
     names: ["~", "vcpus"],
     usage: "~",
     summary: "List vCPU contexts and their RIP values.",
+    details: "A vCPU halted in the Windows hypervisor (VBS) also shows where its VTL0 left off, from the hypervisor's saved state; `.vtlcxr` selects that context.",
     run_state: Halted,
 }
 

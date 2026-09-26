@@ -45,7 +45,7 @@ repl_command! {
     names: [".kdfiles"],
     usage: ".kdfiles [<map-file>] [-m <target> <host>] [-d <target>] [-c]",
     summary: "Serve driver images from host files using a driver replacement map.",
-    details: "With no arguments, show mappings and serving statistics. A path loads a WinDbg map file containing three-line records of `map`, target name, and host path. -m adds a mapping, -d removes one, -c clears the map. Target names match case-insensitively on path suffix boundaries; a bare filename matches any directory. Changes take effect on the next driver load.",
+    details: "With no arguments, show mappings and serving statistics. A path loads a WinDbg map file containing three-line records of `map`, target name, and host path. -m adds a mapping, -d removes one, -c clears the map. Target names match case-insensitively on path suffix boundaries; a bare filename matches any directory. Changes take effect on the next driver load. A rebuilt driver thus loads without being copied into the guest. See the driver replacement map guide.",
     completion: None,
 }
 

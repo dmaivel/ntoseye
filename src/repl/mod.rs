@@ -95,6 +95,7 @@ pub use crate::repl_command;
 pub use aliases::*;
 pub use bugcheck::*;
 pub use command::*;
+pub use commands::{command_reference_json, json_string};
 pub use completion::*;
 pub use disasm::*;
 pub use heap::*;

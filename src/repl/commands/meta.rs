@@ -435,7 +435,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("gh", "execution and stack"),
     ("gn", "execution and stack"),
     ("gu", "execution and stack"),
-    ("k", "execution and stack"),
+    ("kn", "execution and stack"),
     ("pa", "execution and stack"),
     ("p", "execution and stack"),
     ("pc", "execution and stack"),
@@ -538,13 +538,106 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("?", "symbols, types, and expressions"),
     ("dt", "symbols, types, and expressions"),
     ("dv", "symbols, types, and expressions"),
-    ("ev", "symbols, types, and expressions"),
     ("ln", "symbols, types, and expressions"),
     ("set", "symbols, types, and expressions"),
     ("unset", "symbols, types, and expressions"),
     ("vars", "symbols, types, and expressions"),
     ("x", "symbols, types, and expressions"),
+    (".frame", "execution and stack"),
+    (".cxr", "execution and stack"),
+    (".ecxr", "execution and stack"),
+    (".exr", "execution and stack"),
+    (".trap", "execution and stack"),
+    (".vtlcxr", "execution and stack"),
+    (".thread", "execution and stack"),
+    (".process", "processes and modules"),
+    (".context", "processes and modules"),
+    (".readmem", "memory and disassembly"),
+    (".writemem", "memory and disassembly"),
+    (".pagein", "memory and disassembly"),
+    ("!address", "memory and disassembly"),
+    (".reload", "symbols, types, and expressions"),
+    (".sympath", "symbols, types, and expressions"),
+    (".sympath+", "symbols, types, and expressions"),
+    (".symfix", "symbols, types, and expressions"),
+    (".srcpath", "symbols, types, and expressions"),
+    (".srcpath+", "symbols, types, and expressions"),
+    (".fetchimage", "symbols, types, and expressions"),
+    ("ls", "symbols, types, and expressions"),
+    ("lsa", "symbols, types, and expressions"),
+    (".formats", "symbols, types, and expressions"),
+    ("n", "symbols, types, and expressions"),
+    ("irps", "objects and I/O"),
+    (".crash", "target control"),
+    (".reboot", "target control"),
+    (".dump", "target control"),
+    (".kdfiles", "target control"),
+    (".lastevent", "target control"),
+    (".time", "target control"),
+    ("vertarget", "target control"),
+    ("status", "target control"),
+    ("capabilities", "target control"),
+    ("!dbgprint", "target control"),
+    (".cls", "session"),
+    (".echo", "session"),
+    (".printf", "session"),
+    (".hh", "session"),
+    (".logopen", "session"),
+    (".logappend", "session"),
+    (".logclose", "session"),
+    ("ad", "session"),
+    ("al", "session"),
+    ("as", "session"),
+    ("reload-scripts", "session"),
+    ("q", "session"),
 ];
+
+/// Every built-in command's help as JSON, for the documentation site's
+/// generated reference: `[{"category", "names", "usage", "summary",
+/// "details"}]` (`details` may be null), grouped as `.hh` groups them and
+/// sorted by category, then canonical name.
+pub fn command_reference_json() -> String {
+    let mut specs: Vec<&CommandSpec> = COMMANDS.iter().collect();
+    specs.sort_by_key(|spec| (command_category(spec.names[0]), spec.names[0]));
+    let entries: Vec<String> = specs
+        .into_iter()
+        .map(|spec| {
+            let names: Vec<String> = spec.names.iter().map(|name| json_string(name)).collect();
+            format!(
+                "{{\"category\":{},\"names\":[{}],\"usage\":{},\"summary\":{},\"details\":{}}}",
+                json_string(command_category(spec.names[0])),
+                names.join(","),
+                json_string(spec.usage),
+                json_string(spec.summary),
+                spec.details.map_or_else(|| "null".to_string(), json_string)
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(",\n"))
+}
+
+/// `value` as a JSON string literal, quotes included.
+pub fn json_string(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
 
 fn command_category(name: &str) -> &'static str {
     if let Some((_, category)) = COMMAND_CATEGORIES
@@ -920,5 +1013,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, "index=28 %");
+    }
+
+    #[test]
+    fn every_command_has_an_explicit_category() {
+        let canonical: Vec<&str> = COMMANDS.iter().map(|spec| spec.names[0]).collect();
+        let uncategorized: Vec<&str> = canonical
+            .iter()
+            .copied()
+            .filter(|name| !COMMAND_CATEGORIES.iter().any(|(key, _)| key == name))
+            .collect();
+        assert!(
+            uncategorized.is_empty(),
+            "commands missing from COMMAND_CATEGORIES: {uncategorized:?}"
+        );
+        let stale: Vec<&str> = COMMAND_CATEGORIES
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| !canonical.contains(key))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "COMMAND_CATEGORIES keys that are no command's canonical name: {stale:?}"
+        );
     }
 }

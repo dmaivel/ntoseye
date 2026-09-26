@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use owo_colors::OwoColorize;
 use std::ffi::OsString;
 use std::mem::take;
@@ -15,7 +15,7 @@ use crate::{
     Backend, TargetSpec, configure, diagnostics,
     error::{Error, Result},
     kd::KdMemorySource,
-    repl::{start_plain_repl, start_repl},
+    repl::{command_reference_json, json_string, start_plain_repl, start_repl},
     session::Session,
     symbols,
 };
@@ -39,6 +39,11 @@ struct Cli {
     /// or history
     #[arg(long)]
     plain_repl: bool,
+
+    /// Print the command-line and REPL command help as JSON for the
+    /// documentation build
+    #[arg(long, hide = true)]
+    dump_command_reference: bool,
 
     #[command(flatten)]
     target: TargetOptions,
@@ -259,6 +264,37 @@ pub fn main() {
     std::process::exit(run_with_args(std::env::args_os()));
 }
 
+/// `{"cli": [{"name", "help"}], "commands": [...]}`: `ntoseye --help` and
+/// each subcommand's, as clap renders them, then every REPL command (see
+/// [`command_reference_json`]).
+fn reference_json() -> String {
+    let mut root = Cli::command();
+    root.build();
+    let mut pages = vec![("ntoseye".to_string(), root.render_long_help().to_string())];
+    for sub in root
+        .get_subcommands()
+        .filter(|sub| sub.get_name() != "help")
+    {
+        let name = format!("ntoseye {}", sub.get_name());
+        pages.push((name, sub.clone().render_long_help().to_string()));
+    }
+    let cli: Vec<String> = pages
+        .iter()
+        .map(|(name, help)| {
+            format!(
+                "{{\"name\":{},\"help\":{}}}",
+                json_string(name),
+                json_string(help)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"cli\":[{}],\n\"commands\":{}}}",
+        cli.join(",\n"),
+        command_reference_json()
+    )
+}
+
 /// Run the CLI on `args` (the program name first) and return the process
 /// exit status. The wheel's `ntoseye` script calls this with `sys.argv`.
 pub fn run_with_args(args: impl IntoIterator<Item = OsString>) -> i32 {
@@ -277,11 +313,16 @@ fn run(cli: Cli) -> Result<()> {
         gdbstub_instructions,
         kd_instructions,
         plain_repl,
+        dump_command_reference,
         target: mut args,
         command,
     } = cli;
     if version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if dump_command_reference {
+        println!("{}", reference_json());
         return Ok(());
     }
     if gdbstub_instructions {

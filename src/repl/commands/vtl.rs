@@ -9,7 +9,7 @@ repl_command! {
     names: [".vtl"],
     usage: ".vtl [0|1 [pid]]",
     summary: "Select NT (VTL0) or secure-kernel (VTL1) memory inspection, or show which is active.",
-    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes reads and symbol scope, not the CPU's VTL. An optional decimal NT PID selects a trustlet's root. The VTL1 scope is a read-only memory view: registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends) and resume with plain `g`, which returns to the live context first. A vCPU stopped in VTL1 shows its real registers, stack, and memory; with no argument `.vtl` reports whether reads follow such a live stop or the manual view.",
+    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes reads and symbol scope, not the CPU's VTL. With no argument `.vtl` prints the current scope; `.vtl 0` returns to the NT kernel, `.vtl 1` selects the secure kernel's system address space, and `.vtl 1 <pid>` a trustlet's address space by its NT PID (always decimal). The VTL1 scope is a read-only memory view: registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends) and resume with plain `g`, which returns to the live context first. A vCPU stopped in VTL1 shows its real registers, stack, and memory; with no argument `.vtl` reports whether reads follow such a live stop or the manual view.",
 }
 
 repl_command! {
@@ -17,7 +17,7 @@ repl_command! {
     names: ["!trustlets"],
     usage: "!trustlets",
     summary: "List validated VTL1 processes with their NT identities and translation roots.",
-    details: "Reads SkpsProcessList through the secure kernel's page tables. Unsupported internal layouts fail rather than guessing offsets. Does not switch scope.",
+    details: "Reads SkpsProcessList through the secure kernel's page tables. Each row shows the secure-kernel process object, NT PID and image name, trustlet ID, and address-space root. Unsupported internal layouts fail rather than guessing offsets. Does not switch scope.",
 }
 
 /// Commands that only read memory through the current root or are

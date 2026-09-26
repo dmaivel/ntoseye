@@ -13,7 +13,7 @@ repl_command! {
     names: ["!devnode", "devnode"],
     usage: "!devnode [node|0] [-r]",
     summary: "Display a PnP device node and optionally its subtree.",
-    details: "With no node (or 0), displays the root device node. -r and the trailing WinDbg-style 1 walk the node's subtree.",
+    details: "Shows the instance path, service, state and state history, flags, problem code, and pending IRP. With no node (or 0), displays the root device node. -r and the trailing WinDbg-style 1 walk the node's subtree, one node per line.",
     completion: Expression,
 }
 
@@ -22,7 +22,7 @@ repl_command! {
     names: ["!devstack", "devstack"],
     usage: "!devstack <device-object|devnode>",
     summary: "Display the device stack for a DEVICE_OBJECT or device node.",
-    details: "The argument may be a DEVICE_OBJECT or a DEVICE_NODE; the stack is shown from the top filter down to the PDO.",
+    details: "The argument may be any DEVICE_OBJECT in the stack or its DEVICE_NODE; the stack is shown from the top filter down to the PDO, each device with its !DevObj, !DrvObj, !DevExt, and object name, the argument marked `>`, followed by the PDO's device node.",
     completion: Expression,
 }
 

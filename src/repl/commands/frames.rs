@@ -57,7 +57,7 @@ repl_command! {
     names: [".vtlcxr"],
     usage: ".vtlcxr",
     summary: "Select the VTL0 context the Windows hypervisor saved for the vCPU halted in it.",
-    details: "For a vCPU stopped in the Windows hypervisor (VBS), reads what its virtual processor's VTLs were doing from their Enlightened VMCS pages, lists them, and selects VTL0's, so r, k, and u show where NT left off. The VM must expose hv-evmcs; the first use per boot scans host RAM for the pages. The context has RIP, RSP, flags, control, and segment registers, but no other general-purpose registers: the hypervisor keeps those in undocumented state. VTL1's saved state is listed, not selected. .cxr resets.",
+    details: "For a vCPU stopped in the Windows hypervisor (VBS), reads what its virtual processor's VTLs were doing from their Enlightened VMCS pages, lists them, and selects VTL0's, so r, k, and u show where NT left off. The VM must expose hv-evmcs; the first use per boot scans host RAM for the pages. The context has RIP, RSP, flags, control, and segment registers, but no other general-purpose registers: the hypervisor keeps those in undocumented state. VTL1's saved state is listed, not selected. .cxr resets. See 'Where NT left off under the hypervisor' in the VBS guide.",
     run_state: Halted,
 }
 
@@ -91,6 +91,7 @@ repl_command! {
     names: [".trap", "trap"],
     usage: ".trap [address-expression]",
     summary: "Decode and display a _KTRAP_FRAME (defaults to the current thread's saved frame).",
+    details: "A trap frame names no process, so a user-mode frame resolves in the selected process; .trap warns when its address lies outside every module there. Select the owning thread or process first (`.thread`, `.process /p`).",
     completion: Expression,
 }
 

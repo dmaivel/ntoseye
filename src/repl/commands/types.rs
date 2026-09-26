@@ -24,7 +24,7 @@ repl_command! {
     names: ["dt"],
     usage: "dt [-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern...]",
     summary: "Display a type layout or decoded structure.",
-    details: "-r expands nested structures, -a expands bounded arrays, -v shows field sizes, -y uses case-insensitive prefix matching, and -l walks a LIST_ENTRY field.",
+    details: "-r expands nested structures, -a expands bounded arrays, -v shows field sizes, -y uses case-insensitive prefix matching, and -l <field> walks a LIST_ENTRY field. Nested field paths are dotted, and field patterns support * and ?. With -l, the address given is the first element, like WinDbg, so the walk emits every node up to the return to that address. A list head and a record link are indistinguishable in memory, so starting at a list head (rather than `poi(ListHead)`) prints the head as one pseudo-record instead of dropping a real record; an empty list, whose link points at itself, prints nothing. The walk keeps whatever it collected and reports null links, cycles, unreadable links, and reaching the entry bound.",
     completion: Type,
 }
 
@@ -33,7 +33,7 @@ repl_command! {
     names: ["dl"],
     usage: "dl [-b] <address> <maxcount> [size]",
     summary: "Dump a bounded _LIST_ENTRY chain.",
-    details: "The default walk follows Flink; -b follows Blink. The optional size is the number of pointer-sized words displayed per element (default 2).",
+    details: "The default walk follows Flink; -b follows Blink. The optional size is the number of pointer-sized words displayed per element (default 2). The address given is the first element, like WinDbg, so the walk emits every node up to the return to that address. A list head and a record link are indistinguishable in memory, so starting at a list head (rather than `poi(ListHead)`) prints the head as one pseudo-record instead of dropping a real record; an empty list, whose link points at itself, prints nothing. The walk keeps whatever it collected and reports null links, cycles, unreadable links, and reaching the entry bound; reaching the requested maxcount is not reported.",
     completion: Expression,
 }
 
@@ -42,7 +42,7 @@ repl_command! {
     names: ["!list"],
     usage: "!list -t [module!]<type>.<field> -x \"<commands>\" <address>",
     summary: "Run commands for every element of a typed LIST_ENTRY chain.",
-    details: "The element address is available as $extret, @extret, or @$extret in each command. Walks stop at the head, repeated links, or 4096 elements.",
+    details: "The element address is available as $extret, @extret, or @$extret in each command. Walks stop at the head, repeated links, or 4096 elements. The address given is the first element, like WinDbg, so the walk emits every node up to the return to that address. A list head and a record link are indistinguishable in memory, so starting at a list head (rather than `poi(ListHead)`) treats the head as one pseudo-record instead of dropping a real record; an empty list, whose link points at itself, runs nothing. The walk keeps whatever it collected and reports null links, cycles, unreadable links, and reaching the entry bound.",
     completion: Expression,
 }
 

@@ -52,7 +52,7 @@ repl_command! {
     names: ["!chkimg", "chkimg"],
     usage: "!chkimg [-d] [-v] [-nospec] <module>",
     summary: "Compare executable module sections with the cached on-disk image.",
-    details: "Compares .text, PAGE*, and INIT executable sections after applying DIR64/HIGHLOW relocations. Discardable or paged-out sections are skipped. Known kernel self-patches are counted separately unless -nospec is given. -d prints bounded byte diffs; -v prints per-section results.",
+    details: "Compares .text, PAGE*, and INIT executable sections after applying DIR64/HIGHLOW relocations. Discardable or paged-out sections are skipped. Known kernel self-patches (import optimization, retpoline, KiPatchSelf retargets) are counted separately unless -nospec is given, which drops that breakdown and reports them as ordinary mismatches. -d prints bounded byte diffs; -v prints per-section results.",
     completion: [None, None, None, Symbol],
 }
 

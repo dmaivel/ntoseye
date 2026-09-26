@@ -23,7 +23,7 @@ repl_command! {
     names: ["!ready", "ready"],
     usage: "!ready [processor]",
     summary: "List bounded dispatcher-ready queues, optionally for one processor.",
-    details: "Reads DispatcherReadyListHead (or ReadyListHead on newer builds) from each _KPRCB.",
+    details: "Reads DispatcherReadyListHead (or ReadyListHead on newer builds) from each _KPRCB. Each queue walk reports null links, cycles, unreadable links, and reaching its entry bound, as `dt -l` does.",
     completion: Expression,
 }
 

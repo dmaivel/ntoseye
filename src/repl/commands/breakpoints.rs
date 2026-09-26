@@ -51,7 +51,7 @@ repl_command! {
     names: ["ba"],
     usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a hardware (debug-register) breakpoint.",
-    details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). e.g. ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped there) only `ba e1` on GDB backends is accepted, and it is global: no /p or /t, which name NT processes and threads. e.g. .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g",
+    details: "access: e=execute, r=read/write, w=write; size: 1,2,4,8 bytes (execute is 1). Not available on a dump or the `memory` backend. e.g. ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped there) only `ba e1` on GDB backends is accepted, and it is global: no /p or /t, which name NT processes and threads. e.g. .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g",
     completion: [None, Expression],
     run_state: Halted,
 }
@@ -61,6 +61,7 @@ repl_command! {
     names: ["bl"],
     usage: "bl",
     summary: "List all breakpoints.",
+    details: "The status column reads `e` enabled, `d` disabled, or `o` owed (a kernel code breakpoint waiting for its page to become resident).",
 }
 
 repl_command! {

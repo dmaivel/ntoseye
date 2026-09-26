@@ -32,6 +32,8 @@ mod usermode;
 mod verifier;
 mod vtl;
 
+pub use meta::{command_reference_json, json_string};
+
 impl ReplState<'_> {
     pub fn dispatch_line(&mut self, line: &str) -> Result<Flow> {
         let flow = self.dispatch_line_inner(line, 0);

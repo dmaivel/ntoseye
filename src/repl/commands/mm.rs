@@ -58,7 +58,7 @@ repl_command! {
     names: ["!poolused", "poolused"],
     usage: "!poolused [flags] [tag]",
     summary: "Aggregate pool tracker usage by tag.",
-    details: "Flags follow WinDbg: bit 1 sorts by nonpaged bytes, bit 2 by paged bytes, and bit 0 enables alloc/free columns. Tag matching is case-sensitive and supports * and ?.",
+    details: "Aggregates across every processor's tag table. Flags follow WinDbg: bit 1 (2) sorts by nonpaged bytes, bit 2 (4) by paged bytes, and bit 0 (1) enables alloc/free columns. Tag matching is case-sensitive and supports * and ?.",
     completion: Expression,
 }
 

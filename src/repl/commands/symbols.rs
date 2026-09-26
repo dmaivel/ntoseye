@@ -25,7 +25,7 @@ repl_command! {
     names: ["x"],
     usage: "x <query>  or  x <module>!<query>",
     summary: "Fuzzy-search symbols by name.",
-    details: "operators: ^prefix  suffix$  'exact  !negate  (space = AND)",
+    details: "`*` and `?` are globs. Operators: `^` prefix, `$` suffix, `'` exact, `!` negation, and space-separated terms are ANDed.",
     completion: Symbol,
 }
 
@@ -109,7 +109,7 @@ repl_command! {
     names: ["ls"],
     usage: "ls [.] [first][,count]",
     summary: "List source lines of the current scope's file.",
-    details: "With no arguments, continues after the lines the previous ls or lsa listed; `.` restarts at the current line. `first` is a line number; `count` defaults to 10. The file is the one the current scope IP maps to, found through .srcpath.",
+    details: "With no arguments, continues after the lines the previous ls or lsa listed; `.` restarts at the current line. `first` is a line number; `count` defaults to 10. The file is the one the current scope IP (`$scopeip`) maps to, found through .srcpath.",
 }
 
 repl_command! {
@@ -117,7 +117,7 @@ repl_command! {
     names: ["lsa"],
     usage: "lsa [address][,first][,count]",
     summary: "List source lines around an address.",
-    details: "Defaults to the current scope IP, five lines before it, and twelve lines in all. `first` is an offset from the address's line (negative for lines before it). The line at the address is marked `>`.",
+    details: "Defaults to the current scope IP (`$scopeip`), five lines before it, and twelve lines in all. `first` is an offset from the address's line (negative for lines before it). The line at the address is marked `>`.",
     completion: Expression,
 }
 
