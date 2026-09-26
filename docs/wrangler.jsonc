@@ -1,0 +1,17 @@
+// The documentation site at ntoseye.com: static assets only, no Worker script.
+// The release workflow builds the site into _build/html and deploys it with
+// `wrangler deploy` from this directory.
+{
+  "name": "ntoseye-docs",
+  "compatibility_date": "2026-09-26",
+  "assets": {
+    "directory": "./_build/html",
+    // Missing pages get the site's 404.html (see notfound_* in conf.py).
+    "not_found_handling": "404-page"
+    // html_handling stays at its default, auto-trailing-slash: the site is
+    // built with `-b dirhtml`, so every page is a directory served at `page/`.
+  },
+  // Cloudflare creates the DNS record and certificate for the apex domain.
+  // www.ntoseye.com is a redirect rule in the dashboard, not a second domain.
+  "routes": [{ "pattern": "ntoseye.com", "custom_domain": true }]
+}

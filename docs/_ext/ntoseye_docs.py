@@ -592,6 +592,17 @@ def sync(out: Path, pages: dict[str, str]) -> None:
             path.write_text(text)
 
 
+def root_404(app: Sphinx, exception: Exception | None) -> None:
+    """Cloudflare answers a missing path with the site's `/404.html`, but the
+    dirhtml builder writes the not-found page as `404/index.html`. Its links
+    are absolute (`notfound_urls_prefix`), so a copy works at the root."""
+    if exception is not None or app.builder.name != "dirhtml":
+        return
+    page = Path(app.outdir) / "404" / "index.html"
+    if page.exists():
+        shutil.copyfile(page, Path(app.outdir) / "404.html")
+
+
 def setup(app: Sphinx) -> dict:
     app.add_object_type(
         "command", "command", indextemplate="pair: %s; command", objname="REPL command"
@@ -600,4 +611,5 @@ def setup(app: Sphinx) -> dict:
     app.add_role_to_domain("std", "command", CommandRole(), override=True)
     app.connect("builder-inited", generate)
     app.connect("missing-reference", resolve_builtin)
+    app.connect("build-finished", root_404)
     return {"parallel_read_safe": True, "parallel_write_safe": True}

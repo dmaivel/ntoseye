@@ -28,7 +28,8 @@ classifiers = [
 ntoseye = "ntoseye._ntoseye:_cli_main"
 
 [project.urls]
-Homepage = "https://github.com/dmaivel/ntoseye"
+Homepage = "https://ntoseye.com"
+Documentation = "https://ntoseye.com/scripting/sdk/"
 Repository = "https://github.com/dmaivel/ntoseye"
 Issues = "https://github.com/dmaivel/ntoseye/issues"
 

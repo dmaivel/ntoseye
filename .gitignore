@@ -10,6 +10,7 @@ dist/
 
 # Sphinx output and generated reference pages
 /docs/_build/
+/docs/.wrangler/
 /docs/reference/commands/
 /docs/reference/command-line/
 /docs/reference/sdk/
