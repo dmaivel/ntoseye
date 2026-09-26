@@ -72,12 +72,10 @@ pub enum TrapKind {
 
 impl TrapKind {
     /// The kind of the frame whose `ExceptionActive` is `value`, entered
-    /// from `cs`. Only a user-mode `syscall` writes 2, and a `cs` that is no
-    /// Windows code selector (`KGDT64_R0_CODE`, `KGDT64_R3_CMCODE | 3`,
-    /// `KGDT64_R3_CODE | 3`) means no trap built the frame: a thread's
-    /// `TrapFrame` can outlive the trap.
+    /// from `cs`. Only a user-mode `syscall` writes 2, and a frame no trap
+    /// saved (see [`is_code_selector`]) has no kind.
     fn from_exception_active(value: u64, cs: u16) -> Option<Self> {
-        if !matches!(cs, 0x10 | 0x23 | 0x33) {
+        if !is_code_selector(cs) {
             return None;
         }
         match value {
@@ -107,6 +105,14 @@ impl TrapKind {
             Self::ZwCall => "Zw call",
         }
     }
+}
+
+/// Whether `cs` is a Windows x64 code selector (`KGDT64_R0_CODE`,
+/// `KGDT64_R3_CMCODE | 3`, `KGDT64_R3_CODE | 3`), as every trap saves it. A
+/// frame holding anything else was not saved by a trap: a thread's
+/// `TrapFrame` can outlive the trap, its slot reused since.
+fn is_code_selector(cs: u16) -> bool {
+    matches!(cs, 0x10 | 0x23 | 0x33)
 }
 
 /// The `_KTRAP_FRAME` slots only some entries write.
@@ -411,14 +417,24 @@ fn read_ktrap_frame_in(debugger: &Target, dtb: Dtb, addr: VirtAddr) -> Result<Kt
     KtrapFrame::decode(&layout, addr.0, &buf, service_linkage)
 }
 
+/// The registers the trap frame at `addr` saved, to seed a stack walk. An
+/// x64 frame no trap saved (a stale `TrapFrame`) is refused rather than
+/// walked from its leftover rip and rsp.
 pub fn decode_ktrap_frame_for_thread(
     debugger: &Target,
     dtb: Dtb,
     addr: VirtAddr,
 ) -> Result<SavedThreadRegisters> {
-    Ok(SavedThreadRegisters::from(&read_ktrap_frame_in(
-        debugger, dtb, addr,
-    )?))
+    let frame = read_ktrap_frame_in(debugger, dtb, addr)?;
+    if let Some(amd64) = frame.amd64()
+        && !is_code_selector(amd64.cs)
+    {
+        return Err(Error::DebugInfo(format!(
+            "{addr} holds no trap frame (cs {:#x} is no code selector)",
+            amd64.cs
+        )));
+    }
+    Ok(SavedThreadRegisters::from(&frame))
 }
 
 fn decode_kswitch_frame(

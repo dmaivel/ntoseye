@@ -263,10 +263,16 @@ impl Session {
     }
 
     /// Refill the target's register cache from the live backend context, or
-    /// clear it while the VM runs or a parked thread is selected, so
-    /// expression evaluation follows the current thread's address space.
+    /// clear it while the VM runs, so expression evaluation follows the
+    /// current thread's address space. A parked thread has no register file:
+    /// its process's address space is the scope again.
     pub fn restore_live_register_cache(&mut self) {
-        let registers = if self.backend.is_running() || self.parked_windows_thread().is_some() {
+        if let Some(thread) = self.parked_windows_thread().cloned() {
+            self.target.registers = None;
+            self.target.scope_to_parked_thread(&thread);
+            return;
+        }
+        let registers = if self.backend.is_running() {
             Err(Error::TargetRunning(REGISTERS_NEED_HALT))
         } else {
             self.read_registers()

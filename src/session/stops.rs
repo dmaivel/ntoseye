@@ -23,6 +23,7 @@ use crate::session::{
 };
 use crate::target::ThreadInfo;
 use crate::types::VirtAddr;
+use crate::unwind::{resolve_thread_trace_context_at, try_format_symbol};
 
 /// The low bits of a CR3/DTB that select the page-directory base physical
 /// frame (PCID and reserved/canonical bits masked out), for comparing the
@@ -214,15 +215,23 @@ impl Session {
             let rip = registers
                 .as_ref()
                 .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
-            // The vCPU's own description names code outside NT (the Windows
-            // hypervisor, VTL1) and where the hypervisor's VTLs left off.
-            let vcpu = registers
+            // Named in the vCPU's own address space, as the stop header names
+            // it, not the inspection scope (`.process`, a parked `.thread`),
+            // and code outside NT (the Windows hypervisor, VTL1) for what it
+            // is.
+            let symbol = registers.as_ref().zip(rip).and_then(|(regs, rip)| {
+                let cr3 = self
+                    .register_map
+                    .read_u64(self.target.arch().dtb_register(), regs)
+                    .unwrap_or(0);
+                let trace = resolve_thread_trace_context_at(&self.target, cr3, rip);
+                try_format_symbol(&self.target, &trace, rip)
+            });
+            // Where the hypervisor's VTLs left off, for a vCPU halted in it.
+            let saved_vtl = registers
                 .as_ref()
-                .map(|regs| self.describe_vcpu(&self.current_thread, regs));
-            let symbol = rip
-                .and_then(|r| self.target.closest_symbol_current_context(VirtAddr(r)))
-                .or_else(|| vcpu.as_ref().and_then(|vcpu| vcpu.symbol.clone()));
-            let saved_vtl = vcpu.map(|vcpu| vcpu.saved_vtl).unwrap_or_default();
+                .map(|regs| self.describe_vcpu(&self.current_thread, regs).saved_vtl)
+                .unwrap_or_default();
             let (stopped_process, stopped_thread) = self.stopped_context();
             (rip, symbol, saved_vtl, stopped_process, stopped_thread)
         };

@@ -261,18 +261,20 @@ impl Target {
         // A parked thread has no coherent register file. In particular, do not
         // let expressions reuse registers cached from the still-selected vCPU.
         self.registers = None;
-        // Nor is the vCPU's address space the thread's: at a stop in the
-        // hypervisor or VTL1 it maps no NT memory at all. Reads follow the
-        // owning process, as a running thread's follow its vCPU's root.
+        self.scope_to_parked_thread(&thread);
+        self.windows_thread_selection = Some(thread);
+    }
+
+    /// Read through parked `thread`'s owning process. The vCPU's address
+    /// space is not the thread's: at a stop in the hypervisor or VTL1 it maps
+    /// no NT memory at all. Reads follow the owning process, as a running
+    /// thread's follow its vCPU's root.
+    pub fn scope_to_parked_thread(&mut self, thread: &ThreadInfo) {
         let kernel = self.kernel_dtb();
-        match self
-            .thread_process_dtb(&thread)
-            .filter(|dtb| *dtb != kernel)
-        {
+        match self.thread_process_dtb(thread).filter(|dtb| *dtb != kernel) {
             Some(dtb) => self.set_context_dtb_override(dtb),
             None => self.clear_context_dtb_override(),
         }
-        self.windows_thread_selection = Some(thread);
     }
 
     pub fn clear_current_windows_thread_context(&mut self) {
