@@ -7,17 +7,14 @@ use std::time::Duration;
 
 use crate::backend::MemoryOps;
 use crate::bytes;
-use crate::disasm::{
-    DisasmRow, decode_preceding, decode_rows, decode_rows_arm64, disasm_formatter,
-    max_instruction_bytes,
-};
+use crate::disasm::{DisasmRow, decode_code, decode_preceding};
 use crate::error::{Error, Result};
 use crate::kd::{context, context_arm64};
 use crate::memory::{PAGE_SIZE, read_page_chunks};
 use crate::session::{ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead};
 use crate::target::ThreadInfo;
 use crate::target::usermode::ImageCheckDetail;
-use crate::types::{Arch, Dtb, VirtAddr};
+use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
     build_parked_thread_recovered_stack, build_parked_thread_stack, build_stacktrace_with_context,
@@ -231,13 +228,9 @@ impl Session {
     pub fn disassemble(&self, addr: VirtAddr, count: usize) -> Result<Vec<DisasmRow>> {
         let dtb = self.target.current_dtb();
 
-        // x86-64 instructions are at most 15 bytes; ARM64 is fixed 4 bytes.
-        // Over-read so `count` decode.
-        let overread = match self.target.arch() {
-            Arch::Amd64 => count * 16,
-            Arch::Arm64 => count * 4,
-        };
-        let mut buf = vec![0u8; overread];
+        let machine = self.target.code_machine(addr);
+        // Over-read so `count` instructions decode even at their longest.
+        let mut buf = vec![0u8; count * machine.max_instruction_bytes()];
         self.read_masked(addr, &mut buf)?;
 
         let symbols = &self.target.symbols;
@@ -246,21 +239,7 @@ impl Session {
                 .format_closest_symbol_for_address(dtb, VirtAddr(target))
                 .unwrap_or_default()
         };
-        let bitness = self.target.code_bitness(addr);
-        match self.target.arch() {
-            Arch::Amd64 => {
-                let mut formatter = disasm_formatter();
-                Ok(decode_rows(
-                    &buf,
-                    addr.0,
-                    Some(count),
-                    bitness,
-                    &mut formatter,
-                    resolve,
-                ))
-            }
-            Arch::Arm64 => Ok(decode_rows_arm64(&buf, addr.0, Some(count), resolve)),
-        }
+        Ok(decode_code(&buf, addr.0, Some(count), machine, resolve))
     }
 
     /// Disassemble the runtime function containing `addr`. Returns its start
@@ -290,14 +269,8 @@ impl Session {
         let mut bytes = vec![0u8; len];
         self.read_masked(VirtAddr(start), &mut bytes)?;
         let resolve = |target| format_symbol(&self.target, &trace, target);
-        let bitness = self.target.code_bitness(VirtAddr(start));
-        let rows = match self.target.arch() {
-            Arch::Amd64 => {
-                let mut formatter = disasm_formatter();
-                decode_rows(&bytes, start, None, bitness, &mut formatter, resolve)
-            }
-            Arch::Arm64 => decode_rows_arm64(&bytes, start, None, resolve),
-        };
+        let machine = self.target.code_machine(VirtAddr(start));
+        let rows = decode_code(&bytes, start, None, machine, resolve);
         Ok((format_symbol(&self.target, &trace, start), len, rows))
     }
 
@@ -309,8 +282,8 @@ impl Session {
                 "instruction count must be greater than zero".to_string(),
             ));
         }
-        let arch = self.target.arch();
-        let max_bytes = count.saturating_mul(max_instruction_bytes(arch));
+        let machine = self.target.code_machine(addr);
+        let max_bytes = count.saturating_mul(machine.max_instruction_bytes());
         let start = VirtAddr(addr.0.saturating_sub(max_bytes as u64));
         let length = usize::try_from(addr.0 - start.0).unwrap_or(max_bytes);
         let (data, valid) =
@@ -320,7 +293,7 @@ impl Session {
             .rposition(|readable| !readable)
             .map_or(0, |last_unreadable| last_unreadable + 1);
         let mut suffix_len = length - readable_suffix_start;
-        if arch == Arch::Arm64 {
+        if machine == CodeMachine::Arm64 {
             suffix_len -= suffix_len % 4;
         }
         let suffix_offset = length.saturating_sub(suffix_len);
@@ -335,8 +308,7 @@ impl Session {
 
         let dtb = self.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.target, dtb);
-        let bitness = self.target.code_bitness(addr);
-        decode_preceding(arch, bytes, read_start, addr.0, count, bitness, |target| {
+        decode_preceding(machine, bytes, read_start, addr.0, count, |target| {
             format_symbol(&self.target, &trace, target)
         })
         .ok_or_else(|| {

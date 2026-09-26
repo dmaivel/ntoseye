@@ -9,7 +9,7 @@ use crate::gdb::RegisterMap;
 use crate::gdb::registers::repeats_another_register;
 use crate::symbols::SourceLocation;
 use crate::target::Target;
-use crate::types::{Arch, VirtAddr};
+use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
 use crate::unwind::{
     FrameSource, StackTrace, ThreadTraceContext, build_stacktrace, format_symbol,
@@ -266,8 +266,8 @@ pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) 
 // Decoding lives in core; the REPL owns the *rendering*
 // (`format_disasm_line`/`render_rows` below).
 pub use crate::disasm::{
-    AsmToken, DisasmRow, decode_preceding, decode_rows, decode_rows_arm64, disasm_formatter,
-    max_instruction_bytes,
+    AsmToken, DisasmRow, decode_code, decode_preceding, decode_rows, decode_rows_arm64,
+    disasm_formatter,
 };
 
 /// Width of the byte column for a listing: the longest hex string among the
@@ -356,25 +356,14 @@ pub fn non_resident_note(pc: u64, error: &Error) -> String {
 fn decode_disasm_context(
     bytes_at_rip: &[u8],
     rip: u64,
-    arm64: bool,
-    bitness: u32,
+    machine: CodeMachine,
     resolve: impl Fn(u64) -> String,
 ) -> Vec<DisasmRow> {
-    if arm64 {
-        return decode_rows_arm64(
-            bytes_at_rip,
-            rip,
-            Some(DISASM_CONTEXT_INSTRUCTIONS),
-            resolve,
-        );
-    }
-    let mut formatter = disasm_formatter();
-    decode_rows(
+    decode_code(
         bytes_at_rip,
         rip,
         Some(DISASM_CONTEXT_INSTRUCTIONS),
-        bitness,
-        &mut formatter,
+        machine,
         resolve,
     )
 }
@@ -405,13 +394,7 @@ pub fn print_disasm_context(
     breakpoints.mask_breakpoint_bytes(debugger, VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
-    let rows = decode_disasm_context(
-        &bytes,
-        rip,
-        debugger.arch() == Arch::Arm64,
-        debugger.code_bitness(VirtAddr(rip)),
-        resolve,
-    );
+    let rows = decode_disasm_context(&bytes, rip, debugger.code_machine(VirtAddr(rip)), resolve);
     render_rows(&rows, |ip| Some(ip == rip));
 }
 
@@ -525,7 +508,7 @@ mod tests {
     #[test]
     fn stop_disassembly_starts_at_rip_and_only_looks_forward() {
         let rip = 0xffff_f807_c0e1_3ae0;
-        let rows = decode_disasm_context(&[0x90; 8], rip, false, 64, |_| String::new());
+        let rows = decode_disasm_context(&[0x90; 8], rip, CodeMachine::Amd64, |_| String::new());
         let ips = rows.iter().map(|row| row.ip).collect::<Vec<_>>();
 
         assert_eq!(ips, (rip..rip + 7).collect::<Vec<_>>());

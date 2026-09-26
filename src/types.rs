@@ -120,6 +120,43 @@ pub struct KernelLocation {
     pub arch: Arch,
 }
 
+/// The instruction set a stretch of code is in. It need not be the
+/// processor's: ARM64 Windows runs x86 programs under WOW64 and x64 code
+/// inside ARM64EC processes by emulation, and an AMD64 processor runs a
+/// WOW64 program's x86 code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeMachine {
+    X86,
+    Amd64,
+    Arm64,
+}
+
+impl CodeMachine {
+    /// The processor's own instruction set.
+    pub const fn native(arch: Arch) -> Self {
+        match arch {
+            Arch::Amd64 => Self::Amd64,
+            Arch::Arm64 => Self::Arm64,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::X86 => "x86",
+            Self::Amd64 => "AMD64",
+            Self::Arm64 => "ARM64",
+        }
+    }
+
+    /// Longest encoded instruction, which bounds a lookbehind window.
+    pub const fn max_instruction_bytes(self) -> usize {
+        match self {
+            Self::X86 | Self::Amd64 => 15,
+            Self::Arm64 => 4,
+        }
+    }
+}
+
 /// Guest CPU architecture. Determines page-table descriptor interpretation and
 /// register-file layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -8,12 +8,12 @@ use crate::layout::utf16le_nul_terminated;
 use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;
+use crate::target::Target;
 use crate::target::meta::{
     ErrorCodeDetail, TargetTimeDetail, TargetVersionDetail, decode_error_code,
     decode_error_code_as_ntstatus,
 };
-use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, Target};
-use crate::types::VirtAddr;
+use crate::types::{Arch, CodeMachine, VirtAddr};
 
 use crate::repl::*;
 
@@ -37,9 +37,9 @@ repl_command! {
 repl_command! {
     cmd_effmach;
     names: [".effmach"],
-    usage: ".effmach [x86|amd64|auto|.]",
+    usage: ".effmach [x86|amd64|arm64|auto|.]",
     summary: "Display or set the effective code machine.",
-    details: "With no argument, display the selected machine; x86 and amd64 override automatic code-bitness detection, while auto or . clears the override. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
+    details: "With no argument, display the selected machine. x86, amd64, and (on an ARM64 target) arm64 make u, ub, uf, and editor disassembly decode as that instruction set wherever the code is; auto or . goes back to choosing by context and image: a WOW64 program's x86 images, and on ARM64 an emulated x64 image or the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
 }
 
 repl_command! {
@@ -169,21 +169,24 @@ impl ReplState<'_> {
         if let Some(machine) = invocation.arg(0) {
             let machine = machine.to_ascii_lowercase();
             self.ctx.target.effmach = match machine.as_str() {
-                "x86" => Some(CODE_BITNESS_X86),
-                "amd64" => Some(CODE_BITNESS_AMD64),
+                "x86" => Some(CodeMachine::X86),
+                "amd64" => Some(CodeMachine::Amd64),
+                "arm64" if self.ctx.target.arch() == Arch::Arm64 => Some(CodeMachine::Arm64),
+                "arm64" => {
+                    error!("an AMD64 target runs no ARM64 code; use x86, amd64, or auto");
+                    return Ok(());
+                }
                 "." | "auto" => None,
                 _ => {
-                    error!("invalid effective machine '{machine}' (use x86, amd64, or auto)");
+                    error!(
+                        "invalid effective machine '{machine}' (use x86, amd64, arm64, or auto)"
+                    );
                     return Ok(());
                 }
             };
         }
 
-        let machine = match self.ctx.target.effmach {
-            Some(CODE_BITNESS_X86) => "x86",
-            Some(CODE_BITNESS_AMD64) => "AMD64",
-            _ => "auto",
-        };
+        let machine = self.ctx.target.effmach.map_or("auto", CodeMachine::label);
         outln!("effective machine: {machine}\n");
         Ok(())
     }

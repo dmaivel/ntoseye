@@ -10,7 +10,7 @@ use crate::expr::Expr;
 use crate::layout::utf16le_lossy;
 use crate::memory::{PAGE_SIZE, for_each_page_chunk, read_page_chunks};
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
-use crate::types::{Arch, VirtAddr};
+use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
 use crate::unwind::{
     ThreadTraceContext, format_symbol, resolve_thread_trace_context, try_format_symbol,
@@ -893,10 +893,10 @@ impl ReplState<'_> {
     fn cmd_disasm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         // WinDbg: `L<n>` counts instructions, an end address bounds bytes.
         const DEFAULT_INSTRUCTIONS: u64 = 8;
-        let max_instruction_bytes = match self.ctx.target.arch() {
-            Arch::Amd64 => 15u64,
-            Arch::Arm64 => 4u64,
-        };
+        // The window is sized for the machine at the start expression's
+        // address, which is only known once it is evaluated: size it for the
+        // longest instruction set, and decode what the address holds.
+        let max_instruction_bytes = CodeMachine::Amd64.max_instruction_bytes() as u64;
         let (start_addr, byte_len, instruction_limit) =
             match invocation.arg(1).and_then(windbg_count_expression) {
                 Some(count_expr) => {
@@ -967,22 +967,8 @@ impl ReplState<'_> {
         let dtb = self.ctx.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
-        let bitness = self.ctx.target.code_bitness(start_addr);
-
-        let rows = match self.ctx.target.arch() {
-            Arch::Amd64 => {
-                let mut formatter = disasm_formatter();
-                decode_rows(
-                    &bytes,
-                    start_addr.0,
-                    instruction_limit,
-                    bitness,
-                    &mut formatter,
-                    resolve,
-                )
-            }
-            Arch::Arm64 => decode_rows_arm64(&bytes, start_addr.0, instruction_limit, resolve),
-        };
+        let machine = self.ctx.target.code_machine(start_addr);
+        let rows = decode_code(&bytes, start_addr.0, instruction_limit, machine, resolve);
         render_rows(&rows, |_| None);
         outln!();
 

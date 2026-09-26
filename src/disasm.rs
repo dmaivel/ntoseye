@@ -6,7 +6,7 @@ use iced_x86::{
 
 use std::fmt::Write as _;
 
-use crate::types::Arch;
+use crate::types::{Arch, CodeMachine};
 
 /// Control-flow class for the instruction at the start of a byte buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -597,35 +597,51 @@ fn arm64_pcrel_comment(
     Some(resolve(target as u64))
 }
 
-/// Maximum encoded instruction length per architecture, used to size the
-/// lookbehind window for [`decode_preceding`].
-pub fn max_instruction_bytes(arch: Arch) -> usize {
-    match arch {
-        Arch::Amd64 => 15,
-        Arch::Arm64 => 4,
+/// Decode up to `limit` instructions of `machine` code starting at `ip`.
+pub fn decode_code(
+    bytes: &[u8],
+    ip: u64,
+    limit: Option<usize>,
+    machine: CodeMachine,
+    resolve: impl Fn(u64) -> String,
+) -> Vec<DisasmRow> {
+    match x86_bitness(machine) {
+        Some(bitness) => {
+            let mut formatter = disasm_formatter();
+            decode_rows(bytes, ip, limit, bitness, &mut formatter, resolve)
+        }
+        None => decode_rows_arm64(bytes, ip, limit, resolve),
     }
 }
 
-/// Decode `count` instructions of the given x86 `bitness` ending exactly at
+/// The iced decoder bitness for x86-family code; `None` for ARM64.
+fn x86_bitness(machine: CodeMachine) -> Option<u32> {
+    match machine {
+        CodeMachine::X86 => Some(32),
+        CodeMachine::Amd64 => Some(64),
+        CodeMachine::Arm64 => None,
+    }
+}
+
+/// Decode `count` instructions of `machine` code ending exactly at
 /// `end_addr`.
 ///
 /// `bytes` spans `read_start..end_addr`. Try each starting offset because x86
 /// cannot decode backwards, preferring streams without invalid instructions.
 /// Return `None` if no alignment reaches the end.
 pub fn decode_preceding(
-    arch: Arch,
+    machine: CodeMachine,
     bytes: &[u8],
     read_start: u64,
     end_addr: u64,
     count: usize,
-    bitness: u32,
     resolve: impl Fn(u64) -> String,
 ) -> Option<Vec<DisasmRow>> {
     if bytes.is_empty() || count == 0 {
         return None;
     }
-    let rows = match arch {
-        Arch::Amd64 => {
+    let rows = match x86_bitness(machine) {
+        Some(bitness) => {
             let offset = preceding_start_offset(bytes, read_start, end_addr, bitness)?;
             let start = read_start + offset as u64;
             let mut decoder =
@@ -651,7 +667,7 @@ pub fn decode_preceding(
                 resolve,
             )
         }
-        Arch::Arm64 => {
+        None => {
             let tail_len = count.saturating_mul(4);
             let tail_offset = bytes.len().saturating_sub(tail_len);
             decode_rows_arm64(
@@ -663,8 +679,8 @@ pub fn decode_preceding(
         }
     };
 
-    let ends_at_address = rows.last().is_some_and(|row| match arch {
-        Arch::Amd64 => {
+    let ends_at_address = rows.last().is_some_and(|row| match x86_bitness(machine) {
+        Some(bitness) => {
             let Ok(offset) = usize::try_from(row.ip.saturating_sub(read_start)) else {
                 return false;
             };
@@ -678,7 +694,7 @@ pub fn decode_preceding(
             let instruction = decoder.decode();
             instruction.code() != Code::INVALID && decoder.ip() == end_addr
         }
-        Arch::Arm64 => row.ip.saturating_add(4) == end_addr,
+        None => row.ip.saturating_add(4) == end_addr,
     });
     ends_at_address.then_some(rows)
 }
@@ -718,6 +734,7 @@ fn preceding_start_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::cell::Cell;
 
     #[test]

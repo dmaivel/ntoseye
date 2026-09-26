@@ -33,7 +33,7 @@ use crate::{
     memory::DTB_IDENTITY,
     phys::PhysMem,
     symbols::SymbolStore,
-    types::{Arch, Dtb, VirtAddr},
+    types::{Arch, CodeMachine, Dtb, VirtAddr},
     unwind::RecoveredStackTrace,
 };
 
@@ -48,8 +48,9 @@ pub struct Target {
     process: Option<ProcessInfo>,
     /// Secure-kernel or trustlet root selected for read-only inspection.
     secure_root: Option<Dtb>,
-    /// Explicit code-machine override (`32` or `64`); `None` follows context.
-    pub effmach: Option<u32>,
+    /// `.effmach`: the instruction set code is disassembled as, whatever the
+    /// address; `None` follows the context and the image.
+    pub effmach: Option<CodeMachine>,
     triage_modules_cache: Option<Vec<ModuleInfo>>,
     context_dtb_override: Option<Dtb>,
     pub registers: Option<HashMap<String, u64>>,

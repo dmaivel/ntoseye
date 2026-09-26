@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
 use crate::backend::MemoryOps;
-use crate::disasm::{decode_preceding, max_instruction_bytes};
+use crate::disasm::decode_preceding;
 use crate::error::Error;
 use crate::types::VirtAddr;
 
@@ -149,15 +149,14 @@ impl Server {
         count: usize,
     ) -> result::Result<Vec<DisassembledRow>, String> {
         let session = self.session()?;
-        let arch = session.target.arch();
-        let bitness = session.target.code_bitness(VirtAddr(address));
-        let window = count.saturating_mul(max_instruction_bytes(arch));
+        let machine = session.target.code_machine(VirtAddr(address));
+        let window = count.saturating_mul(machine.max_instruction_bytes());
         let start = address.saturating_sub(window as u64);
         let mut bytes = vec![0u8; (address - start) as usize];
         if bytes.is_empty() || session.read_masked(VirtAddr(start), &mut bytes).is_err() {
             return Ok(Vec::new());
         }
-        let rows = decode_preceding(arch, &bytes, start, address, count, bitness, |target| {
+        let rows = decode_preceding(machine, &bytes, start, address, count, |target| {
             format!("{target:#x}")
         });
         Ok(rows

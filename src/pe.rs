@@ -9,7 +9,10 @@ use crate::{
     memory::{self, PAGE_SIZE},
     types::*,
 };
-use pelite::{PeFile, PeView, Wrap, image::IMAGE_DIRECTORY_ENTRY_EXPORT};
+use pelite::{
+    PeFile, PeView, Wrap,
+    image::{IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG},
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, hash_map::Entry};
 use std::ops::{Deref, DerefMut};
@@ -231,6 +234,109 @@ pub fn image_base(view: &PeView<'_>) -> u64 {
         Wrap::T32(header) => u64::from(header.ImageBase),
         Wrap::T64(header) => header.ImageBase,
     }
+}
+
+const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
+/// `CHPEMetadataPointer` in `IMAGE_LOAD_CONFIG_DIRECTORY64`: a virtual
+/// address, relocated like the image.
+const LOAD_CONFIG_CHPE_METADATA: usize = 0xc8;
+/// More range entries than any image has; bounds a corrupt count.
+const MAX_CODE_RANGES: u32 = 1 << 16;
+
+/// Which instruction set each part of an image holds: the header's machine,
+/// and for a hybrid ARM64X or ARM64EC image, the code-range map in its load
+/// config (`IMAGE_ARM64EC_METADATA`). An ARM64EC image's header says AMD64
+/// though most of its code is ARM64, so the map decides wherever it covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeLayout {
+    machine: CodeMachine,
+    /// `(start RVA, end RVA, machine)`, sorted by start.
+    ranges: Vec<(u32, u32, CodeMachine)>,
+}
+
+impl CodeLayout {
+    pub fn machine_at(&self, rva: u32) -> CodeMachine {
+        let index = self.ranges.partition_point(|&(start, _, _)| start <= rva);
+        index
+            .checked_sub(1)
+            .map(|index| self.ranges[index])
+            .filter(|&(_, end, _)| rva < end)
+            .map_or(self.machine, |(_, _, machine)| machine)
+    }
+}
+
+/// Read an image's [`CodeLayout`] through `read`, which reads at an RVA of
+/// the image mapped at `base`. `None` when the header names no machine this
+/// debugger decodes.
+pub fn read_code_layout(
+    base: u64,
+    read: &dyn Fn(u64, &mut [u8]) -> Result<()>,
+) -> Result<Option<CodeLayout>> {
+    let headers = read_pe_header_page_with(read)?;
+    let view = PeView::from_bytes(&*headers)?;
+    let machine = match view.file_header().Machine {
+        IMAGE_FILE_MACHINE_I386 => CodeMachine::X86,
+        IMAGE_FILE_MACHINE_AMD64 => CodeMachine::Amd64,
+        IMAGE_FILE_MACHINE_ARM64 => CodeMachine::Arm64,
+        _ => return Ok(None),
+    };
+    let mut layout = CodeLayout {
+        machine,
+        ranges: Vec::new(),
+    };
+    // Only 64-bit images carry the ARM64EC metadata.
+    let config = match view.optional_header() {
+        Wrap::T64(_) => view
+            .data_directory()
+            .get(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
+            .copied(),
+        Wrap::T32(_) => None,
+    };
+    let Some(config) = config.filter(|config| config.VirtualAddress != 0) else {
+        return Ok(Some(layout));
+    };
+    let mut size = [0u8; 4];
+    read(u64::from(config.VirtualAddress), &mut size)?;
+    if (u32::from_le_bytes(size) as usize) < LOAD_CONFIG_CHPE_METADATA + 8 {
+        return Ok(Some(layout));
+    }
+    let mut pointer = [0u8; 8];
+    read(
+        u64::from(config.VirtualAddress) + LOAD_CONFIG_CHPE_METADATA as u64,
+        &mut pointer,
+    )?;
+    let metadata = u64::from_le_bytes(pointer);
+    let Some(metadata_rva) = metadata.checked_sub(base).filter(|_| metadata != 0) else {
+        return Ok(Some(layout));
+    };
+    let mut header = [0u8; 12];
+    read(metadata_rva, &mut header)?;
+    let (map_rva, count) = (read_u32(&header, 4), read_u32(&header, 8));
+    if count == 0 || count > MAX_CODE_RANGES {
+        return Ok(Some(layout));
+    }
+    let mut entries = vec![0u8; count as usize * 8];
+    read(u64::from(map_rva), &mut entries)?;
+    layout.ranges = entries
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .filter_map(|entry| {
+            let (offset, length) = (read_u32(entry, 0), read_u32(entry, 4));
+            let start = offset & !3;
+            // The low two bits type the range: ARM64, ARM64EC, or AMD64.
+            let machine = match offset & 3 {
+                0 | 1 => CodeMachine::Arm64,
+                2 => CodeMachine::Amd64,
+                _ => return None,
+            };
+            Some((start, start.saturating_add(length), machine))
+        })
+        .collect();
+    layout.ranges.sort_unstable_by_key(|&(start, _, _)| start);
+    Ok(Some(layout))
 }
 
 /// Open a module image in guest memory: the headers are read now, the rest
@@ -581,12 +687,13 @@ pub fn read_pe_image_from_file(path: &Path) -> Result<PeImage> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, read_pe_exports,
+        IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, read_code_layout, read_pe_exports,
         read_pe_header_page, read_pe_image,
     };
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
     use crate::memory::{AddressSpace, DTB_IDENTITY};
+    use crate::types::CodeMachine;
     use crate::types::{PhysAddr, VirtAddr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -680,6 +787,69 @@ mod tests {
             image[va as usize..va as usize + 0x1000].fill(fill);
         }
         image
+    }
+
+    /// [`synthetic_image`] as a hybrid image of `machine` loaded at `base`: a
+    /// load config in `.rdata` whose `CHPEMetadataPointer` (relocated, as in
+    /// memory) leads to a code map of `ranges` (`StartOffset`, `Length`).
+    fn hybrid_image(machine: u16, base: u64, ranges: &[(u32, u32)]) -> Vec<u8> {
+        let mut image = synthetic_image();
+        let (pe, config, metadata, map) = (0x80, 0x2000usize, 0x2100usize, 0x2200usize);
+        image[pe + 4..pe + 6].copy_from_slice(&machine.to_le_bytes());
+        let directory = pe + 24 + 112 + 10 * 8;
+        image[directory..directory + 4].copy_from_slice(&(config as u32).to_le_bytes());
+        image[directory + 4..directory + 8].copy_from_slice(&0x140u32.to_le_bytes());
+        image[config..config + 0x140].fill(0);
+        image[config..config + 4].copy_from_slice(&0x140u32.to_le_bytes());
+        image[config + 0xc8..config + 0xd0]
+            .copy_from_slice(&(base + metadata as u64).to_le_bytes());
+        image[metadata..metadata + 12].fill(0);
+        image[metadata..metadata + 4].copy_from_slice(&1u32.to_le_bytes());
+        image[metadata + 4..metadata + 8].copy_from_slice(&(map as u32).to_le_bytes());
+        image[metadata + 8..metadata + 12].copy_from_slice(&(ranges.len() as u32).to_le_bytes());
+        for (index, (offset, length)) in ranges.iter().enumerate() {
+            let entry = map + 8 * index;
+            image[entry..entry + 4].copy_from_slice(&offset.to_le_bytes());
+            image[entry + 4..entry + 8].copy_from_slice(&length.to_le_bytes());
+        }
+        image
+    }
+
+    fn layout_of(image: &[u8], base: u64) -> super::CodeLayout {
+        let read = |rva: u64, buf: &mut [u8]| {
+            let start = rva as usize;
+            buf.copy_from_slice(&image[start..start + buf.len()]);
+            Ok(())
+        };
+        read_code_layout(base, &read).unwrap().unwrap()
+    }
+
+    /// An ARM64EC image says AMD64 in its header while most of its code is
+    /// ARM64; its code map types each range (ARM64, ARM64EC, AMD64), and
+    /// only an AMD64 range is x64 code.
+    #[test]
+    fn a_hybrid_image_code_map_decides_each_range() {
+        const BASE: u64 = 0x7ff6_0000_0000;
+        let image = hybrid_image(0x8664, BASE, &[(0x1000 | 1, 0x800), (0x1800 | 2, 0x800)]);
+        let layout = layout_of(&image, BASE);
+        assert_eq!(layout.machine_at(0x1000), CodeMachine::Arm64);
+        assert_eq!(layout.machine_at(0x17fc), CodeMachine::Arm64);
+        assert_eq!(layout.machine_at(0x1800), CodeMachine::Amd64);
+        // Outside the map, the header's machine.
+        assert_eq!(layout.machine_at(0x2400), CodeMachine::Amd64);
+
+        let arm64x = hybrid_image(0xaa64, BASE, &[(0x1000 | 2, 0x100)]);
+        let layout = layout_of(&arm64x, BASE);
+        assert_eq!(layout.machine_at(0x1080), CodeMachine::Amd64);
+        assert_eq!(layout.machine_at(0x1100), CodeMachine::Arm64);
+
+        // No metadata: the header decides everywhere.
+        let mut plain = synthetic_image();
+        plain[0x84..0x86].copy_from_slice(&0xaa64u16.to_le_bytes());
+        assert_eq!(
+            layout_of(&plain, BASE).machine_at(0x1000),
+            CodeMachine::Arm64
+        );
     }
 
     /// Opening an image costs the header probe; a lookup fetches the one

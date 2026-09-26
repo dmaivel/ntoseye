@@ -537,7 +537,6 @@ fn memory_reads_follow_the_halted_context_root() {
 #[test]
 fn string_descriptors_follow_the_requested_width() {
     use crate::layout::{FieldInfo, ParsedType, TypeInfo};
-    use crate::target::CODE_BITNESS_X86;
 
     let mut memory = [0u8; 0x40];
     memory[0..2].copy_from_slice(&4u16.to_le_bytes());
@@ -597,7 +596,7 @@ fn string_descriptors_follow_the_requested_width() {
     let unicode = VirtAddr(0x1000);
 
     let native = session.target.read_unicode_string(unicode, 64);
-    session.target.effmach = Some(CODE_BITNESS_X86);
+    session.target.effmach = Some(crate::types::CodeMachine::X86);
     let bits = session.target.data_bitness();
 
     assert!(

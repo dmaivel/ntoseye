@@ -11,21 +11,22 @@ use crate::{
     error::{Error, Result},
     guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo},
     memory::DTB_IDENTITY,
-    types::{Dtb, VirtAddr},
+    pe::read_code_layout,
+    types::{Arch, CodeMachine, Dtb, VirtAddr},
 };
 
 const COMPATIBILITY_MODE_CS: u64 = 0x23;
 const WOW64_ADDRESS_LIMIT: u64 = 1 << 32;
 
 fn decide_bitness(
-    effmach: Option<u32>,
+    effmach: Option<CodeMachine>,
     cs: Option<u64>,
     is_wow64: bool,
     modules: &[ModuleInfo],
     address: VirtAddr,
 ) -> u32 {
     if let Some(effmach) = effmach {
-        return if matches!(effmach, CODE_BITNESS_X86 | 0x14c) {
+        return if effmach == CodeMachine::X86 {
             CODE_BITNESS_X86
         } else {
             CODE_BITNESS_AMD64
@@ -470,8 +471,49 @@ impl Target {
     /// `.effmach x86` (a WOW64 process's x86 structures), else 64.
     pub fn data_bitness(&self) -> u32 {
         match self.effmach {
-            Some(CODE_BITNESS_X86 | 0x14c) => CODE_BITNESS_X86,
+            Some(CodeMachine::X86) => CODE_BITNESS_X86,
             _ => CODE_BITNESS_AMD64,
+        }
+    }
+
+    /// The instruction set of the code at `address`, for disassembling it:
+    /// `.effmach` if set, else what the context and the image say. On AMD64
+    /// that is x86 or AMD64 ([`Self::code_bitness`]). On ARM64 the processor
+    /// only ever runs ARM64 code, but a WOW64 program's images are x86 and an
+    /// emulated x64 image, or the x64 ranges of a hybrid one, are AMD64.
+    pub fn code_machine(&self, address: VirtAddr) -> CodeMachine {
+        if let Some(machine) = self.effmach {
+            return machine;
+        }
+        match self.arch() {
+            Arch::Amd64 if self.code_bitness(address) == CODE_BITNESS_X86 => CodeMachine::X86,
+            Arch::Amd64 => CodeMachine::Amd64,
+            Arch::Arm64 => self.arm64_image_code_machine(address),
+        }
+    }
+
+    fn arm64_image_code_machine(&self, address: VirtAddr) -> CodeMachine {
+        // The kernel and its drivers are ARM64.
+        if looks_like_kernel_pointer(address.0) {
+            return CodeMachine::Arm64;
+        }
+        let Some(module) = self
+            .modules()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|module| module.contains_address(address))
+        else {
+            return CodeMachine::Arm64;
+        };
+        if module.is_32bit {
+            return CodeMachine::X86;
+        }
+        let memory = self.context_memory();
+        let base = module.base_address;
+        let layout = read_code_layout(base.0, &|rva, buf| memory.read_bytes(base + rva, buf));
+        match layout {
+            Ok(Some(layout)) => layout.machine_at((address.0 - base.0) as u32),
+            _ => CodeMachine::Arm64,
         }
     }
 
@@ -512,6 +554,7 @@ mod tests {
     use crate::guest::{ModuleInfo, ProcessInfo};
     use crate::session::session_over_memory;
     use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, sample_thread};
+    use crate::types::CodeMachine;
     use crate::types::VirtAddr;
 
     #[test]
@@ -522,7 +565,7 @@ mod tests {
 
         assert_eq!(
             decide_bitness(
-                Some(CODE_BITNESS_AMD64),
+                Some(CodeMachine::Amd64),
                 Some(0x23),
                 true,
                 &[x86.clone()],
