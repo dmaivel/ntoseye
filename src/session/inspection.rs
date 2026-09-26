@@ -18,8 +18,10 @@ use crate::session::{ContinueOutcome, ExceptionRecord, PageInReport, Session, Te
 use crate::target::ThreadInfo;
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
-    RecoveredStackTrace, StackTrace, ThreadStackTrace, build_parked_thread_recovered_stack,
-    build_parked_thread_stack, format_symbol, function_range, resolve_thread_trace_context,
+    RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
+    build_parked_thread_recovered_stack, build_parked_thread_stack, build_stacktrace_with_context,
+    build_stacktrace_with_register_values, format_symbol, function_range,
+    resolve_thread_trace_context,
 };
 
 /// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
@@ -361,20 +363,75 @@ impl Session {
     /// [`Self::recovered_backtrace`]'s frames alone, up to `limit`.
     pub fn backtrace(&mut self, limit: usize) -> Result<StackTrace> {
         let (recovered, _, _) = self.recovered_backtrace(limit)?;
-        Ok(StackTrace {
-            frames: recovered
-                .frames
-                .into_iter()
-                .map(|frame| frame.frame)
-                .collect(),
-            truncated: recovered.truncated,
-        })
+        Ok(recovered.into_stacktrace())
     }
 
-    /// Unwind a specified non-running Windows thread in its owning process
-    /// address space without selecting it or mutating the backend vCPU.
-    pub fn backtrace_thread(&self, thread: &ThreadInfo, limit: usize) -> Result<ThreadStackTrace> {
+    /// Unwind a Windows thread without selecting it or moving the backend's
+    /// current vCPU. `running_on` is the vCPU running it, if any: the walk
+    /// starts from that vCPU's registers, or, when it is halted in the Windows
+    /// hypervisor, from the VTL0 state the hypervisor saved. A thread not
+    /// running, or whose vCPU's registers cannot be read, is walked from what
+    /// it saved on its kernel stack.
+    pub fn backtrace_thread(
+        &mut self,
+        thread: &ThreadInfo,
+        running_on: Option<&str>,
+        limit: usize,
+    ) -> Result<ThreadStackTrace> {
+        if let Some(vcpu) = running_on
+            && let Some(trace) = self.running_thread_stack(vcpu, limit)?
+        {
+            return Ok(trace);
+        }
         build_parked_thread_stack(&self.target, thread, limit)
+    }
+
+    /// The stack of the thread `vcpu` runs, from that vCPU's context; `None`
+    /// when its registers cannot be read (the target runs).
+    fn running_thread_stack(
+        &mut self,
+        vcpu: &str,
+        limit: usize,
+    ) -> Result<Option<ThreadStackTrace>> {
+        if self.backend.is_running() {
+            return Ok(None);
+        }
+        let registers = self
+            .backend
+            .set_current_thread(vcpu)
+            .and_then(|()| self.backend.read_registers());
+        self.backend.set_current_thread(&self.current_thread)?;
+        let Ok(registers) = registers else {
+            return Ok(None);
+        };
+        let values = self.register_map.to_hashmap(&registers);
+        if values
+            .get(self.target.arch().dtb_register())
+            .is_some_and(|dtb| self.target.recognize_secure_root(*dtb))
+        {
+            return Err(Error::DebugInfo(format!(
+                "{vcpu} is running VTL1; NT's thread there is suspended in a VTL call"
+            )));
+        }
+        let (source, recovered) = match self.saved_vtl0_registers(vcpu, &values) {
+            Some(saved) => (
+                ThreadStackSource::SavedVtl0,
+                build_stacktrace_with_register_values(
+                    &self.target,
+                    &self.register_map,
+                    &saved,
+                    limit,
+                ),
+            ),
+            None => (
+                ThreadStackSource::Live,
+                build_stacktrace_with_context(&self.target, &self.register_map, &registers, limit),
+            ),
+        };
+        Ok(Some(ThreadStackTrace {
+            source,
+            stacktrace: recovered.into_stacktrace(),
+        }))
     }
 
     /// Ask the guest's own debugger worker to fault a page in, and wait for it

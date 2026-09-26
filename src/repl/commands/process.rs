@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
@@ -202,10 +204,16 @@ impl ReplState<'_> {
         let truncated = threads.len() > MAX_PROCESS_THREADS;
         threads.truncate(MAX_PROCESS_THREADS);
         *self.caches.threads.write().unwrap() = threads.clone();
+        let active = if include_stack {
+            self.ctx.active_thread_map()
+        } else {
+            HashMap::new()
+        };
         for thread in &threads {
             print_thread_extended_detail(&self.ctx.target, thread);
             if include_stack {
-                match self.ctx.backtrace_thread(thread, THREAD_STACK_LIMIT) {
+                let vcpu = active.get(&thread.ethread.0).map(|(vcpu, _)| vcpu.as_str());
+                match self.ctx.backtrace_thread(thread, vcpu, THREAD_STACK_LIMIT) {
                     Ok(trace) => {
                         outln!("  k-stack ({}):", trace.source.as_str());
                         print_stacktrace_data_with_provenance(

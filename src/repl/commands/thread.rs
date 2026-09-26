@@ -15,6 +15,7 @@ use crate::session::ThreadContext;
 use crate::target::{Target, ThreadInfo, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
 use crate::ui;
+use crate::unwind::ThreadStackSource;
 
 use crate::repl::*;
 
@@ -29,9 +30,6 @@ pub enum ThreadResolution {
 
 pub(super) const THREAD_STACK_LIMIT: usize = 32;
 const DEFAULT_THREAD_FRAME_LIMIT: usize = 16;
-/// Where a running thread's stack starts when its processor is halted in the
-/// Windows hypervisor.
-const SAVED_VTL0_SOURCE: &str = "saved VTL0 context";
 
 repl_command! {
     cmd_threads;
@@ -382,7 +380,7 @@ impl ReplState<'_> {
             self.clear_selected_frame();
             self.caches.refresh_symbol_context(&self.ctx.target);
             if default_stack {
-                match self.ctx.backtrace_thread(thread, THREAD_STACK_LIMIT) {
+                match self.ctx.backtrace_thread(thread, None, THREAD_STACK_LIMIT) {
                     Ok(trace) => {
                         outln!("k-stack ({}):", trace.source.as_str());
                         print_stacktrace_data_with_provenance(
@@ -430,9 +428,10 @@ impl ReplState<'_> {
         );
         print_thread_extended_detail(&self.ctx.target, thread);
         let source = match selection {
-            ThreadContext::SavedVtl0(_) => SAVED_VTL0_SOURCE,
-            _ => "live",
-        };
+            ThreadContext::SavedVtl0(_) => ThreadStackSource::SavedVtl0,
+            _ => ThreadStackSource::Live,
+        }
+        .as_str();
 
         if default_stack {
             self.print_running_kstack(source);

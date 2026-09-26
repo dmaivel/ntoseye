@@ -148,17 +148,36 @@ impl RecoveredStackTrace {
             dtb: trace.dtb(),
         }
     }
+
+    /// The frames alone, for hosts that only render the walk.
+    pub fn into_stacktrace(self) -> StackTrace {
+        StackTrace {
+            frames: self.frames.into_iter().map(|frame| frame.frame).collect(),
+            truncated: self.truncated,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadStackSource {
-    TrapFrame { address: VirtAddr },
-    ContextSwitch { kernel_stack: VirtAddr },
+    /// The registers of the vCPU running the thread.
+    Live,
+    /// The VTL0 state the Windows hypervisor saved for the vCPU running the
+    /// thread, which is halted in the hypervisor.
+    SavedVtl0,
+    TrapFrame {
+        address: VirtAddr,
+    },
+    ContextSwitch {
+        kernel_stack: VirtAddr,
+    },
 }
 
 impl ThreadStackSource {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Live => "live",
+            Self::SavedVtl0 => "saved VTL0 context",
             Self::TrapFrame { .. } => "ktrap-frame",
             Self::ContextSwitch { .. } => "kernel-stack",
         }
@@ -785,15 +804,7 @@ pub fn build_parked_thread_stack(
     let recovered = build_parked_thread_recovered_stack(debugger, thread, limit)?;
     Ok(ThreadStackTrace {
         source: recovered.source,
-        stacktrace: StackTrace {
-            frames: recovered
-                .stacktrace
-                .frames
-                .into_iter()
-                .map(|frame| frame.frame)
-                .collect(),
-            truncated: recovered.stacktrace.truncated,
-        },
+        stacktrace: recovered.stacktrace.into_stacktrace(),
     })
 }
 

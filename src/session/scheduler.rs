@@ -23,24 +23,29 @@ const APC_THREAD_DISPLAY_LIMIT: usize = 16_384;
 
 impl Session {
     /// Decode running processor metadata and, when requested, append a bounded
-    /// short stack for each current thread using the session's stack walker.
+    /// short stack for each current thread, walked from its processor's
+    /// context (see [`Session::backtrace_thread`]).
     /// KPRC/KPCR, current/next/idle pointers, thread metadata, and stack reads
     /// are independent diagnostics, so one processor's missing field does not
     /// discard its other rows.
     pub fn inspect_running(
-        &self,
+        &mut self,
         include_idle: bool,
         include_stacks: bool,
     ) -> Result<RunningDetail> {
         let mut detail = self.target.running_data(include_idle)?;
         if include_stacks {
+            let vcpus = self.processor_vcpus();
             for processor in &mut detail.processors {
+                let vcpu = vcpus.get(&processor.index).map(String::as_str);
                 let stack = match &processor.current_thread {
                     DiagnosticValue::Available(Some(thread)) => {
                         match self.target.thread_info_from_ethread(thread.ethread) {
-                            Ok(thread_info) => match self
-                                .backtrace_thread(&thread_info, MAX_RUNNING_STACK_FRAMES)
-                            {
+                            Ok(thread_info) => match self.backtrace_thread(
+                                &thread_info,
+                                vcpu,
+                                MAX_RUNNING_STACK_FRAMES,
+                            ) {
                                 Ok(trace) => available(frame_details(trace.stacktrace.frames)),
                                 Err(error) => unavailable(error.to_string()),
                             },
@@ -213,7 +218,11 @@ impl Session {
                 interrupted = true;
                 break;
             }
-            let stack = self.backtrace_thread(&thread, frame_limit);
+            let stack = self.backtrace_thread(
+                &thread,
+                active_vcpus.get(&thread.ethread.0).map(String::as_str),
+                frame_limit,
+            );
             let (frames, truncated, error, top_symbol) = match stack {
                 Ok(trace) => {
                     let frames = frame_details(trace.stacktrace.frames);

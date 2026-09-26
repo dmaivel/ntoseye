@@ -124,6 +124,7 @@ fn print_hang_report(state: &mut ReplState<'_>) {
     if processor_count == 0 {
         outln!("  {}", ui::muted("processor count unavailable"));
     }
+    let vcpus = state.ctx.processor_vcpus();
     for processor in 0..processor_count {
         match state
             .ctx
@@ -145,7 +146,8 @@ fn print_hang_report(state: &mut ReplState<'_>) {
                         .unwrap_or_else(|| "?".into()),
                     thread.process_name.as_deref().unwrap_or("unknown")
                 );
-                match state.ctx.backtrace_thread(&thread, 8) {
+                let vcpu = vcpus.get(&processor).map(String::as_str);
+                match state.ctx.backtrace_thread(&thread, vcpu, 8) {
                     Ok(trace) => print_stacktrace_data(&trace.stacktrace, 8, true),
                     Err(error) => {
                         outln!("    {}", ui::muted(&format!("stack unavailable: {error}")))
