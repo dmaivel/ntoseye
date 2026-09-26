@@ -10,7 +10,7 @@
 
 ## Using ntoseye
 
-New to `ntoseye`? [Install](get-started/install.md) it, attach to a VM with the [Quickstart](get-started/quickstart.md), then follow the [Tutorial](get-started/tutorial.md) through a first session. If you already know WinDbg, [Coming from WinDbg](get-started/windbg.md) lists what carries over and what differs.
+New to `ntoseye`? [Install](get-started/install.md) it, attach to a VM with the [Quickstart](get-started/quickstart.md), then follow [Your first session](get-started/tutorial.md) from attaching to stepping. If you already know WinDbg, [Coming from WinDbg](get-started/windbg.md) lists what carries over and what differs.
 
 Every REPL command is documented in the [command reference](reference/commands/index.md), which is the same text `.hh <command>` prints. To drive the debugger from code, start with the [Python SDK](scripting/sdk.md).
 

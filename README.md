@@ -134,7 +134,7 @@ See the [backend comparison table](https://ntoseye.com/setup/backends/).
 
 The full documentation is at [ntoseye.com](https://ntoseye.com). The debugger also documents itself: run `ntoseye --help` for command-line arguments, press tab in the REPL for completions and descriptions of commands, symbols, and types, and run `.hh <command>` for a command's full help. The site's command reference is built from that same help.
 
-- [Tutorial](https://ntoseye.com/get-started/tutorial/): a first session, from attaching to stepping
+- [Your first session](https://ntoseye.com/get-started/tutorial/): from attaching to stepping
 - [Coming from WinDbg](https://ntoseye.com/get-started/windbg/): what carries over and what differs
 - [Troubleshooting](https://ntoseye.com/get-started/troubleshooting/)
 - [Using the REPL](https://ntoseye.com/using/repl/): command names, aliases

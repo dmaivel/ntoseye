@@ -21,4 +21,4 @@ See the [backend comparison table](../setup/backends.md).
 
 ## Finding your way around
 
-Once attached, the [Tutorial](tutorial.md) walks through a first session. [`ntoseye --help`](../reference/command-line/index.md) lists the command-line arguments. In the REPL, tab completes commands, symbols, and types and describes each, and `.hh <command>` prints a command's help; the same text makes up the [command reference](../reference/commands/index.md). If something does not work, see [Troubleshooting](troubleshooting.md).
+Once attached, [Your first session](tutorial.md) walks through what to do next. [`ntoseye --help`](../reference/command-line/index.md) lists the command-line arguments. In the REPL, tab completes commands, symbols, and types and describes each, and `.hh <command>` prints a command's help; the same text makes up the [command reference](../reference/commands/index.md). If something does not work, see [Troubleshooting](troubleshooting.md).
