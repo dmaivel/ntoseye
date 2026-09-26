@@ -7,6 +7,7 @@ use super::variables::VARIABLES_BASE;
 use super::*;
 use crate::expr::Expr;
 use crate::guest::ProcessInfo;
+use crate::kd::context::{OFFSET_RIP, OFFSET_RSP};
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::session::session_over_memory;
 use crate::symbols::{LocalVariableLocation, ProcedureLocal};
@@ -335,6 +336,39 @@ fn a_console_context_change_invalidates_the_clients_view() {
         json!(["stacks", "variables", "registers"])
     );
     assert!(server.frames.is_empty() && server.vars.is_empty());
+}
+
+/// `.cxr` in the console repoints the stack without moving the address space
+/// or the vCPU; the client is still told its stack is stale.
+#[test]
+fn a_console_cxr_invalidates_the_clients_view() {
+    let base = 0x1000;
+    let record = 0x100;
+    let mut memory = vec![0u8; 0x1000];
+    memory[record + OFFSET_RIP..record + OFFSET_RIP + 8].copy_from_slice(&0x1010u64.to_le_bytes());
+    memory[record + OFFSET_RSP..record + OFFSET_RSP + 8].copy_from_slice(&0x1800u64.to_le_bytes());
+    let session = session_over_memory(base, &memory);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.supports_invalidated = true;
+
+    let response = server
+        .on_evaluate(&json!({
+            "expression": format!(".cxr {:#x}", base + record as u64),
+            "context": "repl",
+        }))
+        .unwrap()
+        .unwrap();
+
+    let result = response["result"].as_str().unwrap();
+    assert!(result.contains("selected context"), "{result}");
+    let messages = decode_sink(&sink);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["event"] == "invalidated"),
+        "{messages:?}"
+    );
 }
 
 #[test]

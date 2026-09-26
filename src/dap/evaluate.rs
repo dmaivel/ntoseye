@@ -1,6 +1,7 @@
 //! The Debug Console and expression evaluation, and invalidating the
 //! client's view when a console command moves the inspection context.
 
+use std::collections::HashMap;
 use std::result;
 
 use serde_json::{Value, json};
@@ -13,6 +14,15 @@ use crate::target::Target;
 use crate::typeview::{Expand, TypeView};
 
 use super::{Handled, Server, VarRef, arg_str};
+
+/// See [`Server::inspection_context`].
+#[derive(Debug, Default, PartialEq)]
+struct InspectionContext {
+    parked_thread: Option<u64>,
+    dtb: u64,
+    vcpu: String,
+    stack_seed: Option<HashMap<String, u64>>,
+}
 
 impl Server {
     pub(super) fn on_evaluate(&mut self, args: &Value) -> Handled {
@@ -163,19 +173,25 @@ impl Server {
     }
 
     /// What the console can repoint underneath the client: the selected
-    /// Windows thread, the address space, and the backend vCPU. `.thread`,
-    /// `.process` and `.cxr` all move one of these.
-    fn inspection_context(&mut self) -> (Option<u64>, u64, String) {
+    /// Windows thread, the address space, the backend vCPU, and the registers
+    /// a selected context's stack starts from. `.thread`, `.process`, `.cxr`
+    /// and `.trap` all move one of these; `.frame` keeps the stack's seed.
+    fn inspection_context(&mut self) -> InspectionContext {
         let Some(session) = self.session.as_mut() else {
-            return (None, 0, String::new());
+            return InspectionContext::default();
         };
-        (
-            session
+        InspectionContext {
+            parked_thread: session
                 .parked_windows_thread()
                 .map(|thread| thread.ethread.0),
-            session.target.current_dtb(),
-            session.current_thread.clone(),
-        )
+            dtb: session.target.current_dtb(),
+            vcpu: session.current_thread.clone(),
+            stack_seed: session
+                .target
+                .selected_frame
+                .as_ref()
+                .map(|frame| frame.seed_registers.clone()),
+        }
     }
 
     /// Tell the client its frames and variables are stale after a console
