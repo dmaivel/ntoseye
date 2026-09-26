@@ -88,7 +88,7 @@ pub(super) fn build_recovered_stacktrace_seeded(
         ));
     }
 
-    ensure_frame_module_symbols(
+    ensure_module_symbols(
         debugger,
         trace,
         raw.iter().map(|(context, _, _)| context.rip),
@@ -131,14 +131,15 @@ pub(super) fn build_recovered_stacktrace_seeded(
     stacktrace
 }
 
-/// Lazily load symbols for the modules a backtrace touches. Only modules with no
+/// Lazily load symbols for the modules `ips` fall in: a backtrace's frames up
+/// front, or one address [`super::try_format_symbol`] could not name. Only modules with no
 /// prior load attempt are considered (so kernel modules, loaded on stop, and an
 /// attached process's modules are skipped), and each is attempted once per
 /// session. PDBs already on disk are indexed now; anything that needs the
 /// network is fetched in the background, because this runs inside a stop
 /// render that a host may be waiting on with a client timeout, and a frame
 /// shown as `module+offset` is worth more than a stalled stop.
-pub(super) fn ensure_frame_module_symbols(
+pub(super) fn ensure_module_symbols(
     debugger: &Target,
     trace: &ThreadTraceContext,
     ips: impl Iterator<Item = u64>,

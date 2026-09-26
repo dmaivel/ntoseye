@@ -46,7 +46,7 @@ mod walk;
 
 use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
 use arm64::{Arm64Lookup, call_return_address, lookup_arm64_runtime_function};
-use walk::build_recovered_stacktrace_seeded;
+use walk::{build_recovered_stacktrace_seeded, ensure_module_symbols};
 
 // hard cap on frames walked, so a stack switch (which relaxes the rsp-advances
 // guard) can't let a cyclic/corrupt stack spin forever
@@ -337,9 +337,12 @@ pub fn try_format_symbol(
     };
 
     if let Some(module) = trace.module_for_address(addr) {
-        return Some(try_format(module.dtb).unwrap_or_else(|| {
-            // The module has no PDB, or ensure_frame_module_symbols has not
-            // loaded it yet (a background fetch may still be running).
+        let symbol = try_format(module.dtb).or_else(|| {
+            ensure_module_symbols(debugger, trace, std::iter::once(addr));
+            try_format(module.dtb)
+        });
+        return Some(symbol.unwrap_or_else(|| {
+            // The module has no PDB, or its fetch is still running.
             let offset = addr.saturating_sub(module.info.base_address.0);
             format!("{}+{:#x}", module.info.short_name, offset)
         }));
