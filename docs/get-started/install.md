@@ -1,12 +1,21 @@
 # Install
 
+`ntoseye` runs on Linux (x86-64, ARM64) and macOS on Apple Silicon. Every method below installs the same debugger; they differ in whether it embeds Python, which [custom commands](../scripting/commands.md) need, and in what they need installed first:
+
+| Method | Custom commands | Needs |
+|---|---|---|
+| [Shell script](#shell-script) | no | nothing |
+| [uv or pipx](#uv-or-pipx) | yes | Python 3.9 or newer |
+| [cargo](#cargo) | yes | Rust, and Python 3.9 or newer with its development files (`python3-dev` on Debian and Ubuntu) |
+| [pip](#python-sdk), for the Python SDK | yes | Python 3.9 or newer |
+
 ## Shell script
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dmaivel/ntoseye/releases/latest/download/ntoseye-installer.sh | sh
 ```
 
-The prebuilt binaries have no Python, so they cannot run [custom commands](../scripting/commands.md).
+Installs a prebuilt binary to `~/.local/bin`.
 
 ## uv or pipx
 
@@ -14,7 +23,7 @@ The prebuilt binaries have no Python, so they cannot run [custom commands](../sc
 uv tool install ntoseye    # or: pipx install ntoseye
 ```
 
-Installs the `ntoseye` command with support for custom commands, in its own environment. Requires Python 3.9 or newer, on Linux (x86-64, ARM64) or Apple Silicon macOS.
+Installs the `ntoseye` command in its own environment.
 
 ## cargo
 
@@ -22,7 +31,7 @@ Installs the `ntoseye` command with support for custom commands, in its own envi
 cargo install ntoseye
 ```
 
-`cargo install` and default source builds embed Python and link against the local Python installation.
+Builds the release from crates.io, linked against your Python.
 
 ## Python SDK
 
@@ -42,7 +51,7 @@ cd ntoseye
 cargo build --release
 ```
 
-To build without embedded Python:
+Like `cargo install`, a default build embeds Python and needs its development files. To build without it:
 
 ```bash
 cargo build --release --no-default-features --features cli,mcp,dap,gdbserver
