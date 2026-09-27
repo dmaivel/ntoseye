@@ -124,13 +124,7 @@ impl Args<'_, '_> {
                 &target.alpc_message(self.addr(1)?)?,
             )),
             Some("/lpp") => {
-                let process = match self.argv.get(1) {
-                    Some(selector) => self.state.process_for_selector_or_name(
-                        selector,
-                        &target.matching_processes(None)?,
-                    )?,
-                    None => target.selected_process_info()?,
-                };
+                let process = self.state.process_or_current(self.argv.get(1).copied())?;
                 Ok(view::object::alpc_process_ports(
                     &target.alpc_process_ports(process)?,
                 ))
@@ -146,14 +140,10 @@ impl Args<'_, '_> {
     fn handle_traces(&self) -> Result<View> {
         let handle = self.opt_value(0)?.filter(|handle| *handle != 0);
         let max_traces = self.opt_value(2)?.map(|max| max as usize);
-        let target = self.target();
-        let process = match self.argv.get(1).filter(|text| **text != "0") {
-            Some(selector) => self
-                .state
-                .process_for_selector_or_name(selector, &target.matching_processes(None)?)?,
-            None => target.selected_process_info()?,
-        };
-        let detail = target.handle_traces(&process, handle, max_traces)?;
+        let process = self
+            .state
+            .process_or_current(self.argv.get(1).copied().filter(|text| *text != "0"))?;
+        let detail = self.target().handle_traces(&process, handle, max_traces)?;
         Ok(view::object::handle_traces(&detail))
     }
 

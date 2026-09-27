@@ -217,6 +217,18 @@ impl ReplState<'_> {
         }
     }
 
+    /// The process `selector` names (see [`Self::process_for_selector_or_name`]),
+    /// or the current process when there is none.
+    pub fn process_or_current(&self, selector: Option<&str>) -> Result<ProcessInfo> {
+        let target = &self.ctx.target;
+        match selector {
+            Some(selector) => {
+                self.process_for_selector_or_name(selector, &target.matching_processes(None)?)
+            }
+            None => target.selected_process_info(),
+        }
+    }
+
     fn print_process_threads(&mut self, process: &ProcessInfo, include_stack: bool) {
         let mut threads = match self.ctx.target.enumerate_threads_for_process_info(process) {
             Ok(threads) => threads,

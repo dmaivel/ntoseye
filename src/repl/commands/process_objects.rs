@@ -92,13 +92,10 @@ impl ReplState<'_> {
                 }
             }
             "/lpp" => {
-                let process = match invocation.arg(1) {
-                    Some(selector) => target.matching_processes(None).and_then(|processes| {
-                        self.process_for_selector_or_name(selector, &processes)
-                    }),
-                    None => target.selected_process_info(),
-                };
-                match process.and_then(|process| target.alpc_process_ports(process)) {
+                match self
+                    .process_or_current(invocation.arg(1))
+                    .and_then(|process| target.alpc_process_ports(process))
+                {
                     Ok(ports) => print_alpc_process_ports(&ports),
                     Err(error) => error!("{error}"),
                 }
@@ -121,13 +118,10 @@ impl ReplState<'_> {
             None => None,
         };
         let target = &self.ctx.target;
-        let process = match arg(1) {
-            Some(selector) => target
-                .matching_processes(None)
-                .and_then(|processes| self.process_for_selector_or_name(selector, &processes)),
-            None => target.selected_process_info(),
-        };
-        match process.and_then(|process| target.handle_traces(&process, handle, max_traces)) {
+        match self
+            .process_or_current(arg(1))
+            .and_then(|process| target.handle_traces(&process, handle, max_traces))
+        {
             Ok(detail) => print_handle_traces(&detail),
             Err(error) => error!("{error}"),
         }
