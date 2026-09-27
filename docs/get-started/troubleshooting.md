@@ -18,7 +18,7 @@ Common problems, by symptom. Integration-specific problems are covered with each
 
 **The guest hangs with the `gdb` backend.** Turn kernel debug mode off in the guest (`bcdedit /debug off`). With it on, Windows expects a KD debugger to answer breaks, and nothing on the GDB side does. See [KVM/QEMU](../setup/kvm-qemu.md#gdb-stub).
 
-**UTM kills the VM when the `gdb` backend attaches.** Turn "Use Hypervisor" off in the VM's QEMU settings; see [UTM](../setup/utm.md#gdb-stub).
+**`the VM runs under HVF`** (the `gdb` backend under UTM). QEMU before 10.1 kills a VM running under HVF as soon as a debugger attaches to its GDB stub, so `ntoseye` refuses to connect. Turn "Use Hypervisor" off in the VM's QEMU settings, or use the `memory`, `kd`, or `kdnet` backend. If your UTM ships QEMU 10.1 or later, run with `NTOSEYE_GDB_ON_HVF=1` to connect anyway. See [UTM](../setup/utm.md#gdb-stub).
 
 **The guest's own hypervisor does not boot under nested virtualization** (VBS, Hyper-V, WSL2). On the tested host `host-passthrough` failed and a custom CPU model with `vmx` worked; see [KVM/QEMU](../setup/kvm-qemu.md#virtualization-based-security-vbs).
 
