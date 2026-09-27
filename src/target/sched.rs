@@ -556,7 +556,7 @@ fn thread_is_idle(thread: &ThreadSummary) -> bool {
         )
 }
 
-fn layout_for(target: &Target, name: &str) -> Result<Arc<TypeInfo>> {
+pub(super) fn layout_for(target: &Target, name: &str) -> Result<Arc<TypeInfo>> {
     target.guest()?.ntoskrnl.types().layout(name)
 }
 
@@ -641,7 +641,7 @@ pub fn walk_list_nodes(
     })
 }
 
-fn processor_indices(target: &Target) -> Result<Vec<u16>> {
+pub(super) fn processor_indices(target: &Target) -> Result<Vec<u16>> {
     let count = usize::from(processor_count(target)?).clamp(1, usize::from(MAX_PROCESSORS));
     Ok((0..count).map(|index| index as u16).collect())
 }

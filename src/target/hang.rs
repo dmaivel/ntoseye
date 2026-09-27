@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
-use crate::cpu_state::{MAX_PROCESSORS, kprcb_for_processor, processor_count};
+use crate::cpu_state::kprcb_for_processor;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo, le_uint};
+use crate::target::sched::{layout_for, processor_indices};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;
 
@@ -263,24 +264,15 @@ fn array_len(type_data: &ParsedType) -> Option<usize> {
     }
 }
 
-fn processors(target: &Target) -> Result<Vec<u16>> {
-    let count = processor_count(target)?.clamp(1, MAX_PROCESSORS);
-    Ok((0..count).collect())
-}
-
 impl Target {
-    fn nt_layout(&self, name: &str) -> Result<Arc<TypeInfo>> {
-        self.guest()?.ntoskrnl.types().layout(name)
-    }
-
     /// Owner and waiters of every numbered queued spinlock, from each
     /// processor's `_KPRCB.LockQueue` entries. An unreadable processor block
     /// is reported and skipped.
     pub fn queued_locks(&self) -> Result<QueuedLocksDetail> {
         let guest = self.guest()?;
-        let prcb = self.nt_layout("_KPRCB")?;
+        let prcb = layout_for(self, "_KPRCB")?;
         let field = prcb.field("LockQueue")?;
-        let entry_layout = self.nt_layout("_KSPIN_LOCK_QUEUE")?;
+        let entry_layout = layout_for(self, "_KSPIN_LOCK_QUEUE")?;
         let stride = entry_layout.size as u64;
         let next_offset = entry_layout.field_offset("Next")? as usize;
         let lock_offset = entry_layout.field_offset("Lock")? as usize;
@@ -316,7 +308,7 @@ impl Target {
             locks: Vec::new(),
             errors: Vec::new(),
         };
-        for processor in processors(self)? {
+        for processor in processor_indices(self)? {
             let base = match kprcb_for_processor(self, processor) {
                 Ok(kprcb) => kprcb + u64::from(field.offset),
                 Err(error) => {
@@ -372,8 +364,8 @@ impl Target {
     /// processor's mailbox list (`_KPRCB.Mailbox`, a list of the senders'
     /// slots in its `RequestMailbox` array) on builds that have one.
     pub fn ipi_state(&self, processor: Option<u16>) -> Result<IpiDetail> {
-        let prcb = self.nt_layout("_KPRCB")?;
-        let all = processors(self)?;
+        let prcb = layout_for(self, "_KPRCB")?;
+        let all = processor_indices(self)?;
         let selected = match processor {
             Some(index) if !all.contains(&index) => {
                 return Err(Error::InvalidArgument(format!(
@@ -458,7 +450,7 @@ impl Target {
         let layout = || -> Result<MailboxLayout> {
             let mailbox = prcb.field_offset("Mailbox")?;
             let array = prcb.field_offset("RequestMailbox")?;
-            let entry = self.nt_layout("_REQUEST_MAILBOX")?;
+            let entry = layout_for(self, "_REQUEST_MAILBOX")?;
             Ok(MailboxLayout {
                 mailbox,
                 array,
