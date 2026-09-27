@@ -8,11 +8,14 @@
 //! thread, and a capture installed on one never sees output from another.
 //! Transcript logging is process-wide so a `.logopen` command also records
 //! diagnostics emitted by the backend or another command context.
+//!
+//! Styling reaches stdout and stderr only when the stream is a terminal and
+//! `NO_COLOR` is unset or empty; a redirected stream gets plain text.
 
 use std::cell::RefCell;
 use std::fmt;
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
@@ -21,6 +24,27 @@ thread_local! {
 }
 
 static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
+
+static NO_COLOR: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()));
+static STDOUT_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stdout().is_terminal());
+static STDERR_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stderr().is_terminal());
+
+fn print_stdout(args: fmt::Arguments<'_>) {
+    if *STDOUT_STYLED {
+        print!("{args}");
+    } else {
+        print!("{}", strip_ansi(&args.to_string()));
+    }
+}
+
+fn print_stderr(args: fmt::Arguments<'_>) {
+    if *STDERR_STYLED {
+        eprint!("{args}");
+    } else {
+        eprint!("{}", strip_ansi(&args.to_string()));
+    }
+}
 
 /// Open the command transcript sink. Every subsequent `out!`, `outln!`,
 /// and diagnostic emission is copied here with terminal escape sequences
@@ -103,7 +127,7 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
         true
     });
     if !captured {
-        print!("{args}");
+        print_stdout(args);
     }
 }
 
@@ -112,7 +136,7 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
 /// the visible channel outside a captured host.
 pub fn write_stderr_fmt(args: fmt::Arguments<'_>) {
     log_args(args);
-    eprint!("{args}");
+    print_stderr(args);
 }
 
 /// Whether this thread's REPL output is currently being captured.

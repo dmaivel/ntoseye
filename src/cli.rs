@@ -428,7 +428,7 @@ fn run(cli: Cli) -> Result<()> {
         None => live_spec(&args, backend),
     };
     let mut ctx = Session::open_with_progress(&spec, &mut |line| {
-        eprintln!("{}", line.bright_black());
+        crate::output::write_stderr_fmt(format_args!("{}\n", line.bright_black()));
     })?;
     if plain_repl {
         start_plain_repl(&mut ctx)

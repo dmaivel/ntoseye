@@ -4,6 +4,8 @@ Command names follow WinDbg. The first name is canonical, and friendly aliases (
 
 Every command is listed in the [command reference](../reference/commands/index.md), and `.hh <command>` prints the same help in the REPL; expressions, registers, and symbol syntax are in the [expression reference](../reference/expressions.md). Several commands can go on one line, separated by semicolons.
 
+`--plain-repl` reads commands line by line, without completion or history, so a command file can be piped in. Output is colored only on a terminal; redirected output, or any output with `NO_COLOR` set, is plain text.
+
 ## Aliases
 
 Aliases use `alias <name> <expansion>`. `${1}` is the first argument passed to the alias, `${2}` is the second, and `${*}` expands to all alias arguments separated by spaces. Alias expansions can contain command lists separated by semicolons.
