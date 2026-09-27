@@ -656,7 +656,12 @@ const RELEASE_WINDOW: Duration = Duration::from_millis(20);
 /// it is given up on. A run ends early when another vCPU reaches a marked
 /// site, which in hot code is at once, so the runs are bounded by time
 /// rather than counted.
-const RELEASE_BUDGET: Duration = Duration::from_secs(1);
+const RELEASE_BUDGET: Duration = if cfg!(test) {
+    // The mock target never frees a waiting vCPU; don't spin tests for it.
+    Duration::from_millis(20)
+} else {
+    Duration::from_secs(1)
+};
 
 /// Execute the instruction under the (already lifted) breakpoint site at
 /// `rip` without a single step, which is unsafe on this backend (see
@@ -898,8 +903,9 @@ enum Released {
     /// Still short of the successors on the same thread, in an interrupt
     /// handler (`in_handler`) or the Windows hypervisor: let them run again.
     Waiting { in_handler: bool },
-    /// Running another Windows thread: the step's was switched out, and
-    /// the step ends where the vCPU is.
+    /// Running another Windows thread (the step's was switched out), or
+    /// stopped on a breakpoint in the handler: the step ends where the vCPU
+    /// is.
     Diverted,
 }
 
@@ -947,10 +953,13 @@ impl Release {
         };
         // Whichever vCPU stops first ends the run, or a break-in does.
         let stop = backend.continue_execution().and_then(|()| {
-            if backend.try_wait_for_stop(RELEASE_WINDOW)?.is_none() {
-                backend.interrupt()?;
-            }
-            Ok(())
+            Ok(match backend.try_wait_for_stop(RELEASE_WINDOW)? {
+                Some(event) => event.thread_id,
+                None => {
+                    backend.interrupt()?;
+                    None
+                }
+            })
         });
         if let Some(slot) = site {
             let lifted = lift_site(backend, self.rip, slot);
@@ -958,7 +967,7 @@ impl Release {
                 lifted?;
             }
         }
-        stop?;
+        let stopped = stop?;
         backend.set_current_thread(thread)?;
         let regs = backend.read_registers()?;
         let now = register_map.read_u64("rip", &regs)?;
@@ -979,6 +988,11 @@ impl Release {
             } else {
                 Released::Diverted
             });
+        }
+        // Stopped by itself short of the marked sites, it hit a breakpoint
+        // (or the bugcheck trap) in the handler: the step ends there.
+        if stopped.as_deref() == Some(thread) {
+            return Ok(Released::Diverted);
         }
         Ok(Released::Waiting { in_handler: true })
     }
