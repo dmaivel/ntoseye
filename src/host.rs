@@ -247,6 +247,12 @@ mod platform {
         }
 
         /// The host mapping guest reads are served from, for diagnostics.
+        /// Whether the hypervisor aborts the VM when a debugger enables guest
+        /// debugging through its GDB stub; KVM and VMware do not.
+        pub fn guest_debug_aborts_vm(&self) -> bool {
+            false
+        }
+
         pub fn describe(&self) -> String {
             format!(
                 "pid {}, host mapping {:#x}-{:#x}",
@@ -518,6 +524,43 @@ mod platform {
         None
     }
 
+    /// Whether the QEMU process `pid` runs its guest under HVF: `-accel hvf`, or
+    /// `accel=hvf` in `-machine`, among its arguments (`KERN_PROCARGS2`: argc,
+    /// the executable path, then the arguments, NUL-separated). `false` when
+    /// they cannot be read.
+    fn runs_under_hvf(pid: i32) -> bool {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut size: libc::size_t = 0;
+        let mut sysctl = |buffer: *mut libc::c_void, size: &mut libc::size_t| unsafe {
+            libc::sysctl(mib.as_mut_ptr(), 3, buffer, size, std::ptr::null_mut(), 0)
+        };
+        if sysctl(std::ptr::null_mut(), &mut size) != 0 {
+            return false;
+        }
+        let mut buffer = vec![0u8; size];
+        if sysctl(buffer.as_mut_ptr().cast(), &mut size) != 0 {
+            return false;
+        }
+        buffer.truncate(size);
+        let Some(argc) = buffer
+            .get(..4)
+            .map(|bytes| u32::from_ne_bytes(bytes.try_into().expect("4 bytes")) as usize)
+        else {
+            return false;
+        };
+        // The executable path, then argc arguments; the environment follows.
+        let args: Vec<&[u8]> = buffer[4..]
+            .split(|&byte| byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .take(argc + 1)
+            .collect();
+        args.windows(2)
+            .any(|pair| pair[0] == b"-accel" && pair[1].starts_with(b"hvf"))
+            || args
+                .iter()
+                .any(|arg| arg.windows(9).any(|window| window == b"accel=hvf"))
+    }
+
     fn task_for_vm_process(pid: i32) -> Result<u32> {
         let self_task = unsafe { mach_task_self() };
         let mut task = 0u32;
@@ -621,6 +664,14 @@ mod platform {
         }
 
         /// The host mapping guest reads are served from, for diagnostics.
+        /// Whether QEMU aborts this VM when a debugger enables guest debugging
+        /// through its GDB stub: it does under HVF (`hv_vcpu_set_trap_debug_exceptions`
+        /// fails, seen on UTM 4.7.5 and 5.0.5), so the `gdb` backend must not
+        /// connect to it. See the UTM setup guide.
+        pub fn guest_debug_aborts_vm(&self) -> bool {
+            runs_under_hvf(self.pid)
+        }
+
         pub fn describe(&self) -> String {
             format!(
                 "pid {}, host mapping {:#x}-{:#x}",

@@ -161,6 +161,14 @@ pub enum Error {
     TaskForPidDenied { pid: i32, detail: String },
 
     #[error(
+        "the VM runs under HVF (QEMU's -accel hvf), and QEMU aborts such a VM as soon as a \
+         debugger connects to its GDB stub and enables guest debugging.\n\
+         Turn off \"Use Hypervisor\" in the VM's QEMU settings in UTM to use the gdb backend, \
+         or use --backend memory, kd, or kdnet, which never enable it (see the UTM setup guide)"
+    )]
+    GdbAbortsHvfVm,
+
+    #[error(
         "permission denied reading from VM process (PID {pid}).\n\
          /proc/sys/kernel/yama/ptrace_scope is currently {scope}. To allow attaching, run:\n    \
              echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope\n\

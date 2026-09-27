@@ -98,6 +98,11 @@ impl Session {
                     Backend::Gdb => PhysMem::live()?.with_halt_clock(Arc::clone(&halts)),
                     _ => PhysMem::live()?,
                 };
+                // Checked before the stub sees a packet: the first one already
+                // makes QEMU enable guest debugging.
+                if *backend == Backend::Gdb && phys.guest_debug_aborts_vm() {
+                    return Err(Error::GdbAbortsHvfVm);
+                }
                 let endpoint = spec.endpoint();
                 Self::connect(Arc::new(phys), endpoint, || {
                     Ok(match backend {

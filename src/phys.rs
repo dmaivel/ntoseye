@@ -142,6 +142,15 @@ impl PhysMem {
     }
 
     /// Whether this reads a live VM's RAM from the host.
+    /// Whether the hypervisor aborts this live VM when a debugger enables
+    /// guest debugging (QEMU under HVF); see `VmHandle::guest_debug_aborts_vm`.
+    pub fn guest_debug_aborts_vm(&self) -> bool {
+        match &self.source {
+            Source::Live { host, .. } => host.guest_debug_aborts_vm(),
+            Source::Dmp(_) | Source::Remote(_) => false,
+        }
+    }
+
     pub fn is_live_host(&self) -> bool {
         matches!(self.source, Source::Live { .. })
     }
