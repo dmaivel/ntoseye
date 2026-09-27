@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
+use crate::expr::{Expr, NumberRadix};
 use crate::guest::{Guest, ProcessInfo};
 use crate::layout::{StructRef, TypeInfo};
 use crate::memory::PAGE_SIZE;
@@ -123,6 +124,27 @@ pub struct ObjectHeaderDetail {
     pub name_info: Option<VirtAddr>,
     pub name: Option<String>,
 }
+
+/// An object and, for a directory, what it holds (`!object`).
+#[derive(Debug, Clone)]
+pub struct ObjectDetail {
+    pub header: ObjectHeaderDetail,
+    /// A directory's entries, by name; `None` for any other object.
+    pub entries: Option<Vec<ObjectDirectoryEntry>>,
+}
+
+/// One named object in an object directory.
+#[derive(Debug, Clone)]
+pub struct ObjectDirectoryEntry {
+    pub name: String,
+    pub object: VirtAddr,
+    /// The object's type (`Directory`, `Driver`, `SymbolicLink`, ...),
+    /// `None` when its header cannot be decoded.
+    pub type_name: Option<String>,
+}
+
+/// The object type name of an object directory.
+const DIRECTORY_TYPE: &str = "Directory";
 
 /// One process/thread/image notification callback registered with the kernel.
 #[derive(Debug, Clone)]
@@ -443,21 +465,88 @@ impl Target {
 
     pub fn enumerate_driver_objects(&self) -> Result<Vec<DriverObjectInfo>> {
         let guest = self.guest()?;
-        guest.memoized_drivers(|| self.walk_driver_objects(guest))
+        guest.memoized_drivers(|| self.walk_driver_objects())
     }
 
-    fn walk_driver_objects(&self, guest: &Guest) -> Result<Vec<DriverObjectInfo>> {
-        let memory = guest.ntoskrnl.memory();
+    /// The object at `path` in the object namespace (`\`, `\Driver`,
+    /// `\Driver\ACPI`): each component looked up in the directory before it,
+    /// from `ObpRootDirectoryObject`, by name without case as the object
+    /// manager does. Symbolic links along the path are not followed.
+    pub fn object_at_path(&self, path: &str) -> Result<VirtAddr> {
+        let components = path
+            .strip_prefix('\\')
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("object path {path} does not start with \\"))
+            })?
+            .split('\\')
+            .filter(|component| !component.is_empty());
+        let guest = self.guest()?;
+        let root_ptr = guest.ntoskrnl.symbol("ObpRootDirectoryObject")?.address();
+        let mut object: VirtAddr = guest.ntoskrnl.memory().read(root_ptr)?;
         let object_name = self.object_name_layout()?;
         let dir = self.object_directory_layout()?;
-        let root_ptr = guest.ntoskrnl.symbol("ObpRootDirectoryObject")?.address();
-        let root: VirtAddr = memory.read(root_ptr)?;
-        let driver_dir = self
-            .enumerate_object_directory(root, &dir, &object_name)?
-            .into_iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("Driver"))
-            .map(|(_, object)| object)
-            .ok_or_else(|| Error::DebugInfo("\\Driver object directory not found".to_string()))?;
+        let mut walked = String::new();
+        for component in components {
+            let type_name = self.inspect_object_header(object)?.type_name;
+            if type_name.as_deref() != Some(DIRECTORY_TYPE) {
+                return Err(Error::DebugInfo(format!(
+                    "{} is a {}, not a directory",
+                    if walked.is_empty() { "\\" } else { &walked },
+                    type_name.as_deref().unwrap_or("object of unknown type")
+                )));
+            }
+            walked.push('\\');
+            walked.push_str(component);
+            object = self
+                .enumerate_object_directory(object, &dir, &object_name)?
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(component))
+                .map(|(_, object)| object)
+                .ok_or_else(|| Error::DebugInfo(format!("{walked} not found")))?;
+        }
+        Ok(object)
+    }
+
+    /// The object at `address` (body or header) and, when it is a
+    /// directory, its entries.
+    pub fn inspect_object(&self, address: VirtAddr) -> Result<ObjectDetail> {
+        let header = self.inspect_object_header(address)?;
+        let entries = if header.type_name.as_deref() == Some(DIRECTORY_TYPE) {
+            let object_name = self.object_name_layout()?;
+            let dir = self.object_directory_layout()?;
+            Some(
+                self.enumerate_object_directory(header.body, &dir, &object_name)?
+                    .into_iter()
+                    .map(|(name, object)| ObjectDirectoryEntry {
+                        type_name: self
+                            .inspect_object_header(object)
+                            .ok()
+                            .and_then(|header| header.type_name),
+                        name,
+                        object,
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        Ok(ObjectDetail { header, entries })
+    }
+
+    /// What an `!object` argument names: an object namespace path (`\`,
+    /// `\Driver\ACPI`), else an address expression.
+    pub fn object_argument(&self, text: &str, radix: NumberRadix) -> Result<VirtAddr> {
+        if text.starts_with('\\') {
+            self.object_at_path(text)
+        } else {
+            Expr::eval_with_radix(text, self, radix)
+        }
+    }
+
+    fn walk_driver_objects(&self) -> Result<Vec<DriverObjectInfo>> {
+        let object_name = self.object_name_layout()?;
+        let dir = self.object_directory_layout()?;
+        let driver_dir = self.object_at_path("\\Driver")?;
 
         let mut drivers = Vec::new();
         for (name, object) in self.enumerate_object_directory(driver_dir, &dir, &object_name)? {

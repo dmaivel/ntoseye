@@ -22,10 +22,16 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let detail = args.target().inspect_device_object(address)?;
             Ok(view::object::device_object(&detail))
         }),
-        "!object" | "object" => args.addr(0).and_then(|address| {
-            let detail = args.target().inspect_object_header(address)?;
-            Ok(view::object::object_header(&detail))
-        }),
+        "!object" | "object" => match argv.first() {
+            Some(text) => args
+                .target()
+                .object_argument(text, args.state.radix)
+                .and_then(|address| args.target().inspect_object(address))
+                .map(|detail| view::object::object(&detail)),
+            None => Err(Error::DebugInfo(
+                "missing argument 1 (an object path or address expression)".into(),
+            )),
+        },
         "!handle" => match args.opt_value(0) {
             Ok(Some(handle)) => args
                 .target()

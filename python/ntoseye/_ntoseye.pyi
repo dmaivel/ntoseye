@@ -895,7 +895,8 @@ class Inspect:
         """
     def object(self, /, address: int) -> Record:
         """
-        Decode an executive object header and resolve its type and name (`!object`).
+        Decode an executive object header and resolve its type and name, and
+        list a directory's entries (`!object`).
         """
     def object_security(self, /, object: int) -> Record:
         """

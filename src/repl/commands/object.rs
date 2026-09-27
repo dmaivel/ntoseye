@@ -55,8 +55,9 @@ repl_command! {
 repl_command! {
     cmd_object;
     names: ["!object", "object"],
-    usage: "!object <object-expression>",
-    summary: "Inspect an executive object header and body.",
+    usage: "!object <path|object-expression>",
+    summary: "Inspect an executive object header and body, and list a directory.",
+    details: "A path starting with `\\` names an object in the object namespace (`!object \\`, `!object \\Driver\\ACPI`), looked up from the root directory without case; symbolic links along it are not followed. A directory lists its entries with their types.",
     completion: Expression,
 }
 
@@ -406,17 +407,19 @@ impl ReplState<'_> {
             return Ok(());
         };
 
-        let Some(addr) = self.eval_or_report(expr) else {
-            return Ok(());
-        };
-
-        let o = match self.ctx.target.inspect_object_header(addr) {
-            Ok(o) => o,
+        let detail = match self
+            .ctx
+            .target
+            .object_argument(expr, self.radix)
+            .and_then(|addr| self.ctx.target.inspect_object(addr))
+        {
+            Ok(detail) => detail,
             Err(e) => {
                 error!("{}", e);
                 return Ok(());
             }
         };
+        let o = &detail.header;
 
         outln!("object {}", ui::addr(o.body.0));
         outln!("  input         : {} ({})", ui::addr(o.input.0), o.mode);
@@ -440,6 +443,21 @@ impl ReplState<'_> {
         }
         if let Some(name) = &o.name {
             outln!("  name          : {}", name);
+        }
+        if let Some(entries) = &detail.entries {
+            outln!("  entries       : {}", entries.len());
+            let mut builder = Builder::default();
+            builder.push_record(["Object", "Type", "Name"]);
+            for entry in entries {
+                builder.push_record([
+                    ui::addr(entry.object.0).to_string(),
+                    entry.type_name.clone().unwrap_or_else(|| "?".to_string()),
+                    entry.name.clone(),
+                ]);
+            }
+            outln!();
+            print_padded_table(builder);
+            return Ok(());
         }
         outln!();
 

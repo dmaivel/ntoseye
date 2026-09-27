@@ -6,8 +6,8 @@ use super::process::process;
 use super::{View, diagnostic, list_termination};
 use crate::target::object::{
     DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, FileObjectDetail, HandleEntryDetail,
-    HandleTableSummary, IoStackLocationInfo, IrpHit, IrpInfo, NotifyCallback, ObjectHeaderDetail,
-    ResourceDetail, ResourceListSummary, ResourceOwner, SsdtTable,
+    HandleTableSummary, IoStackLocationInfo, IrpHit, IrpInfo, NotifyCallback, ObjectDetail,
+    ObjectHeaderDetail, ResourceDetail, ResourceListSummary, ResourceOwner, SsdtTable,
 };
 use crate::target::{Target, irp_major_function_name, kthread_state_name, wait_reason_name};
 
@@ -148,6 +148,32 @@ pub fn object_header(o: &ObjectHeaderDetail) -> View {
         ("name_info", View::OptHex(o.name_info.map(|n| n.0))),
         ("name", View::OptStr(o.name.clone())),
     ])
+}
+
+/// An object ([`object_header`]'s keys) plus `entries`, a directory's
+/// contents (`name`, `object`, `type`), or null for any other object.
+pub fn object(detail: &ObjectDetail) -> View {
+    let View::Object(mut fields) = object_header(&detail.header) else {
+        unreachable!("object_header renders an object");
+    };
+    fields.push((
+        "entries",
+        detail.entries.as_ref().map_or(View::Null, |entries| {
+            View::List(
+                entries
+                    .iter()
+                    .map(|entry| {
+                        View::Object(vec![
+                            ("name", View::Str(entry.name.clone())),
+                            ("object", View::Hex(entry.object.0)),
+                            ("type", View::OptStr(entry.type_name.clone())),
+                        ])
+                    })
+                    .collect(),
+            )
+        }),
+    ));
+    View::Object(fields)
 }
 
 /// One notification-callback row; `symbol` is resolved by the surface (it also

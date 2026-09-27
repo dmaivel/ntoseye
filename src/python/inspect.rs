@@ -74,14 +74,15 @@ impl Inspect {
         })
     }
 
-    /// Decode an executive object header and resolve its type and name (`!object`).
+    /// Decode an executive object header and resolve its type and name, and
+    /// list a directory's entries (`!object`).
     fn object<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
         self.record(py, |session| {
             let detail = session
                 .target
-                .inspect_object_header(VirtAddr(address))
+                .inspect_object(VirtAddr(address))
                 .map_err(err)?;
-            Ok(view::object::object_header(&detail))
+            Ok(view::object::object(&detail))
         })
     }
 
