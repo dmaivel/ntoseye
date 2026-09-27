@@ -246,7 +246,7 @@ repl_command! {
 repl_command! {
     cmd_writemem;
     names: [".writemem"],
-    usage: ".writemem <file> <address> [L<len>|end]",
+    usage: ".writemem <file> <address> <L<len>|end>",
     summary: "Write a virtual memory range to a file.",
     completion: [None, Expression, Expression],
 }
@@ -254,7 +254,7 @@ repl_command! {
 repl_command! {
     cmd_readmem;
     names: [".readmem"],
-    usage: ".readmem <file> <address> [L<len>|end]",
+    usage: ".readmem <file> <address> <L<len>|end>",
     summary: "Read a file into a virtual memory range.",
     completion: [None, Expression, Expression],
 }
