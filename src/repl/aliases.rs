@@ -234,11 +234,35 @@ fn expand_alias_template(
 }
 
 fn quote_alias_arg(arg: &str) -> String {
-    if arg.is_empty() || arg.chars().any(|ch| ch.is_whitespace() || ch == ';') {
-        let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{escaped}\"")
+    if arg.is_empty() || arg.contains(char::is_whitespace) || breaks_command_line(arg) {
+        quote_arg(arg)
     } else {
         arg.to_string()
+    }
+}
+
+/// Whether `value`, spliced raw into a command line, could end a command or
+/// a quoted argument early: it holds a `;` or a quote.
+fn breaks_command_line(value: &str) -> bool {
+    value.contains([';', '"', '\''])
+}
+
+/// `value` as one quoted argument, escaped as command arguments are.
+fn quote_arg(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// `value` ready to splice into a command line it did not come from (a
+/// guest string, a `.foreach` token): quoted when it holds a `;` or a quote,
+/// so it cannot end the command it lands in and start another. Whitespace
+/// is left alone, so a value may still become several arguments, as with
+/// WinDbg's substitution.
+pub fn splice_value(value: &str) -> Cow<'_, str> {
+    if breaks_command_line(value) {
+        Cow::Owned(quote_arg(value))
+    } else {
+        Cow::Borrowed(value)
     }
 }
 

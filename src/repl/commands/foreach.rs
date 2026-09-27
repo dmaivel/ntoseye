@@ -40,7 +40,7 @@ repl_command! {
     names: [".foreach"],
     usage: ".foreach [/pS n] [/ps n] ( Variable { InCommands } ) { OutCommands } | .foreach [options] /s ( Variable \"InString\" ) { OutCommands } | .foreach [options] /f ( Variable \"InFile\" ) { OutCommands }",
     summary: "Run commands once for each token of a command's output, a string, or a file.",
-    details: "InCommands run first with their output hidden (errors and warnings they report are shown, not used as tokens); that output (or InString, or the text of InFile) is split at spaces, tabs, and line breaks, and OutCommands run once per token with each whole-word occurrence of Variable replaced by it. Variable must stand alone between spaces (or at an end of OutCommands) to be replaced; `${Variable}` replaces it anywhere, even inside other text. /pS n skips the first n tokens, and /ps n skips n tokens after each one used: `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token... The skip counts are expressions in the current radix. OutCommands can hold several `;`-separated commands, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
+    details: "InCommands run first with their output hidden (errors and warnings they report are shown, not used as tokens); that output (or InString, or the text of InFile) is split at spaces, tabs, and line breaks, and OutCommands run once per token with each whole-word occurrence of Variable replaced by it. Variable must stand alone between spaces (or at an end of OutCommands) to be replaced; `${Variable}` replaces it anywhere, even inside other text. A token holding `;` or a quote goes in as a quoted string, so it cannot end the command it lands in and start another. /pS n skips the first n tokens, and /ps n skips n tokens after each one used: `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token... The skip counts are expressions in the current radix. OutCommands can hold several `;`-separated commands, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
     completion: Expression,
     style: ExpressionTail,
 }
@@ -68,7 +68,7 @@ repl_command! {
     names: ["!for_each_module"],
     usage: "!for_each_module [\"CommandString\"]",
     summary: "Run commands once for each loaded module `lm` lists.",
-    details: "Visits the modules of the current scope in `lm` order: the `.process` process's, else the kernel's (the secure kernel's under `.vtl 1`). CommandString may use these aliases, each replaced as a whole word or anywhere as `${@#Name}`, case-sensitively: @#ModuleIndex (0-based position), @#ModuleName (the `module!` name `lm` shows), @#ImageName (the image name `lm` shows), @#LoadedImageName (the loader's full path when known, else the image name), @#SymbolFileName (the local PDB the symbols came from, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while fetching, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (string length plus one). Numbers are 0x-prefixed hex, so they read the same in any radix. A module lacking a value an alias names (no timestamp, no version resource) is reported and skipped. Without CommandString, runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
+    details: "Visits the modules of the current scope in `lm` order: the `.process` process's, else the kernel's (the secure kernel's under `.vtl 1`). CommandString may use these aliases, each replaced as a whole word or anywhere as `${@#Name}`, case-sensitively: @#ModuleIndex (0-based position), @#ModuleName (the `module!` name `lm` shows), @#ImageName (the image name `lm` shows), @#LoadedImageName (the loader's full path when known, else the image name), @#SymbolFileName (the local PDB the symbols came from, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while fetching, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (string length plus one). A value holding `;` or a quote goes in as a quoted string, so it cannot end the command it lands in and start another. Numbers are 0x-prefixed hex, so they read the same in any radix. A module lacking a value an alias names (no timestamp, no version resource) is reported and skipped. Without CommandString, runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
     style: ExpressionTail,
 }
 
@@ -251,7 +251,9 @@ fn foreach_tokens(input: &str, initial_skip: usize, skip: usize) -> Vec<&str> {
 /// Replace names in `text`: a whitespace-delimited word that `lookup`
 /// resolves, and `${name}` anywhere. Other text, including a name glued to
 /// punctuation, stays as it is, as WinDbg's `.foreach` and `!for_each_*`
-/// aliases require.
+/// aliases require. A value holding `;` or a quote goes in quoted (see
+/// [`splice_value`]): tokens and module names come from the guest, and one
+/// named `x;g` must not resume it.
 fn substitute<E>(
     text: &str,
     mut lookup: impl FnMut(&str) -> std::result::Result<Option<String>, E>,
@@ -265,7 +267,7 @@ fn substitute<E>(
             && let Some(close) = inner.find('}')
             && let Some(value) = lookup(&inner[..close])?
         {
-            out.push_str(&value);
+            out.push_str(&splice_value(&value));
             index += 2 + close + 1;
             at_word_start = false;
             continue;
@@ -273,7 +275,7 @@ fn substitute<E>(
         if at_word_start && !ch.is_whitespace() {
             let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
             if let Some(value) = lookup(&rest[..end])? {
-                out.push_str(&value);
+                out.push_str(&splice_value(&value));
                 index += end;
                 at_word_start = false;
                 continue;
@@ -722,6 +724,16 @@ mod tests {
     }
 
     #[test]
+    fn a_token_holding_a_semicolon_stays_one_argument() {
+        let (flow, text) = run(
+            ".foreach /s (x \"a;.echo injected\") {.echo x}",
+            DispatchContext::Interactive,
+        );
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(text, "a;.echo\ninjected\n");
+    }
+
+    #[test]
     fn in_command_errors_are_shown_and_not_used_as_tokens() {
         // The malformed inner `.foreach` reports an error and carries on.
         let (flow, text) = run(
@@ -829,6 +841,18 @@ mod tests {
     fn substitution_does_not_rescan_replacements() {
         assert_eq!(sub("p", "p", "p p"), "p p");
         assert_eq!(sub("${p}", "p", "${p}"), "${p}");
+    }
+
+    #[test]
+    fn substitution_quotes_values_that_would_end_the_command() {
+        assert_eq!(sub(".echo p", "p", "x;g"), r#".echo "x;g""#);
+        assert_eq!(sub("dq ${p}", "p", r#"a"b\"#), r#"dq "a\"b\\""#);
+        assert_eq!(sub(".echo p", "p", "it's"), r#".echo "it's""#);
+        // Plain values, paths with spaces included, go in as they are.
+        assert_eq!(
+            sub(".echo p", "p", r"C:\Program Files\a.dll"),
+            r".echo C:\Program Files\a.dll"
+        );
     }
 
     #[test]
