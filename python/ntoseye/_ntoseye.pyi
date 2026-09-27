@@ -916,6 +916,12 @@ class Inspect:
         """
         Find in-flight IRPs, optionally filtered by process or driver (`irps`).
         """
+    def job(self, /, address: int |None = None) -> Record:
+        """
+        Decode a job object: its accounting, limits, flags, nesting, and the
+        processes assigned to it (`!job`). `address` is the job, or a process
+        or thread whose job to decode; `None` is the current process's job.
+        """
     def lookaside(self, /, address: int) -> Record:
         """
         Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).

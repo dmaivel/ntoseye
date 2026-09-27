@@ -25,6 +25,7 @@ mod object;
 mod physical;
 mod pnp;
 mod process;
+mod process_objects;
 mod sched;
 mod script;
 mod security;

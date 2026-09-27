@@ -163,6 +163,29 @@ impl TypeInfo {
         self.field(name).map(|f| u64::from(f.offset))
     }
 
+    /// The names of the one-bit bitfields sharing `word`'s offset that are
+    /// set in `value` (`word`'s whole value), in bit order: how a flags word
+    /// the PDB also declares bit by bit reads by name.
+    pub fn set_bit_names(&self, word: &str, value: u64) -> Vec<String> {
+        let Ok(word) = self.field(word) else {
+            return Vec::new();
+        };
+        let mut names: Vec<(u8, &String)> = self
+            .fields
+            .iter()
+            .filter_map(|(name, field)| match field.type_data {
+                ParsedType::Bitfield { pos, len: 1, .. }
+                    if field.offset == word.offset && value >> pos & 1 != 0 =>
+                {
+                    Some((pos, name))
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names.into_iter().map(|(_, name)| name.clone()).collect()
+    }
+
     /// The fields in `dt`'s layout order: by offset, then bit position, then
     /// name, so every host lists a union's members and a bitfield group the
     /// same way.

@@ -24,7 +24,7 @@ use crate::bytes::{get_u16, get_u32, get_u64, write_u16, write_u32, write_u64};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
-use crate::layout::{ParsedType, TypeInfo};
+use crate::layout::TypeInfo;
 use crate::target::{ListCursor, Target};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
@@ -962,21 +962,8 @@ impl Target {
             .types()
             .struct_with_layout(layout.clone(), address)
             .prefetch();
-        let flags_field = layout.field("Flags")?;
         let flags = ctx.read_field::<u32>("Flags")?;
-        let mut flag_names: Vec<(u8, String)> = layout
-            .fields
-            .iter()
-            .filter_map(|(name, field)| match field.type_data {
-                ParsedType::Bitfield { pos, len: 1, .. }
-                    if field.offset == flags_field.offset && flags >> pos & 1 != 0 =>
-                {
-                    Some((pos, name.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        flag_names.sort();
+        let flag_names = layout.set_bit_names("Flags", u64::from(flags));
         let reference = ctx.embedded("ReferenceTime")?;
         let instance_guid: [u8; 16] = ctx
             .read_field_bytes("InstanceGuid", 16)?
@@ -988,7 +975,7 @@ impl Target {
             name: ctx.unicode_string("LoggerName").ok(),
             log_file_name: ctx.unicode_string("LogFileName").ok(),
             logger_mode: ctx.read_field("LoggerMode")?,
-            flag_names: flag_names.into_iter().map(|(_, name)| name).collect(),
+            flag_names,
             flags,
             buffer_size: ctx.read_field("BufferSize")?,
             maximum_event_size: ctx.read_field("MaximumEventSize")?,

@@ -8,6 +8,7 @@ pub mod etw;
 pub mod heap;
 pub mod image;
 pub mod irpfind;
+pub mod job;
 mod lifecycle;
 mod list;
 mod memory;

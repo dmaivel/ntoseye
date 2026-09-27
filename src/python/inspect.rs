@@ -112,6 +112,19 @@ impl Inspect {
         })
     }
 
+    /// Decode a job object: its accounting, limits, flags, nesting, and the
+    /// processes assigned to it (`!job`). `address` is the job, or a process
+    /// or thread whose job to decode; `None` is the current process's job.
+    #[pyo3(signature = (address=None))]
+    fn job<'py>(&self, py: Python<'py>, address: Option<u64>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let target = &session.target;
+            let job = target.job_address(address.map(VirtAddr)).map_err(err)?;
+            let detail = target.inspect_job(job).map_err(err)?;
+            Ok(view::process::job(&detail))
+        })
+    }
+
     /// Decode an executive object header and resolve its type and name, and
     /// list a directory's entries (`!object`). `object` is the object's
     /// address, or its path in the object namespace (`"\\Driver\\ACPI"`).

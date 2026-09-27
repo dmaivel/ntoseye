@@ -1,4 +1,4 @@
-//! Process and thread listings.
+//! Process and thread listings, and job objects.
 
 use super::Args;
 use crate::error::Result;
@@ -28,6 +28,11 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                     .collect(),
             )
         }),
+        "!job" | "job" => (|| {
+            let target = args.target();
+            let job = target.job_address(args.opt_addr(0)?)?;
+            Ok(view::process::job(&target.inspect_job(job)?))
+        })(),
         _ => return None,
     })
 }

@@ -578,6 +578,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!handle", "objects and I/O"),
     ("!irp", "objects and I/O"),
     ("!irpfind", "objects and I/O"),
+    ("!job", "processes and modules"),
     ("!list", "objects and I/O"),
     ("!locks", "objects and I/O"),
     ("!object", "objects and I/O"),

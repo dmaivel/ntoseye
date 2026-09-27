@@ -261,6 +261,11 @@ impl<'a> StructRef<'a> {
         self.base
     }
 
+    /// The struct's resolved layout.
+    pub fn layout(&self) -> &TypeInfo {
+        &self.ti
+    }
+
     /// Wrap a freshly resolved layout at `base`, carrying this cursor's context.
     fn with(&self, ti: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
         self.types.struct_with_layout(ti, base)
