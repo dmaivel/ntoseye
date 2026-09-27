@@ -228,18 +228,16 @@ impl Session {
     }
 
     /// Read as much of `buf` as the guest will give with [`Self::read_masked`],
-    /// one page-sized chunk at a time, returning how many leading bytes are
-    /// valid. Chunks are relative to `addr`, so an unmapped page truncates the
-    /// read at the request's own granularity rather than at a page boundary.
+    /// one page at a time, returning how many leading bytes are valid: the
+    /// read stops at the first unreadable page.
     pub fn read_masked_partial(&self, addr: VirtAddr, buf: &mut [u8]) -> usize {
         if self.read_masked(addr, buf).is_ok() {
             return buf.len();
         }
-        const CHUNK: usize = 0x1000;
         let mut read = 0;
         while read < buf.len() {
-            let end = (read + CHUNK).min(buf.len());
             let chunk_address = VirtAddr(addr.0.wrapping_add(read as u64));
+            let end = (read + PAGE_SIZE - chunk_address.page_offset() as usize).min(buf.len());
             if self
                 .read_masked(chunk_address, &mut buf[read..end])
                 .is_err()

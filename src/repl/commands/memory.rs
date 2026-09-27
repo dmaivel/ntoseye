@@ -1356,20 +1356,20 @@ impl ReplState<'_> {
         let mut searched = 0u64;
         let mut found = None;
         let mut stop = None;
+        let mut buffer = vec![0u8; CHUNK + max_instruction_bytes];
         'search: while searched < budget {
             if target.interrupted() {
                 stop = Some("interrupted".to_string());
                 break;
             }
-            let mut bytes = vec![0u8; CHUNK + max_instruction_bytes];
-            let readable = self.ctx.read_masked_partial(VirtAddr(cursor), &mut bytes);
-            bytes.truncate(readable);
+            let readable = self.ctx.read_masked_partial(VirtAddr(cursor), &mut buffer);
+            let bytes = &buffer[..readable];
             // Instructions starting past the chunk are decoded again from the
             // next read, which has the bytes after them.
             let window_end = cursor.saturating_add(CHUNK.min(readable) as u64);
             let read_end = cursor.saturating_add(readable as u64);
             let mut next = cursor;
-            for row in decode_code(&bytes, cursor, None, machine, resolve) {
+            for row in decode_code(bytes, cursor, None, machine, resolve) {
                 let end = row
                     .ip
                     .saturating_add(row.hex.split_whitespace().count() as u64);
@@ -1387,7 +1387,7 @@ impl ReplState<'_> {
                 }
             }
             if next == cursor {
-                stop = Some(format!("{} is unreadable", ui::addr(cursor)));
+                stop = Some(format!("{} is unreadable", ui::addr(read_end)));
                 break;
             }
             cursor = next;
