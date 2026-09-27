@@ -157,7 +157,7 @@ The session lives on its own thread. A `Debugger` can be used from any Python th
 
 All SDK exceptions derive from `ntoseye.NtoseyeError`. `MemoryAccessError` reports an unreadable/partially readable guest range; `TargetRunningError` means an operation requires a halted target; `SymbolNotFoundError` also derives from `LookupError`; `StaleHandleError` identifies a handle from before a reboot. An argument outside its fixed choices (`backend="windbg"`, `until="calls"`) or an invalid combination (`backend="kdnet"` without `key`) raises `ValueError` before anything touches the target.
 
-`to_dict()` on a process, thread, module, CPU, driver, or breakpoint returns the same fields the MCP server reports for it; on a value object (a `Field`, `Symbol`, `MemoryRegion`, ...) it returns the object's attributes.
+Decoded results (`dbg.inspect.pci()`, `thread.inspect()`, a `Field`, `Symbol`, `MemoryRegion`, ...) are records with one typed property per field, each listed under [Results](../reference/sdk/index.md#results), so an editor completes them and a type checker flags a misspelt one. A record also reads like a mapping (`keys()`, `record["field"]`), and `to_dict()` on it, or on a process, thread, module, CPU, driver, or breakpoint, returns the same fields the MCP server reports.
 
 `ntoseye.build` is the commit stamp compiled into the extension (`<commit>`, `<commit>-dirty`, or `unknown`). Compare it after rebuilding if a long-lived Python interpreter may still have an older native module loaded.
 

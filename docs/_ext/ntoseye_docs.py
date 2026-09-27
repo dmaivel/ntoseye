@@ -487,12 +487,32 @@ def sdk_pages() -> dict[str, str]:
         "```{toctree}",
         ":maxdepth: 1",
         "",
-        *(node.name for node in classes),
+        *(node.name for node in classes if not is_result(node)),
+        "```",
+        "",
+        "## Results",
+        "",
+        "What the `inspect` methods and other decodings return: records whose",
+        "properties type each field. `to_dict()` gives the same shape as the MCP",
+        "server's JSON.",
+        "",
+        "```{toctree}",
+        ":maxdepth: 1",
+        "",
+        *(node.name for node in classes if is_result(node)),
         "```",
         "",
     ]
     pages["index.md"] = "\n".join(index)
     return pages
+
+
+def is_result(node: ast.ClassDef) -> bool:
+    """A decoded result: a declared shape, which subclasses `BaseRecord`
+    (as does `Record`, the untyped record, which is not one)."""
+    return node.name != "Record" and any(
+        isinstance(base, ast.Name) and base.id == "BaseRecord" for base in node.bases
+    )
 
 
 def repl_module_markdown() -> str:
