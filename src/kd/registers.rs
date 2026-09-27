@@ -46,6 +46,29 @@ pub(super) const ARM64_WINDBG_TTBR1_EL1: u32 = 0x0003_0201;
 const ARM64_WINDBG_TTBR0_EL1: u32 = 0x0003_0200;
 const ARM64_WINDBG_ESR_EL1: u32 = 0x0003_0520;
 const ARM64_WINDBG_FAR_EL1: u32 = 0x0003_0600;
+/// `TPIDR_EL1`: op0=3, op1=0, CRn=13, CRm=0, op2=4. Windows keeps the
+/// processor's KPCR there, with flags in the low bits.
+const ARM64_WINDBG_TPIDR_EL1: u32 = 0x0003_0d04;
+
+/// `x18` of a kernel-mode ARM64 `context`: the processor's KPCR, which
+/// every exception entry loads as `TPIDR_EL1` with the low 12 bits cleared.
+/// An exception taken in kernel mode reloads `x18` without saving it, so
+/// the `x18` KD returns there is whatever the frame's slot held (0, or
+/// another pointer). `None` for user mode, where `x18` is the TEB and is
+/// saved.
+pub(super) fn arm64_kernel_x18(
+    context: &[u8],
+    tpidr_el1: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    let cpsr = bytes::read_u32(context, context_arm64::OFFSET_CPSR);
+    // CPSR.M[3:2] is the exception level the context was taken at.
+    if (cpsr >> 2) & 3 != 1 {
+        return None;
+    }
+    tpidr_el1()
+        .map(|value| value & !0xfff)
+        .filter(|kpcr| *kpcr != 0)
+}
 
 const ARM64_DEBUG_REGISTER_OFFSETS: &[(usize, usize, usize, usize)] = &[
     (
@@ -340,6 +363,18 @@ impl KdBackend {
                     (0, 0)
                 };
                 let kernel_dtb = self.kernel_dtb_override;
+                let processor = self.current_processor;
+                let kpcr = arm64_kernel_x18(ctx, || {
+                    self.read_msr_value(processor, ARM64_WINDBG_TPIDR_EL1)
+                        .inspect_err(|error| {
+                            kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}")
+                        })
+                        .ok()
+                });
+                if let Some(kpcr) = kpcr {
+                    let at = context_arm64::OFFSET_X0 + 18 * 8;
+                    ctx[at..at + 8].copy_from_slice(&kpcr.to_le_bytes());
+                }
                 ctx.resize(context_arm64::REGISTER_BUFFER_SIZE, 0);
                 ctx[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
                     .copy_from_slice(&kernel_dtb.to_le_bytes());

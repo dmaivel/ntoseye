@@ -15,7 +15,7 @@ use crate::kd::registers::{
     KSPECIAL_REGISTERS_CR8_OFFSET, KSPECIAL_REGISTERS_DR0_OFFSET, KSPECIAL_REGISTERS_DR6_OFFSET,
     KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_GDTR_OFFSET, KSPECIAL_REGISTERS_IDTR_OFFSET,
     KSPECIAL_REGISTERS_LDTR_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE, KSPECIAL_REGISTERS_TR_OFFSET,
-    append_control_registers_from_special, context_payload,
+    append_control_registers_from_special, arm64_kernel_x18, context_payload,
     update_arm64_debug_registers_from_context, update_special_debug_registers_from_context,
 };
 
@@ -219,4 +219,33 @@ fn arm64_registers_survive_refused_control_space() {
     assert_eq!(backend.read_registers().unwrap(), regs);
     drop(backend);
     worker.join().unwrap();
+}
+
+/// In a kernel-mode ARM64 context Windows' KD returns whatever the frame's
+/// unsaved `x18` slot held (seen: 0, and the KPRCB); the real value is the
+/// KPCR, `TPIDR_EL1` with the flag bits in its low 12 cleared, as the
+/// exception entry loads it. A user-mode `x18` (the TEB) is kept as read.
+#[test]
+fn a_kernel_mode_arm64_context_gets_its_kpcr_in_x18() {
+    const EL1H: u32 = 0b0101;
+    const EL0T: u32 = 0b0000;
+    let context = |cpsr: u32, x18: u64| {
+        let mut bytes = vec![0u8; context_arm64::CONTEXT_SIZE];
+        bytes[context_arm64::OFFSET_CPSR..context_arm64::OFFSET_CPSR + 4]
+            .copy_from_slice(&cpsr.to_le_bytes());
+        let at = context_arm64::OFFSET_X0 + 18 * 8;
+        bytes[at..at + 8].copy_from_slice(&x18.to_le_bytes());
+        bytes
+    };
+    let tpidr = || Some(0xffff_f800_a1b7_0002);
+    assert_eq!(
+        arm64_kernel_x18(&context(EL1H, 0), tpidr),
+        Some(0xffff_f800_a1b7_0000)
+    );
+    assert_eq!(
+        arm64_kernel_x18(&context(EL1H, 0xffff_f800_a1b7_0980), tpidr),
+        Some(0xffff_f800_a1b7_0000)
+    );
+    assert_eq!(arm64_kernel_x18(&context(EL0T, 0), tpidr), None);
+    assert_eq!(arm64_kernel_x18(&context(EL1H, 0), || None), None);
 }
