@@ -111,6 +111,7 @@ pub fn logger_buffers(detail: &EtwLoggerBuffers) -> View {
             "buffers",
             View::List(detail.buffers.iter().map(buffer).collect()),
         ),
+        ("list_stop", View::OptStr(detail.list_stop.clone())),
     ])
 }
 
@@ -197,6 +198,7 @@ pub fn event_dump(dump: &EtwEventDump) -> View {
     View::Object(vec![
         ("logger", logger(&dump.logger)),
         ("buffers_walked", View::Num(dump.buffers_walked as u64)),
+        ("list_stop", View::OptStr(dump.list_stop.clone())),
         ("total_events", View::Num(dump.total_events as u64)),
         ("qpc_frequency", View::OptNum(dump.qpc_frequency)),
         ("cpu_mhz", View::OptNum(dump.cpu_mhz)),

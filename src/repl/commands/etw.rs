@@ -6,8 +6,9 @@ use owo_colors::OwoColorize;
 
 use crate::error::Result;
 use crate::target::etw::{
-    EtwClock, EtwEvent, EtwHeaderKind, EtwLogger, LogDumpArguments, event_trace_group_name,
-    extended_type_name, format_filetime_precise, format_guid, logger_mode_names,
+    EtwBufferIssue, EtwClock, EtwEvent, EtwHeaderKind, EtwLogger, LogDumpArguments,
+    event_trace_group_name, extended_type_name, format_filetime_precise, format_guid,
+    logger_mode_names,
 };
 use crate::ui;
 
@@ -116,6 +117,7 @@ impl ReplState<'_> {
             logger.number_of_buffers,
             logger.buffers_available
         );
+        print_issues(detail.list_stop.as_deref(), &[]);
         if detail.buffers.is_empty() {
             outln!();
             return;
@@ -280,15 +282,7 @@ impl ReplState<'_> {
         for event in &dump.events {
             print_event(event);
         }
-        for issue in &dump.issues {
-            outln!(
-                "  {} buffer {} +{:#x}: {}",
-                "stopped:".yellow(),
-                ui::addr(issue.buffer.0),
-                issue.offset,
-                issue.reason
-            );
-        }
+        print_issues(dump.list_stop.as_deref(), &dump.issues);
         if let Some(note) = &dump.message_format_note {
             outln!("  {}", ui::muted(note));
         }
@@ -321,6 +315,7 @@ impl ReplState<'_> {
             file.logger.buffer_size,
             file.bytes.len()
         );
+        print_issues(file.list_stop.as_deref(), &[]);
         Ok(())
     }
 }
@@ -332,6 +327,22 @@ fn print_logger_title(logger: &EtwLogger) {
         ui::addr(logger.address.0),
         logger.name
     );
+}
+
+/// Where a `GlobalList` walk ended early, and the buffers not read whole.
+fn print_issues(list_stop: Option<&str>, issues: &[EtwBufferIssue]) {
+    if let Some(stop) = list_stop {
+        outln!("  {} {stop}", "stopped:".yellow());
+    }
+    for issue in issues {
+        outln!(
+            "  {} buffer {} +{:#x}: {}",
+            "stopped:".yellow(),
+            ui::addr(issue.buffer.0),
+            issue.offset,
+            issue.reason
+        );
+    }
 }
 
 fn print_event(event: &EtwEvent) {

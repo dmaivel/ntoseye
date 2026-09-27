@@ -16,7 +16,6 @@
 //! same in 32- and 64-bit Windows and unchanged since Windows 8, and are
 //! written out below.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
@@ -26,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{ParsedType, TypeInfo};
-use crate::target::Target;
+use crate::target::{ListCursor, Target};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 
@@ -289,6 +288,8 @@ pub struct EtwBuffer {
 pub struct EtwLoggerBuffers {
     pub logger: EtwLogger,
     pub buffers: Vec<EtwBuffer>,
+    /// Why the `GlobalList` walk ended before returning to its head.
+    pub list_stop: Option<String>,
 }
 
 /// Which trace header an event record starts with.
@@ -413,6 +414,8 @@ pub struct EtwBufferIssue {
 pub struct EtwEventDump {
     pub logger: EtwLogger,
     pub buffers_walked: usize,
+    /// Why the `GlobalList` walk ended before returning to its head.
+    pub list_stop: Option<String>,
     /// Buffers skipped whole (compressed) and walks that stopped early.
     pub issues: Vec<EtwBufferIssue>,
     /// Events found before `-t` kept the most recent.
@@ -1025,11 +1028,22 @@ impl Target {
     pub fn etw_logger_buffers(&self, text: &str, radix: NumberRadix) -> Result<EtwLoggerBuffers> {
         let logger = self.etw_logger(text, radix)?;
         let types = self.etw_types()?;
-        let buffers = self.read_etw_buffers(&types, &logger)?;
-        Ok(EtwLoggerBuffers { logger, buffers })
+        let (buffers, list_stop) = self.read_etw_buffers(&types, &logger)?;
+        Ok(EtwLoggerBuffers {
+            logger,
+            buffers,
+            list_stop,
+        })
     }
 
-    fn read_etw_buffers(&self, types: &EtwTypes, logger: &EtwLogger) -> Result<Vec<EtwBuffer>> {
+    /// The buffers on `logger`'s `GlobalList`, and why the walk ended before
+    /// returning to the list head, if it did: a bad link or a node that is
+    /// not one of the logger's buffers keeps the buffers already found.
+    fn read_etw_buffers(
+        &self,
+        types: &EtwTypes,
+        logger: &EtwLogger,
+    ) -> Result<(Vec<EtwBuffer>, Option<String>)> {
         if logger.buffer_size as usize <= types.buffer.size || logger.buffer_size > MAX_BUFFER_SIZE
         {
             return Err(Error::DebugInfo(format!(
@@ -1041,40 +1055,49 @@ impl Target {
         let memory = self.kernel_address_space();
         let head = logger.address + types.logger.field_offset("GlobalList")?;
         let global_entry = types.buffer.field_offset("GlobalEntry")?;
+        let next = |link: VirtAddr| memory.read::<VirtAddr>(link).map_err(|e| e.to_string());
         let mut buffers = Vec::new();
-        let mut seen = HashSet::new();
-        let mut link: VirtAddr = memory.read(head)?;
-        while link != head {
-            if link.is_zero() || !seen.insert(link.0) {
-                return Err(Error::DebugInfo(format!(
-                    "logger {:#x}'s GlobalList at {:#x} breaks at {:#x}",
-                    logger.logger_id, head.0, link.0
-                )));
-            }
-            if buffers.len() >= MAX_LOGGER_BUFFERS {
-                return Err(Error::DebugInfo(format!(
-                    "logger {:#x}'s GlobalList has more than {MAX_LOGGER_BUFFERS} entries",
-                    logger.logger_id
-                )));
-            }
+        let mut cursor = ListCursor::new(head, MAX_LOGGER_BUFFERS);
+        cursor.advance(next(head));
+        while let Some(link) = cursor.take_current() {
             // Windows 10 links a small node per buffer ({LIST_ENTRY, buffer
             // pointer}, pool tag Etwn); earlier kernels linked the buffers'
             // own GlobalEntry. Take whichever is one of this logger's buffers.
-            let node_buffer: VirtAddr = memory.read(link + 0x10u64)?;
-            let buffer = [node_buffer, VirtAddr(link.0.wrapping_sub(global_entry))]
-                .into_iter()
-                .find_map(|candidate| self.read_etw_buffer(types, logger, candidate).ok())
-                .ok_or_else(|| {
-                    Error::DebugInfo(format!(
-                        "logger {:#x}'s GlobalList entry {:#x} leads to no _WMI_BUFFER_HEADER \
-                         of this logger (BufferSize {:#x}, LoggerId {:#x})",
-                        logger.logger_id, link.0, logger.buffer_size, logger.logger_id
-                    ))
-                })?;
+            let node_buffer = memory.read::<VirtAddr>(link + 0x10u64).ok();
+            let buffer = [
+                node_buffer,
+                Some(VirtAddr(link.0.wrapping_sub(global_entry))),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(|candidate| self.read_etw_buffer(types, logger, candidate).ok());
+            let Some(buffer) = buffer else {
+                let reason = format!(
+                    "entry {:#x} leads to no _WMI_BUFFER_HEADER of this logger (BufferSize \
+                     {:#x}, LoggerId {:#x})",
+                    link.0, logger.buffer_size, logger.logger_id
+                );
+                // No buffer at all means the list is not laid out as
+                // expected, rather than torn at one node.
+                if buffers.is_empty() {
+                    return Err(Error::DebugInfo(format!(
+                        "logger {:#x}'s GlobalList {reason}",
+                        logger.logger_id
+                    )));
+                }
+                return Ok((
+                    buffers,
+                    Some(format!("GlobalList at {:#x} {reason}", head.0)),
+                ));
+            };
             buffers.push(buffer);
-            link = memory.read(link)?;
+            cursor.advance(next(link));
         }
-        Ok(buffers)
+        let list_stop = cursor
+            .finish()
+            .diagnostic()
+            .map(|reason| format!("GlobalList at {:#x} ends early: {reason}", head.0));
+        Ok((buffers, list_stop))
     }
 
     fn read_etw_buffer(
@@ -1141,7 +1164,7 @@ impl Target {
     ) -> Result<EtwEventDump> {
         let logger = self.etw_logger(text, radix)?;
         let types = self.etw_types()?;
-        let buffers = self.read_etw_buffers(&types, &logger)?;
+        let (buffers, list_stop) = self.read_etw_buffers(&types, &logger)?;
         let qpc_frequency = KuserSharedData::new(self).qpc_frequency();
         let cpu_mhz = match logger.clock {
             EtwClock::CpuCycle => Some(self.processor_mhz()?),
@@ -1219,6 +1242,7 @@ impl Target {
         Ok(EtwEventDump {
             logger,
             buffers_walked: walked,
+            list_stop,
             issues,
             total_events,
             events,
@@ -1248,6 +1272,8 @@ pub struct EtwLogFile {
     pub logger: EtwLogger,
     /// Buffers with events written after the header buffer.
     pub buffers: usize,
+    /// Why the `GlobalList` walk ended before returning to its head.
+    pub list_stop: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -1428,7 +1454,7 @@ impl Target {
     pub fn etw_log_file(&self, text: &str, radix: NumberRadix) -> Result<EtwLogFile> {
         let logger = self.etw_logger(text, radix)?;
         let types = self.etw_types()?;
-        let buffers = self.read_etw_buffers(&types, &logger)?;
+        let (buffers, list_stop) = self.read_etw_buffers(&types, &logger)?;
         let guest = self.guest()?;
         let kernel = guest.ntoskrnl.types();
         let offsets =
@@ -1513,6 +1539,7 @@ impl Target {
         Ok(EtwLogFile {
             logger,
             buffers: data_buffers.len(),
+            list_stop,
             bytes,
         })
     }
