@@ -160,7 +160,8 @@ impl Debugger {
 
     /// Run a REPL command line and return its text output (styling stripped).
     /// Commands that resume the target wait for the next stop, up to
-    /// `timeout` seconds; the stop is then `dbg.stop`.
+    /// `timeout` seconds; the stop is then `dbg.stop`. Command loops and
+    /// `.sleep` end when `timeout` elapses too.
     #[pyo3(signature = (line, timeout=None))]
     fn command(slf: &Bound<'_, Self>, line: &str, timeout: Option<f64>) -> PyResult<String> {
         runner::command(slf, line, timeout)

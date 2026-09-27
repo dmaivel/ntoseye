@@ -287,7 +287,7 @@ struct CommandArgs {
     line: String,
     #[schemars(
         range(min = 0, max = 300000),
-        description = "How long the call may wait for the target to stop before returning with it still running (default 10000, max 300000; 0 = default): a resuming command (g, p, gu, pa, ...) waits for the stop it causes, and a halted-only command (k, r, bp, ...) issued while the target runs waits for the stop before running. Commands that work on a running target ignore it."
+        description = "How long the call may wait for the target to stop before returning with it still running (default 10000, max 300000; 0 = default): a resuming command (g, p, gu, pa, ...) waits for the stop it causes, and a halted-only command (k, r, bp, ...) issued while the target runs waits for the stop before running. Command loops (.for, .while, .foreach, !for_each_*, scripts) and .sleep stop when it elapses; other commands that work on a running target ignore it."
     )]
     timeout_ms: Option<u64>,
     #[schemars(

@@ -3,13 +3,14 @@
 
 use std::collections::HashMap;
 use std::result;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
 use crate::expr::{Expr, ExprValue, NumberRadix};
 use crate::layout::{FieldInfo, ParsedType};
 use crate::output;
-use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore};
+use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitBudget};
 use crate::target::Target;
 use crate::typeview::{Expand, TypeView};
 
@@ -228,6 +229,8 @@ impl Server {
             .take()
             .unwrap_or_else(|| ReplStore::new(session, DispatchContext::Remote(RemoteClient::Dap)));
         let mut state = ReplState::attach(session, store);
+        // A pause or disconnect ends a command loop or `.sleep`.
+        state.stop_wait = Some(StopWaitBudget::unbounded(Arc::clone(&self.cancel)));
         state.line = line.trim().to_string();
         let (result, text) = output::capture(|| state.dispatch_line(line));
         self.repl = Some(state.detach());

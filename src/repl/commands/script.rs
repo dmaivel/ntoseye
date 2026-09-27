@@ -53,7 +53,7 @@ repl_command! {
     names: [".while"],
     usage: ".while (Condition) { Commands }",
     summary: "Run a block of commands while a condition holds.",
-    details: "Condition is an expression, evaluated before each pass; nonzero is true. .break leaves the loop and .continue starts the next pass. Ctrl+C, or a remote host cancelling the call, stops the loop between passes. A command the session refuses ends the loop and the rest of the command line.",
+    details: "Condition is an expression, evaluated before each pass; nonzero is true. .break leaves the loop and .continue starts the next pass. Ctrl+C, or a remote call's timeout or cancellation, stops the loop between passes. A command the session refuses ends the loop and the rest of the command line.",
     style: RawTail,
 }
 
@@ -62,7 +62,7 @@ repl_command! {
     names: [".for"],
     usage: ".for (InitialCommand ; Condition ; IncrementCommand) { Commands }",
     summary: "Run a block of commands in a loop, as C's for.",
-    details: "InitialCommand runs once; then, while the expression Condition is nonzero, the block runs followed by IncrementCommand. The two commands are typically pseudo-register assignments: `.for (r $t0 = 0; @$t0 < 4; r $t0 = @$t0 + 1) { ? @$t0 }`. .break leaves the loop and .continue skips to IncrementCommand. Ctrl+C, or a remote host cancelling the call, stops the loop between passes.",
+    details: "InitialCommand runs once; then, while the expression Condition is nonzero, the block runs followed by IncrementCommand. The two commands are typically pseudo-register assignments: `.for (r $t0 = 0; @$t0 < 4; r $t0 = @$t0 + 1) { ? @$t0 }`. .break leaves the loop and .continue skips to IncrementCommand. Ctrl+C, or a remote call's timeout or cancellation, stops the loop between passes.",
     style: RawTail,
 }
 
@@ -71,7 +71,7 @@ repl_command! {
     names: [".do"],
     usage: ".do { Commands } (Condition)",
     summary: "Run a block of commands, then again while a condition holds.",
-    details: "Condition is an expression, evaluated after each pass; nonzero is true. .break leaves the loop and .continue skips to the condition. Ctrl+C, or a remote host cancelling the call, stops the loop between passes.",
+    details: "Condition is an expression, evaluated after each pass; nonzero is true. .break leaves the loop and .continue skips to the condition. Ctrl+C, or a remote call's timeout or cancellation, stops the loop between passes.",
     style: RawTail,
 }
 
@@ -128,7 +128,7 @@ repl_command! {
     names: [".sleep"],
     usage: ".sleep Milliseconds",
     summary: "Pause the debugger for a number of milliseconds.",
-    details: "Milliseconds is an expression in the current radix (`.sleep 0n500`). Ctrl+C, or a remote host cancelling the call, ends the pause early. The target is left as it is: a running target runs on.",
+    details: "Milliseconds is an expression in the current radix (`.sleep 0n500`). Ctrl+C, or a remote call's timeout or cancellation, ends the pause early. The target is left as it is: a running target runs on.",
     completion: Expression,
 }
 
@@ -958,6 +958,20 @@ mod tests {
         // Outside an action, gc has nothing to resume.
         let (flow, _) = capture(|| state.dispatch_line("gc"));
         assert_eq!(flow.unwrap(), Flow::Denied);
+    }
+
+    #[test]
+    fn a_remote_timeout_ends_an_endless_loop_and_sleep() {
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        state.stop_wait = Some(StopWaitBudget::new(
+            Duration::from_millis(50),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ));
+        let (flow, text) = capture(|| state.dispatch_line(".while (1) { }; .sleep ffffffff"));
+        assert_eq!(flow.unwrap(), Flow::Continue);
+        assert!(text.starts_with(".while: interrupted"), "{text}");
+        assert!(text.ends_with(".sleep: interrupted\n"), "{text}");
     }
 
     #[test]

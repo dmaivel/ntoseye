@@ -435,20 +435,20 @@ impl ReplState<'_> {
     }
 
     /// Ctrl+C since the outermost loop began (even one a command inside took
-    /// to stop itself), or a remote host cancelling the call (client gone,
-    /// shutdown).
+    /// to stop itself), or a remote call's cancellation (client gone,
+    /// shutdown) or elapsed timeout.
     pub fn command_loop_cancelled(&self) -> bool {
         self.cancelled_since(self.command_loop_interrupts)
     }
 
     /// Ctrl+C since [`Target::interrupt_requests`] read `requests`, or a
-    /// remote host cancelling the call.
+    /// remote call's cancellation or elapsed timeout.
     pub fn cancelled_since(&self, requests: u64) -> bool {
         self.ctx.target.interrupt_requests() != requests
             || self
                 .stop_wait
                 .as_ref()
-                .is_some_and(|budget| budget.cancel.load(Ordering::Relaxed))
+                .is_some_and(StopWaitBudget::exhausted)
     }
 
     /// Run `count` iterations of a loop, each dispatching the commands

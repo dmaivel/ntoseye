@@ -3,8 +3,10 @@
 
 use gdbstub::target::ext::monitor_cmd::{ConsoleOutput, MonitorCmd};
 
+use std::sync::Arc;
+
 use crate::output;
-use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore};
+use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitBudget};
 
 use super::GdbTarget;
 
@@ -51,6 +53,8 @@ impl MonitorCmd for GdbTarget<'_> {
             ReplStore::new(self.session, DispatchContext::Remote(RemoteClient::Gdb))
         });
         let mut state = ReplState::attach(self.session, store);
+        // Shutdown ends a command loop or `.sleep`.
+        state.stop_wait = Some(StopWaitBudget::unbounded(Arc::clone(&self.cancel)));
         state.line = line.clone();
         let (result, mut text) = output::capture(|| state.dispatch_line(&line));
         self.repl = Some(state.detach());

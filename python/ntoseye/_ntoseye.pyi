@@ -368,7 +368,8 @@ class Debugger:
         """
         Run a REPL command line and return its text output (styling stripped).
         Commands that resume the target wait for the next stop, up to
-        `timeout` seconds; the stop is then `dbg.stop`.
+        `timeout` seconds; the stop is then `dbg.stop`. Command loops and
+        `.sleep` end when `timeout` elapses too.
         """
     def cont(self, /, disposition: Literal["handled", "not_handled"] = ...) -> None:
         """
