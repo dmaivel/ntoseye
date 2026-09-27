@@ -24,8 +24,8 @@ pub fn logger(l: &EtwLogger) -> View {
     View::Object(vec![
         ("address", View::Hex(l.address.0)),
         ("logger_id", View::Num(l.logger_id.into())),
-        ("name", View::Str(l.name.clone())),
-        ("log_file_name", View::Str(l.log_file_name.clone())),
+        ("name", View::OptStr(l.name.clone())),
+        ("log_file_name", View::OptStr(l.log_file_name.clone())),
         ("logger_mode", View::Hex(l.logger_mode.into())),
         (
             "logger_mode_names",

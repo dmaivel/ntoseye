@@ -20,6 +20,9 @@ const PAYLOAD_DISPLAY_BYTES: usize = 256;
 /// Bytes of each extended data item `!wmitrace.logdump` prints.
 const EXTENDED_DISPLAY_BYTES: usize = 32;
 
+/// Shown for a logger or log file name whose buffer could not be read.
+const UNREADABLE_NAME: &str = "<unreadable>";
+
 repl_command! {
     cmd_wmitrace_strdump;
     names: ["!wmitrace.strdump", "wmitrace.strdump"],
@@ -85,7 +88,7 @@ impl ReplState<'_> {
             builder.push_record([
                 format!("{:#04x}", logger.logger_id),
                 ui::addr(logger.address.0),
-                logger.name.clone(),
+                logger_name(&logger.name),
                 format!("{:#010x}", logger.logger_mode),
                 format!("{} KB", logger.buffer_size / 1024),
                 logger.number_of_buffers.to_string(),
@@ -93,7 +96,7 @@ impl ReplState<'_> {
                 logger.buffers_available.to_string(),
                 logger.buffers_written.to_string(),
                 logger.events_lost.to_string(),
-                logger.log_file_name.clone(),
+                logger_name(&logger.log_file_name),
             ]);
         }
         outln!();
@@ -221,10 +224,10 @@ impl ReplState<'_> {
         row("InstanceGuid", format_guid(&logger.instance_guid));
         row(
             "LogFileName",
-            if logger.log_file_name.is_empty() {
-                ui::muted("(none)")
-            } else {
-                logger.log_file_name.clone()
+            match logger.log_file_name.as_deref() {
+                Some("") => ui::muted("(none)"),
+                Some(name) => name.to_string(),
+                None => ui::muted(UNREADABLE_NAME),
             },
         );
         outln!();
@@ -309,7 +312,7 @@ impl ReplState<'_> {
         outln!(
             "wrote logger {:#04x} '{}' to '{}': header buffer and {} buffers of {:#x} bytes ({:#x} bytes)\n",
             file.logger.logger_id,
-            file.logger.name,
+            logger_name(&file.logger.name),
             path,
             file.buffers,
             file.logger.buffer_size,
@@ -320,12 +323,17 @@ impl ReplState<'_> {
     }
 }
 
+/// A logger's name or log file name, which may have been unreadable.
+fn logger_name(name: &Option<String>) -> String {
+    name.clone().unwrap_or_else(|| UNREADABLE_NAME.to_string())
+}
+
 fn print_logger_title(logger: &EtwLogger) {
     outln!(
         "Logger {:#04x} @ {} '{}'",
         logger.logger_id,
         ui::addr(logger.address.0),
-        logger.name
+        logger_name(&logger.name)
     );
 }
 

@@ -214,8 +214,10 @@ impl EtwClock {
 pub struct EtwLogger {
     pub address: VirtAddr,
     pub logger_id: u32,
-    pub name: String,
-    pub log_file_name: String,
+    /// `LoggerName` and `LogFileName`, `None` when their buffer is
+    /// unreadable (pool freed or paged out while a session stops).
+    pub name: Option<String>,
+    pub log_file_name: Option<String>,
     pub logger_mode: u32,
     /// Names of the `Flags` bitfields that are set, from the PDB.
     pub flag_names: Vec<String>,
@@ -820,11 +822,12 @@ fn select_logger<'t>(
     text: &str,
     evaluate: impl FnOnce(&str) -> Result<VirtAddr>,
 ) -> Result<&'t EtwLogger> {
-    if let Some(logger) = table
-        .loggers
-        .iter()
-        .find(|logger| logger.name.eq_ignore_ascii_case(text))
-    {
+    if let Some(logger) = table.loggers.iter().find(|logger| {
+        logger
+            .name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(text))
+    }) {
         return Ok(logger);
     }
     let value = evaluate(text).map_err(|e| {
@@ -982,8 +985,8 @@ impl Target {
         Ok(EtwLogger {
             address,
             logger_id: ctx.read_field("LoggerId")?,
-            name: ctx.unicode_string("LoggerName")?,
-            log_file_name: ctx.unicode_string("LogFileName")?,
+            name: ctx.unicode_string("LoggerName").ok(),
+            log_file_name: ctx.unicode_string("LogFileName").ok(),
             logger_mode: ctx.read_field("LoggerMode")?,
             flag_names: flag_names.into_iter().map(|(_, name)| name).collect(),
             flags,
@@ -1386,8 +1389,8 @@ fn logfile_header_buffer(
 ) -> Result<Vec<u8>> {
     let size = logger.buffer_size as usize;
     let mut buffer = vec![0u8; size];
-    let logger_name = utf16z(&logger.name);
-    let file_name = utf16z(&logger.log_file_name);
+    let logger_name = utf16z(logger.name.as_deref().unwrap_or_default());
+    let file_name = utf16z(logger.log_file_name.as_deref().unwrap_or_default());
     let event_size = 0x20 + TRACE_LOGFILE_HEADER64_SIZE + logger_name.len() + file_name.len();
     let event = offsets.size;
     let used = align8(event + event_size);
