@@ -46,7 +46,7 @@ repl_command! {
     names: ["!pci", "pci"],
     usage: "!pci [flags] [bus [device [function [min max]]]]",
     summary: "Read and decode PCI configuration space.",
-    details: "Scans a bus as WinDbg does (bus 0 by default): function 0 of each device, and functions 1-7 when function 0 is multi-function, and prints a line per function: device:function, vendor:device.revision, the command and status registers (Cmd letters: i I/O space, m memory space, b bus master, w memory write and invalidate, p parity error response, s SERR; Sts letters: c capability list, 6 66 MHz, p master data parity error, a signaled target abort, s signaled system error), the class, and the subsystem IDs or a bridge's primary->secondary-subordinate buses. Arguments are hex. Flags: 0x1 verbose, decoding the whole header (class code, header type, command and status bits by name, BARs, expansion ROM, bridge bus numbers, interrupt pin and line, and the capability lists); 0x2 scan buses 0 through bus; 0x4 raw bytes of the 64-byte header; 0x8 the same as dwords; 0x40 capability lists (the PCI capabilities, and a PCI Express function's extended capabilities); 0x100 raw bytes of the 256-byte configuration space. min and max (with a device and function) dump that range, extended space included (0-0xfff). Configuration space is device registers, not RAM, so it is read through the backend: over kd/kdnet the HAL reads it (DbgKdGetBusDataApi; segment 0), and over gdb QEMU's stub reads the function's ECAM page in its physical-memory mode, located by the ACPI MCFG table the HAL keeps. The memory and dump backends cannot read it; !pcitree still works there. Needs a halted target.",
+    details: "Scans a bus as WinDbg does (bus 0 by default): function 0 of each device, and functions 1-7 when function 0 is multi-function, and prints a line per function: device:function, vendor:device.revision, the command and status registers (Cmd letters: i I/O space, m memory space, b bus master, w memory write and invalidate, p parity error response, s SERR; Sts letters: c capability list, 6 66 MHz, p master data parity error, A signaled target abort, s signaled system error), the class, and the subsystem IDs or a bridge's primary->secondary-subordinate buses. Arguments are hex. Flags: 0x1 verbose, decoding the whole header (class code, header type, command and status bits by name, BARs, expansion ROM, bridge bus numbers, interrupt pin and line, and the capability lists); 0x2 scan buses 0 through bus; 0x4 raw bytes of the 64-byte header; 0x8 the same as dwords; 0x40 capability lists (the PCI capabilities, and a PCI Express function's extended capabilities); 0x100 raw bytes of the 256-byte configuration space. min and max (with a device and function) dump that range, extended space included (0-0xfff). Configuration space is device registers, not RAM, so it is read through the backend: over kd/kdnet the HAL reads it (DbgKdGetBusDataApi; segment 0), and over gdb QEMU's stub reads the function's ECAM page in its physical-memory mode, located by the ACPI MCFG table the HAL keeps. The memory and dump backends cannot read it; !pcitree still works there. Needs a halted target.",
     completion: Expression,
 }
 
@@ -492,7 +492,7 @@ const STATUS_LETTERS: [(u16, char); 5] = [
     (0x0010, 'c'),
     (0x0020, '6'),
     (0x0100, 'p'),
-    (0x0800, 'a'),
+    (0x0800, 'A'),
     (0x4000, 's'),
 ];
 

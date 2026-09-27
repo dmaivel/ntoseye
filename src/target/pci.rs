@@ -236,10 +236,10 @@ pub fn parse_pci_request(values: &[u64]) -> Result<PciRequest> {
                     "configuration range {min:#x}-{max:#x} is not inside 0-0xfff"
                 )));
             }
-            let start = if dwords { *min & !3 } else { *min } as usize;
+            // A dword dump covers the dwords holding `min` and `max`.
             Some(PciRawRange {
-                start,
-                end: *max as usize + 1,
+                start: if dwords { *min & !3 } else { *min } as usize,
+                end: if dwords { *max | 3 } else { *max } as usize + 1,
                 dwords,
             })
         }
@@ -1307,8 +1307,9 @@ mod tests {
         );
         assert_eq!(request.query.size, PCI_CONFIG_SIZE);
 
-        // A range into extended space reads it; dwords start aligned.
-        let request = parse_pci_request(&[0x8, 0, 2, 0, 0x102, 0x10f]).unwrap();
+        // A range into extended space reads it; a dword dump covers the
+        // dwords holding both ends.
+        let request = parse_pci_request(&[0x8, 0, 2, 0, 0x102, 0x10d]).unwrap();
         assert_eq!(
             request.raw,
             Some(PciRawRange {
