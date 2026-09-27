@@ -3,7 +3,7 @@
 
 use super::SymbolStore;
 use crate::{
-    layout::{EnumDef, FieldInfo, ParsedType, TypeInfo},
+    layout::{EnumDef, FieldInfo, ParsedType, TypeInfo, aggregate_key},
     types::Dtb,
 };
 use pdb2::{FallibleIterator, PrimitiveKind, TypeData, TypeFinder, TypeIndex};
@@ -247,8 +247,14 @@ impl SymbolStore {
                 }
             }
 
-            TypeData::Class(data) => Ok(ParsedType::Struct(format!("{prefix}{}", data.name))),
-            TypeData::Union(data) => Ok(ParsedType::Union(format!("{prefix}{}", data.name))),
+            TypeData::Class(data) => Ok(ParsedType::Struct(format!(
+                "{prefix}{}",
+                aggregate_key(&data.name.to_string(), class_field_list(&data))
+            ))),
+            TypeData::Union(data) => Ok(ParsedType::Union(format!(
+                "{prefix}{}",
+                aggregate_key(&data.name.to_string(), union_field_list(&data))
+            ))),
             TypeData::Enumeration(data) => Ok(ParsedType::Enum(format!("{prefix}{}", data.name))),
 
             TypeData::Pointer(data) => {
@@ -465,4 +471,18 @@ impl SymbolStore {
         }
         Ok(())
     }
+}
+
+/// A complete class's field list, which keys it when unnamed (see
+/// [`aggregate_key`]); a forward reference has none of its own.
+fn class_field_list(class: &pdb2::ClassType<'_>) -> Option<u32> {
+    class
+        .fields
+        .filter(|_| !class.properties.forward_reference())
+        .map(|fields| fields.0)
+}
+
+/// [`class_field_list`] for a union.
+fn union_field_list(union: &pdb2::UnionType<'_>) -> Option<u32> {
+    (!union.properties.forward_reference()).then_some(union.fields.0)
 }

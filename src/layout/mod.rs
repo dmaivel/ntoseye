@@ -44,6 +44,28 @@ impl ParsedType {
     }
 }
 
+/// The name a class or union is indexed and looked up by. MSVC names every
+/// unnamed type in a PDB alike (`<unnamed-tag>`, with the unique name
+/// `.?AT<unnamed-tag>@@` just as shared), `_IRP.Tail` among hundreds, so
+/// one of those is keyed by its field list's type index as well
+/// (`<unnamed-tag>#1124`); its members reference its definition, which
+/// carries that index. A named type keeps its name.
+pub fn aggregate_key(name: &str, field_list: Option<u32>) -> String {
+    match field_list {
+        Some(index) if name.starts_with("<unnamed-") => format!("{name}#{index:x}"),
+        _ => name.to_string(),
+    }
+}
+
+/// How an aggregate key (see [`aggregate_key`]) is shown: an unnamed type
+/// as the `<unnamed-tag>` the PDB names it.
+pub fn aggregate_display_name(key: &str) -> &str {
+    match key.split_once('#') {
+        Some((name, _)) if name.starts_with("<unnamed-") => name,
+        _ => key,
+    }
+}
+
 impl fmt::Display for ParsedType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn signature(f: &mut fmt::Formatter<'_>, args: &[ParsedType]) -> fmt::Result {
@@ -57,10 +79,10 @@ impl fmt::Display for ParsedType {
             f.write_str(")")
         }
         match self {
-            ParsedType::Primitive(s)
-            | ParsedType::Struct(s)
-            | ParsedType::Union(s)
-            | ParsedType::Enum(s) => write!(f, "{}", s),
+            ParsedType::Primitive(s) | ParsedType::Enum(s) => write!(f, "{}", s),
+            ParsedType::Struct(s) | ParsedType::Union(s) => {
+                write!(f, "{}", aggregate_display_name(s))
+            }
             ParsedType::Pointer(inner) => {
                 if let ParsedType::Function(ret_type, args) = &**inner {
                     write!(f, "{ret_type} (*)")?;

@@ -6,6 +6,7 @@ use super::{
     SymbolIndexDiagnostic, SymbolStore, SymbolVisibility,
 };
 use crate::error::{Error, Result};
+use crate::layout::aggregate_key;
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
 use std::{
     collections::HashMap,
@@ -534,7 +535,8 @@ fn parse_type_stream(
                     if !class.properties.forward_reference()
                         && class.name.to_string() != "<anonymous-tag>" =>
                 {
-                    let name = class.name.to_string().into_owned();
+                    let name =
+                        aggregate_key(&class.name.to_string(), class.fields.map(|fields| fields.0));
                     record_struct(name.clone(), class.size, class.fields);
                     type_strings.push(name);
                 }
@@ -542,7 +544,7 @@ fn parse_type_stream(
                     if !union.properties.forward_reference()
                         && union.name.to_string() != "<anonymous-tag>" =>
                 {
-                    let name = union.name.to_string().into_owned();
+                    let name = aggregate_key(&union.name.to_string(), Some(union.fields.0));
                     record_struct(name.clone(), union.size, Some(union.fields));
                     type_strings.push(name);
                 }
