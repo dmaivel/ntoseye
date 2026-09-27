@@ -254,8 +254,9 @@ impl Expr {
 /// Parse a MASM numeric literal, returning the label of the failure it is not.
 ///
 /// `0x` hexadecimal, `0n` decimal, `0t` octal, and `0y` binary (`0b` stays
-/// accepted as a synonym for `0y` outside the hexadecimal radix, where it is
-/// a hex number, `0b` == `0xb`, as in WinDbg) each override `radix`, as does
+/// accepted as a synonym for `0y` outside the hexadecimal radix and
+/// separated tokens, which read it as a hex number, `0b` == `0xb`, as
+/// WinDbg does) each override `radix`, as does
 /// a trailing `h`; everything else reads in `radix`. Every command that takes a bare
 /// number goes through this, so the prefixes mean the same thing in an
 /// expression and in an option argument like `bp /p`.
@@ -282,7 +283,7 @@ pub fn parse_number_literal_text(
         ("0y", 2, "invalid binary literal"),
         ("0b", 2, "invalid binary literal"),
     ] {
-        if prefix == "0b" && radix.value() == 16 && !separated {
+        if prefix == "0b" && (radix.value() == 16 || separated) {
             continue;
         }
         let Some(digits) = strip_prefix_ignore_case(token, prefix) else {
