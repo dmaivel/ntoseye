@@ -5,6 +5,7 @@
 
 use std::ops::Range;
 
+use super::amd64::{EntryLookup, HandlerDetail, RuntimeFunctionDetail, UnwindDetail};
 use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
 use crate::{
     kd::context_arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
@@ -106,6 +107,10 @@ enum Program {
 
 #[derive(Debug)]
 struct Xdata {
+    /// The first header word: length, version, and the X and E bits.
+    header: u32,
+    /// Where the unwind codes end: the exception handler's RVA follows.
+    end: usize,
     /// Function length in instructions.
     length: u32,
     epilog_in_header: bool,
@@ -152,6 +157,8 @@ fn read_xdata(image: &PeImage, at: usize) -> Option<Xdata> {
     }
     let codes = image.read(next, code_words as usize * 4)?.into_owned();
     Some(Xdata {
+        header,
+        end: next + codes.len(),
         length: header & 0x3ffff,
         epilog_in_header,
         epilog_count,
@@ -671,6 +678,261 @@ fn run_codes(
     Some(resume)
 }
 
+/// ARM64 unwind data, as `.fnent` shows it.
+#[derive(Debug, Clone)]
+pub enum Arm64UnwindDetail {
+    /// Packed into the `.pdata` entry (flag 1 or 2): a canonical prolog,
+    /// listed as the codes it stands for. `frame_size` is in bytes.
+    Packed {
+        flag: u32,
+        reg_f: u32,
+        reg_i: u32,
+        homes_arguments: bool,
+        cr: u32,
+        frame_size: u32,
+        codes: Vec<Arm64CodeDetail>,
+    },
+    /// An `.xdata` record. `scopes` are each epilog's start (bytes from the
+    /// function's) and first code's index.
+    Xdata {
+        version: u32,
+        exception_data: bool,
+        epilog_in_header: bool,
+        epilog_count: u32,
+        code_words: u32,
+        scopes: Vec<(u32, u32)>,
+        codes: Vec<Arm64CodeDetail>,
+        handler: Option<HandlerDetail>,
+        /// Bytes of the record, the handler's RVA included.
+        size: usize,
+    },
+}
+
+/// One ARM64 unwind code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arm64CodeDetail {
+    /// Its first byte's index in the code bytes.
+    pub index: usize,
+    pub bytes: Vec<u8>,
+    /// Its name and the prolog instruction it stands for.
+    pub description: String,
+}
+
+/// The `.pdata` entry covering `address` and its unwind data. `symbol` names
+/// an image address.
+pub fn describe_arm64_function_entry(
+    image: &PeImage,
+    layout: Option<&CodeLayout>,
+    base: u64,
+    address: u64,
+    symbol: impl Fn(u64) -> String,
+) -> EntryLookup {
+    let Some(pdata) = runtime_functions(image, layout, CodeMachine::Arm64) else {
+        return EntryLookup::Leaf;
+    };
+    let Ok(rva) = u32::try_from(address.wrapping_sub(base)) else {
+        return EntryLookup::Leaf;
+    };
+    let function = match lookup_arm64_runtime_function(image, pdata, rva) {
+        Arm64Lookup::Found(function) => function,
+        Arm64Lookup::Missing => return EntryLookup::Leaf,
+        Arm64Lookup::Unreadable => return EntryLookup::Holed,
+    };
+    let Some(unwind) = describe_arm64_unwind(image, function.unwind_data, |rva| {
+        symbol(base + u64::from(rva))
+    }) else {
+        return EntryLookup::Holed;
+    };
+    EntryLookup::Found {
+        entries: vec![RuntimeFunctionDetail {
+            begin: function.begin,
+            end: function.end,
+            unwind_data: function.unwind_data,
+            symbol: symbol(base + u64::from(function.begin)),
+            unwind: Some(UnwindDetail::Arm64(unwind)),
+        }],
+        incomplete: None,
+    }
+}
+
+fn describe_arm64_unwind(
+    image: &PeImage,
+    unwind_data: u32,
+    symbol: impl Fn(u32) -> String,
+) -> Option<Arm64UnwindDetail> {
+    Some(match read_program(image, unwind_data)? {
+        Program::Packed(unwind_data) => {
+            let packed = Packed::new(unwind_data);
+            let codes = packed
+                .codes()
+                .map_or_else(Vec::new, |(prolog, _)| describe_arm64_codes(&prolog, 0));
+            Arm64UnwindDetail::Packed {
+                flag: packed.flag,
+                reg_f: packed.reg_f,
+                reg_i: packed.reg_i,
+                homes_arguments: packed.homes_arguments,
+                cr: packed.cr,
+                frame_size: packed.frame_size * 16,
+                codes,
+            }
+        }
+        Program::Full(xdata) => {
+            let exception_data = xdata.header & (1 << 20) != 0;
+            let handler = if exception_data {
+                let rva = image_u32(&image.read(xdata.end, 4)?, 0)?;
+                Some(HandlerDetail {
+                    rva,
+                    symbol: symbol(rva),
+                    data_rva: u32::try_from(xdata.end + 4).ok()?,
+                })
+            } else {
+                None
+            };
+            let size = xdata.end - unwind_data as usize + if exception_data { 4 } else { 0 };
+            // The last code sequence starts at the prolog's or an epilog's
+            // first code; the bytes after its `end` pad the last word.
+            let last_sequence = if xdata.epilog_in_header {
+                xdata.epilog_count as usize
+            } else {
+                xdata
+                    .scopes
+                    .iter()
+                    .map(|scope| (scope >> 22) as usize)
+                    .max()
+                    .unwrap_or(0)
+            };
+            Arm64UnwindDetail::Xdata {
+                version: (xdata.header >> 18) & 3,
+                exception_data,
+                epilog_in_header: xdata.epilog_in_header,
+                epilog_count: xdata.epilog_count,
+                code_words: (xdata.codes.len() / 4) as u32,
+                scopes: xdata
+                    .scopes
+                    .iter()
+                    .map(|scope| ((scope & 0x3ffff) * 4, scope >> 22))
+                    .collect(),
+                codes: describe_arm64_codes(&xdata.codes, last_sequence),
+                handler,
+                size,
+            }
+        }
+    })
+}
+
+/// Each unwind code in `codes`, framed by its length, up to the `end` of
+/// the sequence starting at or after `last_sequence`: what follows it pads
+/// the code words.
+fn describe_arm64_codes(codes: &[u8], last_sequence: usize) -> Vec<Arm64CodeDetail> {
+    let mut described = Vec::new();
+    let mut at = 0;
+    while let Some(&op) = codes.get(at) {
+        if at > last_sequence
+            && described
+                .last()
+                .is_some_and(|code: &Arm64CodeDetail| matches!(code.bytes[0], 0xe4 | 0xe5))
+        {
+            break;
+        }
+        let len = code_len(op);
+        let Some(bytes) = codes.get(at..at + len) else {
+            described.push(Arm64CodeDetail {
+                index: at,
+                bytes: codes[at..].to_vec(),
+                description: "(truncated)".into(),
+            });
+            break;
+        };
+        described.push(Arm64CodeDetail {
+            index: at,
+            bytes: bytes.to_vec(),
+            description: describe_arm64_code(bytes),
+        });
+        at += len;
+    }
+    described
+}
+
+/// An unwind code's name and the prolog instruction it stands for, with
+/// the operand fields the Windows ARM64 unwind format gives it.
+fn describe_arm64_code(bytes: &[u8]) -> String {
+    let op = bytes[0];
+    let value = bytes.get(1).map_or(u32::from(op), |&second| {
+        u32::from(op) << 8 | u32::from(second)
+    });
+    let small = value & 0x1f;
+    let wide = value & 0x3f;
+    let x = |shift: u32, mask: u32| (value >> shift) & mask;
+    match op {
+        0x00..=0x1f => format!("alloc_s: sub sp, sp, #{:#x}", 16 * small),
+        0x20..=0x3f => format!("save_r19r20_x: stp x19, x20, [sp, #-{:#x}]!", 8 * small),
+        0x40..=0x7f => format!("save_fplr: stp fp, lr, [sp, #{:#x}]", 8 * wide),
+        0x80..=0xbf => format!("save_fplr_x: stp fp, lr, [sp, #-{:#x}]!", 8 * (wide + 1)),
+        0xc0..=0xc7 => format!("alloc_m: sub sp, sp, #{:#x}", 16 * (value & 0x7ff)),
+        0xc8..=0xcb => {
+            let r = 19 + x(6, 0xf);
+            format!("save_regp: stp x{r}, x{}, [sp, #{:#x}]", r + 1, 8 * wide)
+        }
+        0xcc..=0xcf => {
+            let r = 19 + x(6, 0xf);
+            format!(
+                "save_regp_x: stp x{r}, x{}, [sp, #-{:#x}]!",
+                r + 1,
+                8 * (wide + 1)
+            )
+        }
+        0xd0..=0xd3 => format!("save_reg: str x{}, [sp, #{:#x}]", 19 + x(6, 0xf), 8 * wide),
+        0xd4..=0xd5 => format!(
+            "save_reg_x: str x{}, [sp, #-{:#x}]!",
+            19 + x(5, 0xf),
+            8 * (small + 1)
+        ),
+        0xd6..=0xd7 => format!(
+            "save_lrpair: stp x{}, lr, [sp, #{:#x}]",
+            19 + 2 * x(6, 0x7),
+            8 * wide
+        ),
+        0xd8..=0xd9 => {
+            let d = 8 + x(6, 0x7);
+            format!("save_fregp: stp d{d}, d{}, [sp, #{:#x}]", d + 1, 8 * wide)
+        }
+        0xda..=0xdb => {
+            let d = 8 + x(6, 0x7);
+            format!(
+                "save_fregp_x: stp d{d}, d{}, [sp, #-{:#x}]!",
+                d + 1,
+                8 * (wide + 1)
+            )
+        }
+        0xdc..=0xdd => format!("save_freg: str d{}, [sp, #{:#x}]", 8 + x(6, 0x7), 8 * wide),
+        0xde => format!(
+            "save_freg_x: str d{}, [sp, #-{:#x}]!",
+            8 + x(5, 0x7),
+            8 * (small + 1)
+        ),
+        0xe0 => {
+            let size = bytes[1..]
+                .iter()
+                .fold(0u32, |size, &byte| size << 8 | u32::from(byte));
+            format!("alloc_l: sub sp, sp, #{:#x}", 16 * size)
+        }
+        0xe1 => "set_fp: mov fp, sp".into(),
+        0xe2 => format!("add_fp: add fp, sp, #{:#x}", 8 * (value & 0xff)),
+        0xe3 => "nop".into(),
+        0xe4 => "end".into(),
+        0xe5 => "end_c".into(),
+        0xe6 => "save_next".into(),
+        0xe7 => "save_any_reg".into(),
+        0xe8 => "MSFT_OP_TRAP_FRAME".into(),
+        0xe9 => "MSFT_OP_MACHINE_FRAME".into(),
+        0xea => "MSFT_OP_CONTEXT".into(),
+        0xeb => "MSFT_OP_EC_CONTEXT".into(),
+        0xec => "MSFT_OP_CLEAR_UNWOUND_TO_CALL".into(),
+        0xfc => "pac_sign_lr".into(),
+        _ => "reserved".into(),
+    }
+}
+
 /// Resolution of a pc against a module's ARM64 unwind tables.
 enum Resolve {
     /// No module or no `.pdata` entry covers the pc.
@@ -971,6 +1233,8 @@ mod tests {
             0x04, 0x44, 0xe6, 0x26, 0xe4, 0xe3, 0xe3, 0xe3, // epilog
         ];
         let program = Program::Full(Xdata {
+            header: 0,
+            end: 0,
             length: 0x20,
             epilog_in_header: false,
             epilog_count: 1,
@@ -1041,6 +1305,8 @@ mod tests {
     #[test]
     fn a_machine_frame_resumes_at_the_interrupted_pc_and_stack() {
         let program = Program::Full(Xdata {
+            header: 0,
+            end: 0,
             length: 4,
             epilog_in_header: true,
             epilog_count: 0,
@@ -1060,6 +1326,8 @@ mod tests {
     fn the_frame_pointer_at_a_body_undoes_allocations_made_after_it_was_set() {
         // `stp x29, lr, [sp, #0x50]; add x29, sp, #0x50` ends the prolog.
         let program = Program::Full(Xdata {
+            header: 0,
+            end: 0,
             length: 0x10,
             epilog_in_header: true,
             epilog_count: 0,
@@ -1070,6 +1338,8 @@ mod tests {
 
         // `mov x29, sp; sub sp, sp, #0x20`: the body's sp is 0x20 below x29.
         let program = Program::Full(Xdata {
+            header: 0,
+            end: 0,
             length: 0x10,
             epilog_in_header: true,
             epilog_count: 0,
@@ -1134,5 +1404,40 @@ mod tests {
         assert_eq!(range(0x1040), None);
         assert_eq!(range(0x117c), Some((0x1100, 0x1180)));
         assert_eq!(range(0x1180), None);
+    }
+
+    /// Operands come from each code's fields as the format lays them out:
+    /// offsets in 8- or 16-byte units, registers from x19 or d8, and the
+    /// pre-indexed forms one unit further.
+    #[test]
+    fn arm64_codes_describe_their_instructions() {
+        let codes = [
+            0x02, // alloc_s 2
+            0x87, // save_fplr_x 7
+            0xc8, 0x42, // save_regp x20, 2
+            0xd4, 0x21, // save_reg_x x20, 1
+            0xc1, 0x00, // alloc_m 0x100
+            0xe2, 0x04, // add_fp 4
+            0xe0, 0x00, 0x01, 0x00, // alloc_l 0x100
+            0xe4, // end
+        ];
+        let described: Vec<(usize, String)> = describe_arm64_codes(&codes, 0)
+            .into_iter()
+            .map(|code| (code.index, code.description))
+            .collect();
+        let expected = [
+            (0, "alloc_s: sub sp, sp, #0x20"),
+            (1, "save_fplr_x: stp fp, lr, [sp, #-0x40]!"),
+            (2, "save_regp: stp x20, x21, [sp, #0x10]"),
+            (4, "save_reg_x: str x20, [sp, #-0x10]!"),
+            (6, "alloc_m: sub sp, sp, #0x1000"),
+            (8, "add_fp: add fp, sp, #0x20"),
+            (10, "alloc_l: sub sp, sp, #0x1000"),
+            (14, "end"),
+        ];
+        assert_eq!(
+            described,
+            expected.map(|(index, text)| (index, text.to_string()))
+        );
     }
 }

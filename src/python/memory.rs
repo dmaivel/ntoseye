@@ -413,8 +413,8 @@ impl Memory {
         )
     }
 
-    /// The function-table entry and unwind info of the function containing
-    /// `addr`, chained parents included (`.fnent`).
+    /// The function-table entry and unwind info (AMD64 or ARM64) of the
+    /// function containing `addr`, chained parents included (`.fnent`).
     fn function_entry<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
         self.space.require_virtual()?;
         let context = self.space.context();

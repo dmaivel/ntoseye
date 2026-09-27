@@ -9,7 +9,10 @@ use crate::breakpoints::Breakpoint;
 use crate::disasm::DisasmRow;
 use crate::exception_policy::{ExceptionPolicy, ExceptionPolicyFinalAction, exception_alias};
 use crate::session::{CallTrace, CallTraceEnd, CallTraceFrame, RunStatus, VcpuInfo};
-use crate::unwind::{FunctionEntryDetail, StackFrame};
+use crate::unwind::{
+    Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, StackFrame,
+    UnwindDetail,
+};
 
 pub fn vcpu(v: &VcpuInfo) -> View {
     View::Object(vec![
@@ -138,62 +141,154 @@ pub fn disasm_row(row: &DisasmRow) -> View {
 
 /// `.fnent`: the function-table entry covering an address and its unwind
 /// info, then each chained parent's. Addresses are absolute; `*_rva` fields
-/// are the raw image-relative values.
+/// are the raw image-relative values, and `unwind_data` is the entry's raw
+/// word: the unwind info's RVA, or ARM64's packed unwind data, for which
+/// `unwind_info` is null. `unwind.form` is `amd64`, `packed`, or `xdata`.
 pub fn function_entry(detail: &FunctionEntryDetail) -> View {
     let base = detail.image_base;
     let va = |rva: u32| View::Hex(base.wrapping_add(u64::from(rva)));
+    let handler = |handler: &Option<HandlerDetail>| {
+        handler.as_ref().map_or(View::Null, |handler| {
+            View::Object(vec![
+                ("address", va(handler.rva)),
+                ("symbol", View::Str(handler.symbol.clone())),
+                ("data", va(handler.data_rva)),
+            ])
+        })
+    };
+    let arm64_codes = |codes: &[Arm64CodeDetail]| {
+        View::List(
+            codes
+                .iter()
+                .map(|code| {
+                    View::Object(vec![
+                        ("index", View::Num(code.index as u64)),
+                        (
+                            "bytes",
+                            View::List(
+                                code.bytes
+                                    .iter()
+                                    .map(|&byte| View::Hex(byte.into()))
+                                    .collect(),
+                            ),
+                        ),
+                        ("description", View::Str(code.description.clone())),
+                    ])
+                })
+                .collect(),
+        )
+    };
     let entries = detail
         .entries
         .iter()
         .map(|entry| {
-            let unwind = entry.unwind.as_ref().map_or(View::Null, |info| {
-                View::Object(vec![
-                    ("version", View::Num(info.version.into())),
-                    ("flags", View::Num(info.flags.into())),
-                    ("prolog_size", View::Num(info.prolog_size.into())),
-                    ("code_count", View::Num(info.code_count.into())),
-                    (
-                        "frame_register",
-                        View::OptStr(info.frame_register.map(str::to_string)),
-                    ),
-                    ("frame_offset", View::Num(info.frame_offset.into())),
-                    ("size", View::Num(info.size as u64)),
-                    (
-                        "codes",
-                        View::List(
-                            info.codes
-                                .iter()
-                                .map(|code| {
-                                    View::Object(vec![
-                                        ("slot", View::Num(code.slot as u64)),
-                                        ("code_offset", View::Num(code.code_offset.into())),
-                                        ("op", View::Num(code.op.into())),
-                                        ("op_info", View::Num(code.op_info.into())),
-                                        ("description", View::Str(code.description.clone())),
-                                    ])
-                                })
-                                .collect(),
+            let unwind = entry
+                .unwind
+                .as_ref()
+                .map_or(View::Null, |unwind| match unwind {
+                    UnwindDetail::Amd64(info) => View::Object(vec![
+                        ("form", View::Str("amd64".into())),
+                        ("version", View::Num(info.version.into())),
+                        ("flags", View::Num(info.flags.into())),
+                        ("prolog_size", View::Num(info.prolog_size.into())),
+                        ("code_count", View::Num(info.code_count.into())),
+                        (
+                            "frame_register",
+                            View::OptStr(info.frame_register.map(str::to_string)),
                         ),
-                    ),
-                    (
-                        "handler",
-                        info.handler.as_ref().map_or(View::Null, |handler| {
-                            View::Object(vec![
-                                ("address", va(handler.rva)),
-                                ("symbol", View::Str(handler.symbol.clone())),
-                                ("data", va(handler.data_rva)),
-                            ])
-                        }),
-                    ),
-                ])
-            });
+                        ("frame_offset", View::Num(info.frame_offset.into())),
+                        ("size", View::Num(info.size as u64)),
+                        (
+                            "codes",
+                            View::List(
+                                info.codes
+                                    .iter()
+                                    .map(|code| {
+                                        View::Object(vec![
+                                            ("slot", View::Num(code.slot as u64)),
+                                            ("code_offset", View::Num(code.code_offset.into())),
+                                            ("op", View::Num(code.op.into())),
+                                            ("op_info", View::Num(code.op_info.into())),
+                                            ("description", View::Str(code.description.clone())),
+                                        ])
+                                    })
+                                    .collect(),
+                            ),
+                        ),
+                        ("handler", handler(&info.handler)),
+                    ]),
+                    UnwindDetail::Arm64(Arm64UnwindDetail::Packed {
+                        flag,
+                        reg_f,
+                        reg_i,
+                        homes_arguments,
+                        cr,
+                        frame_size,
+                        codes,
+                    }) => View::Object(vec![
+                        ("form", View::Str("packed".into())),
+                        ("flag", View::Num((*flag).into())),
+                        ("reg_f", View::Num((*reg_f).into())),
+                        ("reg_i", View::Num((*reg_i).into())),
+                        ("homes_arguments", View::Bool(*homes_arguments)),
+                        ("cr", View::Num((*cr).into())),
+                        ("frame_size", View::Num((*frame_size).into())),
+                        ("codes", arm64_codes(codes)),
+                    ]),
+                    UnwindDetail::Arm64(Arm64UnwindDetail::Xdata {
+                        version,
+                        exception_data,
+                        epilog_in_header,
+                        epilog_count,
+                        code_words,
+                        scopes,
+                        codes,
+                        handler: xdata_handler,
+                        size,
+                    }) => View::Object(vec![
+                        ("form", View::Str("xdata".into())),
+                        ("version", View::Num((*version).into())),
+                        ("exception_data", View::Bool(*exception_data)),
+                        ("epilog_in_header", View::Bool(*epilog_in_header)),
+                        ("epilog_count", View::Num((*epilog_count).into())),
+                        ("code_words", View::Num((*code_words).into())),
+                        (
+                            "epilog_scopes",
+                            View::List(
+                                scopes
+                                    .iter()
+                                    .map(|(start, first_code)| {
+                                        View::Object(vec![
+                                            ("start_offset", View::Hex((*start).into())),
+                                            ("first_code", View::Num((*first_code).into())),
+                                        ])
+                                    })
+                                    .collect(),
+                            ),
+                        ),
+                        ("size", View::Num(*size as u64)),
+                        ("codes", arm64_codes(codes)),
+                        ("handler", handler(xdata_handler)),
+                    ]),
+                });
+            let packed = matches!(
+                entry.unwind,
+                Some(UnwindDetail::Arm64(Arm64UnwindDetail::Packed { .. }))
+            );
             View::Object(vec![
                 ("begin", va(entry.begin)),
                 ("end", va(entry.end)),
                 ("begin_rva", View::Hex(entry.begin.into())),
                 ("end_rva", View::Hex(entry.end.into())),
-                ("unwind_info", va(entry.unwind_rva)),
-                ("unwind_info_rva", View::Hex(entry.unwind_rva.into())),
+                (
+                    "unwind_info",
+                    if packed {
+                        View::Null
+                    } else {
+                        va(entry.unwind_data)
+                    },
+                ),
+                ("unwind_data", View::Hex(entry.unwind_data.into())),
                 ("symbol", View::Str(entry.symbol.clone())),
                 ("unwind", unwind),
             ])

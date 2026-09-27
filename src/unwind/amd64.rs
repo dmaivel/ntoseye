@@ -694,16 +694,25 @@ pub struct FunctionEntryDetail {
     pub incomplete: Option<String>,
 }
 
-/// One `RUNTIME_FUNCTION` (RVAs) and the `UNWIND_INFO` it points at.
+/// One function-table entry (RVAs) and the unwind data it points at.
 #[derive(Debug, Clone)]
 pub struct RuntimeFunctionDetail {
     pub begin: u32,
     pub end: u32,
-    pub unwind_rva: u32,
+    /// The unwind info's RVA; on ARM64, the packed unwind data itself when
+    /// its low two bits (the flag) are not zero.
+    pub unwind_data: u32,
     /// The symbol at `begin`.
     pub symbol: String,
     /// `None` when the unwind info is unreadable.
-    pub unwind: Option<UnwindInfoDetail>,
+    pub unwind: Option<UnwindDetail>,
+}
+
+/// An entry's unwind data, by architecture.
+#[derive(Debug, Clone)]
+pub enum UnwindDetail {
+    Amd64(UnwindInfoDetail),
+    Arm64(super::arm64::Arm64UnwindDetail),
 }
 
 #[derive(Debug, Clone)]
@@ -800,12 +809,12 @@ pub fn describe_function_entry(
         }
         let unwind = described.map(|(info, parent)| {
             next = parent;
-            info
+            UnwindDetail::Amd64(info)
         });
         entries.push(RuntimeFunctionDetail {
             begin: function.BeginAddress,
             end: function.EndAddress,
-            unwind_rva: function.UnwindData,
+            unwind_data: function.UnwindData,
             symbol: symbol(base_address + u64::from(function.BeginAddress)),
             unwind,
         });

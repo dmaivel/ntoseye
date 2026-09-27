@@ -47,9 +47,11 @@ mod walk;
 mod wow64;
 
 pub use amd64::{
-    FunctionEntryDetail, HandlerDetail, RuntimeFunctionDetail, UnwindCodeDetail, UnwindInfoDetail,
+    FunctionEntryDetail, HandlerDetail, RuntimeFunctionDetail, UnwindCodeDetail, UnwindDetail,
+    UnwindInfoDetail,
 };
 use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
+pub use arm64::{Arm64CodeDetail, Arm64UnwindDetail};
 use arm64::{Arm64Lookup, call_return_address, lookup_arm64_runtime_function};
 use walk::{build_recovered_stacktrace_seeded, ensure_module_symbols};
 
@@ -601,9 +603,10 @@ pub fn function_range(
     None
 }
 
-/// The AMD64 function-table entry covering `address` and its unwind data
-/// (`.fnent`), chained parents included. Paged-out `.pdata` or `.xdata` is
-/// read from the matched on-disk image, as the unwinder does.
+/// The function-table entry covering `address` and its unwind data
+/// (`.fnent`): AMD64's with its chained parents, or ARM64's packed or
+/// `.xdata` form. Paged-out `.pdata` or `.xdata` is read from the matched
+/// on-disk image, as the unwinder does.
 pub fn function_entry(
     debugger: &Target,
     trace: &ThreadTraceContext,
@@ -616,16 +619,21 @@ pub fn function_entry(
         )));
     };
     let (base, module) = (module.info.base_address.0, module.info.short_name.clone());
-    if tracer.code_machine_at(address) != CodeMachine::Amd64 {
+    let machine = tracer.code_machine_at(address);
+    if machine == CodeMachine::X86 {
         return Err(Error::DebugInfo(format!(
-            "{address:#x} is ARM64 code; .fnent decodes AMD64 function tables"
+            "{address:#x} is x86 code, which has no function table"
         )));
     }
     let symbol = |address| format_symbol(debugger, trace, address);
     let lookup = |tracer: &StackTracer<'_>| {
         let (image, layout) = tracer.module_code(address)?;
-        let found =
-            amd64::describe_function_entry(&image, layout.as_deref(), base, address, symbol);
+        let layout = layout.as_deref();
+        let found = if machine == CodeMachine::Arm64 {
+            arm64::describe_arm64_function_entry(&image, layout, base, address, symbol)
+        } else {
+            amd64::describe_function_entry(&image, layout, base, address, symbol)
+        };
         Some((found, image.is_complete()))
     };
     let unreadable = || Error::DebugInfo(format!("the image of {module} is unreadable"));

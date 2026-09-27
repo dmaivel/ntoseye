@@ -12,9 +12,10 @@ use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_ri
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
-    FunctionEntryDetail, RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT,
-    build_stacktrace_with_register_values, build_thread_stacktrace, describe_saved_vtl,
-    halted_in_windows_hypervisor, resolve_thread_trace_context, try_format_symbol,
+    Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, RecoveredStackTrace,
+    StackTrace, UNKNOWN_CONTEXT, UnwindDetail, build_stacktrace_with_register_values,
+    build_thread_stacktrace, describe_saved_vtl, halted_in_windows_hypervisor,
+    resolve_thread_trace_context, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -40,7 +41,7 @@ repl_command! {
     names: [".fnent"],
     usage: ".fnent <address>",
     summary: "Display the function table entry and unwind info of the function containing an address.",
-    details: "Shows the AMD64 RUNTIME_FUNCTION covering the address (begin, end, and unwind info RVAs), then its UNWIND_INFO: version, flags, prolog size, frame register and offset, each unwind code with its operands, and the exception or termination handler; a chained entry is followed by each parent's. Paged-out function tables are read from the on-disk image. ARM64 code is not decoded.",
+    details: "Shows the RUNTIME_FUNCTION covering the address (begin, end, and unwind info RVAs), then its unwind data. AMD64: the UNWIND_INFO's version, flags, prolog size, frame register and offset, each unwind code with its operands, and the exception or termination handler; a chained entry is followed by each parent's. ARM64: packed unwind data's fields (flag, RegF, RegI, H, CR, frame size) with the prolog codes they stand for, or the .xdata record's header, epilog scopes, each unwind code with the instruction it undoes, and the exception handler. Paged-out function tables are read from the on-disk image.",
     completion: Expression,
 }
 
@@ -1019,6 +1020,16 @@ pub fn print_indexed_stacktrace(
 fn print_function_entry(detail: &FunctionEntryDetail) {
     let base = detail.image_base;
     let va = |rva: u32| ui::addr(base.wrapping_add(u64::from(rva)));
+    let print_handler = |handler: &Option<HandlerDetail>| {
+        if let Some(handler) = handler {
+            outln!(
+                "    handler {} {}, data at {}",
+                va(handler.rva),
+                ui::symbol(&handler.symbol),
+                va(handler.data_rva)
+            );
+        }
+    };
     for (index, entry) in detail.entries.iter().enumerate() {
         if index == 0 {
             outln!(
@@ -1037,65 +1048,126 @@ fn print_function_entry(detail: &FunctionEntryDetail) {
             va(entry.begin)
         );
         outln!("  EndAddress        = {:08x}  {}", entry.end, va(entry.end));
-        outln!(
-            "  UnwindInfoAddress = {:08x}  {}",
-            entry.unwind_rva,
-            va(entry.unwind_rva)
-        );
+        if matches!(
+            entry.unwind,
+            Some(UnwindDetail::Arm64(Arm64UnwindDetail::Packed { .. }))
+        ) {
+            outln!("  UnwindData        = {:08x}  (packed)", entry.unwind_data);
+        } else {
+            outln!(
+                "  UnwindInfoAddress = {:08x}  {}",
+                entry.unwind_data,
+                va(entry.unwind_data)
+            );
+        }
         outln!();
-        let Some(info) = &entry.unwind else {
-            outln!("  unwind info unreadable\n");
-            continue;
-        };
-        outln!(
-            "  Unwind info at {}, {} bytes",
-            va(entry.unwind_rva),
-            info.size
-        );
-        let flag_names: Vec<&str> = [(1, "EHANDLER"), (2, "UHANDLER"), (4, "CHAININFO")]
-            .into_iter()
-            .filter(|(bit, _)| info.flags & bit != 0)
-            .map(|(_, name)| name)
-            .collect();
-        outln!(
-            "    version {}, flags {:#x}{}, prolog {:#x}, codes {}",
-            info.version,
-            info.flags,
-            if flag_names.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", flag_names.join(" "))
-            },
-            info.prolog_size,
-            info.code_count
-        );
-        if let Some(register) = info.frame_register {
-            outln!(
-                "    frame register {register}, frame offset {:#x}",
-                info.frame_offset
-            );
-        }
-        for code in &info.codes {
-            outln!(
-                "    {:02}: offs {:#x}, unwind op {}, op info {}  {}",
-                code.slot,
-                code.code_offset,
-                code.op,
-                code.op_info,
-                code.description
-            );
-        }
-        if let Some(handler) = &info.handler {
-            outln!(
-                "    handler {} {}, data at {}",
-                va(handler.rva),
-                ui::symbol(&handler.symbol),
-                va(handler.data_rva)
-            );
+        match &entry.unwind {
+            None => outln!("  unwind info unreadable"),
+            Some(UnwindDetail::Amd64(info)) => {
+                outln!(
+                    "  Unwind info at {}, {} bytes",
+                    va(entry.unwind_data),
+                    info.size
+                );
+                let flag_names: Vec<&str> = [(1, "EHANDLER"), (2, "UHANDLER"), (4, "CHAININFO")]
+                    .into_iter()
+                    .filter(|(bit, _)| info.flags & bit != 0)
+                    .map(|(_, name)| name)
+                    .collect();
+                outln!(
+                    "    version {}, flags {:#x}{}, prolog {:#x}, codes {}",
+                    info.version,
+                    info.flags,
+                    if flag_names.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", flag_names.join(" "))
+                    },
+                    info.prolog_size,
+                    info.code_count
+                );
+                if let Some(register) = info.frame_register {
+                    outln!(
+                        "    frame register {register}, frame offset {:#x}",
+                        info.frame_offset
+                    );
+                }
+                for code in &info.codes {
+                    outln!(
+                        "    {:02}: offs {:#x}, unwind op {}, op info {}  {}",
+                        code.slot,
+                        code.code_offset,
+                        code.op,
+                        code.op_info,
+                        code.description
+                    );
+                }
+                print_handler(&info.handler);
+            }
+            Some(UnwindDetail::Arm64(Arm64UnwindDetail::Packed {
+                flag,
+                reg_f,
+                reg_i,
+                homes_arguments,
+                cr,
+                frame_size,
+                codes,
+            })) => {
+                outln!(
+                    "  Packed unwind data: flag {flag}, RegF {reg_f}, RegI {reg_i}, H {}, CR {cr}, frame size {frame_size:#x}",
+                    u8::from(*homes_arguments)
+                );
+                outln!("    prolog codes:");
+                print_arm64_codes(codes);
+            }
+            Some(UnwindDetail::Arm64(Arm64UnwindDetail::Xdata {
+                version,
+                exception_data,
+                epilog_in_header,
+                epilog_count,
+                code_words,
+                scopes,
+                codes,
+                handler,
+                size,
+            })) => {
+                outln!("  Unwind info at {}, {size} bytes", va(entry.unwind_data));
+                outln!(
+                    "    version {version}, X {}, E {}, epilog {} {epilog_count}, code words {code_words}",
+                    u8::from(*exception_data),
+                    u8::from(*epilog_in_header),
+                    if *epilog_in_header {
+                        "code index"
+                    } else {
+                        "count"
+                    }
+                );
+                for (start, first_code) in scopes {
+                    outln!("    epilog at +{start:#x}, codes from index {first_code:#x}");
+                }
+                print_arm64_codes(codes);
+                print_handler(handler);
+            }
         }
         outln!();
     }
     if let Some(reason) = &detail.incomplete {
         outln!("{}\n", ui::muted(reason));
+    }
+}
+
+fn print_arm64_codes(codes: &[Arm64CodeDetail]) {
+    for code in codes {
+        let bytes: Vec<String> = code
+            .bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        outln!(
+            "    {:02x}: {:<12} {}",
+            code.index,
+            bytes.join(" "),
+            code.description
+        );
     }
 }

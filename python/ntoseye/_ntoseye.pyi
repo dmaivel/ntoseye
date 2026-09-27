@@ -1176,8 +1176,8 @@ class Memory:
         """
     def function_entry(self, /, addr: int) -> Record:
         """
-        The function-table entry and unwind info of the function containing
-        `addr`, chained parents included (`.fnent`).
+        The function-table entry and unwind info (AMD64 or ARM64) of the
+        function containing `addr`, chained parents included (`.fnent`).
         """
     def page_in(self, /, addr: int) -> bool:
         """
