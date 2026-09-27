@@ -14,6 +14,7 @@ use crate::target::sched::{
     UniqStackScope, UnwalkedThread, available, frame_details, frame_symbol_matches, group_stacks,
     select_threads, thread_summary, unavailable, walk_list_nodes,
 };
+use crate::target::workqueue::ExQueueDetail;
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{ThreadStackTrace, ThreadTraceContext, resolve_thread_trace_context};
@@ -24,6 +25,47 @@ const MAX_STACK_FRAMES_LEVEL_2: usize = 64;
 const APC_THREAD_DISPLAY_LIMIT: usize = 16_384;
 
 impl Session {
+    /// [`Target::executive_work_queues`](crate::target::Target::executive_work_queues),
+    /// plus each worker thread's bounded stack when flag 0x4 is set, walked
+    /// as [`Session::inspect_stacks`] walks them.
+    pub fn inspect_work_queues(&mut self, flags: u64) -> Result<ExQueueDetail> {
+        let mut detail = self.target.executive_work_queues(flags)?;
+        if flags & 0x4 == 0 {
+            return Ok(detail);
+        }
+        let active: HashMap<u64, String> = self
+            .active_thread_map()
+            .into_iter()
+            .map(|(ethread, (vcpu, _))| (ethread, vcpu))
+            .collect();
+        for queue in &mut detail.queues {
+            for worker in &mut queue.threads {
+                if self.target.interrupted() {
+                    return Ok(detail);
+                }
+                let DiagnosticValue::Available(summary) = &worker.thread else {
+                    continue;
+                };
+                let ethread = summary.ethread;
+                let stack = self
+                    .target
+                    .thread_info_from_ethread(ethread)
+                    .and_then(|info| {
+                        self.backtrace_thread(
+                            &info,
+                            active.get(&ethread.0).map(String::as_str),
+                            MAX_STACK_FRAMES_LEVEL_1,
+                        )
+                    });
+                worker.stack = Some(match stack {
+                    Ok(trace) => available(frame_details(trace.stacktrace.frames)),
+                    Err(error) => unavailable(error.to_string()),
+                });
+            }
+        }
+        Ok(detail)
+    }
+
     /// Decode running processor metadata and, when requested, append a bounded
     /// short stack for each current thread, walked from its processor's
     /// context (see [`Session::backtrace_thread`]).

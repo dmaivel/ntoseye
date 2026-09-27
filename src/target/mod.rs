@@ -21,6 +21,7 @@ mod symbols;
 pub mod usermode;
 mod variables;
 mod vtl;
+pub mod workqueue;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
 pub use memory::{CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, SearchResult, SearchStop};

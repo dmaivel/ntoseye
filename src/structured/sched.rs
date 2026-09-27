@@ -40,6 +40,10 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let detail = args.state.ctx.inspect_apcs(selector)?;
             Ok(view::sched::apcs(&detail))
         }),
+        "!exqueue" | "exqueue" => args.opt_value(0).and_then(|flags| {
+            let detail = args.state.ctx.inspect_work_queues(flags.unwrap_or(0))?;
+            Ok(view::sched::work_queues(&detail))
+        }),
         "!stacks" | "stacks" => {
             let (level, filter) = match argv.first() {
                 Some(&"0") | None => (0, argv.get(1..).map(|rest| rest.join(" "))),

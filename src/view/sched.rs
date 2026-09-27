@@ -8,6 +8,9 @@ use crate::target::sched::{
     StacksDetail, ThreadSummary, TimerBucketTermination, TimerDetail, TimerListDetail,
     TimerListEntry, UniqStackDetail, UniqStackGroup, UniqStackScope, UnwalkedThread,
 };
+use crate::target::workqueue::{
+    ExQueueDetail, WorkItemDetail, WorkQueueDetail, WorkQueuePriority, WorkerThread,
+};
 use crate::target::{DiagnosticValue, kthread_state_name, wait_reason_name};
 
 fn thread_summary(thread: &ThreadSummary) -> View {
@@ -500,6 +503,98 @@ pub fn findstack(detail: &FindStackDetail) -> View {
     ])
 }
 
+fn work_item(item: &WorkItemDetail) -> View {
+    View::Object(vec![
+        ("address", View::Hex(item.address.0)),
+        ("routine", View::Hex(item.routine.0)),
+        ("routine_symbol", View::OptStr(item.routine_symbol.clone())),
+        ("parameter", View::Hex(item.parameter.0)),
+        (
+            "io_work_item",
+            item.io.as_ref().map_or(View::Null, |io| {
+                View::Object(vec![
+                    ("routine", View::Hex(io.routine.0)),
+                    ("routine_symbol", View::OptStr(io.routine_symbol.clone())),
+                    ("io_object", View::Hex(io.io_object.0)),
+                    ("context", View::Hex(io.context.0)),
+                ])
+            }),
+        ),
+    ])
+}
+
+fn work_queue_priority(priority: &WorkQueuePriority) -> View {
+    View::Object(vec![
+        ("priority", View::Num(priority.priority.into())),
+        (
+            "queue_types",
+            View::List(
+                priority
+                    .queue_types
+                    .iter()
+                    .map(|name| View::Str(name.to_string()))
+                    .collect(),
+            ),
+        ),
+        ("current_count", View::Int(priority.current_count.into())),
+        (
+            "items",
+            View::List(priority.items.iter().map(work_item).collect()),
+        ),
+        ("termination", list_termination(&priority.termination)),
+    ])
+}
+
+fn worker_thread(worker: &WorkerThread) -> View {
+    View::Object(vec![
+        ("kthread", View::Hex(worker.kthread.0)),
+        ("thread", diagnostic(&worker.thread, thread_summary)),
+        (
+            "stack",
+            worker.stack.as_ref().map_or(View::Null, |stack| {
+                diagnostic(stack, |frames| {
+                    View::List(frames.iter().map(frame).collect())
+                })
+            }),
+        ),
+    ])
+}
+
+fn work_queue(queue: &WorkQueueDetail) -> View {
+    View::Object(vec![
+        ("address", View::Hex(queue.address.0)),
+        ("partition", View::Hex(queue.partition.0)),
+        ("node", View::Num(queue.node.into())),
+        ("queue_index", View::Num(queue.queue_index.into())),
+        (
+            "queue_index_name",
+            View::OptStr(queue.queue_index_name.clone()),
+        ),
+        ("items_processed", View::Num(queue.items_processed.into())),
+        (
+            "items_processed_last_pass",
+            View::Num(queue.items_processed_last_pass.into()),
+        ),
+        ("thread_count", View::Int(queue.thread_count.into())),
+        ("min_threads", View::Num(queue.min_threads)),
+        ("max_threads", View::Int(queue.max_threads.into())),
+        ("concurrency", View::Num(queue.concurrency.into())),
+        ("pending", View::Num(queue.pending)),
+        (
+            "priorities",
+            View::List(queue.priorities.iter().map(work_queue_priority).collect()),
+        ),
+        (
+            "threads",
+            View::List(queue.threads.iter().map(worker_thread).collect()),
+        ),
+        (
+            "threads_termination",
+            list_termination(&queue.threads_termination),
+        ),
+    ])
+}
+
 fn uniqstack_group(group: &UniqStackGroup) -> View {
     View::Object(vec![
         ("thread_count", View::Num(group.threads.len() as u64)),
@@ -549,6 +644,31 @@ pub fn uniqstack(detail: &UniqStackDetail) -> View {
         (
             "unwalked",
             View::List(detail.unwalked.iter().map(unwalked_thread).collect()),
+        ),
+    ])
+}
+
+/// Executive worker queues; top-level keys: `flags`, `priority_filter`,
+/// `queues`, `errors`.
+pub fn work_queues(detail: &ExQueueDetail) -> View {
+    View::Object(vec![
+        ("flags", View::Hex(detail.flags)),
+        (
+            "priority_filter",
+            detail
+                .priority_filter
+                .as_ref()
+                .map_or(View::Null, |selected| {
+                    View::List(selected.iter().map(|p| View::Num((*p).into())).collect())
+                }),
+        ),
+        (
+            "queues",
+            View::List(detail.queues.iter().map(work_queue).collect()),
+        ),
+        (
+            "errors",
+            View::List(detail.errors.iter().map(|e| View::Str(e.clone())).collect()),
         ),
     ])
 }

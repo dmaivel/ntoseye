@@ -199,6 +199,36 @@ impl Inspect {
         })
     }
 
+    /// Report the executive worker queues, their pending work items, and
+    /// worker threads (`!exqueue`). `include_stacks` adds each worker's stack;
+    /// `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`) restricts
+    /// the listed items to those types' priorities.
+    #[pyo3(signature = (include_stacks=false, queue_types=None))]
+    fn work_queues<'py>(
+        &self,
+        py: Python<'py>,
+        include_stacks: bool,
+        queue_types: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, Record>> {
+        let mut flags = if include_stacks { 0x4 } else { 0 };
+        for name in queue_types.unwrap_or_default() {
+            flags |= match name.as_str() {
+                "critical" => 0x10,
+                "delayed" => 0x20,
+                "hypercritical" => 0x40,
+                other => {
+                    return Err(raise(format!(
+                        "unknown work queue type '{other}' (critical, delayed, hypercritical)"
+                    )));
+                }
+            };
+        }
+        self.record(py, |session| {
+            let detail = session.inspect_work_queues(flags).map_err(err)?;
+            Ok(view::sched::work_queues(&detail))
+        })
+    }
+
     /// Read bounded kernel timer-table entries and their DPCs (`!timer`).
     fn timers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         self.record(py, |session| {

@@ -6,6 +6,7 @@ use crate::target::sched::{
     StacksDetail, ThreadSummary, TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions,
     UniqStackScope, UnwalkedThread, findstack_level,
 };
+use crate::target::workqueue::{ExQueueDetail, WorkItemDetail};
 use crate::target::{DiagnosticValue, ListTermination, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -35,6 +36,15 @@ repl_command! {
     summary: "List deferred procedure calls queued on each processor.",
     details: "Walks the two _KPRCB DpcData queues with cycle and entry bounds.",
     completion: None,
+}
+
+repl_command! {
+    cmd_exqueue;
+    names: ["!exqueue", "exqueue"],
+    usage: "!exqueue [flags]",
+    summary: "Show the executive worker queues, their pending work items, and worker threads.",
+    details: "Windows 10 and later keep one _EX_WORK_QUEUE per partition, NUMA node, and queue index (_EXQUEUEINDEX: ExPoolUntrusted, IoPoolUntrusted, ...), reached from each _EPARTITION's ExPartition. For each queue: its thread count and limits, concurrency (_KPRIQUEUE.MaximumCount), work items processed, and every pending _WORK_QUEUE_ITEM by priority with its routine symbolized (an IoQueueWorkItem item also by its I/O routine, object, and context), then the threads serving it with their state and wait reason. A priority shows the WORK_QUEUE_TYPEs that map to it (CriticalWorkQueue is 13, DelayedWorkQueue 12, HyperCriticalWorkQueue 15, read from nt!ExpBuiltinPriorities) and its running threads against the concurrency. Flags follow WinDbg: 0x4 adds each worker thread's stack (32 frames); 0x10, 0x20, and 0x40 restrict the listed items to the critical, delayed, and hypercritical priorities; 0x1 and 0x2 are accepted (threads are always listed). Lists are walked with cycle and entry bounds (1,024 items per priority, 4,096 threads per queue).",
+    completion: Expression,
 }
 
 repl_command! {
@@ -355,6 +365,21 @@ impl ReplState<'_> {
         }
         if detail.truncated {
             outln!("DPC output bounded at 4096 entries\n");
+        }
+        Ok(())
+    }
+
+    fn cmd_exqueue(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let flags = match invocation.arg(0) {
+            Some(arg) => match self.eval_or_report(arg) {
+                Some(VirtAddr(flags)) => flags,
+                None => return Ok(()),
+            },
+            None => 0,
+        };
+        match self.ctx.inspect_work_queues(flags) {
+            Ok(detail) => print_work_queues(&detail),
+            Err(error) => error!("{error}"),
         }
         Ok(())
     }
@@ -729,6 +754,117 @@ fn print_apcs(detail: &ApcListDetail) {
         outln!("APC output bounded at 4096 entries\n");
     } else {
         outln!();
+    }
+}
+
+fn print_work_item(item: &WorkItemDetail) {
+    let routine = |address: VirtAddr, symbol: &Option<String>| match symbol {
+        Some(symbol) => format!("{} ({})", ui::symbol(symbol), ui::addr(address.0)),
+        None => ui::addr(address.0).to_string(),
+    };
+    match &item.io {
+        Some(io) => outln!(
+            "    IoWorkItem ({})  Routine {}  IoObject ({})  Context ({})",
+            ui::addr(item.address.0),
+            routine(io.routine, &io.routine_symbol),
+            ui::addr(io.io_object.0),
+            ui::addr(io.context.0)
+        ),
+        None => outln!(
+            "    ExWorkItem ({})  Routine {}  Parameter ({})",
+            ui::addr(item.address.0),
+            routine(item.routine, &item.routine_symbol),
+            ui::addr(item.parameter.0)
+        ),
+    }
+}
+
+fn print_work_queues(detail: &ExQueueDetail) {
+    if let Some(selected) = &detail.priority_filter {
+        let list: Vec<String> = selected.iter().map(u8::to_string).collect();
+        outln!("items listed for priorities {} only", list.join(", "));
+    }
+    for queue in &detail.queues {
+        outln!(
+            "**** Partition {}  NUMA Node {}  {} queue {} ****",
+            ui::addr(queue.partition.0),
+            queue.node,
+            queue
+                .queue_index_name
+                .clone()
+                .unwrap_or_else(|| format!("index {}", queue.queue_index)),
+            ui::addr(queue.address.0)
+        );
+        outln!(
+            "  Threads: {} (min {}, max {})   Concurrency: {}   Pending: {}   Processed: {} ({} at last pass)",
+            queue.thread_count,
+            queue.min_threads,
+            queue.max_threads,
+            queue.concurrency,
+            queue.pending,
+            queue.items_processed,
+            queue.items_processed_last_pass
+        );
+        for priority in &queue.priorities {
+            let types = if priority.queue_types.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", priority.queue_types.join(", "))
+            };
+            outln!(
+                " -> Priority {}{} - ( Concurrency: {}/{} )  {} pending",
+                priority.priority,
+                types,
+                priority.current_count,
+                queue.concurrency,
+                priority.items.len()
+            );
+            for item in &priority.items {
+                print_work_item(item);
+            }
+            if let Some(stop) = termination_message(&priority.termination) {
+                outln!("    list walk stopped: {stop}");
+            }
+        }
+        outln!(" -> Associated Threads ({})", queue.threads.len());
+        for worker in &queue.threads {
+            match &worker.thread {
+                DiagnosticValue::Available(thread) => outln!(
+                    "    THREAD {}  Cid {}.{}  {}  {}  Priority {}",
+                    ui::addr(thread.ethread.0),
+                    thread_pid(thread),
+                    thread_tid(thread),
+                    thread_state(thread),
+                    thread_wait_reason(thread),
+                    thread_priority(thread)
+                ),
+                DiagnosticValue::Unavailable(error) => outln!(
+                    "    KTHREAD {}  <unavailable: {error}>",
+                    ui::addr(worker.kthread.0)
+                ),
+            }
+            match &worker.stack {
+                Some(DiagnosticValue::Available(frames)) => {
+                    for (index, frame) in frames.iter().enumerate() {
+                        outln!("      #{index:<2} {}", frame.symbol);
+                    }
+                }
+                Some(DiagnosticValue::Unavailable(error)) => {
+                    outln!("      <stack unavailable: {error}>")
+                }
+                None => {}
+            }
+        }
+        if let Some(stop) = termination_message(&queue.threads_termination) {
+            outln!("    thread list walk stopped: {stop}");
+        }
+        outln!();
+    }
+    for error in &detail.errors {
+        outln!("<unavailable: {error}>");
+    }
+    if detail.queues.is_empty() {
+        outln!("no executive work queues found\n");
     }
 }
 

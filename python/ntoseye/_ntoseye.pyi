@@ -1041,6 +1041,13 @@ class Inspect:
         """
         Report system memory, pool, PTE, and page-file counters (`!vm`).
         """
+    def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[str] |None = None) -> Record:
+        """
+        Report the executive worker queues, their pending work items, and
+        worker threads (`!exqueue`). `include_stacks` adds each worker's stack;
+        `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`) restricts
+        the listed items to those types' priorities.
+        """
 
 @final
 class Memory:

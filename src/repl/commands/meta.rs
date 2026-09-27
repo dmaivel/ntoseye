@@ -514,6 +514,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!pcr", "cpu"),
     ("!prcb", "cpu"),
     ("!dpcs", "cpu"),
+    ("!exqueue", "cpu"),
     ("!ready", "cpu"),
     ("!running", "cpu"),
     ("!timer", "cpu"),
