@@ -317,8 +317,9 @@ pub mod _ntoseye {
     };
     #[pymodule_export]
     use crate::view::hardware::py::{
-        PciBar, PciBus, PciBuses, PciCapability, PciConfigBytes, PciFunction, PciScan, PciSegment,
-        PciTree, PciTreeDevice,
+        IpiProcessor, IpiRequest, IpiState, PciBar, PciBus, PciBuses, PciCapability,
+        PciConfigBytes, PciFunction, PciScan, PciSegment, PciTree, PciTreeDevice, ProcessorError,
+        QueuedLock, QueuedLockHolder, QueuedLocks,
     };
     #[pymodule_export]
     use crate::view::heap::py::{

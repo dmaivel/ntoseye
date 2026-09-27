@@ -1,10 +1,9 @@
 //! hardware: [`View`] builders for hang diagnosis (`!qlocks`, `!ipi`) and PCI.
 
-use super::shape::{Hex, Omit, ViewValue, shapes};
+use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
 use super::{View, diagnostic};
 use crate::target::hang::{
-    IpiDetail, IpiProcessor, IpiRequest, ProcessorError, QueuedLock, QueuedLockState,
-    QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
+    self, IpiDetail, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
 };
 use crate::target::pci::{
     self, CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PciFunctionConfig, PciRawRange, capabilities,
@@ -12,156 +11,188 @@ use crate::target::pci::{
     status_flags,
 };
 
-fn processor_error(error: &ProcessorError) -> View {
-    View::Object(vec![
-        ("processor", View::Num(error.processor.into())),
-        ("message", View::Str(error.message.clone())),
-    ])
+fn processor_error(error: &hang::ProcessorError) -> ProcessorError {
+    ProcessorError {
+        processor: error.processor,
+        message: error.message.clone(),
+    }
 }
 
-fn queued_lock(lock: &QueuedLock) -> View {
+fn queued_lock(lock: &hang::QueuedLock) -> QueuedLock {
     let holders = lock
         .holders
         .iter()
         .map(|holder| {
-            let (state, order, reason) = match &holder.state {
+            let (state, wait_order, reason) = match &holder.state {
                 QueuedLockState::Owner => ("owner", None, None),
-                QueuedLockState::Waiting(order) => ("waiting", Some(u64::from(*order)), None),
+                QueuedLockState::Waiting(order) => ("waiting", Some(*order), None),
                 QueuedLockState::Corrupt(reason) => ("corrupt", None, Some(reason.clone())),
             };
-            View::Object(vec![
-                ("processor", View::Num(holder.processor.into())),
-                ("state", View::Str(state.into())),
-                ("wait_order", View::OptNum(order)),
-                ("reason", View::OptStr(reason)),
-            ])
+            QueuedLockHolder {
+                processor: holder.processor,
+                state,
+                wait_order,
+                reason,
+            }
         })
         .collect();
-    View::Object(vec![
-        ("number", View::Num(lock.number.into())),
-        ("name", View::Str(lock.name.clone())),
-        ("lock", View::OptHex(lock.lock.map(|lock| lock.0))),
-        ("holders", View::List(holders)),
-    ])
+    QueuedLock {
+        number: lock.number,
+        name: lock.name.clone(),
+        lock: lock.lock.map(|lock| Hex(lock.0)),
+        holders,
+    }
 }
 
-/// Numbered queued spinlocks; top-level keys: `processors`, `locks`, `errors`.
+/// Numbered queued spinlocks and the processors owning or waiting for them.
 pub fn queued_locks(detail: &QueuedLocksDetail) -> View {
-    View::Object(vec![
-        (
-            "processors",
-            View::List(
-                detail
-                    .processors
-                    .iter()
-                    .map(|processor| View::Num((*processor).into()))
-                    .collect(),
-            ),
-        ),
-        (
-            "locks",
-            View::List(detail.locks.iter().map(queued_lock).collect()),
-        ),
-        (
-            "errors",
-            View::List(detail.errors.iter().map(processor_error).collect()),
-        ),
-    ])
+    QueuedLocks {
+        processors: detail.processors.clone(),
+        locks: detail.locks.iter().map(queued_lock).collect(),
+        errors: detail.errors.iter().map(processor_error).collect(),
+    }
+    .into_view()
 }
 
-fn ipi_request(request: &IpiRequest) -> View {
-    View::Object(vec![
-        ("mailbox", View::Hex(request.mailbox.0)),
-        ("sender", View::OptNum(request.sender.map(u64::from))),
-        (
-            "request_summary",
-            diagnostic(&request.request_summary, |summary| View::Hex(*summary)),
-        ),
-        (
-            "request_type",
-            diagnostic(&request.request_summary, |summary| {
-                View::OptStr(ipi_request_type_name(*summary).map(str::to_string))
-            }),
-        ),
-        (
-            "worker_routine",
-            diagnostic(&request.worker_routine, |routine| View::Hex(routine.0)),
-        ),
-        ("worker_symbol", View::OptStr(request.worker_symbol.clone())),
-        (
-            "parameters",
-            diagnostic(&request.parameters, |parameters| {
-                View::List(parameters.iter().map(|value| View::Hex(*value)).collect())
-            }),
-        ),
-    ])
+fn ipi_request(request: &hang::IpiRequest) -> IpiRequest {
+    IpiRequest {
+        mailbox: Hex(request.mailbox.0),
+        sender: request.sender,
+        request_summary: Diag::of(&request.request_summary, |summary| Hex(*summary)),
+        request_type: Diag::of(&request.request_summary, |summary| {
+            ipi_request_type_name(*summary)
+        }),
+        worker_routine: Diag::of(&request.worker_routine, |routine| Hex(routine.0)),
+        worker_symbol: request.worker_symbol.clone(),
+        parameters: Diag::of(&request.parameters, |parameters| {
+            parameters.iter().copied().map(Hex).collect()
+        }),
+    }
 }
 
-fn ipi_processor(processor: &IpiProcessor) -> View {
+fn ipi_processor(processor: &hang::IpiProcessor) -> IpiProcessor {
     let frozen = processor
         .fields
         .iter()
         .find(|field| field.name == "IpiFrozen")
-        .map(|field| {
-            diagnostic(&field.value, |value| {
-                View::Str(ipi_frozen_name(*value).into())
-            })
-        })
-        .unwrap_or(View::Null);
-    View::Object(vec![
-        ("processor", View::Num(processor.processor.into())),
-        ("kprcb", View::Hex(processor.kprcb.0)),
-        (
-            "fields",
-            View::Object(
-                processor
-                    .fields
-                    .iter()
-                    .map(|field| {
-                        (
-                            field.name,
-                            diagnostic(&field.value, |value| View::Hex(*value)),
-                        )
-                    })
-                    .collect(),
-            ),
+        .map(|field| Diag::of(&field.value, |value| ipi_frozen_name(*value)));
+    IpiProcessor {
+        processor: processor.processor,
+        kprcb: Hex(processor.kprcb.0),
+        fields: View::Object(
+            processor
+                .fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.name,
+                        diagnostic(&field.value, |value| View::Hex(*value)),
+                    )
+                })
+                .collect(),
         ),
-        ("frozen_state", frozen),
-        (
-            "pending",
-            diagnostic(&processor.pending, |requests| {
-                View::List(requests.iter().map(ipi_request).collect())
-            }),
-        ),
-        ("pending_truncated", View::Bool(processor.pending_truncated)),
-        (
-            "awaiting",
-            View::List(
-                processor
-                    .awaiting
-                    .iter()
-                    .map(|processor| View::Num((*processor).into()))
-                    .collect(),
-            ),
-        ),
-    ])
+        frozen_state: frozen,
+        pending: Diag::of(&processor.pending, |requests| {
+            requests.iter().map(ipi_request).collect()
+        }),
+        pending_truncated: processor.pending_truncated,
+        awaiting: processor.awaiting.clone(),
+    }
 }
 
-/// Per-processor IPI state; top-level keys: `processors`, `errors`.
+/// Per-processor IPI state.
 pub fn ipi(detail: &IpiDetail) -> View {
-    View::Object(vec![
-        (
-            "processors",
-            View::List(detail.processors.iter().map(ipi_processor).collect()),
-        ),
-        (
-            "errors",
-            View::List(detail.errors.iter().map(processor_error).collect()),
-        ),
-    ])
+    IpiState {
+        processors: detail.processors.iter().map(ipi_processor).collect(),
+        errors: detail.errors.iter().map(processor_error).collect(),
+    }
+    .into_view()
 }
 
 shapes! {
+    /// A processor whose state could not be read.
+    ProcessorError {
+        processor: u16,
+        message: String,
+    }
+
+    /// A processor's entry in a queued spinlock it owns or waits for.
+    QueuedLockHolder {
+        processor: u16,
+        /// `owner`, `waiting`, or `corrupt` (the entry's bits and the queue
+        /// links disagree).
+        state: &'static str,
+        /// 1-based place in the wait queue behind the owner; `None` unless
+        /// waiting.
+        wait_order: Option<u32>,
+        /// How a corrupt entry disagrees; `None` otherwise.
+        reason: Option<String>,
+    }
+
+    /// A numbered queued spinlock and the processors owning or waiting for it.
+    QueuedLock {
+        /// Its `_KSPIN_LOCK_QUEUE_NUMBER`.
+        number: u32,
+        /// The queue number's name without its `LockQueue` prefix and `Lock`
+        /// suffix (`IoCancel`), or `LockQueue[n]` when unknown.
+        name: String,
+        /// The spinlock, from the first processor entry that names it.
+        lock: Option<Hex>,
+        holders: Vec<QueuedLockHolder>,
+    }
+
+    /// Every numbered queued spinlock across the processors (`!qlocks`).
+    QueuedLocks {
+        /// Processors whose `_KPRCB.LockQueue` was read.
+        processors: Vec<u16>,
+        locks: Vec<QueuedLock>,
+        errors: Vec<ProcessorError>,
+    }
+
+    /// A request a sender posted in a processor's IPI mailbox list.
+    IpiRequest {
+        /// The sender's `_REQUEST_MAILBOX` slot in the receiver's array.
+        mailbox: Hex,
+        /// The sending processor; `None` when the mailbox lies outside the
+        /// receiver's array.
+        sender: Option<u16>,
+        request_summary: Diag<Hex>,
+        /// The request summary's type, when it is a known one.
+        request_type: Diag<Option<&'static str>>,
+        worker_routine: Diag<Hex>,
+        /// The worker routine's symbol, when it resolves.
+        worker_symbol: Option<String>,
+        /// `RequestPacket.CurrentPacket`: the worker's three parameters.
+        parameters: Diag<Vec<Hex>>,
+    }
+
+    /// One processor's IPI state.
+    IpiProcessor {
+        processor: u16,
+        kprcb: Hex,
+        /// The `_KPRCB` IPI fields this build has, by name, each a
+        /// `Diagnostic` of its value.
+        fields: View,
+        /// `IpiFrozen` decoded (`Running`, `Frozen`, ...); `None` when the
+        /// build lacks the field.
+        frozen_state: Option<Diag<&'static str>>,
+        /// Requests queued to this processor and not yet taken, in list
+        /// order; unavailable on builds without per-sender mailboxes or when
+        /// the list cannot be read.
+        pending: Diag<Vec<IpiRequest>>,
+        /// Whether the pending walk stopped at its bound or a repeated
+        /// mailbox.
+        pending_truncated: bool,
+        /// Processors whose pending list holds a request from this one.
+        awaiting: Vec<u16>,
+    }
+
+    /// Interprocessor-interrupt state per processor (`!ipi`).
+    IpiState {
+        processors: Vec<IpiProcessor>,
+        errors: Vec<ProcessorError>,
+    }
+
     /// A device pci.sys enumerated (`!pcitree`).
     PciTreeDevice {
         /// pci.sys's device extension.

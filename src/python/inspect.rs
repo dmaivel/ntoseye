@@ -378,7 +378,10 @@ impl Inspect {
 
     /// Report which processors own or wait for each numbered queued spinlock
     /// (`!qlocks`).
-    fn queued_locks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn queued_locks<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, hardware::py::QueuedLocks>> {
         self.record(py, |session| {
             let detail = session.target.queued_locks().map_err(err)?;
             Ok(view::hardware::queued_locks(&detail))
@@ -388,7 +391,11 @@ impl Inspect {
     /// Report interprocessor-interrupt state for every processor or one
     /// (`!ipi`).
     #[pyo3(signature = (processor=None))]
-    fn ipi<'py>(&self, py: Python<'py>, processor: Option<u16>) -> PyResult<Bound<'py, Record>> {
+    fn ipi<'py>(
+        &self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, hardware::py::IpiState>> {
         self.record(py, |session| {
             let detail = session.target.ipi_state(processor).map_err(err)?;
             Ok(view::hardware::ipi(&detail))
