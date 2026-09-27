@@ -316,7 +316,7 @@ struct ObjectDirectoryLayout {
 
 /// `_IRP.Thread` is a direct field on some builds and inside the `Tail.Overlay`
 /// union on others; read whichever is present, else null (never fatal).
-fn irp_thread(irp: &StructRef) -> VirtAddr {
+pub(crate) fn irp_thread(irp: &StructRef) -> VirtAddr {
     if let Ok(t) = irp.read_field::<VirtAddr>("Thread") {
         return t;
     }
@@ -567,8 +567,13 @@ impl Target {
     /// location. Field widths come from the PDB layout; the current stack slot
     /// is `irp + sizeof(_IRP) + (CurrentLocation - 1) * sizeof(_IO_STACK_LOCATION)`.
     pub fn inspect_irp(&self, address: VirtAddr) -> Result<IrpInfo> {
-        let irp = self.kernel_struct("_IRP", address)?;
+        self.irp_info(&self.kernel_struct("_IRP", address)?)
+    }
 
+    /// [`Self::inspect_irp`] of the `_IRP` under the cursor `irp`, which may
+    /// hold a prefetched copy.
+    pub(crate) fn irp_info(&self, irp: &StructRef<'_>) -> Result<IrpInfo> {
+        let address = irp.addr();
         let io_status = irp
             .embedded("IoStatus")
             .and_then(|s| s.read_field::<u32>("Status"))
@@ -592,7 +597,7 @@ impl Target {
             user_event: irp.read_field("UserEvent")?,
             user_buffer: irp.read_field("UserBuffer")?,
             mdl_address: irp.read_field("MdlAddress")?,
-            thread: irp_thread(&irp),
+            thread: irp_thread(irp),
             current_stack,
         })
     }
@@ -612,7 +617,10 @@ impl Target {
         let stack_size = types.layout("_IO_STACK_LOCATION")?.size as u64;
         let addr = irp + irp_size + (current_location as u64 - 1) * stack_size;
 
-        let Ok(ios) = self.kernel_struct("_IO_STACK_LOCATION", addr) else {
+        let Ok(ios) = self
+            .kernel_struct("_IO_STACK_LOCATION", addr)
+            .map(StructRef::prefetch)
+        else {
             return Ok(None);
         };
         Ok(Some(IoStackLocationInfo {

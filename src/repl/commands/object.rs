@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 
 use crate::error::Result;
 use crate::expr::Expr;
-use crate::target::irpfind::{IrpCriteria, IrpFindDetail, IrpPool};
+use crate::target::irpfind::{IrpFindArgs, IrpFindDetail};
 use crate::target::{irp_major_function_name, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -58,7 +58,7 @@ repl_command! {
     names: ["!irpfind", "irpfind"],
     usage: "!irpfind [-v] [pool-type [restart-address [criteria data]]]",
     summary: "Find IRPs by scanning pool for IoAllocateIrp's allocations.",
-    details: "Scans the pool region Windows 10 and later assign in MiState.Vs.SystemVaRegions, walking the page tables so only mapped pages are read, for 16-byte-aligned _POOL_HEADERs tagged Irp; big allocations come from PoolBigPageTable. A block counts when its body is a live _IRP: Type 6 (IoFreeIrp clears it), Size the header plus whole stack locations and at least IoSizeOfIrp(StackCount) (a lookaside IRP keeps its larger packet size), CurrentLocation at most StackCount + 1. Each IRP is listed with its thread (Tail.Overlay.Thread), the current stack location's major and minor function, device, and owning driver, and the process of its MDL; one whose CurrentLocation is past StackCount is listed as complete. -v adds the pool header, I/O status, PendingReturned, UserEvent, UserBuffer, the current location's file object and completion routine, and OriginalFileObject. pool-type is 0 (nonpaged, the default) or 1 (paged); 2 (special) and 4 (session) have no region of their own on these builds and are refused. restart-address resumes a scan from that page. Criteria follow WinDbg: arg (a stack location's Argument1-4), device (a stack location's DeviceObject), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess (MdlAddress->Process), thread (Tail.Overlay.Thread), userevent (UserEvent); use 0 as the restart address to scan the whole pool. The scan stops after 4,096 IRPs or on Ctrl-C and prints where to restart. IRPs a driver builds in its own allocations (IoInitializeIrp) carry that driver's tag and are not found; irps lists IRPs from thread IrpLists instead.",
+    details: "Scans the pool region (the one Windows 10 1803 and later assign in MiState.Vs.SystemVaRegions, else MmNonPagedPoolStart/End or MmPagedPoolStart/End), walking the page tables so only mapped pages are read, for 16-byte-aligned _POOL_HEADERs tagged Irp; big allocations come from PoolBigPageTable. A block counts when its body is a live _IRP: Type 6 (IoFreeIrp clears it), Size the header plus whole stack locations and at least IoSizeOfIrp(StackCount) (a lookaside IRP keeps its larger packet size), CurrentLocation at most StackCount + 1. Each IRP is listed with its thread (Tail.Overlay.Thread), the current stack location's major and minor function, device, and owning driver, and the process of its MDL; one whose CurrentLocation is past StackCount is listed as complete. -v adds the pool header, I/O status, PendingReturned, UserEvent, UserBuffer, the current location's file object and completion routine, and OriginalFileObject. pool-type is 0 (nonpaged, the default) or 1 (paged); 2 (special) and 4 (session) have no region of their own on these builds and are refused. restart-address resumes a scan from that page. Criteria follow WinDbg: arg (a stack location's Argument1-4), device (a stack location's DeviceObject), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess (MdlAddress->Process), thread (Tail.Overlay.Thread), userevent (UserEvent); use 0 as the restart address to scan the whole pool. The scan stops after 4,096 IRPs or on Ctrl-C and prints the command that resumes it, criteria included; when the bound is reached among the big-pool allocations, which are checked last, it says so, and no restart reaches the rest. IRPs a driver builds in its own allocations (IoInitializeIrp) carry that driver's tag and are not found; irps lists IRPs from thread IrpLists instead.",
     completion: Expression,
 }
 
@@ -412,52 +412,21 @@ impl ReplState<'_> {
     }
 
     fn cmd_irpfind(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
-        let verbose = args
-            .first()
-            .is_some_and(|arg| arg.eq_ignore_ascii_case("-v"));
-        if verbose {
-            args.remove(0);
-        }
-        if args.len() == 3 || args.len() > 4 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let mut values = Vec::new();
-        for (index, arg) in args.iter().enumerate() {
-            // The criteria name is a word, not an expression.
-            if index == 2 {
-                continue;
-            }
-            let Some(VirtAddr(value)) = self.eval_or_report(arg) else {
-                return Ok(());
-            };
-            values.push(value);
-        }
-        let pool = match IrpPool::from_windbg(values.first().copied().unwrap_or(0)) {
-            Ok(pool) => pool,
+        let args = match IrpFindArgs::parse(&invocation.argv, |text| {
+            Expr::eval_with_radix(text, &self.ctx.target, self.radix).map(|value| value.0)
+        }) {
+            Ok(args) => args,
             Err(error) => {
                 error!("{error}");
                 return Ok(());
             }
         };
-        let restart = values
-            .get(1)
-            .copied()
-            .filter(|value| *value != 0)
-            .map(VirtAddr);
-        let criteria = match (args.get(2), values.get(2)) {
-            (Some(name), Some(value)) => match IrpCriteria::parse(name, *value) {
-                Ok(criteria) => Some(criteria),
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
-            },
-            _ => None,
-        };
-        match self.ctx.target.irp_find(pool, restart, criteria) {
-            Ok(detail) => self.print_irp_find(&detail, verbose),
+        match self
+            .ctx
+            .target
+            .irp_find(args.pool, args.restart, args.criteria)
+        {
+            Ok(detail) => self.print_irp_find(&detail, args.verbose),
             Err(error) => error!("{error}"),
         }
         Ok(())
@@ -564,15 +533,22 @@ impl ReplState<'_> {
         );
         if let Some(restart) = detail.restart {
             outln!(
-                "{}; resume with !irpfind {} {}",
+                "{}; resume with !irpfind {}{} {}{}",
                 if detail.interrupted {
                     "interrupted"
                 } else {
                     "stopped after 4096 IRPs"
                 },
-                u8::from(detail.pool == IrpPool::Paged),
-                ui::addr(restart.0)
+                if verbose { "-v " } else { "" },
+                detail.pool.windbg(),
+                ui::addr(restart.0),
+                detail
+                    .criteria
+                    .map(|criteria| format!(" {} {:#x}", criteria.name(), criteria.value()))
+                    .unwrap_or_default()
             );
+        } else if detail.truncated {
+            outln!("stopped after 4096 IRPs; big-pool IRPs past the bound are not listed");
         }
         outln!();
     }

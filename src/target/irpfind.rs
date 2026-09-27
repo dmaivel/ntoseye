@@ -1,24 +1,25 @@
 //! `!irpfind`: find IRPs by scanning pool for `IoAllocateIrp`'s allocations
 //! (pool tag `Irp `) and keeping those whose body decodes as a live `_IRP`.
 //!
-//! Windows 10 and later place pool in fixed system-VA regions
-//! (`MiState.Vs.SystemVaRegions`), a few hundred MiB of pages mapped
-//! sparsely across terabytes; the page tables are walked so only mapped
-//! pages are read. Segment-heap blocks still begin with a `_POOL_HEADER`
-//! carrying the tag, so a 16-byte-aligned tag match marks a candidate. Big
+//! The pool's mapped pages are read as [`scan_present_pool_pages`] reads
+//! them (on Windows 10 1803 and later a few hundred MiB mapped sparsely
+//! across a fixed region of terabytes), and every 16-byte-aligned
+//! `_POOL_HEADER` tag is checked (see [`pool_header_tags`]). Big
 //! allocations (a page or more) have no header and come from
 //! `PoolBigPageTable` instead.
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::layout::ParsedType;
+use crate::layout::{StructRef, Types};
 use crate::memory::PAGE_SIZE;
 use crate::target::Target;
-use crate::target::object::IrpInfo;
-use crate::target::pool::{pool_layout, scan_big_pool_entries, tag_string};
+use crate::target::object::{IrpInfo, irp_thread};
+use crate::target::pool::{
+    NONPAGED_POOL, PAGED_POOL, PoolRange, pool_header_tags, pool_layout, pool_range,
+    scan_big_pool_entries, scan_present_pool_pages, tag_string,
+};
 use crate::types::VirtAddr;
 
 /// `IoAllocateIrp`'s tag, as the first three bytes of the little-endian
@@ -123,12 +124,66 @@ impl IrpPool {
         }
     }
 
-    /// The `_MI_ASSIGNED_REGION_TYPES` value naming its system-VA region.
-    fn region(self) -> &'static str {
+    /// Its WinDbg pool-type number.
+    pub fn windbg(self) -> u8 {
         match self {
-            Self::NonPaged => "AssignedRegionNonPagedPool",
-            Self::Paged => "AssignedRegionPagedPool",
+            Self::NonPaged => 0,
+            Self::Paged => 1,
         }
+    }
+
+    fn range(self) -> &'static PoolRange {
+        match self {
+            Self::NonPaged => &NONPAGED_POOL,
+            Self::Paged => &PAGED_POOL,
+        }
+    }
+}
+
+/// A parsed `!irpfind [-v] [pool-type [restart-address [criteria data]]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrpFindArgs {
+    /// `-v`: the text rendering adds each IRP's details.
+    pub verbose: bool,
+    pub pool: IrpPool,
+    /// Where to resume the page scan; a restart address of 0 is none.
+    pub restart: Option<VirtAddr>,
+    pub criteria: Option<IrpCriteria>,
+}
+
+impl IrpFindArgs {
+    pub const USAGE: &str = "!irpfind [-v] [pool-type [restart-address [criteria data]]]";
+
+    /// Parse `argv` as WinDbg does; `eval` evaluates the pool type, restart
+    /// address, and criteria data (the criteria name is a word).
+    pub fn parse<S: AsRef<str>>(argv: &[S], eval: impl Fn(&str) -> Result<u64>) -> Result<Self> {
+        let verbose = argv
+            .first()
+            .is_some_and(|arg| arg.as_ref().eq_ignore_ascii_case("-v"));
+        let rest = &argv[usize::from(verbose)..];
+        if rest.len() == 3 || rest.len() > 4 {
+            return Err(Error::InvalidArgument(format!("usage: {}", Self::USAGE)));
+        }
+        let pool = IrpPool::from_windbg(match rest.first() {
+            Some(text) => eval(text.as_ref())?,
+            None => 0,
+        })?;
+        let restart = match rest.get(1) {
+            Some(text) => Some(VirtAddr(eval(text.as_ref())?)).filter(|at| !at.is_zero()),
+            None => None,
+        };
+        let criteria = match (rest.get(2), rest.get(3)) {
+            (Some(name), Some(value)) => {
+                Some(IrpCriteria::parse(name.as_ref(), eval(value.as_ref())?)?)
+            }
+            _ => None,
+        };
+        Ok(Self {
+            verbose,
+            pool,
+            restart,
+            criteria,
+        })
     }
 }
 
@@ -166,61 +221,24 @@ pub struct IrpFindDetail {
     pub scanned_pages: u64,
     pub big_pool_status: String,
     pub irps: Vec<IrpFindEntry>,
-    /// The result bound or an interrupt ended the scan early; `restart` is
-    /// where to resume.
+    /// The result bound left IRPs out: the page scan stopped at `restart`,
+    /// or big-pool allocations went unchecked (`big_pool_status` counts
+    /// them; no restart reaches those).
     pub truncated: bool,
     pub interrupted: bool,
     pub restart: Option<VirtAddr>,
 }
 
-impl Target {
-    /// Base and end of the `MiState.Vs.SystemVaRegions` entry `region`
-    /// (an `_MI_ASSIGNED_REGION_TYPES` name).
-    fn assigned_system_va_region(&self, region: &str) -> Result<(VirtAddr, VirtAddr)> {
-        let ntos = &self.guest()?.ntoskrnl;
-        let types = ntos.types();
-        let missing = |why: String| {
-            Error::DebugInfo(format!(
-                "cannot locate the {region} system-VA region ({why}); !irpfind scans the fixed \
-                 pool regions of Windows 10 1803 and later"
-            ))
-        };
-        let index = self
-            .symbols
-            .find_enum_across_modules(ntos.dtb(), "_MI_ASSIGNED_REGION_TYPES")
-            .and_then(|values| values.into_iter().find(|(name, _)| name == region))
-            .map(|(_, value)| value as u64)
-            .ok_or_else(|| missing("no _MI_ASSIGNED_REGION_TYPES value".into()))?;
-        let info = types
-            .layout("_MI_SYSTEM_INFORMATION")
-            .map_err(|error| missing(error.to_string()))?;
-        let visible = types
-            .layout("_MI_VISIBLE_STATE")
-            .map_err(|error| missing(error.to_string()))?;
-        let regions = visible
-            .field("SystemVaRegions")
-            .map_err(|error| missing(error.to_string()))?;
-        let count = match &regions.type_data {
-            ParsedType::Array(_, count) => u64::from(*count),
-            _ => return Err(missing("SystemVaRegions is not an array".into())),
-        };
-        if index >= count {
-            return Err(missing(format!("index {index} past {count} regions")));
-        }
-        let entry_size = regions.size / count;
-        let entry = ntos.symbol("MiState")?.address()
-            + info.field_offset("Vs")?
-            + regions.offset as u64
-            + index * entry_size;
-        let assignment = types.struct_at("_MI_SYSTEM_VA_ASSIGNMENT", entry)?;
-        let base = assignment.read_pointer("BaseAddress")?;
-        let size = assignment.read_uint("NumberOfBytes")?;
-        if base.is_zero() || size == 0 {
-            return Err(missing("the region is not assigned".into()));
-        }
-        Ok((base, base + size))
-    }
+/// What `!irpfind` keeps: `sizeof(_IRP)` and `sizeof(_IO_STACK_LOCATION)`
+/// to validate a candidate by, and the criteria it must match.
+#[derive(Clone, Copy)]
+struct IrpQuery {
+    irp_size: u64,
+    stack_size: u64,
+    criteria: Option<IrpCriteria>,
+}
 
+impl Target {
     /// Scan `pool` for IRPs, from `restart` when given, listing those that
     /// match `criteria`. Stops after 4,096 IRPs or when interrupted, at a
     /// page boundary, and says where to restart.
@@ -232,9 +250,12 @@ impl Target {
     ) -> Result<IrpFindDetail> {
         let layout = pool_layout(self)?;
         let types = self.guest()?.ntoskrnl.types();
-        let irp_size = types.layout("_IRP")?.size as u64;
-        let stack_size = types.layout("_IO_STACK_LOCATION")?.size as u64;
-        let (region_start, region_end) = self.assigned_system_va_region(pool.region())?;
+        let query = IrpQuery {
+            irp_size: types.layout("_IRP")?.size as u64,
+            stack_size: types.layout("_IO_STACK_LOCATION")?.size as u64,
+            criteria,
+        };
+        let (region_start, region_end) = pool_range(self, pool.range())?;
         let scan_start = match restart {
             Some(address) if address < region_start || address >= region_end => {
                 return Err(Error::InvalidArgument(format!(
@@ -249,60 +270,28 @@ impl Target {
             None => region_start,
         };
 
-        let header_size = layout.header_size;
-        let tag_offset = layout.pool_tag_offset as usize;
-        let mut candidates: Vec<(VirtAddr, VirtAddr, u32)> = Vec::new();
+        let is_irp_tag = |tag: u32| tag.to_le_bytes()[..3] == IRP_TAG_PREFIX[..];
         let mut irps = Vec::new();
-        let mut scanned_pages = 0u64;
-        let mut restart_at = None;
         let mut drivers = HashMap::new();
-        let mut page = vec![0u8; PAGE_SIZE];
-        let accept = |target: &Target,
-                      irps: &mut Vec<IrpFindEntry>,
-                      drivers: &mut HashMap<VirtAddr, Option<String>>,
-                      header: Option<VirtAddr>,
-                      body: VirtAddr,
-                      tag: u32| {
-            if let Some(entry) =
-                target.irp_find_entry(body, header, tag, irp_size, stack_size, drivers)
-                && criteria.is_none_or(|criteria| target.irp_matches(&entry, criteria, stack_size))
-            {
-                irps.push(entry);
-            }
+        let mut accept = |irps: &mut Vec<IrpFindEntry>, header, body, tag| {
+            irps.extend(self.irp_find_entry(types, body, header, tag, query, &mut drivers));
         };
-        self.kernel_address_space().for_each_present_page(
-            scan_start,
-            region_end,
-            |va, physical, length| {
-                for offset in (0..length).step_by(PAGE_SIZE) {
-                    if self.interrupted() || irps.len() >= MAX_IRPFIND_RESULTS {
-                        restart_at = Some(va + offset);
-                        return ControlFlow::Break(());
-                    }
-                    scanned_pages += 1;
-                    if self.phys.read_bytes(physical + offset, &mut page).is_err() {
-                        continue;
-                    }
-                    let page_va = va + offset;
-                    candidates.clear();
-                    for at in (0..PAGE_SIZE).step_by(header_size as usize) {
-                        let tag = &page[at + tag_offset..at + tag_offset + 4];
-                        if tag[..3] != IRP_TAG_PREFIX[..] {
-                            continue;
-                        }
-                        let header = page_va + at as u64;
-                        let tag = u32::from_le_bytes(tag.try_into().expect("4-byte tag"));
-                        candidates.push((header, header + header_size, tag));
-                    }
-                    for &(header, body, tag) in &candidates {
-                        accept(self, &mut irps, &mut drivers, Some(header), body, tag);
-                    }
+        let scan = scan_present_pool_pages(self, scan_start, region_end, |page_va, page| {
+            for (offset, tag) in pool_header_tags(&layout, page) {
+                if is_irp_tag(tag) {
+                    let header = page_va + offset;
+                    accept(&mut irps, Some(header), header + layout.header_size, tag);
                 }
+            }
+            if irps.len() >= MAX_IRPFIND_RESULTS {
+                ControlFlow::Break(())
+            } else {
                 ControlFlow::Continue(())
-            },
-        )?;
+            }
+        })?;
 
-        let big_pool_status = if restart_at.is_some() {
+        let mut truncated = scan.stopped_at.is_some() && !self.interrupted();
+        let big_pool_status = if scan.stopped_at.is_some() {
             "not searched (the page scan stopped first)".to_string()
         } else {
             let mut big = Vec::new();
@@ -316,7 +305,7 @@ impl Target {
                     if entry.nonpaged == (pool == IrpPool::NonPaged)
                         && entry.va >= scan_start
                         && entry.va < region_end
-                        && entry.tag.to_le_bytes()[..3] == IRP_TAG_PREFIX[..]
+                        && is_irp_tag(entry.tag)
                     {
                         big.push((entry.va, entry.tag));
                     }
@@ -324,45 +313,50 @@ impl Target {
                 },
             )
             .status;
-            for (body, tag) in big {
-                if irps.len() >= MAX_IRPFIND_RESULTS {
-                    break;
-                }
-                accept(self, &mut irps, &mut drivers, None, body, tag);
+            let room = MAX_IRPFIND_RESULTS.saturating_sub(irps.len());
+            let unchecked = big.len().saturating_sub(room);
+            for (body, tag) in big.into_iter().take(room) {
+                accept(&mut irps, None, body, tag);
             }
-            status
+            if unchecked == 0 {
+                status
+            } else {
+                truncated = true;
+                format!(
+                    "{status}; {unchecked} tagged allocation(s) not checked (the {MAX_IRPFIND_RESULTS}-IRP bound)"
+                )
+            }
         };
-        let interrupted = self.interrupted();
         Ok(IrpFindDetail {
             pool,
             region_start,
             region_end,
             scan_start,
             criteria,
-            scanned_pages,
+            scanned_pages: scan.pages,
             big_pool_status,
-            truncated: restart_at.is_some() && !interrupted,
-            interrupted,
-            restart: restart_at,
+            truncated,
+            interrupted: self.interrupted(),
+            restart: scan.stopped_at,
             irps,
         })
     }
 
-    /// Decode the `_IRP` at `body` when it is a live one: `Type` is
-    /// `IO_TYPE_IRP`, `Size` is the header plus whole stack locations and at
-    /// least `IoSizeOfIrp(StackCount)` (an IRP from a lookaside list keeps
-    /// the list's larger packet size), and `CurrentLocation` is at most one
-    /// past `StackCount`.
+    /// The `_IRP` at `body` when it is a live one matching `criteria`:
+    /// `Type` is `IO_TYPE_IRP`, `Size` is the header plus whole stack
+    /// locations and at least `IoSizeOfIrp(StackCount)` (an IRP from a
+    /// lookaside list keeps the list's larger packet size), and
+    /// `CurrentLocation` is at most one past `StackCount`. The criteria the
+    /// `_IRP` itself answers are tested before anything else is read.
     fn irp_find_entry(
         &self,
+        types: Types<'_>,
         body: VirtAddr,
         pool_header: Option<VirtAddr>,
         tag: u32,
-        irp_size: u64,
-        stack_size: u64,
+        query: IrpQuery,
         drivers: &mut HashMap<VirtAddr, Option<String>>,
     ) -> Option<IrpFindEntry> {
-        let types = self.guest().ok()?.ntoskrnl.types();
         let irp = types.struct_at("_IRP", body).ok()?.prefetch();
         let kind: u16 = irp.read_field("Type").ok()?;
         let size: u16 = irp.read_field("Size").ok()?;
@@ -370,18 +364,32 @@ impl Target {
         let current: u8 = irp.read_field("CurrentLocation").ok()?;
         let size = u64::from(size);
         if kind != IO_TYPE_IRP
-            || size < irp_size + u64::from(stack_count) * stack_size
-            || !(size - irp_size).is_multiple_of(stack_size)
+            || size < query.irp_size + u64::from(stack_count) * query.stack_size
+            || !(size - query.irp_size).is_multiple_of(query.stack_size)
             || current > stack_count.saturating_add(1)
         {
             return None;
         }
-        let info = self.inspect_irp(body).ok()?;
         let original_file_object = irp
             .embedded("Tail")
             .and_then(|tail| tail.embedded("Overlay"))
             .and_then(|overlay| overlay.read_pointer("OriginalFileObject"))
             .unwrap_or(VirtAddr(0));
+        let matches = match query.criteria {
+            None | Some(IrpCriteria::MdlProcess(_)) => true,
+            Some(IrpCriteria::Thread(address)) => irp_thread(&irp) == address,
+            Some(IrpCriteria::UserEvent(address)) => {
+                irp.read_pointer("UserEvent").ok() == Some(address)
+            }
+            Some(IrpCriteria::FileObject(address)) => original_file_object == address,
+            Some(criteria @ (IrpCriteria::Arg(_) | IrpCriteria::Device(_))) => {
+                irp_stack_matches(types, body, stack_count, query, criteria)
+            }
+        };
+        if !matches {
+            return None;
+        }
+        let info = self.irp_info(&irp).ok()?;
         let mdl_process = (!info.mdl_address.is_zero())
             .then(|| {
                 types
@@ -390,6 +398,11 @@ impl Target {
                     .ok()
             })
             .flatten();
+        if let Some(IrpCriteria::MdlProcess(address)) = query.criteria
+            && mdl_process != Some(address)
+        {
+            return None;
+        }
         let driver = info.current_stack.as_ref().and_then(|stack| {
             let device = stack.device_object;
             if device.is_zero() {
@@ -419,44 +432,38 @@ impl Target {
             driver,
         })
     }
+}
 
-    fn irp_matches(&self, entry: &IrpFindEntry, criteria: IrpCriteria, stack_size: u64) -> bool {
-        let irp = &entry.irp;
+/// Whether one of the `stack_count` stack locations after the `_IRP` at
+/// `irp` matches the `arg` or `device` criterion.
+fn irp_stack_matches(
+    types: Types<'_>,
+    irp: VirtAddr,
+    stack_count: u8,
+    query: IrpQuery,
+    criteria: IrpCriteria,
+) -> bool {
+    let first = irp + query.irp_size;
+    (0..u64::from(stack_count)).any(|index| {
+        let Ok(stack) = types
+            .struct_at("_IO_STACK_LOCATION", first + index * query.stack_size)
+            .map(StructRef::prefetch)
+        else {
+            return false;
+        };
         match criteria {
-            IrpCriteria::FileObject(address) => entry.original_file_object == address,
-            IrpCriteria::MdlProcess(address) => entry.mdl_process == Some(address),
-            IrpCriteria::Thread(address) => irp.thread == address,
-            IrpCriteria::UserEvent(address) => irp.user_event == address,
-            IrpCriteria::Arg(_) | IrpCriteria::Device(_) => {
-                let Ok(types) = self.guest().map(|guest| guest.ntoskrnl.types()) else {
-                    return false;
-                };
-                let Ok(irp_layout) = types.layout("_IRP") else {
-                    return false;
-                };
-                let first = irp.address + irp_layout.size as u64;
-                (0..u64::from(irp.stack_count)).any(|index| {
-                    let Ok(stack) =
-                        types.struct_at("_IO_STACK_LOCATION", first + index * stack_size)
-                    else {
-                        return false;
-                    };
-                    match criteria {
-                        IrpCriteria::Device(address) => {
-                            stack.read_pointer("DeviceObject").ok() == Some(address)
-                        }
-                        IrpCriteria::Arg(value) => stack
-                            .embedded("Parameters")
-                            .and_then(|parameters| parameters.embedded("Others"))
-                            .is_ok_and(|others| {
-                                ["Argument1", "Argument2", "Argument3", "Argument4"]
-                                    .iter()
-                                    .any(|name| others.read_uint(name).ok() == Some(value))
-                            }),
-                        _ => false,
-                    }
-                })
+            IrpCriteria::Device(address) => {
+                stack.read_pointer("DeviceObject").ok() == Some(address)
             }
+            IrpCriteria::Arg(value) => stack
+                .embedded("Parameters")
+                .and_then(|parameters| parameters.embedded("Others"))
+                .is_ok_and(|others| {
+                    ["Argument1", "Argument2", "Argument3", "Argument4"]
+                        .iter()
+                        .any(|name| others.read_uint(name).ok() == Some(value))
+                }),
+            _ => false,
         }
-    }
+    })
 }
