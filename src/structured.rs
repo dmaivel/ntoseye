@@ -6,6 +6,7 @@
 //! `None` and the caller falls back to the text renderer.
 
 mod cpu;
+mod etw;
 mod execution;
 mod heap;
 mod meta;
@@ -30,7 +31,7 @@ use crate::view::View;
 type Handler = fn(&str, &mut Args<'_, '_>) -> Option<Result<View>>;
 
 /// Every domain's decoder; command names are disjoint across domains.
-const HANDLERS: [Handler; 12] = [
+const HANDLERS: [Handler; 13] = [
     object::command,
     process::command,
     execution::command,
@@ -42,6 +43,7 @@ const HANDLERS: [Handler; 12] = [
     mm::command,
     security::command,
     pnp::command,
+    etw::command,
     meta::command,
 ];
 

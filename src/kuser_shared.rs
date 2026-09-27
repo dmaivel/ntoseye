@@ -36,6 +36,11 @@ impl<'a> KuserSharedData<'a> {
         self.u64_field("SystemTime")
     }
 
+    /// `QueryPerformanceCounter` ticks per second.
+    pub fn qpc_frequency(&self) -> Option<u64> {
+        self.u64_field("QpcFrequency")
+    }
+
     pub fn nt_major_version(&self) -> Option<u64> {
         self.u32_field("NtMajorVersion")
     }

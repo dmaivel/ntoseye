@@ -11,6 +11,7 @@ mod analyze;
 mod breakpoints;
 mod cpu;
 mod diagnostics;
+mod etw;
 mod exceptions;
 mod exec;
 mod foreach;

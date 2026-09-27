@@ -865,6 +865,26 @@ class Inspect:
         """
         Report DPCs queued on each processor (`!dpcs`).
         """
+    def etw_buffers(self, /, logger: int |str) -> Record:
+        """
+        List the trace buffers on an ETW trace session's GlobalList
+        (`!wmitrace.strdump logger`).
+        """
+    def etw_events(self, /, logger: int |str, count: int |None = None) -> Record:
+        """
+        Decode the events still in an ETW trace session's buffers, oldest
+        first (`!wmitrace.logdump`); `count` keeps only the most recent.
+        """
+    def etw_logger(self, /, logger: int |str) -> Record:
+        """
+        Decode one ETW trace session's `_WMI_LOGGER_CONTEXT`
+        (`!wmitrace.logger`). `logger` is its logger id or context address,
+        or its session name.
+        """
+    def etw_loggers(self, /) -> Record:
+        """
+        List the active ETW trace sessions (`!wmitrace.strdump`).
+        """
     def exception_record(self, /, address: int) -> Record:
         """
         Decode an `EXCEPTION_RECORD64` (`.exr`).

@@ -192,6 +192,25 @@ pub enum ExceptionCode {
     Alias(String),
 }
 
+/// An ETW trace session by logger id or `_WMI_LOGGER_CONTEXT` address, or by
+/// session name.
+#[derive(FromPyObject)]
+pub enum LoggerArg {
+    Value(u64),
+    Name(String),
+}
+
+impl LoggerArg {
+    /// The logger as a `!wmitrace` argument: an id or address in hex (read
+    /// the same in every radix), or the name as given.
+    pub fn text(&self) -> String {
+        match self {
+            LoggerArg::Value(value) => format!("{value:#x}"),
+            LoggerArg::Name(name) => name.clone(),
+        }
+    }
+}
+
 /// An executive object by body or header address, or by object namespace
 /// path (`\\Driver\\ACPI`).
 #[derive(FromPyObject)]

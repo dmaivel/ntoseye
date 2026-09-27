@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::args::{ApcTarget, DeviceArg, ObjectArg};
+use super::args::{ApcTarget, DeviceArg, LoggerArg, ObjectArg};
 use super::context::{Context, in_context};
 use super::handle::Owner;
 use super::module::Device;
@@ -10,6 +10,7 @@ use super::record::Record;
 use super::thread::{Frame, Thread, process_for_thread, trap_frame_view};
 use super::{err, raise, view_record, view_records};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
+use crate::expr::NumberRadix;
 use crate::session::Session;
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::sched::{ApcSelector, UniqStackScope};
@@ -596,6 +597,57 @@ impl Inspect {
         self.record(py, |session_state| {
             let detail = session_state.target.sessions(session).map_err(err)?;
             Ok(view::security::sessions(&detail))
+        })
+    }
+
+    /// List the active ETW trace sessions (`!wmitrace.strdump`).
+    fn etw_loggers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let table = session.target.etw_loggers().map_err(err)?;
+            Ok(view::etw::logger_table(&table))
+        })
+    }
+
+    /// Decode one ETW trace session's `_WMI_LOGGER_CONTEXT`
+    /// (`!wmitrace.logger`). `logger` is its logger id or context address,
+    /// or its session name.
+    fn etw_logger<'py>(&self, py: Python<'py>, logger: LoggerArg) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session
+                .target
+                .etw_logger(&logger.text(), NumberRadix::Hexadecimal)
+                .map_err(err)?;
+            Ok(view::etw::logger(&detail))
+        })
+    }
+
+    /// List the trace buffers on an ETW trace session's GlobalList
+    /// (`!wmitrace.strdump logger`).
+    fn etw_buffers<'py>(&self, py: Python<'py>, logger: LoggerArg) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session
+                .target
+                .etw_logger_buffers(&logger.text(), NumberRadix::Hexadecimal)
+                .map_err(err)?;
+            Ok(view::etw::logger_buffers(&detail))
+        })
+    }
+
+    /// Decode the events still in an ETW trace session's buffers, oldest
+    /// first (`!wmitrace.logdump`); `count` keeps only the most recent.
+    #[pyo3(signature = (logger, count=None))]
+    fn etw_events<'py>(
+        &self,
+        py: Python<'py>,
+        logger: LoggerArg,
+        count: Option<usize>,
+    ) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let dump = session
+                .target
+                .etw_log_dump(&logger.text(), NumberRadix::Hexadecimal, count)
+                .map_err(err)?;
+            Ok(view::etw::event_dump(&dump))
         })
     }
 
