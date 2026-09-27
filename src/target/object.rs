@@ -885,7 +885,11 @@ impl Target {
                 if object.is_zero() {
                     Err(Error::DebugInfo("handle entry is free".to_string()))
                 } else {
-                    self.inspect_object_header(*object)
+                    // The entry holds the header; looking it up by its body
+                    // keeps the bytes before it from passing for one.
+                    let types = self.guest()?.ntoskrnl.types();
+                    let body = types.layout("_OBJECT_HEADER")?.field_offset("Body")?;
+                    self.inspect_object_header(*object + body)
                 }
             });
         let type_name = match &header {
