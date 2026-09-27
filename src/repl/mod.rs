@@ -939,11 +939,10 @@ mod tests {
     use crate::repl::{Flow, ReplState};
     use crate::session::tests::{MockBackend, breakpoint_event, session_with_mock};
     use crate::session::{Session, session_over_memory};
-    use crate::types::VirtAddr;
 
     use super::{
         bugcheck_fault_ip, looks_like_kernel_pointer, parse_byte_pattern, plausible_bugcheck_code,
-        repeat_pattern, resolve_length_or_end,
+        repeat_pattern,
     };
 
     #[test]
@@ -997,22 +996,6 @@ mod tests {
     #[test]
     fn parse_byte_pattern_rejects_odd_length_hex() {
         assert_eq!(parse_byte_pattern("488379200074a"), None);
-    }
-
-    #[test]
-    fn resolve_length_or_end_treats_small_value_as_length() {
-        assert_eq!(
-            resolve_length_or_end(VirtAddr(0xfffff8075b471000), VirtAddr(0x20)),
-            Some(0x20)
-        );
-    }
-
-    #[test]
-    fn resolve_length_or_end_treats_large_value_as_end() {
-        assert_eq!(
-            resolve_length_or_end(VirtAddr(0x1000), VirtAddr(0x1020)),
-            Some(0x20)
-        );
     }
 
     #[test]

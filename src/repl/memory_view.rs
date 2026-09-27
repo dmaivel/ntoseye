@@ -23,7 +23,7 @@ pub fn windbg_count_expression(argument: &str) -> Option<&str> {
         return Some(count);
     };
 
-    if first.is_ascii_digit() || matches!(first, '(' | '@' | '$' | '+' | '-') {
+    if first.is_ascii_digit() || matches!(first, '(' | '@' | '$' | '+' | '-' | '?') {
         return Some(count);
     }
     if first.is_ascii_hexdigit() && count.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -32,34 +32,67 @@ pub fn windbg_count_expression(argument: &str) -> Option<&str> {
     None
 }
 
-fn range_length_from_value(
-    start: VirtAddr,
-    value: VirtAddr,
-    explicit_count: bool,
-    item_size: u64,
-) -> Result<usize> {
-    let length = if explicit_count {
-        value.0.checked_mul(item_size).ok_or(Error::InvalidRange)?
-    } else {
-        resolve_length_or_end(start, value).ok_or(Error::InvalidRange)? as u64
-    };
-    usize::try_from(length).map_err(|_| Error::InvalidRange)
+/// The second half of a WinDbg range, after its start address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RangeEnd {
+    /// `L<count>` (or `L?<count>`) elements from the start.
+    Count(u64),
+    /// `L-<count>` elements ending just before the start.
+    CountBack(u64),
+    /// A value: an end address, or a length in bytes when it is below the
+    /// start, which no end address can be.
+    Value(u64),
 }
 
-pub fn eval_range_length(
+/// Where `end` leaves a range starting at `start` of `item_size`-byte
+/// elements. An end address is inclusive: the range runs through the element
+/// containing it.
+fn resolve_range(start: VirtAddr, end: RangeEnd, item_size: u64) -> Result<AddressRange> {
+    let bytes = |count: u64| count.checked_mul(item_size).ok_or(Error::InvalidRange);
+    let (start, length) = match end {
+        RangeEnd::Count(count) => (start, bytes(count)?),
+        RangeEnd::CountBack(count) => {
+            let length = bytes(count)?;
+            (
+                VirtAddr(start.0.checked_sub(length).ok_or(Error::InvalidRange)?),
+                length,
+            )
+        }
+        RangeEnd::Value(length) if length < start.0 => (start, length),
+        RangeEnd::Value(end) => (start, bytes((end - start.0) / item_size + 1)?),
+    };
+    let end = start
+        .0
+        .checked_add(length)
+        .map(VirtAddr)
+        .ok_or(Error::InvalidRange)?;
+    Ok(AddressRange { start, end })
+}
+
+/// Evaluate `argument`, the end of a range starting at `start`: `L<count>`,
+/// `L?<count>`, or `L-<count>` elements of `item_size` bytes, an inclusive
+/// end address, or a byte length.
+pub fn eval_range(
     argument: &str,
     debugger: &Target,
     radix: NumberRadix,
     start: VirtAddr,
     item_size: u64,
-) -> Result<usize> {
-    let (expression, explicit_count) = match windbg_count_expression(argument) {
+) -> Result<AddressRange> {
+    let eval = |text: &str| Expr::eval_with_radix(text, debugger, radix).map(|value| value.0);
+    let end = match windbg_count_expression(argument) {
         Some("") => return Err(Error::InvalidRange),
-        Some(count) => (count, true),
-        None => (argument, false),
+        // WinDbg's `L?` lifts its own range limit; the limits here are fixed.
+        Some(count) => {
+            let count = count.strip_prefix('?').unwrap_or(count);
+            match count.strip_prefix('-') {
+                Some(back) => RangeEnd::CountBack(eval(back)?),
+                None => RangeEnd::Count(eval(count)?),
+            }
+        }
+        None => RangeEnd::Value(eval(argument)?),
     };
-    let value = Expr::eval_with_radix(expression, debugger, radix)?;
-    range_length_from_value(start, value, explicit_count, item_size)
+    resolve_range(start, end, item_size)
 }
 
 impl AddressRange {
@@ -72,24 +105,10 @@ impl AddressRange {
     ) -> Result<Self> {
         let start_arg = invocation.arg(0).ok_or(Error::InvalidRange)?;
         let start = Expr::eval_with_radix(start_arg, debugger, radix)?;
-
-        let length = if let Some(range_arg) = invocation.arg(1) {
-            eval_range_length(range_arg, debugger, radix, start, item_size)?
-        } else {
-            usize::try_from(
-                default_count
-                    .checked_mul(item_size)
-                    .ok_or(Error::InvalidRange)?,
-            )
-            .map_err(|_| Error::InvalidRange)?
-        };
-        let end = start
-            .0
-            .checked_add(u64::try_from(length).map_err(|_| Error::InvalidRange)?)
-            .map(VirtAddr)
-            .ok_or(Error::InvalidRange)?;
-
-        Ok(AddressRange { start, end })
+        match invocation.arg(1) {
+            Some(range_arg) => eval_range(range_arg, debugger, radix, start, item_size),
+            None => resolve_range(start, RangeEnd::Count(default_count), item_size),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -209,16 +228,6 @@ pub fn parse_byte_pattern(pattern: &str) -> Option<Vec<u8>> {
     }
 
     hex::decode(pattern).ok()
-}
-
-pub fn resolve_length_or_end(start: VirtAddr, end_or_length: VirtAddr) -> Option<usize> {
-    let length = if end_or_length.0 < start.0 {
-        end_or_length.0
-    } else {
-        end_or_length.0 - start.0
-    };
-
-    usize::try_from(length).ok()
 }
 
 pub fn repeat_pattern(pattern: &[u8], length: usize) -> Vec<u8> {
@@ -428,7 +437,7 @@ pub fn display_memory_with_validity(
 mod tests {
     use crate::types::VirtAddr;
 
-    use super::{SearchKind, range_length_from_value, windbg_count_expression};
+    use super::{RangeEnd, SearchKind, resolve_range, windbg_count_expression};
 
     /// A value searched as a word or dword is stored little-endian in that
     /// width, and one that does not fit is refused rather than truncated;
@@ -477,17 +486,24 @@ mod tests {
         assert_eq!(windbg_count_expression("LdrpThing"), None);
     }
 
+    /// WinDbg's range forms: `L<count>` counts elements, `L-<count>` counts
+    /// them back from the start, and an end address is inclusive, through
+    /// the element containing it (`0x1000 0x1007` is 8 bytes, 2 dwords, as
+    /// is `0x1000 0x1004`). A value below the start is a byte length.
     #[test]
-    fn explicit_count_scales_by_the_commands_element_size() {
-        let start = VirtAddr(0xffff_f800_0000_1000);
-        assert_eq!(
-            range_length_from_value(start, VirtAddr(0x10), true, 4).unwrap(),
-            0x40
-        );
-        assert_eq!(
-            range_length_from_value(start, start + 0x40u64, false, 4).unwrap(),
-            0x40
-        );
-        assert!(range_length_from_value(start, VirtAddr(u64::MAX), true, 8).is_err());
+    fn ranges_follow_windbg_forms() {
+        let span = |end: RangeEnd, size: u64| {
+            let range = resolve_range(VirtAddr(0x1000), end, size).unwrap();
+            (range.start.0, range.len())
+        };
+        assert_eq!(span(RangeEnd::Count(0x10), 4), (0x1000, 0x40));
+        assert_eq!(span(RangeEnd::CountBack(0x20), 1), (0xfe0, 0x20));
+        assert_eq!(span(RangeEnd::Value(0x1007), 1), (0x1000, 8));
+        assert_eq!(span(RangeEnd::Value(0x1007), 4), (0x1000, 8));
+        assert_eq!(span(RangeEnd::Value(0x1004), 4), (0x1000, 8));
+        assert_eq!(span(RangeEnd::Value(0x1000), 8), (0x1000, 8));
+        assert_eq!(span(RangeEnd::Value(0x20), 1), (0x1000, 0x20));
+        assert!(resolve_range(VirtAddr(0x1000), RangeEnd::Count(u64::MAX), 8).is_err());
+        assert!(resolve_range(VirtAddr(0x10), RangeEnd::CountBack(0x20), 1).is_err());
     }
 }

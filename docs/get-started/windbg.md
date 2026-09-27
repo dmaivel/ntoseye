@@ -7,6 +7,7 @@
 - **Command names and syntax.** {command}`bp`, {command}`kn`, {command}`dt`, {command}`!process`, {command}`lm`, {command}`u`, the `d*` and `e*` families, {command}`.reload`, {command}`.sympath`, {command}`!analyze`, and so on. The [command reference](../reference/commands/index.md) lists every one.
 - **MASM expressions** with WinDbg's hexadecimal default radix: `poi()`, `by`/`wo`/`dwo`/`qwo`, `@rax`, `$ip`/`$proc`/`$thread` and the other pseudo-registers, `@$name`, separated addresses like ``fffff803`1a2b3c4d``. See [Expressions](../reference/expressions.md).
 - **The breakpoint grammar:** pass counts, `if <expr>` conditions, `do "<commands>"` actions with a trailing `gc`, `/1`, `/p`, `/t`. See [Breakpoints](../using/breakpoints.md).
+- **Address ranges:** `L<count>`, `L?<count>`, `L-<count>`, and an end address, which is included (`db nt nt+7` shows 8 bytes).
 - **Symbols.** Microsoft's symbol server is the default, and the cache under `~/.ntoseye/symbols` uses the `symstore` layout that WinDbg reads too.
 - **{command}`.kdfiles`** reads WinDbg's driver replacement map files. See [Driver replacement](../using/kdfiles.md).
 
@@ -31,6 +32,7 @@
 ## Only in ntoseye
 
 - Listings: {command}`ps`, {command}`threads`, {command}`drivers`, {command}`ssdt`, {command}`callbacks`, {command}`irps`.
+- A range's second value below its start is a length in bytes: `db nt 20`.
 - Target and session: {command}`status`, {command}`capabilities`, {command}`vcpu`, convenience variables with {command}`set`, {command}`unset`, and {command}`vars`.
 - Symbols: {command}`.fetchimage` downloads a module's image, {command}`ld` forces one module's symbol loading.
 - VBS: {command}`.vtl`, {command}`!trustlets`, and {command}`.vtlcxr` inspect the secure kernel and the Windows hypervisor. See [VBS and the Windows hypervisor](../platforms/vbs.md).

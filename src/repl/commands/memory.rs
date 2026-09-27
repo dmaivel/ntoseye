@@ -159,7 +159,7 @@ repl_command! {
     names: ["u", "disasm"],
     usage: "u <address> [L<count>|length|end]",
     summary: "Disassemble memory at a symbol or address.",
-    details: "`L<count>` counts instructions (default 8); an end address bounds the range in bytes.",
+    details: "`L<count>` counts instructions (default 8); with an end address, every instruction starting at or before it is shown.",
     completion: Expression,
 }
 
@@ -282,7 +282,7 @@ repl_command! {
     names: ["s"],
     usage: "s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>",
     summary: "Search memory for bytes, values, or a string.",
-    details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` counts elements of the searched type; `L?` is accepted for WinDbg's large-range form. Unreadable pages are skipped, at most 1 GiB is scanned, and the search stops after 4096 matches or at Ctrl+C.",
+    details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` counts elements of the searched type. Unreadable pages are skipped, at most 1 GiB is scanned, and the search stops after 4096 matches or at Ctrl+C.",
     completion: [None, Expression, Expression],
 }
 
@@ -891,13 +891,14 @@ impl ReplState<'_> {
     }
 
     fn cmd_disasm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        // WinDbg: `L<n>` counts instructions, an end address bounds bytes.
+        // WinDbg: `L<n>` counts instructions; an end address lists every
+        // instruction starting at or before it.
         const DEFAULT_INSTRUCTIONS: u64 = 8;
         // The window is sized for the machine at the start expression's
         // address, which is only known once it is evaluated: size it for the
         // longest instruction set, and decode what the address holds.
         let max_instruction_bytes = CodeMachine::Amd64.max_instruction_bytes() as u64;
-        let (start_addr, byte_len, instruction_limit) =
+        let (start_addr, byte_len, instruction_limit, last_start) =
             match invocation.arg(1).and_then(windbg_count_expression) {
                 Some(count_expr) => {
                     let start_arg = require_arg!(invocation, 0, "u");
@@ -915,7 +916,12 @@ impl ReplState<'_> {
                         }
                         None => return Ok(()),
                     };
-                    (start, count * max_instruction_bytes, Some(count as usize))
+                    (
+                        start,
+                        count * max_instruction_bytes,
+                        Some(count as usize),
+                        None,
+                    )
                 }
                 None => match invocation.arg(1) {
                     Some(_) => {
@@ -932,7 +938,13 @@ impl ReplState<'_> {
                                 return Ok(());
                             }
                         };
-                        (range.start, range.len() as u64, None)
+                        // The last instruction may run past the end.
+                        (
+                            range.start,
+                            range.len() as u64 + max_instruction_bytes - 1,
+                            None,
+                            Some(range.end.0),
+                        )
                     }
                     None => {
                         let start_arg = require_arg!(invocation, 0, "u");
@@ -941,6 +953,7 @@ impl ReplState<'_> {
                                 a,
                                 DEFAULT_INSTRUCTIONS * max_instruction_bytes,
                                 Some(DEFAULT_INSTRUCTIONS as usize),
+                                None,
                             ),
                             None => return Ok(()),
                         }
@@ -968,7 +981,10 @@ impl ReplState<'_> {
         let trace = resolve_thread_trace_context(&self.ctx.target, dtb);
         let resolve = |target: u64| format_symbol(&self.ctx.target, &trace, target);
         let machine = self.ctx.target.code_machine(start_addr);
-        let rows = decode_code(&bytes, start_addr.0, instruction_limit, machine, resolve);
+        let mut rows = decode_code(&bytes, start_addr.0, instruction_limit, machine, resolve);
+        if let Some(end) = last_start {
+            rows.retain(|row| row.ip < end);
+        }
         render_rows(&rows, |_| None);
         outln!();
 
@@ -981,20 +997,24 @@ impl ReplState<'_> {
             return Ok(());
         };
         let count = match invocation.arg(1) {
-            Some(arg) => match eval_range_length(arg, &self.ctx.target, self.radix, address, 1) {
-                Ok(count) if count > 0 && count <= MAX_DISASSEMBLY_INSTRUCTIONS => count,
-                Ok(_) => {
-                    error!(
-                        "instruction count must be 1..{}: {}",
-                        MAX_DISASSEMBLY_INSTRUCTIONS, arg
-                    );
-                    return Ok(());
+            Some(arg) => {
+                let count = windbg_count_expression(arg)
+                    .map(|count| count.strip_prefix('?').unwrap_or(count))
+                    .unwrap_or(arg);
+                match self.eval_or_report(count) {
+                    Some(count) if (1..=MAX_DISASSEMBLY_INSTRUCTIONS as u64).contains(&count.0) => {
+                        count.0 as usize
+                    }
+                    Some(_) => {
+                        error!(
+                            "instruction count must be 1..{}: {}",
+                            MAX_DISASSEMBLY_INSTRUCTIONS, arg
+                        );
+                        return Ok(());
+                    }
+                    None => return Ok(()),
                 }
-                Err(e) => {
-                    error!("invalid instruction count '{}': {}", arg, e);
-                    return Ok(());
-                }
-            },
+            }
             None => 8,
         };
 
@@ -1139,13 +1159,7 @@ impl ReplState<'_> {
         let range_arg = invocation
             .arg(address_index + 1)
             .ok_or(Error::InvalidRange)?;
-        let length = eval_range_length(range_arg, &self.ctx.target, self.radix, start, item_size)?;
-        let end = start
-            .0
-            .checked_add(u64::try_from(length).map_err(|_| Error::InvalidRange)?)
-            .map(VirtAddr)
-            .ok_or(Error::InvalidRange)?;
-        Ok(AddressRange { start, end })
+        eval_range(range_arg, &self.ctx.target, self.radix, start, item_size)
     }
 
     fn cmd_writemem(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -1315,16 +1329,17 @@ impl ReplState<'_> {
             outln!("{}\n", command_help("f"));
             return Ok(());
         }
-        let Some(address) = self.eval_or_report(address_arg) else {
+        let Some(start) = self.eval_or_report(address_arg) else {
             return Ok(());
         };
-        let length = match eval_range_length(range_arg, &self.ctx.target, self.radix, address, 1) {
-            Ok(length) => length,
+        let range = match eval_range(range_arg, &self.ctx.target, self.radix, start, 1) {
+            Ok(range) => range,
             Err(e) => {
-                error!("invalid length or end '{}': {}", range_arg, e);
+                error!("invalid range '{}': {}", range_arg, e);
                 return Ok(());
             }
         };
+        let (address, length) = (range.start, range.len());
         let pattern = match SearchKind::Bytes.pattern(pattern_args, |value| {
             Expr::eval_with_radix(value, &self.ctx.target, self.radix).map(|value| value.0)
         }) {
@@ -1373,27 +1388,20 @@ impl ReplState<'_> {
         let Some(start_addr) = self.eval_or_report(start_arg) else {
             return Ok(());
         };
-        // WinDbg's `L?` lifts its own range limit; the one here is fixed.
-        let range_arg = match range_arg
-            .strip_prefix("L?")
-            .or(range_arg.strip_prefix("l?"))
-        {
-            Some(count) => format!("L{count}"),
-            None => range_arg.to_string(),
-        };
-        let length = match eval_range_length(
-            &range_arg,
+        let range = match eval_range(
+            range_arg,
             &self.ctx.target,
             self.radix,
             start_addr,
             kind.element_size(),
         ) {
-            Ok(length) => length,
+            Ok(range) => range,
             Err(error) => {
                 error!("invalid range '{range_arg}': {error}");
                 return Ok(());
             }
         };
+        let (start_addr, length) = (range.start, range.len());
         let pattern = match kind.pattern(pattern_args, |value| {
             Expr::eval_with_radix(value, &self.ctx.target, self.radix).map(|value| value.0)
         }) {
