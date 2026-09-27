@@ -1236,6 +1236,69 @@ fn step_loops_stop_at_a_diverted_step() {
     assert_eq!(trace.instructions, 0);
 }
 
+/// Resuming from a hit, the vCPU run past the site alone can take an
+/// interrupt on it first, leaving the processor's return frame on its stack.
+/// When the handler returns there, the re-armed site traps that same
+/// execution again: that is absorbed once, and the next hit from the same
+/// stack is a new one.
+#[test]
+fn a_hit_interrupted_on_its_site_is_reported_once() {
+    // mov rax, rbx at the site; a stack below it.
+    let mut memory = [0x90u8; 0x100];
+    memory[..3].copy_from_slice(&[0x48, 0x89, 0xd8]);
+    let rsp = 0x1088;
+    // The interrupt frame is pushed below the 16-byte-aligned RSP: RIP,
+    // CS, RFLAGS, RSP, SS.
+    for (index, value) in [0x1000, 0x10, 0x202, rsp, 0x18].into_iter().enumerate() {
+        let at = 0x80 - 40 + index * 8;
+        memory[at..at + 8].copy_from_slice(&u64::to_le_bytes(value));
+    }
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        halts_only_on_interrupt: true,
+        landings: VecDeque::from([0x1030]),
+        lands_at: Some(0x1003),
+        released_to: Some(0x1030),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    backend.set("rsp", rsp);
+    let mut session = stepping_session(&memory, backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session.current_thread = "p01.01".into();
+
+    // The resume diverts: the vCPU stays in the handler.
+    session.resume().unwrap();
+    session.backend.interrupt().unwrap();
+    let returned = |session: &mut Session| {
+        let backend = session.backend.as_mut();
+        let mut regs = backend.read_registers().unwrap();
+        session
+            .register_map
+            .write_u64("rip", &mut regs, 0x1000)
+            .unwrap();
+        session
+            .register_map
+            .write_u64("rsp", &mut regs, rsp)
+            .unwrap();
+        backend.write_registers(&regs).unwrap();
+        session.resolve_breakpoint_stop(0x1000, 0).unwrap()
+    };
+    assert!(matches!(
+        returned(&mut session),
+        BreakpointStopAction::Resumed
+    ));
+    session.backend.interrupt().unwrap();
+    assert!(matches!(
+        returned(&mut session),
+        BreakpointStopAction::Hit { .. }
+    ));
+}
+
 /// Secure-kernel code is never patched: a step there marks its successors
 /// with debug-register sites in slots no breakpoint holds.
 #[test]

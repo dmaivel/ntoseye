@@ -32,6 +32,10 @@ impl Session {
     /// Shared by [`Self::continue_until_break`] and the REPL's continue loop so
     /// they can't drift on which int3 hits surface and which are silently resumed.
     pub fn resolve_breakpoint_stop(&mut self, rip: u64, cr3: u64) -> Result<BreakpointStopAction> {
+        if self.returned_to_interrupted_hit(rip)? {
+            self.step_over_and_resume()?;
+            return Ok(BreakpointStopAction::Resumed);
+        }
         match self
             .breakpoints
             .check_breakpoint_hit(rip, cr3, self.target.arch())
@@ -120,6 +124,18 @@ impl Session {
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)
+    }
+
+    /// Whether a stop at `rip` is an execution returning to the breakpoint
+    /// site it was interrupted on while running past the hit it reported
+    /// there: the same execution, not a new hit.
+    fn returned_to_interrupted_hit(&mut self, rip: u64) -> Result<bool> {
+        if !self.breakpoints.has_interrupted_hits() {
+            return Ok(false);
+        }
+        let regs = self.backend.read_registers()?;
+        let rsp = self.register_map.read_u64("rsp", &regs)?;
+        Ok(self.breakpoints.take_interrupted_hit(rip, rsp))
     }
 }
 

@@ -140,6 +140,10 @@ pub struct BreakpointManager {
     breakpoints: HashMap<u32, Breakpoint>,
     one_shot_hits: HashSet<u32>,
     next_id: u32,
+    /// Executions interrupted on a breakpoint's site while running past it,
+    /// as `(id, stack pointer)`: returning to the site, they hit it again,
+    /// and that hit is the one already reported.
+    interrupted_hits: Vec<(u32, u64)>,
 }
 
 #[derive(Debug)]

@@ -21,6 +21,7 @@ impl BreakpointManager {
             breakpoints: HashMap::new(),
             one_shot_hits: HashSet::new(),
             next_id: 0,
+            interrupted_hits: Vec::new(),
         }
     }
 
@@ -263,6 +264,7 @@ impl BreakpointManager {
         }
         self.breakpoints.remove(&id);
         self.one_shot_hits.remove(&id);
+        self.forget_interrupted_hits(id);
 
         if self.breakpoints.is_empty() {
             self.next_id = 0;
@@ -300,6 +302,7 @@ impl BreakpointManager {
         let bp = self.breakpoints.remove(&id).ok_or(Error::BPNotFound(id))?;
         Self::forget_backend_site(client, &bp);
         self.one_shot_hits.remove(&id);
+        self.forget_interrupted_hits(id);
         if self.breakpoints.is_empty() {
             self.next_id = 0;
         }
@@ -326,6 +329,11 @@ impl BreakpointManager {
         self.breakpoints.insert(new_id, bp);
         if self.one_shot_hits.remove(&id) {
             self.one_shot_hits.insert(new_id);
+        }
+        for (hit, _) in &mut self.interrupted_hits {
+            if *hit == id {
+                *hit = new_id;
+            }
         }
         self.next_id = self.next_id.max(new_id.saturating_add(1));
         Ok(())
@@ -375,7 +383,23 @@ impl BreakpointManager {
         Ok(())
     }
 
+    /// Disable a breakpoint. An execution interrupted on its site then runs
+    /// through it unreported, so it is forgotten.
     pub fn disable(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        id: u32,
+    ) -> Result<()> {
+        self.lift(client, debugger, id)?;
+        self.forget_interrupted_hits(id);
+        Ok(())
+    }
+
+    /// Disable a breakpoint to run the instruction under it, re-enabled
+    /// straight after: other executions stay held meanwhile, so an
+    /// interrupted one still returns to an armed site.
+    pub fn lift(
         &mut self,
         client: &mut dyn DebugBackend,
         debugger: &Target,
@@ -455,6 +479,48 @@ impl BreakpointManager {
         self.breakpoints
             .values()
             .any(|bp| bp.enabled && bp.resolved)
+    }
+
+    /// Remember that the execution with stack pointer `rsp` was interrupted
+    /// on breakpoint `id`'s site, before its instruction, while running past
+    /// the hit reported there. Bounded: the oldest are dropped first.
+    pub fn note_interrupted_hit(&mut self, id: u32, rsp: u64) {
+        const KEPT: usize = 64;
+        if !self.breakpoints.contains_key(&id) || self.interrupted_hits.contains(&(id, rsp)) {
+            return;
+        }
+        if self.interrupted_hits.len() == KEPT {
+            self.interrupted_hits.remove(0);
+        }
+        self.interrupted_hits.push((id, rsp));
+    }
+
+    /// Whether a hit at `rip` with stack pointer `rsp` is an interrupted
+    /// execution returning to the site it was reported at; it is forgotten
+    /// then. Kernel stacks are unique to their thread, and that thread
+    /// cannot get past the armed site without hitting it, so its next hit
+    /// there is always the return.
+    pub fn take_interrupted_hit(&mut self, rip: u64, rsp: u64) -> bool {
+        let Some(id) = self.breakpoint_id_at_address(rip) else {
+            return false;
+        };
+        let Some(index) = self
+            .interrupted_hits
+            .iter()
+            .position(|hit| *hit == (id, rsp))
+        else {
+            return false;
+        };
+        self.interrupted_hits.remove(index);
+        true
+    }
+
+    fn forget_interrupted_hits(&mut self, id: u32) {
+        self.interrupted_hits.retain(|(hit, _)| *hit != id);
+    }
+
+    pub fn has_interrupted_hits(&self) -> bool {
+        !self.interrupted_hits.is_empty()
     }
 
     pub fn refresh_enabled(

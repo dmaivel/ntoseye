@@ -553,7 +553,7 @@ pub fn step_over_current_breakpoint(
         return Ok(None);
     };
 
-    match (breakpoints.disable(backend, debugger, bp_id), cr3) {
+    match (breakpoints.lift(backend, debugger, bp_id), cr3) {
         (Ok(()), _) => {}
         (Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)), Some(cr3)) => {
             breakpoints
@@ -575,10 +575,48 @@ pub fn step_over_current_breakpoint(
         Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => {
             // Address space no longer exists; drop the breakpoint and move on.
             breakpoints.discard(backend, bp_id)?;
+            return stepped.map(Some);
         }
         Err(err) => return stepped.and(Err(err)),
     }
+    // Interrupted on the site itself, the execution returns to it and hits
+    // the re-armed breakpoint again; that hit is this one, not a new one.
+    if matches!(stepped, Ok(RunPast::Diverted))
+        && let Some(rsp) = interrupted_on(debugger, register_map, &regs, rip, cr3)
+    {
+        breakpoints.note_interrupted_hit(bp_id, rsp);
+    }
     stepped.map(Some)
+}
+
+/// The stack pointer of the execution at `regs` when an interrupt it took on
+/// the instruction at `rip`, before executing it, is still pending return:
+/// the processor pushed a return frame (RIP, CS, RFLAGS, RSP, SS, behind an
+/// error code for some exceptions) below the 16-byte-aligned stack pointer,
+/// and NT builds its trap frame below that. `None` without such a frame:
+/// the interrupt was taken past the instruction, came from user mode, or
+/// switched to an interrupt stack.
+fn interrupted_on(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    rip: u64,
+    cr3: Option<u64>,
+) -> Option<u64> {
+    let rsp = register_map.read_u64("rsp", regs).ok()?;
+    let memory = debugger.address_space(code_root(debugger, cr3, rip));
+    let mut frame = [0u8; 48];
+    let base = (rsp & !0xf).wrapping_sub(frame.len() as u64);
+    memory.read_bytes(VirtAddr(base), &mut frame).ok()?;
+    let word = |index: usize| {
+        u64::from_le_bytes(frame[index * 8..index * 8 + 8].try_into().expect("8 bytes"))
+    };
+    // Without an error code the frame is the top five words, with one the
+    // bottom five.
+    [1, 0]
+        .into_iter()
+        .any(|first| word(first) == rip && word(first + 1) & 3 == 0 && word(first + 3) == rsp)
+        .then_some(rsp)
 }
 
 /// Where a vCPU on root `cr3` (or, without one, the module of `rip`) reads
