@@ -460,7 +460,11 @@ struct HeapHandleInfo {
 #[pymethods]
 impl Heaps {
     /// Find the heap block containing `addr` (`!heap -x`).
-    fn find_block<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
+    fn find_block<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Bound<'py, view::heap::py::HeapBlockSearch>> {
         let ctx = Context::process(self.info.clone());
         let detail = self.owner.with_in(py, &ctx, |session| {
             symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;
@@ -537,7 +541,11 @@ impl Heap {
 
     /// Decode this heap (`!heap -h`); `list_entries` materializes entries.
     #[pyo3(signature = (list_entries=false))]
-    fn inspect<'py>(&self, py: Python<'py>, list_entries: bool) -> PyResult<Bound<'py, Record>> {
+    fn inspect<'py>(
+        &self,
+        py: Python<'py>,
+        list_entries: bool,
+    ) -> PyResult<Bound<'py, view::heap::py::HeapDetail>> {
         let ctx = Context::process(self.info.clone());
         let detail = self.owner.with_in(py, &ctx, |session| {
             symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;

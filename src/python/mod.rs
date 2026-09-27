@@ -321,6 +321,15 @@ pub mod _ntoseye {
         PciTree, PciTreeDevice,
     };
     #[pymodule_export]
+    use crate::view::heap::py::{
+        HeapBlock, HeapBlockSearch, HeapDetail, HeapIdentity, HeapLargeAllocation, HeapMatchLarge,
+        HeapMatchLfhBlock, HeapMatchNtEntry, HeapMatchNtLfhBlock, HeapMatchNtSegment,
+        HeapMatchNtVirtual, HeapMatchPage, HeapMatchRange, HeapMatchVsChunk, HeapOverview,
+        HeapPageRange, HeapStats, HeapSummary, HeapWalkStop, LfhSubsegment, NtHeap, NtHeapEntry,
+        NtHeapSegment, NtLfhUserBlocks, NtUncommittedRange, NtVirtualBlock, SegmentHeap,
+        SegmentHeapContext, SegmentHeapKeys, SegmentHeapPageSegment, VsChunk, VsSubsegment,
+    };
+    #[pymodule_export]
     use crate::view::object::py::{
         AlpcClientPort, AlpcConnection, AlpcMessage, AlpcOwnedPort, AlpcPort, AlpcProcessPorts,
         AlpcQueue, AttachedDevice, DeviceObject, DriverDeviceLink, DriverObject,
