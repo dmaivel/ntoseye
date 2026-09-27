@@ -230,8 +230,10 @@ pub const fn is_record_method(key: &str) -> bool {
 /// subclass in the invoking module's `py` submodule, with a property per
 /// field. Doc comments on the struct and its fields document the class and
 /// properties. A field named like a `BaseRecord` method (`keys`, `values`,
-/// `items`, `get`, `to_dict`) is a compile error; write a keyword as a raw
-/// identifier (`r#type`). Methods after a `;` following the fields join the
+/// `items`, `get`, `to_dict`) is a compile error: give it another name and
+/// keep its key with `=> "items"` after the type (`work_items: Vec<T> =>
+/// "items"`). Write a keyword as a raw identifier (`r#type`), whose key
+/// drops the `r#`. Methods after a `;` following the fields join the
 /// class's `#[pymethods]` (`fn __str__(slf: &Bound<'_, Self>) -> ...`), for
 /// behavior a record lacks; they resolve names beside the shapes.
 macro_rules! shapes {
@@ -240,7 +242,7 @@ macro_rules! shapes {
         $name:ident {
             $(
                 $(#[doc = $field_doc:literal])*
-                $field:ident: $ty:ty
+                $field:ident: $ty:ty $(=> $key:literal)?
             ),* $(,)?
             $(; $($method:tt)*)?
         }
@@ -269,7 +271,7 @@ macro_rules! shapes {
                     let mut fields = Vec::new();
                     $(
                         if let Some(value) = $crate::view::shape::ViewValue::into_field(self.$field) {
-                            fields.push(($crate::view::shape::field_key(stringify!($field)), value));
+                            fields.push(($crate::view::shape::key!($field $(, $key)?), value));
                         }
                     )*
                     $crate::view::View::Shaped($crate::view::shape::Shaped {
@@ -317,7 +319,7 @@ macro_rules! shapes {
                     fn $field<'py>(
                         slf: &pyo3::Bound<'py, Self>,
                     ) -> pyo3::PyResult<$crate::view::shape::Field<'py, $ty>> {
-                        let key = $crate::view::shape::field_key(stringify!($field));
+                        let key = $crate::view::shape::key!($field $(, $key)?);
                         Ok($crate::view::shape::Field(
                             slf.as_super().get().field(slf.py(), key)?,
                             std::marker::PhantomData,
@@ -330,6 +332,17 @@ macro_rules! shapes {
     };
 }
 pub(crate) use shapes;
+
+/// A declared field's key: the one given with `=> "key"`, else its name.
+macro_rules! key {
+    ($field:ident) => {
+        $crate::view::shape::field_key(stringify!($field))
+    };
+    ($field:ident, $key:literal) => {
+        $key
+    };
+}
+pub(crate) use key;
 
 #[cfg(all(test, feature = "mcp"))]
 mod tests {
@@ -345,7 +358,8 @@ mod tests {
             present: Omit<u8>,
             null: Option<String>,
             read: Diag<Hex>,
-            failed: Diag<Hex>;
+            failed: Diag<Hex>,
+            work_items: u8 => "items";
             fn __str__(slf: &pyo3::Bound<'_, Self>) -> pyo3::PyResult<String> {
                 Ok(slf.as_super().get().field(slf.py(), "type")?.to_string())
             }
@@ -365,6 +379,7 @@ mod tests {
                 &DiagnosticValue::<u64>::Unavailable("paged out".into()),
                 |v| Hex(*v),
             ),
+            work_items: 1,
         };
         let View::Shaped(shaped) = sample.into_view() else {
             panic!("a shape renders as View::Shaped");
@@ -372,7 +387,9 @@ mod tests {
         let keys: Vec<&str> = shaped.fields.iter().map(|(key, _)| *key).collect();
         assert_eq!(
             keys,
-            ["type", "address", "present", "null", "read", "failed"]
+            [
+                "type", "address", "present", "null", "read", "failed", "items"
+            ]
         );
         assert_eq!(
             to_json(&View::Shaped(shaped)),
@@ -383,6 +400,7 @@ mod tests {
                 "null": null,
                 "read": {"available": true, "value": "0x20", "error": null},
                 "failed": {"available": false, "value": null, "error": "paged out"},
+                "items": 1,
             })
         );
     }
