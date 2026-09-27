@@ -9,8 +9,9 @@ use pelite::pe64::image::{
     UWOP_SAVE_XMM128_FAR, UWOP_SET_FPREG,
 };
 
-use super::{RegisterContext, StackTracer, Unwound, exception_directory, image_u32};
-use crate::pe::PeImage;
+use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
+use crate::pe::{CodeLayout, PeImage};
+use crate::types::CodeMachine;
 
 // cap on chained unwind entries followed per frame, guarding against cyclic or
 // corrupt unwind data
@@ -146,14 +147,14 @@ impl StackTracer<'_> {
     /// `address`.
     pub fn function_body_amd64(&mut self, address: u64) -> Option<u64> {
         let base = self.module_containing(address)?.info.base_address.0;
-        let mut image = self.module_image(address)?;
-        let mut resolved = resolve_function(&image, base, address);
+        let (mut image, mut layout) = self.module_code(address)?;
+        let mut resolved = resolve_function(&image, layout.as_deref(), base, address);
         if matches!(resolved, Resolve::Holed)
             && !image.is_complete()
             && self.upgrade_module_image(address)
         {
-            image = self.module_image(address)?;
-            resolved = resolve_function(&image, base, address);
+            (image, layout) = self.module_code(address)?;
+            resolved = resolve_function(&image, layout.as_deref(), base, address);
         }
 
         let Resolve::Function {
@@ -180,23 +181,23 @@ impl StackTracer<'_> {
             unwind_trace!("unwind: no module for rip -> leaf");
             return self.unwind_leaf(context);
         };
-        let Some(mut image) = self.module_image(context.rip) else {
+        let Some((mut image, mut layout)) = self.module_code(context.rip) else {
             return Unwound::Stop;
         };
 
         // Resolve the function entry. If the lookup or its unwind data lands in a
         // paged-out hole, upgrade to the complete on-disk image and re-resolve so
         // we can unwind through a module whose `.pdata`/`.xdata` isn't resident.
-        let mut resolved = resolve_function(&image, base_address, context.rip);
+        let mut resolved = resolve_function(&image, layout.as_deref(), base_address, context.rip);
         if matches!(resolved, Resolve::Holed)
             && !image.is_complete()
             && self.upgrade_module_image(context.rip)
         {
-            let Some(upgraded) = self.module_image(context.rip) else {
+            let Some(upgraded) = self.module_code(context.rip) else {
                 return Unwound::Stop;
             };
-            image = upgraded;
-            resolved = resolve_function(&image, base_address, context.rip);
+            (image, layout) = upgraded;
+            resolved = resolve_function(&image, layout.as_deref(), base_address, context.rip);
         }
 
         let (mut unwind_data, begin, end) = match resolved {
@@ -480,11 +481,11 @@ impl StackTracer<'_> {
         else {
             return fallback;
         };
-        let Some(image) = self.module_image(context.rip) else {
+        let Some((image, layout)) = self.module_code(context.rip) else {
             return fallback;
         };
         let Resolve::Function { unwind_data, .. } =
-            resolve_function(&image, base_address, context.rip)
+            resolve_function(&image, layout.as_deref(), base_address, context.rip)
         else {
             return fallback;
         };
@@ -518,8 +519,13 @@ enum Resolve {
 
 /// Resolve `rip` against the image's unwind tables, distinguishing a true leaf
 /// from a paged-out hole so the caller knows whether an on-disk image would help.
-fn resolve_function(image: &PeImage, base_address: u64, rip: u64) -> Resolve {
-    let Some(pdata) = exception_directory(image) else {
+fn resolve_function(
+    image: &PeImage,
+    layout: Option<&CodeLayout>,
+    base_address: u64,
+    rip: u64,
+) -> Resolve {
+    let Some(pdata) = runtime_functions(image, layout, CodeMachine::Amd64) else {
         return Resolve::Leaf;
     };
 

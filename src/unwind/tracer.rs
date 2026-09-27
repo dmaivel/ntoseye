@@ -13,10 +13,10 @@ use crate::{
     error::{Error, Result},
     guest::{Image, ModuleInfo},
     memory::{AddressSpace, PAGE_SIZE},
-    pe::{PeImage, pe_headers_end, read_pe_image},
+    pe::{CodeLayout, PeImage, pe_headers_end, read_pe_image},
     symbols::ImageFetch,
     target::Target,
-    types::VirtAddr,
+    types::{Arch, CodeMachine, VirtAddr},
 };
 
 const STACK_SCAN_BYTES: usize = 0x1000;
@@ -125,13 +125,35 @@ impl<'a> StackTracer<'a> {
         self.modules.get(&(module.dtb, module.info.base_address.0))
     }
 
-    /// A cheap clone of the cached image handle for the module containing
-    /// `address` (the module must already be loaded).
-    pub(super) fn module_image(&self, address: u64) -> Option<Arc<PeImage>> {
+    /// Cheap clones of the cached image handle for the module containing
+    /// `address`, and of its code layout (the module must already be
+    /// loaded).
+    pub(super) fn module_code(
+        &self,
+        address: u64,
+    ) -> Option<(Arc<PeImage>, Option<Arc<CodeLayout>>)> {
         let module = self.trace.module_for_address(address)?;
         self.modules
             .get(&(module.dtb, module.info.base_address.0))
-            .map(|cached| cached.image.clone())
+            .map(|cached| (cached.image.clone(), cached.layout.clone()))
+    }
+
+    /// The instruction set of the code at `address`, which picks the
+    /// unwinder for its frame. On ARM64 an emulated x64 image, or the x64
+    /// ranges of a hybrid one, are AMD64; code outside any image (the
+    /// emulator's translation cache) is the processor's own.
+    pub(super) fn code_machine_at(&mut self, address: u64) -> CodeMachine {
+        if self.target.arch() == Arch::Amd64 {
+            return CodeMachine::Amd64;
+        }
+        let Some(module) = self.module_containing(address) else {
+            return CodeMachine::Arm64;
+        };
+        let rva = (address - module.info.base_address.0) as u32;
+        module
+            .layout
+            .as_ref()
+            .map_or(CodeMachine::Arm64, |layout| layout.machine_at(rva))
     }
 
     /// Replace a module's holed in-memory image with the complete on-disk one,
@@ -162,15 +184,8 @@ impl<'a> StackTracer<'a> {
             "unwind: recovered on-disk image for {} (in-memory unwind data paged out)",
             module.info.short_name
         );
-        let executable_ranges = executable_ranges(&disk);
-        self.modules.insert(
-            key,
-            CachedModule {
-                info: module.info.clone(),
-                image: disk,
-                executable_ranges,
-            },
-        );
+        self.modules
+            .insert(key, CachedModule::new(module.info.clone(), disk));
         true
     }
 
@@ -225,16 +240,8 @@ impl<'a> StackTracer<'a> {
             }
             _ => image,
         };
-        let executable_ranges = executable_ranges(&image);
-
-        self.modules.insert(
-            key,
-            CachedModule {
-                info: module.info.clone(),
-                image,
-                executable_ranges,
-            },
-        );
+        self.modules
+            .insert(key, CachedModule::new(module.info.clone(), image));
 
         Some(())
     }
@@ -272,6 +279,17 @@ impl<'a> StackTracer<'a> {
                 fetch,
             )
             .ok()
+    }
+}
+
+impl CachedModule {
+    fn new(info: ModuleInfo, image: Arc<PeImage>) -> Self {
+        Self {
+            info,
+            executable_ranges: executable_ranges(&image),
+            layout: image.code_layout().map(Arc::new),
+            image,
+        }
     }
 }
 

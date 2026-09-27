@@ -5,13 +5,13 @@
 
 use std::ops::Range;
 
-use super::{RegisterContext, StackTracer, Unwound, exception_directory, image_u32};
+use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
 use crate::{
     kd::context_arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
-    pe::PeImage,
+    pe::{CodeLayout, PeImage},
     target::Arm64SavedRegisters,
     trapframe::decode_ktrap_frame_for_thread,
-    types::VirtAddr,
+    types::{CodeMachine, VirtAddr},
 };
 
 const FP: usize = 29;
@@ -684,8 +684,8 @@ enum Resolve {
     Holed,
 }
 
-fn resolve_in(image: &PeImage, base: u64, pc: u64) -> Resolve {
-    let Some(pdata) = exception_directory(image) else {
+fn resolve_in(image: &PeImage, layout: Option<&CodeLayout>, base: u64, pc: u64) -> Resolve {
+    let Some(pdata) = runtime_functions(image, layout, CodeMachine::Arm64) else {
         return Resolve::Leaf;
     };
     let Ok(rva) = u32::try_from(pc.wrapping_sub(base)) else {
@@ -727,16 +727,16 @@ impl StackTracer<'_> {
         else {
             return Resolve::Leaf;
         };
-        let Some(image) = self.module_image(pc) else {
+        let Some((image, layout)) = self.module_code(pc) else {
             return Resolve::Holed;
         };
-        let resolved = resolve_in(&image, base, pc);
+        let resolved = resolve_in(&image, layout.as_deref(), base, pc);
         if matches!(resolved, Resolve::Holed)
             && !image.is_complete()
             && self.upgrade_module_image(pc)
-            && let Some(image) = self.module_image(pc)
+            && let Some((image, layout)) = self.module_code(pc)
         {
-            return resolve_in(&image, base, pc);
+            return resolve_in(&image, layout.as_deref(), base, pc);
         }
         resolved
     }
@@ -744,7 +744,7 @@ impl StackTracer<'_> {
     /// Where a frame's function and unwind state are looked up: a frame
     /// returned into is suspended in the call 4 bytes before its pc, and a
     /// call that ends a function returns into the next one.
-    fn arm64_lookup_pc(context: &RegisterContext) -> u64 {
+    pub(super) fn arm64_lookup_pc(context: &RegisterContext) -> u64 {
         if context.after_call {
             context.rip.wrapping_sub(4)
         } else {

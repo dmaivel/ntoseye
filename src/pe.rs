@@ -159,6 +159,23 @@ impl PeImage {
             }
         }
     }
+
+    /// The image's [`CodeLayout`]. Its metadata pointer is relocated to the
+    /// header's `ImageBase`, which the loader rewrites to where it mapped the
+    /// image, so an in-memory image and its file both resolve it.
+    pub fn code_layout(&self) -> Option<CodeLayout> {
+        let base = image_base(&PeView::from_bytes(self.headers()).ok()?);
+        read_code_layout(base, &|rva, buf| {
+            let bytes = usize::try_from(rva)
+                .ok()
+                .and_then(|rva| self.read(rva, buf.len()))
+                .ok_or(Error::BadVirtualAddress(VirtAddr(base.wrapping_add(rva))))?;
+            buf.copy_from_slice(&bytes);
+            Ok(())
+        })
+        .ok()
+        .flatten()
+    }
 }
 
 impl LazyImage {
@@ -246,6 +263,10 @@ const LOAD_CONFIG_CHPE_METADATA: usize = 0xc8;
 const LOAD_CONFIG32_CHPE_METADATA: usize = 0x7c;
 /// More range entries than any image has; bounds a corrupt count.
 const MAX_CODE_RANGES: u32 = 1 << 16;
+/// `IMAGE_ARM64EC_METADATA` through `ExtraRFETable` (+0x40) and
+/// `ExtraRFETableSize` (+0x44).
+const ARM64EC_METADATA_EXTRA_RFE: usize = 0x40;
+const ARM64EC_METADATA_SIZE: usize = 0x48;
 
 /// Which instruction set each part of an image holds: the header's machine,
 /// and for a hybrid image, the code-range map in its load config. An ARM64X
@@ -258,9 +279,18 @@ pub struct CodeLayout {
     machine: CodeMachine,
     /// `(start RVA, end RVA, machine)`, sorted by start.
     ranges: Vec<(u32, u32, CodeMachine)>,
+    /// An ARM64EC or ARM64X image's second runtime-function table
+    /// (`ExtraRFETable`), for the code the header's machine does not
+    /// describe; see [`Self::runtime_functions`].
+    extra_runtime_functions: Option<(u32, u32)>,
 }
 
 impl CodeLayout {
+    /// The machine the image's header names.
+    pub fn machine(&self) -> CodeMachine {
+        self.machine
+    }
+
     pub fn machine_at(&self, rva: u32) -> CodeMachine {
         let index = self.ranges.partition_point(|&(start, _, _)| start <= rva);
         index
@@ -268,6 +298,24 @@ impl CodeLayout {
             .map(|index| self.ranges[index])
             .filter(|&(_, end, _)| rva < end)
             .map_or(self.machine, |(_, _, machine)| machine)
+    }
+
+    /// The RVA and size of the runtime functions (`.pdata`) for code of
+    /// `machine`, given the image's `exception` directory. A hybrid image
+    /// has one table per instruction set: the exception directory holds the
+    /// header machine's, `ExtraRFETable` the other's. An ARM64X image loaded
+    /// into an x64 process has its header rewritten to AMD64 and the two
+    /// swapped, so which is which follows the header, not the file.
+    pub fn runtime_functions(
+        &self,
+        machine: CodeMachine,
+        exception: Option<(u32, u32)>,
+    ) -> Option<(u32, u32)> {
+        if machine == self.machine {
+            exception
+        } else {
+            self.extra_runtime_functions
+        }
     }
 }
 
@@ -289,6 +337,7 @@ pub fn read_code_layout(
     let mut layout = CodeLayout {
         machine,
         ranges: Vec::new(),
+        extra_runtime_functions: None,
     };
     let (field, width) = match view.optional_header() {
         Wrap::T64(_) => (LOAD_CONFIG_CHPE_METADATA, 8),
@@ -315,8 +364,20 @@ pub fn read_code_layout(
     let Some(metadata_rva) = metadata.checked_sub(base).filter(|_| metadata != 0) else {
         return Ok(Some(layout));
     };
-    let mut header = [0u8; 12];
-    read(metadata_rva, &mut header)?;
+    // A CHPE x86 image's metadata has the map and nothing this reads after
+    // it; an ARM64EC image's goes on to its second runtime-function table.
+    let mut header = [0u8; ARM64EC_METADATA_SIZE];
+    let header_len = if machine == CodeMachine::X86 {
+        12
+    } else {
+        ARM64EC_METADATA_SIZE
+    };
+    read(metadata_rva, &mut header[..header_len])?;
+    if machine != CodeMachine::X86 {
+        let table = read_u32(&header, ARM64EC_METADATA_EXTRA_RFE);
+        let size = read_u32(&header, ARM64EC_METADATA_EXTRA_RFE + 4);
+        layout.extra_runtime_functions = (table != 0 && size != 0).then_some((table, size));
+    }
     let (map_rva, count) = (read_u32(&header, 4), read_u32(&header, 8));
     if count == 0 || count > MAX_CODE_RANGES {
         return Ok(Some(layout));
@@ -879,6 +940,34 @@ mod tests {
             Ok(())
         };
         read_code_layout(base, &read).unwrap().unwrap()
+    }
+
+    /// A hybrid image keeps each instruction set's runtime functions in its
+    /// own table: the exception directory is the header machine's and
+    /// `ExtraRFETable` the other's. An ARM64X image loaded into an x64
+    /// process has its header rewritten to AMD64 and the two swapped; reading
+    /// the file's assignment there sends every lookup to the wrong format.
+    #[test]
+    fn a_hybrid_image_names_each_machines_runtime_functions_by_its_header() {
+        const BASE: u64 = 0x7ff6_0000_0000;
+        let (exception, extra): ((u32, u32), (u32, u32)) = ((0x2800, 0x60), (0x2900, 0x30));
+        for (header, own, other) in [
+            (0xaa64u16, CodeMachine::Arm64, CodeMachine::Amd64),
+            (0x8664, CodeMachine::Amd64, CodeMachine::Arm64),
+        ] {
+            let mut image = hybrid_image(header, BASE, &[(0x1000 | 2, 0x100)]);
+            image[0x2140..0x2144].copy_from_slice(&extra.0.to_le_bytes());
+            image[0x2144..0x2148].copy_from_slice(&extra.1.to_le_bytes());
+            let layout = layout_of(&image, BASE);
+            assert_eq!(
+                layout.runtime_functions(own, Some(exception)),
+                Some(exception)
+            );
+            assert_eq!(
+                layout.runtime_functions(other, Some(exception)),
+                Some(extra)
+            );
+        }
     }
 
     /// An ARM64EC image says AMD64 in its header while most of its code is

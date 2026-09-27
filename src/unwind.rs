@@ -12,7 +12,7 @@ use crate::{
     gdb::RegisterMap,
     guest::{Image, ModuleInfo},
     memory::{AddressSpace, DTB_IDENTITY},
-    pe::PeImage,
+    pe::{CodeLayout, PeImage},
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
     target::{
@@ -20,7 +20,7 @@ use crate::{
         SavedVtlContext, Target, ThreadInfo, lookup_register,
     },
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
-    types::{Arch, Dtb, VirtAddr},
+    types::{Arch, CodeMachine, Dtb, VirtAddr},
 };
 
 /// Per-frame unwinder diagnostics, gated on `NTOSEYE_UNWIND_TRACE`. Prints which
@@ -41,6 +41,7 @@ macro_rules! unwind_trace {
 
 mod amd64;
 mod arm64;
+mod arm64ec;
 mod tracer;
 mod walk;
 mod wow64;
@@ -238,6 +239,10 @@ struct CachedModule {
     // release the borrow on the cache while parsing unwind data
     image: Arc<PeImage>,
     executable_ranges: Vec<(u32, u32)>,
+    /// Which instruction set each part of the image is, and where each
+    /// one's runtime functions are; `None` for a machine the walk does not
+    /// know.
+    layout: Option<Arc<CodeLayout>>,
 }
 
 #[derive(Debug, Clone)]
@@ -458,15 +463,29 @@ fn image_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     ))
 }
 
-/// The exception directory's RVA range, `None` when the image has none.
-fn exception_directory(image: &PeImage) -> Option<Range<usize>> {
+/// The RVA range of the runtime functions for `image`'s code of `machine`:
+/// the exception directory, or in a hybrid image the table for the other
+/// instruction set (see [`CodeLayout::runtime_functions`]). `None` when the
+/// image has none.
+fn runtime_functions(
+    image: &PeImage,
+    layout: Option<&CodeLayout>,
+    machine: CodeMachine,
+) -> Option<Range<usize>> {
     let view = PeView::from_bytes(image.headers()).ok()?;
-    let directory = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_EXCEPTION)?;
-    if directory.Size == 0 {
+    let exception = view
+        .data_directory()
+        .get(IMAGE_DIRECTORY_ENTRY_EXCEPTION)
+        .map(|directory| (directory.VirtualAddress, directory.Size));
+    let (start, size) = match layout {
+        Some(layout) => layout.runtime_functions(machine, exception)?,
+        None => exception?,
+    };
+    if size == 0 {
         return None;
     }
-    let start = directory.VirtualAddress as usize;
-    Some(start..start.checked_add(directory.Size as usize)?)
+    let start = start as usize;
+    Some(start..start.checked_add(size as usize)?)
 }
 
 /// Resolve the runtime-function entry containing `address`.
@@ -480,11 +499,17 @@ pub fn function_range(
     trace: &ThreadTraceContext,
     address: u64,
 ) -> Option<(u64, u64)> {
-    fn range(image: &PeImage, base: u64, address: u64, arch: Arch) -> Option<(u64, u64)> {
+    fn range(
+        image: &PeImage,
+        layout: Option<&CodeLayout>,
+        base: u64,
+        address: u64,
+        machine: CodeMachine,
+    ) -> Option<(u64, u64)> {
         let rva = u32::try_from(address.checked_sub(base)?).ok()?;
-        let pdata = exception_directory(image)?;
-        let (begin, end) = match arch {
-            Arch::Amd64 => {
+        let pdata = runtime_functions(image, layout, machine)?;
+        let (begin, end) = match machine {
+            CodeMachine::Amd64 => {
                 let Lookup::Found(function) = lookup_runtime_function(
                     pdata.len() / RUNTIME_FUNCTION_SIZE,
                     |index| runtime_function_at(image, pdata.start, index),
@@ -494,25 +519,27 @@ pub fn function_range(
                 };
                 (function.BeginAddress, function.EndAddress)
             }
-            Arch::Arm64 => match lookup_arm64_runtime_function(image, pdata, rva) {
+            CodeMachine::Arm64 => match lookup_arm64_runtime_function(image, pdata, rva) {
                 Arm64Lookup::Found(function) => (function.begin, function.end),
                 Arm64Lookup::Missing | Arm64Lookup::Unreadable => return None,
             },
+            // x86 code has no runtime functions.
+            CodeMachine::X86 => return None,
         };
         Some((base + u64::from(begin), base + u64::from(end)))
     }
 
     let mut tracer = StackTracer::new(debugger, trace);
     let base = tracer.module_containing(address)?.info.base_address.0;
-    let arch = debugger.arch();
-    let image = tracer.module_image(address)?;
-    if let Some(found) = range(&image, base, address, arch) {
+    let machine = tracer.code_machine_at(address);
+    let (image, layout) = tracer.module_code(address)?;
+    if let Some(found) = range(&image, layout.as_deref(), base, address, machine) {
         return Some(found);
     }
 
     if !image.is_complete() && tracer.upgrade_module_image(address) {
-        let image = tracer.module_image(address)?;
-        return range(&image, base, address, arch);
+        let (image, layout) = tracer.module_code(address)?;
+        return range(&image, layout.as_deref(), base, address, machine);
     }
 
     None
@@ -1026,7 +1053,10 @@ impl StackTracer<'_> {
                 }
                 unwound
             }
-            Arch::Arm64 => self.unwind_once_arm64(context),
+            Arch::Arm64 => match self.code_machine_at(Self::arm64_lookup_pc(context)) {
+                CodeMachine::Amd64 => self.unwind_once_emulated_amd64(context),
+                CodeMachine::Arm64 | CodeMachine::X86 => self.unwind_once_arm64(context),
+            },
         }
     }
 
