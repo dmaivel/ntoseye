@@ -926,10 +926,6 @@ class Inspect:
         globs with `*`/`?`. `level` 0 counts the matching frames, 1 lists
         them, 2 adds the whole stack.
         """
-    def global_flags(self, /) -> Record:
-        """
-        Decode `nt!NtGlobalFlag` and the current process's
-        `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
     def flt_filters(self, /) -> Record:
         """
         The registered minifilters of each filter manager frame, with their
@@ -945,6 +941,12 @@ class Inspect:
         """
         The volumes of each filter manager frame, with the instances on them
         (`!fltkd.volumes`).
+        """
+    def global_flags(self, /) -> Record:
+        """
+        Decode `nt!NtGlobalFlag` and the current process's
+        `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
+        """
     def ipi(self, /, processor: int |None = None) -> Record:
         """
         Report interprocessor-interrupt state for every processor or one
@@ -972,12 +974,6 @@ class Inspect:
         processes assigned to it (`!job`). `address` is the job, or a process
         or thread whose job to decode; `None` is the current process's job.
         """
-    def zombies(self, /, flags: int = 1) -> Record:
-        """
-        Exited processes and terminated threads whose objects are still
-        referenced, found by scanning nonpaged pool (`!zombies`). `flags`: 1
-        processes, 2 threads, 3 both.
-        """
     def lookaside(self, /, address: int) -> Record:
         """
         Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
@@ -1004,6 +1000,18 @@ class Inspect:
     def object_security(self, /, object: int) -> Record:
         """
         Decode the security descriptor referenced by an object's header (`!objsd`).
+        """
+    def pci(self, /, bus: int = 0, device: int |None = None, function: int |None = None, *, last_bus: int |None = None, raw: bool = False) -> Record:
+        """
+        Read and decode PCI configuration space (`!pci`): the functions on
+        `bus` (through `last_bus`), or one `device` and `function`. Each
+        function's 4 KiB is read, extended capabilities included; `raw` adds
+        it as hex. Needs a backend that reaches configuration space (kd/kdnet,
+        or gdb on QEMU) and a halted target.
+        """
+    def pci_tree(self, /) -> Record:
+        """
+        Report the PCI bus hierarchy pci.sys tracks (`!pcitree`).
         """
     def peb(self, /, process: Process, address: int |None = None) -> Record:
         """
@@ -1033,6 +1041,7 @@ class Inspect:
         """
         Check the block headers of the pool page containing `address` and
         report the first inconsistency (`!poolval`).
+        """
     def queued_locks(self, /) -> Record:
         """
         Report which processors own or wait for each numbered queued spinlock
@@ -1130,6 +1139,12 @@ class Inspect:
         worker threads (`!exqueue`). `include_stacks` adds each worker's stack;
         `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`) restricts
         the listed items to those types' priorities.
+        """
+    def zombies(self, /, flags: int = 1) -> Record:
+        """
+        Exited processes and terminated threads whose objects are still
+        referenced, found by scanning nonpaged pool (`!zombies`). `flags`: 1
+        processes, 2 threads, 3 both.
         """
 
 @final

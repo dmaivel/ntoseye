@@ -370,6 +370,7 @@ pub enum DebugCapability {
     DebugOutput,
     Msr,
     IoPorts,
+    PciConfig,
     TargetControl,
     TargetFileIo,
 }
@@ -396,6 +397,7 @@ impl DebugCapability {
             Self::DebugOutput => "debug_output",
             Self::Msr => "msr",
             Self::IoPorts => "io_ports",
+            Self::PciConfig => "pci_config",
             Self::TargetControl => "target_control",
             Self::TargetFileIo => "target_file_io",
         }
@@ -421,10 +423,23 @@ impl DebugCapability {
             Self::DebugOutput => "debug output",
             Self::Msr => "model-specific registers",
             Self::IoPorts => "I/O ports",
+            Self::PciConfig => "PCI configuration space",
             Self::TargetControl => "reboot / forced crash",
             Self::TargetFileIo => "host-served target files",
         }
     }
+}
+
+/// A PCI function's configuration space: its segment, bus, device, and
+/// function, and the physical address of its 4 KiB page in the firmware's
+/// ECAM window (from the ACPI MCFG table) when one covers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciConfigAddress {
+    pub segment: u16,
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub ecam: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -670,6 +685,10 @@ pub trait DebugBackend {
                 supported: self.supports_io_ports(),
             },
             BackendCapability {
+                capability: DebugCapability::PciConfig,
+                supported: self.supports_pci_config(),
+            },
+            BackendCapability {
                 capability: DebugCapability::TargetControl,
                 supported: self.supports_target_control(),
             },
@@ -886,6 +905,25 @@ pub trait DebugBackend {
     /// Write the low `size` (1, 2, or 4) bytes of `value` to I/O port `port`
     /// on the current processor.
     fn write_io_port(&mut self, _port: u64, _size: u8, _value: u32) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Whether the transport can read PCI configuration space (`!pci`). KD
+    /// asks the HAL (`DbgKdGetBusDataApi`); a QEMU GDB stub reads the ECAM
+    /// window in its physical-memory mode. Host memory and a dump hold only
+    /// RAM, and configuration space is device registers.
+    fn supports_pci_config(&self) -> bool {
+        false
+    }
+
+    /// Read `buf.len()` bytes of `function`'s configuration space from
+    /// `offset`.
+    fn read_pci_config(
+        &mut self,
+        _function: PciConfigAddress,
+        _offset: u16,
+        _buf: &mut [u8],
+    ) -> Result<()> {
         Err(Error::NotSupported)
     }
 

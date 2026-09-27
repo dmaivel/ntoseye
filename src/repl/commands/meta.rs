@@ -603,6 +603,8 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!object", "objects and I/O"),
     ("!pnptriage", "objects and I/O"),
     ("!vpb", "objects and I/O"),
+    ("!pcitree", "objects and I/O"),
+    ("!pci", "objects and I/O"),
     ("ssdt", "objects and I/O"),
     ("!acl", "security"),
     ("!objsd", "security"),

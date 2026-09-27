@@ -36,6 +36,9 @@ pub const DBGKD_READ_MACHINE_SPECIFIC_REGISTER: u32 = 0x0000_3152;
 pub const DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER: u32 = 0x0000_3153;
 pub const DBGKD_REBOOT: u32 = 0x0000_313B;
 pub const DBGKD_CAUSE_BUGCHECK: u32 = 0x0000_3149;
+pub const DBGKD_GET_BUS_DATA: u32 = 0x0000_3157;
+/// `BUS_DATA_TYPE::PCIConfiguration`.
+pub const PCI_CONFIGURATION: u32 = 4;
 pub const DBGKD_SET_CONTEXT_EX: u32 = 0x0000_3160;
 
 /// Scripted KD replies for tests that need a target on the other end of a
@@ -333,6 +336,40 @@ pub fn write_io_space<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET + 12, value);
     let (parsed, _, _) = send_manipulate(framing, &header, &[])?;
     check_status(&parsed, DBGKD_WRITE_IO_SPACE)
+}
+
+/// `DbgKdGetBusDataApi` (WinDbg's `!pci`): `len` bytes of bus data from
+/// `offset`, which the target reads with `HalGetBusDataByOffset`. The union is
+/// `DBGKD_GET_SET_BUS_DATA { BusDataType, BusNumber, SlotNumber, Offset,
+/// Length: u32 }`; the reply's `Length` is what the HAL returned (2 for a PCI
+/// slot with no device), followed by the data.
+pub fn get_bus_data<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    bus_data_type: u32,
+    bus: u32,
+    slot: u32,
+    offset: u32,
+    len: u32,
+) -> Result<Vec<u8>> {
+    let mut header = make_header(DBGKD_GET_BUS_DATA, processor);
+    write_u32(&mut header, UNION_OFFSET, bus_data_type);
+    write_u32(&mut header, UNION_OFFSET + 4, bus);
+    write_u32(&mut header, UNION_OFFSET + 8, slot);
+    write_u32(&mut header, UNION_OFFSET + 12, offset);
+    write_u32(&mut header, UNION_OFFSET + 16, len);
+    let (parsed, reply_header, mut data) = send_manipulate(framing, &header, &[])?;
+    check_status(&parsed, DBGKD_GET_BUS_DATA)?;
+    let actual = read_u32(&reply_header, UNION_OFFSET + 16);
+    if actual > len || data.len() < actual as usize {
+        return Err(Error::Kd(format!(
+            "invalid bus-data read at offset {offset:#x}: received {} bytes, target reported \
+             {actual} for request {len}",
+            data.len()
+        )));
+    }
+    data.truncate(actual as usize);
+    Ok(data)
 }
 
 /// Send a manipulate-state request whose API has no reply packet. The KD

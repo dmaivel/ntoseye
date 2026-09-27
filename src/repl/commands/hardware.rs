@@ -1,5 +1,5 @@
-//! Hang diagnosis from the processor blocks (`!qlocks`, `!ipi`) and I/O-port
-//! access (`ib`/`iw`/`id`, `ob`/`ow`/`od`).
+//! Hang diagnosis from the processor blocks (`!qlocks`, `!ipi`), I/O-port
+//! access (`ib`/`iw`/`id`, `ob`/`ow`/`od`), and PCI (`!pcitree`, `!pci`).
 
 use crate::error::Result;
 use crate::expr::Expr;
@@ -7,6 +7,11 @@ use crate::repl::*;
 use crate::target::DiagnosticValue;
 use crate::target::hang::{
     IpiProcessor, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
+};
+use crate::target::pci::{
+    CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PciFunctionConfig, PciRawRange, PciRequest, PciTree,
+    PciTreeBus, PciTreeDevice, capabilities, capability_name, class_name, command_flags,
+    extended_capabilities, extended_capability_name, parse_header, parse_pci_request, status_flags,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -25,6 +30,23 @@ repl_command! {
     usage: "!ipi [processor]",
     summary: "Show interprocessor-interrupt state for one processor or all of them.",
     details: "For each processor, the IPI fields its _KPRCB has on this build: IpiFrozen (the freeze state the debugger and KeFreezeExecution drive: Running, Frozen, Freeze owner...), TargetCount and PacketBarrier (as a sender, the targets still to finish its packet), SelfIpiRequestSummary, and IpiFrame (the trap frame of the IPI being serviced). On builds with per-sender mailboxes (Windows 10 and later), also the requests queued to the processor and not yet taken: the sender, the request type (packet, TB or cache flush, from RequestSummary), and a packet's worker routine and parameters; and, as a sender, the processors whose queues still hold its request.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_pcitree;
+    names: ["!pcitree", "pcitree"],
+    usage: "!pcitree",
+    summary: "Show the PCI bus hierarchy and the functions on each bus, as pci.sys tracks them.",
+    details: "Walks pci.sys's segment list (pci!PciSegmentList), each segment's root buses, and each bus's functions and child buses, from the driver's own extensions (pci!_PCI_BUS, pci!_PCI_DEVICE; Windows 8 and later), so it reads guest memory only and works on every backend. A bus line gives its number and FDO extension; a function line gives its device and function number, vendor and device ID, PDO extension (devext), PDO (devstack, for !devstack), and class code and name. A bridge's secondary bus follows the bridge, indented. JSON adds each function's PnP instance path.",
+}
+
+repl_command! {
+    cmd_pci;
+    names: ["!pci", "pci"],
+    usage: "!pci [flags] [bus [device [function [min max]]]]",
+    summary: "Read and decode PCI configuration space.",
+    details: "Scans a bus as WinDbg does (bus 0 by default): function 0 of each device, and functions 1-7 when function 0 is multi-function, and prints a line per function: device:function, vendor:device.revision, the command and status registers (Cmd letters: i I/O space, m memory space, b bus master, w memory write and invalidate, p parity error response, s SERR; Sts letters: c capability list, 6 66 MHz, p master data parity error, a signaled target abort, s signaled system error), the class, and the subsystem IDs or a bridge's primary->secondary-subordinate buses. Arguments are hex. Flags: 0x1 verbose, decoding the whole header (class code, header type, command and status bits by name, BARs, expansion ROM, bridge bus numbers, interrupt pin and line, and the capability lists); 0x2 scan buses 0 through bus; 0x4 raw bytes of the 64-byte header; 0x8 the same as dwords; 0x40 capability lists (the PCI capabilities, and a PCI Express function's extended capabilities); 0x100 raw bytes of the 256-byte configuration space. min and max (with a device and function) dump that range, extended space included (0-0xfff). Configuration space is device registers, not RAM, so it is read through the backend: over kd/kdnet the HAL reads it (DbgKdGetBusDataApi; segment 0), and over gdb QEMU's stub reads the function's ECAM page in its physical-memory mode, located by the ACPI MCFG table the HAL keeps. The memory and dump backends cannot read it; !pcitree still works there. Needs a halted target.",
     completion: Expression,
 }
 
@@ -149,6 +171,47 @@ impl ReplState<'_> {
         }
         Ok(())
     }
+    fn cmd_pcitree(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if !invocation.argv.is_empty() {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        match self.ctx.target.pci_tree() {
+            Ok(tree) => print_pci_tree(&tree),
+            Err(error) => error!("failed to read pci.sys's device tree: {error}"),
+        }
+        Ok(())
+    }
+
+    fn cmd_pci(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let mut values = Vec::with_capacity(invocation.argv.len());
+        for text in &invocation.argv {
+            let Some(VirtAddr(value)) = self.eval_or_report(text) else {
+                return Ok(());
+            };
+            values.push(value);
+        }
+        let request = match parse_pci_request(&values) {
+            Ok(request) => request,
+            Err(error) => {
+                error!("!pci: {error}");
+                return Ok(());
+            }
+        };
+        let scan = match self.ctx.scan_pci(&request.query) {
+            Ok(scan) => scan,
+            Err(error) => {
+                error!("!pci: {error}");
+                return Ok(());
+            }
+        };
+        print_pci_scan(&request, &scan.functions);
+        if scan.interrupted {
+            outln!("(interrupted)");
+        }
+        Ok(())
+    }
+
     fn cmd_qlocks(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if !invocation.argv.is_empty() {
             outln!("{}\n", command_help(invocation.name));
@@ -345,4 +408,301 @@ fn print_ipi_processor(processor: &IpiProcessor) {
         }
     }
     outln!("");
+}
+
+fn print_pci_tree(tree: &PciTree) {
+    let mut root_buses = 0;
+    for segment in &tree.segments {
+        if tree.segments.len() > 1 {
+            outln!(
+                "Segment 0x{:x} ({})",
+                segment.number,
+                ui::addr(segment.address.0)
+            );
+        }
+        for bus in &segment.root_buses {
+            print_pci_tree_bus(bus, 0);
+            root_buses += 1;
+        }
+    }
+    outln!("");
+    outln!("Total PCI Root busses processed = {root_buses}");
+    outln!("Total PCI Segments processed = {}", tree.segments.len());
+    if tree.truncated {
+        outln!("(walk stopped at a repeated link or its size limit)");
+    }
+}
+
+fn print_pci_tree_bus(bus: &PciTreeBus, depth: usize) {
+    let indent = "  ".repeat(depth);
+    outln!(
+        "{indent}Bus 0x{:x} (FDO Ext {})",
+        bus.number,
+        ui::addr(bus.extension.0)
+    );
+    let mut printed = vec![false; bus.child_buses.len()];
+    for device in &bus.devices {
+        print_pci_tree_device(device, &indent);
+        for (index, child) in bus.child_buses.iter().enumerate() {
+            if !printed[index]
+                && !device.device_object.is_zero()
+                && child.bridge_pdo == device.device_object
+            {
+                print_pci_tree_bus(child, depth + 1);
+                printed[index] = true;
+            }
+        }
+    }
+    for (index, child) in bus.child_buses.iter().enumerate() {
+        if !printed[index] {
+            print_pci_tree_bus(child, depth + 1);
+        }
+    }
+}
+
+fn print_pci_tree_device(device: &PciTreeDevice, indent: &str) {
+    let slot = format!("{:x},", device.device);
+    outln!(
+        "{indent}  (d={slot:<3} f={:x}) {:04x}{:04x} devext 0x{} devstack 0x{} {:02x}{:02x} {}",
+        device.function,
+        device.vendor_id,
+        device.device_id,
+        ui::addr(device.extension.0),
+        ui::addr(device.device_object.0),
+        device.base_class,
+        device.sub_class,
+        class_name(device.base_class, device.sub_class).unwrap_or_default()
+    );
+}
+
+/// WinDbg's register letters: a letter per listed bit, `.` when clear.
+fn register_letters(value: u16, bits: &[(u16, char)]) -> String {
+    bits.iter()
+        .map(|(bit, letter)| if value & bit != 0 { *letter } else { '.' })
+        .collect()
+}
+
+const COMMAND_LETTERS: [(u16, char); 6] = [
+    (0x0001, 'i'),
+    (0x0002, 'm'),
+    (0x0004, 'b'),
+    (0x0010, 'w'),
+    (0x0040, 'p'),
+    (0x0100, 's'),
+];
+
+const STATUS_LETTERS: [(u16, char); 5] = [
+    (0x0010, 'c'),
+    (0x0020, '6'),
+    (0x0100, 'p'),
+    (0x0800, 'a'),
+    (0x4000, 's'),
+];
+
+fn print_pci_scan(request: &PciRequest, functions: &[PciFunctionConfig]) {
+    if functions.is_empty() {
+        let query = &request.query;
+        let place = match (query.device, query.function) {
+            (Some(device), Some(function)) => format!(
+                "at bus 0x{:x} device 0x{device:x} function 0x{function:x}",
+                query.last_bus
+            ),
+            (Some(device), None) => {
+                format!("at bus 0x{:x} device 0x{device:x}", query.last_bus)
+            }
+            _ if query.first_bus == query.last_bus => format!("on bus 0x{:x}", query.last_bus),
+            _ => format!("on buses 0x{:x}-0x{:x}", query.first_bus, query.last_bus),
+        };
+        outln!("no PCI function responds {place}");
+        return;
+    }
+    let mut current_bus = None;
+    for function in functions {
+        if current_bus != Some((function.segment, function.bus)) {
+            if current_bus.is_some() {
+                outln!("");
+            }
+            outln!("PCI Segment {} Bus 0x{:x}", function.segment, function.bus);
+            current_bus = Some((function.segment, function.bus));
+        }
+        print_pci_function(request, function);
+    }
+}
+
+fn print_pci_function(request: &PciRequest, function: &PciFunctionConfig) {
+    let config = &function.config;
+    let Some(header) = parse_header(config) else {
+        return;
+    };
+    let class = class_name(header.base_class, header.sub_class)
+        .unwrap_or_else(|| format!("Class {:02x}{:02x}", header.base_class, header.sub_class));
+    let tail = match (header.subsystem, header.buses) {
+        (_, Some((primary, secondary, subordinate))) => {
+            format!("  Bus:{primary:x}->{secondary:x}-{subordinate:x}")
+        }
+        (Some((vendor, id)), None) if vendor != 0 || id != 0 => {
+            format!("  SubID:{vendor:04x}:{id:04x}")
+        }
+        _ => String::new(),
+    };
+    outln!(
+        "{:02x}:{:x}  {:04x}:{:04x}.{:02x}  Cmd[{:04x}:{}]  Sts[{:04x}:{}]  {class}{tail}",
+        function.device,
+        function.function,
+        header.vendor_id,
+        header.device_id,
+        header.revision,
+        header.command,
+        register_letters(header.command, &COMMAND_LETTERS),
+        header.status,
+        register_letters(header.status, &STATUS_LETTERS),
+    );
+    const INDENT: &str = "      ";
+    if request.verbose {
+        let layout = match header.layout() {
+            0 => "device",
+            1 => "PCI-to-PCI bridge",
+            2 => "CardBus bridge",
+            _ => "unknown layout",
+        };
+        outln!(
+            "{INDENT}Class {:02x}:{:02x}:{:02x}  Header {:02x} ({layout}{})  CacheLine {:x}  Latency {:x}  BIST {:02x}",
+            header.base_class,
+            header.sub_class,
+            header.prog_if,
+            header.header_type,
+            if header.multifunction() {
+                ", multi-function"
+            } else {
+                ""
+            },
+            header.cache_line_size,
+            header.latency_timer,
+            header.bist
+        );
+        outln!(
+            "{INDENT}Command {:04x} {}",
+            header.command,
+            command_flags(header.command).join(" ")
+        );
+        outln!(
+            "{INDENT}Status  {:04x} {}",
+            header.status,
+            status_flags(header.status).join(" ")
+        );
+        for bar in &header.bars {
+            let width = if bar.raw > u64::from(u32::MAX) { 16 } else { 8 };
+            outln!(
+                "{INDENT}BAR{} {} {:0width$x}{}",
+                bar.index,
+                bar.kind.name(),
+                bar.address,
+                if bar.prefetchable {
+                    " prefetchable"
+                } else {
+                    ""
+                }
+            );
+        }
+        if let Some(rom) = header.expansion_rom.filter(|rom| *rom != 0) {
+            outln!(
+                "{INDENT}ROM  {:08x} {}",
+                rom & !0x7ff,
+                if rom & 1 != 0 { "enabled" } else { "disabled" }
+            );
+        }
+        if let Some((primary, secondary, subordinate)) = header.buses {
+            outln!(
+                "{INDENT}Buses primary {primary:x} secondary {secondary:x} subordinate {subordinate:x}"
+            );
+        }
+        let pin = match header.interrupt_pin {
+            0 => "none".to_string(),
+            pin @ 1..=4 => format!("{pin} (INT{})", char::from(b'A' + pin - 1)),
+            pin => format!("{pin:#x} (invalid)"),
+        };
+        outln!(
+            "{INDENT}Interrupt pin {pin} line 0x{:x}",
+            header.interrupt_line
+        );
+    }
+    if request.verbose || request.capabilities {
+        let list = capabilities(&header, config);
+        if !list.is_empty() {
+            let names: Vec<String> = list
+                .iter()
+                .map(|capability| {
+                    format!(
+                        "{:02x} {}",
+                        capability.offset,
+                        capability_name(capability.id)
+                            .map_or_else(|| format!("ID {:#x}", capability.id), str::to_string)
+                    )
+                })
+                .collect();
+            outln!("{INDENT}Capabilities: {}", names.join(", "));
+        }
+        let express = list
+            .iter()
+            .any(|capability| capability.id == CAPABILITY_PCI_EXPRESS);
+        let extended = if express && config.len() > PCI_CONFIG_SIZE {
+            extended_capabilities(config)
+        } else {
+            Vec::new()
+        };
+        if !extended.is_empty() {
+            let names: Vec<String> = extended
+                .iter()
+                .map(|capability| {
+                    format!(
+                        "{:03x} {} v{}",
+                        capability.offset,
+                        extended_capability_name(capability.id)
+                            .map_or_else(|| format!("ID {:#x}", capability.id), str::to_string),
+                        capability.version.unwrap_or(0)
+                    )
+                })
+                .collect();
+            outln!("{INDENT}Extended capabilities: {}", names.join(", "));
+        }
+    }
+    if let Some(raw) = request.raw {
+        print_pci_raw(config, raw);
+    }
+}
+
+fn print_pci_raw(config: &[u8], raw: PciRawRange) {
+    let end = raw.end.min(config.len());
+    let mut offset = raw.start & !0xf;
+    while offset < end {
+        let line_end = (offset + 16).min(end);
+        let mut text = String::new();
+        if raw.dwords {
+            let mut at = offset;
+            while at + 4 <= line_end {
+                if at >= raw.start {
+                    let value = u32::from_le_bytes([
+                        config[at],
+                        config[at + 1],
+                        config[at + 2],
+                        config[at + 3],
+                    ]);
+                    text.push_str(&format!(" {value:08x}"));
+                } else {
+                    text.push_str("         ");
+                }
+                at += 4;
+            }
+        } else {
+            for (at, byte) in config.iter().enumerate().take(line_end).skip(offset) {
+                if at >= raw.start {
+                    text.push_str(&format!(" {byte:02x}"));
+                } else {
+                    text.push_str("   ");
+                }
+            }
+        }
+        outln!("      {offset:03x}:{text}");
+        offset += 16;
+    }
 }

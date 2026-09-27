@@ -5,7 +5,8 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crate::dbg_backend::{
-    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
+    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress,
+    STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
 };
 use crate::error::{Error, Result};
 use crate::phys::HaltClock;
@@ -283,6 +284,10 @@ const HALTED_NO_NEW_STOP: &str = "S05";
 
 /// Why a request cannot be served right now, for [`Error::TargetRunning`].
 const GDB_STUB_NEEDS_HALT: &str = "the GDB stub serves no requests while the target runs.";
+
+/// Bytes per `m` packet in physical-memory mode; the reply is twice that in
+/// hex, inside QEMU's 4 KiB packet buffer.
+const PHYSICAL_READ_CHUNK: usize = 0x400;
 
 /// The first canonical upper-half (kernel) address on AMD64.
 const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
@@ -778,6 +783,44 @@ impl GdbClient {
         }
         *self.hardware_slot(slot)? = None;
         Ok(())
+    }
+
+    /// Read guest-physical memory through the stub rather than the host
+    /// mapping, in QEMU's physical-memory mode (`Qqemu.PhyMemMode`): the
+    /// stub reads through the machine's address space, so device registers
+    /// (the PCI ECAM window) answer as they do to the guest, where the host
+    /// mapping holds only RAM.
+    fn read_physical_through_stub(&mut self, address: u64, buf: &mut [u8]) -> Result<()> {
+        let reply = self.send_packet("Qqemu.PhyMemMode:1")?;
+        if reply != "OK" {
+            return Err(Error::Rsp(format!(
+                "the GDB stub has no physical-memory mode (QEMU's Qqemu.PhyMemMode answered \
+                 {reply:?}), which device registers are read through"
+            )));
+        }
+        let mut read = || -> Result<()> {
+            let mut next = address;
+            for chunk in buf.chunks_mut(PHYSICAL_READ_CHUNK) {
+                let reply = self.send_packet(&format!("m{next:x},{:x}", chunk.len()))?;
+                if reply.starts_with('E') || reply.len() != chunk.len() * 2 {
+                    return Err(Error::Rsp(format!(
+                        "failed to read {:#x} physical bytes at {next:#x}: {reply}",
+                        chunk.len()
+                    )));
+                }
+                hex::decode_to_slice(&reply, chunk)?;
+                next += chunk.len() as u64;
+            }
+            Ok(())
+        };
+        let result = read();
+        let restored = self.send_packet("Qqemu.PhyMemMode:0")?;
+        if restored != "OK" {
+            return Err(Error::Rsp(format!(
+                "failed to leave the GDB stub's physical-memory mode: {restored}"
+            )));
+        }
+        result
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
@@ -1331,6 +1374,28 @@ impl DebugBackend for GdbClient {
 
     fn is_running(&self) -> bool {
         self.halts.is_running()
+    }
+
+    fn supports_pci_config(&self) -> bool {
+        true
+    }
+
+    /// Through the function's ECAM page, the only configuration mechanism
+    /// that is memory the stub can read.
+    fn read_pci_config(
+        &mut self,
+        function: PciConfigAddress,
+        offset: u16,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        let Some(page) = function.ecam else {
+            return Err(Error::DebugInfo(format!(
+                "no ECAM window (ACPI MCFG entry) covers segment {} bus {:#x}; the GDB stub \
+                 reaches configuration space only through ECAM",
+                function.segment, function.bus
+            )));
+        };
+        self.read_physical_through_stub(page + u64::from(offset), buf)
     }
 }
 

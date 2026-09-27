@@ -14,6 +14,7 @@ use crate::expr::NumberRadix;
 use crate::session::Session;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
+use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciRawRange};
 use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
@@ -342,6 +343,48 @@ impl Inspect {
         self.record(py, |session| {
             let detail = session.target.ipi_state(processor).map_err(err)?;
             Ok(view::hardware::ipi(&detail))
+        })
+    }
+
+    /// Report the PCI bus hierarchy pci.sys tracks (`!pcitree`).
+    fn pci_tree<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let tree = session.target.pci_tree().map_err(err)?;
+            Ok(view::hardware::pci_tree(&tree))
+        })
+    }
+
+    /// Read and decode PCI configuration space (`!pci`): the functions on
+    /// `bus` (through `last_bus`), or one `device` and `function`. Each
+    /// function's 4 KiB is read, extended capabilities included; `raw` adds
+    /// it as hex. Needs a backend that reaches configuration space (kd/kdnet,
+    /// or gdb on QEMU) and a halted target.
+    #[pyo3(signature = (bus=0, device=None, function=None, *, last_bus=None, raw=false))]
+    fn pci<'py>(
+        &self,
+        py: Python<'py>,
+        bus: u8,
+        device: Option<u8>,
+        function: Option<u8>,
+        last_bus: Option<u8>,
+        raw: bool,
+    ) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let query = PciQuery {
+                segment: 0,
+                first_bus: bus,
+                last_bus: last_bus.unwrap_or(bus),
+                device,
+                function,
+                size: PCI_EXTENDED_CONFIG_SIZE,
+            };
+            let scan = session.scan_pci(&query).map_err(err)?;
+            let raw = raw.then_some(PciRawRange {
+                start: 0,
+                end: PCI_EXTENDED_CONFIG_SIZE,
+                dwords: false,
+            });
+            Ok(view::hardware::pci(&scan, raw))
         })
     }
 

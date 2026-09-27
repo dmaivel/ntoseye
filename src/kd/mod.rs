@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent, TebPath, TrapState,
+    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, StopEvent, TebPath,
+    TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::{Error, Result};
@@ -156,6 +157,9 @@ const DBG_KD_COMMAND_STRING_STATE_CHANGE: u32 = 0x0000_3032;
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
 const KD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bytes of configuration space per `DbgKdGetBusDataApi` request, well inside
+/// a KD packet.
+const KD_BUS_DATA_CHUNK: usize = 0x800;
 const KD_INITIAL_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const DBGKD_DEBUG_IO_HEADER_SIZE: usize = 16;
 const DBGKD_DEBUG_IO_MIN_HEADER_SIZE: usize = 12;
@@ -552,6 +556,56 @@ impl DebugBackend for KdBackend {
         })
     }
 
+    fn supports_pci_config(&self) -> bool {
+        true
+    }
+
+    /// Through the HAL (`HalGetBusDataByOffset`), which has no segment
+    /// argument: segment 0 only. Bytes the HAL does not return read as
+    /// all-ones, as an unclaimed configuration read does on the bus.
+    fn read_pci_config(
+        &mut self,
+        function: PciConfigAddress,
+        offset: u16,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        if function.segment != 0 {
+            return Err(Error::DebugInfo(format!(
+                "KD reads PCI configuration space through the HAL, which only reaches \
+                 segment 0, not segment {}",
+                function.segment
+            )));
+        }
+        let processor = self.current_processor;
+        let slot = u32::from(function.device) | (u32::from(function.function) << 5);
+        let mut done = 0;
+        while done < buf.len() {
+            let len = (buf.len() - done).min(KD_BUS_DATA_CHUNK);
+            let start = u32::from(offset) + done as u32;
+            let data = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+                api::get_bus_data(
+                    framing,
+                    processor,
+                    api::PCI_CONFIGURATION,
+                    function.bus.into(),
+                    slot,
+                    start,
+                    len as u32,
+                )
+            })?;
+            buf[done..done + data.len()].copy_from_slice(&data);
+            if data.len() < len {
+                // The HAL stops at what the function has (2 bytes of an
+                // empty slot's vendor ID, nothing past a conventional
+                // function's 256 bytes); the rest reads as the bus does.
+                buf[done + data.len()..].fill(0xff);
+                break;
+            }
+            done += len;
+        }
+        Ok(())
+    }
+
     fn supports_target_control(&self) -> bool {
         true
     }
@@ -590,6 +644,10 @@ impl DebugBackend for KdBackend {
             BackendCapability {
                 capability: DebugCapability::IoPorts,
                 supported: self.supports_io_ports(),
+            },
+            BackendCapability {
+                capability: DebugCapability::PciConfig,
+                supported: self.supports_pci_config(),
             },
             BackendCapability {
                 capability: DebugCapability::TargetControl,

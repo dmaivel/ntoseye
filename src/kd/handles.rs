@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, HwBreakpointAccess,
-    StopEvent, TebPath, TrapState,
+    PciConfigAddress, StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::Result;
@@ -196,6 +196,19 @@ impl DebugBackend for KdBackendHandle {
 
     fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {
         self.lock().write_io_port(port, size, value)
+    }
+
+    fn supports_pci_config(&self) -> bool {
+        self.lock().supports_pci_config()
+    }
+
+    fn read_pci_config(
+        &mut self,
+        function: PciConfigAddress,
+        offset: u16,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        self.lock().read_pci_config(function, offset, buf)
     }
 
     fn supports_target_control(&self) -> bool {
