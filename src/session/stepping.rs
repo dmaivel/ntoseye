@@ -25,7 +25,8 @@ use crate::session::{
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
-    build_stacktrace, format_symbol, preferred_code_dtb, resolve_thread_trace_context, thread_root,
+    build_stacktrace, format_symbol, halted_in_windows_hypervisor, preferred_code_dtb,
+    resolve_thread_trace_context, thread_root,
 };
 
 impl Session {
@@ -74,8 +75,8 @@ impl Session {
         if stepped == RunPast::Diverted {
             self.notices.push(format!(
                 "{} did not reach the next instruction within {RUN_PAST_TIMEOUT:?} of running \
-                 alone: it took an interrupt first, and the handler waits on a vCPU the step \
-                 holds. It stopped in the handler; resume with g to let it finish",
+                 alone: it took an interrupt first, and stopped in the handler (or in another \
+                 thread it switched to); resume with g to let it finish",
                 self.current_thread
             ));
         }
@@ -85,7 +86,8 @@ impl Session {
         }
 
         // Re-arm breakpoints the stub may have lost when the VM stopped, then
-        // adopt whatever thread we ended up on.
+        // adopt whatever thread we ended up on. A step without the trap flag
+        // ends on the vCPU it ran, whichever one the stub last reported.
         if let Err(error) = self
             .breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)
@@ -94,7 +96,9 @@ impl Session {
                 "failed to re-arm breakpoints after the step: {error}"
             ));
         }
-        if let Ok(tid) = self.backend.stopped_thread_id() {
+        if !self.backend.single_step_unsafe()
+            && let Ok(tid) = self.backend.stopped_thread_id()
+        {
             self.current_thread = tid;
         }
         self.refresh_context_for_current_thread();
@@ -593,7 +597,8 @@ pub enum RunPast {
     Reached,
     /// Resumed alone past the instruction, it reached none of its successors
     /// within [`RUN_PAST_TIMEOUT`] and was broken in on elsewhere: it took
-    /// an interrupt first, and the handler waits on a held vCPU.
+    /// an interrupt first, and the handler waits on a held vCPU (or, once the
+    /// held vCPUs were let run, the thread was switched out).
     Diverted,
 }
 
@@ -603,6 +608,14 @@ pub enum RunPast {
 /// so within 24 ms, and the rest (3-4%, waiting on a held vCPU) never
 /// finished alone.
 const RUN_PAST_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// How long every vCPU runs when the one executing an instruction waits on
+/// the others, so they can answer it.
+const RELEASE_WINDOW: Duration = Duration::from_millis(20);
+
+/// How many times the held vCPUs are let run for one instruction before it
+/// is given up on.
+const RELEASES: usize = 20;
 
 /// Execute the instruction under the (already lifted) breakpoint site at
 /// `rip` without a single step, which is unsafe on this backend (see
@@ -622,7 +635,9 @@ fn run_past_site(
     run_past(
         backend,
         register_map,
-        rip,
+        debugger,
+        thread,
+        regs,
         &successors,
         &TemporarySites::Software,
     )
@@ -664,33 +679,86 @@ fn step_without_trap(
     } else {
         TemporarySites::Software
     };
-    run_past(backend, register_map, rip, &successors, &sites)
+    run_past(
+        backend,
+        register_map,
+        debugger,
+        thread,
+        &regs,
+        &successors,
+        &sites,
+    )
 }
 
 /// How [`run_past`] marks an instruction's successors.
 enum TemporarySites {
     /// `int3` sites, the target planting and lifting them.
     Software,
-    /// Debug-register sites in these free slots, one per successor.
+    /// Debug-register sites in these free slots, one per successor; one
+    /// more, when free, marks the instruction itself while the held vCPUs
+    /// run.
     Hardware(Vec<u8>),
 }
 
+impl TemporarySites {
+    /// Plant the `index`th site at `address`: `Ok(None)` for a software
+    /// site, the slot for a hardware one, `Err` when no slot is left.
+    fn plant(
+        &self,
+        backend: &mut dyn DebugBackend,
+        index: usize,
+        address: u64,
+    ) -> Result<Option<u8>> {
+        match self {
+            Self::Software => {
+                backend.set_breakpoint(address)?;
+                Ok(None)
+            }
+            Self::Hardware(slots) => {
+                let slot = *slots.get(index).ok_or_else(|| {
+                    Error::Breakpoint(format!(
+                        "no free hardware breakpoint slot is left to mark {address:#x}"
+                    ))
+                })?;
+                backend.set_hardware_breakpoint(slot, address, HwBreakpointAccess::Execute, 1)?;
+                Ok(Some(slot))
+            }
+        }
+    }
+}
+
+/// Lift a site [`TemporarySites::plant`] planted.
+fn lift_site(backend: &mut dyn DebugBackend, address: u64, slot: Option<u8>) -> Result<()> {
+    match slot {
+        Some(slot) => backend.clear_hardware_breakpoint(slot),
+        None => backend.remove_breakpoint(address),
+    }
+}
+
 /// Plant `sites` on every successor, run the vCPU alone past the instruction
-/// at `rip`, and lift them again whatever happened.
+/// at its PC in `regs`, and lift them again whatever happened.
 fn run_past(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
-    rip: u64,
+    debugger: &Target,
+    thread: &str,
+    regs: &[u8],
     successors: &[u64],
     sites: &TemporarySites,
 ) -> Result<RunPast> {
     let mut planted = Vec::with_capacity(successors.len());
-    let result = run_to_successors(backend, register_map, rip, successors, sites, &mut planted);
+    let result = run_to_successors(
+        backend,
+        register_map,
+        debugger,
+        thread,
+        regs,
+        successors,
+        sites,
+        &mut planted,
+    );
     for (address, slot) in planted {
-        let removed = match slot {
-            Some(slot) => backend.clear_hardware_breakpoint(slot),
-            None => backend.remove_breakpoint(address),
-        };
+        let removed = lift_site(backend, address, slot);
         if result.is_ok() {
             removed?;
         }
@@ -701,52 +769,175 @@ fn run_past(
 fn run_to_successors(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
-    rip: u64,
+    debugger: &Target,
+    thread: &str,
+    regs: &[u8],
     successors: &[u64],
     sites: &TemporarySites,
     planted: &mut Vec<(u64, Option<u8>)>,
 ) -> Result<RunPast> {
+    let rip = register_map.read_u64("rip", regs)?;
     for (index, &address) in successors.iter().enumerate() {
-        let slot = match sites {
-            TemporarySites::Software => {
-                backend.set_breakpoint(address)?;
-                None
-            }
-            TemporarySites::Hardware(slots) => {
-                let slot = slots[index];
-                backend.set_hardware_breakpoint(slot, address, HwBreakpointAccess::Execute, 1)?;
-                Some(slot)
-            }
-        };
+        let slot = sites.plant(backend, index, address)?;
         planted.push((address, slot));
     }
-    backend.continue_current_thread()?;
-    let (event, timed_out) = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
-        Some(event) => (event, false),
-        None => (backend.interrupt()?, true),
+    let mut release = Release {
+        rip,
+        rsp: register_map.read_u64("rsp", regs).ok(),
+        nt_thread: None,
+        count: 0,
     };
-    if event.is_bugcheck {
-        return Err(Error::DebugInfo(format!(
-            "target bugchecked while running past the breakpoint at {rip:#x}"
-        )));
+    loop {
+        backend.continue_current_thread()?;
+        let (event, timed_out) = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
+            Some(event) => (event, false),
+            None => (backend.interrupt()?, true),
+        };
+        if event.is_bugcheck {
+            return Err(Error::DebugInfo(format!(
+                "target bugchecked while running past the instruction at {rip:#x}"
+            )));
+        }
+        let now_regs = backend.read_registers()?;
+        let now = register_map.read_u64("rip", &now_regs)?;
+        if !timed_out || successors.contains(&now) {
+            if now == rip {
+                return Err(Error::DebugInfo(format!(
+                    "{thread} could not execute the instruction at {rip:#x}: resumed alone, it \
+                     stopped on it again; resume with g, disabling any breakpoint there first"
+                )));
+            }
+            return Ok(RunPast::Reached);
+        }
+        // Short of the successors, it waits on a vCPU this holds: in the
+        // Windows hypervisor, on the instruction, or in the handler of an
+        // interrupt taken first. Let them all run so it can finish.
+        let mut in_nt = now != rip && !in_windows_hypervisor(debugger, register_map, &now_regs);
+        loop {
+            if release.count == RELEASES {
+                if in_nt {
+                    return Ok(RunPast::Diverted);
+                }
+                return Err(Error::DebugInfo(format!(
+                    "{thread} could not execute the instruction at {rip:#x}: resumed alone, it \
+                     did not get past it within {RUN_PAST_TIMEOUT:?}, and letting every vCPU \
+                     run {RELEASES} times did not free it (it waits on another vCPU, or in the \
+                     Windows hypervisor); resume with g, disabling any breakpoint there first"
+                )));
+            }
+            match release.run(backend, register_map, debugger, thread, successors, sites)? {
+                Released::Reached => return Ok(RunPast::Reached),
+                Released::Diverted => return Ok(RunPast::Diverted),
+                Released::Back => break,
+                Released::Waiting { in_handler } => in_nt = in_handler,
+            }
+        }
     }
-    let now = register_map.read_u64("rip", &backend.read_registers()?)?;
-    if now == rip {
-        return Err(Error::DebugInfo(format!(
-            "could not execute the instruction at {rip:#x}: its vCPU, resumed alone, did not \
-             get past it within {RUN_PAST_TIMEOUT:?} (it is likely waiting on another vCPU); \
-             resume with g, disabling any breakpoint there first"
-        )));
+}
+
+/// Whether a vCPU with registers `regs` is executing the Windows hypervisor.
+fn in_windows_hypervisor(debugger: &Target, register_map: &RegisterMap, regs: &[u8]) -> bool {
+    let value = |name| register_map.read_u64(name, regs).ok();
+    match (value(debugger.arch().dtb_register()), value("rip")) {
+        (Some(cr3), Some(rip)) => halted_in_windows_hypervisor(debugger, cr3, rip),
+        _ => false,
     }
-    // Anywhere else is progress: most often an interrupt taken before the
-    // instruction, whose handler waits on a held vCPU. The site is armed
-    // again, so when the handler returns to it that same execution hits a
-    // second time.
-    Ok(if timed_out && !successors.contains(&now) {
-        RunPast::Diverted
-    } else {
-        RunPast::Reached
-    })
+}
+
+/// Where a vCPU that waited on the held ones stood after they ran.
+enum Released {
+    /// At a successor, on the same Windows thread.
+    Reached,
+    /// Back on the instruction, not executed: run it alone again.
+    Back,
+    /// Still short of the successors on the same thread, in an interrupt
+    /// handler (`in_handler`) or the Windows hypervisor: let them run again.
+    Waiting { in_handler: bool },
+    /// Running another Windows thread: the step's was switched out, and
+    /// the step ends where the vCPU is.
+    Diverted,
+}
+
+/// Letting every vCPU run while one executing an instruction at `rip` waits
+/// on them. The instruction stays marked, so the vCPU stops on it if it
+/// returns there without executing it; the successors stay marked, so it
+/// stops past it. Another vCPU can stop on one of those too, ending that
+/// run early; it is simply resumed with the next one, and executes the
+/// instruction once the step is over and they are lifted. Holding it
+/// instead can hold the very vCPU the hypervisor waits for.
+struct Release {
+    rip: u64,
+    rsp: Option<u64>,
+    /// The Windows thread on the vCPU when it first waited.
+    nt_thread: Option<Option<u64>>,
+    count: usize,
+}
+
+impl Release {
+    fn run(
+        &mut self,
+        backend: &mut dyn DebugBackend,
+        register_map: &RegisterMap,
+        debugger: &Target,
+        thread: &str,
+        successors: &[u64],
+        sites: &TemporarySites,
+    ) -> Result<Released> {
+        self.count += 1;
+        let nt_thread = *self
+            .nt_thread
+            .get_or_insert_with(|| nt_thread_on(debugger, thread));
+        let site = if successors.contains(&self.rip) {
+            None
+        } else {
+            Some(sites.plant(backend, successors.len(), self.rip)?)
+        };
+        // Whichever vCPU stops first ends the run, or a break-in does.
+        let stop = backend.continue_execution().and_then(|()| {
+            if backend.try_wait_for_stop(RELEASE_WINDOW)?.is_none() {
+                backend.interrupt()?;
+            }
+            Ok(())
+        });
+        if let Some(slot) = site {
+            let lifted = lift_site(backend, self.rip, slot);
+            if stop.is_ok() {
+                lifted?;
+            }
+        }
+        stop?;
+        backend.set_current_thread(thread)?;
+        let regs = backend.read_registers()?;
+        let now = register_map.read_u64("rip", &regs)?;
+        if in_windows_hypervisor(debugger, register_map, &regs) {
+            return Ok(Released::Waiting { in_handler: false });
+        }
+        if nt_thread_on(debugger, thread) != nt_thread {
+            return Ok(Released::Diverted);
+        }
+        if successors.contains(&now) {
+            return Ok(Released::Reached);
+        }
+        if now == self.rip {
+            // The same thread back on the instruction at another stack
+            // depth entered it anew, from the handler it was interrupted by.
+            return Ok(if register_map.read_u64("rsp", &regs).ok() == self.rsp {
+                Released::Back
+            } else {
+                Released::Diverted
+            });
+        }
+        Ok(Released::Waiting { in_handler: true })
+    }
+}
+
+/// The `_ETHREAD` NT runs on the processor backend `thread` stands for.
+fn nt_thread_on(debugger: &Target, thread: &str) -> Option<u64> {
+    let processor = processor_index_from_backend_thread_id(thread)?;
+    debugger
+        .current_windows_thread_for_processor(processor)
+        .ok()
+        .map(|thread| thread.ethread.0)
 }
 
 /// Every address execution can continue at after the instruction at `rip`,

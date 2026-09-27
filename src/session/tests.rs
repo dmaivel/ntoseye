@@ -73,6 +73,10 @@ pub struct MockBackend {
     single_step_unsafe: bool,
     /// Where the lone vCPU stops when resumed alone; `None` never stops.
     lands_at: Option<u64>,
+    /// Where it stops on its first resumes alone, before `lands_at`.
+    landings: VecDeque<u64>,
+    /// Where it stands after every vCPU is resumed; `None` leaves it.
+    released_to: Option<u64>,
     /// Accept selecting (and report) one vCPU, as a stub does.
     one_vcpu: bool,
 }
@@ -102,6 +106,8 @@ impl Default for MockBackend {
             reported_trap_state: None,
             single_step_unsafe: false,
             lands_at: None,
+            landings: VecDeque::new(),
+            released_to: None,
             one_vcpu: false,
         }
     }
@@ -231,6 +237,10 @@ impl DebugBackend for MockBackend {
     fn continue_execution(&mut self) -> Result<()> {
         self.continues.fetch_add(1, Ordering::Relaxed);
         self.running = true;
+        if let Some(address) = self.released_to {
+            self.set("rip", address);
+            self.interrupt_events.push_back(breakpoint_event(address));
+        }
         Ok(())
     }
     fn single_step_unsafe(&self) -> bool {
@@ -239,10 +249,11 @@ impl DebugBackend for MockBackend {
     fn halts_in_windows_hypervisor(&self) -> bool {
         self.single_step_unsafe
     }
-    /// The lone vCPU reaches `lands_at` and reports a breakpoint there.
+    /// The lone vCPU reaches `landings`, then `lands_at`, and reports a
+    /// breakpoint there.
     fn continue_current_thread(&mut self) -> Result<()> {
         self.running = true;
-        if let Some(address) = self.lands_at {
+        if let Some(address) = self.landings.pop_front().or(self.lands_at) {
             self.set("rip", address);
             self.interrupt_events.push_back(breakpoint_event(address));
         }
@@ -1129,8 +1140,9 @@ fn a_step_under_the_windows_hypervisor_runs_the_vcpu_alone_to_every_successor() 
 }
 
 /// A vCPU run alone that reaches none of its successors before the timeout
-/// took an interrupt, and the handler waits on a held vCPU: the step stops
-/// in the handler and says why. One that reached a successor says nothing.
+/// took an interrupt, and the handler waits on a held vCPU: the others are
+/// let run so it can finish. One still in the handler after that stops
+/// there and says why; one that reached a successor says nothing.
 #[test]
 fn a_step_diverted_into_an_interrupt_handler_says_so() {
     let mut code = [0x90u8; 0x40];
@@ -1141,6 +1153,7 @@ fn a_step_diverted_into_an_interrupt_handler_says_so() {
             single_step_unsafe: true,
             halts_only_on_interrupt: true,
             lands_at: Some(lands_at),
+            released_to: Some(lands_at),
             one_vcpu: true,
             ..MockBackend::default()
         };
@@ -1151,6 +1164,43 @@ fn a_step_diverted_into_an_interrupt_handler_says_so() {
         let notices = session.take_notices();
         assert_eq!(!notices.is_empty(), diverted, "{notices:?}");
     }
+}
+
+/// A handler that finishes once the others run returns to the instruction
+/// it interrupted, which is then run past alone again: the step completes
+/// at a successor, with the instruction marked meanwhile and every site
+/// lifted after.
+#[test]
+fn a_step_whose_handler_returns_once_the_others_run_completes() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        halts_only_on_interrupt: true,
+        landings: VecDeque::from([0x1030]),
+        lands_at: Some(0x1002),
+        released_to: Some(0x1000),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let sites = backend.site_writes.clone();
+    let mut session = stepping_session(&code, backend);
+
+    assert_eq!(session.step().unwrap(), 0x1002);
+    assert!(session.take_notices().is_empty());
+    assert_eq!(
+        *sites.lock(),
+        [
+            (0x1002, true),
+            (0x1012, true),
+            (0x1000, true),
+            (0x1000, false),
+            (0x1002, false),
+            (0x1012, false)
+        ]
+    );
 }
 
 /// Stepping on from a diverted step steps the handler's wait, which no held
@@ -1165,6 +1215,7 @@ fn step_loops_stop_at_a_diverted_step() {
             single_step_unsafe: true,
             halts_only_on_interrupt: true,
             lands_at: Some(0x1030),
+            released_to: Some(0x1030),
             one_vcpu: true,
             ..MockBackend::default()
         };
