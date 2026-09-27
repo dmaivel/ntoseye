@@ -1,4 +1,3 @@
-use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -22,6 +21,27 @@ pub const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
 const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;
 const FILETIME_UNIX_MIN_SECONDS: i64 = -62_135_596_800;
 const FILETIME_UNIX_MAX_SECONDS: i64 = 253_402_300_799;
+/// Characters `d*a`/`d*u` show of each string, as `da`/`du` do by default.
+const POINTER_STRING_CHARS: usize = 256;
+
+/// What the `d*p`, `d*a`, and `d*u` commands show after each pointer.
+#[derive(Clone, Copy)]
+enum Pointee {
+    /// The pointer-sized value it points to (`d*p`).
+    Value,
+    /// The NUL-terminated string it points to, in 1-byte (`d*a`) or 2-byte
+    /// (`d*u`) units.
+    String { char_size: usize },
+}
+
+/// A little-endian doubleword or quadword.
+fn le_value(bytes: &[u8]) -> Option<u64> {
+    match bytes.len() {
+        4 => Some(u64::from(u32::from_le_bytes(bytes.try_into().ok()?))),
+        8 => Some(u64::from_le_bytes(bytes.try_into().ok()?)),
+        _ => None,
+    }
+}
 
 repl_command! {
     cmd_pagein;
@@ -116,9 +136,65 @@ repl_command! {
 
 repl_command! {
     cmd_dpp;
-    names: ["dpp"],
+    names: ["dpp", "dqp"],
     usage: "dpp <address> [L<count>|length|end]",
     summary: "Display pointers, dereference them, and annotate symbols.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_ddp;
+    names: ["ddp"],
+    usage: "ddp <address> [L<count>|length|end]",
+    summary: "Display doublewords as pointers, each followed by the doubleword it points to.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_dqa;
+    names: ["dqa", "dpa"],
+    usage: "dqa <address> [L<count>|length|end]",
+    summary: "Display pointers, each followed by the ASCII string it points to.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_dqu;
+    names: ["dqu", "dpu"],
+    usage: "dqu <address> [L<count>|length|end]",
+    summary: "Display pointers, each followed by the UTF-16 string it points to.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_dda;
+    names: ["dda"],
+    usage: "dda <address> [L<count>|length|end]",
+    summary: "Display doublewords as pointers, each followed by the ASCII string it points to.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_ddu;
+    names: ["ddu"],
+    usage: "ddu <address> [L<count>|length|end]",
+    summary: "Display doublewords as pointers, each followed by the UTF-16 string it points to.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_df;
+    names: ["df"],
+    usage: "df <address> [L<count>|length|end]",
+    summary: "Display memory as single-precision (4-byte) floating-point numbers.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_dd_double;
+    names: ["dD"],
+    usage: "dD <address> [L<count>|length|end]",
+    summary: "Display memory as double-precision (8-byte) floating-point numbers.",
     completion: Expression,
 }
 
@@ -208,6 +284,24 @@ repl_command! {
     names: ["eq"],
     usage: "eq <address> <value...>",
     summary: "Write one or more quadwords (8 bytes) to memory.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_ef;
+    names: ["ef"],
+    usage: "ef <address> <number...>",
+    summary: "Write one or more single-precision (4-byte) floating-point numbers to memory.",
+    details: "Numbers are decimal floating-point literals (`ef @rcx 1.5 -2 3e-4`), whatever the radix.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_ed_double;
+    names: ["eD"],
+    usage: "eD <address> <number...>",
+    summary: "Write one or more double-precision (8-byte) floating-point numbers to memory.",
+    details: "Numbers are decimal floating-point literals (`eD @rcx 1.5 -2 3e-4`), whatever the radix.",
     completion: Expression,
 }
 
@@ -355,23 +449,9 @@ impl ReplState<'_> {
         item_size: u64,
         mode: MemoryDisplayMode,
     ) -> Result<()> {
-        let range = match AddressRange::parse(
-            invocation,
-            &self.ctx.target,
-            self.radix,
-            default_count,
-            item_size,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
-        if range.len() > MAX_DISPLAY_BYTES {
-            error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
+        let Some(range) = self.parse_display_range(invocation, default_count, item_size) else {
             return Ok(());
-        }
+        };
 
         let (data, valid) = match self.read_virtual_best_effort(&range) {
             Ok(read) => read,
@@ -383,6 +463,34 @@ impl ReplState<'_> {
         display_memory_with_validity(range.start, &data, Some(&valid), &mode);
 
         Ok(())
+    }
+
+    /// The `<address> [L<count>|length|end]` range of a display command,
+    /// bounded by [`MAX_DISPLAY_BYTES`]; `None` after saying why not.
+    fn parse_display_range(
+        &self,
+        invocation: &CommandInvocation<'_>,
+        default_count: u64,
+        item_size: u64,
+    ) -> Option<AddressRange> {
+        let range = match AddressRange::parse(
+            invocation,
+            &self.ctx.target,
+            self.radix,
+            default_count,
+            item_size,
+        ) {
+            Ok(range) => range,
+            Err(error) => {
+                error!("{error}");
+                return None;
+            }
+        };
+        if range.len() > MAX_DISPLAY_BYTES {
+            error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
+            return None;
+        }
+        Some(range)
     }
 
     fn write_scalar_command(
@@ -417,9 +525,54 @@ impl ReplState<'_> {
                 display_value(value)
             })
             .collect::<Vec<_>>();
+        self.write_encoded(address, &bytes, &formatted_values, noun);
+        Ok(())
+    }
 
+    /// `ef`/`eD`: write decimal floating-point literals as `size`-byte values.
+    fn write_float_command(
+        &mut self,
+        invocation: &CommandInvocation<'_>,
+        command: &str,
+        size: usize,
+    ) -> Result<()> {
+        if invocation.argv.len() < 2 {
+            outln!("{}\n", command_help(command));
+            return Ok(());
+        }
+        let Some(address) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+            return Ok(());
+        };
+        let mut bytes = Vec::new();
+        let mut formatted_values = Vec::new();
+        for text in invocation.argv.iter().skip(1) {
+            let Ok(value) = text.parse::<f64>() else {
+                error!("invalid floating-point number '{text}'");
+                return Ok(());
+            };
+            if size == 4 {
+                let value = value as f32;
+                bytes.extend(value.to_le_bytes());
+                formatted_values.push(format_float(value));
+            } else {
+                bytes.extend(value.to_le_bytes());
+                formatted_values.push(format_float(value));
+            }
+        }
+        let noun = if size == 4 { "float" } else { "double" };
+        self.write_encoded(address, &bytes, &formatted_values, noun);
+        Ok(())
+    }
+
+    fn write_encoded(
+        &self,
+        address: VirtAddr,
+        bytes: &[u8],
+        formatted_values: &[String],
+        noun: &str,
+    ) {
         let mem = self.ctx.target.context_memory();
-        if let Err(e) = mem.write_bytes(address, &bytes) {
+        if let Err(e) = mem.write_bytes(address, bytes) {
             error!("failed to write {}: {}", noun, e);
         } else {
             outln!(
@@ -429,8 +582,6 @@ impl ReplState<'_> {
                 ui::addr(address.0)
             );
         }
-
-        Ok(())
     }
 
     fn cmd_db(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -549,26 +700,26 @@ impl ReplState<'_> {
         invocation: &CommandInvocation<'_>,
         item_size: usize,
         default_count: u64,
+        visit: impl FnMut(&Self, VirtAddr, &[u8], bool, &ThreadTraceContext),
+    ) -> Result<()> {
+        let Some(range) = self.parse_display_range(invocation, default_count, item_size as u64)
+        else {
+            return Ok(());
+        };
+        self.visit_symbol_range(&range, item_size, visit)
+    }
+
+    fn visit_symbol_range(
+        &self,
+        range: &AddressRange,
+        item_size: usize,
         mut visit: impl FnMut(&Self, VirtAddr, &[u8], bool, &ThreadTraceContext),
     ) -> Result<()> {
-        let range = match AddressRange::parse(
-            invocation,
-            &self.ctx.target,
-            self.radix,
-            default_count,
-            item_size as u64,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
         if range.len() > MAX_DISPLAY_BYTES {
             error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
             return Ok(());
         }
-        let (data, valid) = match self.read_virtual_best_effort(&range) {
+        let (data, valid) = match self.read_virtual_best_effort(range) {
             Ok(read) => read,
             Err(error) => {
                 error!("{error}");
@@ -596,10 +747,18 @@ impl ReplState<'_> {
         item_size: usize,
         default_count: u64,
     ) -> Result<()> {
-        self.visit_symbol_values(
-            invocation,
+        let Some(range) = self.parse_display_range(invocation, default_count, item_size as u64)
+        else {
+            return Ok(());
+        };
+        self.display_symbol_range(&range, item_size)
+    }
+
+    /// `dds`/`dqs` over `range`: each value, and the symbol it resolves to.
+    pub fn display_symbol_range(&self, range: &AddressRange, item_size: usize) -> Result<()> {
+        self.visit_symbol_range(
+            range,
             item_size,
-            default_count,
             |state, address, chunk, readable, trace| {
                 if chunk.len() != item_size {
                     outln!("{}  <partial>", ui::addr(address.0));
@@ -609,20 +768,8 @@ impl ReplState<'_> {
                     outln!("{}  <unreadable>", ui::addr(address.0));
                     return;
                 }
-                let value = match item_size {
-                    4 => {
-                        let Ok(bytes) = chunk.try_into() else {
-                            return;
-                        };
-                        u32::from_le_bytes(bytes) as u64
-                    }
-                    8 => {
-                        let Ok(bytes) = chunk.try_into() else {
-                            return;
-                        };
-                        u64::from_le_bytes(bytes)
-                    }
-                    _ => return,
+                let Some(value) = le_value(chunk) else {
+                    return;
                 };
                 let width = item_size * 2;
                 match try_format_symbol(&state.ctx.target, trace, value) {
@@ -654,12 +801,53 @@ impl ReplState<'_> {
     }
 
     fn cmd_dpp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_pointers(&invocation, 8, 8, Pointee::Value)
+    }
+
+    fn cmd_ddp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_pointers(&invocation, 4, 16, Pointee::Value)
+    }
+
+    fn cmd_dqa(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_pointers(&invocation, 8, 8, Pointee::String { char_size: 1 })
+    }
+
+    fn cmd_dqu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_pointers(&invocation, 8, 8, Pointee::String { char_size: 2 })
+    }
+
+    fn cmd_dda(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_pointers(&invocation, 4, 16, Pointee::String { char_size: 1 })
+    }
+
+    fn cmd_ddu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_pointers(&invocation, 4, 16, Pointee::String { char_size: 2 })
+    }
+
+    fn cmd_df(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_memory_command(&invocation, 16, 4, MemoryDisplayMode::floats())
+    }
+
+    fn cmd_dd_double(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.display_memory_command(&invocation, 6, 8, MemoryDisplayMode::doubles())
+    }
+
+    /// The `d*p`, `d*a`, and `d*u` family: each `item_size`-byte value as a
+    /// pointer, followed by what it points to.
+    fn display_pointers(
+        &self,
+        invocation: &CommandInvocation<'_>,
+        item_size: usize,
+        default_count: u64,
+        pointee: Pointee,
+    ) -> Result<()> {
+        let width = item_size * 2;
         self.visit_symbol_values(
-            &invocation,
-            8,
-            8,
+            invocation,
+            item_size,
+            default_count,
             |state, address, chunk, readable, trace| {
-                if chunk.len() != 8 {
+                if chunk.len() != item_size {
                     outln!("{}  <partial>", ui::addr(address.0));
                     return;
                 }
@@ -667,30 +855,46 @@ impl ReplState<'_> {
                     outln!("{}  <unreadable>", ui::addr(address.0));
                     return;
                 }
-                let Ok(pointer_bytes) = chunk.try_into() else {
+                let Some(pointer) = le_value(chunk) else {
                     return;
                 };
-                let pointer = u64::from_le_bytes(pointer_bytes);
-                let pointer_symbol = try_format_symbol(&state.ctx.target, trace, pointer);
-                let mut line = format!("{}  {:016x}", ui::addr(address.0), pointer);
-                if let Some(symbol) = pointer_symbol {
-                    line.push_str(&format!("  {}", ui::symbol(&symbol)));
-                }
-                if pointer == 0 {
-                    line.push_str("  -> 0000000000000000");
-                } else {
-                    let mut pointed = [0u8; 8];
-                    match state.read_for_display(VirtAddr(pointer), &mut pointed) {
-                        Ok(()) => {
-                            let value = u64::from_le_bytes(pointed);
-                            line.push_str(&format!("  -> {:016x}", value));
-                            if let Some(symbol) = try_format_symbol(&state.ctx.target, trace, value)
+                let mut line = format!("{}  {:0width$x}", ui::addr(address.0), pointer);
+                match pointee {
+                    Pointee::Value => {
+                        if let Some(symbol) = try_format_symbol(&state.ctx.target, trace, pointer) {
+                            line.push_str(&format!("  {}", ui::symbol(&symbol)));
+                        }
+                        if pointer == 0 {
+                            line.push_str(&format!("  -> {:0width$x}", 0));
+                        } else {
+                            let mut pointed = vec![0u8; item_size];
+                            match state
+                                .read_for_display(VirtAddr(pointer), &mut pointed)
+                                .ok()
+                                .and_then(|()| le_value(&pointed))
                             {
-                                line.push_str(&format!("  {}", ui::symbol(&symbol)));
+                                Some(value) => {
+                                    line.push_str(&format!("  -> {value:0width$x}"));
+                                    if let Some(symbol) =
+                                        try_format_symbol(&state.ctx.target, trace, value)
+                                    {
+                                        line.push_str(&format!("  {}", ui::symbol(&symbol)));
+                                    }
+                                }
+                                None => line.push_str("  -> <unreadable>"),
                             }
                         }
-                        Err(_) => line.push_str("  -> <unreadable>"),
                     }
+                    // A null or unreadable pointer shows no string, as in WinDbg.
+                    Pointee::String { char_size } if pointer != 0 => {
+                        if let Ok(text) =
+                            state.quoted_string(VirtAddr(pointer), POINTER_STRING_CHARS, char_size)
+                        {
+                            line.push_str("  ");
+                            line.push_str(&text);
+                        }
+                    }
+                    Pointee::String { .. } => {}
                 }
                 outln!("{}", line);
             },
@@ -879,13 +1083,21 @@ impl ReplState<'_> {
             None => 256,
         };
 
-        let read = match self.ctx.read_terminated(start, max_chars, char_size) {
-            Ok(read) => read,
+        match self.quoted_string(start, max_chars, char_size) {
+            Ok(text) => outln!("{}  {}\n", ui::addr(start.0), text),
             Err(error) => {
                 error!("failed to read string at {:#x}: {}", start.0, error);
-                return Ok(());
             }
-        };
+        }
+
+        Ok(())
+    }
+
+    /// The NUL-terminated string of `char_size`-wide units at `start`,
+    /// quoted and escaped as `da`/`du` show it, marked when it is cut short
+    /// by `max_chars` or an unreadable page.
+    fn quoted_string(&self, start: VirtAddr, max_chars: usize, char_size: usize) -> Result<String> {
+        let read = self.ctx.read_terminated(start, max_chars, char_size)?;
         let text: String = if char_size == 1 {
             read.bytes.iter().map(|&byte| char::from(byte)).collect()
         } else {
@@ -898,14 +1110,7 @@ impl ReplState<'_> {
         } else {
             String::new()
         };
-        outln!(
-            "{}  \"{}\"{}\n",
-            ui::addr(start.0),
-            text.escape_debug(),
-            suffix
-        );
-
-        Ok(())
+        Ok(format!("\"{}\"{}", text.escape_debug(), suffix))
     }
 
     fn cmd_disasm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -1106,6 +1311,14 @@ impl ReplState<'_> {
             |value| value.to_le_bytes().to_vec(),
             |value| format!("{:#x}", value),
         )
+    }
+
+    fn cmd_ef(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.write_float_command(&invocation, "ef", 4)
+    }
+
+    fn cmd_ed_double(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.write_float_command(&invocation, "eD", 8)
     }
 
     fn write_string_command(
@@ -1627,18 +1840,6 @@ fn format_characters(value: u64) -> String {
             }
         })
         .collect()
-}
-
-fn format_float<T>(value: T) -> String
-where
-    T: Copy + Display + std::fmt::LowerExp + Into<f64>,
-{
-    let magnitude = value.into().abs();
-    if (1e-4..1e15).contains(&magnitude) {
-        value.to_string()
-    } else {
-        format!("{value:e}")
-    }
 }
 
 /// Format a proleptic-Gregorian UTC timestamp without pulling a date/time

@@ -170,7 +170,7 @@ impl Session {
     /// bytes exclude the terminator; a later unreadable page is reported with
     /// the readable prefix, while a failure at the start remains an error.
     pub fn read_terminated(
-        &mut self,
+        &self,
         addr: VirtAddr,
         max_units: usize,
         unit: usize,

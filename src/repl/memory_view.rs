@@ -240,6 +240,8 @@ pub enum ItemFormat {
     Dwords,
     Qwords,
     Binary,
+    Floats,
+    Doubles,
 }
 
 pub struct MemoryDisplayMode {
@@ -312,6 +314,43 @@ impl MemoryDisplayMode {
             show_ascii: false,
         }
     }
+
+    /// `df`: four single-precision values a row, as WinDbg lays them out.
+    pub fn floats() -> Self {
+        Self {
+            bytes_per_row: 16,
+            item_size: 4,
+            item_format: ItemFormat::Floats,
+            show_ascii: false,
+        }
+    }
+
+    /// `dD`: three double-precision values a row, as WinDbg lays them out.
+    pub fn doubles() -> Self {
+        Self {
+            bytes_per_row: 24,
+            item_size: 8,
+            item_format: ItemFormat::Doubles,
+            show_ascii: false,
+        }
+    }
+}
+
+const FLOAT_WIDTH: usize = 15;
+const DOUBLE_WIDTH: usize = 23;
+
+/// A floating-point value in decimal when its magnitude reads well that way
+/// (1e-4 up to 1e15, or zero), else in scientific notation.
+pub fn format_float<T>(value: T) -> String
+where
+    T: Copy + std::fmt::Display + std::fmt::LowerExp + Into<f64>,
+{
+    let magnitude = value.into().abs();
+    if magnitude == 0.0 || (1e-4..1e15).contains(&magnitude) {
+        value.to_string()
+    } else {
+        format!("{value:e}")
+    }
 }
 
 /// Render a memory listing while preserving rows that contain unreadable
@@ -347,6 +386,8 @@ pub fn display_memory_with_validity(
                     ItemFormat::Dwords => out!("???????? "),
                     ItemFormat::Qwords => out!("???????????????? "),
                     ItemFormat::Binary => out!("???????? ?? "),
+                    ItemFormat::Floats => out!("{:>FLOAT_WIDTH$} ", "?"),
+                    ItemFormat::Doubles => out!("{:>DOUBLE_WIDTH$} ", "?"),
                 }
                 printed += 1;
                 continue;
@@ -394,6 +435,17 @@ pub fn display_memory_with_validity(
                     out!(" {:02x}", item[0]);
                     out!(" ");
                 }
+                ItemFormat::Floats => match <[u8; 4]>::try_from(item) {
+                    Ok(bytes) => out!("{:>FLOAT_WIDTH$} ", format_float(f32::from_le_bytes(bytes))),
+                    Err(_) => out!("{:>FLOAT_WIDTH$} ", "?"),
+                },
+                ItemFormat::Doubles => match <[u8; 8]>::try_from(item) {
+                    Ok(bytes) => out!(
+                        "{:>DOUBLE_WIDTH$} ",
+                        format_float(f64::from_le_bytes(bytes))
+                    ),
+                    Err(_) => out!("{:>DOUBLE_WIDTH$} ", "?"),
+                },
             }
             printed += 1;
         }
@@ -405,6 +457,8 @@ pub fn display_memory_with_validity(
                 ItemFormat::Dwords => out!("         "),
                 ItemFormat::Qwords => out!("                 "),
                 ItemFormat::Binary => out!("            "),
+                ItemFormat::Floats => out!("{:FLOAT_WIDTH$} ", ""),
+                ItemFormat::Doubles => out!("{:DOUBLE_WIDTH$} ", ""),
             }
         }
 
