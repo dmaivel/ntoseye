@@ -1,7 +1,8 @@
-//! Process, thread, and job [`View`] builders.
+//! Process, thread, job, and global-flag [`View`] builders.
 
-use super::{View, list_termination};
+use super::{View, diagnostic, list_termination};
 use crate::guest::ProcessInfo;
+use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
 use crate::target::job::{JobDetail, JobField, job_limit_flag_names};
 use crate::target::{ThreadInfo, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
@@ -99,6 +100,43 @@ pub fn job(job: &JobDetail) -> View {
         (
             "process_list_termination",
             list_termination(&job.process_termination),
+        ),
+    ])
+}
+
+fn global_flag_names(value: u32) -> View {
+    View::List(
+        global_flags_set(value)
+            .map(|flag| {
+                View::Object(vec![
+                    ("bit", View::Hex(u64::from(flag.bit))),
+                    ("abbreviation", View::Str(flag.abbreviation.to_string())),
+                    ("description", View::Str(flag.description.to_string())),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// `!gflag`; top-level keys: `kernel_address`, `kernel`, `kernel_flags`,
+/// `process`, `process_flags` (a diagnostic of `{value, flags}`).
+pub fn global_flags(detail: &GlobalFlagsDetail) -> View {
+    View::Object(vec![
+        ("kernel_address", View::Hex(detail.kernel_address.0)),
+        ("kernel", View::Hex(u64::from(detail.kernel))),
+        ("kernel_flags", global_flag_names(detail.kernel)),
+        (
+            "process",
+            detail.process.as_ref().map_or(View::Null, process),
+        ),
+        (
+            "process_flags",
+            diagnostic(&detail.process_flags, |&flags| {
+                View::Object(vec![
+                    ("value", View::Hex(u64::from(flags))),
+                    ("flags", global_flag_names(flags)),
+                ])
+            }),
         ),
     ])
 }

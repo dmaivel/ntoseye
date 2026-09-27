@@ -591,6 +591,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!token", "security"),
     ("!chkimg", "analysis"),
     ("!error", "analysis"),
+    ("!gflag", "analysis"),
     ("!verifier", "analysis"),
     ("!wmitrace.logdump", "analysis"),
     ("!wmitrace.logger", "analysis"),

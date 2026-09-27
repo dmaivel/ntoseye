@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod context;
 pub mod cpu;
 pub mod etw;
+pub mod gflag;
 pub mod heap;
 pub mod image;
 pub mod irpfind;

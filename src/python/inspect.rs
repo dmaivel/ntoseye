@@ -112,6 +112,15 @@ impl Inspect {
         })
     }
 
+    /// Decode `nt!NtGlobalFlag` and the current process's
+    /// `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
+    fn global_flags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session.target.global_flags().map_err(err)?;
+            Ok(view::process::global_flags(&detail))
+        })
+    }
+
     /// Decode a job object: its accounting, limits, flags, nesting, and the
     /// processes assigned to it (`!job`). `address` is the job, or a process
     /// or thread whose job to decode; `None` is the current process's job.

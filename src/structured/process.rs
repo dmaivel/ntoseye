@@ -1,4 +1,4 @@
-//! Process and thread listings, and job objects.
+//! Process and thread listings, job objects, and global flags.
 
 use super::Args;
 use crate::error::Result;
@@ -33,6 +33,11 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let job = target.job_address(args.opt_addr(0)?)?;
             Ok(view::process::job(&target.inspect_job(job)?))
         })(),
+        // Only the display form; a change falls through to the REPL command.
+        "!gflag" | "gflag" if argv.is_empty() => args
+            .target()
+            .global_flags()
+            .map(|detail| view::process::global_flags(&detail)),
         _ => return None,
     })
 }

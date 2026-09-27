@@ -900,6 +900,11 @@ class Inspect:
         globs with `*`/`?`. `level` 0 counts the matching frames, 1 lists
         them, 2 adds the whole stack.
         """
+    def global_flags(self, /) -> Record:
+        """
+        Decode `nt!NtGlobalFlag` and the current process's
+        `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
+        """
     def irp(self, /, address: int) -> Record:
         """
         Decode an in-flight `_IRP` and its current I/O stack location (`!irp`).
