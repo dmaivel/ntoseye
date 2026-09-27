@@ -5,12 +5,12 @@ use tabled::settings::{Alignment, Modify, Panel};
 use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::expr::Expr;
-use crate::memory::DTB_IDENTITY;
+use crate::memory::{DTB_IDENTITY, PAGE_SIZE};
 use crate::repl::*;
 use crate::target::mm::{
     LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolFindDetail,
-    PoolType, PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, VmDetail, VtopDetail,
-    VtopLevel,
+    PoolType, PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, SystemPtesDetail, VmDetail,
+    VtopDetail, VtopLevel,
 };
 use crate::target::pool::tag_string;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
@@ -107,6 +107,15 @@ repl_command! {
     completion: Expression,
 }
 
+repl_command! {
+    cmd_sysptes;
+    names: ["!sysptes", "sysptes"],
+    usage: "!sysptes [flags]",
+    summary: "Show system PTE usage from the memory manager's bitmap allocators.",
+    details: "Windows 10 and later hand out system PTEs from _MI_SYSTEM_PTE_TYPE bitmap allocators in MiState: Vs.SystemPteInfo (the SystemPtes region) and SystemPtes' system-view, non-cached-mapping, and kernel-stack allocators. For each: the VA range it serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, PteFailures, and from its bitmap the number of free blocks and the largest; the bitmap is read whole, and a free count that differs from the counter means the target allocated between the reads. Counts are in PTEs; the system-view bitmap covers 16 PTEs per bit. Flags follow WinDbg: 0x1 lists each free block (its first PTE, the address it maps, and its length; 256 per allocator). 0x4 (PTEs mapping locked pages) needs the kernel's TrackPtes tracking: it reports which allocators track, but the tracked mappings themselves are not listed. 0x2, 0x8, and 0x10 select Windows 2000/XP/Vista lists these allocators replaced and are ignored. A build without these allocators is refused.",
+    completion: Expression,
+}
+
 fn print_mdl(detail: &MdlDetail) {
     outln!("Mdl {}", ui::addr(detail.address.0));
     outln!("  Next           {}", ui::addr(detail.next.0));
@@ -141,6 +150,118 @@ fn print_mdl(detail: &MdlDetail) {
             "  ({} more spanned page(s) not listed)",
             detail.spanned_pages - detail.pfns.len() as u64
         );
+    }
+    outln!();
+}
+
+fn print_system_ptes(detail: &SystemPtesDetail) {
+    outln!("System PTE Information");
+    outln!(
+        "  Total System Ptes {}   free {}   in use {}",
+        detail.total,
+        detail.free,
+        detail.total.saturating_sub(detail.free)
+    );
+    for pte_type in &detail.types {
+        outln!();
+        outln!(
+            "  {} ({}) @ {}",
+            pte_type.name,
+            pte_type.va_type.as_deref().unwrap_or("unknown VA type"),
+            ui::addr(pte_type.address.0)
+        );
+        if pte_type.bitmap_bits == 0 {
+            outln!("    unused (empty bitmap)");
+            continue;
+        }
+        let span = pte_type.bitmap_bits * pte_type.ptes_per_bit;
+        match pte_type.base_va {
+            Some(base) => outln!(
+                "    VA range      {} - {}   first PTE {}",
+                ui::addr(base.0),
+                ui::addr(base.0.wrapping_add(span * PAGE_SIZE as u64)),
+                ui::addr(pte_type.base_pte.0)
+            ),
+            None => outln!("    first PTE     {}", ui::addr(pte_type.base_pte.0)),
+        }
+        outln!(
+            "    Total Ptes    {}   free {}   in use {}   failures {}",
+            pte_type.total,
+            pte_type.free,
+            pte_type.total.saturating_sub(pte_type.free),
+            pte_type.failures
+        );
+        outln!(
+            "    bitmap        {:#x} bits at {}, {} PTE{} per bit; {} PTEs reserved beyond Total",
+            pte_type.bitmap_bits,
+            ui::addr(pte_type.bitmap.0),
+            pte_type.ptes_per_bit,
+            if pte_type.ptes_per_bit == 1 { "" } else { "s" },
+            span.saturating_sub(pte_type.total)
+        );
+        if pte_type.unreadable_bitmap_bytes != 0 {
+            outln!(
+                "    {} bitmap bytes unreadable (counted as allocated)",
+                pte_type.unreadable_bitmap_bytes
+            );
+        }
+        for run in &pte_type.free_runs {
+            match run.va {
+                Some(va) => outln!(
+                    "      free ptes: {} (va {})   number free: {}.",
+                    ui::addr(run.pte.0),
+                    ui::addr(va.0),
+                    run.ptes
+                ),
+                None => outln!(
+                    "      free ptes: {}   number free: {}.",
+                    ui::addr(run.pte.0),
+                    run.ptes
+                ),
+            }
+        }
+        if pte_type.free_runs_truncated {
+            outln!(
+                "      ... {} more free blocks not listed",
+                pte_type.free_run_count - pte_type.free_runs.len() as u64
+            );
+        }
+        outln!(
+            "    free blocks: {}   total free: {}   largest free block: {}",
+            pte_type.free_run_count,
+            pte_type.bitmap_free,
+            pte_type.largest_free_run
+        );
+        if pte_type.bitmap_free != pte_type.free {
+            outln!(
+                "    (the bitmap counts {} free where TotalFreeSystemPtes says {}: the target allocated between the reads)",
+                pte_type.bitmap_free,
+                pte_type.free
+            );
+        }
+    }
+    if detail.flags & 0x4 != 0 {
+        let tracked: Vec<&str> = detail
+            .types
+            .iter()
+            .filter(|pte_type| pte_type.tracking)
+            .map(|pte_type| pte_type.name.as_str())
+            .collect();
+        outln!();
+        if tracked.is_empty() {
+            outln!(
+                "  No allocator tracks its mappings (TrackPtes is off), so there is no record of the PTEs mapping locked pages."
+            );
+        } else {
+            outln!(
+                "  Tracking is on for {}; listing the tracked mappings is not supported.",
+                tracked.join(", ")
+            );
+        }
+    }
+    if detail.flags & 0x1a != 0 {
+        outln!();
+        outln!("  Flags 0x2, 0x8, and 0x10 apply to allocators this build does not have; ignored.");
     }
     outln!();
 }
@@ -805,6 +926,21 @@ impl ReplState<'_> {
         };
         match self.ctx.target.inspect_mdl(address, pfn_count) {
             Ok(detail) => print_mdl(&detail),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
+    fn cmd_sysptes(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let flags = match invocation.arg(0) {
+            Some(arg) => match self.eval_or_report(arg) {
+                Some(VirtAddr(flags)) => flags,
+                None => return Ok(()),
+            },
+            None => 0,
+        };
+        match self.ctx.target.system_ptes(flags, flags & 1 != 0) {
+            Ok(detail) => print_system_ptes(&detail),
             Err(error) => error!("{error}"),
         }
         Ok(())

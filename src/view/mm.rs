@@ -9,7 +9,8 @@ use crate::target::mm::{
     MdlDetail, MemoryRegionInfo, PfnDetail, PfnSelector, PoolBlockDetail, PoolFindDetail,
     PoolFindMatch, PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail,
     ProcessMemoryUsage, PteLevel, PteWalk, PtovDetail, PtovMapping, SystemMemorySummary,
-    VadProtection, VadType, VmCounter, VmDetail, VmPoolDetail, VmPteDetail, VtopDetail, VtopLevel,
+    SystemPteTypeDetail, SystemPtesDetail, VadProtection, VadType, VmCounter, VmDetail,
+    VmPoolDetail, VmPteDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
 use crate::types::{PageTableLevel, PteAttributes, VirtAddr};
@@ -521,6 +522,63 @@ pub fn mdl(detail: &MdlDetail) -> View {
             View::List(detail.pfns.iter().map(|pfn| View::Hex(*pfn)).collect()),
         ),
         ("truncated", View::Bool(detail.truncated)),
+    ])
+}
+
+fn system_pte_type(detail: &SystemPteTypeDetail) -> View {
+    let runs = detail
+        .free_runs
+        .iter()
+        .map(|run| {
+            View::Object(vec![
+                ("pte", View::Hex(run.pte.0)),
+                ("va", View::OptHex(run.va.map(|va| va.0))),
+                ("ptes", View::Num(run.ptes)),
+            ])
+        })
+        .collect();
+    View::Object(vec![
+        ("name", View::Str(detail.name.clone())),
+        ("address", View::Hex(detail.address.0)),
+        ("va_type", View::OptStr(detail.va_type.clone())),
+        ("flags", View::Hex(u64::from(detail.flags))),
+        ("ptes_per_bit", View::Num(detail.ptes_per_bit)),
+        ("base_pte", View::Hex(detail.base_pte.0)),
+        ("base_va", View::OptHex(detail.base_va.map(|va| va.0))),
+        ("bitmap", View::Hex(detail.bitmap.0)),
+        ("bitmap_bits", View::Num(detail.bitmap_bits)),
+        ("total", View::Num(detail.total)),
+        ("free", View::Num(detail.free)),
+        ("used", View::Num(detail.total.saturating_sub(detail.free))),
+        ("failures", View::Num(u64::from(detail.failures))),
+        ("bitmap_free", View::Num(detail.bitmap_free)),
+        (
+            "unreadable_bitmap_bytes",
+            View::Num(detail.unreadable_bitmap_bytes),
+        ),
+        ("free_run_count", View::Num(detail.free_run_count)),
+        ("largest_free_run", View::Num(detail.largest_free_run)),
+        ("free_runs", View::List(runs)),
+        (
+            "free_runs_truncated",
+            View::Bool(detail.free_runs_truncated),
+        ),
+        ("tracking", View::Bool(detail.tracking)),
+    ])
+}
+
+/// Render `!sysptes`; top-level keys: `flags`, `types` (one per
+/// `_MI_SYSTEM_PTE_TYPE` allocator, counts in PTEs), `total`, `free`, `used`.
+pub fn system_ptes(detail: &SystemPtesDetail) -> View {
+    View::Object(vec![
+        ("flags", View::Hex(detail.flags)),
+        (
+            "types",
+            View::List(detail.types.iter().map(system_pte_type).collect()),
+        ),
+        ("total", View::Num(detail.total)),
+        ("free", View::Num(detail.free)),
+        ("used", View::Num(detail.total.saturating_sub(detail.free))),
     ])
 }
 

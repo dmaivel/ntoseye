@@ -17,6 +17,7 @@ mod mdl;
 mod paging;
 mod pfn;
 mod pool;
+mod sysptes;
 mod vad;
 mod vm;
 
@@ -357,6 +358,63 @@ pub struct MdlDetail {
     /// Fewer PFNs are listed than the buffer spans (a requested count or the
     /// display bound).
     pub truncated: bool,
+}
+
+/// A run of free system PTEs: clear bits in an allocation bitmap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemPteRun {
+    /// Address of the run's first PTE.
+    pub pte: VirtAddr,
+    /// Virtual address that PTE maps.
+    pub va: Option<VirtAddr>,
+    /// Length in PTEs.
+    pub ptes: u64,
+}
+
+/// One `_MI_SYSTEM_PTE_TYPE` bitmap allocator (`!sysptes`). Counts are in
+/// PTEs; the bitmap may cover several PTEs per bit (`ptes_per_bit`).
+#[derive(Debug, Clone)]
+pub struct SystemPteTypeDetail {
+    /// The `MiState` path of the allocator, e.g. `Vs.SystemPteInfo`.
+    pub name: String,
+    pub address: VirtAddr,
+    /// `VaType`'s `_MI_SYSTEM_VA_TYPE` name, without the `MiVa` prefix.
+    pub va_type: Option<String>,
+    pub flags: u32,
+    pub ptes_per_bit: u64,
+    pub base_pte: VirtAddr,
+    /// Virtual address `base_pte` maps; `None` without `MmPteBase`.
+    pub base_va: Option<VirtAddr>,
+    pub bitmap: VirtAddr,
+    pub bitmap_bits: u64,
+    /// `TotalSystemPtes`: PTEs made available so far; the rest of the
+    /// bitmap is reserved (its bits set) until the allocator expands.
+    pub total: u64,
+    /// `TotalFreeSystemPtes`.
+    pub free: u64,
+    pub failures: u32,
+    /// Free PTEs counted from the bitmap's clear bits. It differs from
+    /// `free` only when the target allocated between the two reads.
+    pub bitmap_free: u64,
+    /// Bitmap bytes that could not be read (counted as allocated).
+    pub unreadable_bitmap_bytes: u64,
+    pub free_run_count: u64,
+    pub largest_free_run: u64,
+    /// The free runs in address order, when listing was requested; bounded.
+    pub free_runs: Vec<SystemPteRun>,
+    pub free_runs_truncated: bool,
+    /// `TrackingBitmap` is allocated: the kernel tracks which driver
+    /// mapped each PTE (`TrackPtes`).
+    pub tracking: bool,
+}
+
+/// Every system-PTE bitmap allocator in `MiState` (`!sysptes`).
+#[derive(Debug, Clone)]
+pub struct SystemPtesDetail {
+    pub flags: u64,
+    pub types: Vec<SystemPteTypeDetail>,
+    pub total: u64,
+    pub free: u64,
 }
 
 fn diagnostic_unavailable<T>(error: impl std::fmt::Display) -> DiagnosticValue<T> {

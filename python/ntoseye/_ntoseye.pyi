@@ -995,6 +995,11 @@ class Inspect:
         """
         Report thread states, wait reasons, and bounded stacks (`!stacks`).
         """
+    def system_ptes(self, /, free_runs: bool = False) -> Record:
+        """
+        Report system PTE usage from each `_MI_SYSTEM_PTE_TYPE` bitmap
+        allocator (`!sysptes`); `free_runs` lists each allocator's free blocks.
+        """
     def teb(self, /, thread: Thread, address: int |None = None) -> Record:
         """
         Decode a thread TEB and its WOW64 companion (`!teb`).

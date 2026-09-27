@@ -565,6 +565,17 @@ impl Inspect {
         })
     }
 
+    /// Report system PTE usage from each `_MI_SYSTEM_PTE_TYPE` bitmap
+    /// allocator (`!sysptes`); `free_runs` lists each allocator's free blocks.
+    #[pyo3(signature = (free_runs=false))]
+    fn system_ptes<'py>(&self, py: Python<'py>, free_runs: bool) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let flags = u64::from(free_runs);
+            let detail = session.target.system_ptes(flags, free_runs).map_err(err)?;
+            Ok(view::mm::system_ptes(&detail))
+        })
+    }
+
     /// Decode a security descriptor, including owner/group SIDs and ACLs (`!sd`).
     #[pyo3(signature = (address, annotate_well_known=false))]
     fn security_descriptor<'py>(
