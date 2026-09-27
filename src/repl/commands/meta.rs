@@ -67,8 +67,9 @@ repl_command! {
 repl_command! {
     cmd_printf;
     names: [".printf"],
-    usage: ".printf \"format\" [arguments...]",
+    usage: ".printf \"format\" [, argument]...",
     summary: "Format debugger values using WinDbg-style printf specifiers.",
+    details: "Arguments follow the format separated by commas, as in WinDbg (`.printf \"%p %d\\n\", poi(@rcx + 8), @$t0`), or by spaces when each is one word.",
     completion: Expression,
     style: ExpressionTail,
 }
@@ -840,6 +841,13 @@ fn print_target_time(detail: &TargetTimeDetail) {
 }
 
 fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
+    // WinDbg's own form, `"format", arg, ...`: each argument is an
+    // expression up to the next comma outside parentheses, spaces and all.
+    if let Some((format, rest)) = take_quoted(text.trim())
+        && let Some(rest) = rest.trim_start().strip_prefix(',')
+    {
+        return Some((format, split_printf_arguments(rest)?));
+    }
     let line = format!(".printf {text}");
     let parsed = parse_command(&line).ok()??;
     let invocation = parsed.invocation(CommandStyle::StructuredArgs).ok()?;
@@ -851,6 +859,31 @@ fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
         .map(|argument| argument.into_owned())
         .collect();
     Some((format, args))
+}
+
+/// `a, poi(b + 8), c` split at its top-level commas; `None` for an empty
+/// argument or an unterminated quote.
+fn split_printf_arguments(text: &str) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let scan = scan_unquoted(text, |offset, ch| {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                args.push(text[start..offset].trim().to_string());
+                start = offset + 1;
+            }
+            _ => {}
+        }
+        false
+    });
+    if let Unquoted::OpenQuote(_) = scan {
+        return None;
+    }
+    args.push(text[start..].trim().to_string());
+    (!args.iter().any(String::is_empty)).then_some(args)
 }
 
 fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Option<String> {
@@ -1022,6 +1055,23 @@ mod tests {
         let (result, text) = capture(|| state.dispatch_line("\u{2e}printf \"C:\\dir\\x\""));
         result.unwrap();
         assert_eq!(text, "C:\\dir\\x");
+    }
+
+    #[test]
+    fn printf_takes_windbg_comma_separated_arguments() {
+        let parse = |tail: &str| parse_printf_tail(tail).map(|(_, args)| args);
+        // Spaces belong to the expression, and commas nest in parentheses.
+        assert_eq!(
+            parse(r#""%p %d\n", poi(@rcx + 8), (1, 2) , 3"#),
+            Some(vec!["poi(@rcx + 8)".into(), "(1, 2)".into(), "3".into()])
+        );
+        // A comma inside the format string is text; the old space form stays.
+        assert_eq!(
+            parse(r#""a, %d" 0n42 7"#),
+            Some(vec!["0n42".into(), "7".into()])
+        );
+        assert_eq!(parse(r#""%d", 1,"#), None);
+        assert_eq!(parse(r#""%d", , 1"#), None);
     }
 
     #[test]
