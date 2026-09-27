@@ -6,10 +6,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 
-use super::{DiagnosticValue, Target};
+use super::{DiagnosticValue, Target, fast_ref_address};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::layout::{ParsedType, TypeInfo, utf16le_lossy};
+use crate::layout::utf16le_lossy;
 use crate::types::VirtAddr;
 
 /// Subsections one `!ca` walks.
@@ -127,27 +127,6 @@ pub struct CachedFile {
     pub valid_bytes: u64,
 }
 
-/// The names of the one-bit fields of bitfield type `layout` set in `raw`,
-/// in bit order.
-fn set_flag_names(layout: &TypeInfo, raw: u64) -> Vec<String> {
-    let mut flags: Vec<(u8, &String)> = layout
-        .fields
-        .iter()
-        .filter_map(|(name, field)| match field.type_data {
-            ParsedType::Bitfield { pos, len: 1, .. } if field.decode(raw) != 0 => Some((pos, name)),
-            _ => None,
-        })
-        .collect();
-    flags.sort();
-    flags.into_iter().map(|(_, name)| name.clone()).collect()
-}
-
-/// The object an `_EX_FAST_REF` holds: its pointer with the reference count
-/// in the low four bits cleared.
-fn fast_ref_object(value: u64) -> VirtAddr {
-    VirtAddr(value & !0xf)
-}
-
 impl Target {
     /// `_FILE_OBJECT.FileName` of `file_object`.
     fn file_object_name(&self, file_object: VirtAddr) -> Result<String> {
@@ -178,8 +157,9 @@ impl Target {
                 .is_ok_and(|field| field.decode(flags) != 0)
         };
         let data_file = flag("File") && !flag("Image");
-        let flag_names = set_flag_names(&section_flags, flags);
-        let file_object = fast_ref_object(control_area.read_uint("FilePointer")?);
+        // Every `_MMSECTION_FLAGS` bit shares the word `BeingDeleted` opens.
+        let flag_names = section_flags.set_bit_names("BeingDeleted", flags);
+        let file_object = fast_ref_address(control_area.read_uint("FilePointer")?);
         let segment_detail = DiagnosticValue::from_result((|| {
             let segment = types.struct_at("_SEGMENT", segment)?;
             Ok(SegmentDetail {
@@ -397,7 +377,7 @@ impl Target {
                 .prefetch();
             let file_object = map_ref
                 .read_uint("FileObjectFastRef")
-                .map(fast_ref_object)
+                .map(fast_ref_address)
                 .unwrap_or(VirtAddr(0));
             let read = |name: &str| DiagnosticValue::from_result(map_ref.read_uint(name));
             files.push(CachedFile {
@@ -425,43 +405,5 @@ impl Target {
             file_count,
             interrupted,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::layout::FieldInfo;
-    use std::collections::HashMap;
-
-    fn bit(pos: u8, len: u8) -> FieldInfo {
-        FieldInfo {
-            offset: 0,
-            size: 4,
-            type_data: ParsedType::Bitfield {
-                underlying: Box::new(ParsedType::Primitive("ULONG".into())),
-                pos,
-                len,
-            },
-        }
-    }
-
-    #[test]
-    fn flag_names_are_the_set_single_bits_in_bit_order() {
-        let layout = TypeInfo {
-            name: "_MMSECTION_FLAGS".into(),
-            size: 4,
-            fields: HashMap::from([
-                ("File".to_string(), bit(7, 1)),
-                ("Image".to_string(), bit(5, 1)),
-                ("BeingDeleted".to_string(), bit(0, 1)),
-                ("PreferredNode".to_string(), bit(20, 7)),
-            ]),
-            pointer_size: 8,
-        };
-        assert_eq!(
-            set_flag_names(&layout, 0xa0 | 0x3 << 20),
-            vec!["Image".to_string(), "File".to_string()]
-        );
     }
 }
