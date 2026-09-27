@@ -1,6 +1,6 @@
 //! usermode: [`View`] builders for the structured inspectors.
 
-use super::shape::{Diag, Hex, ViewValue, shapes};
+use super::shape::{Diag, Hex, shapes};
 use super::{ListEnd, View, list_termination};
 use crate::target::usermode::{
     self as target, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,

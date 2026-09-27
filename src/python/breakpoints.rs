@@ -24,7 +24,6 @@ use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
 use crate::view;
-use crate::view::shape::ViewValue;
 
 /// Code breakpoints and data watchpoints, keyed by id (`dbg.breakpoints`).
 #[pyclass(module = "ntoseye")]

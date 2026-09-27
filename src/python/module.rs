@@ -8,7 +8,7 @@ use pyo3::types::{PyAny, PyBytes, PyDict};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{DriverIterator, ModuleIterator};
-use super::record::{BaseRecord, PlainDict, Record};
+use super::record::{BaseRecord, PlainDict};
 use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict, view_record, view_records};
 use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
@@ -18,7 +18,7 @@ use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::module::{Export, Section};
-use crate::view::shape::{Hex, ViewValue};
+use crate::view::shape::Hex;
 use crate::view::{self, View};
 use pelite::PeView;
 

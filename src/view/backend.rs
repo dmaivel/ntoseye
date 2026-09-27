@@ -2,7 +2,7 @@
 //! captured guest debug output.
 
 use super::View;
-use super::shape::{ViewValue, shapes};
+use super::shape::shapes;
 use crate::dbg_backend::{self, DebugLine, DebugOutputPage};
 
 shapes! {

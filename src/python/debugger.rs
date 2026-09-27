@@ -16,7 +16,6 @@ use super::inspect::Inspect;
 use super::memory::Memory;
 use super::module::{Drivers, Modules};
 use super::process::Processes;
-use super::record::Record;
 use super::secure::SecureKernel;
 use super::stop::Stop;
 use super::symbols::Location;

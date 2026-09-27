@@ -26,7 +26,6 @@ use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
 use crate::view::View;
-use crate::view::shape::ViewValue;
 use crate::view::symbols;
 
 fn lookup_field<'a>(

@@ -2,7 +2,7 @@
 
 use super::View;
 use super::process::process;
-use super::shape::{Diag, Hex, ViewValue, shapes};
+use super::shape::{Diag, Hex, shapes};
 use crate::target::security::{
     self, AceDetail, AclDetail, ObjectSecurityDetail, PrivilegeInfo, SecurityDescriptorDetail,
     SessionDetail, SessionProcessDetail, SessionProcessesDetail, SessionsDetail, SidDetail,
@@ -94,7 +94,7 @@ shapes! {
         /// `None` for processes whose session is unknown.
         id: Option<u64>,
         /// Each a process record.
-        processes: Vec<View>,
+        processes: Vec<super::process::ProcessIdentity>,
     }
 
     /// Sessions and their processes (`!session`).
@@ -111,7 +111,7 @@ shapes! {
     /// A process and its session id.
     SessionProcess {
         /// The process record.
-        process: View,
+        process: super::process::ProcessIdentity,
         /// `None` when neither `_EPROCESS` nor the primary token yields one.
         session: Option<u64>,
     }
@@ -145,7 +145,7 @@ shapes! {
     /// A process's primary token (`!token`).
     Token {
         /// The process record.
-        process: View,
+        process: super::process::ProcessIdentity,
         /// The `_TOKEN`.
         token: Hex,
         token_id: Diag<Hex>,

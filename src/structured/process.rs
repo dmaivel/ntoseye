@@ -3,6 +3,7 @@
 use super::Args;
 use crate::error::Result;
 use crate::target::zombies::ZombieKinds;
+use crate::view::shape::ViewValue;
 use crate::view::{self, View};
 
 pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
@@ -11,23 +12,31 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         "ps" => args
             .target()
             .matching_processes(argv.first().copied())
-            .map(|processes| View::List(processes.iter().map(view::process::process).collect())),
+            .map(|processes| {
+                processes
+                    .iter()
+                    .map(view::process::process)
+                    .collect::<Vec<_>>()
+                    .into_view()
+            }),
         "!process" if argv.first().is_some_and(|arg| *arg == "0") => args
             .target()
             .matching_processes(argv.get(2).copied())
-            .map(|processes| View::List(processes.iter().map(view::process::process).collect())),
-        "threads" => args.state.ctx.windows_threads().map(|(threads, active)| {
-            View::List(
-                threads
+            .map(|processes| {
+                processes
                     .iter()
-                    .map(|thread| {
-                        view::process::thread(
-                            thread,
-                            active.get(&thread.ethread.0).map(String::as_str),
-                        )
-                    })
-                    .collect(),
-            )
+                    .map(view::process::process)
+                    .collect::<Vec<_>>()
+                    .into_view()
+            }),
+        "threads" => args.state.ctx.windows_threads().map(|(threads, active)| {
+            threads
+                .iter()
+                .map(|thread| {
+                    view::process::thread(thread, active.get(&thread.ethread.0).map(String::as_str))
+                })
+                .collect::<Vec<_>>()
+                .into_view()
         }),
         "!job" | "job" => (|| {
             let target = args.target();

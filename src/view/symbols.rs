@@ -2,7 +2,7 @@
 //! builders.
 
 use super::View;
-use super::shape::{Hex, Omit, ViewValue, shapes};
+use super::shape::{Hex, Omit, shapes};
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::symbols::{self, SymbolVisibility, format_symbol_with_offset};
 use crate::target::{self, Target};
@@ -205,7 +205,7 @@ pub fn symbol(address: u64, module: String, name: String, offset: u32) -> View {
     .into_view()
 }
 
-pub fn source_location(location: &symbols::SourceLocation) -> View {
+pub fn source_location(location: &symbols::SourceLocation) -> SourceLocation {
     SourceLocation {
         file: location.file.clone(),
         line: location.line,
@@ -216,7 +216,6 @@ pub fn source_location(location: &symbols::SourceLocation) -> View {
             .map(|path| path.display().to_string()),
         local_exists: location.local_exists,
     }
-    .into_view()
 }
 
 fn local_location(location: &symbols::LocalVariableLocation) -> LocalVariableLocation {

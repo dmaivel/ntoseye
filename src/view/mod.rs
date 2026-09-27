@@ -19,7 +19,7 @@ pub mod symbols;
 pub mod triage;
 pub mod usermode;
 
-use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination};
+use crate::target::{DiagnosticValue, ListTermination};
 
 // Shared shape for SDK/MCP structure rendering; surfaces disagree only on how
 // address-like values are encoded.
@@ -27,16 +27,12 @@ use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination};
 pub enum View {
     /// An address/pointer/status: hex string for MCP, int for Python.
     Hex(u64),
-    OptHex(Option<u64>),
     /// A plain count: a number on both surfaces.
     Num(u64),
-    OptNum(Option<u64>),
     /// A signed count.
     Int(i64),
     Bool(bool),
-    OptBool(Option<bool>),
     Str(String),
-    OptStr(Option<String>),
     Null,
     List(Vec<View>),
     /// An ordered key/value object (insertion order is preserved on render).
@@ -64,14 +60,10 @@ pub fn to_json(v: &View) -> serde_json::Value {
     use serde_json::Value;
     match v {
         View::Hex(n) => Value::from(format!("{n:#x}")),
-        View::OptHex(o) => o.map_or(Value::Null, |n| Value::from(format!("{n:#x}"))),
         View::Num(n) => Value::from(*n),
-        View::OptNum(o) => o.map_or(Value::Null, Value::from),
         View::Int(n) => Value::from(*n),
         View::Bool(b) => Value::from(*b),
-        View::OptBool(o) => o.map_or(Value::Null, Value::from),
         View::Str(s) => Value::from(s.clone()),
-        View::OptStr(o) => o.clone().map_or(Value::Null, Value::from),
         View::Null => Value::Null,
         View::List(items) => Value::Array(items.iter().map(to_json).collect()),
         View::Object(fields) | View::Shaped(shape::Shaped { fields, .. }) => {
@@ -128,21 +120,9 @@ pub fn to_py<'py>(
     use pyo3::types::{PyDict, PyList};
     Ok(match v {
         View::Hex(n) | View::Num(n) => n.into_bound_py_any(py)?,
-        View::OptHex(o) | View::OptNum(o) => match o {
-            Some(n) => n.into_bound_py_any(py)?,
-            None => py.None().into_bound(py),
-        },
         View::Int(n) => n.into_bound_py_any(py)?,
         View::Bool(b) => b.into_bound_py_any(py)?,
-        View::OptBool(o) => match o {
-            Some(b) => b.into_bound_py_any(py)?,
-            None => py.None().into_bound(py),
-        },
         View::Str(s) => s.as_str().into_bound_py_any(py)?,
-        View::OptStr(o) => match o {
-            Some(s) => s.as_str().into_bound_py_any(py)?,
-            None => py.None().into_bound(py),
-        },
         View::Null => py.None().into_bound(py),
         View::List(items) => {
             let list = PyList::empty(py);
@@ -155,7 +135,7 @@ pub fn to_py<'py>(
             let dict = PyDict::new(py);
             let mut hex = Vec::new();
             for (key, val) in fields {
-                if matches!(val, View::Hex(_) | View::OptHex(Some(_))) {
+                if matches!(val, View::Hex(_)) {
                     hex.push(*key);
                 }
                 dict.set_item(key, to_py(py, val, shape)?)?;
@@ -178,7 +158,7 @@ pub fn to_py<'py>(
                     py,
                     Diagnostic {
                         value: value.unbind(),
-                        hex: matches!(diagnostic.value, Some(View::Hex(_) | View::OptHex(Some(_)))),
+                        hex: matches!(diagnostic.value, Some(View::Hex(_))),
                         error: diagnostic.error.clone(),
                         source: diagnostic.source.clone(),
                     },
@@ -209,14 +189,6 @@ pub fn diagnostic<T>(value: &DiagnosticValue<T>, encode: impl FnOnce(&T) -> View
         error,
         source: None,
     }))
-}
-
-pub fn diagnostic_metric<T>(metric: &DiagnosticMetric<T>, encode: impl FnOnce(&T) -> View) -> View {
-    let View::Diagnostic(mut diagnostic) = diagnostic(&metric.value, encode) else {
-        unreachable!()
-    };
-    diagnostic.source = Some(metric.source.map(|source| source.to_string()));
-    View::Diagnostic(diagnostic)
 }
 
 shape::shapes! {

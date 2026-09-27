@@ -1,7 +1,7 @@
 //! ETW [`View`] builders: trace sessions, their buffers, and their events.
 
 use super::View;
-use super::shape::{Hex, ViewValue, shapes};
+use super::shape::{Hex, shapes};
 use crate::target::etw::{
     self, EtwEventDump as EtwEventDumpDetail, EtwLoggerBuffers as EtwLoggerBuffersDetail,
     EtwLoggerTable as EtwLoggerTableDetail, event_trace_group_name, extended_type_name,

@@ -2,12 +2,9 @@
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 
-#[cfg(feature = "python-stubs")]
-use pyo3::type_hint_union;
-
 use super::View;
 use super::process::{process, thread};
-use super::shape::{Hex, Omit, ViewValue, shapes};
+use super::shape::{Hex, Omit, shapes, unions};
 use super::symbols::source_location;
 use crate::breakpoints::Breakpoint;
 use crate::disasm::DisasmRow;
@@ -93,12 +90,12 @@ shapes! {
         saved_vtl: Vec<String>,
         /// The process chosen with `.process` whose memory `dt`, `dq`, ...
         /// read; it survives resumes.
-        attached_process: Option<View>,
+        attached_process: Option<super::process::ProcessIdentity>,
         /// The process whose page tables the stopped vCPU has loaded.
-        stopped_process: Option<View>,
+        stopped_process: Option<super::process::ProcessIdentity>,
         /// The Windows thread the stopped vCPU runs; its owner can differ
         /// from `stopped_process` (`KeStackAttachProcess`).
-        stopped_thread: Option<View>,
+        stopped_thread: Option<super::process::ThreadOverview>,
         /// False after a reboot until the kernel's loaded-module list exists:
         /// process and module enumeration is not yet meaningful.
         coherent: bool,
@@ -120,7 +117,7 @@ shapes! {
         /// How the frame was recovered: `current`, `seed`, `unwind`, or `scan`.
         source: &'static str,
         /// The source line at `ip`, when line information resolves it.
-        source_location: Option<View>,
+        source_location: Option<super::symbols::SourceLocation>,
     }
 
     /// One decoded instruction.
@@ -321,47 +318,23 @@ shapes! {
     }
 }
 
-/// An entry's decoded unwind data, by form.
-pub enum Unwind {
-    Amd64(Amd64UnwindInfo),
-    Packed(Arm64PackedUnwind),
-    Xdata(Arm64XdataUnwind),
-}
-
-impl ViewValue for Unwind {
-    fn into_view(self) -> View {
-        match self {
-            Self::Amd64(info) => info.into_view(),
-            Self::Packed(packed) => packed.into_view(),
-            Self::Xdata(xdata) => xdata.into_view(),
-        }
+unions! {
+    /// An entry's decoded unwind data, by form.
+    Unwind {
+        Amd64(Amd64UnwindInfo),
+        Packed(Arm64PackedUnwind),
+        Xdata(Arm64XdataUnwind),
     }
-    #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr = type_hint_union!(
-        <Amd64UnwindInfo as ViewValue>::HINT,
-        <Arm64PackedUnwind as ViewValue>::HINT,
-        <Arm64XdataUnwind as ViewValue>::HINT
-    );
 }
 
-/// A register's value: an address-width value, or a vector register too
-/// wide for an int's hex rendering.
-pub enum RegisterContent {
-    Scalar(Hex),
-    /// A 128-bit value, as `0x` and 32 hex digits.
-    Wide(String),
-}
-
-impl ViewValue for RegisterContent {
-    fn into_view(self) -> View {
-        match self {
-            Self::Scalar(value) => value.into_view(),
-            Self::Wide(value) => value.into_view(),
-        }
+unions! {
+    /// A register's value: an address-width value, or a vector register too
+    /// wide for an int's hex rendering.
+    RegisterContent {
+        Scalar(Hex),
+        /// A 128-bit value, as `0x` and 32 hex digits.
+        Wide(String),
     }
-    #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr =
-        type_hint_union!(<Hex as ViewValue>::HINT, <String as ViewValue>::HINT);
 }
 
 pub fn vcpu(v: &VcpuInfo) -> View {

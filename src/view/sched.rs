@@ -1,10 +1,7 @@
 //! sched: [`View`] builders for the structured inspectors.
 
-#[cfg(feature = "python-stubs")]
-use pyo3::type_hint_union;
-
 use super::execution::{self, numbered_stack_frame, stack_frame};
-use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
+use super::shape::{Diag, Hex, Omit, shapes, unions};
 use super::{ListEnd, View, list_termination};
 use crate::target::sched::{self as detail, ApcSelector};
 use crate::target::workqueue::{self, ExQueueDetail};
@@ -411,25 +408,13 @@ shapes! {
     }
 }
 
-/// `!apc`'s selector: a name for the whole-walk selections, an
-/// [`ApcSelection`] for a thread or process.
-pub enum ApcSelectorValue {
-    Name(&'static str),
-    Selection(ApcSelection),
-}
-
-impl ViewValue for ApcSelectorValue {
-    fn into_view(self) -> View {
-        match self {
-            Self::Name(name) => name.into_view(),
-            Self::Selection(selection) => selection.into_view(),
-        }
+unions! {
+    /// `!apc`'s selector: a name for the whole-walk selections, an
+    /// [`ApcSelection`] for a thread or process.
+    ApcSelectorValue {
+        Name(&'static str),
+        Selection(ApcSelection),
     }
-    #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr = type_hint_union!(
-        pyo3::type_hint_identifier!("builtins", "str"),
-        <py::ApcSelection as pyo3::PyTypeInfo>::TYPE_HINT
-    );
 }
 
 fn thread_summary(thread: &detail::ThreadSummary) -> ThreadSummary {

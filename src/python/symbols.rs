@@ -151,7 +151,7 @@ impl Symbols {
         })?;
         location
             .as_ref()
-            .map(|location| view_record(py, &view::symbols::source_location(location)))
+            .map(|location| view_record(py, &view::symbols::source_location(location).into_view()))
             .transpose()
     }
 

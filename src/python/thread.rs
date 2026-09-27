@@ -12,7 +12,7 @@ use super::context::{Context, Space};
 use super::handle::{Owner, require_halted};
 use super::iter::{CpuIterator, NameIterator, ThreadIterator};
 use super::process::Process;
-use super::record::{PlainDict, Record};
+use super::record::PlainDict;
 use super::types::{Struct, enum_value};
 use super::{err, view_dict, view_record};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
@@ -328,13 +328,19 @@ impl Thread {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, view::process::py::ThreadOverview>> {
         let active = self.cpu_id(py)?;
-        view_record(py, &view::process::thread(&self.info, active.as_deref()))
+        view_record(
+            py,
+            &view::process::thread(&self.info, active.as_deref()).into_view(),
+        )
     }
 
     /// The thread as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let active = self.cpu_id(py)?;
-        view_dict(py, &view::process::thread(&self.info, active.as_deref()))
+        view_dict(
+            py,
+            &view::process::thread(&self.info, active.as_deref()).into_view(),
+        )
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

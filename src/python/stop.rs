@@ -14,7 +14,6 @@ use crate::session::{ContinueOutcome, ExceptionRecord};
 use crate::target::ThreadInfo;
 use crate::unwind::try_format_symbol_at;
 use crate::view;
-use crate::view::shape::ViewValue;
 
 /// Rust-only snapshot backing the shared properties of a typed stop.
 #[pyclass(name = "_StopContext", module = "ntoseye")]

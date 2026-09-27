@@ -1,6 +1,6 @@
 //! `View` builders for the metadata inspectors.
 
-use super::shape::{Diag, Hex, ViewValue, shapes};
+use super::shape::{Diag, Hex, shapes};
 use super::{ListEnd, View};
 use crate::target::ListTermination;
 use crate::target::meta::{

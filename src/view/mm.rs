@@ -2,7 +2,7 @@
 
 use super::View;
 use super::process::process;
-use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
+use super::shape::{Diag, Hex, Omit, shapes};
 use crate::target::mm::{
     self as target_mm, BigPoolDetail, LookasideDetail, LookasideListsDetail, MdlDetail,
     MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange,
@@ -515,7 +515,7 @@ shapes! {
     /// What `VirtualQuery` reports for an address (`!vprot`), each
     /// `MEM_*`/`PAGE_*` value beside its name.
     MemoryBasicInformation {
-        process: View,
+        process: super::process::ProcessIdentity,
         address: Hex,
         base_address: Hex,
         /// The VAD's start; zero for free memory.
@@ -590,7 +590,7 @@ shapes! {
 
     /// One process's memory counters, in bytes.
     ProcessMemoryUsage {
-        process: View,
+        process: super::process::ProcessIdentity,
         virtual_size: Diag<u64>,
         peak_virtual_size: Diag<u64>,
         working_set_size: Diag<u64>,

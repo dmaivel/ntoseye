@@ -5,7 +5,7 @@ use super::View;
 use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::{run_status, stack_frame};
 use super::module::loaded_module;
-use super::shape::{Hex, Omit, ViewValue, shapes};
+use super::shape::{Hex, Omit, shapes};
 use crate::dmp::{self, DmpException, DmpSystemInfo, TriageCrashInfo};
 use crate::triage::TriagePrcbInfo;
 use crate::triage_report::{

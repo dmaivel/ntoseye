@@ -2,7 +2,7 @@
 //! load status.
 
 use super::View;
-use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
+use super::shape::{Diag, Hex, Omit, shapes};
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::pe::headers::{
     CodeView, DebugRecord, FileHeader, ImportDescriptor, ImportName, OptionalHeader, SectionHeader,

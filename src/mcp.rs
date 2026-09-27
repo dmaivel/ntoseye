@@ -37,7 +37,6 @@ use crate::repl::{
 use crate::session::{RunStatus, Session};
 use crate::structured;
 use crate::view;
-use crate::view::shape::ViewValue;
 use crate::{Backend, TargetSpec};
 
 /// The session actor's state: the (`!Send`) session plus the REPL state the

@@ -1,6 +1,6 @@
 //! hardware: [`View`] builders for hang diagnosis (`!qlocks`, `!ipi`) and PCI.
 
-use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
+use super::shape::{Diag, Hex, Omit, shapes};
 use super::{View, diagnostic};
 use crate::target::hang::{
     self, IpiDetail, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,

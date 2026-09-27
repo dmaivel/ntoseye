@@ -7,9 +7,6 @@
 //!
 //! [`BaseRecord`]: crate::python::record::BaseRecord
 
-#[cfg(feature = "python-stubs")]
-use pyo3::type_hint_union;
-
 use super::{DiagnosticView, View};
 use crate::target::{DiagnosticMetric, DiagnosticValue};
 
@@ -111,7 +108,7 @@ impl<T: ViewValue> ViewValue for Option<T> {
     }
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr =
-        type_hint_union!(T::HINT, pyo3::type_hint_identifier!("builtins", "None"));
+        hint_union!(T::HINT, pyo3::type_hint_identifier!("builtins", "None"));
 }
 
 impl<T: ViewValue> ViewValue for Omit<T> {
@@ -276,6 +273,16 @@ macro_rules! shapes {
                 );
             )*
 
+            impl $name {
+                /// Render this shape (see [`ViewValue`]); inherent so callers
+                /// need no trait import.
+                ///
+                /// [`ViewValue`]: $crate::view::shape::ViewValue
+                pub fn into_view(self) -> $crate::view::View {
+                    $crate::view::shape::ViewValue::into_view(self)
+                }
+            }
+
             impl $crate::view::shape::ViewValue for $name {
                 fn into_view(self) -> $crate::view::View {
                     let mut fields = Vec::new();
@@ -342,6 +349,58 @@ macro_rules! shapes {
     };
 }
 pub(crate) use shapes;
+
+/// Declare fields that hold one of several kinds of value: each becomes an
+/// enum whose variants wrap a [`ViewValue`] (usually a shape), rendered as
+/// the variant's value and typed as the union of the variants' types.
+macro_rules! unions {
+    ($(
+        $(#[doc = $doc:literal])*
+        $name:ident {
+            $(
+                $(#[doc = $variant_doc:literal])*
+                $variant:ident($ty:ty)
+            ),+ $(,)?
+        }
+    )*) => {$(
+        $(#[doc = $doc])*
+        pub enum $name {
+            $(
+                $(#[doc = $variant_doc])*
+                $variant($ty),
+            )+
+        }
+
+        impl $crate::view::shape::ViewValue for $name {
+            fn into_view(self) -> $crate::view::View {
+                match self {
+                    $(Self::$variant(value) => $crate::view::shape::ViewValue::into_view(value),)+
+                }
+            }
+            #[cfg(feature = "python-stubs")]
+            const HINT: pyo3::inspect::PyStaticExpr = $crate::view::shape::hint_union!(
+                $(<$ty as $crate::view::shape::ViewValue>::HINT),+
+            );
+        }
+    )*};
+}
+pub(crate) use unions;
+
+/// `A | B | ...` of type hints (pyo3's `type_hint_union!` recurses by its
+/// unqualified name, so it only works where imported).
+#[cfg(feature = "python-stubs")]
+macro_rules! hint_union {
+    ($hint:expr) => { $hint };
+    ($left:expr, $($rest:expr),+) => {
+        pyo3::inspect::PyStaticExpr::BinOp {
+            left: &$left,
+            op: pyo3::inspect::PyStaticOperator::BitOr,
+            right: &$crate::view::shape::hint_union!($($rest),+),
+        }
+    };
+}
+#[cfg(feature = "python-stubs")]
+pub(crate) use hint_union;
 
 /// A declared field's key: the one given with `=> "key"`, else its name.
 macro_rules! key {

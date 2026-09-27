@@ -2,7 +2,7 @@
 //! VPBs, the file cache, and the filter manager.
 
 use super::View;
-use super::shape::{Diag, Hex, ViewValue, shapes};
+use super::shape::{Diag, Hex, shapes};
 use crate::target::fltmgr::{
     FltFilterDetail, FltFrame, FltFrames, FltInstanceDetail, FltVolumeDetail,
 };

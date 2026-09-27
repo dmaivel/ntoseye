@@ -2,13 +2,11 @@
 //! decoded trap frames and exception records.
 
 use super::View;
-use super::shape::{Hex, ViewValue, shapes};
+use super::shape::{Hex, shapes, unions};
 use crate::bugchecks::{self, BugcheckAnalysis};
 use crate::session;
 use crate::trapframe::{KtrapFrame, KtrapFrameData};
 use crate::triage_report::exception_code_name;
-#[cfg(feature = "python-stubs")]
-use pyo3::type_hint_union;
 
 shapes! {
     /// A decoded bugcheck (BSOD): its code, the four parameters, and the
@@ -185,22 +183,12 @@ shapes! {
     }
 }
 
-/// A `_KTRAP_FRAME`'s registers, as the frame's architecture names them.
-pub enum KtrapFrameRegisters {
-    Amd64(Amd64TrapFrame),
-    Arm64(Box<Arm64TrapFrame>),
-}
-
-impl ViewValue for KtrapFrameRegisters {
-    fn into_view(self) -> View {
-        match self {
-            Self::Amd64(frame) => frame.into_view(),
-            Self::Arm64(frame) => frame.into_view(),
-        }
+unions! {
+    /// A `_KTRAP_FRAME`'s registers, as the frame's architecture names them.
+    KtrapFrameRegisters {
+        Amd64(Amd64TrapFrame),
+        Arm64(Box<Arm64TrapFrame>),
     }
-    #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr =
-        type_hint_union!(Amd64TrapFrame::HINT, Arm64TrapFrame::HINT);
 }
 
 /// A decoded bugcheck (BSOD): code/name/description, its four parameters, and the
@@ -358,7 +346,6 @@ pub fn bugcheck_trap_frame(tf: &bugchecks::BugcheckTrapFrame) -> BugcheckTrapFra
 mod tests {
     use super::bugcheck_trap_frame;
     use crate::bugchecks::BugcheckTrapFrame;
-    use crate::view::shape::ViewValue;
     use crate::view::to_json;
 
     #[test]

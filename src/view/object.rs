@@ -3,7 +3,7 @@
 //! resources, notification callbacks, service tables, and ALPC ports.
 
 use super::process::process;
-use super::shape::{Diag, Hex, ViewValue, shapes};
+use super::shape::{Diag, Hex, shapes};
 use super::{ListEnd, View, list_termination};
 use crate::target::alpc::{
     AlpcConnection as AlpcConnectionDetail, AlpcField, AlpcMessageDetail, AlpcPortDetail,
@@ -225,8 +225,8 @@ shapes! {
         device: Option<Hex>,
     }
 
-    /// A `_DRIVER_OBJECT` as listed in the `\Driver` and `\FileSystem`
-    /// directories (`drivers`).
+    /// A `_DRIVER_OBJECT` as listed in the object manager's Driver and
+    /// FileSystem directories (`drivers`).
     DriverObjectSummary {
         name: String,
         object: Hex,
@@ -256,7 +256,7 @@ shapes! {
     /// A process's handle table (`!handle`).
     HandleTable {
         /// The process whose table it is.
-        process: View,
+        process: super::process::ProcessIdentity,
         /// The `_HANDLE_TABLE`.
         table: Hex,
         /// The table's level (0-2: how many pointer levels lead to entries).
@@ -406,7 +406,7 @@ shapes! {
     /// A process's handle traces (`!htrace`).
     HandleTraces {
         /// The traced process.
-        process: View,
+        process: super::process::ProcessIdentity,
         object_table: Hex,
         /// The `_HANDLE_TRACE_DEBUG_INFO`; None when handle tracing is off.
         debug_info: Option<Hex>,
@@ -559,7 +559,7 @@ shapes! {
 
     /// The ALPC ports a process holds handles to (`!alpc /lpp`).
     AlpcProcessPorts {
-        process: View,
+        process: super::process::ProcessIdentity,
         /// Connection ports the process owns.
         created: Vec<AlpcOwnedPort>,
         /// Client ports the process holds.

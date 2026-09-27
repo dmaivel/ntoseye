@@ -5,7 +5,6 @@ use pyo3::types::PyBytes;
 
 use super::context::Space;
 use super::handle::{Owner, require_halted};
-use super::record::Record;
 use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise, view_record, view_records};
 use crate::backend::MemoryOps;

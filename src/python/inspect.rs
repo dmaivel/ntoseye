@@ -6,7 +6,6 @@ use super::context::{Context, in_context};
 use super::handle::Owner;
 use super::module::Device;
 use super::process::Process;
-use super::record::Record;
 use super::thread::{Frame, Thread, process_for_thread, trap_frame_view};
 use super::{err, raise, view_record, view_records};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
@@ -23,7 +22,6 @@ use crate::types::VirtAddr;
 use crate::view::hardware;
 use crate::view::mm;
 use crate::view::sched;
-use crate::view::shape::ViewValue;
 use crate::view::{self, View};
 
 /// System-wide reports and decode-by-address helpers (`dbg.inspect`); the

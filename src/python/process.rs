@@ -10,7 +10,7 @@ use super::handle::Owner;
 use super::iter::{HeapIterator, MemoryRegionIterator, ProcessIterator};
 use super::memory::Memory;
 use super::module::Modules;
-use super::record::{PlainDict, Record};
+use super::record::PlainDict;
 use super::symbols::{self, Symbols};
 use super::thread::Threads;
 use super::types::{Struct, Types};
@@ -360,7 +360,7 @@ impl Process {
     /// `eprocess`, `wow64`), the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::process::process(&self.info))
+        view_dict(py, &view::process::process(&self.info).into_view())
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

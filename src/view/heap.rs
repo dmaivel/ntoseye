@@ -1,7 +1,7 @@
 //! Heap [`View`] builders for the structured inspectors.
 
 use super::View;
-use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
+use super::shape::{Diag, Hex, Omit, shapes, unions};
 use crate::target::heap::{self as target, BlockMatch, HeapKind, SegmentSubsegment};
 use crate::types::VirtAddr;
 
@@ -519,65 +519,27 @@ shapes! {
     }
 }
 
-/// A page range's subsegment: VS or LFH.
-pub enum HeapSubsegment {
-    Vs(VsSubsegment),
-    Lfh(LfhSubsegment),
-}
-
-impl ViewValue for HeapSubsegment {
-    fn into_view(self) -> View {
-        match self {
-            Self::Vs(subsegment) => subsegment.into_view(),
-            Self::Lfh(subsegment) => subsegment.into_view(),
-        }
+unions! {
+    /// A page range's subsegment: VS or LFH.
+    HeapSubsegment {
+        Vs(VsSubsegment),
+        Lfh(LfhSubsegment),
     }
-    #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr = pyo3::type_hint_union!(
-        <VsSubsegment as ViewValue>::HINT,
-        <LfhSubsegment as ViewValue>::HINT
-    );
 }
 
-/// Where a searched address lands, told apart by `kind`.
-pub enum HeapBlockMatch {
-    NtEntry(HeapMatchNtEntry),
-    NtLfhBlock(HeapMatchNtLfhBlock),
-    NtVirtual(HeapMatchNtVirtual),
-    NtSegment(HeapMatchNtSegment),
-    Page(HeapMatchPage),
-    VsChunk(HeapMatchVsChunk),
-    LfhBlock(HeapMatchLfhBlock),
-    Range(HeapMatchRange),
-    Large(HeapMatchLarge),
-}
-
-impl ViewValue for HeapBlockMatch {
-    fn into_view(self) -> View {
-        match self {
-            Self::NtEntry(block) => block.into_view(),
-            Self::NtLfhBlock(block) => block.into_view(),
-            Self::NtVirtual(block) => block.into_view(),
-            Self::NtSegment(block) => block.into_view(),
-            Self::Page(block) => block.into_view(),
-            Self::VsChunk(block) => block.into_view(),
-            Self::LfhBlock(block) => block.into_view(),
-            Self::Range(block) => block.into_view(),
-            Self::Large(block) => block.into_view(),
-        }
+unions! {
+    /// Where a searched address lands, told apart by `kind`.
+    HeapBlockMatch {
+        NtEntry(HeapMatchNtEntry),
+        NtLfhBlock(HeapMatchNtLfhBlock),
+        NtVirtual(HeapMatchNtVirtual),
+        NtSegment(HeapMatchNtSegment),
+        Page(HeapMatchPage),
+        VsChunk(HeapMatchVsChunk),
+        LfhBlock(HeapMatchLfhBlock),
+        Range(HeapMatchRange),
+        Large(HeapMatchLarge),
     }
-    #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr = pyo3::type_hint_union!(
-        <HeapMatchNtEntry as ViewValue>::HINT,
-        <HeapMatchNtLfhBlock as ViewValue>::HINT,
-        <HeapMatchNtVirtual as ViewValue>::HINT,
-        <HeapMatchNtSegment as ViewValue>::HINT,
-        <HeapMatchPage as ViewValue>::HINT,
-        <HeapMatchVsChunk as ViewValue>::HINT,
-        <HeapMatchLfhBlock as ViewValue>::HINT,
-        <HeapMatchRange as ViewValue>::HINT,
-        <HeapMatchLarge as ViewValue>::HINT
-    );
 }
 
 fn heap_kind(kind: HeapKind) -> String {

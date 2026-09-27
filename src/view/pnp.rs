@@ -5,7 +5,7 @@ use crate::target::pnp::{
 };
 
 use super::View;
-use super::shape::{Hex, ViewValue, shapes};
+use super::shape::{Hex, shapes};
 
 shapes! {
     /// A device node's identity and state, as subtree and triage listings

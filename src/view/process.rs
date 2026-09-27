@@ -1,6 +1,6 @@
 //! Process, thread, job, global-flag, and zombie [`View`] builders.
 
-use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
+use super::shape::{Diag, Hex, Omit, shapes};
 use super::{ListEnd, View, list_termination};
 use crate::guest::ProcessInfo;
 use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
@@ -216,7 +216,7 @@ shapes! {
 
 /// One Windows thread from the kernel thread walk; `active` is the vCPU id
 /// currently running it (only resolved while halted).
-pub fn thread(t: &ThreadInfo, active: Option<&str>) -> View {
+pub fn thread(t: &ThreadInfo, active: Option<&str>) -> ThreadOverview {
     ThreadOverview {
         tid: t.tid,
         pid: t.pid,
@@ -230,10 +230,9 @@ pub fn thread(t: &ThreadInfo, active: Option<&str>) -> View {
         wait_reason_name: t.wait_reason.map(|r| wait_reason_name(r).to_string()),
         active: active.map(str::to_string),
     }
-    .into_view()
 }
 
-fn process_identity(process: &ProcessInfo) -> ProcessIdentity {
+pub fn process(process: &ProcessInfo) -> ProcessIdentity {
     ProcessIdentity {
         pid: process.pid,
         name: process.name.clone(),
@@ -241,10 +240,6 @@ fn process_identity(process: &ProcessInfo) -> ProcessIdentity {
         eprocess: Hex(process.eprocess_va.0),
         wow64: process.is_wow64(),
     }
-}
-
-pub fn process(process: &ProcessInfo) -> View {
-    process_identity(process).into_view()
 }
 
 /// The value of the job field keyed `key`, if this build has it.
@@ -315,7 +310,7 @@ pub fn job(job: &JobDetail) -> View {
         child_job_list_termination: list_termination(&job.child_job_termination),
         silo: job.silo,
         server_silo_globals: job.server_silo_globals.map(|globals| Hex(globals.0)),
-        processes: job.processes.iter().map(process_identity).collect(),
+        processes: job.processes.iter().map(process).collect(),
         unreadable_processes: job
             .unreadable_processes
             .iter()
@@ -341,7 +336,7 @@ pub fn global_flags(detail: &GlobalFlagsDetail) -> View {
         kernel_address: Hex(detail.kernel_address.0),
         kernel: Hex(detail.kernel.into()),
         kernel_flags: global_flag_names(detail.kernel),
-        process: detail.process.as_ref().map(process_identity),
+        process: detail.process.as_ref().map(process),
         process_flags: Diag::of(&detail.process_flags, |&flags| ProcessGlobalFlags {
             value: Hex(flags.into()),
             flags: global_flag_names(flags),
