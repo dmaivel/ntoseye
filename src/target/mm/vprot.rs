@@ -226,7 +226,9 @@ struct PageWalk<'a> {
 
 impl PageWalk<'_> {
     /// The state of the page at `va` and the end of the span sharing it:
-    /// one page, or the rest of a table that is not there.
+    /// one page, or the rest of a table that is not there (a zero entry
+    /// above it). A table trimmed to its transition entry is still read; one
+    /// in the page file makes the page an `Err`.
     fn state_at(&mut self, va: u64) -> Result<(PageState, u64)> {
         let span_end = |span: u64| (va | (span - 1)).saturating_add(1);
         let [pxe, ppe, pde, pte] = self.self_map.entries(va);
@@ -237,7 +239,7 @@ impl PageWalk<'_> {
             (pde, PTE_TABLE_SPAN),
         ] {
             entry = self.memory.read(address)?;
-            if entry & 1 == 0 {
+            if entry == 0 {
                 return self.untouched(va, span_end(span));
             }
         }
