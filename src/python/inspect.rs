@@ -1,3 +1,4 @@
+use pyo3::PyTypeCheck;
 use pyo3::prelude::*;
 
 use super::args::{ApcTarget, DeviceArg, FltFilterArg, LoggerArg, ObjectArg};
@@ -19,6 +20,7 @@ use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
+use crate::view::hardware;
 use crate::view::{self, View};
 
 /// System-wide reports and decode-by-address helpers (`dbg.inspect`); the
@@ -33,11 +35,11 @@ impl Inspect {
         Inspect { owner }
     }
 
-    fn record<'py>(
+    fn record<'py, T: PyTypeCheck>(
         &self,
         py: Python<'py>,
         build: impl FnOnce(&mut Session) -> PyResult<View> + Send,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, T>> {
         let view = self.owner.with_in(py, &Context::default(), build)?;
         view_record(py, &view)
     }
@@ -342,7 +344,7 @@ impl Inspect {
     }
 
     /// Report the PCI bus hierarchy pci.sys tracks (`!pcitree`).
-    fn pci_tree<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn pci_tree<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, hardware::py::PciTree>> {
         self.record(py, |session| {
             let tree = session.target.pci_tree().map_err(err)?;
             Ok(view::hardware::pci_tree(&tree))
@@ -363,7 +365,7 @@ impl Inspect {
         function: Option<u8>,
         last_bus: Option<u8>,
         raw: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, hardware::py::PciScan>> {
         self.record(py, |session| {
             let query = PciQuery {
                 segment: 0,

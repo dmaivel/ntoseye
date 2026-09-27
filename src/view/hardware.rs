@@ -1,14 +1,15 @@
 //! hardware: [`View`] builders for hang diagnosis (`!qlocks`, `!ipi`) and PCI.
 
+use super::shape::{Hex, Omit, ViewValue, shapes};
 use super::{View, diagnostic};
 use crate::target::hang::{
     IpiDetail, IpiProcessor, IpiRequest, ProcessorError, QueuedLock, QueuedLockState,
     QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
 };
 use crate::target::pci::{
-    CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PciCapability, PciFunctionConfig, PciRawRange,
-    PciScan, PciTree, PciTreeBus, PciTreeDevice, capabilities, capability_name, class_name,
-    command_flags, extended_capabilities, extended_capability_name, parse_header, status_flags,
+    self, CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PciFunctionConfig, PciRawRange, capabilities,
+    capability_name, class_name, command_flags, extended_capabilities, extended_capability_name,
+    status_flags,
 };
 
 fn processor_error(error: &ProcessorError) -> View {
@@ -160,216 +161,292 @@ pub fn ipi(detail: &IpiDetail) -> View {
     ])
 }
 
-fn pci_tree_device(device: &PciTreeDevice) -> View {
-    View::Object(vec![
-        ("extension", View::Hex(device.extension.0)),
-        ("pdo", View::Hex(device.device_object.0)),
-        ("bus", View::Num(device.bus.into())),
-        ("device", View::Num(device.device.into())),
-        ("function", View::Num(device.function.into())),
-        ("vendor_id", View::Hex(device.vendor_id.into())),
-        ("device_id", View::Hex(device.device_id.into())),
-        ("revision", View::Hex(device.revision.into())),
-        ("base_class", View::Hex(device.base_class.into())),
-        ("sub_class", View::Hex(device.sub_class.into())),
-        ("prog_if", View::Hex(device.prog_if.into())),
-        (
-            "class_name",
-            View::OptStr(class_name(device.base_class, device.sub_class)),
-        ),
-        (
-            "subsystem_vendor_id",
-            View::Hex(device.subsystem_vendor_id.into()),
-        ),
-        ("subsystem_id", View::Hex(device.subsystem_id.into())),
-        ("header_type", View::Hex(device.header_type.into())),
-        ("instance_path", View::OptStr(device.instance_path.clone())),
-    ])
+shapes! {
+    /// A device pci.sys enumerated (`!pcitree`).
+    PciTreeDevice {
+        /// pci.sys's device extension.
+        extension: Hex,
+        /// The device's physical device object.
+        pdo: Hex,
+        bus: u32,
+        device: u8,
+        function: u8,
+        vendor_id: Hex,
+        device_id: Hex,
+        revision: Hex,
+        base_class: Hex,
+        sub_class: Hex,
+        prog_if: Hex,
+        /// The class code's name, when it is a known one.
+        class_name: Option<String>,
+        subsystem_vendor_id: Hex,
+        subsystem_id: Hex,
+        header_type: Hex,
+        /// The device's PnP instance path, when pci.sys recorded one.
+        instance_path: Option<String>,
+    }
+
+    /// A bus pci.sys enumerated, with the devices on it and the buses behind
+    /// its bridges.
+    PciBus {
+        /// pci.sys's bus extension.
+        extension: Hex,
+        number: u32,
+        /// The highest bus number behind this one.
+        subordinate: u32,
+        /// The bridge's physical device object; 0 for a root bus.
+        bridge_pdo: Hex,
+        devices: Vec<PciTreeDevice>,
+        child_buses: Vec<PciBus>,
+    }
+
+    /// A PCI segment and its root buses.
+    PciSegment {
+        /// pci.sys's segment record.
+        address: Hex,
+        segment: u16,
+        root_buses: Vec<PciBus>,
+    }
+
+    /// The PCI hierarchy pci.sys tracks (`!pcitree`).
+    PciTree {
+        segments: Vec<PciSegment>,
+        /// Whether the walk stopped at its bound before the end.
+        truncated: bool,
+        /// Each unreadable bus or function, whose list the walk left.
+        errors: Vec<String>,
+    }
+
+    /// A base address register.
+    PciBar {
+        /// Which BAR (0-5).
+        index: u8,
+        /// `io`, `memory32`, or `memory64`.
+        kind: &'static str,
+        /// The decoded base address.
+        address: Hex,
+        prefetchable: bool,
+        /// The register as read (both halves for a 64-bit BAR).
+        raw: Hex,
+    }
+
+    /// A type 1 or 2 header's bus numbers.
+    PciBuses {
+        primary: u8,
+        secondary: u8,
+        subordinate: u8,
+    }
+
+    /// A capability-list entry.
+    PciCapability {
+        /// Its offset in configuration space.
+        offset: Hex,
+        id: Hex,
+        /// The capability's name, when it is a known one.
+        name: Option<&'static str>,
+        /// The version of an extended capability; absent for a standard one.
+        version: Omit<u8>,
+    }
+
+    /// Requested raw configuration bytes.
+    PciConfigBytes {
+        /// Offset of the first byte.
+        offset: Hex,
+        /// The bytes, as hex.
+        bytes: String,
+    }
+
+    /// One function's decoded configuration space.
+    PciFunction {
+        segment: u16,
+        bus: u8,
+        device: u8,
+        function: u8,
+        vendor_id: Hex,
+        device_id: Hex,
+        revision: Hex,
+        base_class: Hex,
+        sub_class: Hex,
+        prog_if: Hex,
+        /// The class code's name, when it is a known one.
+        class_name: Option<String>,
+        header_type: Hex,
+        multifunction: bool,
+        command: Hex,
+        /// The names of the command register's set bits.
+        command_flags: Vec<&'static str>,
+        status: Hex,
+        /// The names of the status register's set bits.
+        status_flags: Vec<&'static str>,
+        /// Type 0 and 2 headers only.
+        subsystem_vendor_id: Option<Hex>,
+        /// Type 0 and 2 headers only.
+        subsystem_id: Option<Hex>,
+        bars: Vec<PciBar>,
+        /// The expansion ROM base register (types 0 and 1).
+        expansion_rom: Option<Hex>,
+        /// Type 1 and 2 headers only.
+        buses: Option<PciBuses>,
+        interrupt_line: Hex,
+        /// 0 for none, 1-4 for INTA#-INTD#.
+        interrupt_pin: u8,
+        capabilities: Vec<PciCapability>,
+        /// PCI Express extended capabilities; empty for a conventional
+        /// function, or when only 256 bytes were read.
+        extended_capabilities: Vec<PciCapability>,
+        /// The requested raw range (`raw=True`), else `None`.
+        config: Option<PciConfigBytes>,
+    }
+
+    /// The functions a `!pci` scan found.
+    PciScan {
+        functions: Vec<PciFunction>,
+        /// Whether an interrupt request stopped the scan early.
+        interrupted: bool,
+    }
 }
 
-fn pci_tree_bus(bus: &PciTreeBus) -> View {
-    View::Object(vec![
-        ("extension", View::Hex(bus.extension.0)),
-        ("number", View::Num(bus.number.into())),
-        ("subordinate", View::Num(bus.subordinate.into())),
-        ("bridge_pdo", View::Hex(bus.bridge_pdo.0)),
-        (
-            "devices",
-            View::List(bus.devices.iter().map(pci_tree_device).collect()),
-        ),
-        (
-            "child_buses",
-            View::List(bus.child_buses.iter().map(pci_tree_bus).collect()),
-        ),
-    ])
+fn pci_tree_device(device: &pci::PciTreeDevice) -> PciTreeDevice {
+    PciTreeDevice {
+        extension: Hex(device.extension.0),
+        pdo: Hex(device.device_object.0),
+        bus: device.bus,
+        device: device.device,
+        function: device.function,
+        vendor_id: Hex(device.vendor_id.into()),
+        device_id: Hex(device.device_id.into()),
+        revision: Hex(device.revision.into()),
+        base_class: Hex(device.base_class.into()),
+        sub_class: Hex(device.sub_class.into()),
+        prog_if: Hex(device.prog_if.into()),
+        class_name: class_name(device.base_class, device.sub_class),
+        subsystem_vendor_id: Hex(device.subsystem_vendor_id.into()),
+        subsystem_id: Hex(device.subsystem_id.into()),
+        header_type: Hex(device.header_type.into()),
+        instance_path: device.instance_path.clone(),
+    }
 }
 
-/// pci.sys's hierarchy; top-level keys: `segments` (each with `root_buses`,
-/// which nest `child_buses`), `truncated`, `errors` (each unreadable bus or
-/// function, whose list the walk left).
-pub fn pci_tree(tree: &PciTree) -> View {
-    let segments = tree
-        .segments
-        .iter()
-        .map(|segment| {
-            View::Object(vec![
-                ("address", View::Hex(segment.address.0)),
-                ("segment", View::Num(segment.number.into())),
-                (
-                    "root_buses",
-                    View::List(segment.root_buses.iter().map(pci_tree_bus).collect()),
-                ),
-            ])
-        })
-        .collect();
-    View::Object(vec![
-        ("segments", View::List(segments)),
-        ("truncated", View::Bool(tree.truncated)),
-        (
-            "errors",
-            View::List(tree.errors.iter().map(|e| View::Str(e.clone())).collect()),
-        ),
-    ])
+fn pci_bus(bus: &pci::PciTreeBus) -> PciBus {
+    PciBus {
+        extension: Hex(bus.extension.0),
+        number: bus.number,
+        subordinate: bus.subordinate,
+        bridge_pdo: Hex(bus.bridge_pdo.0),
+        devices: bus.devices.iter().map(pci_tree_device).collect(),
+        child_buses: bus.child_buses.iter().map(pci_bus).collect(),
+    }
 }
 
-fn pci_capabilities(list: &[PciCapability], name: fn(u16) -> Option<&'static str>) -> View {
-    View::List(
-        list.iter()
-            .map(|capability| {
-                let mut fields = vec![
-                    ("offset", View::Hex(capability.offset.into())),
-                    ("id", View::Hex(capability.id.into())),
-                    (
-                        "name",
-                        View::OptStr(name(capability.id).map(str::to_string)),
-                    ),
-                ];
-                if let Some(version) = capability.version {
-                    fields.push(("version", View::Num(version.into())));
-                }
-                View::Object(fields)
+/// pci.sys's hierarchy.
+pub fn pci_tree(tree: &pci::PciTree) -> View {
+    PciTree {
+        segments: tree
+            .segments
+            .iter()
+            .map(|segment| PciSegment {
+                address: Hex(segment.address.0),
+                segment: segment.number,
+                root_buses: segment.root_buses.iter().map(pci_bus).collect(),
             })
             .collect(),
-    )
+        truncated: tree.truncated,
+        errors: tree.errors.clone(),
+    }
+    .view()
 }
 
-fn pci_function(function: &PciFunctionConfig, raw: Option<PciRawRange>) -> View {
+fn pci_capabilities(
+    list: &[pci::PciCapability],
+    name: fn(u16) -> Option<&'static str>,
+) -> Vec<PciCapability> {
+    list.iter()
+        .map(|capability| PciCapability {
+            offset: Hex(capability.offset.into()),
+            id: Hex(capability.id.into()),
+            name: name(capability.id),
+            version: Omit(capability.version),
+        })
+        .collect()
+}
+
+fn pci_function(function: &PciFunctionConfig, raw: Option<PciRawRange>) -> PciFunction {
     let config = &function.config;
-    let mut fields = vec![
-        ("segment", View::Num(function.segment.into())),
-        ("bus", View::Num(function.bus.into())),
-        ("device", View::Num(function.device.into())),
-        ("function", View::Num(function.function.into())),
-    ];
-    if let Some(header) = parse_header(config) {
-        let list = capabilities(&header, config);
-        let extended = if list
-            .iter()
-            .any(|capability| capability.id == CAPABILITY_PCI_EXPRESS)
-            && config.len() > PCI_CONFIG_SIZE
-        {
-            extended_capabilities(config)
-        } else {
-            Vec::new()
-        };
-        let bars = header
+    let header = &function.header;
+    let list = capabilities(header, config);
+    let extended = if list
+        .iter()
+        .any(|capability| capability.id == CAPABILITY_PCI_EXPRESS)
+        && config.len() > PCI_CONFIG_SIZE
+    {
+        extended_capabilities(config)
+    } else {
+        Vec::new()
+    };
+    PciFunction {
+        segment: function.segment,
+        bus: function.bus,
+        device: function.device,
+        function: function.function,
+        vendor_id: Hex(header.vendor_id.into()),
+        device_id: Hex(header.device_id.into()),
+        revision: Hex(header.revision.into()),
+        base_class: Hex(header.base_class.into()),
+        sub_class: Hex(header.sub_class.into()),
+        prog_if: Hex(header.prog_if.into()),
+        class_name: class_name(header.base_class, header.sub_class),
+        header_type: Hex(header.header_type.into()),
+        multifunction: header.multifunction(),
+        command: Hex(header.command.into()),
+        command_flags: command_flags(header.command),
+        status: Hex(header.status.into()),
+        status_flags: status_flags(header.status),
+        subsystem_vendor_id: header.subsystem.map(|(vendor, _)| Hex(vendor.into())),
+        subsystem_id: header.subsystem.map(|(_, id)| Hex(id.into())),
+        bars: header
             .bars
             .iter()
-            .map(|bar| {
-                View::Object(vec![
-                    ("index", View::Num(bar.index.into())),
-                    ("kind", View::Str(bar.kind.name().into())),
-                    ("address", View::Hex(bar.address)),
-                    ("prefetchable", View::Bool(bar.prefetchable)),
-                    ("raw", View::Hex(bar.raw)),
-                ])
+            .map(|bar| PciBar {
+                index: bar.index,
+                kind: bar.kind.name(),
+                address: Hex(bar.address),
+                prefetchable: bar.prefetchable,
+                raw: Hex(bar.raw),
             })
-            .collect();
-        let names = |flags: Vec<&'static str>| {
-            View::List(
-                flags
-                    .into_iter()
-                    .map(|flag| View::Str(flag.into()))
-                    .collect(),
-            )
-        };
-        fields.extend([
-            ("vendor_id", View::Hex(header.vendor_id.into())),
-            ("device_id", View::Hex(header.device_id.into())),
-            ("revision", View::Hex(header.revision.into())),
-            ("base_class", View::Hex(header.base_class.into())),
-            ("sub_class", View::Hex(header.sub_class.into())),
-            ("prog_if", View::Hex(header.prog_if.into())),
-            (
-                "class_name",
-                View::OptStr(class_name(header.base_class, header.sub_class)),
-            ),
-            ("header_type", View::Hex(header.header_type.into())),
-            ("multifunction", View::Bool(header.multifunction())),
-            ("command", View::Hex(header.command.into())),
-            ("command_flags", names(command_flags(header.command))),
-            ("status", View::Hex(header.status.into())),
-            ("status_flags", names(status_flags(header.status))),
-            (
-                "subsystem_vendor_id",
-                View::OptHex(header.subsystem.map(|(vendor, _)| vendor.into())),
-            ),
-            (
-                "subsystem_id",
-                View::OptHex(header.subsystem.map(|(_, id)| id.into())),
-            ),
-            ("bars", View::List(bars)),
-            (
-                "expansion_rom",
-                View::OptHex(header.expansion_rom.map(u64::from)),
-            ),
-            (
-                "buses",
-                header
-                    .buses
-                    .map_or(View::Null, |(primary, secondary, subordinate)| {
-                        View::Object(vec![
-                            ("primary", View::Num(primary.into())),
-                            ("secondary", View::Num(secondary.into())),
-                            ("subordinate", View::Num(subordinate.into())),
-                        ])
-                    }),
-            ),
-            ("interrupt_line", View::Hex(header.interrupt_line.into())),
-            ("interrupt_pin", View::Num(header.interrupt_pin.into())),
-            ("capabilities", pci_capabilities(&list, capability_name)),
-            (
-                "extended_capabilities",
-                pci_capabilities(&extended, extended_capability_name),
-            ),
-        ]);
+            .collect(),
+        expansion_rom: header.expansion_rom.map(|rom| Hex(rom.into())),
+        buses: header
+            .buses
+            .map(|(primary, secondary, subordinate)| PciBuses {
+                primary,
+                secondary,
+                subordinate,
+            }),
+        interrupt_line: Hex(header.interrupt_line.into()),
+        interrupt_pin: header.interrupt_pin,
+        capabilities: pci_capabilities(&list, capability_name),
+        extended_capabilities: pci_capabilities(&extended, extended_capability_name),
+        config: raw.map(|raw| {
+            let end = raw.end.min(config.len());
+            let start = raw.start.min(end);
+            PciConfigBytes {
+                offset: Hex(start as u64),
+                bytes: hex::encode(&config[start..end]),
+            }
+        }),
     }
-    let raw = raw.map(|raw| {
-        let end = raw.end.min(config.len());
-        let start = raw.start.min(end);
-        View::Object(vec![
-            ("offset", View::Hex(start as u64)),
-            ("bytes", View::Str(hex::encode(&config[start..end]))),
-        ])
-    });
-    fields.push(("config", raw.unwrap_or(View::Null)));
-    View::Object(fields)
 }
 
-/// Configuration space of the functions a `!pci` scan found; top-level keys:
-/// `functions` (each decoded, with `config` holding the requested raw range
-/// as hex or null), `interrupted`.
-pub fn pci(scan: &PciScan, raw: Option<PciRawRange>) -> View {
-    View::Object(vec![
-        (
-            "functions",
-            View::List(
-                scan.functions
-                    .iter()
-                    .map(|function| pci_function(function, raw))
-                    .collect(),
-            ),
-        ),
-        ("interrupted", View::Bool(scan.interrupted)),
-    ])
+/// Configuration space of the functions a `!pci` scan found, each with the
+/// requested raw range.
+pub fn pci(scan: &pci::PciScan, raw: Option<PciRawRange>) -> View {
+    PciScan {
+        functions: scan
+            .functions
+            .iter()
+            .map(|function| pci_function(function, raw))
+            .collect(),
+        interrupted: scan.interrupted,
+    }
+    .view()
 }

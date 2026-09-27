@@ -14,6 +14,7 @@ pub mod pnp;
 pub mod process;
 pub mod sched;
 pub mod security;
+pub mod shape;
 pub mod symbols;
 pub mod triage;
 pub mod usermode;
@@ -40,6 +41,9 @@ pub enum View {
     List(Vec<View>),
     /// An ordered key/value object (insertion order is preserved on render).
     Object(Vec<(&'static str, View)>),
+    /// An object declared with [`shape::shapes!`]: rendered as an
+    /// [`Object`](Self::Object), and as its own class in the SDK.
+    Shaped(shape::Shaped),
     /// A value that can fail to read on its own: `{available, value, error}`
     /// for MCP, an [`ntoseye.Diagnostic`](crate::python::record::Diagnostic)
     /// for Python.
@@ -70,7 +74,7 @@ pub fn to_json(v: &View) -> serde_json::Value {
         View::OptStr(o) => o.clone().map_or(Value::Null, Value::from),
         View::Null => Value::Null,
         View::List(items) => Value::Array(items.iter().map(to_json).collect()),
-        View::Object(fields) => {
+        View::Object(fields) | View::Shaped(shape::Shaped { fields, .. }) => {
             let mut map = serde_json::Map::new();
             for (key, val) in fields {
                 map.insert((*key).to_string(), to_json(val));
@@ -118,7 +122,7 @@ pub fn to_py<'py>(
     v: &View,
     shape: PyShape,
 ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
-    use crate::python::record::{Diagnostic, Record};
+    use crate::python::record::{BaseRecord, Diagnostic, Record};
     use pyo3::IntoPyObjectExt;
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
@@ -147,7 +151,7 @@ pub fn to_py<'py>(
             }
             list.into_any()
         }
-        View::Object(fields) => {
+        View::Object(fields) | View::Shaped(shape::Shaped { fields, .. }) => {
             let dict = PyDict::new(py);
             let mut hex = Vec::new();
             for (key, val) in fields {
@@ -156,9 +160,12 @@ pub fn to_py<'py>(
                 }
                 dict.set_item(key, to_py(py, val, shape)?)?;
             }
-            match shape {
-                PyShape::Records => Bound::new(py, Record::new(dict.unbind(), hex))?.into_any(),
-                PyShape::Plain => dict.into_any(),
+            if let PyShape::Plain = shape {
+                return Ok(dict.into_any());
+            }
+            match v {
+                View::Shaped(shaped) => (shaped.class)(py, BaseRecord::new(dict.unbind(), hex))?,
+                _ => Bound::new(py, Record::new(dict.unbind(), hex))?.into_any(),
             }
         }
         View::Diagnostic(diagnostic) => {

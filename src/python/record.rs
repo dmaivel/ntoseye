@@ -1,5 +1,7 @@
 //! Attribute-shaped results: every [`View::Object`](crate::view::View) the SDK
-//! returns is a [`Record`] (`frame.ip`, `thread.state_name`), and every field
+//! returns is a [`Record`] (`frame.ip`, `thread.state_name`), every declared
+//! shape ([`shapes!`](crate::view::shape::shapes)) its own [`BaseRecord`]
+//! subclass with a property per field, and every field
 //! that can fail to read on its own is a [`Diagnostic`] (`peb.ldr.value`,
 //! `if peb.ldr:`). Both keep dict access (`record["ip"]`, `to_dict()`) so the
 //! shape stays the one the MCP JSON surface documents.
@@ -39,30 +41,54 @@ impl<'py> IntoPyObject<'py> for PlainDict<'py> {
     }
 }
 
-/// An immutable, ordered set of named fields with attribute access.
-#[pyclass(module = "ntoseye", frozen)]
-pub struct Record {
+/// An immutable, ordered set of named fields with dict access: the base of
+/// `Record` and of every typed result class (`PciFunction`, ...), whose
+/// properties type each field.
+#[pyclass(module = "ntoseye", frozen, subclass)]
+pub struct BaseRecord {
     fields: Py<PyDict>,
     /// Fields that are addresses, rendered as hex by `__repr__`.
     hex: Vec<&'static str>,
 }
 
+/// An immutable, ordered set of named fields with attribute access.
+#[pyclass(module = "ntoseye", frozen, extends = BaseRecord)]
+pub struct Record;
+
 impl Record {
-    pub fn new(fields: Py<PyDict>, hex: Vec<&'static str>) -> Self {
-        Self { fields, hex }
+    pub fn new(fields: Py<PyDict>, hex: Vec<&'static str>) -> PyClassInitializer<Self> {
+        PyClassInitializer::from(BaseRecord::new(fields, hex)).add_subclass(Record)
     }
 }
 
 #[pymethods]
 impl Record {
-    fn __getattr__<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
-        let fields = self.fields.bind(py);
+    fn __getattr__<'py>(slf: &Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        let fields = slf.as_super().get().fields.bind(slf.py());
         fields.get_item(name)?.ok_or_else(|| {
             let known: Vec<String> = fields.keys().iter().map(|k| k.to_string()).collect();
             PyAttributeError::new_err(format!("no field '{name}'; fields: {}", known.join(", ")))
         })
     }
+}
 
+impl BaseRecord {
+    pub fn new(fields: Py<PyDict>, hex: Vec<&'static str>) -> Self {
+        Self { fields, hex }
+    }
+
+    /// Field `name`, or `None` when the record leaves it out.
+    pub fn field<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        Ok(self
+            .fields
+            .bind(py)
+            .get_item(name)?
+            .unwrap_or_else(|| py.None().into_bound(py)))
+    }
+}
+
+#[pymethods]
+impl BaseRecord {
     fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
         let fields = self.fields.bind(py);
         fields
@@ -83,7 +109,7 @@ impl Record {
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let other = match other.cast::<Record>() {
+        let other = match other.cast::<BaseRecord>() {
             Ok(record) => record.get().fields.bind(py).clone().into_any(),
             Err(_) => other.clone(),
         };
@@ -100,18 +126,19 @@ impl Record {
         Ok(names)
     }
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let this = slf.get();
         let mut parts = Vec::new();
-        for (key, value) in self.fields.bind(py).iter() {
+        for (key, value) in this.fields.bind(slf.py()).iter() {
             let key = key.extract::<String>()?;
-            let shown = if self.hex.contains(&key.as_str()) && !value.is_none() {
+            let shown = if this.hex.contains(&key.as_str()) && !value.is_none() {
                 format!("{:#x}", value.extract::<u64>()?)
             } else {
                 summarize(&value)?
             };
             parts.push(format!("{key}={shown}"));
         }
-        Ok(format!("Record({})", parts.join(", ")))
+        Ok(format!("{}({})", slf.get_type().name()?, parts.join(", ")))
     }
 
     /// The field names, in order.
@@ -233,9 +260,10 @@ impl Diagnostic {
 /// A one-line rendering for `__repr__`: scalars in full, containers by size,
 /// so a record with a 700-thread list stays readable.
 fn summarize(value: &Bound<'_, PyAny>) -> PyResult<String> {
-    if let Ok(record) = value.cast::<Record>() {
+    if let Ok(record) = value.cast::<BaseRecord>() {
         return Ok(format!(
-            "Record(<{} fields>)",
+            "{}(<{} fields>)",
+            record.get_type().name()?,
             record.get().fields.bind(value.py()).len()
         ));
     }
@@ -250,7 +278,7 @@ fn summarize(value: &Bound<'_, PyAny>) -> PyResult<String> {
 
 /// Convert records and diagnostics to dicts throughout a value.
 fn plain<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    if let Ok(record) = value.cast::<Record>() {
+    if let Ok(record) = value.cast::<BaseRecord>() {
         return Ok(record.get().to_dict(value.py())?.0.into_any());
     }
     if let Ok(diagnostic) = value.cast::<Diagnostic>() {

@@ -46,6 +46,41 @@ class AddressModule:
         """
     def to_dict(self, /) -> dict[str, Any]: ...
 
+class BaseRecord:
+    """
+    An immutable, ordered set of named fields with dict access: the base of
+    `Record` and of every typed result class (`PciFunction`, ...), whose
+    properties type each field.
+    """
+    def __contains__(self, key: str, /) -> bool: ...
+    def __dir__(self, /) -> list[str]: ...
+    def __eq__(self, other: object, /) -> bool: ...
+    def __getitem__(self, key: str, /) -> Any: ...
+    def __iter__(self, /) -> NameIterator: ...
+    def __len__(self, /) -> int: ...
+    def __repr__(self, /) -> str: ...
+    def get(self, /, key: str, default: Any |None = None) -> Any:
+        """
+        The field, or `default` when the record has no such field.
+        """
+    def items(self, /) -> list[tuple[str, Any]]:
+        """
+        `(name, value)` pairs, in order.
+        """
+    def keys(self, /) -> list[str]:
+        """
+        The field names, in order.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        A plain nested `dict` (records and diagnostics converted throughout),
+        the shape the MCP `format=json` surface returns.
+        """
+    def values(self, /) -> list[Any]:
+        """
+        The field values, in order.
+        """
+
 class Breakpoint:
     """
     A breakpoint handle. Breakpoints outlive target rebuilds (symbolic ones
@@ -1002,7 +1037,7 @@ class Inspect:
         """
         Decode the security descriptor referenced by an object's header (`!objsd`).
         """
-    def pci(self, /, bus: int = 0, device: int |None = None, function: int |None = None, *, last_bus: int |None = None, raw: bool = False) -> Record:
+    def pci(self, /, bus: int = 0, device: int |None = None, function: int |None = None, *, last_bus: int |None = None, raw: bool = False) -> PciScan:
         """
         Read and decode PCI configuration space (`!pci`): the functions on
         `bus` (through `last_bus`), or one `device` and `function`. Each
@@ -1010,7 +1045,7 @@ class Inspect:
         it as hex. Needs a backend that reaches configuration space (kd/kdnet,
         or gdb on QEMU) and a halted target.
         """
-    def pci_tree(self, /) -> Record:
+    def pci_tree(self, /) -> PciTree:
         """
         Report the PCI bus hierarchy pci.sys tracks (`!pcitree`).
         """
@@ -1531,6 +1566,300 @@ class NameIterator:
     def __next__(self, /) -> str: ...
 
 @final
+class PciBar(BaseRecord):
+    """
+    A base address register.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The decoded base address.
+        """
+    @property
+    def index(self, /) -> int:
+        """
+        Which BAR (0-5).
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `io`, `memory32`, or `memory64`.
+        """
+    @property
+    def prefetchable(self, /) -> bool: ...
+    @property
+    def raw(self, /) -> int:
+        """
+        The register as read (both halves for a 64-bit BAR).
+        """
+
+@final
+class PciBus(BaseRecord):
+    """
+    A bus pci.sys enumerated, with the devices on it and the buses behind
+    its bridges.
+    """
+    @property
+    def bridge_pdo(self, /) -> int:
+        """
+        The bridge's physical device object; 0 for a root bus.
+        """
+    @property
+    def child_buses(self, /) -> list[PciBus]: ...
+    @property
+    def devices(self, /) -> list[PciTreeDevice]: ...
+    @property
+    def extension(self, /) -> int:
+        """
+        pci.sys's bus extension.
+        """
+    @property
+    def number(self, /) -> int: ...
+    @property
+    def subordinate(self, /) -> int:
+        """
+        The highest bus number behind this one.
+        """
+
+@final
+class PciBuses(BaseRecord):
+    """
+    A type 1 or 2 header's bus numbers.
+    """
+    @property
+    def primary(self, /) -> int: ...
+    @property
+    def secondary(self, /) -> int: ...
+    @property
+    def subordinate(self, /) -> int: ...
+
+@final
+class PciCapability(BaseRecord):
+    """
+    A capability-list entry.
+    """
+    @property
+    def id(self, /) -> int: ...
+    @property
+    def name(self, /) -> str |None:
+        """
+        The capability's name, when it is a known one.
+        """
+    @property
+    def offset(self, /) -> int:
+        """
+        Its offset in configuration space.
+        """
+    @property
+    def version(self, /) -> int |None:
+        """
+        The version of an extended capability; absent for a standard one.
+        """
+
+@final
+class PciConfigBytes(BaseRecord):
+    """
+    Requested raw configuration bytes.
+    """
+    @property
+    def bytes(self, /) -> str:
+        """
+        The bytes, as hex.
+        """
+    @property
+    def offset(self, /) -> int:
+        """
+        Offset of the first byte.
+        """
+
+@final
+class PciFunction(BaseRecord):
+    """
+    One function's decoded configuration space.
+    """
+    @property
+    def bars(self, /) -> list[PciBar]: ...
+    @property
+    def base_class(self, /) -> int: ...
+    @property
+    def bus(self, /) -> int: ...
+    @property
+    def buses(self, /) -> PciBuses |None:
+        """
+        Type 1 and 2 headers only.
+        """
+    @property
+    def capabilities(self, /) -> list[PciCapability]: ...
+    @property
+    def class_name(self, /) -> str |None:
+        """
+        The class code's name, when it is a known one.
+        """
+    @property
+    def command(self, /) -> int: ...
+    @property
+    def command_flags(self, /) -> list[str]:
+        """
+        The names of the command register's set bits.
+        """
+    @property
+    def config(self, /) -> PciConfigBytes |None:
+        """
+        The requested raw range (`raw=True`), else `None`.
+        """
+    @property
+    def device(self, /) -> int: ...
+    @property
+    def device_id(self, /) -> int: ...
+    @property
+    def expansion_rom(self, /) -> int |None:
+        """
+        The expansion ROM base register (types 0 and 1).
+        """
+    @property
+    def extended_capabilities(self, /) -> list[PciCapability]:
+        """
+        PCI Express extended capabilities; empty for a conventional
+        function, or when only 256 bytes were read.
+        """
+    @property
+    def function(self, /) -> int: ...
+    @property
+    def header_type(self, /) -> int: ...
+    @property
+    def interrupt_line(self, /) -> int: ...
+    @property
+    def interrupt_pin(self, /) -> int:
+        """
+        0 for none, 1-4 for INTA#-INTD#.
+        """
+    @property
+    def multifunction(self, /) -> bool: ...
+    @property
+    def prog_if(self, /) -> int: ...
+    @property
+    def revision(self, /) -> int: ...
+    @property
+    def segment(self, /) -> int: ...
+    @property
+    def status(self, /) -> int: ...
+    @property
+    def status_flags(self, /) -> list[str]:
+        """
+        The names of the status register's set bits.
+        """
+    @property
+    def sub_class(self, /) -> int: ...
+    @property
+    def subsystem_id(self, /) -> int |None:
+        """
+        Type 0 and 2 headers only.
+        """
+    @property
+    def subsystem_vendor_id(self, /) -> int |None:
+        """
+        Type 0 and 2 headers only.
+        """
+    @property
+    def vendor_id(self, /) -> int: ...
+
+@final
+class PciScan(BaseRecord):
+    """
+    The functions a `!pci` scan found.
+    """
+    @property
+    def functions(self, /) -> list[PciFunction]: ...
+    @property
+    def interrupted(self, /) -> bool:
+        """
+        Whether an interrupt request stopped the scan early.
+        """
+
+@final
+class PciSegment(BaseRecord):
+    """
+    A PCI segment and its root buses.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        pci.sys's segment record.
+        """
+    @property
+    def root_buses(self, /) -> list[PciBus]: ...
+    @property
+    def segment(self, /) -> int: ...
+
+@final
+class PciTree(BaseRecord):
+    """
+    The PCI hierarchy pci.sys tracks (`!pcitree`).
+    """
+    @property
+    def errors(self, /) -> list[str]:
+        """
+        Each unreadable bus or function, whose list the walk left.
+        """
+    @property
+    def segments(self, /) -> list[PciSegment]: ...
+    @property
+    def truncated(self, /) -> bool:
+        """
+        Whether the walk stopped at its bound before the end.
+        """
+
+@final
+class PciTreeDevice(BaseRecord):
+    """
+    A device pci.sys enumerated (`!pcitree`).
+    """
+    @property
+    def base_class(self, /) -> int: ...
+    @property
+    def bus(self, /) -> int: ...
+    @property
+    def class_name(self, /) -> str |None:
+        """
+        The class code's name, when it is a known one.
+        """
+    @property
+    def device(self, /) -> int: ...
+    @property
+    def device_id(self, /) -> int: ...
+    @property
+    def extension(self, /) -> int:
+        """
+        pci.sys's device extension.
+        """
+    @property
+    def function(self, /) -> int: ...
+    @property
+    def header_type(self, /) -> int: ...
+    @property
+    def instance_path(self, /) -> str |None:
+        """
+        The device's PnP instance path, when pci.sys recorded one.
+        """
+    @property
+    def pdo(self, /) -> int:
+        """
+        The device's physical device object.
+        """
+    @property
+    def prog_if(self, /) -> int: ...
+    @property
+    def revision(self, /) -> int: ...
+    @property
+    def sub_class(self, /) -> int: ...
+    @property
+    def subsystem_id(self, /) -> int: ...
+    @property
+    def subsystem_vendor_id(self, /) -> int: ...
+    @property
+    def vendor_id(self, /) -> int: ...
+
+@final
 class Process:
     """
     One process: identity fields plus views bound to its address space.
@@ -1684,39 +2013,11 @@ class Processes:
         """
 
 @final
-class Record:
+class Record(BaseRecord):
     """
     An immutable, ordered set of named fields with attribute access.
     """
-    def __contains__(self, key: str, /) -> bool: ...
-    def __dir__(self, /) -> list[str]: ...
-    def __eq__(self, other: object, /) -> bool: ...
     def __getattr__(self, name: str, /) -> Any: ...
-    def __getitem__(self, key: str, /) -> Any: ...
-    def __iter__(self, /) -> NameIterator: ...
-    def __len__(self, /) -> int: ...
-    def __repr__(self, /) -> str: ...
-    def get(self, /, key: str, default: Any |None = None) -> Any:
-        """
-        The field, or `default` when the record has no such field.
-        """
-    def items(self, /) -> list[tuple[str, Any]]:
-        """
-        `(name, value)` pairs, in order.
-        """
-    def keys(self, /) -> list[str]:
-        """
-        The field names, in order.
-        """
-    def to_dict(self, /) -> dict[str, Any]:
-        """
-        A plain nested `dict` (records and diagnostics converted throughout),
-        the shape the MCP `format=json` surface returns.
-        """
-    def values(self, /) -> list[Any]:
-        """
-        The field values, in order.
-        """
 
 @final
 class RecordIterator:

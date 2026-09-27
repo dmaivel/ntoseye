@@ -142,13 +142,14 @@ pub fn parse_mcfg(bytes: &[u8]) -> Vec<EcamWindow> {
 }
 
 /// A function's configuration space as read (256 bytes, or 4 KiB with
-/// extended space), with where it is.
+/// extended space), with where it is and its decoded header.
 #[derive(Debug, Clone)]
 pub struct PciFunctionConfig {
     pub segment: u16,
     pub bus: u8,
     pub device: u8,
     pub function: u8,
+    pub header: PciHeader,
     pub config: Vec<u8>,
 }
 
@@ -1208,11 +1209,19 @@ impl Session {
                     if u16_at(&config, 0) == u16::MAX {
                         continue;
                     }
+                    let Some(header) = parse_header(&config) else {
+                        return Err(Error::DebugInfo(format!(
+                            "PCI {bus:02x}:{device:02x}.{function} returned {} bytes of \
+                             configuration space, short of its 64-byte header",
+                            config.len()
+                        )));
+                    };
                     scan.functions.push(PciFunctionConfig {
                         segment: query.segment,
                         bus,
                         device,
                         function,
+                        header,
                         config,
                     });
                 }

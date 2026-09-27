@@ -10,6 +10,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
+use pyo3::PyTypeCheck;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -164,9 +165,9 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
 
 /// Render a neutral [`View`] object into a [`Record`] (the shared shape with
 /// the MCP surface; here addresses come through as ints, there as hex).
-pub fn view_record<'py>(py: Python<'py>, v: &View) -> PyResult<Bound<'py, Record>> {
+pub fn view_record<'py, T: PyTypeCheck>(py: Python<'py>, v: &View) -> PyResult<Bound<'py, T>> {
     view::to_py(py, v, PyShape::Records)?
-        .cast_into::<Record>()
+        .cast_into::<T>()
         .map_err(|e| raise(e.to_string()))
 }
 
@@ -286,7 +287,7 @@ pub mod _ntoseye {
     #[pymodule_export]
     use super::process::{Heap, Heaps, Process, Processes, Regions};
     #[pymodule_export]
-    use super::record::{Diagnostic, Record};
+    use super::record::{BaseRecord, Diagnostic, Record};
     #[pymodule_export]
     use super::secure::{SecureKernel, Trustlet};
     #[pymodule_export]
@@ -299,6 +300,11 @@ pub mod _ntoseye {
     use super::types::{Field, Struct, Type, Types};
     #[pymodule_export]
     use super::{attach, decode_error};
+    #[pymodule_export]
+    use crate::view::hardware::py::{
+        PciBar, PciBus, PciBuses, PciCapability, PciConfigBytes, PciFunction, PciScan, PciSegment,
+        PciTree, PciTreeDevice,
+    };
 
     /// The ntoseye release this extension was built as.
     #[pymodule_export]

@@ -11,7 +11,7 @@ use crate::target::hang::{
 use crate::target::pci::{
     CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PciFunctionConfig, PciRawRange, PciRequest, PciTree,
     PciTreeBus, PciTreeDevice, capabilities, capability_name, class_name, command_flags,
-    extended_capabilities, extended_capability_name, parse_header, parse_pci_request, status_flags,
+    extended_capabilities, extended_capability_name, parse_pci_request, status_flags,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -534,9 +534,7 @@ fn print_pci_scan(request: &PciRequest, functions: &[PciFunctionConfig]) {
 
 fn print_pci_function(request: &PciRequest, function: &PciFunctionConfig) {
     let config = &function.config;
-    let Some(header) = parse_header(config) else {
-        return;
-    };
+    let header = &function.header;
     let class = class_name(header.base_class, header.sub_class)
         .unwrap_or_else(|| format!("Class {:02x}{:02x}", header.base_class, header.sub_class));
     let tail = match (header.subsystem, header.buses) {
@@ -630,7 +628,7 @@ fn print_pci_function(request: &PciRequest, function: &PciFunctionConfig) {
         );
     }
     if request.verbose || request.capabilities {
-        let list = capabilities(&header, config);
+        let list = capabilities(header, config);
         if !list.is_empty() {
             let names: Vec<String> = list
                 .iter()

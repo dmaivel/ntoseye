@@ -227,7 +227,7 @@ impl Stop {
             Self::Bugcheck { info, .. } => {
                 let info = info
                     .as_ref()
-                    .map(|info| info.get().to_dict(py))
+                    .map(|info| info.bind(py).as_super().get().to_dict(py))
                     .transpose()?;
                 dict.set_item("info", info.map(|info| info.0))?;
             }
