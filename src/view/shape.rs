@@ -256,7 +256,6 @@ macro_rules! shapes {
     )*) => {
         $(
             $(#[doc = $doc])*
-            #[derive(Debug)]
             pub struct $name {
                 $(
                     $(#[doc = $field_doc])*
