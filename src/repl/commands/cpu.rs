@@ -510,9 +510,10 @@ fn print_selectors(detail: &GdtDetail, selectors: impl Iterator<Item = u16>) {
                         got(&entry.dpl).unwrap_or(0),
                         flag(&entry.default_size, "Bg", "Nb"),
                         flag(&entry.granularity, "Pg", "By"),
-                        flag(&entry.present, "P ", "NP"),
+                        flag(&entry.present, "P ", "Np"),
                         flag(&entry.long_mode, "Lo", "Nl"),
-                        (raw >> 40) & 0xf0ff
+                        // Access byte, then the G/D/L/AVL nibble above it.
+                        ((raw >> 40) & 0xff) | (((raw >> 52) & 0xf) << 8)
                     )
                 }
                 _ => match &entry.raw {
