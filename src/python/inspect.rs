@@ -112,6 +112,56 @@ impl Inspect {
         })
     }
 
+    /// Decode an ALPC port (`!alpc /p`): its kind, owner, connection, state,
+    /// queues, and a connection port's connections. `address` is the port
+    /// object's body or header.
+    fn alpc_port<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let port = session.target.alpc_port(VirtAddr(address)).map_err(err)?;
+            Ok(view::object::alpc_port(&port))
+        })
+    }
+
+    /// Decode an ALPC message, a `_KALPC_MESSAGE` (`!alpc /m`).
+    fn alpc_message<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let message = session
+                .target
+                .alpc_message(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::object::alpc_message(&message))
+        })
+    }
+
+    /// The ALPC ports a process holds handles to (`!alpc /lpp`): the
+    /// connection ports it owns with their connections, and the client ports
+    /// it is connected through. `process` defaults to the current process.
+    #[pyo3(signature = (process=None))]
+    fn alpc_process_ports<'py>(
+        &self,
+        py: Python<'py>,
+        process: Option<PyRef<'py, Process>>,
+    ) -> PyResult<Bound<'py, Record>> {
+        let process = match process {
+            Some(process) => {
+                process
+                    .owner
+                    .require_argument_of(py, &self.owner, "process")?;
+                Some(process.info.clone())
+            }
+            None => None,
+        };
+        self.record(py, |session| {
+            let target = &session.target;
+            let process = match process {
+                Some(process) => process,
+                None => target.selected_process_info().map_err(err)?,
+            };
+            let ports = target.alpc_process_ports(process).map_err(err)?;
+            Ok(view::object::alpc_process_ports(&ports))
+        })
+    }
+
     /// Decode `nt!NtGlobalFlag` and the current process's
     /// `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
     fn global_flags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {

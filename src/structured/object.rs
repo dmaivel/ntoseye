@@ -92,6 +92,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             )
         }
         "!htrace" | "htrace" => args.handle_traces(),
+        "!alpc" | "alpc" => args.alpc(),
         "irps" => args
             .target()
             .discover_irps(argv.first().copied())
@@ -109,6 +110,37 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
 }
 
 impl Args<'_, '_> {
+    /// `!alpc /p <port> | /m <message> | /lpp [process]`.
+    fn alpc(&self) -> Result<View> {
+        let target = self.target();
+        match self
+            .argv
+            .first()
+            .map(|switch| switch.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("/p") => Ok(view::object::alpc_port(&target.alpc_port(self.addr(1)?)?)),
+            Some("/m") => Ok(view::object::alpc_message(
+                &target.alpc_message(self.addr(1)?)?,
+            )),
+            Some("/lpp") => {
+                let process = match self.argv.get(1) {
+                    Some(selector) => self.state.process_for_selector_or_name(
+                        selector,
+                        &target.matching_processes(None)?,
+                    )?,
+                    None => target.selected_process_info()?,
+                };
+                Ok(view::object::alpc_process_ports(
+                    &target.alpc_process_ports(process)?,
+                ))
+            }
+            _ => Err(Error::InvalidArgument(
+                "usage: !alpc /p <port> | /m <message> | /lpp [process]".into(),
+            )),
+        }
+    }
+
     /// `!htrace [handle [process [max-traces]]]`, 0 standing for an omitted
     /// handle or process as in the REPL.
     fn handle_traces(&self) -> Result<View> {

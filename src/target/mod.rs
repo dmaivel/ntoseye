@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub mod alpc;
 mod context;
 pub mod cpu;
 pub mod etw;

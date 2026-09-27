@@ -910,8 +910,8 @@ impl Target {
 
     fn handle_table_context(
         &self,
+        process: ProcessInfo,
     ) -> Result<(ProcessInfo, VirtAddr, VirtAddr, u8, usize, Arc<TypeInfo>)> {
-        let process = self.selected_process_info()?;
         let types = self.guest()?.ntoskrnl.types_in(process.dtb);
         let eprocess = types.struct_at("_EPROCESS", process.eprocess_va)?;
         let table: VirtAddr = eprocess.read_field("ObjectTable")?;
@@ -944,9 +944,18 @@ impl Target {
     /// List non-free handles in the selected/current process.  Both page-table
     /// traversal and slot count are bounded by `limit`.
     pub fn enumerate_handles(&self, limit: usize) -> Result<HandleTableSummary> {
-        let limit = limit.clamp(1, 4096);
+        self.enumerate_process_handles(self.selected_process_info()?, limit.clamp(1, 4096))
+    }
+
+    /// List the non-free handles of `process`, scanning at most `limit`
+    /// slots.
+    pub fn enumerate_process_handles(
+        &self,
+        process: ProcessInfo,
+        limit: usize,
+    ) -> Result<HandleTableSummary> {
         let (process, table, table_base, level, advertised, entry_layout) =
-            self.handle_table_context()?;
+            self.handle_table_context(process)?;
         let scanned = advertised.min(limit);
         let mut entries = Vec::new();
         let mut skipped_entries = 0usize;
@@ -986,7 +995,8 @@ impl Target {
                 "handle {handle:#x} is not 4-byte aligned"
             )));
         }
-        let (_, _, table_base, level, advertised, entry_layout) = self.handle_table_context()?;
+        let (_, _, table_base, level, advertised, entry_layout) =
+            self.handle_table_context(self.selected_process_info()?)?;
         let index = (handle / 4) as usize;
         if index >= advertised {
             return Err(Error::DebugInfo(format!(

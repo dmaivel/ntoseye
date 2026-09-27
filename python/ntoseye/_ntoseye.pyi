@@ -833,6 +833,22 @@ class Inspect:
         """
         Decode an ACL and its ACEs (`!acl`).
         """
+    def alpc_message(self, /, address: int) -> Record:
+        """
+        Decode an ALPC message, a `_KALPC_MESSAGE` (`!alpc /m`).
+        """
+    def alpc_port(self, /, address: int) -> Record:
+        """
+        Decode an ALPC port (`!alpc /p`): its kind, owner, connection, state,
+        queues, and a connection port's connections. `address` is the port
+        object's body or header.
+        """
+    def alpc_process_ports(self, /, process: Process |None = None) -> Record:
+        """
+        The ALPC ports a process holds handles to (`!alpc /lpp`): the
+        connection ports it owns with their connections, and the client ports
+        it is connected through. `process` defaults to the current process.
+        """
     def apcs(self, /, target: Process |Thread |int |None = None) -> Record:
         """
         Decode kernel and user APC queues for all threads, a process, or a thread (`!apc`).

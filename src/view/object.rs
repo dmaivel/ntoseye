@@ -1,9 +1,13 @@
 //! Object- and I/O-manager [`View`] builders: IRPs, driver and
 //! device objects, object headers, handles, file objects, executive
-//! resources, notification callbacks, and service tables.
+//! resources, notification callbacks, service tables, and ALPC ports.
 
 use super::process::process;
 use super::{View, diagnostic, list_termination};
+use crate::target::alpc::{
+    AlpcConnection, AlpcField, AlpcMessageDetail, AlpcPortDetail, AlpcPortKind, AlpcProcessPorts,
+    lpc_message_type_name,
+};
 use crate::target::htrace::{HandleTraceDetail, handle_trace_kind_name};
 use crate::target::irpfind::{IrpFindDetail, IrpFindEntry, IrpPool};
 use crate::target::object::{
@@ -12,6 +16,7 @@ use crate::target::object::{
     ObjectHeaderDetail, ResourceDetail, ResourceListSummary, ResourceOwner, SsdtTable,
 };
 use crate::target::{Target, irp_major_function_name, kthread_state_name, wait_reason_name};
+use crate::types::VirtAddr;
 
 fn io_stack(s: &IoStackLocationInfo) -> View {
     View::Object(vec![
@@ -553,5 +558,217 @@ pub fn handle_traces(detail: &HandleTraceDetail) -> View {
         ("parsed", View::Num(detail.parsed)),
         ("unreadable", View::Num(detail.unreadable)),
         ("traces", View::List(traces)),
+    ])
+}
+
+fn alpc_kind(kind: Option<AlpcPortKind>) -> View {
+    View::OptStr(kind.map(|kind| kind.name().to_string()))
+}
+
+fn alpc_fields(fields: &[AlpcField]) -> View {
+    View::Object(
+        fields
+            .iter()
+            .map(|field| (field.key, View::Hex(field.value.0)))
+            .collect(),
+    )
+}
+
+fn alpc_connection(connection: &AlpcConnection) -> View {
+    View::Object(vec![
+        (
+            "communication_info",
+            View::Hex(connection.communication_info.0),
+        ),
+        ("server_port", View::Hex(connection.server_port.0)),
+        ("server_queued", View::OptNum(connection.server_queued)),
+        ("client_port", View::Hex(connection.client_port.0)),
+        ("client_queued", View::OptNum(connection.client_queued)),
+        ("client_owner", View::Hex(connection.client_owner.0)),
+        (
+            "client_owner_name",
+            View::OptStr(connection.client_owner_name.clone()),
+        ),
+    ])
+}
+
+/// `!alpc /p`; `kind` is WinDbg's port type name, `queues` each
+/// `{field, key, length, entries, termination}` (the wait queue's entries
+/// are threads), and `connections` (a connection port's) each
+/// `{communication_info, server_port, server_queued, client_port,
+/// client_queued, client_owner, client_owner_name}`.
+pub fn alpc_port(port: &AlpcPortDetail) -> View {
+    let queues = port
+        .queues
+        .iter()
+        .map(|queue| {
+            View::Object(vec![
+                ("field", View::Str(queue.field.to_string())),
+                ("key", View::Str(queue.key.to_string())),
+                ("length", View::OptNum(queue.length)),
+                (
+                    "entries",
+                    View::List(queue.entries.iter().map(|at| View::Hex(at.0)).collect()),
+                ),
+                ("termination", list_termination(&queue.termination)),
+            ])
+        })
+        .collect();
+    let optional_hex = |value: Option<VirtAddr>| View::OptHex(value.map(|at| at.0));
+    View::Object(vec![
+        ("address", View::Hex(port.address.0)),
+        ("name", View::OptStr(port.name.clone())),
+        ("pointer_count", View::Int(port.pointer_count)),
+        ("handle_count", View::Int(port.handle_count)),
+        ("kind", alpc_kind(port.kind)),
+        ("state", View::OptHex(port.state)),
+        ("port_type", View::OptNum(port.port_type)),
+        (
+            "state_flags",
+            View::List(port.state_flags.iter().cloned().map(View::Str).collect()),
+        ),
+        ("owner", View::Hex(port.owner.0)),
+        ("owner_name", View::OptStr(port.owner_name.clone())),
+        ("communication_info", View::Hex(port.communication_info.0)),
+        ("connection_port", optional_hex(port.connection_port)),
+        ("server_port", optional_hex(port.server_port)),
+        ("client_port", optional_hex(port.client_port)),
+        ("sequence_no", View::OptNum(port.sequence_no)),
+        ("completion_port", optional_hex(port.completion_port)),
+        ("completion_list", optional_hex(port.completion_list)),
+        ("port_context", optional_hex(port.port_context)),
+        ("attribute_flags", View::OptHex(port.attribute_flags)),
+        ("max_message_length", View::OptNum(port.max_message_length)),
+        ("queues", View::List(queues)),
+        (
+            "direct_queue_length",
+            View::OptNum(port.direct_queue_length),
+        ),
+        (
+            "connections",
+            View::List(port.connections.iter().map(alpc_connection).collect()),
+        ),
+        (
+            "connection_termination",
+            port.connection_termination
+                .as_ref()
+                .map_or(View::Null, list_termination),
+        ),
+    ])
+}
+
+/// `!alpc /m`; `message_type_name` is the `LPC_*` name of the message
+/// type's low byte, `pointers` and `attributes` map snake_case field names to
+/// addresses.
+pub fn alpc_message(message: &AlpcMessageDetail) -> View {
+    View::Object(vec![
+        ("address", View::Hex(message.address.0)),
+        ("message_id", View::OptNum(message.message_id)),
+        ("callback_id", View::OptNum(message.callback_id)),
+        ("sequence_no", View::OptNum(message.sequence_no)),
+        ("message_type", View::OptHex(message.message_type)),
+        (
+            "message_type_name",
+            View::OptStr(
+                message
+                    .message_type
+                    .and_then(lpc_message_type_name)
+                    .map(str::to_string),
+            ),
+        ),
+        ("data_length", View::OptNum(message.data_length)),
+        ("total_length", View::OptNum(message.total_length)),
+        ("client_process_id", View::OptNum(message.client_process_id)),
+        ("client_thread_id", View::OptNum(message.client_thread_id)),
+        ("state", View::OptHex(message.state)),
+        ("queue_type", View::OptNum(message.queue_type)),
+        ("queue_port_type", View::OptNum(message.queue_port_type)),
+        (
+            "state_flags",
+            View::List(message.state_flags.iter().cloned().map(View::Str).collect()),
+        ),
+        ("owner_port", View::Hex(message.owner_port.0)),
+        ("owner_port_kind", alpc_kind(message.owner_port_kind)),
+        ("port_queue", View::Hex(message.port_queue.0)),
+        ("port_queue_kind", alpc_kind(message.port_queue_kind)),
+        (
+            "port_queue_owner",
+            View::OptHex(message.port_queue_owner.map(|owner| owner.0)),
+        ),
+        (
+            "port_queue_owner_name",
+            View::OptStr(message.port_queue_owner_name.clone()),
+        ),
+        (
+            "cancel_sequence_no",
+            View::OptNum(message.cancel_sequence_no),
+        ),
+        (
+            "extension_buffer_size",
+            View::OptNum(message.extension_buffer_size),
+        ),
+        ("pointers", alpc_fields(&message.pointers)),
+        ("attributes", alpc_fields(&message.attributes)),
+    ])
+}
+
+/// `!alpc /lpp`; `created` lists the connection ports the process owns
+/// `{handle, port, name, connections, termination}`, `connected` the client
+/// ports it holds `{handle, port, queued, connection_port, connection_name,
+/// server_port, server_queued, server_owner, server_owner_name}`.
+pub fn alpc_process_ports(ports: &AlpcProcessPorts) -> View {
+    let created = ports
+        .created
+        .iter()
+        .map(|port| {
+            View::Object(vec![
+                ("handle", View::Hex(port.handle)),
+                ("port", View::Hex(port.port.0)),
+                ("name", View::OptStr(port.name.clone())),
+                (
+                    "connections",
+                    View::List(port.connections.iter().map(alpc_connection).collect()),
+                ),
+                ("termination", list_termination(&port.termination)),
+            ])
+        })
+        .collect();
+    let connected = ports
+        .connected
+        .iter()
+        .map(|port| {
+            View::Object(vec![
+                ("handle", View::Hex(port.handle)),
+                ("port", View::Hex(port.port.0)),
+                ("queued", View::OptNum(port.queued)),
+                ("connection_port", View::Hex(port.connection_port.0)),
+                (
+                    "connection_name",
+                    View::OptStr(port.connection_name.clone()),
+                ),
+                ("server_port", View::Hex(port.server_port.0)),
+                ("server_queued", View::OptNum(port.server_queued)),
+                (
+                    "server_owner",
+                    View::OptHex(port.server_owner.map(|owner| owner.0)),
+                ),
+                (
+                    "server_owner_name",
+                    View::OptStr(port.server_owner_name.clone()),
+                ),
+            ])
+        })
+        .collect();
+    View::Object(vec![
+        ("process", process(&ports.process)),
+        ("created", View::List(created)),
+        ("connected", View::List(connected)),
+        ("server_ports", View::Num(ports.server_ports as u64)),
+        ("scanned_handles", View::Num(ports.scanned_handles as u64)),
+        (
+            "advertised_handles",
+            View::Num(ports.advertised_handles as u64),
+        ),
+        ("skipped_entries", View::Num(ports.skipped_entries as u64)),
     ])
 }

@@ -570,6 +570,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!vm", "memory manager"),
     ("!vtop", "memory manager"),
     ("callbacks", "objects and I/O"),
+    ("!alpc", "objects and I/O"),
     ("!devnode", "objects and I/O"),
     ("!devobj", "objects and I/O"),
     ("!devstack", "objects and I/O"),

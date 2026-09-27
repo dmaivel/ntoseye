@@ -1,9 +1,14 @@
-//! Process-state inspectors: job objects, global flags, and handle traces.
+//! Process-state inspectors: job objects, global flags, handle traces, and
+//! ALPC ports.
 
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::DiagnosticValue;
+use crate::target::alpc::{
+    AlpcConnection, AlpcMessageDetail, AlpcPortDetail, AlpcPortKind, AlpcProcessPorts,
+    lpc_message_type_name,
+};
 use crate::target::gflag::{GLOBAL_FLAGS, GlobalFlagChange, GlobalFlagsDetail, global_flags_set};
 use crate::target::htrace::{HandleTraceDetail, handle_trace_kind_name};
 use crate::target::job::{JobDetail, job_limit_flag_names};
@@ -37,7 +42,61 @@ repl_command! {
     completion: Expression,
 }
 
+repl_command! {
+    cmd_alpc;
+    names: ["!alpc", "alpc"],
+    usage: "!alpc /p <port> | /m <message> | /lpp [process]",
+    summary: "Show an ALPC port, an ALPC message, or the ports a process holds.",
+    details: "/p decodes an _ALPC_PORT (its object body or header): its kind, owner, the connection, server, and client ports of its communication info, its state flags, and its queues with the messages (or, for the wait queue, the threads) on them; a connection port also lists its connections. /m decodes a _KALPC_MESSAGE: its IDs, type, sizes, state, owner and queue ports, and the waiting and server threads. /lpp walks a process's handle table (an EPROCESS address, PID, or name; default the current process) for ALPC ports: the connection ports it owns with each connection's server and client ports and client process, then the ports it is connected to. The number after a port is its queued messages (main, large-message, and pending queues).",
+    completion: Expression,
+}
+
 impl ReplState<'_> {
+    fn cmd_alpc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let usage = || error!("usage: !alpc /p <port> | /m <message> | /lpp [process]");
+        let Some(switch) = invocation.arg(0) else {
+            usage();
+            return Ok(());
+        };
+        let target = &self.ctx.target;
+        match switch.to_ascii_lowercase().as_str() {
+            form @ ("/p" | "/m") => {
+                let Some(text) = invocation.arg(1) else {
+                    usage();
+                    return Ok(());
+                };
+                let Some(address) = self.eval_or_report(text) else {
+                    return Ok(());
+                };
+                let target = &self.ctx.target;
+                let shown = if form == "/p" {
+                    target.alpc_port(address).map(|port| print_alpc_port(&port))
+                } else {
+                    target
+                        .alpc_message(address)
+                        .map(|message| print_alpc_message(&message))
+                };
+                if let Err(error) = shown {
+                    error!("{error}");
+                }
+            }
+            "/lpp" => {
+                let process = match invocation.arg(1) {
+                    Some(selector) => target.matching_processes(None).and_then(|processes| {
+                        self.process_for_selector_or_name(selector, &processes)
+                    }),
+                    None => target.selected_process_info(),
+                };
+                match process.and_then(|process| target.alpc_process_ports(process)) {
+                    Ok(ports) => print_alpc_process_ports(&ports),
+                    Err(error) => error!("{error}"),
+                }
+            }
+            _ => usage(),
+        }
+        Ok(())
+    }
+
     fn cmd_htrace(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let arg = |index: usize| invocation.arg(index).filter(|text| *text != "0");
         let handle = match arg(0).map(|text| self.eval_or_report(text)) {
@@ -275,5 +334,248 @@ fn print_handle_traces(detail: &HandleTraceDetail) {
     if detail.unreadable != 0 {
         outln!("{:#x} trace slot(s) unreadable.", detail.unreadable);
     }
+    outln!();
+}
+
+fn optional_addr(value: Option<VirtAddr>) -> String {
+    value.map_or("-".to_string(), |value| ui::addr(value.0))
+}
+
+fn optional_hex(value: Option<u64>) -> String {
+    value.map_or("-".to_string(), |value| format!("{value:#x}"))
+}
+
+fn optional_count(value: Option<u64>) -> String {
+    value.map_or("?".to_string(), |value| value.to_string())
+}
+
+fn owner_label(owner: VirtAddr, name: &Option<String>) -> String {
+    format!("{} ({})", ui::addr(owner.0), name.as_deref().unwrap_or("?"))
+}
+
+fn kind_name(kind: Option<AlpcPortKind>) -> &'static str {
+    kind.map_or("unknown", AlpcPortKind::name)
+}
+
+fn print_alpc_connection(connection: &AlpcConnection) {
+    outln!(
+        "    {} {} -> {} {} {}",
+        ui::addr(connection.server_port.0),
+        optional_count(connection.server_queued),
+        ui::addr(connection.client_port.0),
+        optional_count(connection.client_queued),
+        owner_label(connection.client_owner, &connection.client_owner_name)
+    );
+}
+
+fn print_alpc_port(port: &AlpcPortDetail) {
+    match &port.name {
+        Some(name) => outln!("Port {} ('{name}')", ui::addr(port.address.0)),
+        None => outln!("Port {}", ui::addr(port.address.0)),
+    }
+    let row = |label: &str, value: String| outln!("  {label:<24}: {value}");
+    row(
+        "Type",
+        format!(
+            "{} (Type bits {})",
+            kind_name(port.kind),
+            optional_hex(port.port_type)
+        ),
+    );
+    row(
+        "PointerCount/Handles",
+        format!("{} / {}", port.pointer_count, port.handle_count),
+    );
+    row("OwnerProcess", owner_label(port.owner, &port.owner_name));
+    row("CommunicationInfo", ui::addr(port.communication_info.0));
+    row("  ConnectionPort", optional_addr(port.connection_port));
+    row("  ServerCommunicationPort", optional_addr(port.server_port));
+    row("  ClientCommunicationPort", optional_addr(port.client_port));
+    row("SequenceNo", optional_hex(port.sequence_no));
+    row("CompletionPort", optional_addr(port.completion_port));
+    row("CompletionList", optional_addr(port.completion_list));
+    row("PortContext", optional_addr(port.port_context));
+    row("PortAttributes.Flags", optional_hex(port.attribute_flags));
+    row("MaxMessageLength", optional_hex(port.max_message_length));
+    row(
+        "State",
+        format!(
+            "{} {}",
+            optional_hex(port.state),
+            port.state_flags
+                .iter()
+                .map(|flag| format!("[{flag}]"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    );
+    outln!();
+    for queue in &port.queues {
+        let what = if queue.key == "wait" {
+            "thread(s)"
+        } else {
+            "message(s)"
+        };
+        outln!(
+            "  {}: {} {what} (length {})",
+            queue.field,
+            queue.entries.len(),
+            optional_count(queue.length)
+        );
+        for entry in &queue.entries {
+            outln!("    {}", ui::addr(entry.0));
+        }
+        if let Some(why) = queue.termination.diagnostic() {
+            outln!("    walk ended early: {why}");
+        }
+    }
+    outln!(
+        "  DirectQueue: length {}",
+        optional_count(port.direct_queue_length)
+    );
+    if let Some(termination) = &port.connection_termination {
+        outln!();
+        outln!(
+            "  {} connection(s) (server port, queued -> client port, queued, client process):",
+            port.connections.len()
+        );
+        port.connections.iter().for_each(print_alpc_connection);
+        if let Some(why) = termination.diagnostic() {
+            outln!("    connection list ended early: {why}");
+        }
+    }
+    outln!();
+}
+
+fn print_alpc_message(message: &AlpcMessageDetail) {
+    outln!("Message {}", ui::addr(message.address.0));
+    let row = |label: &str, value: String| outln!("  {label:<22}: {value}");
+    let number =
+        |value: Option<u64>| value.map_or("-".to_string(), |value| format!("{value:#x} ({value})"));
+    row("MessageID", number(message.message_id));
+    row("CallbackID", number(message.callback_id));
+    row("SequenceNumber", number(message.sequence_no));
+    row(
+        "Type",
+        match message.message_type {
+            Some(value) => format!(
+                "{} ({value:#x})",
+                lpc_message_type_name(value).unwrap_or("unknown")
+            ),
+            None => "-".to_string(),
+        },
+    );
+    row("DataLength", number(message.data_length));
+    row("TotalLength", number(message.total_length));
+    row(
+        "ClientId",
+        format!(
+            "{}.{}",
+            optional_hex(message.client_process_id),
+            optional_hex(message.client_thread_id)
+        ),
+    );
+    row(
+        "State",
+        format!(
+            "{} QueueType {} QueuePortType {} {}",
+            optional_hex(message.state),
+            optional_count(message.queue_type),
+            optional_count(message.queue_port_type),
+            message
+                .state_flags
+                .iter()
+                .map(|flag| format!("[{flag}]"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    );
+    row(
+        "OwnerPort",
+        format!(
+            "{} [{}]",
+            ui::addr(message.owner_port.0),
+            kind_name(message.owner_port_kind)
+        ),
+    );
+    row(
+        "QueuePort",
+        format!(
+            "{} [{}]",
+            ui::addr(message.port_queue.0),
+            kind_name(message.port_queue_kind)
+        ),
+    );
+    if let Some(owner) = message.port_queue_owner {
+        row(
+            "QueuePortOwnerProcess",
+            owner_label(owner, &message.port_queue_owner_name),
+        );
+    }
+    for field in &message.pointers {
+        row(field.field, ui::addr(field.value.0));
+    }
+    row("CancelSequenceNumber", number(message.cancel_sequence_no));
+    row("ExtensionBufferSize", number(message.extension_buffer_size));
+    for field in &message.attributes {
+        row(field.field, ui::addr(field.value.0));
+    }
+    outln!();
+}
+
+fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
+    let process = &ports.process;
+    let label = format!(
+        "{} ({}, PID {})",
+        ui::addr(process.eprocess_va.0),
+        process.name,
+        process.pid
+    );
+    outln!("Ports created by the process {label}:");
+    for port in &ports.created {
+        outln!(
+            "  {} ('{}') handle {:#x}, {} connection(s)",
+            ui::addr(port.port.0),
+            port.name.as_deref().unwrap_or(""),
+            port.handle,
+            port.connections.len()
+        );
+        port.connections.iter().for_each(print_alpc_connection);
+        if let Some(why) = port.termination.diagnostic() {
+            outln!("    connection list ended early: {why}");
+        }
+    }
+    outln!();
+    outln!("Ports the process {label} is connected to:");
+    outln!("  (client port, queued -> server port, queued, server process; connection port)");
+    for port in &ports.connected {
+        outln!(
+            "  {} {} -> {} {} {}  {} ('{}')  handle {:#x}",
+            ui::addr(port.port.0),
+            optional_count(port.queued),
+            ui::addr(port.server_port.0),
+            optional_count(port.server_queued),
+            port.server_owner
+                .map_or("-".to_string(), |owner| owner_label(
+                    owner,
+                    &port.server_owner_name
+                )),
+            ui::addr(port.connection_port.0),
+            port.connection_name.as_deref().unwrap_or(""),
+            port.handle
+        );
+    }
+    outln!();
+    outln!(
+        "{} server communication port handle(s); scanned {}/{} handle slots{}",
+        ports.server_ports,
+        ports.scanned_handles,
+        ports.advertised_handles,
+        if ports.skipped_entries == 0 {
+            String::new()
+        } else {
+            format!(", {} unreadable", ports.skipped_entries)
+        }
+    );
     outln!();
 }
