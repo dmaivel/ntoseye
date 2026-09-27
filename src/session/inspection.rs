@@ -13,8 +13,8 @@ use crate::kd::{context, context_arm64};
 use crate::memory::{PAGE_SIZE, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead};
-use crate::target::ThreadInfo;
 use crate::target::usermode::ImageCheckDetail;
+use crate::target::{SearchResult, ThreadInfo};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
@@ -115,6 +115,16 @@ impl Session {
     /// host (REPL, MCP, SDK) sees the same bytes the guest would run.
     pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
         self.read_masked_in(self.target.current_dtb(), addr, buf)
+    }
+
+    /// Search the inspection address space for `pattern`
+    /// ([`Target::search`](crate::target::Target::search)) as
+    /// [`Self::read_masked`] reads it, so a breakpoint this session planted
+    /// neither hides the original bytes nor matches as an `int3`.
+    pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<SearchResult> {
+        self.target.search(start, pattern, length, |address, buf| {
+            self.read_masked(address, buf)
+        })
     }
 
     /// [`Self::read_masked`] in the address space `dtb` rather than the

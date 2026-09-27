@@ -236,7 +236,10 @@ impl Memory {
         self.read_descriptor(py, addr, StringDescriptor::Ansi, bits)
     }
 
-    /// Find overlapping matches and include symbol/module/VAD context.
+    /// Find overlapping matches and include symbol/module/VAD context. In a
+    /// virtual space unreadable pages are skipped, this session's own
+    /// breakpoints read as the code they replaced, and at most 4096 matches
+    /// are returned.
     fn search(
         &self,
         py: Python<'_>,
@@ -252,8 +255,8 @@ impl Memory {
         let physical = matches!(self.space, Space::Physical);
         let secure = matches!(self.space, Space::Secure(_));
         self.owner.with_in(py, &context, move |session| {
-            let mut bytes = vec![0; length];
             if physical {
+                let mut bytes = vec![0; length];
                 session
                     .target
                     .read_physical(start, &mut bytes)
@@ -262,12 +265,10 @@ impl Memory {
                     .map(|offset| MemorySearchMatch::physical(start, offset))
                     .collect())
             } else {
-                session
-                    .read_masked(VirtAddr(start), &mut bytes)
-                    .map_err(err)?;
-                let hits = pattern_offsets(&bytes, pattern)
-                    .map(|offset| start.wrapping_add(offset as u64))
-                    .collect::<Vec<_>>();
+                let hits = session
+                    .search(VirtAddr(start), pattern, length)
+                    .map_err(err)?
+                    .matches;
                 if secure {
                     // NT's region descriptions do not cover VTL1 addresses.
                     return Ok(hits

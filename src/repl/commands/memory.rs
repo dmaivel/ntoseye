@@ -1406,7 +1406,7 @@ impl ReplState<'_> {
             }
         };
 
-        let result = match self.ctx.target.search(start_addr, &pattern, length) {
+        let result = match self.ctx.search(start_addr, &pattern, length) {
             Ok(result) => result,
             Err(e) => {
                 error!("failed to search memory: {}", e);

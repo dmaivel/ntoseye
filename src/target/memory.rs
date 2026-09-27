@@ -85,11 +85,18 @@ impl Target {
         }
     }
 
-    /// Search `length` bytes from `start` in the current address space for the
-    /// byte `pattern`. Unreadable pages are skipped, and a match must lie in
-    /// readable bytes. The range is read a chunk at a time, so it may be
+    /// Search `length` bytes from `start` for the byte `pattern`, reading
+    /// with `read` (a host's view of the inspection space, with its own
+    /// breakpoints masked). Unreadable pages are skipped, and a match must lie
+    /// in readable bytes. The range is read a chunk at a time, so it may be
     /// large; see [`SearchResult`] for where it stops.
-    pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<SearchResult> {
+    pub fn search(
+        &self,
+        start: VirtAddr,
+        pattern: &[u8],
+        length: usize,
+        read: impl Fn(VirtAddr, &mut [u8]) -> Result<()>,
+    ) -> Result<SearchResult> {
         if length > MAX_SEARCH_BYTES {
             return Err(Error::InvalidArgument(format!(
                 "search length {length:#x} exceeds the maximum of {MAX_SEARCH_BYTES:#x} bytes"
@@ -99,7 +106,6 @@ impl Target {
         if pattern.is_empty() || pattern.len() > length {
             return Ok(result);
         }
-        let memory = self.context_memory();
         let mut offset = 0usize;
         while offset + pattern.len() <= length {
             if self.interrupt.load(Ordering::Relaxed) {
@@ -109,11 +115,9 @@ impl Target {
             // Each chunk reads on past its end by a pattern less one byte,
             // so a match straddling two chunks is found in the first.
             let starts = SEARCH_CHUNK.min(length - offset - pattern.len() + 1);
-            let read = starts + pattern.len() - 1;
+            let chunk_len = starts + pattern.len() - 1;
             let chunk_start = VirtAddr(start.0.wrapping_add(offset as u64));
-            let (data, valid) = read_page_chunks(chunk_start, read, |address, buf| {
-                memory.read_bytes(address, buf)
-            })?;
+            let (data, valid) = read_page_chunks(chunk_start, chunk_len, &read)?;
             result.unreadable += valid[..starts].iter().filter(|valid| !**valid).count();
             for at in pattern_offsets(&data, pattern).filter(|&at| at < starts) {
                 if !valid[at..at + pattern.len()].iter().all(|valid| *valid) {
