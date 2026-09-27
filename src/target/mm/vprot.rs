@@ -1,8 +1,10 @@
 //! `!vprot`: what `VirtualQuery` reports for a user address, from the VAD
 //! holding it and the page-table and prototype PTEs of its pages.
 
+use super::paging::PteSelfMap;
 use super::{MemoryRegionInfo, VadType, VprotDetail};
 use crate::backend::MemoryOps;
+use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
@@ -33,8 +35,6 @@ const PAGE_WRITECOMBINE: u32 = 0x400;
 /// The MM protection a software PTE of a decommitted page carries
 /// (`MM_DECOMMIT`: guard with no access).
 const MM_DECOMMIT: u64 = 0x10;
-/// The self-map index bits of a 48-bit virtual address.
-const VA_MASK: u64 = 0xFFFF_FFFF_FFFF;
 const PTE_TABLE_SPAN: u64 = 1 << 21;
 const PDE_TABLE_SPAN: u64 = 1 << 30;
 const PPE_TABLE_SPAN: u64 = 1 << 39;
@@ -193,7 +193,7 @@ impl PteFormat {
         } else {
             raw
         };
-        (address >= 0xffff_8000_0000_0000 && address != u64::MAX && address & 7 == 0)
+        (looks_like_kernel_pointer(address) && address != u64::MAX && address & 7 == 0)
             .then_some(address)
     }
 }
@@ -218,10 +218,7 @@ struct PageWalk<'a> {
     memory: AddressSpace<'a, PhysMem>,
     kernel: AddressSpace<'a, PhysMem>,
     format: PteFormat,
-    pte_base: u64,
-    pde_base: u64,
-    ppe_base: u64,
-    pxe_base: u64,
+    self_map: PteSelfMap,
     vad: VadPages,
     /// The page-table page last read: its self-map address and entries.
     table: Option<(u64, Vec<u8>)>,
@@ -231,39 +228,33 @@ impl PageWalk<'_> {
     /// The state of the page at `va` and the end of the span sharing it:
     /// one page, or the rest of a table that is not there.
     fn state_at(&mut self, va: u64) -> Result<(PageState, u64)> {
-        let index = va & VA_MASK;
         let span_end = |span: u64| (va | (span - 1)).saturating_add(1);
-        let pxe: u64 = self
-            .memory
-            .read(VirtAddr(self.pxe_base + ((index >> 39) & 0x1ff) * 8))?;
-        if pxe & 1 == 0 {
-            return self.untouched(va, span_end(PPE_TABLE_SPAN));
+        let [pxe, ppe, pde, pte] = self.self_map.entries(va);
+        let mut entry = 0;
+        for (address, span) in [
+            (pxe, PPE_TABLE_SPAN),
+            (ppe, PDE_TABLE_SPAN),
+            (pde, PTE_TABLE_SPAN),
+        ] {
+            entry = self.memory.read(address)?;
+            if entry & 1 == 0 {
+                return self.untouched(va, span_end(span));
+            }
         }
-        let ppe: u64 = self
-            .memory
-            .read(VirtAddr(self.ppe_base + (index >> 30) * 8))?;
-        if ppe & 1 == 0 {
-            return self.untouched(va, span_end(PDE_TABLE_SPAN));
-        }
-        let pde: u64 = self
-            .memory
-            .read(VirtAddr(self.pde_base + (index >> 21) * 8))?;
-        if pde & 1 == 0 {
-            return self.untouched(va, span_end(PTE_TABLE_SPAN));
-        }
-        if pde & 0x80 != 0 {
+        // The PDE: valid and large, it maps the whole span.
+        if entry & 0x81 == 0x81 {
             return Ok((
-                Some(self.format.valid_protection(pde)),
+                Some(self.format.valid_protection(entry)),
                 span_end(PTE_TABLE_SPAN),
             ));
         }
-        let table = self.pte_base + ((index >> 21) << 12);
+        let table = pte.0 & !(PAGE_SIZE as u64 - 1);
         if self.table.as_ref().is_none_or(|(at, _)| *at != table) {
             let mut entries = vec![0u8; PAGE_SIZE];
             self.memory.read_bytes(VirtAddr(table), &mut entries)?;
             self.table = Some((table, entries));
         }
-        let offset = ((index >> 12) & 0x1ff) as usize * 8;
+        let offset = (pte.0 - table) as usize;
         let pte = self
             .table
             .as_ref()
@@ -493,19 +484,11 @@ impl Target {
             };
             (read("FirstPrototypePte"), read("LastContiguousPte"))
         };
-        let pte_base: VirtAddr = guest.ntoskrnl.symbol("MmPteBase")?.read()?;
-        let pte_base = pte_base.0;
-        let pde_base = pte_base + (pte_base >> 9 & 0x7F_FFFF_FFFF);
-        let ppe_base = pde_base + (pde_base >> 9 & 0x3FFF_FFFF);
-        let pxe_base = ppe_base + (ppe_base >> 9 & 0x1F_FFFF);
         Ok(PageWalk {
             memory: self.address_space(process.dtb),
             kernel,
             format: PteFormat::load(self)?,
-            pte_base,
-            pde_base,
-            ppe_base,
-            pxe_base,
+            self_map: self.pte_self_map()?,
             vad: VadPages {
                 start: region.start,
                 private,

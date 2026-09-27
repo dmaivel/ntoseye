@@ -4,6 +4,7 @@
 
 use super::{DiagnosticValue, Target};
 use crate::backend::MemoryOps;
+use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::pe::headers::{
@@ -11,9 +12,6 @@ use crate::pe::headers::{
 };
 use crate::pe::{ImageExports, PeImage, read_pe_exports};
 use crate::types::{Dtb, VirtAddr};
-
-/// Where the kernel half of the address space begins.
-const KERNEL_SPACE_START: u64 = 0xffff_8000_0000_0000;
 
 /// Which parts of the image `!dh` shows (`-f`, `-s`, `-e`, `-i`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +123,7 @@ impl Target {
         let module = module.ok_or_else(|| {
             Error::DebugInfo(format!("{:#x} is the base of no loaded module", base.0))
         })?;
-        let dtb = if base.0 >= KERNEL_SPACE_START {
+        let dtb = if looks_like_kernel_pointer(base.0) {
             self.kernel_dtb()
         } else {
             self.process_dtb()

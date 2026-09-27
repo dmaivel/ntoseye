@@ -15,6 +15,28 @@ const MAX_PTOV_RESULTS: usize = 32;
 const LARGE_PAGE_1G: u64 = 1 << 30;
 const LARGE_PAGE_2M: u64 = 1 << 21;
 
+/// NT's page-table self-map: the bases of its PTE, PDE, PPE, and PXE arrays.
+#[derive(Debug, Clone, Copy)]
+pub struct PteSelfMap {
+    pte: u64,
+    pde: u64,
+    ppe: u64,
+    pxe: u64,
+}
+
+impl PteSelfMap {
+    /// Where the PXE, PPE, PDE, and PTE of `address` sit in the self-map.
+    pub fn entries(&self, address: u64) -> [VirtAddr; 4] {
+        let index = address & 0xFFFF_FFFF_FFFF;
+        [
+            VirtAddr(self.pxe + (index >> 39 << 3)),
+            VirtAddr(self.ppe + (index >> 30 << 3)),
+            VirtAddr(self.pde + (index >> 21 << 3)),
+            VirtAddr(self.pte + (index >> 12 << 3)),
+        ]
+    }
+}
+
 impl Target {
     /// Read guest-physical memory directly through the target's physical-memory
     /// backend without translating the supplied address.
@@ -166,6 +188,16 @@ impl Target {
         })
     }
 
+    /// The self-map `MmPteBase` heads.
+    pub fn pte_self_map(&self) -> Result<PteSelfMap> {
+        let pte: VirtAddr = self.guest()?.ntoskrnl.symbol("MmPteBase")?.read()?;
+        let pte = pte.0;
+        let pde = pte + (pte >> 9 & 0x7F_FFFF_FFFF);
+        let ppe = pde + (pde >> 9 & 0x3FFF_FFFF);
+        let pxe = ppe + (ppe >> 9 & 0x1F_FFFF);
+        Ok(PteSelfMap { pte, pde, ppe, pxe })
+    }
+
     /// The page-table entries mapping `address`, read through NT's
     /// self-map in the inspection address space, so user VAs resolve through
     /// the selected process's tables. Every NT root maps the self-map; a root
@@ -188,14 +220,8 @@ impl Target {
         // read through `dtb` for both halves; through the kernel's root it
         // would show the kernel's (empty) user half.
         let memory = AddressSpace::for_arch(&self.phys, dtb, dtb, self.arch());
-
-        let pte_base: VirtAddr = self.guest()?.ntoskrnl.symbol("MmPteBase")?.read()?;
-        let pde_base = pte_base + (pte_base.0 >> 9 & 0x7FFFFFFFFF);
-        let ppe_base = pde_base + (pde_base.0 >> 9 & 0x3FFFFFFF);
-        let pxe_base = ppe_base + (ppe_base.0 >> 9 & 0x1FFFFF);
-
-        let pxe_address = VirtAddr(pxe_base.0 + (((address.0 >> 39) & 0x1FF) << 3));
-        let ppe_address = VirtAddr((((address.0 & 0xFFFFFFFFFFFF) >> 30) << 3) + ppe_base.0);
+        let [pxe_address, ppe_address, pde_address, pte_address] =
+            self.pte_self_map()?.entries(address.0);
 
         let arch = self.arch();
         let read_level = |level: PageTableLevel, at: VirtAddr| -> Result<PteLevel> {
@@ -217,12 +243,10 @@ impl Target {
         } else {
             Some(read_level(PageTableLevel::Ppe, ppe_address)?)
         };
-        let pde_address = VirtAddr((((address.0 & 0xFFFFFFFFFFFF) >> 21) << 3) + pde_base.0);
         let pde = match &ppe {
             Some(ppe) if !ends(ppe) => Some(read_level(PageTableLevel::Pde, pde_address)?),
             _ => None,
         };
-        let pte_address = VirtAddr(((address.0 & 0xFFFFFFFFFFFF) >> 12) << 3) + pte_base.0;
         let pte = match &pde {
             Some(pde) if !ends(pde) => Some(read_level(PageTableLevel::Pte, pte_address)?),
             _ => None,
