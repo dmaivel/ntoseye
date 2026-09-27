@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::layout::ParsedType;
 use crate::memory::PAGE_SIZE;
 use crate::target::Target;
-use crate::types::{Arch, VirtAddr};
+use crate::types::VirtAddr;
 
 const PTE_TYPE: &str = "_MI_SYSTEM_PTE_TYPE";
 /// `MiState` members that hold `_MI_SYSTEM_PTE_TYPE` allocators.
@@ -102,14 +102,11 @@ fn pte_to_va(pte: VirtAddr, pte_base: VirtAddr) -> VirtAddr {
 }
 
 impl Target {
-    /// Maps an AMD64 PTE address to the virtual address it maps, when the PTE
-    /// lies in NT's PTE self-map (one PML4 slot: 512 GiB of PTEs), and to
-    /// `None` for a PTE elsewhere, such as a prototype PTE. `None` on other
-    /// architectures or without `MmPteBase`, which is read once, here.
+    /// Maps a PTE address to the virtual address it maps, when the PTE lies
+    /// in NT's PTE self-map (one top-level slot: 512 GiB of PTEs; AMD64 and
+    /// ARM64 lay it out alike), and to `None` for a PTE elsewhere, such as a
+    /// prototype PTE. `None` without `MmPteBase`, which is read once, here.
     pub fn va_mapped_by_pte(&self) -> Option<impl Fn(VirtAddr) -> Option<VirtAddr>> {
-        if self.arch() != Arch::Amd64 {
-            return None;
-        }
         let pte_base: VirtAddr = self
             .guest()
             .ok()?
