@@ -141,12 +141,15 @@ impl Target {
         let name = process_info.name.clone();
         let guest = self.guest.as_ref().ok_or(Error::NtoskrnlNotFound)?;
 
-        // A kernel-only process (System, Registry, ...) has no PEB and so no
-        // user modules; attaching still scopes its address space.
-        let symbol_report =
+        // The address space is the process's to inspect whatever its user
+        // modules: a kernel-only process (System, Registry, ...) has no PEB,
+        // and a process whose loader data is paged out, or which has exited
+        // and lost its user address space, has none to list.
+        let (symbol_report, modules_error) =
             match guest.load_all_process_module_symbols(&self.phys, &self.symbols, &process_info) {
-                Err(Error::MissingPEB) => ModuleSymbolLoadReport::default(),
-                report => report?,
+                Ok(report) => (report, None),
+                Err(Error::MissingPEB) => (ModuleSymbolLoadReport::default(), None),
+                Err(error) => (ModuleSymbolLoadReport::default(), Some(error.to_string())),
             };
 
         self.process = Some(process_info);
@@ -157,6 +160,7 @@ impl Target {
         Ok(AttachReport {
             name,
             symbol_report,
+            modules_error,
         })
     }
 

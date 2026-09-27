@@ -102,6 +102,17 @@ pub(super) fn display_pointer(value: Option<VirtAddr>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+/// A selected process's user modules: their symbol loading, or why there
+/// are none to list.
+fn print_user_modules(report: &AttachReport) {
+    match &report.modules_error {
+        Some(error) => crate::diagnostics::print_warning(format!(
+            "user modules unavailable: {error}; the address space is selected without them"
+        )),
+        None => print_module_symbol_report(&report.symbol_report),
+    }
+}
+
 fn process_brief_row(process: &ProcessInfo, detail: &ProcessDetail) -> Vec<String> {
     vec![
         display_pointer(Some(process.eprocess_va)),
@@ -404,14 +415,11 @@ impl ReplState<'_> {
         };
         self.leave_vtl1();
         match self.ctx.target.attach(process.pid) {
-            Ok(AttachReport {
-                name,
-                symbol_report,
-            }) => {
+            Ok(report) => {
                 self.caches.refresh_symbol_context(&self.ctx.target);
                 self.clear_selected_frame();
-                outln!("attached to {} (PID {})", name, process.pid);
-                print_module_symbol_report(&symbol_report);
+                outln!("attached to {} (PID {})", report.name, process.pid);
+                print_user_modules(&report);
                 outln!();
             }
             Err(e) => error!("failed to attach: {}", e),
@@ -482,20 +490,17 @@ impl ReplState<'_> {
         };
         self.leave_vtl1();
         match self.ctx.target.attach_process_info(process.clone()) {
-            Ok(AttachReport {
-                name,
-                symbol_report,
-            }) => {
+            Ok(report) => {
                 self.caches.refresh_symbol_context(&self.ctx.target);
                 self.clear_selected_frame();
                 outln!(
                     "process context: {} (PID {}, EPROCESS {}{})",
-                    name,
+                    report.name,
                     process.pid,
                     ui::addr(process.eprocess_va.0),
                     if process.is_wow64() { ", WOW64" } else { "" },
                 );
-                print_module_symbol_report(&symbol_report);
+                print_user_modules(&report);
             }
             Err(error) => error!("failed to select process context: {}", error),
         }

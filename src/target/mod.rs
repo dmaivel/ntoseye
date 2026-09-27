@@ -652,6 +652,10 @@ pub struct ReloadReport {
 pub struct AttachReport {
     pub name: String,
     pub symbol_report: ModuleSymbolLoadReport,
+    /// Why the process's user modules could not be listed (its loader data
+    /// is unreadable: paged out, or the process has exited); the process is
+    /// selected all the same.
+    pub modules_error: Option<String>,
 }
 
 impl Target {
