@@ -139,12 +139,8 @@ impl Target {
                 ),
                 Some("MmGetTotalCommitLimit"),
             ),
-            paged_pool_pages: self.global_memory_counter("MmSizeOfPagedPoolInPages", None, None),
-            nonpaged_pool_bytes: self.global_memory_counter(
-                "MmSizeOfNonPagedPoolInBytes",
-                None,
-                None,
-            ),
+            paged_pool_pages: self.paged_pool_pages(),
+            nonpaged_pool_bytes: self.nonpaged_pool_bytes(),
             processes,
             process_count,
             truncated,
@@ -160,9 +156,9 @@ impl Target {
             })
             .collect();
         let pool = VmPoolDetail {
-            nonpaged_pool_bytes: global_metric(self, "MmSizeOfNonPagedPoolInBytes"),
+            nonpaged_pool_bytes: self.nonpaged_pool_bytes(),
             nonpaged_pool_maximum: global_metric(self, "MmMaximumNonPagedPoolInBytes"),
-            paged_pool_pages: global_metric(self, "MmSizeOfPagedPoolInPages"),
+            paged_pool_pages: self.paged_pool_pages(),
             fields: pool_fields,
         };
         let pte = VmPteDetail {
@@ -292,6 +288,62 @@ impl Target {
         })())
     }
 
+    /// Paged pool in use, in pages: `MmSizeOfPagedPoolInPages`, or on builds
+    /// without it `MiState.Vs.PagedPoolInfo.AllocatedPagedPool`.
+    fn paged_pool_pages(&self) -> DiagnosticMetric<u64> {
+        self.pool_in_use(
+            "MmSizeOfPagedPoolInPages",
+            &["Vs", "PagedPoolInfo", "AllocatedPagedPool"],
+            1,
+        )
+    }
+
+    /// Nonpaged pool in use, in bytes: `MmSizeOfNonPagedPoolInBytes`, or on
+    /// builds without it `MiState.Pools.AllocatedNonPagedPool`, which counts
+    /// pages.
+    fn nonpaged_pool_bytes(&self) -> DiagnosticMetric<u64> {
+        self.pool_in_use(
+            "MmSizeOfNonPagedPoolInBytes",
+            &["Pools", "AllocatedNonPagedPool"],
+            PAGE_SIZE as u64,
+        )
+    }
+
+    /// The kernel global `symbol`, else the `MiState` field at `path` times
+    /// `scale`. Newer kernels keep pool usage only in `MiState`. KDBG's pool
+    /// sizes are the configured ranges, not usage, so they are not used.
+    fn pool_in_use(&self, symbol: &str, path: &[&str], scale: u64) -> DiagnosticMetric<u64> {
+        let global = match read_kernel_global_u64(self, symbol) {
+            Ok(value) => return available_metric(value),
+            Err(error) => error,
+        };
+        let field = (|| -> Result<u64> {
+            let guest = self.guest()?;
+            let (leaf, parents) = path
+                .split_last()
+                .ok_or_else(|| Error::DebugInfo("empty MiState field path".into()))?;
+            let base = guest.ntoskrnl.symbol("MiState")?.address();
+            let mut cursor = guest
+                .ntoskrnl
+                .types()
+                .struct_at("_MI_SYSTEM_INFORMATION", base)?;
+            for parent in parents {
+                cursor = cursor.embedded(parent)?;
+            }
+            cursor
+                .read_uint(leaf)?
+                .checked_mul(scale)
+                .ok_or_else(|| Error::DebugInfo(format!("MiState.{} overflows", path.join("."))))
+        })();
+        match field {
+            Ok(value) => available_metric(value),
+            Err(error) => DiagnosticMetric::unavailable(vec![
+                global.to_string(),
+                format!("MiState.{}: {error}", path.join(".")),
+            ]),
+        }
+    }
+
     fn debugger_data_counter(
         &self,
         address: Option<MetadataValue<VirtAddr>>,
@@ -393,16 +445,8 @@ impl Target {
                 ),
                 Some("MmGetTotalCommitLimit"),
             ),
-            // KDBG exposes the configured paged-pool virtual range, not current
-            // usage, so it is intentionally not substituted here.
-            paged_pool_pages: self.global_memory_counter("MmSizeOfPagedPoolInPages", None, None),
-            // KDBG exposes the configured maximum nonpaged-pool size, not the
-            // current usage requested here, so it is intentionally not substituted.
-            nonpaged_pool_bytes: self.global_memory_counter(
-                "MmSizeOfNonPagedPoolInBytes",
-                None,
-                None,
-            ),
+            paged_pool_pages: self.paged_pool_pages(),
+            nonpaged_pool_bytes: self.nonpaged_pool_bytes(),
             processes,
             process_count,
             truncated: process_count > process_limit,
