@@ -46,12 +46,7 @@ impl Target {
                 message: None,
             });
         }
-        let region =
-            classify_pool_region(self, address).map(|(name, start, end)| PoolRegionDetail {
-                name: name.to_string(),
-                start,
-                end,
-            });
+        let region = pool_region_detail(self, address);
         let (blocks, index, page) = locate_pool_block_in_page(self, &layout, address);
         let details = blocks
             .iter()
@@ -120,12 +115,7 @@ impl Target {
         }
         let mut bytes = vec![0u8; POOL_PAGE_SIZE as usize];
         self.kernel_address_space().read_bytes(page, &mut bytes)?;
-        let region =
-            classify_pool_region(self, address).map(|(name, start, end)| PoolRegionDetail {
-                name: name.to_string(),
-                start,
-                end,
-            });
+        let region = pool_region_detail(self, address);
         let paged = region.as_ref().and_then(|region| {
             if region.name == PAGED_POOL.name {
                 Some(true)
@@ -538,6 +528,14 @@ fn pool_block_detail(block: &PoolHeader, marked: bool, target: VirtAddr) -> Pool
         state,
         target_offset: marked.then(|| target.0.saturating_sub(block.body.0)),
     }
+}
+
+fn pool_region_detail(target: &Target, address: VirtAddr) -> Option<PoolRegionDetail> {
+    classify_pool_region(target, address).map(|(name, start, end)| PoolRegionDetail {
+        name: name.to_string(),
+        start,
+        end,
+    })
 }
 
 fn big_pool_detail(target: VirtAddr, entry: &BigPoolEntry) -> BigPoolDetail {

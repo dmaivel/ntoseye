@@ -226,7 +226,6 @@ pub struct PoolPageDetail {
     pub message: Option<String>,
 }
 
-/// Virtual pool range metadata attached to a pool-page result.
 /// `!poolval`: the blocks of one pool page and the first inconsistency
 /// among their headers, `None` when the page is consistent.
 #[derive(Debug, Clone)]
@@ -247,6 +246,7 @@ pub struct PoolProblem {
     pub message: String,
 }
 
+/// Virtual pool range metadata attached to a pool-page result.
 #[derive(Debug, Clone)]
 pub struct PoolRegionDetail {
     pub name: String,
