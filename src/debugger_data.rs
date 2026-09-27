@@ -7,7 +7,7 @@ use std::mem::{offset_of, size_of};
 use crate::backend::MemoryOps;
 use crate::bytes::{get_u64, read_u32};
 use crate::error::{Error, Result};
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 
 const KDBG_OWNER_TAG: u32 = 0x4742_444b;
 const KDBG_HEADER_SIZE: usize = size_of::<DbgKdDebugDataHeader64>();
@@ -231,17 +231,58 @@ fn read_pointer<M: MemoryOps<VirtAddr>>(memory: &M, address: VirtAddr) -> Option
     Some(VirtAddr(u64::from_le_bytes(bytes)))
 }
 
-/// Evaluate a deliberately small, straight-line subset of an x64 memory-manager
-/// getter. Unknown instructions or control flow are rejected rather than
-/// guessing a counter location.
+/// Most bytes of a getter evaluated, and instructions run.
+const MAX_GETTER_BYTES: usize = 128;
+const MAX_GETTER_INSTRUCTIONS: usize = 24;
+
+/// Evaluate a deliberately small, straight-line subset of a memory-manager
+/// getter (`MmGetAvailablePages`, ...) compiled for `arch`, which returns a
+/// counter of the partition its first argument selects. The argument is 0,
+/// the system partition, and the pointer chain must pass through
+/// `expected_system_partition`. Unknown instructions or control flow are
+/// rejected rather than guessing a counter location.
 pub fn read_counter_from_getter<M: MemoryOps<VirtAddr>>(
+    memory: &M,
+    arch: Arch,
+    address: VirtAddr,
+    expected_system_partition: VirtAddr,
+) -> Result<MetadataValue<u64>> {
+    match arch {
+        Arch::Amd64 => read_counter_from_x64_getter(memory, address, expected_system_partition),
+        Arch::Arm64 => read_counter_from_a64_getter(memory, address, expected_system_partition),
+    }
+}
+
+/// The counter a getter returned, once it followed the validated chain: at
+/// least the partition table, the partition, and the counter loaded, the
+/// partition being the system one.
+fn getter_result(
+    address: VirtAddr,
+    value: Option<u64>,
+    memory_loads: usize,
+    saw_system_partition: bool,
+) -> Result<MetadataValue<u64>> {
+    let value = value.ok_or_else(|| {
+        Error::DebugInfo(format!(
+            "memory getter {address:#x} returned without producing its result register"
+        ))
+    })?;
+    if memory_loads < 3 || !saw_system_partition {
+        return Err(Error::DebugInfo(format!(
+            "memory getter {address:#x} did not follow the validated system-partition pointer chain"
+        )));
+    }
+    Ok(MetadataValue {
+        value,
+        source: MetadataSource::KernelCode,
+    })
+}
+
+fn read_counter_from_x64_getter<M: MemoryOps<VirtAddr>>(
     memory: &M,
     address: VirtAddr,
     expected_system_partition: VirtAddr,
 ) -> Result<MetadataValue<u64>> {
-    const MAX_GETTER_BYTES: usize = 128;
-    const MAX_INSTRUCTIONS: usize = 24;
-
     let mut code = [0u8; MAX_GETTER_BYTES];
     memory.read_bytes(address, &mut code)?;
     let mut decoder = Decoder::with_ip(64, &code, address.0, DecoderOptions::NONE);
@@ -252,7 +293,7 @@ pub fn read_counter_from_getter<M: MemoryOps<VirtAddr>>(
     let mut memory_loads = 0usize;
     let mut saw_system_partition = false;
 
-    for _ in 0..MAX_INSTRUCTIONS {
+    for _ in 0..MAX_GETTER_INSTRUCTIONS {
         let instruction = decoder.decode();
         if instruction.is_invalid() {
             break;
@@ -300,20 +341,7 @@ pub fn read_counter_from_getter<M: MemoryOps<VirtAddr>>(
             }
             Mnemonic::Nop => {}
             Mnemonic::Ret => {
-                let value = registers[0].ok_or_else(|| {
-                    Error::DebugInfo(format!(
-                        "memory getter {address:#x} returned without producing RAX"
-                    ))
-                })?;
-                if memory_loads < 3 || !saw_system_partition {
-                    return Err(Error::DebugInfo(format!(
-                        "memory getter {address:#x} did not follow the validated system-partition pointer chain"
-                    )));
-                }
-                return Ok(MetadataValue {
-                    value,
-                    source: MetadataSource::KernelCode,
-                });
+                return getter_result(address, registers[0], memory_loads, saw_system_partition);
             }
             _ => {
                 return Err(unsupported_getter_instruction(
@@ -327,6 +355,172 @@ pub fn read_counter_from_getter<M: MemoryOps<VirtAddr>>(
     Err(Error::DebugInfo(format!(
         "memory getter {address:#x} has no return within the bounded straight-line prefix"
     )))
+}
+
+/// [`read_counter_from_x64_getter`] for an ARM64 kernel's getters: `adrp`
+/// and `add` to `MiState`, loads through the partition table (`ldr`,
+/// `ldar`, with an immediate, register, or shifted-register offset), the
+/// partition index taken with `ubfx`, and `mov` of an offset.
+fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
+    memory: &M,
+    address: VirtAddr,
+    expected_system_partition: VirtAddr,
+) -> Result<MetadataValue<u64>> {
+    use bad64::{Imm, Op, Operand, Shift};
+
+    let mut code = [0u8; MAX_GETTER_BYTES];
+    memory.read_bytes(address, &mut code)?;
+    // x0..x30, and slot 31 the zero register. x0 is the partition index.
+    let mut registers = [None; 32];
+    registers[0] = Some(0);
+    registers[31] = Some(0);
+    let mut memory_loads = 0usize;
+    let mut saw_system_partition = false;
+    let immediate = |imm: &Imm| match *imm {
+        Imm::Signed(value) => value as u64,
+        Imm::Unsigned(value) => value,
+    };
+
+    for (index, word) in code
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .take(MAX_GETTER_INSTRUCTIONS)
+        .enumerate()
+    {
+        let pc = address.0 + 4 * index as u64;
+        let Ok(instruction) = bad64::decode(u32::from_le_bytes(*word), pc) else {
+            break;
+        };
+        let unsupported = || unsupported_getter_instruction(address, &instruction.to_string());
+        let read = |registers: &[Option<u64>; 32], operand: &Operand| -> Option<u64> {
+            match operand {
+                Operand::Reg { reg, arrspec: None } => {
+                    let (slot, width) = a64_register(*reg)?;
+                    Some(registers[slot]? & width_mask(width))
+                }
+                Operand::Imm32 { imm, shift } | Operand::Imm64 { imm, shift } => match shift {
+                    None => Some(immediate(imm)),
+                    Some(Shift::LSL(amount)) => immediate(imm).checked_shl(*amount),
+                    Some(_) => None,
+                },
+                Operand::Label(imm) => Some(immediate(imm)),
+                _ => None,
+            }
+        };
+        let operands = instruction.operands();
+        let destination = match operands.first() {
+            Some(Operand::Reg { reg, arrspec: None }) => a64_register(*reg),
+            _ => None,
+        };
+        let value = match instruction.op() {
+            Op::RET => {
+                return getter_result(address, registers[0], memory_loads, saw_system_partition);
+            }
+            Op::NOP => continue,
+            Op::ADRP | Op::MOV => operands.get(1).and_then(|source| read(&registers, source)),
+            Op::ADD => match operands {
+                [_, left, right] => read(&registers, left)
+                    .zip(read(&registers, right))
+                    .map(|(left, right)| left.wrapping_add(right)),
+                _ => None,
+            },
+            Op::UBFX => match operands {
+                [_, source, lsb, width] => read(&registers, source)
+                    .zip(read(&registers, lsb))
+                    .zip(read(&registers, width))
+                    .and_then(|((source, lsb), width)| {
+                        Some(source.checked_shr(u32::try_from(lsb).ok()?)? & width_mask_bits(width))
+                    }),
+                _ => None,
+            },
+            Op::LDR | Op::LDAR => {
+                let effective = match operands.get(1) {
+                    Some(Operand::MemReg(base)) => {
+                        a64_register(*base).and_then(|(slot, _)| registers[slot])
+                    }
+                    Some(Operand::MemOffset {
+                        reg,
+                        offset,
+                        mul_vl: false,
+                        arrspec: None,
+                    }) => a64_register(*reg)
+                        .and_then(|(slot, _)| registers[slot])
+                        .map(|base| base.wrapping_add(immediate(offset))),
+                    Some(Operand::MemExt {
+                        regs: [base, index],
+                        shift: None | Some(Shift::LSL(_)),
+                        arrspec: None,
+                    }) => {
+                        let shift = match operands.get(1) {
+                            Some(Operand::MemExt {
+                                shift: Some(Shift::LSL(amount)),
+                                ..
+                            }) => *amount,
+                            _ => 0,
+                        };
+                        let base = a64_register(*base).and_then(|(slot, _)| registers[slot]);
+                        let index = a64_register(*index).and_then(|(slot, _)| registers[slot]);
+                        base.zip(index).and_then(|(base, index)| {
+                            Some(base.wrapping_add(index.checked_shl(shift)?))
+                        })
+                    }
+                    _ => None,
+                };
+                match (effective, destination) {
+                    (Some(effective), Some((_, width))) => {
+                        memory_loads += 1;
+                        let value = read_unsigned(memory, VirtAddr(effective), width)?;
+                        saw_system_partition |= value == expected_system_partition.0;
+                        Some(value)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (Some(value), Some((slot, width))) = (value, destination) else {
+            return Err(unsupported());
+        };
+        // A write to a W register zero-extends; the zero register discards.
+        if slot != 31 {
+            registers[slot] = Some(value & width_mask(width));
+        }
+    }
+
+    Err(Error::DebugInfo(format!(
+        "memory getter {address:#x} has no return within the bounded straight-line prefix"
+    )))
+}
+
+/// An A64 general-purpose register's number (31 for the zero register) and
+/// width in bytes; `None` for any other register (sp, SIMD).
+fn a64_register(register: bad64::Reg) -> Option<(usize, usize)> {
+    use bad64::Reg;
+    let number = register as u32;
+    if (Reg::X0 as u32..=Reg::X30 as u32).contains(&number) {
+        return Some(((number - Reg::X0 as u32) as usize, 8));
+    }
+    if (Reg::W0 as u32..=Reg::W30 as u32).contains(&number) {
+        return Some(((number - Reg::W0 as u32) as usize, 4));
+    }
+    match register {
+        Reg::XZR => Some((31, 8)),
+        Reg::WZR => Some((31, 4)),
+        _ => None,
+    }
+}
+
+fn width_mask(width: usize) -> u64 {
+    width_mask_bits(width as u64 * 8)
+}
+
+fn width_mask_bits(bits: u64) -> u64 {
+    if bits >= 64 {
+        u64::MAX
+    } else {
+        (1 << bits) - 1
+    }
 }
 
 fn effective_address(
@@ -565,7 +759,8 @@ mod tests {
         ]);
 
         let counter =
-            read_counter_from_getter(&memory, VirtAddr(0x1000), VirtAddr(0x5000)).unwrap();
+            read_counter_from_getter(&memory, Arch::Amd64, VirtAddr(0x1000), VirtAddr(0x5000))
+                .unwrap();
         assert_eq!(counter.value, 0x1234);
         assert_eq!(counter.source, MetadataSource::KernelCode);
     }
@@ -577,10 +772,52 @@ mod tests {
         let memory = TestMemory::with_regions(&[(0x1000, code)]);
 
         assert!(
-            read_counter_from_getter(&memory, VirtAddr(0x1000), VirtAddr(0x5000))
+            read_counter_from_getter(&memory, Arch::Amd64, VirtAddr(0x1000), VirtAddr(0x5000))
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported instruction")
+        );
+    }
+
+    /// ARM64 Windows 11 22631's `MmGetTotalCommittedPages`: `adrp`/`add` to
+    /// `MiState`, the partition table at +0x1fc8 indexed by the argument's
+    /// low 16 bits, then an acquire load at +0x4668 of the partition.
+    #[test]
+    fn evaluates_an_arm64_partition_getter() {
+        const GETTER: u64 = 0xffff_f803_3efb_8bf0;
+        const MI_STATE: u64 = 0xffff_f803_3f83_c980;
+        const TABLE: u64 = 0xffff_b182_0000_1000;
+        const PARTITION: u64 = 0xffff_f803_3f84_2180;
+        let words: [u32; 9] = [
+            0x9000_4428, // adrp x8, MiState page
+            0x9126_0108, // add x8, x8, #0x980
+            0xf94f_e509, // ldr x9, [x8, #0x1fc8]
+            0xd340_3c0a, // ubfx x10, x0, #0, #16
+            0xd288_cd08, // mov x8, #0x4668
+            0xf86a_792a, // ldr x10, [x9, x10, lsl #3]
+            0x8b08_0148, // add x8, x10, x8
+            0xc8df_fd00, // ldar x0, [x8]
+            0xd65f_03c0, // ret
+        ];
+        let mut code = vec![0u8; 128];
+        for (index, word) in words.iter().enumerate() {
+            code[4 * index..4 * index + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let memory = TestMemory::with_regions(&[
+            (GETTER, code),
+            (MI_STATE + 0x1fc8, TABLE.to_le_bytes().to_vec()),
+            (TABLE, PARTITION.to_le_bytes().to_vec()),
+            (PARTITION + 0x4668, 369_837u64.to_le_bytes().to_vec()),
+        ]);
+
+        let counter =
+            read_counter_from_getter(&memory, Arch::Arm64, VirtAddr(GETTER), VirtAddr(PARTITION))
+                .unwrap();
+        assert_eq!(counter.value, 369_837);
+        // A chain that never reaches the system partition is refused.
+        let elsewhere = VirtAddr(0xffff_f803_3f84_0000);
+        assert!(
+            read_counter_from_getter(&memory, Arch::Arm64, VirtAddr(GETTER), elsewhere).is_err()
         );
     }
 }

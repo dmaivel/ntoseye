@@ -392,7 +392,12 @@ impl Target {
                 let guest = self.guest()?;
                 let getter = guest.ntoskrnl.symbol(getter_name)?.address();
                 let system_partition = guest.ntoskrnl.symbol("MiSystemPartition")?.address();
-                read_counter_from_getter(&self.kernel_address_space(), getter, system_partition)
+                read_counter_from_getter(
+                    &self.kernel_address_space(),
+                    self.arch(),
+                    getter,
+                    system_partition,
+                )
             })() {
                 Ok(value) => return DiagnosticMetric::available(value),
                 Err(error) => errors.push(error.to_string()),
