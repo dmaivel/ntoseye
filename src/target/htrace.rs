@@ -91,8 +91,7 @@ impl Target {
         let info = types.struct_at("_HANDLE_TRACE_DEBUG_INFO", debug_info)?;
         detail.table_size = info.read_uint("TableSize")?;
         detail.recorded = info.read_uint("CurrentStackIndex")?;
-        let size = detail.table_size.min(MAX_TRACE_SLOTS);
-        if size == 0 {
+        if detail.table_size == 0 {
             return Ok(detail);
         }
         let db = debug_info + info.layout().field_offset("TraceDb")?;
@@ -100,11 +99,12 @@ impl Target {
         let entry_size = entry_layout.size as u64;
         let max_traces = max_traces.unwrap_or(usize::MAX);
         let symbols = &self.symbols;
-        for back in 0..detail.recorded.min(size) {
+        let slots = detail.recorded.min(detail.table_size).min(MAX_TRACE_SLOTS);
+        for back in 0..slots {
             if detail.traces.len() >= max_traces || self.interrupted() {
                 break;
             }
-            let slot = (detail.recorded - back) % size;
+            let slot = (detail.recorded - back) % detail.table_size;
             detail.parsed += 1;
             let entry = types
                 .struct_with_layout(entry_layout.clone(), db + slot * entry_size)
