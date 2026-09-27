@@ -821,10 +821,10 @@ mod tests {
 
     #[test]
     fn a_refused_command_ends_the_loop_and_the_line() {
-        // A breakpoint action may not resume; the refused `g` must stop the
+        // A breakpoint action may not step; the refused `p` must stop the
         // loop and the rest of the line, as it would typed alone.
         let (flow, text) = run(
-            ".foreach /s (x \"1 2\") {.echo x ; g}; .echo after",
+            ".foreach /s (x \"1 2\") {.echo x ; p}; .echo after",
             DispatchContext::BreakpointAction,
         );
         assert_eq!(flow, Flow::Denied);

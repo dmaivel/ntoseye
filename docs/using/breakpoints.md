@@ -2,7 +2,7 @@
 
 The shared breakpoint grammar follows WinDbg. Code breakpoints use `/1` (one-shot), `/p <pid>` (process scope), `/t <ethread>` (thread scope), `/c <processor>` (processor scope), and `/w "<expr>"` (conditional shorthand), followed by a target, optional pass count, `if <expr>`, and `do "<commands>"`; {command}`ba` takes the same options and adds `<access><size>`. `/c` has no WinDbg equivalent.
 
-Conditions use the normal expression grammar. Comparisons, bitwise operations, and short-circuiting `!`, `&&`, and `||` can be combined with parentheses. Write ranges explicitly (`0 < @rax && @rax < 0n10`) rather than as chained comparisons; chained equality (`a == b == c`) is refused for the same reason and names `&&` as the fix. Multi-command actions must be quoted, like WinDbg, and a trailing `gc` continues after the action.
+Conditions use the normal expression grammar. Comparisons, bitwise operations, and short-circuiting `!`, `&&`, and `||` can be combined with parentheses. Write ranges explicitly (`0 < @rax && @rax < 0n10`) rather than as chained comparisons; chained equality (`a == b == c`) is refused for the same reason and names `&&` as the fix. Multi-command actions must be quoted, like WinDbg. `gc`, or a plain `g`, continues from the breakpoint wherever it runs in the action, including inside a `j` or `.if` branch (`bp nt!NtClose "j (@rcx == 0) 'kb; g' ; 'g'"`); commands after it do not run. Other run control (`g <address>`, `p`, `t`, `gu`, `gh`, `gn`) is refused inside an action.
 
 ```text
 bp nt!KeBugCheckEx @rcx == 0x50 && (@rdx & 0xff) != 0

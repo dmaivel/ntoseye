@@ -333,7 +333,7 @@ impl StopWaitBudget {
 pub enum DispatchContext {
     /// The user's prompt: anything goes.
     Interactive,
-    /// A breakpoint's action string; only a trailing `gc` may resume.
+    /// A breakpoint's action string; only `gc` or a plain `g` may resume.
     BreakpointAction,
     /// An exception policy's command; the policy's `-f` owns the disposition.
     ExceptionCommand,

@@ -77,7 +77,7 @@ repl_command! {
     names: ["gc"],
     usage: "gc",
     summary: "Resume from the breakpoint whose command string is running.",
-    details: "Only valid in a breakpoint's command string. It ends the command string and resumes the target wherever it runs, at the end (`bp nt!NtClose \"r rcx; gc\"`) or in a branch (`bp nt!NtClose \"j (@rcx == 0) '' ; 'gc'\"`); commands after it do not run.",
+    details: "Only valid in a breakpoint's command string. It ends the command string and resumes the target wherever it runs, at the end (`bp nt!NtClose \"r rcx; gc\"`) or in a branch (`bp nt!NtClose \"j (@rcx == 0) '' ; 'gc'\"`); commands after it do not run. A plain `g` there does the same, as WinDbg scripts write it; `g <address>` and other run control stay refused.",
 }
 
 repl_command! {

@@ -943,6 +943,15 @@ mod tests {
         let (second, text) = capture(|| state.dispatch_breakpoint_action(action));
         assert!(second.unwrap());
         assert_eq!(text, "second\n");
+        // WinDbg scripts write a plain `g` for the same resume; one with an
+        // address is still run control the action may not take.
+        let (resumed, text) =
+            capture(|| state.dispatch_breakpoint_action("j (1) '.echo x; g; .echo not' ; 'g'"));
+        assert!(resumed.unwrap());
+        assert_eq!(text, "x\n");
+        let (resumed, text) = capture(|| state.dispatch_breakpoint_action("g 1000"));
+        assert!(!resumed.unwrap());
+        assert!(text.contains("error:"), "{text}");
         // Outside an action, gc has nothing to resume.
         let (flow, _) = capture(|| state.dispatch_line("gc"));
         assert_eq!(flow.unwrap(), Flow::Denied);

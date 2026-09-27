@@ -70,8 +70,9 @@ impl ReplState<'_> {
     }
 
     /// Execute frontend-owned breakpoint commands while keeping the core free
-    /// of REPL state. A WinDbg-style `gc` requests automatic resume; it ends
-    /// the action wherever it runs, so `j (cond) ''; 'gc'` resumes too.
+    /// of REPL state. A WinDbg-style `gc` or plain `g` requests automatic
+    /// resume; it ends the action wherever it runs, so `j (cond) ''; 'g'`
+    /// resumes too.
     /// Recursive actions are bounded even when an alias resumes into another
     /// command breakpoint.
     pub fn dispatch_breakpoint_action(&mut self, line: &str) -> Result<bool> {
@@ -172,7 +173,7 @@ impl ReplState<'_> {
             DispatchContext::Interactive => None,
             DispatchContext::BreakpointAction if spec.run != RunEffect::None => Some(format!(
                 "run-control command '{name}' must not appear inside a breakpoint action; \
-                 use trailing 'gc' to continue"
+                 use 'g' or 'gc' (no address) to continue"
             )),
             DispatchContext::ExceptionCommand
                 if spec.run != RunEffect::None || spec.run_state == Some(RunState::Running) =>
@@ -289,6 +290,16 @@ impl ReplState<'_> {
         };
 
         if let Some(spec) = command_registry().get(parsed.name) {
+            // WinDbg scripts resume from a breakpoint action with a plain
+            // `g` (`"j (cond) 'kb; g' ; 'g'"`): there it is `gc`, which hands
+            // the resume to the stop loop that ran the action. `g <address>`
+            // stays refused below.
+            if self.context == DispatchContext::BreakpointAction
+                && spec.names[0] == "g"
+                && parsed.raw_tail.trim().is_empty()
+            {
+                return Ok(Flow::Jump(Jump::Resume));
+            }
             // `r $t0 = ...` touches no target state, so it runs whatever the
             // target is doing, unlike the register display `r` otherwise is.
             if spec.names[0] == "r"
