@@ -77,6 +77,9 @@ pub struct MockBackend {
     landings: VecDeque<u64>,
     /// Where it stands after every vCPU is resumed; `None` leaves it.
     released_to: Option<u64>,
+    /// A run of every vCPU ends with this backend thread reporting its own
+    /// stop (a breakpoint it hit), rather than by a break-in.
+    released_stop_by: Option<&'static str>,
     /// Accept selecting (and report) one vCPU, as a stub does.
     one_vcpu: bool,
 }
@@ -108,6 +111,7 @@ impl Default for MockBackend {
             lands_at: None,
             landings: VecDeque::new(),
             released_to: None,
+            released_stop_by: None,
             one_vcpu: false,
         }
     }
@@ -288,6 +292,18 @@ impl DebugBackend for MockBackend {
         Ok(event)
     }
     fn try_wait_for_stop(&mut self, _timeout: Duration) -> Result<Option<StopEvent>> {
+        if let Some(thread) = self.released_stop_by
+            && self.running
+            && self.continues.load(Ordering::Relaxed) > 0
+        {
+            let mut event = self
+                .interrupt_events
+                .pop_front()
+                .ok_or(Error::NotSupported)?;
+            event.thread_id = Some(thread.into());
+            self.running = false;
+            return Ok(Some(event));
+        }
         if self.halts_only_on_interrupt {
             return Ok(None);
         }
@@ -1164,6 +1180,33 @@ fn a_step_diverted_into_an_interrupt_handler_says_so() {
         let notices = session.take_notices();
         assert_eq!(!notices.is_empty(), diverted, "{notices:?}");
     }
+}
+
+/// A handler that hits a breakpoint while the others run stops the step's
+/// vCPU on it: the step ends there at once, rather than letting them run
+/// again until the release budget is spent.
+#[test]
+fn a_step_whose_handler_stops_on_a_breakpoint_ends_there() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        halts_only_on_interrupt: true,
+        lands_at: Some(0x1030),
+        released_to: Some(0x1030),
+        released_stop_by: Some("p01.01"),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let continues = Arc::clone(&backend.continues);
+    let mut session = stepping_session(&code, backend);
+    session.current_thread = "p01.01".into();
+
+    assert_eq!(session.step().unwrap(), 0x1030);
+    assert!(!session.take_notices().is_empty());
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
 
 /// A handler that finishes once the others run returns to the instruction

@@ -1076,7 +1076,12 @@ pub fn site_successors(
         Mnemonic::Into | Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2
     );
     if vtl1 && through_nt_tables {
-        return Err(unsupported());
+        return Err(Error::DebugInfo(format!(
+            "cannot step the instruction at {rip:#x}: in VTL1, `{}` continues through the \
+             secure kernel's own entry or IDT, or returns to VTL0, which is not known from \
+             here; resume with g",
+            format!("{:?}", instruction.mnemonic()).to_ascii_lowercase()
+        )));
     }
     let mut successors = match instruction.code() {
         Code::Syscall => vec![system_call_entry(debugger, bitness)?],
