@@ -299,15 +299,6 @@ impl PageTableEntry {
         self.0 & 0x80 != 0
     }
 
-    /// A Windows transition PTE: the page is still in physical memory, on the
-    /// standby or modified list, but the hardware valid bit is clear so the
-    /// next access faults and the kernel can re-attach it.
-    ///
-    /// The PFN field is a real page frame, which is what separates this from
-    /// the other invalid `MMPTE_SOFTWARE` forms: a prototype PTE (bit 10)
-    /// stores a pointer to a prototype entry, and a page-file PTE stores an
-    /// offset. Reading either as a frame would return unrelated memory, so
-    /// both must be excluded.
     /// This non-present entry with Windows' L1TF swizzle undone: an entry
     /// whose `SwizzleBit` (bit 4) is clear has `mask` set to point it at no
     /// real memory, and its frame is the one with `mask` cleared.
@@ -319,8 +310,34 @@ impl PageTableEntry {
         }
     }
 
+    /// A Windows transition PTE: the page is still in physical memory, on the
+    /// standby or modified list, but the hardware valid bit is clear so the
+    /// next access faults and the kernel can re-attach it.
+    ///
+    /// The PFN field is a real page frame, which is what separates this from
+    /// the other invalid `MMPTE_SOFTWARE` forms: a prototype PTE (bit 10)
+    /// stores a pointer to a prototype entry, and a page-file PTE stores an
+    /// offset. Reading either as a frame would return unrelated memory, so
+    /// both must be excluded.
     pub const fn is_transition(self) -> bool {
         !self.is_present() && self.0 & (1 << 11) != 0 && self.0 & (1 << 10) == 0
+    }
+
+    /// A Windows prototype PTE (`MMPTE_PROTOTYPE`): the page belongs to a
+    /// section, and the section's own PTE for it, shared by every process
+    /// mapping it, says where the page is.
+    pub const fn is_prototype(self) -> bool {
+        !self.is_present() && self.0 & (1 << 10) != 0
+    }
+
+    /// The kernel address of the section PTE a prototype PTE points at
+    /// (`ProtoAddress`, bits 63:16 sign-extended), or `None` for
+    /// `MI_PTE_LOOKUP_NEEDED`, which leaves it to the VAD mapping the page.
+    pub const fn prototype_address(self) -> Option<VirtAddr> {
+        if self.0 >> 32 == 0xFFFF_FFFF {
+            return None;
+        }
+        Some(VirtAddr(((self.0 as i64) >> 16) as u64))
     }
 
     pub const fn page_frame(self) -> u64 {

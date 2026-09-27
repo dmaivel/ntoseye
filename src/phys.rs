@@ -1,13 +1,13 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::backend::MemoryOps;
 use crate::dmp::{DmpInfo, DmpMem};
 use crate::error::Result;
 use crate::host::VmHandle;
 use crate::kd::KdMemory;
-use crate::memory::TranslationCache;
+use crate::memory::{SectionViews, TranslationCache};
 use crate::types::{Dtb, PhysAddr, VirtAddr};
 
 /// Guest physical memory backed by a live VM process, KD transport, or crash
@@ -18,6 +18,9 @@ pub struct PhysMem {
     /// The guest kernel's `InvalidPteMask`, set when a kernel is found (see
     /// [`Self::set_invalid_pte_mask`]).
     invalid_pte_mask: AtomicU64,
+    /// The guest kernel's mapped-view lookup, set when a kernel is found (see
+    /// [`Self::set_section_views`]).
+    section_views: Mutex<Option<Arc<SectionViews>>>,
 }
 
 /// Where [`PhysMem`] reads from. `Dmp` is boxed because it is much larger than
@@ -80,6 +83,7 @@ impl PhysMem {
         Self {
             source,
             invalid_pte_mask: AtomicU64::new(0),
+            section_views: Mutex::new(None),
         }
     }
 
@@ -142,6 +146,15 @@ impl PhysMem {
     /// [`MemoryOps::invalid_pte_mask`].
     pub fn set_invalid_pte_mask(&self, mask: u64) {
         self.invalid_pte_mask.store(mask, Ordering::Release);
+    }
+
+    /// Record the guest kernel's mapped-view lookup for this boot, or `None`
+    /// when its PDB lacks the layout; see [`MemoryOps::section_views`].
+    pub fn set_section_views(&self, views: Option<SectionViews>) {
+        *self
+            .section_views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = views.map(Arc::new);
     }
 
     pub fn dmp_info(&self) -> Option<&DmpInfo> {
@@ -284,6 +297,13 @@ impl MemoryOps<PhysAddr> for PhysMem {
 
     fn invalid_pte_mask(&self) -> u64 {
         self.invalid_pte_mask.load(Ordering::Acquire)
+    }
+
+    fn section_views(&self) -> Option<Arc<SectionViews>> {
+        self.section_views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 

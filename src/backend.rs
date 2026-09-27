@@ -3,7 +3,7 @@ use std::sync::Arc;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::error::Result;
-use crate::memory::TranslationCache;
+use crate::memory::{SectionViews, TranslationCache};
 use crate::types::{Dtb, VirtAddr};
 
 pub trait MemoryOps<A> {
@@ -58,6 +58,12 @@ pub trait MemoryOps<A> {
         0
     }
 
+    /// The guest's mapped views, for pages a process's page tables do not
+    /// map (see [`SectionViews`]); `None` until a kernel is found.
+    fn section_views(&self) -> Option<Arc<SectionViews>> {
+        None
+    }
+
     fn read<T: Copy + FromZeros + FromBytes + IntoBytes>(&self, addr: A) -> Result<T> {
         let mut obj = T::new_zeroed();
 
@@ -107,5 +113,9 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn invalid_pte_mask(&self) -> u64 {
         (**self).invalid_pte_mask()
+    }
+
+    fn section_views(&self) -> Option<Arc<SectionViews>> {
+        (**self).section_views()
     }
 }

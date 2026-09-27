@@ -132,6 +132,10 @@ pub struct VtopDetail {
     /// The leaf was a transition PTE: `physical` is a real frame the guest
     /// still holds, but nothing maps it here and it cannot be written.
     pub transition: bool,
+    /// Nothing maps the page here; `physical` is the frame its section PTE
+    /// holds, a page of a shared image or file view the process has not
+    /// touched. It cannot be written either.
+    pub section: bool,
 }
 
 /// One reverse page-table mapping found by `!ptov`.

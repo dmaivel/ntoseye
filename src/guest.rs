@@ -2,7 +2,8 @@ use crate::backend::MemoryOps;
 use crate::{
     dmp::DmpInfo,
     error::{Error, Result},
-    memory::DTB_IDENTITY,
+    layout::ParsedType,
+    memory::{DTB_IDENTITY, SectionLayout, SectionViews},
     phys::PhysMem,
     symbols::SymbolStore,
     target::ListTermination,
@@ -193,6 +194,9 @@ impl Guest {
         ntoskrnl
             .phys
             .set_invalid_pte_mask(invalid_pte_mask(&ntoskrnl).unwrap_or(0));
+        ntoskrnl
+            .phys
+            .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
         Self {
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
@@ -402,4 +406,39 @@ fn invalid_pte_mask(kernel: &Image) -> Option<u64> {
         .field_offset("InvalidPteMask")
         .ok()?;
     kernel.memory().read::<u64>(state + hardware + mask).ok()
+}
+
+/// Where the kernel keeps what [`SectionViews`] reads: the process list and
+/// each process's VAD tree. `None` when the PDB lacks any of it.
+fn section_layout(kernel: &Image) -> Option<SectionLayout> {
+    let types = kernel.types();
+    let eprocess = types.layout("_EPROCESS").ok()?;
+    let kprocess = types.layout("_KPROCESS").ok()?;
+    let tree = types.layout("_RTL_AVL_TREE").ok()?;
+    let node = types.layout("_RTL_BALANCED_NODE").ok()?;
+    let short = types.layout("_MMVAD_SHORT").ok()?;
+    let vad = types.layout("_MMVAD").ok()?;
+    let flags = types.layout("_MMVAD_FLAGS").ok()?;
+    let ParsedType::Bitfield { pos, .. } = flags.fields.get("PrivateMemory")?.type_data else {
+        return None;
+    };
+    Some(SectionLayout {
+        process_list_head: kernel.symbol("PsActiveProcessHead").ok()?.address(),
+        active_process_links: eprocess.field_offset("ActiveProcessLinks").ok()?,
+        directory_table_base: eprocess.field_offset("Pcb").ok()?
+            + kprocess.field_offset("DirectoryTableBase").ok()?,
+        root_mask: kernel.arch().dtb_page_mask(),
+        vad_root: eprocess.field_offset("VadRoot").ok()? + tree.field_offset("Root").ok()?,
+        left: node.field_offset("Left").ok()?,
+        right: node.field_offset("Right").ok()?,
+        vad_node: short.field_offset("VadNode").ok()?,
+        starting_vpn: short.field_offset("StartingVpn").ok()?,
+        ending_vpn: short.field_offset("EndingVpn").ok()?,
+        starting_vpn_high: short.field_offset("StartingVpnHigh").ok(),
+        ending_vpn_high: short.field_offset("EndingVpnHigh").ok(),
+        vad_flags: short.field_offset("u").ok()?,
+        private_memory_bit: u32::from(pos),
+        first_prototype_pte: vad.field_offset("FirstPrototypePte").ok()?,
+        last_contiguous_pte: vad.field_offset("LastContiguousPte").ok()?,
+    })
 }

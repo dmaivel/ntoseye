@@ -22,6 +22,8 @@ The `kd` source needs no hypervisor or VM-process access, so AMD64 and ARM64 Win
 
 A page the guest has trimmed out of a working set is usually still in RAM on the standby or modified list, with its PTE left in the *transition* state. Both the host page walk and the target read those, so trimmed memory keeps reading normally. Writes to such a page are refused: the kernel is free to repurpose the frame or re-read it from disk, so the edit would be lost or land somewhere unrelated.
 
+A process has no PTE of its own for a page of a DLL or mapped file it has never touched, but another process mapping the same file often has that page in memory. The host page walk finds the page through the process's VAD and reads the frame recorded in the section's shared prototype PTE, so a DLL's code and unwind tables read in every process that maps it. {command}`!vtop` shows such a page as `mapping : section`. These pages are read-only as well.
+
 A page that has genuinely gone to disk reads as unavailable, and {command}`.pagein` asks the guest to fetch it:
 
 ```

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail, VtopLevel};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::memory::{DTB_IDENTITY, PAGE_SIZE, PFN_MASK};
+use crate::memory::{DTB_IDENTITY, PAGE_SIZE, PFN_MASK, Residency};
 use crate::target::Target;
 use crate::types::{Arch, Dtb, PageTableEntry, PageTableLevel, VirtAddr};
 
@@ -58,10 +58,8 @@ impl Target {
         if directory_base == 0
             && let Ok(walk) = self.pte_traverse(address)
         {
-            let physical = self
-                .address_space(dtb)
-                .virt_to_phys(address)?
-                .map(|translation| translation.address);
+            let translation = self.address_space(dtb).virt_to_phys(address)?;
+            let physical = translation.map(|translation| translation.address);
             let walk_transition = walk
                 .pte
                 .as_ref()
@@ -88,6 +86,7 @@ impl Target {
                 physical,
                 large,
                 transition: physical.is_some() && walk_transition,
+                section: translation.is_some_and(|value| value.residency == Residency::Section),
             });
         }
         if self.arch() != Arch::Amd64 {
@@ -98,10 +97,21 @@ impl Target {
                 levels: Vec::new(),
                 physical: translation.map(|value| value.address),
                 large: translation.is_some_and(|value| value.large),
-                transition: translation.is_some_and(|value| value.transition),
+                transition: translation
+                    .is_some_and(|value| value.residency == Residency::Transition),
+                section: translation.is_some_and(|value| value.residency == Residency::Section),
             });
         }
-        explicit_amd64_walk(self, dtb, address)
+        let mut detail = explicit_amd64_walk(self, dtb, address)?;
+        // The tables end short of a frame; the page's section may hold one.
+        if detail.physical.is_none()
+            && let Some(translation) = self.address_space(dtb).virt_to_phys(address)?
+            && translation.residency == Residency::Section
+        {
+            detail.physical = Some(translation.address);
+            detail.section = true;
+        }
+        Ok(detail)
     }
 
     /// Reverse-walk the current AMD64 directory base for mappings of a physical
@@ -260,6 +270,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             physical: Some(va.0),
             large: false,
             transition: false,
+            section: false,
         });
     }
     let root = dtb & PFN_MASK;
@@ -282,6 +293,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             physical: None,
             large: false,
             transition: false,
+            section: false,
         });
     }
     let pdpt_address = pml4e
@@ -302,6 +314,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             physical: None,
             large: false,
             transition: false,
+            section: false,
         });
     }
     if pdpte.is_large_page() {
@@ -313,6 +326,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             physical: frame.checked_add(va.huge_page_offset()),
             large: true,
             transition: false,
+            section: false,
         });
     }
     let pde_address = pdpte
@@ -333,6 +347,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             physical: None,
             large: false,
             transition: false,
+            section: false,
         });
     }
     if pde.is_large_page() {
@@ -343,6 +358,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
             levels,
             physical: frame.checked_add(va.large_page_offset()),
             transition: false,
+            section: false,
             large: true,
         });
     }
@@ -373,6 +389,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         },
         large: false,
         transition,
+        section: false,
     })
 }
 

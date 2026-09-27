@@ -337,6 +337,11 @@ fn print_vtop(detail: &VtopDetail) {
     if detail.transition {
         outln!("  mapping              : transition (resident, not mapped; read-only)");
     }
+    if detail.section {
+        outln!(
+            "  mapping              : section (the view's shared page, not mapped here; read-only)"
+        );
+    }
     if detail.large {
         outln!("  mapping              : large page");
     }

@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+mod sections;
+
+pub use sections::{SectionLayout, SectionViews};
+
 /// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
 pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
@@ -72,8 +76,9 @@ pub const PT_INDEX_MASK: u64 = 0x1FF;
 /// captured virtual memory regions.
 pub const DTB_IDENTITY: Dtb = u64::MAX;
 
-/// Page translations remembered across [`AddressSpace`] instances, which are
-/// created per read, for as long as the target's page tables cannot change.
+/// Page translations, and pages found unmapped, remembered across
+/// [`AddressSpace`] instances, which are created per read, for as long as
+/// the target's page tables cannot change.
 /// Owned by a backend that knows when that is: a KD target clears it on
 /// every resume and write.
 ///
@@ -84,20 +89,20 @@ pub const DTB_IDENTITY: Dtb = u64::MAX;
 /// (breakpoint install) cannot relink kernel lists.
 #[derive(Default)]
 pub struct TranslationCache {
-    pages: Mutex<HashMap<(Dtb, u64), Translation>>,
+    pages: Mutex<HashMap<(Dtb, u64), Option<Translation>>>,
     halt_epoch: AtomicU64,
 }
 
 impl TranslationCache {
-    fn pages(&self) -> MutexGuard<'_, HashMap<(Dtb, u64), Translation>> {
+    fn pages(&self) -> MutexGuard<'_, HashMap<(Dtb, u64), Option<Translation>>> {
         self.pages.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn get(&self, key: (Dtb, u64)) -> Option<Translation> {
+    fn get(&self, key: (Dtb, u64)) -> Option<Option<Translation>> {
         self.pages().get(&key).copied()
     }
 
-    fn insert(&self, key: (Dtb, u64), translation: Translation) {
+    fn insert(&self, key: (Dtb, u64), translation: Option<Translation>) {
         self.pages().insert(key, translation);
     }
 
@@ -139,9 +144,22 @@ pub struct Translation {
     /// Effective AArch64 UXN, including ancestor UXNTable restrictions.
     /// Always `false` on AMD64.
     pub uxn: bool,
-    /// The leaf entry was a transition PTE, so the frame is on the standby or
-    /// modified list rather than mapped. Readable; never written.
-    pub transition: bool,
+    pub residency: Residency,
+}
+
+/// Whether the page tables map a translated page, or where its frame was
+/// found instead. A frame they do not map is readable, never written: the
+/// kernel may repurpose it or read it back from disk, and the edit would
+/// vanish or land somewhere unrelated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Residency {
+    Mapped,
+    /// The leaf is a transition PTE: the frame is on the standby or modified
+    /// list.
+    Transition,
+    /// The page tables do not map it; the frame is the one the page's
+    /// section PTE holds (see [`SectionViews`]).
+    Section,
 }
 
 impl Translation {
@@ -159,7 +177,7 @@ impl Translation {
             user: pml4e.is_user() && pdpte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx(),
             uxn: false,
-            transition: false,
+            residency: Residency::Mapped,
         }
     }
 
@@ -176,7 +194,7 @@ impl Translation {
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx(),
             uxn: false,
-            transition: false,
+            residency: Residency::Mapped,
         }
     }
 
@@ -197,7 +215,7 @@ impl Translation {
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user() && pte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx() || pte.is_nx(),
             uxn: false,
-            transition: false,
+            residency: Residency::Mapped,
         }
     }
 
@@ -212,7 +230,21 @@ impl Translation {
             user: false,
             nx: false,
             uxn: false,
-            transition: true,
+            residency: Residency::Transition,
+        }
+    }
+
+    /// A page the page tables do not map, read from the frame its section
+    /// PTE holds. Like a transition page, only readability is claimed.
+    pub const fn new_section(frame: PhysAddr, va: VirtAddr) -> Self {
+        Self {
+            address: frame + va.page_offset(),
+            large: false,
+            writable: false,
+            user: false,
+            nx: false,
+            uxn: false,
+            residency: Residency::Section,
         }
     }
 
@@ -227,7 +259,7 @@ impl Translation {
             user: l0.arm64_table_allows_user() && l1.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
             uxn,
-            transition: false,
+            residency: Residency::Mapped,
         }
     }
 
@@ -251,7 +283,7 @@ impl Translation {
                 && l2.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
             uxn,
-            transition: false,
+            residency: Residency::Mapped,
         }
     }
 
@@ -284,7 +316,7 @@ impl Translation {
                 && l3.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
             uxn,
-            transition: false,
+            residency: Residency::Mapped,
         }
     }
 }
@@ -341,53 +373,42 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         }
     }
 
-    fn virt_to_phys_arm64(&self, va: VirtAddr) -> Result<Option<Translation>> {
-        if self.dtb == DTB_IDENTITY {
-            return Ok(Some(Translation {
-                address: va.0,
-                large: false,
-                writable: false,
-                user: false,
-                nx: false,
-                uxn: false,
-                transition: false,
-            }));
-        }
-
+    /// The AArch64 table walk.
+    fn walk_arm64(&self, va: VirtAddr) -> Result<Walked> {
         // AArch64: bit 55 selects TTBR1 (kernel) vs TTBR0 (user).
         let root = self.root_for(va);
 
         // Level 0 uses bits 47:39, like x64 PML4.
         let Some(l0) = self.read_pt_entry(root, va.pml4_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
         if !l0.arm64_is_valid() || l0.arm64_is_block() {
             // 512 GiB L0 blocks are not used by Windows; treat as unmapped.
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         }
 
         let Some(l1) = self.read_pt_entry(l0.arm64_page_frame(), va.pdpt_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
         if !l1.arm64_is_valid() {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         }
         if l1.arm64_is_block() {
-            return Ok(Some(Translation::arm64_huge(l0, l1, va)));
+            return Ok(Walked::Mapped(Translation::arm64_huge(l0, l1, va)));
         }
 
         let Some(l2) = self.read_pt_entry(l1.arm64_page_frame(), va.pd_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
         if !l2.arm64_is_valid() {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         }
         if l2.arm64_is_block() {
-            return Ok(Some(Translation::arm64_large(l0, l1, l2, va)));
+            return Ok(Walked::Mapped(Translation::arm64_large(l0, l1, l2, va)));
         }
 
         let Some(l3) = self.read_pt_entry(l2.arm64_page_frame(), va.pt_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
         // At L3 only 0b11 is a page descriptor; 0b01 is reserved.
         if l3.0 & 0b11 != 0b11 {
@@ -396,11 +417,11 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             // transition, and the frame in the bits AMD64's do.
             if l3.is_transition() {
                 let pte = l3.unswizzled(self.backend.invalid_pte_mask());
-                return Ok(Some(Translation::new_transition(pte, va)));
+                return Ok(Walked::Mapped(Translation::new_transition(pte, va)));
             }
-            return Ok(None);
+            return Ok(Walked::Unmapped(Some(l3)));
         }
-        Ok(Some(Translation::arm64_page(l0, l1, l2, l3, va)))
+        Ok(Walked::Mapped(Translation::arm64_page(l0, l1, l2, l3, va)))
     }
 
     pub fn virt_to_phys(&self, va: VirtAddr) -> Result<Option<Translation>> {
@@ -409,19 +430,14 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         };
         let key = (self.root_for(va), va.0 >> PAGE_SHIFT);
         if let Some(translation) = cache.get(key) {
-            return Ok(Some(translation.at_offset(va)));
+            return Ok(translation.map(|translation| translation.at_offset(va)));
         }
         let translation = self.walk(va)?;
-        if let Some(translation) = translation {
-            cache.insert(key, translation);
-        }
+        cache.insert(key, translation);
         Ok(translation)
     }
 
     fn walk(&self, va: VirtAddr) -> Result<Option<Translation>> {
-        if self.arm64 {
-            return self.virt_to_phys_arm64(va);
-        }
         if self.dtb == DTB_IDENTITY {
             return Ok(Some(Translation {
                 address: va.0,
@@ -430,44 +446,58 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 user: false,
                 nx: false,
                 uxn: false,
-                transition: false,
+                residency: Residency::Mapped,
             }));
         }
+        let walked = if self.arm64 {
+            self.walk_arm64(va)?
+        } else {
+            self.walk_amd64(va)?
+        };
+        match walked {
+            Walked::Mapped(translation) => Ok(Some(translation)),
+            Walked::Unmapped(leaf) => Ok(self.section_page(va, leaf)),
+        }
+    }
 
+    /// The AMD64 table walk.
+    fn walk_amd64(&self, va: VirtAddr) -> Result<Walked> {
         let Some(pml4e) = self.read_pt_entry(self.dtb, va.pml4_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
 
         if !pml4e.is_present() {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         }
 
         let Some(pdpte) = self.read_pt_entry(pml4e.page_frame(), va.pdpt_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
 
         if !pdpte.is_present() {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         }
 
         if pdpte.is_large_page() {
-            return Ok(Some(Translation::new_huge(pml4e, pdpte, va)));
+            return Ok(Walked::Mapped(Translation::new_huge(pml4e, pdpte, va)));
         }
 
         let Some(pde) = self.read_pt_entry(pdpte.page_frame(), va.pd_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
 
         if !pde.is_present() {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         }
 
         if pde.is_large_page() {
-            return Ok(Some(Translation::new_large(pml4e, pdpte, pde, va)));
+            return Ok(Walked::Mapped(Translation::new_large(
+                pml4e, pdpte, pde, va,
+            )));
         }
 
         let Some(pte) = self.read_pt_entry(pde.page_frame(), va.pt_index())? else {
-            return Ok(None);
+            return Ok(Walked::Unmapped(None));
         };
 
         if !pte.is_present() {
@@ -477,13 +507,51 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             // can still show.
             if pte.is_transition() {
                 let pte = pte.unswizzled(self.backend.invalid_pte_mask());
-                return Ok(Some(Translation::new_transition(pte, va)));
+                return Ok(Walked::Mapped(Translation::new_transition(pte, va)));
             }
-            return Ok(None);
+            return Ok(Walked::Unmapped(Some(pte)));
         }
 
-        Ok(Some(Translation::new(pml4e, pdpte, pde, pte, va)))
+        Ok(Walked::Mapped(Translation::new(pml4e, pdpte, pde, pte, va)))
     }
+
+    /// A user page of a mapped view that the tables do not map, read from
+    /// the frame its section PTE holds when that page is in memory (see
+    /// [`SectionViews`]). `leaf` is the page's PTE, `None` when a table above
+    /// it is absent.
+    fn section_page(&self, va: VirtAddr, leaf: Option<PageTableEntry>) -> Option<Translation> {
+        // Views are mapped in a process's user half only.
+        if va.0 >> 47 != 0 {
+            return None;
+        }
+        let views = self.backend.section_views()?;
+        let from_vad = || views.prototype_pte(self, self.dtb, va);
+        let prototype = match leaf {
+            None => from_vad(),
+            Some(pte) if pte.0 == 0 => from_vad(),
+            Some(pte) if pte.is_prototype() => pte.prototype_address().or_else(from_vad),
+            // A page-file PTE: the process's own copy of the page, paged out.
+            Some(_) => None,
+        }?;
+        let pte = PageTableEntry(self.read::<u64>(prototype).ok()?);
+        let valid = if self.arm64 {
+            (pte.0 & 0b11 == 0b11).then(|| pte.arm64_page_frame())
+        } else {
+            pte.is_present().then(|| pte.page_frame())
+        };
+        let frame = valid.or_else(|| {
+            pte.is_transition()
+                .then(|| pte.unswizzled(self.backend.invalid_pte_mask()).page_frame())
+        })?;
+        Some(Translation::new_section(frame, va))
+    }
+}
+
+/// Where a table walk ended.
+enum Walked {
+    Mapped(Translation),
+    /// Nothing maps the page. The leaf PTE, when its table exists, says why.
+    Unmapped(Option<PageTableEntry>),
 }
 
 impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
@@ -542,15 +610,20 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
                     }
                 }
             };
-            // The frame is on the standby or modified list, not mapped here,
-            // so the kernel may repurpose it or re-read it from disk and the
-            // edit would vanish or land somewhere unrelated.
-            if translation.transition {
+            // Not mapped here, so the kernel may repurpose the frame or read
+            // it back from disk, and the edit would vanish or land somewhere
+            // unrelated.
+            let unmapped = match translation.residency {
+                Residency::Mapped => None,
+                Residency::Transition => Some("transition PTE"),
+                Residency::Section => Some("a section's page this process has not touched"),
+            };
+            if let Some(reason) = unmapped {
                 if offset > 0 {
                     return Err(Error::PartialWrite(offset));
                 }
                 return Err(Error::DebugInfo(format!(
-                    "{curr_vaddr} is resident but not mapped (transition PTE); \
+                    "{curr_vaddr} is resident but not mapped ({reason}); \
                      it cannot be written until the target faults it back in"
                 )));
             }
@@ -571,6 +644,7 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
 mod tests {
     use super::*;
     use crate::backend::MemoryOps;
+    use std::sync::Arc;
 
     struct FakePhysMem {
         data: Vec<u8>,
@@ -911,5 +985,124 @@ mod tests {
         mem.cache.clear();
         let _: u64 = AddressSpace::new(&mem, root as u64).read(va).unwrap();
         assert_eq!(mem.reads.get(), 11);
+    }
+
+    /// [`FakePhysMem`] with the guest's mapped views.
+    struct ViewedPhysMem {
+        inner: FakePhysMem,
+        views: Arc<SectionViews>,
+    }
+
+    impl MemoryOps<PhysAddr> for ViewedPhysMem {
+        fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+            self.inner.read_bytes(addr, buf)
+        }
+
+        fn write_bytes(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
+            self.inner.write_bytes(addr, buf)
+        }
+
+        fn section_views(&self) -> Option<Arc<SectionViews>> {
+            Some(Arc::clone(&self.views))
+        }
+    }
+
+    /// [`amd64_space`] with its user page at vpn 0x10 and the next one in a
+    /// view, `flags` its VAD flags: one process, one VAD, and the view's two
+    /// prototype PTEs, valid for frame 0x5000 and transition for 0x6000, in a
+    /// kernel page at `KERNEL`.
+    const KERNEL: u64 = 0xffff_8000_0000_0000;
+    fn viewed_space(leaf: u64, flags: u32) -> (ViewedPhysMem, VirtAddr) {
+        let (mut mem, va) = amd64_space(leaf);
+        mem.data.resize(0xC000, 0);
+        let mut put = |at: u64, value: u64| {
+            let at = at as usize;
+            mem.data[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        let kernel = VirtAddr(KERNEL);
+        put(0x1000 + 8 * kernel.pml4_index() as u64, 0x9000 | 0b11);
+        put(0x9000, 0xA000 | 0b11);
+        put(0xA000, 0xB000 | 0b11);
+        put(0xB000, 0x8000 | 0b11);
+        let page = |offset: u64| 0x8000 + offset;
+        put(page(0x000), KERNEL + 0x110); // PsActiveProcessHead
+        put(page(0x110), KERNEL); // the process's ActiveProcessLinks
+        put(page(0x128), 0x1000); // its DirectoryTableBase
+        put(page(0x140), KERNEL + 0x200); // its VadRoot
+        put(page(0x218), 0x11 << 32 | 0x10); // VAD StartingVpn, EndingVpn
+        put(page(0x230), u64::from(flags));
+        put(page(0x250), KERNEL + 0x300); // FirstPrototypePte
+        put(page(0x258), KERNEL + 0x308); // LastContiguousPte
+        put(page(0x300), 0x5000 | 1);
+        put(page(0x308), 0x6000 | 1 << 11);
+        put(0x6000, 0x9999_aaaa_bbbb_cccc);
+        let views = SectionViews::new(SectionLayout {
+            process_list_head: kernel,
+            active_process_links: 0x10,
+            directory_table_base: 0x28,
+            root_mask: PFN_MASK,
+            vad_root: 0x40,
+            left: 0,
+            right: 8,
+            vad_node: 0,
+            starting_vpn: 0x18,
+            ending_vpn: 0x1c,
+            starting_vpn_high: None,
+            ending_vpn_high: None,
+            vad_flags: 0x30,
+            private_memory_bit: 21,
+            first_prototype_pte: 0x50,
+            last_contiguous_pte: 0x58,
+        });
+        let mem = ViewedPhysMem {
+            inner: mem,
+            views: Arc::new(views),
+        };
+        (mem, va)
+    }
+
+    /// A process's PTE for a page of an image or file view stays empty until
+    /// the process touches the page, but the page is often in memory for the
+    /// others mapping it, recorded in the section's prototype PTEs. The page
+    /// reads from there, whether the PTE is empty, its table absent, or it
+    /// points at the prototype PTE; it is never written, since this process
+    /// does not map it.
+    #[test]
+    fn an_untouched_view_page_reads_the_frame_its_section_holds() {
+        let read =
+            |space: &AddressSpace<'_, ViewedPhysMem>, va: VirtAddr| space.read::<u64>(va).ok();
+
+        let (mem, va) = viewed_space(0, 0);
+        let space = AddressSpace::new(&mem, 0x1000);
+        assert_eq!(read(&space, va), Some(0x1122_3344_5566_7788));
+        assert_eq!(read(&space, va + 0x1000u64), Some(0x9999_aaaa_bbbb_cccc));
+        assert!(matches!(
+            space.write_bytes(va, &[0xcc]),
+            Err(Error::DebugInfo(_))
+        ));
+
+        let pointer = (KERNEL + 0x308) << 16 | 1 << 10;
+        let (mem, va) = viewed_space(pointer, 0);
+        let space = AddressSpace::new(&mem, 0x1000);
+        assert_eq!(read(&space, va), Some(0x9999_aaaa_bbbb_cccc));
+
+        let (mut mem, va) = viewed_space(0, 0);
+        let pde = 0x3000 + 8 * va.pd_index();
+        mem.inner.data[pde..pde + 8].fill(0);
+        let space = AddressSpace::new(&mem, 0x1000);
+        assert_eq!(read(&space, va), Some(0x1122_3344_5566_7788));
+        // No view maps the pages below it.
+        assert_eq!(read(&space, VirtAddr(va.0 - 0x10000)), None);
+    }
+
+    /// Private memory has no prototype PTEs; a VAD's `FirstPrototypePte`
+    /// there is not one, and a page-file PTE is the process's own copy.
+    #[test]
+    fn private_and_paged_out_pages_are_not_read_from_a_section() {
+        let (mem, va) = viewed_space(0, 1 << 21);
+        assert!(AddressSpace::new(&mem, 0x1000).read::<u64>(va).is_err());
+
+        let (mem, va) = viewed_space(0x5000, 0);
+        assert!(AddressSpace::new(&mem, 0x1000).read::<u64>(va).is_err());
     }
 }
