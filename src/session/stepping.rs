@@ -651,9 +651,11 @@ const RUN_PAST_TIMEOUT: Duration = Duration::from_millis(100);
 /// the others, so they can answer it.
 const RELEASE_WINDOW: Duration = Duration::from_millis(20);
 
-/// How many times the held vCPUs are let run for one instruction before it
-/// is given up on.
-const RELEASES: usize = 20;
+/// How long the held vCPUs are let run, in all, for one instruction before
+/// it is given up on. A run ends early when another vCPU reaches a marked
+/// site, which in hot code is at once, so the runs are bounded by time
+/// rather than counted.
+const RELEASE_BUDGET: Duration = Duration::from_secs(1);
 
 /// Execute the instruction under the (already lifted) breakpoint site at
 /// `rip` without a single step, which is unsafe on this backend (see
@@ -823,7 +825,7 @@ fn run_to_successors(
         rip,
         rsp: register_map.read_u64("rsp", regs).ok(),
         nt_thread: None,
-        count: 0,
+        started: None,
     };
     loop {
         backend.continue_current_thread()?;
@@ -852,15 +854,15 @@ fn run_to_successors(
         // interrupt taken first. Let them all run so it can finish.
         let mut in_nt = now != rip && !in_windows_hypervisor(debugger, register_map, &now_regs);
         loop {
-            if release.count == RELEASES {
+            if release.exhausted() {
                 if in_nt {
                     return Ok(RunPast::Diverted);
                 }
                 return Err(Error::DebugInfo(format!(
                     "{thread} could not execute the instruction at {rip:#x}: resumed alone, it \
                      did not get past it within {RUN_PAST_TIMEOUT:?}, and letting every vCPU \
-                     run {RELEASES} times did not free it (it waits on another vCPU, or in the \
-                     Windows hypervisor); resume with g, disabling any breakpoint there first"
+                     run for {RELEASE_BUDGET:?} did not free it (it waits on another vCPU, or in \
+                     the Windows hypervisor); resume with g, disabling any breakpoint there first"
                 )));
             }
             match release.run(backend, register_map, debugger, thread, successors, sites)? {
@@ -908,10 +910,16 @@ struct Release {
     rsp: Option<u64>,
     /// The Windows thread on the vCPU when it first waited.
     nt_thread: Option<Option<u64>>,
-    count: usize,
+    /// When the first run began.
+    started: Option<Instant>,
 }
 
 impl Release {
+    fn exhausted(&self) -> bool {
+        self.started
+            .is_some_and(|started| started.elapsed() >= RELEASE_BUDGET)
+    }
+
     fn run(
         &mut self,
         backend: &mut dyn DebugBackend,
@@ -921,7 +929,7 @@ impl Release {
         successors: &[u64],
         sites: &TemporarySites,
     ) -> Result<Released> {
-        self.count += 1;
+        self.started.get_or_insert_with(Instant::now);
         let nt_thread = *self
             .nt_thread
             .get_or_insert_with(|| nt_thread_on(debugger, thread));
