@@ -231,7 +231,9 @@ pub const fn is_record_method(key: &str) -> bool {
 /// field. Doc comments on the struct and its fields document the class and
 /// properties. A field named like a `BaseRecord` method (`keys`, `values`,
 /// `items`, `get`, `to_dict`) is a compile error; write a keyword as a raw
-/// identifier (`r#type`).
+/// identifier (`r#type`). Methods after a `;` following the fields join the
+/// class's `#[pymethods]` (`fn __str__(slf: &Bound<'_, Self>) -> ...`), for
+/// behavior a record lacks; they resolve names beside the shapes.
 macro_rules! shapes {
     ($(
         $(#[doc = $doc:literal])*
@@ -240,6 +242,7 @@ macro_rules! shapes {
                 $(#[doc = $field_doc:literal])*
                 $field:ident: $ty:ty
             ),* $(,)?
+            $(; $($method:tt)*)?
         }
     )*) => {
         $(
@@ -321,6 +324,7 @@ macro_rules! shapes {
                         ))
                     }
                 )*
+                $($($method)*)?
             }
         )*
     };
@@ -341,7 +345,10 @@ mod tests {
             present: Omit<u8>,
             null: Option<String>,
             read: Diag<Hex>,
-            failed: Diag<Hex>,
+            failed: Diag<Hex>;
+            fn __str__(slf: &pyo3::Bound<'_, Self>) -> pyo3::PyResult<String> {
+                Ok(slf.as_super().get().field(slf.py(), "type")?.to_string())
+            }
         }
     }
 
