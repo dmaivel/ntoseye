@@ -741,8 +741,16 @@ enum TemporarySites {
 }
 
 impl TemporarySites {
-    /// Plant the `index`th site at `address`: `Ok(None)` for a software
-    /// site, the slot for a hardware one, `Err` when no slot is left.
+    /// Whether an `index`th site can be planted.
+    fn has_room(&self, index: usize) -> bool {
+        match self {
+            Self::Software => true,
+            Self::Hardware(slots) => index < slots.len(),
+        }
+    }
+
+    /// Plant the `index`th site at `address`, which [`Self::has_room`] for:
+    /// `None` for a software site, the slot for a hardware one.
     fn plant(
         &self,
         backend: &mut dyn DebugBackend,
@@ -755,11 +763,7 @@ impl TemporarySites {
                 Ok(None)
             }
             Self::Hardware(slots) => {
-                let slot = *slots.get(index).ok_or_else(|| {
-                    Error::Breakpoint(format!(
-                        "no free hardware breakpoint slot is left to mark {address:#x}"
-                    ))
-                })?;
+                let slot = slots[index];
                 backend.set_hardware_breakpoint(slot, address, HwBreakpointAccess::Execute, 1)?;
                 Ok(Some(slot))
             }
@@ -933,7 +937,9 @@ impl Release {
         let nt_thread = *self
             .nt_thread
             .get_or_insert_with(|| nt_thread_on(debugger, thread));
-        let site = if successors.contains(&self.rip) {
+        // Without a slot left for it, the instruction goes unmarked: a vCPU
+        // returning to it runs it, and stops on a successor.
+        let site = if successors.contains(&self.rip) || !sites.has_room(successors.len()) {
             None
         } else {
             Some(sites.plant(backend, successors.len(), self.rip)?)
@@ -1042,6 +1048,21 @@ pub fn site_successors(
         )
     };
     let top_of_stack = |width: usize| pointer(register(Register::RSP)?, width);
+    // The secure kernel enters system calls and interrupts through its own
+    // entry and IDT, which NT's symbols and tables do not describe, and a
+    // hypercall there can return to VTL0 instead of the next instruction.
+    let vtl1 = debugger.is_secure_address(VirtAddr(rip))
+        || cr3.is_some_and(|cr3| debugger.recognize_secure_root(cr3));
+    let through_nt_tables = matches!(
+        instruction.code(),
+        Code::Syscall | Code::Vmcall | Code::Vmmcall | Code::Int_imm8 | Code::Int3 | Code::Int1
+    ) || matches!(
+        instruction.mnemonic(),
+        Mnemonic::Into | Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2
+    );
+    if vtl1 && through_nt_tables {
+        return Err(unsupported());
+    }
     let mut successors = match instruction.code() {
         Code::Syscall => vec![system_call_entry(debugger, bitness)?],
         // `sysret` returns to RCX, `sysexit` to RDX; the 32-bit forms to
