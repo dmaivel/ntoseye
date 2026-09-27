@@ -219,6 +219,14 @@ impl<'a> StructRef<'a> {
         self.read_uint(name).map(VirtAddr)
     }
 
+    /// Read an integer field's value: a bitfield's own bits, the whole
+    /// integer otherwise.
+    pub fn read_bits(&self, name: &str) -> Result<u64> {
+        let field = self.ti.field(name)?;
+        self.read_uint_at(name, field.offset as u64, field.size)
+            .map(|raw| field.decode(raw))
+    }
+
     /// Read a field's raw bytes at its PDB-declared size, rejecting a zero
     /// size or one past the caller's bound.
     pub fn read_field_bytes(&self, name: &str, max_len: usize) -> Result<Vec<u8>> {

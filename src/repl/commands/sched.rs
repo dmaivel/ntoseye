@@ -5,7 +5,7 @@ use crate::repl::*;
 use crate::target::sched::{
     ApcDetail, ApcListDetail, ApcSelector, FindStackDetail, ReadyQueuesDetail, StacksDetail,
     ThreadSummary, TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions, UniqStackScope,
-    UnwalkedThread, findstack_level,
+    UnwalkedThread, findstack_level, thread_summary,
 };
 use crate::target::workqueue::{ExQueueDetail, WorkItemDetail};
 use crate::target::{DiagnosticValue, ListTermination, kthread_state_name, wait_reason_name};
@@ -789,7 +789,7 @@ fn print_work_item(item: &WorkItemDetail) {
     match &item.io {
         Some(io) => outln!(
             "    IoWorkItem ({})  Routine {}  IoObject ({})  Context ({})",
-            ui::addr(item.address.0),
+            ui::addr(io.address.0),
             routine(io.routine, &io.routine_symbol),
             ui::addr(io.io_object.0),
             ui::addr(io.context.0)
@@ -853,15 +853,18 @@ fn print_work_queues(detail: &ExQueueDetail) {
         outln!(" -> Associated Threads ({})", queue.threads.len());
         for worker in &queue.threads {
             match &worker.thread {
-                DiagnosticValue::Available(thread) => outln!(
-                    "    THREAD {}  Cid {}.{}  {}  {}  Priority {}",
-                    ui::addr(thread.ethread.0),
-                    thread_pid(thread),
-                    thread_tid(thread),
-                    thread_state(thread),
-                    thread_wait_reason(thread),
-                    thread_priority(thread)
-                ),
+                DiagnosticValue::Available(info) => {
+                    let thread = &thread_summary(info);
+                    outln!(
+                        "    THREAD {}  Cid {}.{}  {}  {}  Priority {}",
+                        ui::addr(thread.ethread.0),
+                        thread_pid(thread),
+                        thread_tid(thread),
+                        thread_state(thread),
+                        thread_wait_reason(thread),
+                        thread_priority(thread)
+                    );
+                }
                 DiagnosticValue::Unavailable(error) => outln!(
                     "    KTHREAD {}  <unavailable: {error}>",
                     ui::addr(worker.kthread.0)

@@ -489,6 +489,7 @@ fn work_item(item: &WorkItemDetail) -> View {
             "io_work_item",
             item.io.as_ref().map_or(View::Null, |io| {
                 View::Object(vec![
+                    ("address", View::Hex(io.address.0)),
                     ("routine", View::Hex(io.routine.0)),
                     ("routine_symbol", View::OptStr(io.routine_symbol.clone())),
                     ("io_object", View::Hex(io.io_object.0)),
@@ -524,7 +525,12 @@ fn work_queue_priority(priority: &WorkQueuePriority) -> View {
 fn worker_thread(worker: &WorkerThread) -> View {
     View::Object(vec![
         ("kthread", View::Hex(worker.kthread.0)),
-        ("thread", diagnostic(&worker.thread, thread_summary)),
+        (
+            "thread",
+            diagnostic(&worker.thread, |info| {
+                thread_summary(&crate::target::sched::thread_summary(info))
+            }),
+        ),
         (
             "stack",
             worker.stack.as_ref().map_or(View::Null, |stack| {

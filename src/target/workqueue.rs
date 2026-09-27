@@ -8,9 +8,9 @@
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::layout::{StructRef, TypeInfo};
-use crate::target::sched::{ThreadSummary, thread_summary, walk_list_nodes};
-use crate::target::{DiagnosticValue, ListTermination, Target};
+use crate::layout::Types;
+use crate::target::sched::walk_list_nodes;
+use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::StackFrame;
 
@@ -36,6 +36,8 @@ const MAX_THREADS_PER_QUEUE: usize = 4096;
 /// routine is `nt!IopProcessWorkItem`, which calls `Routine`.
 #[derive(Debug, Clone)]
 pub struct IoWorkItemDetail {
+    /// The `_IO_WORKITEM` holding the queued `_WORK_QUEUE_ITEM`.
+    pub address: VirtAddr,
     pub routine: VirtAddr,
     pub routine_symbol: Option<String>,
     pub io_object: VirtAddr,
@@ -68,8 +70,8 @@ pub struct WorkQueuePriority {
 #[derive(Debug, Clone)]
 pub struct WorkerThread {
     pub kthread: VirtAddr,
-    pub thread: DiagnosticValue<ThreadSummary>,
-    /// Filled when stacks were requested.
+    pub thread: DiagnosticValue<ThreadInfo>,
+    /// Filled when stacks were requested for a thread that decoded.
     pub stack: Option<DiagnosticValue<Vec<StackFrame>>>,
 }
 
@@ -167,7 +169,7 @@ impl Target {
                  _EX_PARTITION queues of Windows 10 and later"
             ))
         };
-        let queue_layout = types
+        types
             .layout("_EX_WORK_QUEUE")
             .map_err(|error| unsupported(error.to_string()))?;
         types
@@ -176,6 +178,9 @@ impl Target {
         let entry_size = types.layout("_LIST_ENTRY")?.size as u64;
         let priqueue = types.layout("_KPRIQUEUE")?;
         let entry_lists = priqueue.field_offset("EntryListHead")?;
+        let thread_list = priqueue.field_offset("ThreadListHead")?;
+        let item_link = types.layout("_WORK_QUEUE_ITEM")?.field_offset("List")?;
+        let io_item = types.layout("_IO_WORKITEM")?.field_offset("WorkItem")?;
         let queue_link = types.layout("_KTHREAD")?.field_offset("QueueListEntry")?;
         let tcb = types.layout("_ETHREAD")?.field_offset("Tcb")?;
         let node_count = u64::from(ntos.symbol("KeNumberNodes")?.read::<u16>()?).min(MAX_NODES);
@@ -291,7 +296,7 @@ impl Target {
                     let mut pending = 0u64;
                     let mut priorities = Vec::new();
                     for (priority, &current_count) in counts.iter().enumerate() {
-                        let head = queue + entry_lists + priority as u64 * entry_size;
+                        let head = pri.addr() + entry_lists + priority as u64 * entry_size;
                         let (nodes, termination) =
                             walk_list_nodes(self, head, MAX_ITEMS_PER_PRIORITY);
                         pending += nodes.len() as u64;
@@ -303,7 +308,9 @@ impl Target {
                         }
                         let items = nodes
                             .into_iter()
-                            .map(|item| self.work_item(item, io_work_item, &symbol))
+                            .map(|link| {
+                                work_item(types, link - item_link, io_item, io_work_item, &symbol)
+                            })
                             .collect();
                         priorities.push(WorkQueuePriority {
                             priority: priority as u8,
@@ -317,9 +324,8 @@ impl Target {
                             termination,
                         });
                     }
-                    let thread_head = queue + priqueue.field_offset("ThreadListHead")?;
                     let (links, threads_termination) =
-                        walk_list_nodes(self, thread_head, MAX_THREADS_PER_QUEUE);
+                        walk_list_nodes(self, pri.addr() + thread_list, MAX_THREADS_PER_QUEUE);
                     let threads = links
                         .into_iter()
                         .map(|link| {
@@ -327,7 +333,7 @@ impl Target {
                             WorkerThread {
                                 kthread,
                                 thread: match self.thread_info_from_ethread(kthread - tcb) {
-                                    Ok(info) => DiagnosticValue::Available(thread_summary(&info)),
+                                    Ok(info) => DiagnosticValue::Available(info),
                                     Err(error) => DiagnosticValue::Unavailable(error.to_string()),
                                 },
                                 stack: None,
@@ -348,7 +354,7 @@ impl Target {
                         items_processed_last_pass: work_queue
                             .read_field("WorkItemsProcessedLastPass")?,
                         thread_count: work_queue.read_field("ThreadCount")?,
-                        min_threads: bitfield(&queue_layout, &work_queue, "MinThreads"),
+                        min_threads: work_queue.read_bits("MinThreads")?,
                         max_threads: work_queue.read_field("MaxThreads")?,
                         concurrency: pri.read_field("MaximumCount")?,
                         pending,
@@ -364,55 +370,42 @@ impl Target {
         }
         Ok(detail)
     }
-
-    fn work_item(
-        &self,
-        address: VirtAddr,
-        io_work_item: Option<VirtAddr>,
-        symbol: &impl Fn(VirtAddr) -> Option<String>,
-    ) -> WorkItemDetail {
-        let Ok(types) = self.guest().map(|guest| guest.ntoskrnl.types()) else {
-            return WorkItemDetail {
-                address,
-                routine: VirtAddr(0),
-                routine_symbol: None,
-                parameter: VirtAddr(0),
-                io: None,
-            };
-        };
-        let item = types.struct_at("_WORK_QUEUE_ITEM", address).ok();
-        let read = |name: &str| {
-            item.as_ref()
-                .and_then(|item| item.read_pointer(name).ok())
-                .unwrap_or(VirtAddr(0))
-        };
-        let routine = read("WorkerRoutine");
-        let io = (io_work_item == Some(routine))
-            .then(|| types.struct_at("_IO_WORKITEM", address).ok())
-            .flatten()
-            .and_then(|io| {
-                let routine = io.read_pointer("Routine").ok()?;
-                Some(IoWorkItemDetail {
-                    routine,
-                    routine_symbol: symbol(routine),
-                    io_object: io.read_pointer("IoObject").ok()?,
-                    context: io.read_pointer("Context").ok()?,
-                })
-            });
-        WorkItemDetail {
-            address,
-            routine,
-            routine_symbol: symbol(routine),
-            parameter: read("Parameter"),
-            io,
-        }
-    }
 }
 
-/// A (bitfield) member's value, 0 when unreadable.
-fn bitfield(layout: &TypeInfo, record: &StructRef<'_>, name: &str) -> u64 {
-    layout
-        .field(name)
-        .and_then(|field| record.read_uint(name).map(|raw| field.decode(raw)))
-        .unwrap_or(0)
+/// The `_WORK_QUEUE_ITEM` at `address`; an `_IO_WORKITEM` (its `WorkItem`
+/// at `io_item`) when the routine is `nt!IopProcessWorkItem`.
+fn work_item(
+    types: Types<'_>,
+    address: VirtAddr,
+    io_item: u64,
+    io_work_item: Option<VirtAddr>,
+    symbol: &impl Fn(VirtAddr) -> Option<String>,
+) -> WorkItemDetail {
+    let item = types.struct_at("_WORK_QUEUE_ITEM", address).ok();
+    let read = |name: &str| {
+        item.as_ref()
+            .and_then(|item| item.read_pointer(name).ok())
+            .unwrap_or(VirtAddr(0))
+    };
+    let routine = read("WorkerRoutine");
+    let io = (io_work_item == Some(routine))
+        .then(|| types.struct_at("_IO_WORKITEM", address - io_item).ok())
+        .flatten()
+        .and_then(|io| {
+            let routine = io.read_pointer("Routine").ok()?;
+            Some(IoWorkItemDetail {
+                address: io.addr(),
+                routine,
+                routine_symbol: symbol(routine),
+                io_object: io.read_pointer("IoObject").ok()?,
+                context: io.read_pointer("Context").ok()?,
+            })
+        });
+    WorkItemDetail {
+        address,
+        routine,
+        routine_symbol: symbol(routine),
+        parameter: read("Parameter"),
+        io,
+    }
 }

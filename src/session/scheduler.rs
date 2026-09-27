@@ -26,8 +26,9 @@ const APC_THREAD_DISPLAY_LIMIT: usize = 16_384;
 
 impl Session {
     /// [`Target::executive_work_queues`](crate::target::Target::executive_work_queues),
-    /// plus each worker thread's bounded stack when flag 0x4 is set, walked
-    /// as [`Session::inspect_stacks`] walks them.
+    /// plus each decoded worker thread's bounded stack when flag 0x4 is set,
+    /// walked as [`Session::inspect_stacks`] walks them. Workers left when
+    /// the host interrupts have their stack marked unavailable.
     pub fn inspect_work_queues(&mut self, flags: u64) -> Result<ExQueueDetail> {
         let mut detail = self.target.executive_work_queues(flags)?;
         if flags & 0x4 == 0 {
@@ -38,30 +39,30 @@ impl Session {
             .into_iter()
             .map(|(ethread, (vcpu, _))| (ethread, vcpu))
             .collect();
-        for queue in &mut detail.queues {
-            for worker in &mut queue.threads {
-                if self.target.interrupted() {
-                    return Ok(detail);
-                }
-                let DiagnosticValue::Available(summary) = &worker.thread else {
-                    continue;
-                };
-                let ethread = summary.ethread;
-                let stack = self
-                    .target
-                    .thread_info_from_ethread(ethread)
-                    .and_then(|info| {
-                        self.backtrace_thread(
-                            &info,
-                            active.get(&ethread.0).map(String::as_str),
-                            MAX_STACK_FRAMES_LEVEL_1,
-                        )
-                    });
-                worker.stack = Some(match stack {
-                    Ok(trace) => available(trace.stacktrace.frames),
-                    Err(error) => unavailable(error.to_string()),
-                });
-            }
+        let threads: Vec<ThreadInfo> = detail
+            .queues
+            .iter()
+            .flat_map(|queue| &queue.threads)
+            .filter_map(|worker| match &worker.thread {
+                DiagnosticValue::Available(info) => Some(info.clone()),
+                DiagnosticValue::Unavailable(_) => None,
+            })
+            .collect();
+        let mut stacks = Vec::with_capacity(threads.len());
+        self.walk_thread_stacks(threads, &active, MAX_STACK_FRAMES_LEVEL_1, |_, stack| {
+            stacks.push(match stack {
+                Ok(trace) => available(trace.stacktrace.frames),
+                Err(error) => unavailable(error.to_string()),
+            });
+        });
+        let mut stacks = stacks.into_iter();
+        for worker in detail
+            .queues
+            .iter_mut()
+            .flat_map(|queue| &mut queue.threads)
+            .filter(|worker| matches!(worker.thread, DiagnosticValue::Available(_)))
+        {
+            worker.stack = Some(stacks.next().unwrap_or_else(|| unavailable("interrupted")));
         }
         Ok(detail)
     }
