@@ -912,6 +912,18 @@ mod tests {
     }
 
     #[test]
+    fn a_breakpoint_action_leaves_a_pending_ctrl_c_for_the_stop_loop() {
+        // Ctrl+C pressed while the target ran, before this hit: the `g`
+        // loop that ran the action must still see it and break in.
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        state.ctx.target.interrupt_requester().raise();
+        let (resumed, _) = capture(|| state.dispatch_breakpoint_action("j (1) 'gc' ; ''"));
+        assert!(resumed.unwrap());
+        assert!(state.ctx.target.interrupt.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn a_remote_timeout_ends_an_endless_loop_and_sleep() {
         let mut session = session_over_memory(0x1000, &[0u8; 8]);
         let mut state = ReplState::for_oneshot(&mut session);

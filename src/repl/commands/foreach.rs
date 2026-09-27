@@ -414,7 +414,8 @@ impl ReplState<'_> {
     /// Run `body` as one command loop. Past the nesting limit the loop is
     /// refused, and the refusal ends every loop around it. The outermost loop
     /// drops a Ctrl+C left over from before it started and counts only the
-    /// ones after.
+    /// ones after, unless a breakpoint action or exception command runs it:
+    /// a Ctrl+C then is for the stop loop that ran the action, to break in.
     pub(super) fn in_command_loop(
         &mut self,
         name: &str,
@@ -424,15 +425,18 @@ impl ReplState<'_> {
             error!("{name}: command loops nested more than {COMMAND_LOOP_DEPTH_LIMIT} deep");
             return Ok(Flow::Denied);
         }
-        if self.command_loop_depth == 0 {
+        let owns_interrupt = self.command_loop_depth == 0 && self.event_command_depth == 0;
+        if owns_interrupt {
             self.ctx.target.interrupt.store(false, Ordering::SeqCst);
+        }
+        if self.command_loop_depth == 0 {
             self.command_loop_interrupts = self.ctx.target.interrupt_requests();
         }
         self.command_loop_depth += 1;
         let flow = body(self);
         self.command_loop_depth -= 1;
         // A Ctrl+C that stopped the loops is spent once the outermost ends.
-        if self.command_loop_depth == 0 {
+        if owns_interrupt {
             self.ctx.target.interrupt.store(false, Ordering::SeqCst);
         }
         flow

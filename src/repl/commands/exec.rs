@@ -478,6 +478,9 @@ impl ReplState<'_> {
                             }
                             if let Some(action) = breakpoint.action.as_deref()
                                 && self.dispatch_breakpoint_action(action)?
+                                // A Ctrl+C this pass took breaks in at the hit
+                                // instead of being lost to the action's resume.
+                                && !interrupt_requested
                             {
                                 if let Err(error) = self
                                     .ctx
