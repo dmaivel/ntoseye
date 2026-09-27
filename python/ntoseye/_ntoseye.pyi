@@ -916,6 +916,11 @@ class Inspect:
         """
         List exported nonpaged and paged `GENERAL_LOOKASIDE` lists (`!lookaside`).
         """
+    def mdl(self, /, address: int, pfn_count: int |None = None) -> Record:
+        """
+        Decode an `_MDL` and the page frames after its header (`!mdl`).
+        `pfn_count` overrides the count `ByteCount` spans from `ByteOffset`.
+        """
     def memusage(self, /, process_limit: int = 64) -> Record:
         """
         Return bounded system and per-process memory-use counters (`!memusage`).

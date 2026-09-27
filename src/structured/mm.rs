@@ -19,6 +19,10 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let walk = args.target().pte_traverse(address)?;
             Ok(view::mm::pte_walk(&walk))
         }),
+        "!mdl" | "mdl" => args.addr(0).and_then(|address| {
+            let detail = args.target().inspect_mdl(address, args.opt_value(1)?)?;
+            Ok(view::mm::mdl(&detail))
+        }),
         "address" => args.addr(0).and_then(|address| {
             let description = args.target().describe_address(address)?;
             Ok(view::mm::address_description(&description))

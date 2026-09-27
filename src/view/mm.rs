@@ -6,10 +6,10 @@ use crate::target::DiagnosticValue;
 use crate::target::MemorySearchMatch;
 use crate::target::mm::{
     AddressDescription, AddressModule, BigPoolDetail, LookasideDetail, LookasideListsDetail,
-    MemoryRegionInfo, PfnDetail, PfnSelector, PoolBlockDetail, PoolFindDetail, PoolFindMatch,
-    PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail, ProcessMemoryUsage,
-    PteLevel, PteWalk, PtovDetail, PtovMapping, SystemMemorySummary, VadProtection, VadType,
-    VmCounter, VmDetail, VmPoolDetail, VmPteDetail, VtopDetail, VtopLevel,
+    MdlDetail, MemoryRegionInfo, PfnDetail, PfnSelector, PoolBlockDetail, PoolFindDetail,
+    PoolFindMatch, PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail,
+    ProcessMemoryUsage, PteLevel, PteWalk, PtovDetail, PtovMapping, SystemMemorySummary,
+    VadProtection, VadType, VmCounter, VmDetail, VmPoolDetail, VmPteDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
 use crate::types::{PageTableLevel, PteAttributes, VirtAddr};
@@ -485,6 +485,41 @@ pub fn lookaside_lists(detail: &LookasideListsDetail) -> View {
             View::Str(detail.paged_termination.clone()),
         ),
         ("interrupted", View::Bool(detail.interrupted)),
+        ("truncated", View::Bool(detail.truncated)),
+    ])
+}
+
+/// Render `!mdl`; top-level keys: `address`, `next`, `size`, `flags`,
+/// `flag_names`, `process`, `mapped_system_va`, `start_va`, `byte_count`,
+/// `byte_offset`, `spanned_pages`, `capacity`, `pfn_array`, `pfns`, `truncated`.
+pub fn mdl(detail: &MdlDetail) -> View {
+    View::Object(vec![
+        ("address", View::Hex(detail.address.0)),
+        ("next", View::Hex(detail.next.0)),
+        ("size", View::Num(u64::from(detail.size))),
+        ("flags", View::Hex(u64::from(detail.flags))),
+        (
+            "flag_names",
+            View::List(
+                detail
+                    .flag_names
+                    .iter()
+                    .map(|name| View::Str(name.to_string()))
+                    .collect(),
+            ),
+        ),
+        ("process", View::Hex(detail.process.0)),
+        ("mapped_system_va", View::Hex(detail.mapped_system_va.0)),
+        ("start_va", View::Hex(detail.start_va.0)),
+        ("byte_count", View::Num(u64::from(detail.byte_count))),
+        ("byte_offset", View::Hex(u64::from(detail.byte_offset))),
+        ("spanned_pages", View::Num(detail.spanned_pages)),
+        ("capacity", View::Num(detail.capacity)),
+        ("pfn_array", View::Hex(detail.pfn_array.0)),
+        (
+            "pfns",
+            View::List(detail.pfns.iter().map(|pfn| View::Hex(*pfn)).collect()),
+        ),
         ("truncated", View::Bool(detail.truncated)),
     ])
 }

@@ -8,8 +8,9 @@ use crate::expr::Expr;
 use crate::memory::DTB_IDENTITY;
 use crate::repl::*;
 use crate::target::mm::{
-    LookasideDetail, LookasideListsDetail, PfnDetail, PfnSelector, PoolFindDetail, PoolType,
-    PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, VmDetail, VtopDetail, VtopLevel,
+    LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolFindDetail,
+    PoolType, PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, VmDetail, VtopDetail,
+    VtopLevel,
 };
 use crate::target::pool::tag_string;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
@@ -95,6 +96,53 @@ repl_command! {
     usage: "!pool <address-expression>",
     summary: "Inspect the pool page containing an address.",
     completion: Expression,
+}
+
+repl_command! {
+    cmd_mdl;
+    names: ["!mdl", "mdl"],
+    usage: "!mdl <address> [pfn-count]",
+    summary: "Decode a memory descriptor list and the page frames it describes.",
+    details: "Shows the _MDL header (Next, Size, MdlFlags by MDL_* name, Process, MappedSystemVa, StartVa, ByteCount, ByteOffset) and the PFN array after it. The PFN count defaults to the pages ByteCount spans from ByteOffset; a pfn-count overrides it. Either is bounded by the slots Size leaves after the header and by 65,536. A header whose Size, ByteOffset, or span cannot describe an MDL is refused. Next is not followed; run !mdl on it for a chained MDL.",
+    completion: Expression,
+}
+
+fn print_mdl(detail: &MdlDetail) {
+    outln!("Mdl {}", ui::addr(detail.address.0));
+    outln!("  Next           {}", ui::addr(detail.next.0));
+    outln!(
+        "  Size           {:#x} ({} PFN slot{})",
+        detail.size,
+        detail.capacity,
+        if detail.capacity == 1 { "" } else { "s" }
+    );
+    outln!(
+        "  MdlFlags       {:#06x} {}",
+        detail.flags,
+        detail.flag_names.join(" ")
+    );
+    outln!("  Process        {}", ui::addr(detail.process.0));
+    outln!("  MappedSystemVa {}", ui::addr(detail.mapped_system_va.0));
+    outln!("  StartVa        {}", ui::addr(detail.start_va.0));
+    outln!("  ByteCount      {:#x}", detail.byte_count);
+    outln!("  ByteOffset     {:#x}", detail.byte_offset);
+    outln!(
+        "Physical pages ({} of {} spanned) at {}:",
+        detail.pfns.len(),
+        detail.spanned_pages,
+        ui::addr(detail.pfn_array.0)
+    );
+    for row in detail.pfns.chunks(8) {
+        let cells: Vec<String> = row.iter().map(|pfn| format!("{pfn:>8x}")).collect();
+        outln!("  {}", cells.join(" "));
+    }
+    if detail.truncated {
+        outln!(
+            "  ({} more spanned page(s) not listed)",
+            detail.spanned_pages - detail.pfns.len() as u64
+        );
+    }
+    outln!();
 }
 
 fn diagnostic_hex(value: &DiagnosticValue<u64>) -> String {
@@ -737,6 +785,28 @@ impl ReplState<'_> {
             }
         }
 
+        Ok(())
+    }
+
+    fn cmd_mdl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(expr) = invocation.arg(0) else {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        };
+        let Some(address) = self.eval_or_report(expr) else {
+            return Ok(());
+        };
+        let pfn_count = match invocation.arg(1) {
+            Some(count) => match self.eval_or_report(count) {
+                Some(VirtAddr(count)) => Some(count),
+                None => return Ok(()),
+            },
+            None => None,
+        };
+        match self.ctx.target.inspect_mdl(address, pfn_count) {
+            Ok(detail) => print_mdl(&detail),
+            Err(error) => error!("{error}"),
+        }
         Ok(())
     }
 

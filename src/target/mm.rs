@@ -13,6 +13,7 @@ use crate::target::pool::{PoolUsageRow, kernel_symbol_address, read_pool_field};
 use crate::types::{Dtb, PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
 
 mod lookaside;
+mod mdl;
 mod paging;
 mod pfn;
 mod pool;
@@ -328,6 +329,33 @@ pub struct LookasideListsDetail {
     pub nonpaged_termination: String,
     pub paged_termination: String,
     pub interrupted: bool,
+    pub truncated: bool,
+}
+
+/// A decoded `_MDL` header and the page-frame array that follows it (`!mdl`).
+#[derive(Debug, Clone)]
+pub struct MdlDetail {
+    pub address: VirtAddr,
+    pub next: VirtAddr,
+    /// `Size`: bytes of header plus PFN array the allocation holds.
+    pub size: u16,
+    pub flags: u16,
+    /// `MDL_*` names of the set `flags` bits, low bit first.
+    pub flag_names: Vec<&'static str>,
+    pub process: VirtAddr,
+    pub mapped_system_va: VirtAddr,
+    pub start_va: VirtAddr,
+    pub byte_count: u32,
+    pub byte_offset: u32,
+    /// Pages the described buffer spans (`ADDRESS_AND_SIZE_TO_SPAN_PAGES`).
+    pub spanned_pages: u64,
+    /// PFN slots `Size` leaves after the header.
+    pub capacity: u64,
+    /// Where the PFN array starts (just past the header).
+    pub pfn_array: VirtAddr,
+    pub pfns: Vec<u64>,
+    /// Fewer PFNs are listed than the buffer spans (a requested count or the
+    /// display bound).
     pub truncated: bool,
 }
 

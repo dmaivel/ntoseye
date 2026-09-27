@@ -547,6 +547,24 @@ impl Inspect {
         })
     }
 
+    /// Decode an `_MDL` and the page frames after its header (`!mdl`).
+    /// `pfn_count` overrides the count `ByteCount` spans from `ByteOffset`.
+    #[pyo3(signature = (address, pfn_count=None))]
+    fn mdl<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+        pfn_count: Option<u64>,
+    ) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session
+                .target
+                .inspect_mdl(VirtAddr(address), pfn_count)
+                .map_err(err)?;
+            Ok(view::mm::mdl(&detail))
+        })
+    }
+
     /// Decode a security descriptor, including owner/group SIDs and ACLs (`!sd`).
     #[pyo3(signature = (address, annotate_well_known=false))]
     fn security_descriptor<'py>(

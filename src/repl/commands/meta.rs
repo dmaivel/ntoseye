@@ -518,6 +518,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!running", "cpu"),
     ("!timer", "cpu"),
     ("!lookaside", "memory manager"),
+    ("!mdl", "memory manager"),
     ("!memusage", "memory manager"),
     ("!pfn", "memory manager"),
     ("!pool", "memory manager"),
