@@ -57,6 +57,10 @@ repl_command! {
 
 impl ReplState<'_> {
     fn cmd_wmitrace_strdump(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.len() > 1 {
+            outln!("{}\n", command_help("!wmitrace.strdump"));
+            return Ok(());
+        }
         match invocation.arg(0) {
             None => self.print_etw_loggers(),
             Some(text) => self.print_etw_buffers(text),
@@ -146,7 +150,7 @@ impl ReplState<'_> {
     }
 
     fn cmd_wmitrace_logger(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(text) = invocation.arg(0) else {
+        let (Some(text), 1) = (invocation.arg(0), invocation.argv.len()) else {
             outln!("{}\n", command_help("!wmitrace.logger"));
             return Ok(());
         };
@@ -294,7 +298,9 @@ impl ReplState<'_> {
     }
 
     fn cmd_wmitrace_logsave(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let (Some(logger), Some(path)) = (invocation.arg(0), invocation.arg(1)) else {
+        let (Some(logger), Some(path), 2) =
+            (invocation.arg(0), invocation.arg(1), invocation.argv.len())
+        else {
             outln!("{}\n", command_help("!wmitrace.logsave"));
             return Ok(());
         };

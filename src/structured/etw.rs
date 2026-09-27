@@ -10,20 +10,29 @@ pub fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
     let radix = args.state.radix;
     let missing = || Error::InvalidArgument("missing argument 1 (a logger id or name)".into());
     Some(match name.trim_start_matches('!') {
-        "wmitrace.strdump" => match argv.first() {
-            None => args
+        "wmitrace.strdump" => match argv {
+            [] => args
                 .target()
                 .etw_loggers()
                 .map(|table| view::etw::logger_table(&table)),
-            Some(logger) => args
+            [logger] => args
                 .target()
                 .etw_logger_buffers(logger, radix)
                 .map(|detail| view::etw::logger_buffers(&detail)),
+            _ => Err(Error::InvalidArgument(
+                "usage: !wmitrace.strdump [logger-id|logger-name|context-address]".into(),
+            )),
         },
-        "wmitrace.logger" => argv.first().ok_or_else(missing).and_then(|logger| {
-            let logger = args.target().etw_logger(logger, radix)?;
-            Ok(view::etw::logger(&logger))
-        }),
+        "wmitrace.logger" => match argv {
+            [] => Err(missing()),
+            [logger] => args
+                .target()
+                .etw_logger(logger, radix)
+                .map(|logger| view::etw::logger(&logger)),
+            _ => Err(Error::InvalidArgument(
+                "usage: !wmitrace.logger <logger-id|logger-name|context-address>".into(),
+            )),
+        },
         "wmitrace.logdump" => LogDumpArguments::parse(argv.iter().copied())
             .and_then(|arguments| arguments.ok_or_else(missing))
             .and_then(|arguments| {

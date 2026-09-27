@@ -1828,6 +1828,31 @@ mod tests {
         assert!(stop.reason.contains("extended data item at +0x50"));
     }
 
+    #[test]
+    fn parses_logdump_arguments() {
+        let parse = |args: &[&str]| LogDumpArguments::parse(args.iter().copied());
+        let arguments = |logger: &str, most_recent| {
+            Some(LogDumpArguments {
+                logger: logger.to_string(),
+                most_recent,
+            })
+        };
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&["-t", "5"]).unwrap(), None);
+        assert_eq!(parse(&["0x24"]).unwrap(), arguments("0x24", None));
+        assert_eq!(
+            parse(&["-t", "0x10", "NT Kernel Logger"]).unwrap(),
+            arguments("NT Kernel Logger", Some(0x10))
+        );
+        assert_eq!(
+            parse(&["NtfsLog", "-T", "10"]).unwrap(),
+            arguments("NtfsLog", Some(10))
+        );
+        assert!(parse(&["NtfsLog", "-t"]).is_err());
+        assert!(parse(&["-t", "ten", "NtfsLog"]).is_err());
+        assert!(parse(&["NT", "Kernel"]).is_err());
+    }
+
     /// `_WMI_BUFFER_HEADER` offsets of the 26200 kernel PDB.
     fn buffer_offsets() -> BufferHeaderOffsets {
         BufferHeaderOffsets {
