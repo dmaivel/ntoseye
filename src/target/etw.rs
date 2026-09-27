@@ -1289,6 +1289,9 @@ pub struct EtwLogFile {
     pub buffers: usize,
     /// Why the `GlobalList` walk ended before returning to its head.
     pub list_stop: Option<String>,
+    /// Buffers left out (unreadable) and buffers cut short before a record
+    /// that does not decode.
+    pub issues: Vec<EtwBufferIssue>,
     pub bytes: Vec<u8>,
 }
 
@@ -1380,15 +1383,16 @@ impl BufferHeaderOffsets {
 /// the `WMI_LOG_TYPE_HEADER` event, a `SYSTEM_TRACE_HEADER` followed by a
 /// `TRACE_LOGFILE_HEADER64` and the logger and log file names. Laid out as
 /// the kernel writes it (checked against a 26200 kernel's own .etl).
-fn logfile_header_buffer(
+/// `buffer` is one zeroed trace buffer of the logger's `BufferSize`.
+fn write_logfile_header_buffer(
+    buffer: &mut [u8],
     logger: &EtwLogger,
     system: &LogFileSystem,
     offsets: &BufferHeaderOffsets,
     flush_state: u32,
     buffers_written: u32,
-) -> Result<Vec<u8>> {
-    let size = logger.buffer_size as usize;
-    let mut buffer = vec![0u8; size];
+) -> Result<()> {
+    let size = buffer.len();
     let logger_name = utf16z(logger.name.as_deref().unwrap_or_default());
     let file_name = utf16z(logger.log_file_name.as_deref().unwrap_or_default());
     let event_size = 0x20 + TRACE_LOGFILE_HEADER64_SIZE + logger_name.len() + file_name.len();
@@ -1400,14 +1404,14 @@ fn logfile_header_buffer(
             "the logfile header event ({event_size:#x} bytes) does not fit a {size:#x}-byte buffer"
         )));
     }
-    write_u32(&mut buffer, offsets.buffer_size, logger.buffer_size);
-    write_u16(&mut buffer, offsets.logger_id, logger.logger_id as u16);
+    write_u32(buffer, offsets.buffer_size, logger.buffer_size);
+    write_u16(buffer, offsets.logger_id, logger.logger_id as u16);
     // SYSTEM_TRACE_HEADER: version 2, TRACE_HEADER_TYPE_SYSTEM64, flags
     // 0xc0; the thread, process and CPU times stay 0.
-    write_u32(&mut buffer, event, 0xc002_0002);
-    write_u16(&mut buffer, event + 4, event_size as u16);
-    write_u16(&mut buffer, event + 6, WMI_LOG_TYPE_HEADER);
-    write_u64(&mut buffer, event + 0x10, logger.reference_clock);
+    write_u32(buffer, event, 0xc002_0002);
+    write_u16(buffer, event + 4, event_size as u16);
+    write_u16(buffer, event + 6, WMI_LOG_TYPE_HEADER);
+    write_u64(buffer, event + 0x10, logger.reference_clock);
 
     let h = event + 0x20;
     // Layout 1.5 (QPC and platform clock in the header), 2.0 for buffers
@@ -1420,52 +1424,48 @@ fn logfile_header_buffer(
     } else {
         0x0501
     };
-    write_u32(&mut buffer, h, logger.buffer_size);
+    write_u32(buffer, h, logger.buffer_size);
     buffer[h + 4] = system.major_version;
     buffer[h + 5] = system.minor_version;
-    write_u16(&mut buffer, h + 6, sub_version);
-    write_u32(&mut buffer, h + 0x08, system.build_number);
-    write_u32(&mut buffer, h + 0x0c, system.processors);
-    write_u64(&mut buffer, h + 0x10, system.end_time);
-    write_u32(&mut buffer, h + 0x18, system.timer_resolution);
-    write_u32(&mut buffer, h + 0x1c, logger.maximum_file_size);
-    write_u32(
-        &mut buffer,
-        h + 0x20,
-        logger.logger_mode & !LOGFILE_MODE_CLEARED,
-    );
-    write_u32(&mut buffer, h + 0x24, buffers_written);
-    write_u32(&mut buffer, h + 0x28, 1); // StartBuffers
-    write_u32(&mut buffer, h + 0x2c, 8); // PointerSize
-    write_u32(&mut buffer, h + 0x30, logger.events_lost);
-    write_u32(&mut buffer, h + 0x34, system.cpu_mhz);
+    write_u16(buffer, h + 6, sub_version);
+    write_u32(buffer, h + 0x08, system.build_number);
+    write_u32(buffer, h + 0x0c, system.processors);
+    write_u64(buffer, h + 0x10, system.end_time);
+    write_u32(buffer, h + 0x18, system.timer_resolution);
+    write_u32(buffer, h + 0x1c, logger.maximum_file_size);
+    write_u32(buffer, h + 0x20, logger.logger_mode & !LOGFILE_MODE_CLEARED);
+    write_u32(buffer, h + 0x24, buffers_written);
+    write_u32(buffer, h + 0x28, 1); // StartBuffers
+    write_u32(buffer, h + 0x2c, 8); // PointerSize
+    write_u32(buffer, h + 0x30, logger.events_lost);
+    write_u32(buffer, h + 0x34, system.cpu_mhz);
     // LoggerName/LogFileName (0x38/0x40) hold platform timer sources, not
     // known here; TimeZone (0x48) gets only the bias.
-    write_u32(&mut buffer, h + 0x48, system.time_zone_bias as u32);
-    write_u64(&mut buffer, h + 0xf8, system.boot_time);
-    write_u64(&mut buffer, h + 0x100, system.qpc_frequency);
-    write_u64(&mut buffer, h + 0x108, logger.reference_system_time);
-    write_u32(&mut buffer, h + 0x110, logger.clock.raw());
-    write_u32(&mut buffer, h + 0x114, logger.log_buffers_lost);
+    write_u32(buffer, h + 0x48, system.time_zone_bias as u32);
+    write_u64(buffer, h + 0xf8, system.boot_time);
+    write_u64(buffer, h + 0x100, system.qpc_frequency);
+    write_u64(buffer, h + 0x108, logger.reference_system_time);
+    write_u32(buffer, h + 0x110, logger.clock.raw());
+    write_u32(buffer, h + 0x114, logger.log_buffers_lost);
     let names = h + TRACE_LOGFILE_HEADER64_SIZE;
     buffer[names..names + logger_name.len()].copy_from_slice(&logger_name);
     let names = names + logger_name.len();
     buffer[names..names + file_name.len()].copy_from_slice(&file_name);
 
     offsets.seal(
-        &mut buffer,
+        buffer,
         used,
         flush_state,
         HEADER_BUFFER_FLAG,
         HEADER_BUFFER_TYPE,
     );
-    Ok(buffer)
+    Ok(())
 }
 
 impl Target {
     /// `!wmitrace.logsave`: the logger `text` names as an .etl file: a header
     /// buffer, then each of its buffers that holds events, sealed as the
-    /// logger flushes them.
+    /// logger flushes them after its last record that decodes.
     pub fn etw_log_file(&self, text: &str, radix: NumberRadix) -> Result<EtwLogFile> {
         let logger = self.etw_logger(text, radix)?;
         let types = self.etw_types()?;
@@ -1490,7 +1490,6 @@ impl Target {
         }
 
         let kuser = KuserSharedData::new(self);
-        let symbol_u32 = |name: &str| -> Result<u32> { guest.ntoskrnl.symbol(name)?.read() };
         let missing =
             |what: &str| Error::DebugInfo(format!("KUSER_SHARED_DATA.{what} is unreadable"));
         let system = LogFileSystem {
@@ -1504,8 +1503,8 @@ impl Target {
                 .nt_build_number()
                 .ok_or_else(|| missing("NtBuildNumber"))?
                 & 0xffff) as u32,
-            processors: symbol_u32("KeNumberProcessors")?,
-            timer_resolution: symbol_u32("KeMaximumIncrement")?,
+            processors: u32::from(crate::cpu_state::processor_count(self)?),
+            timer_resolution: guest.ntoskrnl.symbol("KeMaximumIncrement")?.read()?,
             cpu_mhz: self.processor_mhz()? as u32,
             boot_time: guest.ntoskrnl.symbol("KeBootTime")?.read()?,
             qpc_frequency: kuser
@@ -1518,43 +1517,80 @@ impl Target {
                 / 600_000_000) as i32,
         };
 
+        // The whole file in one allocation: the header buffer first, filled
+        // in once the data buffers are counted, then each data buffer read
+        // in place. read_etw_buffers bounded BufferSize, and every data_end
+        // by it.
         let size = logger.buffer_size as usize;
         let memory = self.kernel_address_space();
-        let mut data_buffers = Vec::new();
-        for buffer in buffers
+        let with_data: Vec<&EtwBuffer> = buffers
             .iter()
             .filter(|b| b.data_end as usize > offsets.size)
-        {
+            .collect();
+        let total = size * (with_data.len() + 1);
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(total).map_err(|e| {
+            Error::DebugInfo(format!(
+                "cannot hold the {total:#x} bytes of logger {:#x}'s buffers: {e}",
+                logger.logger_id
+            ))
+        })?;
+        bytes.resize(size, 0);
+        let mut issues = Vec::new();
+        let mut data_buffers = 0u32;
+        for buffer in with_data {
             if self.interrupted() {
                 return Err(Error::DebugInfo("interrupted".into()));
             }
-            let mut bytes = vec![0u8; size];
-            memory.read_bytes(buffer.address, &mut bytes)?;
-            offsets.seal(
-                &mut bytes,
-                buffer.data_end as usize,
-                flush_state,
-                DATA_BUFFER_FLAG,
-                DATA_BUFFER_TYPE,
-            );
-            data_buffers.push(bytes);
+            let start = bytes.len();
+            bytes.resize(start + size, 0);
+            let slot = &mut bytes[start..];
+            // The rest of the buffer is sealed with 0xff: read only the data.
+            let end = buffer.data_end as usize;
+            if let Err(e) = memory.read_bytes(buffer.address, &mut slot[..end]) {
+                issues.push(EtwBufferIssue {
+                    buffer: buffer.address,
+                    offset: 0,
+                    reason: format!("left out, unreadable: {e}"),
+                });
+                bytes.truncate(start);
+                continue;
+            }
+            // A processor's current buffer can end in a record still being
+            // written, or in stale bytes past a failed reservation: keep
+            // exactly the records logdump decodes.
+            let used = match decode_buffer_records(slot, offsets.size, end, &types.event_header).1 {
+                Some(stop) => {
+                    let used = stop.offset as usize;
+                    issues.push(EtwBufferIssue {
+                        buffer: buffer.address,
+                        offset: stop.offset,
+                        reason: format!("sealed here: {}", stop.reason),
+                    });
+                    used
+                }
+                None => end,
+            };
+            if used <= offsets.size {
+                bytes.truncate(start);
+                continue;
+            }
+            offsets.seal(slot, used, flush_state, DATA_BUFFER_FLAG, DATA_BUFFER_TYPE);
+            data_buffers += 1;
         }
-        let header = logfile_header_buffer(
+        write_logfile_header_buffer(
+            &mut bytes[..size],
             &logger,
             &system,
             &offsets,
             flush_state,
-            data_buffers.len() as u32 + 1,
+            data_buffers + 1,
         )?;
-        let mut bytes = Vec::with_capacity(size * (data_buffers.len() + 1));
-        bytes.extend(header);
-        for buffer in &data_buffers {
-            bytes.extend_from_slice(buffer);
-        }
         Ok(EtwLogFile {
             logger,
-            buffers: data_buffers.len(),
+            buffers: data_buffers as usize,
             list_stop,
+            issues,
             bytes,
         })
     }
@@ -1790,6 +1826,122 @@ mod tests {
         let stop = stop.unwrap();
         assert_eq!(stop.offset, 0);
         assert!(stop.reason.contains("extended data item at +0x50"));
+    }
+
+    /// `_WMI_BUFFER_HEADER` offsets of the 26200 kernel PDB.
+    fn buffer_offsets() -> BufferHeaderOffsets {
+        BufferHeaderOffsets {
+            size: 0x48,
+            buffer_size: 0,
+            saved_offset: 4,
+            current_offset: 8,
+            logger_id: 0x2a,
+            state: 0x2c,
+            offset: 0x30,
+            buffer_flag: 0x34,
+            buffer_type: 0x36,
+        }
+    }
+
+    fn logger(buffer_size: u32) -> EtwLogger {
+        EtwLogger {
+            address: VirtAddr(0xffff_8000_0000_1000),
+            logger_id: 0x24,
+            name: Some("ntoseyetest".into()),
+            log_file_name: Some(r"C:\Windows\Temp\ntoseyetest.etl".into()),
+            logger_mode: 0x0000_0001,
+            flag_names: Vec::new(),
+            flags: 0,
+            buffer_size,
+            maximum_event_size: 0,
+            minimum_buffers: 0,
+            maximum_buffers: 0,
+            number_of_buffers: 0,
+            buffers_available: 0,
+            peak_buffers: 0,
+            buffers_written: 0,
+            events_lost: 0,
+            log_buffers_lost: 0,
+            real_time_buffers_delivered: 0,
+            real_time_buffers_lost: 0,
+            maximum_file_size: 0,
+            flush_timer: 0,
+            flush_threshold: 0,
+            clock: EtwClock::PerformanceCounter,
+            start_time: 0,
+            reference_system_time: 0x01dd_4e61_8a67_b359,
+            reference_clock: 0x1e_7905_eb4d,
+            logger_thread: VirtAddr(0),
+            logger_status: 0,
+            consumers: 0,
+            instance_guid: [0; 16],
+            collection_on: true,
+        }
+    }
+
+    const SYSTEM: LogFileSystem = LogFileSystem {
+        major_version: 10,
+        minor_version: 0,
+        build_number: 26200,
+        processors: 4,
+        timer_resolution: 156_250,
+        cpu_mhz: 1997,
+        boot_time: 0x01dd_4e43_1189_c5c0,
+        qpc_frequency: 10_000_000,
+        end_time: 0x01dd_4e70_0000_0000,
+        time_zone_bias: 0,
+    };
+
+    #[test]
+    fn logfile_header_buffer_holds_one_header_event_and_is_sealed() {
+        let logger = logger(0x1_0000);
+        let offsets = buffer_offsets();
+        let mut buffer = vec![0u8; 0x1_0000];
+        write_logfile_header_buffer(&mut buffer, &logger, &SYSTEM, &offsets, 2, 7).unwrap();
+
+        let names = utf16z("ntoseyetest").len() + utf16z(r"C:\Windows\Temp\ntoseyetest.etl").len();
+        let event_size = 0x20 + TRACE_LOGFILE_HEADER64_SIZE + names;
+        let used = align8(0x48 + event_size);
+        let field = |at| crate::bytes::read_u32(&buffer, at) as usize;
+        assert_eq!(field(offsets.buffer_size), 0x1_0000);
+        assert_eq!(crate::bytes::read_u16(&buffer, offsets.logger_id), 0x24);
+        assert_eq!(
+            (
+                field(offsets.saved_offset),
+                field(offsets.current_offset),
+                field(offsets.offset)
+            ),
+            (used, used, used)
+        );
+        assert!(buffer[used..].iter().all(|&b| b == 0xff));
+
+        let (records, stop) = decode_buffer_records(&buffer, 0x48, used, &layout());
+        assert_eq!(stop, None);
+        assert_eq!(records.len(), 1);
+        let header = &records[0];
+        assert_eq!(header.kind, EtwHeaderKind::System);
+        assert_eq!(header.hook_id, Some(WMI_LOG_TYPE_HEADER));
+        assert_eq!(usize::from(header.size), event_size);
+        assert_eq!(header.timestamp, Some(logger.reference_clock));
+        // TRACE_LOGFILE_HEADER64.BuffersWritten.
+        assert_eq!(crate::bytes::read_u32(&header.payload, 0x24), 7);
+    }
+
+    #[test]
+    fn logfile_header_buffer_refuses_a_buffer_too_small_for_it() {
+        let offsets = buffer_offsets();
+        for size in [0, 0x20, 0x48, 0x100] {
+            let mut buffer = vec![0u8; size];
+            let result = write_logfile_header_buffer(
+                &mut buffer,
+                &logger(size as u32),
+                &SYSTEM,
+                &offsets,
+                2,
+                1,
+            );
+            assert!(result.is_err(), "size {size:#x}");
+        }
     }
 
     #[test]

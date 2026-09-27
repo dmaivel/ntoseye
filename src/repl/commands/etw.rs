@@ -52,7 +52,7 @@ repl_command! {
     names: ["!wmitrace.logsave", "wmitrace.logsave"],
     usage: "!wmitrace.logsave <logger-id|logger-name|context-address> <file>",
     summary: "Save an ETW trace session's in-memory buffers as an .etl file on the host.",
-    details: "Writes an .etl file that ETW consumers such as tracerpt open: a header buffer holding the logfile header event (TRACE_LOGFILE_HEADER: buffer size, OS version and build, processor count, timer resolution, CPU speed, boot time, QPC frequency, the session's start reference and clock type, and its names), then every buffer on the session's GlobalList that holds events, sealed as the logger flushes one (valid length set, the rest filled with 0xff). Buffers already flushed to the session's own log file are included when their events are still in memory. The time zone records only the current bias, and a compressed buffer is refused.",
+    details: "Writes an .etl file that ETW consumers such as tracerpt open: a header buffer holding the logfile header event (TRACE_LOGFILE_HEADER: buffer size, OS version and build, processor count, timer resolution, CPU speed, boot time, QPC frequency, the session's start reference and clock type, and its names), then every buffer on the session's GlobalList that holds events, sealed as the logger flushes one (valid length set, the rest filled with 0xff). Each buffer ends after its last record that decodes, so the file holds the events !wmitrace.logdump shows: a processor's current buffer can end in a record still being written. Buffers already flushed to the session's own log file are included when their events are still in memory. An unreadable buffer is left out, and it and every buffer cut short are listed after the file is written. The time zone records only the current bias, and a compressed buffer is refused.",
 }
 
 impl ReplState<'_> {
@@ -318,7 +318,7 @@ impl ReplState<'_> {
             file.logger.buffer_size,
             file.bytes.len()
         );
-        print_issues(file.list_stop.as_deref(), &[]);
+        print_issues(file.list_stop.as_deref(), &file.issues);
         Ok(())
     }
 }
