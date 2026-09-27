@@ -219,18 +219,31 @@ pub fn diagnostic_metric<T>(metric: &DiagnosticMetric<T>, encode: impl FnOnce(&T
     View::Diagnostic(diagnostic)
 }
 
+shape::shapes! {
+    /// How a guest linked-list walk ended.
+    ListEnd {
+        /// `head` (back at the list head), `null`, `cycle` (a loop not
+        /// through the head), `bound` (the walk's limit), or `corrupt`.
+        kind: &'static str,
+        /// Where a cycle closed.
+        address: Option<shape::Hex>,
+        /// What was wrong, for a corrupt (or, in some walks, null) link.
+        error: Option<String>,
+    }
+}
+
 /// How a guest linked-list walk ended.
-pub fn list_termination(termination: &ListTermination) -> View {
+pub fn list_termination(termination: &ListTermination) -> ListEnd {
     let (kind, address, error) = match termination {
         ListTermination::Head => ("head", None, None),
         ListTermination::Null => ("null", None, None),
-        ListTermination::Cycle(address) => ("cycle", Some(address.0), None),
+        ListTermination::Cycle(address) => ("cycle", Some(shape::Hex(address.0)), None),
         ListTermination::Bound => ("bound", None, None),
         ListTermination::Corrupt(error) => ("corrupt", None, Some(error.clone())),
     };
-    View::Object(vec![
-        ("kind", View::Str(kind.to_string())),
-        ("address", View::OptHex(address)),
-        ("error", View::OptStr(error)),
-    ])
+    ListEnd {
+        kind,
+        address,
+        error,
+    }
 }

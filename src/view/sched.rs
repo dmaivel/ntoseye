@@ -1,6 +1,7 @@
 //! sched: [`View`] builders for the structured inspectors.
 
 use super::execution::{numbered_stack_frame, stack_frame};
+use super::shape::ViewValue;
 use super::{View, diagnostic, list_termination};
 use crate::target::sched::{
     ApcDetail, ApcListDetail, ApcSelector, ApcThread, DpcDetail, DpcQueue, DpcQueuesDetail,
@@ -113,7 +114,10 @@ fn ready_queue(queue: &ReadyQueue) -> View {
             "entries",
             View::List(queue.entries.iter().map(ready_entry).collect()),
         ),
-        ("termination", list_termination(&queue.termination)),
+        (
+            "termination",
+            list_termination(&queue.termination).into_view(),
+        ),
     ])
 }
 
@@ -179,7 +183,10 @@ fn dpc_queue(queue: &DpcQueue) -> View {
             "entries",
             View::List(queue.entries.iter().map(dpc).collect()),
         ),
-        ("termination", list_termination(&queue.termination)),
+        (
+            "termination",
+            list_termination(&queue.termination).into_view(),
+        ),
     ])
 }
 
@@ -253,7 +260,10 @@ fn timer_bucket_termination(entry: &TimerBucketTermination) -> View {
     View::Object(vec![
         ("processor", View::Num(entry.processor.into())),
         ("bucket", View::Num(entry.bucket.into())),
-        ("termination", list_termination(&entry.termination)),
+        (
+            "termination",
+            list_termination(&entry.termination).into_view(),
+        ),
     ])
 }
 
@@ -358,11 +368,11 @@ fn apc_thread(thread: &ApcThread) -> View {
         ),
         (
             "kernel_termination",
-            list_termination(&thread.kernel_termination),
+            list_termination(&thread.kernel_termination).into_view(),
         ),
         (
             "user_termination",
-            list_termination(&thread.user_termination),
+            list_termination(&thread.user_termination).into_view(),
         ),
         ("state_error", View::OptStr(thread.state_error.clone())),
     ])
@@ -518,7 +528,10 @@ fn work_queue_priority(priority: &WorkQueuePriority) -> View {
             "items",
             View::List(priority.items.iter().map(work_item).collect()),
         ),
-        ("termination", list_termination(&priority.termination)),
+        (
+            "termination",
+            list_termination(&priority.termination).into_view(),
+        ),
     ])
 }
 
@@ -572,7 +585,7 @@ fn work_queue(queue: &WorkQueueDetail) -> View {
         ),
         (
             "threads_termination",
-            list_termination(&queue.threads_termination),
+            list_termination(&queue.threads_termination).into_view(),
         ),
     ])
 }

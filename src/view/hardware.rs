@@ -353,7 +353,7 @@ pub fn pci_tree(tree: &pci::PciTree) -> View {
         truncated: tree.truncated,
         errors: tree.errors.clone(),
     }
-    .view()
+    .into_view()
 }
 
 fn pci_capabilities(
@@ -448,5 +448,5 @@ pub fn pci(scan: &pci::PciScan, raw: Option<PciRawRange>) -> View {
             .collect(),
         interrupted: scan.interrupted,
     }
-    .view()
+    .into_view()
 }

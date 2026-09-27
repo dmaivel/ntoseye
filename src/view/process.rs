@@ -1,5 +1,6 @@
 //! Process, thread, job, global-flag, and zombie [`View`] builders.
 
+use super::shape::ViewValue;
 use super::{View, diagnostic, list_termination};
 use crate::guest::ProcessInfo;
 use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
@@ -90,7 +91,7 @@ pub fn job(job: &JobDetail) -> View {
         ("child_jobs", addresses(&job.child_jobs)),
         (
             "child_job_list_termination",
-            list_termination(&job.child_job_termination),
+            list_termination(&job.child_job_termination).into_view(),
         ),
         ("silo", View::Bool(job.silo)),
         (
@@ -104,7 +105,7 @@ pub fn job(job: &JobDetail) -> View {
         ("unreadable_processes", addresses(&job.unreadable_processes)),
         (
             "process_list_termination",
-            list_termination(&job.process_termination),
+            list_termination(&job.process_termination).into_view(),
         ),
     ])
 }

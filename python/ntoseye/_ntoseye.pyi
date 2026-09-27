@@ -1184,6 +1184,28 @@ class Inspect:
         """
 
 @final
+class ListEnd(BaseRecord):
+    """
+    How a guest linked-list walk ended.
+    """
+    @property
+    def address(self, /) -> int |None:
+        """
+        Where a cycle closed.
+        """
+    @property
+    def error(self, /) -> str |None:
+        """
+        What was wrong, for a corrupt (or, in some walks, null) link.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `head` (back at the list head), `null`, `cycle` (a loop not
+        through the head), `bound` (the walk's limit), or `corrupt`.
+        """
+
+@final
 class Memory:
     """
     A guest address space: `dbg.memory` (kernel), `proc.memory`, `dbg.physical`.

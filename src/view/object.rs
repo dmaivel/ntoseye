@@ -3,6 +3,7 @@
 //! resources, notification callbacks, service tables, and ALPC ports.
 
 use super::process::process;
+use super::shape::ViewValue;
 use super::{View, diagnostic, list_termination};
 use crate::target::alpc::{
     AlpcConnection, AlpcField, AlpcMessageDetail, AlpcPortDetail, AlpcPortKind, AlpcProcessPorts,
@@ -446,7 +447,10 @@ pub fn resource_list(summary: &ResourceListSummary) -> View {
             "resources",
             View::List(summary.resources.iter().map(resource).collect()),
         ),
-        ("termination", list_termination(&summary.termination)),
+        (
+            "termination",
+            list_termination(&summary.termination).into_view(),
+        ),
     ])
 }
 
@@ -610,7 +614,10 @@ pub fn alpc_port(port: &AlpcPortDetail) -> View {
                     "entries",
                     View::List(queue.entries.iter().map(|at| View::Hex(at.0)).collect()),
                 ),
-                ("termination", list_termination(&queue.termination)),
+                (
+                    "termination",
+                    list_termination(&queue.termination).into_view(),
+                ),
             ])
         })
         .collect();
@@ -652,7 +659,7 @@ pub fn alpc_port(port: &AlpcPortDetail) -> View {
             "connection_termination",
             port.connection_termination
                 .as_ref()
-                .map_or(View::Null, list_termination),
+                .map_or(View::Null, |end| list_termination(end).into_view()),
         ),
     ])
 }
@@ -729,7 +736,10 @@ pub fn alpc_process_ports(ports: &AlpcProcessPorts) -> View {
                     "connections",
                     View::List(port.connections.iter().map(alpc_connection).collect()),
                 ),
-                ("termination", list_termination(&port.termination)),
+                (
+                    "termination",
+                    list_termination(&port.termination).into_view(),
+                ),
             ])
         })
         .collect();

@@ -181,12 +181,15 @@ pub fn view_dict<'py>(py: Python<'py>, v: &View) -> PyResult<PlainDict<'py>> {
 }
 
 /// Render a neutral [`View`] list of objects into [`Record`]s.
-pub fn view_records<'py>(py: Python<'py>, v: &View) -> PyResult<Vec<Bound<'py, Record>>> {
+pub fn view_records<'py, T: PyTypeCheck>(
+    py: Python<'py>,
+    v: &View,
+) -> PyResult<Vec<Bound<'py, T>>> {
     view::to_py(py, v, PyShape::Records)?
         .cast_into::<PyList>()
         .map_err(|e| raise(e.to_string()))?
         .iter()
-        .map(|item| item.cast_into::<Record>().map_err(|e| raise(e.to_string())))
+        .map(|item| item.cast_into::<T>().map_err(|e| raise(e.to_string())))
         .collect()
 }
 
@@ -305,6 +308,8 @@ pub mod _ntoseye {
         PciBar, PciBus, PciBuses, PciCapability, PciConfigBytes, PciFunction, PciScan, PciSegment,
         PciTree, PciTreeDevice,
     };
+    #[pymodule_export]
+    use crate::view::py::ListEnd;
 
     /// The ntoseye release this extension was built as.
     #[pymodule_export]

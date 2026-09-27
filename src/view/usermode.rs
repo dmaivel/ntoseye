@@ -1,5 +1,6 @@
 //! usermode: [`View`] builders for the structured inspectors.
 
+use super::shape::ViewValue;
 use super::{View, diagnostic, list_termination};
 use crate::target::DiagnosticValue;
 use crate::target::usermode::{
@@ -356,13 +357,16 @@ pub fn loader_modules(detail: &LoaderModulesDetail) -> View {
 /// How a process's native and WOW64 loader lists ended.
 pub fn loader_terminations(detail: &LoaderModulesDetail) -> View {
     View::Object(vec![
-        ("termination", list_termination(&detail.termination)),
+        (
+            "termination",
+            list_termination(&detail.termination).into_view(),
+        ),
         (
             "wow64_termination",
             detail
                 .wow64_termination
                 .as_ref()
-                .map_or(View::Null, list_termination),
+                .map_or(View::Null, |end| list_termination(end).into_view()),
         ),
     ])
 }

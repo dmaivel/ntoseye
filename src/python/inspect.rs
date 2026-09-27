@@ -44,11 +44,11 @@ impl Inspect {
         view_record(py, &view)
     }
 
-    fn list<'py>(
+    fn list<'py, T: PyTypeCheck>(
         &self,
         py: Python<'py>,
         build: impl FnOnce(&mut Session) -> PyResult<View> + Send,
-    ) -> PyResult<Vec<Bound<'py, Record>>> {
+    ) -> PyResult<Vec<Bound<'py, T>>> {
         let view = self.owner.with_in(py, &Context::default(), build)?;
         view_records(py, &view)
     }
