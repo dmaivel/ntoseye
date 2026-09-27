@@ -438,6 +438,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("s", "memory and disassembly"),
     ("u", "memory and disassembly"),
     ("ub", "memory and disassembly"),
+    ("#", "memory and disassembly"),
     ("uf", "memory and disassembly"),
     ("!db", "memory and disassembly"),
     ("!dd", "memory and disassembly"),

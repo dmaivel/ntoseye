@@ -8,6 +8,7 @@ use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
 use crate::layout::utf16le_lossy;
 use crate::memory::{PAGE_SIZE, for_each_page_chunk, read_page_chunks};
+use crate::symbols::glob_matches;
 use crate::target::{CODE_BITNESS_X86, MAX_SEARCH_MATCHES, SearchStop, StringDescriptor};
 use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
@@ -253,6 +254,15 @@ repl_command! {
     usage: "ub <address> [L<count>]",
     summary: "Disassemble instructions ending at an address.",
     completion: Expression,
+}
+
+repl_command! {
+    cmd_disasm_search;
+    names: ["#"],
+    usage: "# [pattern] [address [L<count>]]",
+    summary: "Search disassembly for the next instruction matching a pattern.",
+    details: "The pattern matches anywhere in an instruction's address, bytes, or text (mnemonic, operands, and resolved symbol), case-insensitively, with `*` and `?` wildcards; quote it to include spaces (`# \"mov*cr3\" nt!KiSwapContext`). The first match is shown. Without an address the search continues after the last match (the first search starts at the instruction pointer), and without a pattern the last one is reused, so a bare `#` finds the next occurrence. `L<count>` bounds the instructions searched; otherwise the search runs until a match, an unreadable page, 1,048,576 instructions, or Ctrl+C.",
+    completion: [None, Expression],
 }
 
 repl_command! {
@@ -1270,6 +1280,136 @@ impl ReplState<'_> {
         render_rows(&rows, |_| None);
         outln!();
 
+        Ok(())
+    }
+
+    fn cmd_disasm_search(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        /// Instructions searched when no count bounds the search.
+        const MAX_SEARCH_INSTRUCTIONS: u64 = 1 << 20;
+        /// Code decoded per read.
+        const CHUNK: usize = PAGE_SIZE;
+        let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
+        let count_arg = match args.get(2..).unwrap_or_default() {
+            [] => None,
+            [count] => match windbg_count_expression(count) {
+                Some(count) => Some(count),
+                None => {
+                    outln!("{}\n", command_help("#"));
+                    return Ok(());
+                }
+            },
+            [l, count] if l.eq_ignore_ascii_case("l") => Some(*count),
+            _ => {
+                outln!("{}\n", command_help("#"));
+                return Ok(());
+            }
+        };
+        if let Some(pattern) = args.first() {
+            self.disasm_search.pattern = Some((*pattern).to_string());
+        }
+        let Some(pattern) = self.disasm_search.pattern.clone() else {
+            outln!("{}\n", command_help("#"));
+            return Ok(());
+        };
+        let start = match args.get(1) {
+            Some(address) => self.eval_or_report(address),
+            None => self.disasm_search.next.or_else(|| {
+                let ip = self.ctx.target.builtin_variable_value("ip");
+                if ip.is_none() {
+                    error!("no address to search from: give one, or halt the target");
+                }
+                ip.map(VirtAddr)
+            }),
+        };
+        let Some(start) = start else {
+            return Ok(());
+        };
+        let budget = match count_arg {
+            Some(count) => match self.eval_or_report(count) {
+                Some(count) if (1..=MAX_SEARCH_INSTRUCTIONS).contains(&count.0) => count.0,
+                Some(_) => {
+                    error!("instruction count must be 1..{MAX_SEARCH_INSTRUCTIONS:#x}");
+                    return Ok(());
+                }
+                None => return Ok(()),
+            },
+            None => MAX_SEARCH_INSTRUCTIONS,
+        };
+
+        let wildcard = format!("*{pattern}*");
+        let matches = |row: &DisasmRow| {
+            let bytes: String = row.hex.split_whitespace().collect();
+            let text = match &row.comment {
+                Some(comment) => format!("{} {comment}", row.asm()),
+                None => row.asm(),
+            };
+            [format!("{:016x}", row.ip), bytes, text]
+                .iter()
+                .any(|part| glob_matches(&wildcard, part, true))
+        };
+        let target = &self.ctx.target;
+        let trace = resolve_thread_trace_context(target, target.current_dtb());
+        let resolve = |address: u64| format_symbol(target, &trace, address);
+        let machine = target.code_machine(start);
+        let max_instruction_bytes = machine.max_instruction_bytes();
+        let mut cursor = start.0;
+        let mut searched = 0u64;
+        let mut found = None;
+        let mut stop = None;
+        'search: while searched < budget {
+            if target.interrupted() {
+                stop = Some("interrupted".to_string());
+                break;
+            }
+            let mut bytes = vec![0u8; CHUNK + max_instruction_bytes];
+            let readable = self.ctx.read_masked_partial(VirtAddr(cursor), &mut bytes);
+            bytes.truncate(readable);
+            // Instructions starting past the chunk are decoded again from the
+            // next read, which has the bytes after them.
+            let window_end = cursor.saturating_add(CHUNK.min(readable) as u64);
+            let read_end = cursor.saturating_add(readable as u64);
+            let mut next = cursor;
+            for row in decode_code(&bytes, cursor, None, machine, resolve) {
+                let end = row
+                    .ip
+                    .saturating_add(row.hex.split_whitespace().count() as u64);
+                if row.ip >= window_end || end > read_end {
+                    break;
+                }
+                searched += 1;
+                next = end;
+                if matches(&row) {
+                    found = Some(row);
+                    break 'search;
+                }
+                if searched == budget {
+                    break;
+                }
+            }
+            if next == cursor {
+                stop = Some(format!("{} is unreadable", ui::addr(cursor)));
+                break;
+            }
+            cursor = next;
+        }
+
+        match found {
+            Some(row) => {
+                let len = row.hex.split_whitespace().count() as u64;
+                self.disasm_search.next = Some(VirtAddr(row.ip.saturating_add(len)));
+                render_rows(&[row], |_| None);
+            }
+            None => {
+                self.disasm_search.next = Some(VirtAddr(cursor));
+                outln!(
+                    "{} for '{pattern}' in {searched:#x} instructions from {}{}",
+                    "no match".bright_black(),
+                    ui::addr(start.0),
+                    stop.map(|stop| format!("; {stop}")).unwrap_or_default()
+                );
+            }
+        }
+        outln!();
         Ok(())
     }
 

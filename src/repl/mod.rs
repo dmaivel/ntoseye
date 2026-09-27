@@ -277,6 +277,8 @@ pub struct ReplState<'a> {
     pub quiet_stops: bool,
     /// Where `ls` continues: the file and the line after the last one listed.
     pub source_cursor: Option<(PathBuf, u32)>,
+    /// The pattern and address `#` continues with.
+    pub disasm_search: DisasmSearch,
     /// How long a resuming command may wait for the next stop before handing
     /// control back with the target still running. `None` (the interactive
     /// prompt) waits until a stop or Ctrl+C. A request/response host sets it
@@ -371,6 +373,7 @@ pub struct ReplStore {
     radix: NumberRadix,
     context: DispatchContext,
     source_cursor: Option<(PathBuf, u32)>,
+    disasm_search: DisasmSearch,
 }
 
 impl ReplStore {
@@ -401,6 +404,7 @@ impl ReplStore {
             radix: NumberRadix::Hexadecimal,
             context,
             source_cursor: None,
+            disasm_search: DisasmSearch::default(),
         }
     }
 
@@ -470,6 +474,7 @@ impl<'a> ReplState<'a> {
             context: store.context,
             quiet_stops: false,
             source_cursor: store.source_cursor,
+            disasm_search: store.disasm_search,
             stop_wait: None,
             unseen_stop_rendered: false,
         }
@@ -484,6 +489,7 @@ impl<'a> ReplState<'a> {
             radix: self.radix,
             context: self.context,
             source_cursor: self.source_cursor,
+            disasm_search: self.disasm_search,
         }
     }
 
@@ -835,6 +841,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         context: DispatchContext::Interactive,
         quiet_stops: false,
         source_cursor: None,
+        disasm_search: DisasmSearch::default(),
         stop_wait: None,
         unseen_stop_rendered: false,
     };

@@ -234,6 +234,14 @@ pub fn repeat_pattern(pattern: &[u8], length: usize) -> Vec<u8> {
     pattern.iter().copied().cycle().take(length).collect()
 }
 
+/// What a `#` without a pattern or address continues with.
+#[derive(Clone, Debug, Default)]
+pub struct DisasmSearch {
+    pub pattern: Option<String>,
+    /// The instruction after the last match, or after the last one searched.
+    pub next: Option<VirtAddr>,
+}
+
 pub enum ItemFormat {
     Bytes,
     Words,
