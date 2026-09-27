@@ -11,7 +11,7 @@ use crate::layout::{FieldInfo, ParsedType, TypeInfo};
 use crate::memory::{AddressSpace, PAGE_SIZE};
 use crate::phys::PhysMem;
 use crate::target::Target;
-use crate::types::{Arch, VirtAddr};
+use crate::types::{Arch, PageTableEntry, PageTableLevel, VirtAddr};
 
 pub const MEM_COMMIT: u32 = 0x1000;
 pub const MEM_RESERVE: u32 = 0x2000;
@@ -118,17 +118,23 @@ pub fn memory_type_name(kind: u32) -> &'static str {
     }
 }
 
-/// The PTE bitfields the walk decodes, from the kernel PDB.
+/// The PTE bitfields the walk decodes, from the kernel PDB. The software
+/// formats are laid out alike on AMD64 and ARM64; the hardware ones differ
+/// in names, and ARM64's has no separate dirty or cache-disable bit.
 struct PteFormat {
+    arch: Arch,
     /// `_MMPTE_SOFTWARE.Protection`; transition, prototype, and subsection
     /// PTEs keep theirs in the same bits.
     protection: FieldInfo,
     prototype: FieldInfo,
     proto_address: FieldInfo,
+    /// AMD64's software `Write`, ARM64's `Writable`.
     write: FieldInfo,
-    hardware_write: FieldInfo,
+    /// AMD64's hardware write bit (`Dirty1`).
+    hardware_write: Option<FieldInfo>,
     copy_on_write: FieldInfo,
-    cache_disable: FieldInfo,
+    cache_disable: Option<FieldInfo>,
+    /// AMD64's `NoExecute`, ARM64's `UserNoExecute`.
     no_execute: FieldInfo,
 }
 
@@ -139,16 +145,30 @@ impl PteFormat {
         let prototype = types.layout("_MMPTE_PROTOTYPE")?;
         let hardware = types.layout("_MMPTE_HARDWARE")?;
         let field = |layout: &TypeInfo, name: &str| layout.field(name).cloned();
+        let either = |first: &str, second: &str| {
+            hardware
+                .field(first)
+                .or_else(|_| hardware.field(second))
+                .cloned()
+        };
         Ok(Self {
+            arch: target.arch(),
             protection: field(&software, "Protection")?,
             prototype: field(&software, "Prototype")?,
             proto_address: field(&prototype, "ProtoAddress")?,
-            write: field(&hardware, "Write")?,
-            hardware_write: field(&hardware, "Dirty1")?,
+            write: either("Write", "Writable")?,
+            hardware_write: field(&hardware, "Dirty1").ok(),
             copy_on_write: field(&hardware, "CopyOnWrite")?,
-            cache_disable: field(&hardware, "CacheDisable")?,
-            no_execute: field(&hardware, "NoExecute")?,
+            cache_disable: field(&hardware, "CacheDisable").ok(),
+            no_execute: either("NoExecute", "UserNoExecute")?,
         })
+    }
+
+    /// Whether a present upper-level entry maps a large page itself.
+    fn maps_large_page(&self, entry: u64, va: u64) -> bool {
+        let attributes =
+            PageTableEntry(entry).attributes(self.arch, PageTableLevel::Pde, VirtAddr(va));
+        attributes.present && attributes.large_page
     }
 
     /// The protection of a valid PTE, from its hardware and software bits:
@@ -162,7 +182,12 @@ impl PteFormat {
             } else {
                 PAGE_WRITECOPY
             }
-        } else if self.write.decode(pte) != 0 || self.hardware_write.decode(pte) != 0 {
+        } else if self.write.decode(pte) != 0
+            || self
+                .hardware_write
+                .as_ref()
+                .is_some_and(|field| field.decode(pte) != 0)
+        {
             if execute {
                 PAGE_EXECUTE_READWRITE
             } else {
@@ -173,7 +198,11 @@ impl PteFormat {
         } else {
             PAGE_READONLY
         };
-        if self.cache_disable.decode(pte) != 0 {
+        if self
+            .cache_disable
+            .as_ref()
+            .is_some_and(|field| field.decode(pte) != 0)
+        {
             access | PAGE_NOCACHE
         } else {
             access
@@ -244,7 +273,7 @@ impl PageWalk<'_> {
             }
         }
         // The PDE: valid and large, it maps the whole span.
-        if entry & 0x81 == 0x81 {
+        if self.format.maps_large_page(entry, va) {
             return Ok((
                 Some(self.format.valid_protection(entry)),
                 span_end(PTE_TABLE_SPAN),
@@ -353,9 +382,9 @@ impl Target {
     /// protection, and type; the page tables (and the prototype PTEs of a
     /// section view) give each page's state and protection.
     pub fn virtual_query(&self, process: &ProcessInfo, address: VirtAddr) -> Result<VprotDetail> {
-        if self.arch() != Arch::Amd64 {
+        if !matches!(self.arch(), Arch::Amd64 | Arch::Arm64) {
             return Err(Error::UnsupportedArchitecture(
-                "!vprot decodes AMD64 page tables only".into(),
+                "!vprot decodes AMD64 and ARM64 page tables only".into(),
             ));
         }
         let guest = self.guest()?;
@@ -487,7 +516,10 @@ impl Target {
             (read("FirstPrototypePte"), read("LastContiguousPte"))
         };
         Ok(PageWalk {
-            memory: self.address_space(process.dtb),
+            // The self-map maps the root it is read through; on ARM64 a
+            // process's root is its TTBR1 as well as its TTBR0 (see
+            // `pte_traverse_in`).
+            memory: AddressSpace::for_arch(&self.phys, process.dtb, process.dtb, self.arch()),
             kernel,
             format: PteFormat::load(self)?,
             self_map: self.pte_self_map()?,
