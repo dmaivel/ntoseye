@@ -100,7 +100,8 @@ impl Target {
     /// the `BlockSize` before it; a segment-heap page keeps no such chain,
     /// so there a block whose `BlockSize` runs over another block's header is
     /// the inconsistency. A classic block's `PoolType` must also name the
-    /// pool the page lies in.
+    /// pool the page lies in. Which layout applies is the kernel's: segment
+    /// heap when it has `RtlpHpHeapGlobals`.
     pub fn validate_pool(&self, address: VirtAddr) -> Result<PoolValidationDetail> {
         let layout = pool_layout(self)?;
         let page = VirtAddr(address.0 & !(POOL_PAGE_SIZE - 1));
@@ -127,7 +128,12 @@ impl Target {
         });
         let blocks = pool_page_blocks(&layout, page, &bytes);
         let candidates = pool_header_candidates(&layout, page, &bytes);
-        let (page_layout, problem) = first_pool_problem(&blocks, &candidates, page, paged);
+        let page_layout = if segment_heap_hint(self).is_some() {
+            PoolPageLayout::SegmentHeap
+        } else {
+            PoolPageLayout::Chained
+        };
+        let problem = first_pool_problem(page_layout, &blocks, &candidates, page, paged);
         Ok(PoolValidationDetail {
             address,
             page,
@@ -372,32 +378,20 @@ impl PoolPageLayout {
     }
 }
 
-/// The first inconsistency among the blocks of the pool page at `page`:
-/// `blocks` is [`pool_page_blocks`]'s reading of it and `candidates`
+/// The first inconsistency among the blocks of the `layout` pool page at
+/// `page`: `blocks` is [`pool_page_blocks`]'s reading of it and `candidates`
 /// [`pool_header_candidates`]'s; `paged` says which pool the page's range
 /// belongs to, when known.
 fn first_pool_problem(
+    layout: PoolPageLayout,
     blocks: &[PoolHeader],
     candidates: &[PoolHeader],
     page: VirtAddr,
     paged: Option<bool>,
-) -> (PoolPageLayout, Option<PoolProblem>) {
+) -> Option<PoolProblem> {
     let page_end = page.0 + POOL_PAGE_SIZE;
-    let real = || blocks.iter().filter(|block| !block.synthetic_free);
-    let chained = blocks.windows(2).any(|pair| {
-        !pair[0].synthetic_free
-            && !pair[1].synthetic_free
-            && pair[1].header.0 == pair[0].header.0 + pair[0].size
-            && pair[1].previous_size == pair[0].size
-    });
-    let layout = if chained {
-        PoolPageLayout::Chained
-    } else {
-        PoolPageLayout::SegmentHeap
-    };
-    let problem =
-        |header: VirtAddr, message: String| (layout, Some(PoolProblem { header, message }));
-    let Some(first) = real().next() else {
+    let problem = |header: VirtAddr, message: String| Some(PoolProblem { header, message });
+    let Some(first) = blocks.iter().find(|block| !block.synthetic_free) else {
         return problem(page, "no _POOL_HEADER in the page".into());
     };
     if layout == PoolPageLayout::Chained && first.header != page {
@@ -495,7 +489,7 @@ fn first_pool_problem(
             PoolPageLayout::SegmentHeap => {}
         }
     }
-    (layout, None)
+    None
 }
 
 /// Whether `header` reads as an allocated segment-heap block's: a tag, a
@@ -575,14 +569,16 @@ mod tests {
     }
 
     fn problem_at(
+        layout: PoolPageLayout,
         blocks: &[PoolHeader],
         candidates: &[PoolHeader],
         paged: Option<bool>,
     ) -> Option<u64> {
-        first_pool_problem(blocks, candidates, PAGE, paged)
-            .1
+        first_pool_problem(layout, blocks, candidates, PAGE, paged)
             .map(|problem| problem.header.0 - PAGE.0)
     }
+
+    const CHAINED: PoolPageLayout = PoolPageLayout::Chained;
 
     #[test]
     fn chained_page_flags_a_previous_size_that_breaks_the_chain() {
@@ -591,24 +587,36 @@ mod tests {
             header(0x100, 0x200, 0x100, 1),
             header(0x300, 0xd00, 0x180, 1),
         ];
-        assert_eq!(problem_at(&blocks, &blocks, Some(false)), Some(0x300));
+        assert_eq!(
+            problem_at(CHAINED, &blocks, &blocks, Some(false)),
+            Some(0x300)
+        );
+        // No link holds, as when the only link is the corrupt one.
+        let blocks = [header(0, 0x100, 0, 1), header(0x100, 0xf00, 0x80, 1)];
+        assert_eq!(
+            problem_at(CHAINED, &blocks, &blocks, Some(false)),
+            Some(0x100)
+        );
     }
 
     #[test]
     fn chained_page_must_end_at_the_page_end() {
         let blocks = [header(0, 0x100, 0, 1), header(0x100, 0x200, 0x100, 1)];
-        assert_eq!(problem_at(&blocks, &blocks, Some(false)), Some(0x100));
+        assert_eq!(
+            problem_at(CHAINED, &blocks, &blocks, Some(false)),
+            Some(0x100)
+        );
         let whole = [header(0, 0x100, 0, 1), header(0x100, 0xf00, 0x100, 1)];
-        assert_eq!(problem_at(&whole, &whole, Some(false)), None);
+        assert_eq!(problem_at(CHAINED, &whole, &whole, Some(false)), None);
     }
 
     #[test]
     fn chained_pool_type_must_match_the_page_region() {
         // PoolType 2 is PagedPool + 1.
         let blocks = [header(0, 0x100, 0, 2), header(0x100, 0xf00, 0x100, 2)];
-        assert_eq!(problem_at(&blocks, &blocks, Some(false)), Some(0));
-        assert_eq!(problem_at(&blocks, &blocks, Some(true)), None);
-        assert_eq!(problem_at(&blocks, &blocks, None), None);
+        assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(false)), Some(0));
+        assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(true)), None);
+        assert_eq!(problem_at(CHAINED, &blocks, &blocks, None), None);
     }
 
     #[test]
@@ -618,15 +626,16 @@ mod tests {
         let overrun = header(0x150, 0x200, 0, 2);
         let next = header(0x360, 0x100, 0, 2);
         let blocks = [outer, next];
+        let heap = PoolPageLayout::SegmentHeap;
         assert_eq!(
-            problem_at(&blocks, &[outer, overrun, next], Some(false)),
+            problem_at(heap, &blocks, &[outer, overrun, next], Some(false)),
             Some(0x40)
         );
         // The second header of a cache-aligned allocation points back at the
         // first with its PreviousSize.
         let aligned = header(0x60, 0x2f0, 0x20, 6);
         assert_eq!(
-            problem_at(&blocks, &[outer, aligned, next], Some(false)),
+            problem_at(heap, &blocks, &[outer, aligned, next], Some(false)),
             None
         );
     }
