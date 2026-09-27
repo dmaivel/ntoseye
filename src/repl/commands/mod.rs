@@ -26,6 +26,7 @@ mod physical;
 mod pnp;
 mod process;
 mod sched;
+mod script;
 mod security;
 mod symbols;
 mod target_control;
@@ -69,7 +70,8 @@ impl ReplState<'_> {
     }
 
     /// Execute frontend-owned breakpoint commands while keeping the core free
-    /// of REPL state. A trailing WinDbg-style `gc` requests automatic resume.
+    /// of REPL state. A WinDbg-style `gc` requests automatic resume; it ends
+    /// the action wherever it runs, so `j (cond) ''; 'gc'` resumes too.
     /// Recursive actions are bounded even when an alias resumes into another
     /// command breakpoint.
     pub fn dispatch_breakpoint_action(&mut self, line: &str) -> Result<bool> {
@@ -84,14 +86,12 @@ impl ReplState<'_> {
                 return Ok(false);
             }
         };
-        let continue_after = commands
-            .last()
-            .is_some_and(|command| command.trim().eq_ignore_ascii_case("gc"));
-        let command_count = commands.len().saturating_sub(usize::from(continue_after));
         self.event_command_depth += 1;
         let outer = std::mem::replace(&mut self.context, DispatchContext::BreakpointAction);
+        // A loop the stop interrupted is not the action's to break.
+        let breakable = std::mem::replace(&mut self.breakable_loop, false);
         let result = (|| {
-            for command in commands.into_iter().take(command_count) {
+            for command in commands {
                 // A failing action command is reported and abandons the rest
                 // of the list. Propagating would end the session, and a log
                 // point whose argument is briefly unreadable must not take
@@ -104,14 +104,16 @@ impl ReplState<'_> {
                     }
                 };
                 match flow {
-                    Flow::Quit | Flow::Denied => return Ok(false),
+                    Flow::Jump(Jump::Resume) => return Ok(true),
+                    Flow::Quit | Flow::Denied | Flow::Jump(_) => return Ok(false),
                     Flow::Continue => {}
                 }
                 self.caches.refresh_expression_context(&self.ctx.target);
             }
-            Ok(continue_after)
+            Ok(false)
         })();
         self.context = outer;
+        self.breakable_loop = breakable;
         self.event_command_depth -= 1;
         result
     }
@@ -133,6 +135,7 @@ impl ReplState<'_> {
         };
         self.event_command_depth += 1;
         let outer = std::mem::replace(&mut self.context, DispatchContext::ExceptionCommand);
+        let breakable = std::mem::replace(&mut self.breakable_loop, false);
         let result = (|| {
             for command in commands {
                 let flow = match self.dispatch_one(command, 0) {
@@ -143,7 +146,7 @@ impl ReplState<'_> {
                     }
                 };
                 match flow {
-                    Flow::Denied => return Ok(()),
+                    Flow::Denied | Flow::Jump(_) => return Ok(()),
                     Flow::Quit => {
                         error!("quit is ignored inside an exception command");
                         return Ok(());
@@ -155,6 +158,7 @@ impl ReplState<'_> {
             Ok(())
         })();
         self.context = outer;
+        self.breakable_loop = breakable;
         self.event_command_depth -= 1;
         result
     }
@@ -221,9 +225,8 @@ impl ReplState<'_> {
 
         for command in commands {
             match self.dispatch_one(command, depth)? {
-                Flow::Quit => return Ok(Flow::Quit),
-                Flow::Denied => return Ok(Flow::Denied),
                 Flow::Continue => {}
+                flow => return Ok(flow),
             }
             self.caches.refresh_expression_context(&self.ctx.target);
         }
@@ -263,6 +266,19 @@ impl ReplState<'_> {
             }
             return self.cmd_tilde(line.trim());
         }
+        // Script files (`$<`, `$$>a<`...) glue the file name on too.
+        if let Some((token, operand)) = script_file_token(line.trim_start()) {
+            if let Some(spec) = command_registry().get("$<")
+                && let Some(flow) = self.admit(spec)?
+            {
+                return Ok(flow);
+            }
+            return self.run_script_file(token, operand);
+        }
+        // So do comments: `$$` runs to the next `;`, `*` to the line's end.
+        if is_comment(line) {
+            return Ok(Flow::Continue);
+        }
         let parsed = match parse_command(line) {
             Ok(Some(parsed)) => parsed,
             Ok(None) => return Ok(Flow::Continue),
@@ -273,6 +289,14 @@ impl ReplState<'_> {
         };
 
         if let Some(spec) = command_registry().get(parsed.name) {
+            // `r $t0 = ...` touches no target state, so it runs whatever the
+            // target is doing, unlike the register display `r` otherwise is.
+            if spec.names[0] == "r"
+                && let Some((slot, value)) = script::pseudo_register_operand(parsed.raw_tail)
+            {
+                self.cmd_pseudo_register(slot, value);
+                return Ok(Flow::Continue);
+            }
             if let Some(flow) = self.admit(spec)? {
                 return Ok(flow);
             }

@@ -232,7 +232,7 @@ impl Server {
         let (result, text) = output::capture(|| state.dispatch_line(line));
         self.repl = Some(state.detach());
         match result {
-            Ok(Flow::Continue | Flow::Quit) => Ok(text),
+            Ok(Flow::Continue | Flow::Quit | Flow::Jump(_)) => Ok(text),
             Ok(Flow::Denied) => Err(if text.is_empty() {
                 "the debug console cannot move the target; use the client's run controls"
                     .to_string()

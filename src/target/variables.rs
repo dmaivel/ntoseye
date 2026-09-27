@@ -205,12 +205,13 @@ impl Target {
             "eprocess" | "process" => self.process.as_ref().map(|p| p.eprocess_va.0),
             "peb" => self.current_process_peb(),
             "pid" => self.process.as_ref().map(|p| p.pid),
-            // `$t0`-`$t19` are WinDbg's twenty writable slots. An assigned
-            // value already wins in the evaluator's user-variable lookup, so
-            // only the documented default of zero belongs here.
+            // `$t0`-`$t19` are WinDbg's twenty writable slots, kept as the
+            // user variables `r $t0 = ...` sets. Pseudo-register names are
+            // case-insensitive, so `$T0` reads the slot too; one never
+            // assigned holds the documented default of zero.
             _ => {
                 return match Self::user_pseudo_register_slot(&name) {
-                    Some(_) => Some(Some(0)),
+                    Some(_) => Some(Some(self.user_vars.get(&name).map_or(0, |var| var.value))),
                     // Not a name either side knows.
                     None => thread.map(|_| None),
                 };
@@ -303,7 +304,7 @@ impl Target {
     }
 
     /// `t0`..`t19` and nothing else: `t20`, `t007`, and `ta` are not slots.
-    fn user_pseudo_register_slot(name: &str) -> Option<u8> {
+    pub fn user_pseudo_register_slot(name: &str) -> Option<u8> {
         let digits = name.strip_prefix('t')?;
         if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
             return None;

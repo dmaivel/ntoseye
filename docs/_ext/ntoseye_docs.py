@@ -110,7 +110,17 @@ class CommandDirective(GenericObject):
         return sig_node["_toc_name"]
 
 
-PUNCTUATION = {".": "dot-", "!": "bang-", "~": "tilde", "?": "question", "+": "-plus"}
+PUNCTUATION = {
+    ".": "dot-",
+    "!": "bang-",
+    "~": "tilde",
+    "?": "question",
+    "+": "-plus",
+    "$": "dollar-",
+    "<": "-lt-",
+    ">": "-gt-",
+    "#": "hash",
+}
 
 
 class CommandRole(XRefRole):

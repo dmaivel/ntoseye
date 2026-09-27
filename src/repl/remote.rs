@@ -47,7 +47,7 @@ where
         state.dispatch_line(&line)
     });
     let ok = match flow {
-        Ok(Flow::Continue | Flow::Quit) => true,
+        Ok(Flow::Continue | Flow::Quit | Flow::Jump(_)) => true,
         Ok(Flow::Denied) => false,
         Err(error) => {
             text.push_str(&format!("error: {error}\n"));

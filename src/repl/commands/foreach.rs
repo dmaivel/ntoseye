@@ -106,7 +106,7 @@ fn quoted_arg(text: &str) -> std::result::Result<(String, &str), String> {
 /// The contents of the `{ ... }` block at the start of `text` and what
 /// follows it. Braces inside quoted strings do not count, so
 /// `{ .echo "}" }` is one block.
-fn take_block(text: &str) -> std::result::Result<(&str, &str), String> {
+pub fn take_block(text: &str) -> std::result::Result<(&str, &str), String> {
     if !text.starts_with('{') {
         return Err("expected '{'".to_string());
     }
@@ -254,7 +254,7 @@ fn foreach_tokens(input: &str, initial_skip: usize, skip: usize) -> Vec<&str> {
 /// aliases require. A value holding `;` or a quote goes in quoted (see
 /// [`splice_value`]): tokens and module names come from the guest, and one
 /// named `x;g` must not resume it.
-fn substitute<E>(
+pub fn substitute<E>(
     text: &str,
     mut lookup: impl FnMut(&str) -> std::result::Result<Option<String>, E>,
 ) -> std::result::Result<String, E> {
@@ -290,7 +290,7 @@ fn substitute<E>(
 
 /// A `!for_each_*` CommandString: the tail unquoted when it is one quoted
 /// string, else the tail as it is; `None` for none.
-fn command_string(tail: &str) -> std::result::Result<Option<String>, String> {
+pub fn command_string(tail: &str) -> std::result::Result<Option<String>, String> {
     let tail = tail.trim();
     if tail.is_empty() {
         return Ok(None);
@@ -423,8 +423,14 @@ impl ReplState<'_> {
     /// Ctrl+C since the outermost loop began (even one a command inside took
     /// to stop itself), or a remote host cancelling the call (client gone,
     /// shutdown).
-    fn command_loop_cancelled(&self) -> bool {
-        self.ctx.target.interrupt_requests() != self.command_loop_interrupts
+    pub fn command_loop_cancelled(&self) -> bool {
+        self.cancelled_since(self.command_loop_interrupts)
+    }
+
+    /// Ctrl+C since [`Target::interrupt_requests`] read `requests`, or a
+    /// remote host cancelling the call.
+    pub fn cancelled_since(&self, requests: u64) -> bool {
+        self.ctx.target.interrupt_requests() != requests
             || self
                 .stop_wait
                 .as_ref()
@@ -435,31 +441,38 @@ impl ReplState<'_> {
     /// `commands(state, index)` gives; `None` skips the iteration. Ctrl+C
     /// stops the loop between iterations. A refused command ends it and is
     /// passed on, so the rest of the line is abandoned as it is for a
-    /// refused command typed alone; so is an internal error.
+    /// refused command typed alone; so is an internal error, and a `gc`
+    /// resuming from the breakpoint whose action runs the loop. `.break` and
+    /// `.continue` steer only `.for`/`.while`/`.do`, so not this loop.
     pub(super) fn run_iterations<'c>(
         &mut self,
         name: &str,
         count: usize,
         mut commands: impl FnMut(&mut Self, usize) -> Option<Cow<'c, str>>,
     ) -> Result<Flow> {
-        for index in 0..count {
-            if self.command_loop_cancelled() {
-                outln!("{name}: interrupted after {index} of {count}");
-                break;
-            }
-            let Some(commands) = commands(self, index) else {
-                continue;
-            };
-            match self.dispatch_line(&commands)? {
-                Flow::Continue => {}
-                Flow::Denied => return Ok(Flow::Denied),
-                Flow::Quit => {
-                    error!("{name}: quit is ignored inside a command loop");
-                    return Ok(Flow::Denied);
+        let breakable = std::mem::replace(&mut self.breakable_loop, false);
+        let flow = (|| {
+            for index in 0..count {
+                if self.command_loop_cancelled() {
+                    outln!("{name}: interrupted after {index} of {count}");
+                    break;
+                }
+                let Some(commands) = commands(self, index) else {
+                    continue;
+                };
+                match self.dispatch_line(&commands)? {
+                    Flow::Continue => {}
+                    Flow::Quit => {
+                        error!("{name}: quit is ignored inside a command loop");
+                        return Ok(Flow::Denied);
+                    }
+                    flow => return Ok(flow),
                 }
             }
-        }
-        Ok(Flow::Continue)
+            Ok(Flow::Continue)
+        })();
+        self.breakable_loop = breakable;
+        flow
     }
 
     /// Run `command` once per item, with the resolver `aliases` builds for
@@ -531,7 +544,9 @@ impl ReplState<'_> {
                 ForeachSource::Commands(commands) => {
                     // Only regular output becomes tokens: errors and warnings
                     // reach the user, not OutCommands.
+                    let breakable = std::mem::replace(&mut state.breakable_loop, false);
                     let (flow, text) = output::capture_output(|| state.dispatch_line(commands));
+                    state.breakable_loop = breakable;
                     if !matches!(flow, Ok(Flow::Continue)) {
                         // The InCommands did not finish: show what they said,
                         // since their refusal or failure is in it.
@@ -539,11 +554,11 @@ impl ReplState<'_> {
                     }
                     match flow? {
                         Flow::Continue => Cow::Owned(text),
-                        Flow::Denied => return Ok(Flow::Denied),
                         Flow::Quit => {
                             error!(".foreach: quit is ignored inside a command loop");
                             return Ok(Flow::Denied);
                         }
+                        flow => return Ok(flow),
                     }
                 }
                 ForeachSource::String(text) => Cow::Borrowed(text.as_str()),

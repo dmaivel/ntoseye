@@ -65,6 +65,14 @@ repl_command! {
 }
 
 repl_command! {
+    cmd_gc -> Flow;
+    names: ["gc"],
+    usage: "gc",
+    summary: "Resume from the breakpoint whose command string is running.",
+    details: "Only valid in a breakpoint's command string. It ends the command string and resumes the target wherever it runs, at the end (`bp nt!NtClose \"r rcx; gc\"`) or in a branch (`bp nt!NtClose \"j (@rcx == 0) '' ; 'gc'\"`); commands after it do not run.",
+}
+
+repl_command! {
     cmd_bc;
     names: ["bc"],
     usage: "bc <id|id-id|*>",
@@ -977,6 +985,18 @@ impl ReplState<'_> {
             .with(Padding::new(0, 2, 0, 0));
         outln!("{table}\n");
         Ok(())
+    }
+
+    fn cmd_gc(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
+        if !invocation.raw_tail.is_empty() {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(Flow::Continue);
+        }
+        if self.context != DispatchContext::BreakpointAction {
+            error!("gc resumes only from a breakpoint's command string; use g");
+            return Ok(Flow::Denied);
+        }
+        Ok(Flow::Jump(Jump::Resume))
     }
 
     fn cmd_bc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

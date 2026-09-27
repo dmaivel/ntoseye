@@ -81,6 +81,20 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | ".foreach"
             // Walks `lm`'s list, the secure kernel's in VTL1.
             | "!for_each_module"
+            // Script control flow; each command it runs passes this gate.
+            | ".if"
+            | ".elsif"
+            | ".else"
+            | ".while"
+            | ".for"
+            | ".do"
+            | ".break"
+            | ".continue"
+            | ".block"
+            | "j"
+            | "$<"
+            | "$$"
+            | ".sleep"
             | ".cls"
             | ".logopen"
             | ".logappend"
@@ -99,7 +113,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
 fn secure_hardware_workflow_command(spec: &CommandSpec) -> bool {
     matches!(
         spec.names[0],
-        "ba" | "bl" | "bc" | "bd" | "be" | "bpc" | "bs" | "br" | "bpp" | "g"
+        "ba" | "bl" | "bc" | "bd" | "be" | "bpc" | "bs" | "br" | "bpp" | "g" | "gc"
     )
 }
 

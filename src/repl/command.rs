@@ -209,10 +209,7 @@ pub fn parse_command(
         return Ok(None);
     }
 
-    let name_end = line[start..]
-        .find(char::is_whitespace)
-        .map(|offset| start + offset)
-        .unwrap_or(line.len());
+    let name_end = command_name_end(line, start);
     let args_start = skip_ws(line, name_end);
     Ok(Some(ParsedCommand {
         name: &line[start..name_end],
@@ -234,6 +231,17 @@ pub fn split_command_list(line: &str) -> std::result::Result<Vec<&str>, CommandP
         if command_style_at(&line[start..]) == Some(CommandStyle::RawTail) {
             commands.push(line[start..].trim());
             return Ok(commands);
+        }
+        // A `$$` comment ends at the next `;`, whatever quotes it holds, so
+        // `$$ don't` is a comment and not an unterminated string.
+        if line[start..].starts_with("$$") && is_comment(&line[start..]) {
+            match line[start..].find(';') {
+                Some(offset) => {
+                    start += offset + 1;
+                    continue;
+                }
+                None => return Ok(commands),
+            }
         }
 
         let mut depth = 0usize;
@@ -276,13 +284,47 @@ fn command_style_at(line: &str) -> Option<CommandStyle> {
     if start >= line.len() {
         return None;
     }
-    let end = line[start..]
-        .find(char::is_whitespace)
-        .map(|offset| start + offset)
-        .unwrap_or(line.len());
+    let text = &line[start..];
+    // `*` comments out the rest of the line, and `$<`/`$><` take it as the
+    // file name, `;` included.
+    if (is_comment(text) && !text.starts_with("$$"))
+        || matches!(script_file_token(text), Some(("$<" | "$><", _)))
+    {
+        return Some(CommandStyle::RawTail);
+    }
+    let end = command_name_end(line, start);
     command_registry()
         .get(&line[start..end])
         .map(|spec| spec.style)
+}
+
+/// Where the command name starting at `start` ends: at whitespace, or for a
+/// dot command also at `(` or `{`, which WinDbg's control-flow tokens take
+/// glued on (`.if(x){...}`, `.block{...}`).
+fn command_name_end(line: &str, start: usize) -> usize {
+    let dot = line[start..].starts_with('.');
+    line[start..]
+        .find(|ch: char| ch.is_whitespace() || (dot && matches!(ch, '(' | '{')))
+        .map(|offset| start + offset)
+        .unwrap_or(line.len())
+}
+
+/// Whether `text` is a WinDbg comment: `*` (to the end of the line) or `$$`
+/// (to the next `;`), but not the script-file tokens `$$<` and `$$>`.
+pub fn is_comment(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with('*')
+        || text
+            .strip_prefix("$$")
+            .is_some_and(|rest| !rest.starts_with(['<', '>']))
+}
+
+/// The script-file token (`$<`, `$><`, `$$<`, `$$><`, `$$>a<`) that opens
+/// `text`, and the file name and arguments glued on after it.
+pub fn script_file_token(text: &str) -> Option<(&'static str, &str)> {
+    ["$$>a<", "$$><", "$$<", "$><", "$<"]
+        .into_iter()
+        .find_map(|token| text.strip_prefix(token).map(|rest| (token, rest)))
 }
 
 /// Where [`scan_unquoted`] stopped.
@@ -358,7 +400,7 @@ pub fn take_quoted(text: &str) -> Option<(String, &str)> {
     None
 }
 
-fn parse_args(
+pub fn parse_args(
     line: &str,
     base: usize,
 ) -> std::result::Result<Vec<Cow<'_, str>>, CommandParseError> {

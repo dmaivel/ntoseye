@@ -231,9 +231,24 @@ pub fn print_padded_table(builder: Builder) {
 pub enum Flow {
     Continue,
     Quit,
-    /// The dispatch context refused a command's run effect (already reported);
-    /// the rest of the command list is abandoned.
+    /// The dispatch context refused a command's run effect, or a script
+    /// construct could not run (already reported); the rest of the command
+    /// list is abandoned.
     Denied,
+    /// A control token ending the command list on its way out to the
+    /// construct it steers, which consumes it: `.break`/`.continue` to the
+    /// innermost `.for`/`.while`/`.do`, `gc` to the breakpoint action. Each
+    /// token refuses to run where nothing would consume it, so a host never
+    /// receives one.
+    Jump(Jump),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Jump {
+    Break,
+    Continue,
+    /// Resume from the breakpoint whose action is running.
+    Resume,
 }
 
 pub struct ReplState<'a> {
@@ -250,6 +265,9 @@ pub struct ReplState<'a> {
     /// a count past it means Ctrl+C was pressed during the loop, even if a
     /// command inside it took the interrupt flag.
     pub command_loop_interrupts: u64,
+    /// Whether the innermost command loop is a `.for`/`.while`/`.do`, the
+    /// loops `.break` and `.continue` steer.
+    pub breakable_loop: bool,
     pub radix: NumberRadix,
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
@@ -447,6 +465,7 @@ impl<'a> ReplState<'a> {
             command_loop_depth: 0,
             command_loop_interrupts: 0,
             radix: store.radix,
+            breakable_loop: false,
             line: String::new(),
             context: store.context,
             quiet_stops: false,
@@ -811,6 +830,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         command_loop_depth: 0,
         command_loop_interrupts: 0,
         radix: NumberRadix::Hexadecimal,
+        breakable_loop: false,
         line: String::new(),
         context: DispatchContext::Interactive,
         quiet_stops: false,
@@ -878,7 +898,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                             state.line = buffer.trim().to_string();
                             match state.dispatch_line(&buffer)? {
                                 Flow::Quit => break,
-                                Flow::Continue | Flow::Denied => {}
+                                Flow::Continue | Flow::Denied | Flow::Jump(_) => {}
                             }
                         }
                     }
