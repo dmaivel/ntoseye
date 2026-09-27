@@ -1,6 +1,6 @@
 # Your first session
 
-This walks through one session against a Windows 11 VM: attach, look around, stop on a kernel function, read its arguments, step, and leave. Every command and output below was captured from a real session and trimmed only where marked `...`. It assumes a target you can attach to; the [Quickstart](quickstart.md) gets you there.
+This walks through one session against a Windows 11 VM: attach, look around, stop on a kernel function, read its arguments, step, and leave.
 
 The session uses the `kdnet` backend, Windows' own kernel debugging over the network, as WinDbg uses it; the [KDNET guide](../setup/kdnet.md) sets it up. The commands are the same over `kd` and `gdb`; what differs is where the first stop lands.
 

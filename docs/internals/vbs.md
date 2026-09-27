@@ -1,6 +1,6 @@
 # VBS internals
 
-How [VBS inspection](../platforms/vbs.md) works: what `ntoseye` reads, how it recognizes it, and what it refuses. None of it is needed to use the feature.
+How [VBS inspection](../platforms/vbs.md) works: what `ntoseye` reads, how it recognizes it, and what it refuses.
 
 ## Finding the secure kernel
 

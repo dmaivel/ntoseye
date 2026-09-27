@@ -1,6 +1,6 @@
 # Bugchecks
 
-When Windows crashes, it stops with a *bugcheck*, the blue screen, and names what went wrong with a code and four arguments. With a debugger attached, the crash stops in the debugger first, while everything is still in memory. This page follows one: Sysinternals NotMyFault's high-IRQL fault (`notmyfaultc64 -accepteula crash 0x01`) in a Windows 11 VM, over the `kdnet` backend. Every output below comes from that session, trimmed only where marked `...`.
+When Windows crashes, it stops with a *bugcheck*, the blue screen, and names what went wrong with a code and four arguments. With a debugger attached, the crash stops in the debugger first, while everything is still in memory. This page follows one: Sysinternals NotMyFault's high-IRQL fault (`notmyfaultc64 -accepteula crash 0x01`) in a Windows 11 VM, over the `kdnet` backend.
 
 ## How the crash is caught
 
