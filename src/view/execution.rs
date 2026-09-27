@@ -132,6 +132,7 @@ pub fn call_trace(trace: &CallTrace) -> View {
         CallTraceEnd::Limit => ("limit", None),
         CallTraceEnd::Interrupted => ("interrupted", None),
         CallTraceEnd::Breakpoint => ("breakpoint", None),
+        CallTraceEnd::Diverted => ("diverted", None),
         CallTraceEnd::Failed(error) => ("failed", Some(error.clone())),
     };
     View::Object(vec![

@@ -1106,6 +1106,38 @@ fn a_step_diverted_into_an_interrupt_handler_says_so() {
     }
 }
 
+/// Stepping on from a diverted step steps the handler's wait, which no held
+/// vCPU ends: a step loop stops where the step landed instead of stepping
+/// that wait to its limit.
+#[test]
+fn step_loops_stop_at_a_diverted_step() {
+    let code = [0x90u8; 0x40]; // no call for `until="call"` to find
+    let diverted_session = || {
+        let mut backend = MockBackend {
+            allow_breakpoints: true,
+            single_step_unsafe: true,
+            halts_only_on_interrupt: true,
+            lands_at: Some(0x1030),
+            one_vcpu: true,
+            ..MockBackend::default()
+        };
+        backend.set("rip", 0x1000);
+        stepping_session(&code, backend)
+    };
+
+    let mut session = diverted_session();
+    let outcome = session
+        .step_until(StepMode::Into, 1_000, None, |_, flow| {
+            flow == crate::disasm::ControlFlow::Call
+        })
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1030 }));
+
+    let trace = diverted_session().trace_calls(1_000).unwrap();
+    assert_eq!(trace.end, CallTraceEnd::Diverted);
+    assert_eq!(trace.instructions, 0);
+}
+
 /// Secure-kernel code is never patched: a step there marks its successors
 /// with debug-register sites in slots no breakpoint holds.
 #[test]

@@ -35,6 +35,15 @@ impl Session {
     /// stub can drop non-hit ones on a stop) and re-select the landed-on thread.
     /// The full "step one instruction", shared by the REPL (`si`) and the SDK.
     pub fn step(&mut self) -> Result<u64> {
+        self.step_once().map(|(rip, _)| rip)
+    }
+
+    /// [`Self::step`], saying whether the vCPU was diverted: resumed alone,
+    /// it reached no successor and was broken in on elsewhere, in an
+    /// interrupt handler that waits on a held vCPU. Stepping on from there
+    /// steps that handler's wait, which no held vCPU will ever end; loops
+    /// that step stop instead.
+    fn step_once(&mut self) -> Result<(u64, RunPast)> {
         self.require_steppable_vcpu()?;
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
@@ -99,33 +108,37 @@ impl Session {
                 self.current_thread
             )));
         }
-        Ok(rip)
+        Ok((rip, stepped))
     }
 
     /// Decode the instruction at the current thread's program counter, masking
-    /// any software-breakpoint patch and reading through the thread's preferred
-    /// code DTB. Selects the current thread first; the VM must be halted.
+    /// any software-breakpoint patch and reading through the thread's own root,
+    /// which it fetches through. Selects the current thread first; the VM must
+    /// be halted.
     pub fn current_instruction(&mut self) -> Result<CurrentInstruction> {
         self.require_steppable_vcpu()?;
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
         self.target.registers = Some(self.register_map.to_hashmap(&regs));
         let pc = self.register_map.read_u64("rip", &regs)?;
-        let dtb = self
+        let (code_dtb, active_dtb) = match self
             .register_map
             .read_u64(self.target.arch().dtb_register(), &regs)
-            .unwrap_or(0);
-        let trace = resolve_thread_trace_context(&self.target, dtb);
-        let code_dtb = preferred_code_dtb(&trace, pc);
+        {
+            Ok(cr3) => {
+                let root = thread_root(&self.target, cr3);
+                (root, root)
+            }
+            Err(_) => {
+                let trace = resolve_thread_trace_context(&self.target, 0);
+                (preferred_code_dtb(&trace, pc), trace.active_dtb)
+            }
+        };
         let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
-        self.breakpoints.mask_breakpoint_bytes(
-            &self.target,
-            VirtAddr(pc),
-            &mut bytes,
-            trace.active_dtb,
-        );
+        self.breakpoints
+            .mask_breakpoint_bytes(&self.target, VirtAddr(pc), &mut bytes, active_dtb);
         self.mask_bugcheck_trap(VirtAddr(pc), &mut bytes);
 
         if self.target.arch() == Arch::Arm64 {
@@ -248,9 +261,10 @@ impl Session {
     /// Step until `stop` accepts the instruction about to execute, into or
     /// over calls per `mode`: the SDK's `step(until=)` and `run_to(step=)`.
     /// Returns the `Step` there; a breakpoint, exception, or other stop met on
-    /// the way is returned as is. An interrupt request ([`Target::interrupt`])
-    /// or an elapsed `timeout` ends the walk where it is, as a `Step`; `limit`
-    /// instructions without a match is an error.
+    /// the way is returned as is. An interrupt request ([`Target::interrupt`]),
+    /// an elapsed `timeout`, or a step diverted into an interrupt handler
+    /// (see [`Self::step_once`]) ends the walk where it is, as a `Step`;
+    /// `limit` instructions without a match is an error.
     pub fn step_until(
         &mut self,
         mode: StepMode,
@@ -284,7 +298,15 @@ impl Session {
                         deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
                     self.run_to(next, remaining, &cancel)?
                 }
-                _ => ContinueOutcome::Step { rip: self.step()? },
+                _ => {
+                    let (rip, stepped) = self.step_once()?;
+                    if stepped == RunPast::Diverted {
+                        let outcome = ContinueOutcome::Step { rip };
+                        self.note_stop(&outcome);
+                        return Ok(outcome);
+                    }
+                    ContinueOutcome::Step { rip }
+                }
             };
             let rip = match step {
                 ContinueOutcome::Step { rip } => rip,
@@ -317,9 +339,10 @@ impl Session {
     /// Single-step the current function and collect its call tree (`wt`), up
     /// to `limit` instructions. A frame closes on a `ret` that moves the stack
     /// pointer above the one it was entered with, so a `ret` that does not
-    /// leave the frame (a retpoline) is not taken for a return. An interrupt
-    /// request ([`Target::interrupt`]), a breakpoint, or a failed step ends
-    /// the trace early; [`CallTrace::end`] says which.
+    /// the frame (a retpoline) is not taken for a return. An interrupt
+    /// request ([`Target::interrupt`]), a breakpoint, a step diverted into an
+    /// interrupt handler, or a failed step ends the trace early;
+    /// [`CallTrace::end`] says which.
     pub fn trace_calls(&mut self, limit: usize) -> Result<CallTrace> {
         if limit == 0 {
             return Err(Error::InvalidArgument(
@@ -348,8 +371,10 @@ impl Session {
             if self.target.interrupt.swap(false, Ordering::SeqCst) {
                 break CallTraceEnd::Interrupted;
             }
-            if let Err(error) = self.step() {
-                break CallTraceEnd::Failed(error.to_string());
+            match self.step_once() {
+                Ok((_, RunPast::Reached)) => {}
+                Ok((_, RunPast::Diverted)) => break CallTraceEnd::Diverted,
+                Err(error) => break CallTraceEnd::Failed(error.to_string()),
             }
             instructions += 1;
             let next = match self.control_state() {

@@ -98,7 +98,9 @@ def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
         require_single_step(halted)
         # gdb single-steps at a few hundred instructions a second.
         trace = halted.trace_calls(limit=2_000)
-        if not (trace.end == "failed" and HYPERVISOR_WAIT in (trace.error or "")):
+        if trace.end != "diverted" and not (
+            trace.end == "failed" and HYPERVISOR_WAIT in (trace.error or "")
+        ):
             break
     assert trace.end in ("returned", "limit")
     assert trace.instructions > 0

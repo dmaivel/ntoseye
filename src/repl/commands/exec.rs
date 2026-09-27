@@ -920,6 +920,10 @@ impl ReplState<'_> {
             CallTraceEnd::Limit => outln!("wt instruction cap reached after {count} instructions"),
             CallTraceEnd::Interrupted => outln!("wt interrupted after {count} instructions"),
             CallTraceEnd::Breakpoint => error!("watch-trace stopped at a code breakpoint"),
+            CallTraceEnd::Diverted => error!(
+                "watch-trace stopped after {count} instructions: a step was diverted into an \
+                 interrupt handler"
+            ),
             CallTraceEnd::Failed(error) => {
                 error!("watch-trace stopped after {count} instructions: {error}")
             }
