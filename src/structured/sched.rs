@@ -67,7 +67,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             )),
         },
         "!uniqstack" | "uniqstack" => UniqStackOptions::parse(argv).and_then(|(_, scope)| {
-            let scope = args.target().uniqstack_scope(scope)?;
+            let scope = args.state.uniqstack_scope(scope)?;
             let detail = args.state.ctx.inspect_uniqstack(scope)?;
             Ok(view::sched::uniqstack(&detail))
         }),

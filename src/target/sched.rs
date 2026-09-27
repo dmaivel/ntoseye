@@ -345,52 +345,6 @@ impl UniqStackOptions {
     }
 }
 
-impl Target {
-    /// The threads `!uniqstack` groups: `*` for every thread, a PID or a
-    /// process-name substring naming one process, and by default the
-    /// `.process` selection, or every thread when none is selected.
-    pub fn uniqstack_scope(&self, argument: Option<&str>) -> Result<UniqStackScope> {
-        let process = match argument {
-            Some("*") => return Ok(UniqStackScope::AllThreads),
-            None => match self.attached_process() {
-                Some(process) => process.clone(),
-                None => return Ok(UniqStackScope::AllThreads),
-            },
-            Some(text) => {
-                let mut processes = self.matching_processes(Some(text))?;
-                // `System` is also a substring of `Secure System`.
-                let exact: Vec<usize> = processes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, process)| process.name.eq_ignore_ascii_case(text))
-                    .map(|(index, _)| index)
-                    .collect();
-                if let [index] = exact.as_slice() {
-                    processes.swap(0, *index);
-                    processes.truncate(1);
-                }
-                match processes.len() {
-                    1 => processes.remove(0),
-                    0 => {
-                        return Err(Error::InvalidArgument(format!(
-                            "no process matches '{text}'"
-                        )));
-                    }
-                    many => {
-                        return Err(Error::InvalidArgument(format!(
-                            "ambiguous process '{text}': {many} matches; give a PID"
-                        )));
-                    }
-                }
-            }
-        };
-        Ok(UniqStackScope::Process {
-            pid: process.pid,
-            name: process.name,
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct UniqStackDetail {
     pub scope: UniqStackScope,

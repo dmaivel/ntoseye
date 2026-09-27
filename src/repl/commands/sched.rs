@@ -90,8 +90,8 @@ repl_command! {
     names: ["!uniqstack", "uniqstack"],
     usage: "!uniqstack [-v] [-n] [*|process]",
     summary: "Group threads by identical call stacks, showing each distinct stack once.",
-    details: "WinDbg's !uniqstack groups the user-mode stacks of the current process's threads; this one groups the threads the kernel schedules, by their stacks as !stacks 2 walks them (up to 64 frames: the kernel frames, then the user-mode frames below a system call): the threads of the .process selection, or of every process when none is selected (the default in a kernel session), * for every thread, or a PID or process name for one process. Threads whose frames have the same instruction pointers (and the same truncation) share a group. Each distinct stack is shown once, from its first thread, with the number of threads sharing it and their thread IDs by process; totals follow. -n numbers the frames; -v shows how each frame was recovered (current, seed, unwind, or scan), as kv does, in place of WinDbg's x86 FPO data. WinDbg's -b and -p are refused: x64 passes the first arguments in registers, which a saved stack does not keep, and -p needs private-symbol parameters per frame (use .thread and kp on one thread). A thread whose stack does not walk (one running on a processor while the target runs) is listed apart.",
-    completion: [None, Process],
+    details: "WinDbg's !uniqstack groups the user-mode stacks of the current process's threads; this one groups the threads the kernel schedules, by their stacks as !stacks 2 walks them (up to 64 frames: the kernel frames, then the user-mode frames below a system call): the threads of the .process selection, or of every process when none is selected (the default in a kernel session), * for every thread, or one process by PID, EPROCESS address, or name. Threads whose frames have the same instruction pointers (and the same truncation) share a group. Each distinct stack is shown once, from its first thread, with the number of threads sharing it and their thread IDs by process; totals follow. -n numbers the frames; -v shows how each frame was recovered (current, seed, unwind, or scan), as kv does, in place of WinDbg's x86 FPO data. WinDbg's -b and -p are refused: x64 passes the first arguments in registers, which a saved stack does not keep, and -p needs private-symbol parameters per frame (use .thread and kp on one thread). A thread whose stack does not walk (one running on a processor while the target runs) is listed apart.",
+    completion: Process,
 }
 
 fn diagnostic_cell<T: std::fmt::Display>(value: &DiagnosticValue<T>) -> String {
@@ -512,7 +512,7 @@ impl ReplState<'_> {
     fn cmd_uniqstack(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
         let result = UniqStackOptions::parse(&args).and_then(|(options, scope)| {
-            let scope = self.ctx.target.uniqstack_scope(scope)?;
+            let scope = self.uniqstack_scope(scope)?;
             Ok((options, self.ctx.inspect_uniqstack(scope)?))
         });
         match result {
@@ -520,6 +520,28 @@ impl ReplState<'_> {
             Err(error) => error!("!uniqstack: {error}"),
         }
         Ok(())
+    }
+
+    /// The threads `!uniqstack` groups: `*` for every thread, one process
+    /// named as `.process` names it or by name (see
+    /// [`Self::process_for_selector_or_name`]), and by default the `.process`
+    /// selection, or every thread when none is selected.
+    pub fn uniqstack_scope(&self, argument: Option<&str>) -> Result<UniqStackScope> {
+        let process = match argument {
+            Some("*") => return Ok(UniqStackScope::AllThreads),
+            None => match self.ctx.target.attached_process() {
+                Some(process) => process.clone(),
+                None => return Ok(UniqStackScope::AllThreads),
+            },
+            Some(selector) => {
+                let processes = self.ctx.target.matching_processes(None)?;
+                self.process_for_selector_or_name(selector, &processes)?
+            }
+        };
+        Ok(UniqStackScope::Process {
+            pid: process.pid,
+            name: process.name,
+        })
     }
 }
 

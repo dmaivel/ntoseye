@@ -561,6 +561,7 @@ mod tests {
     use super::{decide_bitness, select_thread_process_dtb, thread_owner_matches};
     use crate::guest::{ModuleInfo, ProcessInfo};
     use crate::session::session_over_memory;
+    use crate::target::process_by_name;
     use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, sample_thread};
     use crate::types::CodeMachine;
     use crate::types::VirtAddr;
@@ -671,5 +672,29 @@ mod tests {
             target.set_parked_windows_thread(thread);
             assert_eq!(target.current_dtb(), kernel, "pid {pid:?}");
         }
+    }
+
+    /// A name matched whole picks its process over the ones it is only a
+    /// substring of; a substring shared by several is ambiguous.
+    #[test]
+    fn process_names_prefer_a_whole_match() {
+        let process = |pid, name: &str| ProcessInfo {
+            pid,
+            name: name.into(),
+            dtb: 0,
+            eprocess_va: VirtAddr(0),
+            wow64_peb: None,
+        };
+        let processes = [
+            process(4, "System"),
+            process(0x70, "Secure System"),
+            process(0x1f10, "svchost.exe"),
+            process(0x2004, "svchost.exe"),
+        ];
+        let pid = |name| process_by_name(&processes, name).map(|process| process.pid);
+        assert_eq!(pid("system").unwrap(), 4);
+        assert_eq!(pid("secure").unwrap(), 0x70);
+        assert!(pid("svchost.exe").is_err());
+        assert!(pid("notepad").is_err());
     }
 }

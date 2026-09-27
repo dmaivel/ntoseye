@@ -447,6 +447,33 @@ pub fn process_matches(process: &ProcessInfo, filter: &str) -> bool {
     }
 }
 
+/// The one process whose name contains `name`, ignoring case. A name
+/// matched whole wins over the processes it is only a substring of
+/// (`System` over `Secure System`).
+pub fn process_by_name<'a>(processes: &'a [ProcessInfo], name: &str) -> Result<&'a ProcessInfo> {
+    let needle = name.to_ascii_lowercase();
+    let matching: Vec<&ProcessInfo> = processes
+        .iter()
+        .filter(|process| process.name.to_ascii_lowercase().contains(&needle))
+        .collect();
+    let mut exact = matching
+        .iter()
+        .filter(|process| process.name.eq_ignore_ascii_case(name));
+    if let (Some(process), None) = (exact.next(), exact.next()) {
+        return Ok(process);
+    }
+    match matching.as_slice() {
+        [process] => Ok(process),
+        [] => Err(Error::InvalidArgument(format!(
+            "no process matches '{name}'"
+        ))),
+        many => Err(Error::InvalidArgument(format!(
+            "ambiguous process '{name}': {} matches; give a PID",
+            many.len()
+        ))),
+    }
+}
+
 /// Parse bare decimal digits as a PID, matching display and completion output.
 /// Other selectors fall back to radix-sensitive expression evaluation.
 pub fn decimal_pid_literal(text: &str) -> Option<u64> {

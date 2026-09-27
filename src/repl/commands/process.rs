@@ -9,7 +9,7 @@ use crate::expr::Expr;
 use crate::guest::ProcessInfo;
 use crate::symbols::glob_matches;
 use crate::target::sched::ProcessDetail;
-use crate::target::{AttachReport, decimal_pid_literal, process_matches};
+use crate::target::{AttachReport, decimal_pid_literal, process_by_name, process_matches};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -202,6 +202,19 @@ impl ReplState<'_> {
         address
             .map(|address| address.0)
             .and_then(|pid| processes.iter().find(|process| process.pid == pid).cloned())
+    }
+
+    /// [`Self::process_for_selector`], or else the process a name names (see
+    /// [`process_by_name`]).
+    pub fn process_for_selector_or_name(
+        &self,
+        selector: &str,
+        processes: &[ProcessInfo],
+    ) -> Result<ProcessInfo> {
+        match self.process_for_selector(selector, processes) {
+            Some(process) => Ok(process),
+            None => process_by_name(processes, selector).cloned(),
+        }
     }
 
     fn print_process_threads(&mut self, process: &ProcessInfo, include_stack: bool) {
