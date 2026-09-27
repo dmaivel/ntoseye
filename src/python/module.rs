@@ -8,7 +8,7 @@ use pyo3::types::{PyAny, PyBytes, PyDict};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{DriverIterator, ModuleIterator};
-use super::record::{PlainDict, Record};
+use super::record::{BaseRecord, PlainDict, Record};
 use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict, view_record};
 use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
@@ -17,6 +17,7 @@ use crate::pe;
 use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
+use crate::view::shape::ViewValue;
 use crate::view::{self, View};
 use pelite::PeView;
 
@@ -289,7 +290,7 @@ impl Module {
     }
 
     /// Symbol status, load diagnostics and PDB identity (`lmv`).
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, BaseRecord>> {
         let info = self.info.clone();
         let process = matches!(self.space, Space::Process(_));
         let view = self.owner.with_in(py, &self.context(), |session| {
@@ -306,7 +307,7 @@ impl Module {
                             info.name
                         )))
                     })?;
-                Ok(view::usermode::loader_module(module))
+                Ok(view::usermode::loader_module(module).into_view())
             } else {
                 let mut fields = match view::module::module(&info) {
                     View::Object(fields) => fields,
@@ -390,7 +391,7 @@ impl Module {
         &self,
         py: Python<'py>,
         include_diffs: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::usermode::py::ImageCheck>> {
         let name = self.info.short_name.clone();
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.check_image(&name, include_diffs).map_err(err)
@@ -528,7 +529,10 @@ impl Modules {
     /// `wow64_termination`, each `{kind, address, error}`), to tell a complete
     /// list from a corrupt or truncated one; `None` for kernel modules.
     #[getter]
-    fn termination<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
+    fn termination<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, view::usermode::py::LoaderTerminations>>> {
         let Space::Process(process) = &self.space else {
             return Ok(None);
         };

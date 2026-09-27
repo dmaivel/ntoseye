@@ -1,207 +1,385 @@
 //! Process, thread, job, global-flag, and zombie [`View`] builders.
 
-use super::shape::ViewValue;
-use super::{View, diagnostic, list_termination};
+use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
+use super::{ListEnd, View, list_termination};
 use crate::guest::ProcessInfo;
 use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
 use crate::target::job::{JobDetail, JobField, job_limit_flag_names};
-use crate::target::zombies::{ObjectCounts, ZombiesDetail};
+use crate::target::zombies::ZombiesDetail;
 use crate::target::{ThreadInfo, kthread_state_name, wait_reason_name};
-use crate::types::VirtAddr;
+
+shapes! {
+    /// A Windows thread from the kernel thread walk (`threads`, `!thread`).
+    /// Fields the walk could not read are `None`.
+    ThreadOverview {
+        tid: Option<u64>,
+        pid: Option<u64>,
+        /// The owning process's image name.
+        process_name: Option<String>,
+        ethread: Hex,
+        kthread: Hex,
+        /// The owning `_EPROCESS`.
+        eprocess: Option<Hex>,
+        /// `_KTHREAD.State`.
+        state: Option<u64>,
+        /// The state's name (`Running`, `Waiting`, ...).
+        state_name: Option<String>,
+        /// `_KTHREAD.WaitReason`.
+        wait_reason: Option<u64>,
+        /// The wait reason's name (`Executive`, `UserRequest`, ...).
+        wait_reason_name: Option<String>,
+        /// The vCPU currently running the thread; `None` when none is, or
+        /// when the target is running.
+        active: Option<String>,
+    }
+
+    /// A process's identity (`ps`, `!process 0 0`).
+    ProcessIdentity {
+        pid: u64,
+        /// The image name.
+        name: String,
+        /// The directory table base (page-table root).
+        dtb: Hex,
+        eprocess: Hex,
+        /// A 32-bit process running under WOW64.
+        wow64: bool,
+    }
+
+    /// A job's `_EJOB` accounting; a field this build lacks is `None`.
+    JobAccounting {
+        /// In 100 ns units.
+        total_user_time: Omit<u64>,
+        /// In 100 ns units.
+        total_kernel_time: Omit<u64>,
+        /// In CPU cycles.
+        total_cycle_time: Omit<u64>,
+        /// In 100 ns units.
+        this_period_total_user_time: Omit<u64>,
+        /// In 100 ns units.
+        this_period_total_kernel_time: Omit<u64>,
+        total_page_fault_count: Omit<u64>,
+        /// Processes ever assigned.
+        total_processes: Omit<u64>,
+        active_processes: Omit<u64>,
+        /// Processes terminated by a job limit violation.
+        total_terminated_processes: Omit<u64>,
+        /// In pages.
+        peak_process_memory_used: Omit<u64>,
+        /// In pages.
+        peak_job_memory_used: Omit<u64>,
+        /// In pages.
+        current_job_memory_used: Omit<u64>,
+    }
+
+    /// A job's `_EJOB` limit settings; a field this build lacks is `None`.
+    JobLimits {
+        /// `JOB_OBJECT_LIMIT_*` bits set.
+        limit_flags: Omit<u64>,
+        /// Limit bits in effect, nesting included.
+        effective_limit_flags: Omit<u64>,
+        active_process_limit: Omit<u64>,
+        /// In 100 ns units.
+        per_process_user_time_limit: Omit<u64>,
+        /// In 100 ns units.
+        per_job_user_time_limit: Omit<u64>,
+        /// In pages.
+        minimum_working_set_size: Omit<u64>,
+        /// In pages.
+        maximum_working_set_size: Omit<u64>,
+        /// In pages.
+        process_memory_limit: Omit<u64>,
+        /// In pages.
+        job_memory_limit: Omit<u64>,
+        priority_class: Omit<u64>,
+        scheduling_class: Omit<u64>,
+        /// `JOB_OBJECT_UILIMIT_*` bits set.
+        ui_restrictions_class: Omit<u64>,
+    }
+
+    /// A job object (`!job`): its accounting, limits, flags, nesting, and
+    /// the processes assigned to it. A field this build lacks is `None`.
+    Job {
+        /// The `_EJOB`.
+        address: Hex,
+        job_id: Option<u64>,
+        session_id: Option<u64>,
+        accounting: JobAccounting,
+        limits: JobLimits,
+        /// The `JOB_OBJECT_LIMIT_*` names of the limit flags set; an
+        /// unnamed bit is its hex value.
+        limit_flag_names: Vec<String>,
+        /// `_EJOB.JobFlags`.
+        job_flags: Option<Hex>,
+        /// The `JobFlags` bits set, by their PDB names.
+        job_flag_names: Vec<String>,
+        nesting_depth: Option<u64>,
+        /// `None` for a top-level job.
+        parent_job: Option<Hex>,
+        /// `None` for a top-level job.
+        root_job: Option<Hex>,
+        child_jobs: Vec<Hex>,
+        child_job_list_termination: ListEnd,
+        /// The job is a silo.
+        silo: bool,
+        /// `None` for a job that is not a server silo.
+        server_silo_globals: Option<Hex>,
+        processes: Vec<ProcessIdentity>,
+        /// `_EPROCESS` addresses on the job's list that could not be decoded.
+        unreadable_processes: Vec<Hex>,
+        process_list_termination: ListEnd,
+    }
+
+    /// One GFlags flag set.
+    GlobalFlag {
+        /// The flag's bit mask.
+        bit: Hex,
+        /// The GFlags abbreviation (`hpa`, `ust`, ...).
+        abbreviation: &'static str,
+        description: &'static str,
+    }
+
+    /// A process's `_PEB.NtGlobalFlag`.
+    ProcessGlobalFlags {
+        value: Hex,
+        flags: Vec<GlobalFlag>,
+    }
+
+    /// `nt!NtGlobalFlag` and the current process's `_PEB.NtGlobalFlag`
+    /// (`!gflag`).
+    GlobalFlags {
+        /// `nt!NtGlobalFlag`'s address.
+        kernel_address: Hex,
+        /// `nt!NtGlobalFlag`.
+        kernel: Hex,
+        kernel_flags: Vec<GlobalFlag>,
+        /// The current process; `None` with no process selected.
+        process: Option<ProcessIdentity>,
+        /// The current process's flags, read from its PEB.
+        process_flags: Diag<ProcessGlobalFlags>,
+    }
+
+    /// An exited process whose object is still referenced.
+    ZombieProcess {
+        eprocess: Hex,
+        pid: u64,
+        /// The image name.
+        image: String,
+        /// `_EPROCESS.ExitTime`, a FILETIME.
+        exit_time: Hex,
+        /// The exit NTSTATUS.
+        exit_status: Hex,
+        /// Open handles to the object.
+        handle_count: u64,
+        /// References to the object.
+        pointer_count: u64,
+    }
+
+    /// A terminated thread whose object is still referenced.
+    ZombieThread {
+        ethread: Hex,
+        pid: u64,
+        tid: u64,
+        /// The owning `_EPROCESS`.
+        process: Hex,
+        /// The owning process's image name; `None` when unreadable.
+        image: Option<String>,
+        /// The exit NTSTATUS.
+        exit_status: Hex,
+        /// Open handles to the object.
+        handle_count: u64,
+        /// References to the object.
+        pointer_count: u64,
+    }
+
+    /// Exited processes and terminated threads still referenced, found by
+    /// scanning nonpaged pool (`!zombies`).
+    Zombies {
+        /// `None` when the flags did not ask for processes.
+        processes: Option<Vec<ZombieProcess>>,
+        /// `None` when the flags did not ask for threads.
+        threads: Option<Vec<ZombieThread>>,
+        /// Live processes seen by the scan.
+        live_processes: u64,
+        /// Live threads seen by the scan.
+        live_threads: u64,
+        /// The scanned pool region's start.
+        region_start: Hex,
+        /// The scanned pool region's end.
+        region_end: Hex,
+        scanned_pages: u64,
+        /// The scan was interrupted before it finished.
+        interrupted: bool,
+        /// A result list hit its cap.
+        truncated: bool,
+    }
+}
 
 /// One Windows thread from the kernel thread walk; `active` is the vCPU id
 /// currently running it (only resolved while halted).
 pub fn thread(t: &ThreadInfo, active: Option<&str>) -> View {
-    View::Object(vec![
-        ("tid", View::OptNum(t.tid)),
-        ("pid", View::OptNum(t.pid)),
-        ("process_name", View::OptStr(t.process_name.clone())),
-        ("ethread", View::Hex(t.ethread.0)),
-        ("kthread", View::Hex(t.kthread.0)),
-        ("eprocess", View::OptHex(t.eprocess.map(|a| a.0))),
-        ("state", View::OptNum(t.state.map(u64::from))),
-        (
-            "state_name",
-            View::OptStr(t.state.map(|s| kthread_state_name(s).to_string())),
-        ),
-        ("wait_reason", View::OptNum(t.wait_reason.map(u64::from))),
-        (
-            "wait_reason_name",
-            View::OptStr(t.wait_reason.map(|r| wait_reason_name(r).to_string())),
-        ),
-        ("active", View::OptStr(active.map(str::to_string))),
-    ])
+    ThreadOverview {
+        tid: t.tid,
+        pid: t.pid,
+        process_name: t.process_name.clone(),
+        ethread: Hex(t.ethread.0),
+        kthread: Hex(t.kthread.0),
+        eprocess: t.eprocess.map(|a| Hex(a.0)),
+        state: t.state.map(u64::from),
+        state_name: t.state.map(|s| kthread_state_name(s).to_string()),
+        wait_reason: t.wait_reason.map(u64::from),
+        wait_reason_name: t.wait_reason.map(|r| wait_reason_name(r).to_string()),
+        active: active.map(str::to_string),
+    }
+    .into_view()
+}
+
+fn process_identity(process: &ProcessInfo) -> ProcessIdentity {
+    ProcessIdentity {
+        pid: process.pid,
+        name: process.name.clone(),
+        dtb: Hex(process.dtb),
+        eprocess: Hex(process.eprocess_va.0),
+        wow64: process.is_wow64(),
+    }
 }
 
 pub fn process(process: &ProcessInfo) -> View {
-    View::Object(vec![
-        ("pid", View::Num(process.pid)),
-        ("name", View::Str(process.name.clone())),
-        ("dtb", View::Hex(process.dtb)),
-        ("eprocess", View::Hex(process.eprocess_va.0)),
-        ("wow64", View::Bool(process.is_wow64())),
-    ])
+    process_identity(process).into_view()
 }
 
-fn job_fields(fields: &[JobField]) -> View {
-    View::Object(
+/// The value of the job field keyed `key`, if this build has it.
+fn job_field(fields: &[JobField], key: &str) -> Omit<u64> {
+    Omit(
         fields
             .iter()
-            .map(|field| (field.key, View::Num(field.value)))
-            .collect(),
+            .find(|field| field.key == key)
+            .map(|field| field.value),
     )
 }
 
-/// `!job`; top-level keys: `address`, `job_id`, `session_id`, `accounting`
-/// (times in 100 ns, memory in pages), `limits`, `limit_flag_names`,
-/// `job_flags`, `job_flag_names`, `nesting_depth`, `parent_job`, `root_job`,
-/// `child_jobs`, `child_job_list_termination`, `silo`, `server_silo_globals`,
-/// `processes`, `unreadable_processes`, `process_list_termination`.
+fn job_accounting(fields: &[JobField]) -> JobAccounting {
+    let field = |key| job_field(fields, key);
+    JobAccounting {
+        total_user_time: field("total_user_time"),
+        total_kernel_time: field("total_kernel_time"),
+        total_cycle_time: field("total_cycle_time"),
+        this_period_total_user_time: field("this_period_total_user_time"),
+        this_period_total_kernel_time: field("this_period_total_kernel_time"),
+        total_page_fault_count: field("total_page_fault_count"),
+        total_processes: field("total_processes"),
+        active_processes: field("active_processes"),
+        total_terminated_processes: field("total_terminated_processes"),
+        peak_process_memory_used: field("peak_process_memory_used"),
+        peak_job_memory_used: field("peak_job_memory_used"),
+        current_job_memory_used: field("current_job_memory_used"),
+    }
+}
+
+fn job_limits(fields: &[JobField]) -> JobLimits {
+    let field = |key| job_field(fields, key);
+    JobLimits {
+        limit_flags: field("limit_flags"),
+        effective_limit_flags: field("effective_limit_flags"),
+        active_process_limit: field("active_process_limit"),
+        per_process_user_time_limit: field("per_process_user_time_limit"),
+        per_job_user_time_limit: field("per_job_user_time_limit"),
+        minimum_working_set_size: field("minimum_working_set_size"),
+        maximum_working_set_size: field("maximum_working_set_size"),
+        process_memory_limit: field("process_memory_limit"),
+        job_memory_limit: field("job_memory_limit"),
+        priority_class: field("priority_class"),
+        scheduling_class: field("scheduling_class"),
+        ui_restrictions_class: field("ui_restrictions_class"),
+    }
+}
+
 pub fn job(job: &JobDetail) -> View {
     let limit_flags = job
         .limits
         .iter()
         .find(|field| field.field == "LimitFlags")
         .map_or(0, |field| field.value);
-    let addresses =
-        |list: &[VirtAddr]| View::List(list.iter().map(|address| View::Hex(address.0)).collect());
-    View::Object(vec![
-        ("address", View::Hex(job.address.0)),
-        ("job_id", View::OptNum(job.job_id)),
-        ("session_id", View::OptNum(job.session_id)),
-        ("accounting", job_fields(&job.accounting)),
-        ("limits", job_fields(&job.limits)),
-        (
-            "limit_flag_names",
-            View::List(
-                job_limit_flag_names(limit_flags)
-                    .into_iter()
-                    .map(View::Str)
-                    .collect(),
-            ),
-        ),
-        ("job_flags", View::OptHex(job.job_flags)),
-        (
-            "job_flag_names",
-            View::List(job.job_flag_names.iter().cloned().map(View::Str).collect()),
-        ),
-        ("nesting_depth", View::OptNum(job.nesting_depth)),
-        ("parent_job", View::OptHex(job.parent_job.map(|job| job.0))),
-        ("root_job", View::OptHex(job.root_job.map(|job| job.0))),
-        ("child_jobs", addresses(&job.child_jobs)),
-        (
-            "child_job_list_termination",
-            list_termination(&job.child_job_termination).into_view(),
-        ),
-        ("silo", View::Bool(job.silo)),
-        (
-            "server_silo_globals",
-            View::OptHex(job.server_silo_globals.map(|globals| globals.0)),
-        ),
-        (
-            "processes",
-            View::List(job.processes.iter().map(process).collect()),
-        ),
-        ("unreadable_processes", addresses(&job.unreadable_processes)),
-        (
-            "process_list_termination",
-            list_termination(&job.process_termination).into_view(),
-        ),
-    ])
-}
-
-fn global_flag_names(value: u32) -> View {
-    View::List(
-        global_flags_set(value)
-            .map(|flag| {
-                View::Object(vec![
-                    ("bit", View::Hex(u64::from(flag.bit))),
-                    ("abbreviation", View::Str(flag.abbreviation.to_string())),
-                    ("description", View::Str(flag.description.to_string())),
-                ])
-            })
+    Job {
+        address: Hex(job.address.0),
+        job_id: job.job_id,
+        session_id: job.session_id,
+        accounting: job_accounting(&job.accounting),
+        limits: job_limits(&job.limits),
+        limit_flag_names: job_limit_flag_names(limit_flags),
+        job_flags: job.job_flags.map(Hex),
+        job_flag_names: job.job_flag_names.clone(),
+        nesting_depth: job.nesting_depth,
+        parent_job: job.parent_job.map(|job| Hex(job.0)),
+        root_job: job.root_job.map(|job| Hex(job.0)),
+        child_jobs: job.child_jobs.iter().map(|job| Hex(job.0)).collect(),
+        child_job_list_termination: list_termination(&job.child_job_termination),
+        silo: job.silo,
+        server_silo_globals: job.server_silo_globals.map(|globals| Hex(globals.0)),
+        processes: job.processes.iter().map(process_identity).collect(),
+        unreadable_processes: job
+            .unreadable_processes
+            .iter()
+            .map(|process| Hex(process.0))
             .collect(),
-    )
+        process_list_termination: list_termination(&job.process_termination),
+    }
+    .into_view()
 }
 
-/// `!gflag`; top-level keys: `kernel_address`, `kernel`, `kernel_flags`,
-/// `process`, `process_flags` (a diagnostic of `{value, flags}`).
+fn global_flag_names(value: u32) -> Vec<GlobalFlag> {
+    global_flags_set(value)
+        .map(|flag| GlobalFlag {
+            bit: Hex(flag.bit.into()),
+            abbreviation: flag.abbreviation,
+            description: flag.description,
+        })
+        .collect()
+}
+
 pub fn global_flags(detail: &GlobalFlagsDetail) -> View {
-    View::Object(vec![
-        ("kernel_address", View::Hex(detail.kernel_address.0)),
-        ("kernel", View::Hex(u64::from(detail.kernel))),
-        ("kernel_flags", global_flag_names(detail.kernel)),
-        (
-            "process",
-            detail.process.as_ref().map_or(View::Null, process),
-        ),
-        (
-            "process_flags",
-            diagnostic(&detail.process_flags, |&flags| {
-                View::Object(vec![
-                    ("value", View::Hex(u64::from(flags))),
-                    ("flags", global_flag_names(flags)),
-                ])
-            }),
-        ),
-    ])
+    GlobalFlags {
+        kernel_address: Hex(detail.kernel_address.0),
+        kernel: Hex(detail.kernel.into()),
+        kernel_flags: global_flag_names(detail.kernel),
+        process: detail.process.as_ref().map(process_identity),
+        process_flags: Diag::of(&detail.process_flags, |&flags| ProcessGlobalFlags {
+            value: Hex(flags.into()),
+            flags: global_flag_names(flags),
+        }),
+    }
+    .into_view()
 }
 
-/// `!zombies`: exited processes and terminated threads still referenced.
-/// `processes`/`threads` are `null` for a kind the flags did not ask for.
 pub fn zombies(detail: &ZombiesDetail) -> View {
-    let counts = |counts: &ObjectCounts| {
-        [
-            ("handle_count", View::Num(counts.handle_count as u64)),
-            ("pointer_count", View::Num(counts.pointer_count as u64)),
-        ]
-    };
-    let processes = detail.processes.iter().map(|process| {
-        let mut fields = vec![
-            ("eprocess", View::Hex(process.eprocess.0)),
-            ("pid", View::Num(process.pid)),
-            ("image", View::Str(process.image.clone())),
-            ("exit_time", View::Hex(process.exit_time)),
-            ("exit_status", View::Hex(u64::from(process.exit_status))),
-        ];
-        fields.extend(counts(&process.counts));
-        View::Object(fields)
+    let processes = detail.processes.iter().map(|process| ZombieProcess {
+        eprocess: Hex(process.eprocess.0),
+        pid: process.pid,
+        image: process.image.clone(),
+        exit_time: Hex(process.exit_time),
+        exit_status: Hex(process.exit_status.into()),
+        handle_count: process.counts.handle_count as u64,
+        pointer_count: process.counts.pointer_count as u64,
     });
-    let threads = detail.threads.iter().map(|thread| {
-        let mut fields = vec![
-            ("ethread", View::Hex(thread.ethread.0)),
-            ("pid", View::Num(thread.pid)),
-            ("tid", View::Num(thread.tid)),
-            ("process", View::Hex(thread.process.0)),
-            ("image", View::OptStr(thread.image.clone())),
-            ("exit_status", View::Hex(u64::from(thread.exit_status))),
-        ];
-        fields.extend(counts(&thread.counts));
-        View::Object(fields)
+    let threads = detail.threads.iter().map(|thread| ZombieThread {
+        ethread: Hex(thread.ethread.0),
+        pid: thread.pid,
+        tid: thread.tid,
+        process: Hex(thread.process.0),
+        image: thread.image.clone(),
+        exit_status: Hex(thread.exit_status.into()),
+        handle_count: thread.counts.handle_count as u64,
+        pointer_count: thread.counts.pointer_count as u64,
     });
-    View::Object(vec![
-        (
-            "processes",
-            if detail.kinds.processes {
-                View::List(processes.collect())
-            } else {
-                View::Null
-            },
-        ),
-        (
-            "threads",
-            if detail.kinds.threads {
-                View::List(threads.collect())
-            } else {
-                View::Null
-            },
-        ),
-        ("live_processes", View::Num(detail.live_processes as u64)),
-        ("live_threads", View::Num(detail.live_threads as u64)),
-        ("region_start", View::Hex(detail.region_start.0)),
-        ("region_end", View::Hex(detail.region_end.0)),
-        ("scanned_pages", View::Num(detail.scanned_pages)),
-        ("interrupted", View::Bool(detail.interrupted)),
-        ("truncated", View::Bool(detail.truncated)),
-    ])
+    Zombies {
+        processes: detail.kinds.processes.then(|| processes.collect()),
+        threads: detail.kinds.threads.then(|| threads.collect()),
+        live_processes: detail.live_processes as u64,
+        live_threads: detail.live_threads as u64,
+        region_start: Hex(detail.region_start.0),
+        region_end: Hex(detail.region_end.0),
+        scanned_pages: detail.scanned_pages,
+        interrupted: detail.interrupted,
+        truncated: detail.truncated,
+    }
+    .into_view()
 }

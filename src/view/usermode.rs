@@ -1,536 +1,559 @@
 //! usermode: [`View`] builders for the structured inspectors.
 
-use super::shape::ViewValue;
-use super::{View, diagnostic, list_termination};
-use crate::target::DiagnosticValue;
+use super::shape::{Diag, Hex, ViewValue, shapes};
+use super::{ListEnd, View, list_termination};
 use crate::target::usermode::{
-    ByteDiff, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
-    LoaderListHead, LoaderListHeads, LoaderModuleDetail, LoaderModulesDetail, MismatchRange,
-    Peb32Detail, PebDetail, ProcessParametersDetail, SelfPatchCounts, SelfPatchRange, Teb32Detail,
-    TebDetail,
+    self as target, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
+    LoaderListHeads, LoaderModuleDetail, LoaderModulesDetail, Peb32Detail, PebDetail,
+    ProcessParametersDetail, Teb32Detail, TebDetail,
 };
+use crate::types::VirtAddr;
 
-fn process_parameters(detail: &ProcessParametersDetail) -> View {
-    View::Object(vec![
-        ("address", View::Hex(detail.address.0)),
-        (
-            "command_line",
-            diagnostic(&detail.command_line, |value| View::Str(value.clone())),
-        ),
-        (
-            "image_path_name",
-            diagnostic(&detail.image_path_name, |value| View::Str(value.clone())),
-        ),
-        (
-            "current_directory",
-            diagnostic(&detail.current_directory, |value| View::Str(value.clone())),
-        ),
-        (
-            "dll_path",
-            diagnostic(&detail.dll_path, |value| View::Str(value.clone())),
-        ),
-        (
-            "window_title",
-            diagnostic(&detail.window_title, |value| View::Str(value.clone())),
-        ),
-        (
-            "desktop_info",
-            diagnostic(&detail.desktop_info, |value| View::Str(value.clone())),
-        ),
-        (
-            "shell_info",
-            diagnostic(&detail.shell_info, |value| View::Str(value.clone())),
-        ),
-        (
-            "runtime_data",
-            diagnostic(&detail.runtime_data, |value| View::Str(value.clone())),
-        ),
-        (
-            "environment",
-            diagnostic(&detail.environment, |value| View::Hex(value.0)),
-        ),
-        (
-            "environment_size",
-            diagnostic(&detail.environment_size, |value| View::Num(*value)),
-        ),
-    ])
+shapes! {
+    /// A process's `_RTL_USER_PROCESS_PARAMETERS`: its strings read on their
+    /// own, each unavailable when paged out.
+    ProcessParameters {
+        address: Hex,
+        command_line: Diag<String>,
+        /// The image's full path.
+        image_path_name: Diag<String>,
+        current_directory: Diag<String>,
+        /// The DLL search path.
+        dll_path: Diag<String>,
+        window_title: Diag<String>,
+        desktop_info: Diag<String>,
+        shell_info: Diag<String>,
+        runtime_data: Diag<String>,
+        /// The environment block's address.
+        environment: Diag<Hex>,
+        /// The environment block's size in bytes.
+        environment_size: Diag<u64>,
+    }
+
+    /// A `_PEB_LDR_DATA` list head.
+    LoaderListHead {
+        /// The `LIST_ENTRY` head itself.
+        address: Hex,
+        /// The first entry.
+        flink: Diag<Hex>,
+        /// The last entry.
+        blink: Diag<Hex>,
+    }
+
+    /// The three `_PEB_LDR_DATA` module lists' heads.
+    LoaderLists {
+        in_load_order: Diag<LoaderListHead>,
+        in_memory_order: Diag<LoaderListHead>,
+        in_initialization_order: Diag<LoaderListHead>,
+    }
+
+    /// A process's `_PEB` (`!peb`), each field read on its own.
+    Peb {
+        address: Hex,
+        image_base_address: Diag<Hex>,
+        /// The `_PEB_LDR_DATA` address.
+        ldr: Diag<Hex>,
+        /// The `_RTL_USER_PROCESS_PARAMETERS` address.
+        process_parameters: Diag<Hex>,
+        /// The decoded process parameters.
+        process_parameters_detail: Diag<ProcessParameters>,
+        /// The default heap.
+        process_heap: Diag<Hex>,
+        number_of_heaps: Diag<u64>,
+        /// The heap pointer array.
+        process_heaps: Diag<Hex>,
+        /// `BeingDebugged`: nonzero while a user-mode debugger is attached.
+        being_debugged: Diag<u8>,
+        os_major_version: Diag<u64>,
+        os_minor_version: Diag<u64>,
+        os_build_number: Diag<u64>,
+        session_id: Diag<u64>,
+        number_of_processors: Diag<u64>,
+        /// The API set schema.
+        api_set_map: Diag<Hex>,
+        /// The loader's module list heads.
+        loader_lists: Diag<LoaderLists>,
+        /// The WOW64 `_PEB32`; `None` for a native process.
+        peb32: Option<Peb32>,
+    }
+
+    /// A WOW64 process's 32-bit `_PEB32`, each field read on its own.
+    Peb32 {
+        address: Hex,
+        image_base_address: Diag<Hex>,
+        /// The `_PEB_LDR_DATA32` address.
+        ldr: Diag<Hex>,
+        /// The 32-bit process parameters' address.
+        process_parameters: Diag<Hex>,
+        /// The decoded 32-bit process parameters.
+        process_parameters_detail: Diag<ProcessParameters>,
+        /// The default heap.
+        process_heap: Diag<Hex>,
+        number_of_heaps: Diag<u64>,
+        /// The heap pointer array.
+        process_heaps: Diag<Hex>,
+        /// `BeingDebugged`: nonzero while a user-mode debugger is attached.
+        being_debugged: Diag<u8>,
+        os_major_version: Diag<u64>,
+        os_minor_version: Diag<u64>,
+        os_build_number: Diag<u64>,
+        session_id: Diag<u64>,
+        number_of_processors: Diag<u64>,
+        /// The loader's 32-bit module list heads.
+        loader_lists: Diag<LoaderLists>,
+    }
+
+    /// A thread's `_TEB` (`!teb`), each field read on its own.
+    Teb {
+        address: Hex,
+        stack_base: Diag<Hex>,
+        stack_limit: Diag<Hex>,
+        /// The thread-local storage array.
+        tls_pointer: Diag<Hex>,
+        /// The Win32 last error.
+        last_error_value: Diag<u32>,
+        /// The last NTSTATUS.
+        last_status_value: Diag<Hex>,
+        count_of_owned_critical_sections: Diag<u32>,
+        /// The process's `_PEB`.
+        peb: Diag<Hex>,
+        /// `WowTebOffset`: the byte offset to the WOW64 `_TEB32` (0 for none).
+        wow_teb_offset: Diag<i64>,
+        /// `WOW32Reserved`: the WOW64 transition thunk.
+        wow64_reserved: Diag<Hex>,
+        /// The active activation context; value `None` when there is none.
+        activation_context: Diag<Option<Hex>>,
+        client_id_unique_process: Diag<Hex>,
+        client_id_unique_thread: Diag<Hex>,
+        /// The WOW64 `_TEB32`; `None` for a native thread.
+        teb32: Option<Teb32>,
+    }
+
+    /// A WOW64 thread's 32-bit `_TEB32`, each field read on its own.
+    Teb32 {
+        address: Hex,
+        stack_base: Diag<Hex>,
+        stack_limit: Diag<Hex>,
+        /// The thread-local storage array.
+        tls_pointer: Diag<Hex>,
+        /// The Win32 last error.
+        last_error_value: Diag<u32>,
+        /// The last NTSTATUS.
+        last_status_value: Diag<Hex>,
+        count_of_owned_critical_sections: Diag<u32>,
+        /// The process's `_PEB32`.
+        peb: Diag<Hex>,
+        client_id_unique_process: Diag<Hex>,
+        client_id_unique_thread: Diag<Hex>,
+    }
+
+    /// One module on a process's loader list (`!dlls`).
+    LoaderModule {
+        /// The full path.
+        name: String,
+        /// The file name.
+        short_name: String,
+        base_address: Hex,
+        /// The image size in bytes.
+        size: u32,
+        /// On the WOW64 (32-bit) loader list.
+        is_32bit: bool,
+        /// `None` when the loader entry has none (or it is unreadable).
+        entry_point: Option<Hex>,
+        /// The PE header's link timestamp; `None` when the header is
+        /// unreadable.
+        time_date_stamp: Option<Hex>,
+        /// The PE header's checksum; `None` when the header is unreadable.
+        checksum: Option<Hex>,
+        /// The version resource's file version; `None` when unreadable.
+        file_version: Option<String>,
+        /// The version resource's product version; `None` when unreadable.
+        product_version: Option<String>,
+    }
+
+    /// A process's loader-list modules (`!dlls`) and how the walks ended.
+    LoaderModules {
+        modules: Vec<LoaderModule>,
+        /// How the native loader-list walk ended.
+        termination: ListEnd,
+        /// How the WOW64 loader-list walk ended; `None` for a native process.
+        wow64_termination: Option<ListEnd>,
+    }
+
+    /// How a process's native and WOW64 loader-list walks ended.
+    LoaderTerminations {
+        termination: ListEnd,
+        /// `None` for a native process.
+        wow64_termination: Option<ListEnd>,
+    }
+
+    /// A thread's Win32 last error and last NTSTATUS (`!gle`).
+    LastError {
+        /// The `_TEB` read.
+        teb: Hex,
+        last_error_value: Diag<u32>,
+        /// The error's symbolic name; value `None` when unknown.
+        last_error_name: Diag<Option<String>>,
+        last_status_value: Diag<Hex>,
+        /// The status's symbolic name; value `None` when unknown.
+        last_status_name: Diag<Option<String>>,
+        /// The WOW64 `_TEB32`'s values; `None` for a native thread.
+        teb32: Option<LastError32>,
+    }
+
+    /// A WOW64 thread's 32-bit last error and last NTSTATUS.
+    LastError32 {
+        /// The `_TEB32` read.
+        teb: Hex,
+        last_error_value: Diag<u32>,
+        /// The error's symbolic name; value `None` when unknown.
+        last_error_name: Diag<Option<String>>,
+        last_status_value: Diag<Hex>,
+        /// The status's symbolic name; value `None` when unknown.
+        last_status_name: Diag<Option<String>>,
+    }
+
+    /// Bytes recognized as known kernel self-patches, by kind.
+    ImageSelfPatchCounts {
+        import_optimization: u64,
+        retpoline: u64,
+        /// `KiPatchSelf` / JMP thunks.
+        ki_patch_self: u64,
+        /// Relocated addresses of kernel VA regions moved at boot.
+        region_rebase: u64,
+        total: u64,
+    }
+
+    /// One executable section's comparison against the cached image.
+    ImageSectionCheck {
+        name: String,
+        rva: Hex,
+        /// Mismatched bytes, known self-patches excluded.
+        genuine_mismatches: u64,
+        /// Mismatched bytes, known self-patches included.
+        total_mismatches: u64,
+        self_patches: ImageSelfPatchCounts,
+        /// The section was not compared.
+        skipped: bool,
+        /// Why it was skipped; `None` when compared.
+        skip_reason: Option<String>,
+        /// Why its memory could not be read; `None` when read.
+        unavailable: Option<String>,
+    }
+
+    /// A contiguous RVA range of mismatched bytes.
+    ImageMismatchRange {
+        start: Hex,
+        /// Exclusive.
+        end: Hex,
+        /// In bytes.
+        size: u64,
+    }
+
+    /// A contiguous RVA range recognized as one kernel self-patch kind.
+    ImageSelfPatchRange {
+        start: Hex,
+        /// Exclusive.
+        end: Hex,
+        /// In bytes.
+        size: u64,
+        /// `import optimization`, `retpoline`, `KiPatchSelf/JMP thunk`, or
+        /// `kernel VA region rebase`.
+        kind: &'static str,
+        /// The function containing the patch, when a symbol covers it.
+        function: Option<String>,
+    }
+
+    /// One byte that differs from the cached image.
+    ImageByteDiff {
+        rva: Hex,
+        /// The cached image's byte.
+        expected: Hex,
+        /// The byte in memory.
+        actual: Hex,
+        /// The self-patch kind it belongs to; `None` for a genuine mismatch.
+        kind: Option<&'static str>,
+    }
+
+    /// A module's in-memory code compared against its cached image
+    /// (`!chkimg`). Range lists are capped; the `*_overflow` flags say when
+    /// more existed.
+    ImageCheck {
+        /// The full path.
+        module: String,
+        short_name: String,
+        base_address: Hex,
+        sections: Vec<ImageSectionCheck>,
+        /// Mismatched bytes, known self-patches excluded.
+        genuine_mismatched_bytes: u64,
+        /// Mismatched bytes, known self-patches included.
+        total_mismatched_bytes: u64,
+        self_patches: ImageSelfPatchCounts,
+        /// Genuine mismatch ranges.
+        mismatch_ranges: Vec<ImageMismatchRange>,
+        mismatch_range_overflow: bool,
+        /// Mismatch ranges, self-patches included.
+        all_mismatch_ranges: Vec<ImageMismatchRange>,
+        all_mismatch_range_overflow: bool,
+        self_patch_ranges: Vec<ImageSelfPatchRange>,
+        self_patch_range_overflow: bool,
+        /// Byte-level differences; empty unless requested (`-d`).
+        byte_diffs: Vec<ImageByteDiff>,
+        byte_diffs_truncated: bool,
+    }
 }
 
-fn loader_list_head(detail: &LoaderListHead) -> View {
-    View::Object(vec![
-        ("address", View::Hex(detail.address.0)),
-        (
-            "flink",
-            diagnostic(&detail.flink, |value| View::Hex(value.0)),
-        ),
-        (
-            "blink",
-            diagnostic(&detail.blink, |value| View::Hex(value.0)),
-        ),
-    ])
+fn hex(address: &VirtAddr) -> Hex {
+    Hex(address.0)
 }
 
-fn loader_list_heads(detail: &LoaderListHeads) -> View {
-    View::Object(vec![
-        (
-            "in_load_order",
-            diagnostic(&detail.in_load_order, loader_list_head),
-        ),
-        (
-            "in_memory_order",
-            diagnostic(&detail.in_memory_order, loader_list_head),
-        ),
-        (
-            "in_initialization_order",
-            diagnostic(&detail.in_initialization_order, loader_list_head),
-        ),
-    ])
+fn process_parameters(detail: &ProcessParametersDetail) -> ProcessParameters {
+    ProcessParameters {
+        address: hex(&detail.address),
+        command_line: Diag::of(&detail.command_line, String::clone),
+        image_path_name: Diag::of(&detail.image_path_name, String::clone),
+        current_directory: Diag::of(&detail.current_directory, String::clone),
+        dll_path: Diag::of(&detail.dll_path, String::clone),
+        window_title: Diag::of(&detail.window_title, String::clone),
+        desktop_info: Diag::of(&detail.desktop_info, String::clone),
+        shell_info: Diag::of(&detail.shell_info, String::clone),
+        runtime_data: Diag::of(&detail.runtime_data, String::clone),
+        environment: Diag::of(&detail.environment, hex),
+        environment_size: Diag::of(&detail.environment_size, |value| *value),
+    }
 }
 
-fn peb32(detail: &Peb32Detail) -> View {
-    View::Object(vec![
-        ("address", View::Hex(detail.address.0)),
-        (
-            "image_base_address",
-            diagnostic(&detail.image_base_address, |value| View::Hex(value.0)),
-        ),
-        ("ldr", diagnostic(&detail.ldr, |value| View::Hex(value.0))),
-        (
-            "process_parameters",
-            diagnostic(&detail.process_parameters, |value| View::Hex(value.0)),
-        ),
-        (
-            "process_parameters_detail",
-            diagnostic(&detail.process_parameters_detail, process_parameters),
-        ),
-        (
-            "process_heap",
-            diagnostic(&detail.process_heap, |value| View::Hex(value.0)),
-        ),
-        (
-            "number_of_heaps",
-            diagnostic(&detail.number_of_heaps, |value| View::Num(*value)),
-        ),
-        (
-            "process_heaps",
-            diagnostic(&detail.process_heaps, |value| View::Hex(value.0)),
-        ),
-        (
-            "being_debugged",
-            diagnostic(&detail.being_debugged, |value| View::Num((*value).into())),
-        ),
-        (
-            "os_major_version",
-            diagnostic(&detail.os_major_version, |value| View::Num(*value)),
-        ),
-        (
-            "os_minor_version",
-            diagnostic(&detail.os_minor_version, |value| View::Num(*value)),
-        ),
-        (
-            "os_build_number",
-            diagnostic(&detail.os_build_number, |value| View::Num(*value)),
-        ),
-        (
-            "session_id",
-            diagnostic(&detail.session_id, |value| View::Num(*value)),
-        ),
-        (
-            "number_of_processors",
-            diagnostic(&detail.number_of_processors, |value| View::Num(*value)),
-        ),
-        (
-            "loader_lists",
-            diagnostic(&detail.loader_lists, loader_list_heads),
-        ),
-    ])
+fn loader_list_head(detail: &target::LoaderListHead) -> LoaderListHead {
+    LoaderListHead {
+        address: hex(&detail.address),
+        flink: Diag::of(&detail.flink, hex),
+        blink: Diag::of(&detail.blink, hex),
+    }
 }
 
-/// Build a PEB view; top-level keys: `address`, `image_base_address`, `ldr`, `process_parameters`, `process_parameters_detail`, `process_heap`, `number_of_heaps`, `process_heaps`, `being_debugged`, `os_major_version`, `os_minor_version`, `os_build_number`, `session_id`, `number_of_processors`, `api_set_map`, `loader_lists`, `peb32`.
+fn loader_lists(detail: &LoaderListHeads) -> LoaderLists {
+    LoaderLists {
+        in_load_order: Diag::of(&detail.in_load_order, loader_list_head),
+        in_memory_order: Diag::of(&detail.in_memory_order, loader_list_head),
+        in_initialization_order: Diag::of(&detail.in_initialization_order, loader_list_head),
+    }
+}
+
+fn peb32(detail: &Peb32Detail) -> Peb32 {
+    Peb32 {
+        address: hex(&detail.address),
+        image_base_address: Diag::of(&detail.image_base_address, hex),
+        ldr: Diag::of(&detail.ldr, hex),
+        process_parameters: Diag::of(&detail.process_parameters, hex),
+        process_parameters_detail: Diag::of(&detail.process_parameters_detail, process_parameters),
+        process_heap: Diag::of(&detail.process_heap, hex),
+        number_of_heaps: Diag::of(&detail.number_of_heaps, |value| *value),
+        process_heaps: Diag::of(&detail.process_heaps, hex),
+        being_debugged: Diag::of(&detail.being_debugged, |value| *value),
+        os_major_version: Diag::of(&detail.os_major_version, |value| *value),
+        os_minor_version: Diag::of(&detail.os_minor_version, |value| *value),
+        os_build_number: Diag::of(&detail.os_build_number, |value| *value),
+        session_id: Diag::of(&detail.session_id, |value| *value),
+        number_of_processors: Diag::of(&detail.number_of_processors, |value| *value),
+        loader_lists: Diag::of(&detail.loader_lists, loader_lists),
+    }
+}
+
 pub fn peb(detail: &PebDetail) -> View {
-    View::Object(vec![
-        ("address", View::Hex(detail.address.0)),
-        (
-            "image_base_address",
-            diagnostic(&detail.image_base_address, |value| View::Hex(value.0)),
-        ),
-        ("ldr", diagnostic(&detail.ldr, |value| View::Hex(value.0))),
-        (
-            "process_parameters",
-            diagnostic(&detail.process_parameters, |value| View::Hex(value.0)),
-        ),
-        (
-            "process_parameters_detail",
-            diagnostic(&detail.process_parameters_detail, process_parameters),
-        ),
-        (
-            "process_heap",
-            diagnostic(&detail.process_heap, |value| View::Hex(value.0)),
-        ),
-        (
-            "number_of_heaps",
-            diagnostic(&detail.number_of_heaps, |value| View::Num(*value)),
-        ),
-        (
-            "process_heaps",
-            diagnostic(&detail.process_heaps, |value| View::Hex(value.0)),
-        ),
-        (
-            "being_debugged",
-            diagnostic(&detail.being_debugged, |value| View::Num((*value).into())),
-        ),
-        (
-            "os_major_version",
-            diagnostic(&detail.os_major_version, |value| View::Num(*value)),
-        ),
-        (
-            "os_minor_version",
-            diagnostic(&detail.os_minor_version, |value| View::Num(*value)),
-        ),
-        (
-            "os_build_number",
-            diagnostic(&detail.os_build_number, |value| View::Num(*value)),
-        ),
-        (
-            "session_id",
-            diagnostic(&detail.session_id, |value| View::Num(*value)),
-        ),
-        (
-            "number_of_processors",
-            diagnostic(&detail.number_of_processors, |value| View::Num(*value)),
-        ),
-        (
-            "api_set_map",
-            diagnostic(&detail.api_set_map, |value| View::Hex(value.0)),
-        ),
-        (
-            "loader_lists",
-            diagnostic(&detail.loader_lists, loader_list_heads),
-        ),
-        ("peb32", detail.peb32.as_ref().map_or(View::Null, peb32)),
-    ])
+    Peb {
+        address: hex(&detail.address),
+        image_base_address: Diag::of(&detail.image_base_address, hex),
+        ldr: Diag::of(&detail.ldr, hex),
+        process_parameters: Diag::of(&detail.process_parameters, hex),
+        process_parameters_detail: Diag::of(&detail.process_parameters_detail, process_parameters),
+        process_heap: Diag::of(&detail.process_heap, hex),
+        number_of_heaps: Diag::of(&detail.number_of_heaps, |value| *value),
+        process_heaps: Diag::of(&detail.process_heaps, hex),
+        being_debugged: Diag::of(&detail.being_debugged, |value| *value),
+        os_major_version: Diag::of(&detail.os_major_version, |value| *value),
+        os_minor_version: Diag::of(&detail.os_minor_version, |value| *value),
+        os_build_number: Diag::of(&detail.os_build_number, |value| *value),
+        session_id: Diag::of(&detail.session_id, |value| *value),
+        number_of_processors: Diag::of(&detail.number_of_processors, |value| *value),
+        api_set_map: Diag::of(&detail.api_set_map, hex),
+        loader_lists: Diag::of(&detail.loader_lists, loader_lists),
+        peb32: detail.peb32.as_ref().map(peb32),
+    }
+    .into_view()
 }
 
-fn teb32(detail: &Teb32Detail) -> View {
-    View::Object(vec![
-        ("address", View::Hex(detail.address.0)),
-        (
-            "stack_base",
-            diagnostic(&detail.stack_base, |value| View::Hex(value.0)),
+fn teb32(detail: &Teb32Detail) -> Teb32 {
+    Teb32 {
+        address: hex(&detail.address),
+        stack_base: Diag::of(&detail.stack_base, hex),
+        stack_limit: Diag::of(&detail.stack_limit, hex),
+        tls_pointer: Diag::of(&detail.tls_pointer, hex),
+        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
+        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
+        count_of_owned_critical_sections: Diag::of(
+            &detail.count_of_owned_critical_sections,
+            |value| *value,
         ),
-        (
-            "stack_limit",
-            diagnostic(&detail.stack_limit, |value| View::Hex(value.0)),
-        ),
-        (
-            "tls_pointer",
-            diagnostic(&detail.tls_pointer, |value| View::Hex(value.0)),
-        ),
-        (
-            "last_error_value",
-            diagnostic(&detail.last_error_value, |value| View::Num((*value).into())),
-        ),
-        (
-            "last_status_value",
-            diagnostic(&detail.last_status_value, |value| {
-                View::Hex((*value).into())
-            }),
-        ),
-        (
-            "count_of_owned_critical_sections",
-            diagnostic(&detail.count_of_owned_critical_sections, |value| {
-                View::Num((*value).into())
-            }),
-        ),
-        ("peb", diagnostic(&detail.peb, |value| View::Hex(value.0))),
-        (
-            "client_id_unique_process",
-            diagnostic(&detail.client_id_unique_process, |value| View::Hex(value.0)),
-        ),
-        (
-            "client_id_unique_thread",
-            diagnostic(&detail.client_id_unique_thread, |value| View::Hex(value.0)),
-        ),
-    ])
+        peb: Diag::of(&detail.peb, hex),
+        client_id_unique_process: Diag::of(&detail.client_id_unique_process, hex),
+        client_id_unique_thread: Diag::of(&detail.client_id_unique_thread, hex),
+    }
 }
 
-/// Build a TEB view; top-level keys: `address`, `stack_base`, `stack_limit`, `tls_pointer`, `last_error_value`, `last_status_value`, `count_of_owned_critical_sections`, `peb`, `wow_teb_offset`, `wow64_reserved`, `activation_context`, `client_id_unique_process`, `client_id_unique_thread`, `teb32`.
 pub fn teb(detail: &TebDetail) -> View {
-    View::Object(vec![
-        ("address", View::Hex(detail.address.0)),
-        (
-            "stack_base",
-            diagnostic(&detail.stack_base, |value| View::Hex(value.0)),
+    Teb {
+        address: hex(&detail.address),
+        stack_base: Diag::of(&detail.stack_base, hex),
+        stack_limit: Diag::of(&detail.stack_limit, hex),
+        tls_pointer: Diag::of(&detail.tls_pointer, hex),
+        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
+        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
+        count_of_owned_critical_sections: Diag::of(
+            &detail.count_of_owned_critical_sections,
+            |value| *value,
         ),
-        (
-            "stack_limit",
-            diagnostic(&detail.stack_limit, |value| View::Hex(value.0)),
-        ),
-        (
-            "tls_pointer",
-            diagnostic(&detail.tls_pointer, |value| View::Hex(value.0)),
-        ),
-        (
-            "last_error_value",
-            diagnostic(&detail.last_error_value, |value| View::Num((*value).into())),
-        ),
-        (
-            "last_status_value",
-            diagnostic(&detail.last_status_value, |value| {
-                View::Hex((*value).into())
-            }),
-        ),
-        (
-            "count_of_owned_critical_sections",
-            diagnostic(&detail.count_of_owned_critical_sections, |value| {
-                View::Num((*value).into())
-            }),
-        ),
-        ("peb", diagnostic(&detail.peb, |value| View::Hex(value.0))),
-        (
-            "wow_teb_offset",
-            diagnostic(&detail.wow_teb_offset, |value| View::Int((*value).into())),
-        ),
-        (
-            "wow64_reserved",
-            diagnostic(&detail.wow64_reserved, |value| View::Hex(value.0)),
-        ),
-        (
-            "activation_context",
-            diagnostic(&detail.activation_context, |value| {
-                View::OptHex(value.map(|address| address.0))
-            }),
-        ),
-        (
-            "client_id_unique_process",
-            diagnostic(&detail.client_id_unique_process, |value| View::Hex(value.0)),
-        ),
-        (
-            "client_id_unique_thread",
-            diagnostic(&detail.client_id_unique_thread, |value| View::Hex(value.0)),
-        ),
-        ("teb32", detail.teb32.as_ref().map_or(View::Null, teb32)),
-    ])
+        peb: Diag::of(&detail.peb, hex),
+        wow_teb_offset: Diag::of(&detail.wow_teb_offset, |value| (*value).into()),
+        wow64_reserved: Diag::of(&detail.wow64_reserved, hex),
+        activation_context: Diag::of(&detail.activation_context, |value| value.as_ref().map(hex)),
+        client_id_unique_process: Diag::of(&detail.client_id_unique_process, hex),
+        client_id_unique_thread: Diag::of(&detail.client_id_unique_thread, hex),
+        teb32: detail.teb32.as_ref().map(teb32),
+    }
+    .into_view()
 }
 
 /// One loader-list entry (`!dlls`).
-pub fn loader_module(detail: &LoaderModuleDetail) -> View {
-    let fields = vec![
-        ("name", View::Str(detail.name.clone())),
-        ("short_name", View::Str(detail.short_name.clone())),
-        ("base_address", View::Hex(detail.base_address.0)),
-        ("size", View::Num(detail.size.into())),
-        ("is_32bit", View::Bool(detail.is_32bit)),
-        (
-            "entry_point",
-            View::OptHex(detail.entry_point.map(|address| address.0)),
-        ),
-        (
-            "time_date_stamp",
-            View::OptHex(detail.time_date_stamp.map(u64::from)),
-        ),
-        ("checksum", View::OptHex(detail.checksum.map(u64::from))),
-        ("file_version", View::OptStr(detail.file_version.clone())),
-        (
-            "product_version",
-            View::OptStr(detail.product_version.clone()),
-        ),
-    ];
-    View::Object(fields)
+pub fn loader_module(detail: &LoaderModuleDetail) -> LoaderModule {
+    LoaderModule {
+        name: detail.name.clone(),
+        short_name: detail.short_name.clone(),
+        base_address: hex(&detail.base_address),
+        size: detail.size,
+        is_32bit: detail.is_32bit,
+        entry_point: detail.entry_point.as_ref().map(hex),
+        time_date_stamp: detail.time_date_stamp.map(|stamp| Hex(stamp.into())),
+        checksum: detail.checksum.map(|checksum| Hex(checksum.into())),
+        file_version: detail.file_version.clone(),
+        product_version: detail.product_version.clone(),
+    }
 }
 
-/// Build a loader-module view; top-level keys: `modules`, `termination`, `wow64_termination`.
 pub fn loader_modules(detail: &LoaderModulesDetail) -> View {
-    let View::Object(mut fields) = loader_terminations(detail) else {
-        unreachable!("terminations are an object");
-    };
-    fields.insert(
-        0,
-        (
-            "modules",
-            View::List(detail.modules.iter().map(loader_module).collect()),
-        ),
-    );
-    View::Object(fields)
+    LoaderModules {
+        modules: detail.modules.iter().map(loader_module).collect(),
+        termination: list_termination(&detail.termination),
+        wow64_termination: detail.wow64_termination.as_ref().map(list_termination),
+    }
+    .into_view()
 }
 
 /// How a process's native and WOW64 loader lists ended.
 pub fn loader_terminations(detail: &LoaderModulesDetail) -> View {
-    View::Object(vec![
-        (
-            "termination",
-            list_termination(&detail.termination).into_view(),
-        ),
-        (
-            "wow64_termination",
-            detail
-                .wow64_termination
-                .as_ref()
-                .map_or(View::Null, |end| list_termination(end).into_view()),
-        ),
-    ])
+    LoaderTerminations {
+        termination: list_termination(&detail.termination),
+        wow64_termination: detail.wow64_termination.as_ref().map(list_termination),
+    }
+    .into_view()
 }
 
-fn status_name(value: &DiagnosticValue<Option<String>>) -> View {
-    diagnostic(value, |name| View::OptStr(name.clone()))
+fn last_error32(detail: &LastError32Detail) -> LastError32 {
+    LastError32 {
+        teb: hex(&detail.teb),
+        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
+        last_error_name: Diag::of(&detail.last_error_name, Option::clone),
+        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
+        last_status_name: Diag::of(&detail.last_status_name, Option::clone),
+    }
 }
 
-fn last_error32(detail: &LastError32Detail) -> View {
-    View::Object(vec![
-        ("teb", View::Hex(detail.teb.0)),
-        (
-            "last_error_value",
-            diagnostic(&detail.last_error_value, |value| View::Num((*value).into())),
-        ),
-        ("last_error_name", status_name(&detail.last_error_name)),
-        (
-            "last_status_value",
-            diagnostic(&detail.last_status_value, |value| {
-                View::Hex((*value).into())
-            }),
-        ),
-        ("last_status_name", status_name(&detail.last_status_name)),
-    ])
-}
-
-/// Build a last-error view; top-level keys: `teb`, `last_error_value`, `last_error_name`, `last_status_value`, `last_status_name`, `teb32`.
 pub fn last_error(detail: &LastErrorDetail) -> View {
-    View::Object(vec![
-        ("teb", View::Hex(detail.teb.0)),
-        (
-            "last_error_value",
-            diagnostic(&detail.last_error_value, |value| View::Num((*value).into())),
-        ),
-        ("last_error_name", status_name(&detail.last_error_name)),
-        (
-            "last_status_value",
-            diagnostic(&detail.last_status_value, |value| {
-                View::Hex((*value).into())
-            }),
-        ),
-        ("last_status_name", status_name(&detail.last_status_name)),
-        (
-            "teb32",
-            detail.teb32.as_ref().map_or(View::Null, last_error32),
-        ),
-    ])
+    LastError {
+        teb: hex(&detail.teb),
+        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
+        last_error_name: Diag::of(&detail.last_error_name, Option::clone),
+        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
+        last_status_name: Diag::of(&detail.last_status_name, Option::clone),
+        teb32: detail.teb32.as_ref().map(last_error32),
+    }
+    .into_view()
 }
 
-fn self_patch_counts(detail: &SelfPatchCounts) -> View {
-    View::Object(vec![
-        ("import_optimization", View::Num(detail.import_optimization)),
-        ("retpoline", View::Num(detail.retpoline)),
-        ("ki_patch_self", View::Num(detail.ki_patch_self)),
-        ("region_rebase", View::Num(detail.region_rebase)),
-        ("total", View::Num(detail.total())),
-    ])
+fn self_patch_counts(detail: &target::SelfPatchCounts) -> ImageSelfPatchCounts {
+    ImageSelfPatchCounts {
+        import_optimization: detail.import_optimization,
+        retpoline: detail.retpoline,
+        ki_patch_self: detail.ki_patch_self,
+        region_rebase: detail.region_rebase,
+        total: detail.total(),
+    }
 }
 
-fn section_result(detail: &ImageSectionResult) -> View {
-    View::Object(vec![
-        ("name", View::Str(detail.name.clone())),
-        ("rva", View::Hex(detail.rva.into())),
-        ("genuine_mismatches", View::Num(detail.genuine_mismatches)),
-        ("total_mismatches", View::Num(detail.total_mismatches)),
-        ("self_patches", self_patch_counts(&detail.self_patches)),
-        ("skipped", View::Bool(detail.skipped)),
-        ("skip_reason", View::OptStr(detail.skip_reason.clone())),
-        ("unavailable", View::OptStr(detail.unavailable.clone())),
-    ])
+fn section_result(detail: &ImageSectionResult) -> ImageSectionCheck {
+    ImageSectionCheck {
+        name: detail.name.clone(),
+        rva: Hex(detail.rva.into()),
+        genuine_mismatches: detail.genuine_mismatches,
+        total_mismatches: detail.total_mismatches,
+        self_patches: self_patch_counts(&detail.self_patches),
+        skipped: detail.skipped,
+        skip_reason: detail.skip_reason.clone(),
+        unavailable: detail.unavailable.clone(),
+    }
 }
 
-fn mismatch_range(detail: &MismatchRange) -> View {
-    View::Object(vec![
-        ("start", View::Hex(detail.start)),
-        ("end", View::Hex(detail.end)),
-        ("size", View::Num(detail.end.saturating_sub(detail.start))),
-    ])
+fn mismatch_range(detail: &target::MismatchRange) -> ImageMismatchRange {
+    ImageMismatchRange {
+        start: Hex(detail.start),
+        end: Hex(detail.end),
+        size: detail.end.saturating_sub(detail.start),
+    }
 }
 
-fn self_patch_range(detail: &SelfPatchRange) -> View {
-    View::Object(vec![
-        ("start", View::Hex(detail.start)),
-        ("end", View::Hex(detail.end)),
-        ("size", View::Num(detail.end.saturating_sub(detail.start))),
-        ("kind", View::Str(detail.kind.name().to_string())),
-        ("function", View::OptStr(detail.function.clone())),
-    ])
+fn self_patch_range(detail: &target::SelfPatchRange) -> ImageSelfPatchRange {
+    ImageSelfPatchRange {
+        start: Hex(detail.start),
+        end: Hex(detail.end),
+        size: detail.end.saturating_sub(detail.start),
+        kind: detail.kind.name(),
+        function: detail.function.clone(),
+    }
 }
 
-fn byte_diff(detail: &ByteDiff) -> View {
-    View::Object(vec![
-        ("rva", View::Hex(detail.rva.into())),
-        ("expected", View::Hex(detail.expected.into())),
-        ("actual", View::Hex(detail.actual.into())),
-        (
-            "kind",
-            View::OptStr(detail.kind.map(|kind| kind.name().to_string())),
-        ),
-    ])
+fn byte_diff(detail: &target::ByteDiff) -> ImageByteDiff {
+    ImageByteDiff {
+        rva: Hex(detail.rva.into()),
+        expected: Hex(detail.expected.into()),
+        actual: Hex(detail.actual.into()),
+        kind: detail.kind.map(target::SelfPatchKind::name),
+    }
 }
 
-/// Build an image-check view; top-level keys: `module`, `short_name`, `base_address`, `sections`, `genuine_mismatched_bytes`, `total_mismatched_bytes`, `self_patches`, `mismatch_ranges`, `mismatch_range_overflow`, `all_mismatch_ranges`, `all_mismatch_range_overflow`, `self_patch_ranges`, `self_patch_range_overflow`, `byte_diffs`, `byte_diffs_truncated`.
 pub fn image_check(detail: &ImageCheckDetail) -> View {
-    View::Object(vec![
-        ("module", View::Str(detail.module.clone())),
-        ("short_name", View::Str(detail.short_name.clone())),
-        ("base_address", View::Hex(detail.base_address.0)),
-        (
-            "sections",
-            View::List(detail.sections.iter().map(section_result).collect()),
-        ),
-        (
-            "genuine_mismatched_bytes",
-            View::Num(detail.genuine_mismatched_bytes),
-        ),
-        (
-            "total_mismatched_bytes",
-            View::Num(detail.total_mismatched_bytes),
-        ),
-        ("self_patches", self_patch_counts(&detail.self_patches)),
-        (
-            "mismatch_ranges",
-            View::List(detail.mismatch_ranges.iter().map(mismatch_range).collect()),
-        ),
-        (
-            "mismatch_range_overflow",
-            View::Bool(detail.mismatch_range_overflow),
-        ),
-        (
-            "all_mismatch_ranges",
-            View::List(
-                detail
-                    .all_mismatch_ranges
-                    .iter()
-                    .map(mismatch_range)
-                    .collect(),
-            ),
-        ),
-        (
-            "all_mismatch_range_overflow",
-            View::Bool(detail.all_mismatch_range_overflow),
-        ),
-        (
-            "self_patch_ranges",
-            View::List(
-                detail
-                    .self_patch_ranges
-                    .iter()
-                    .map(self_patch_range)
-                    .collect(),
-            ),
-        ),
-        (
-            "self_patch_range_overflow",
-            View::Bool(detail.self_patch_range_overflow),
-        ),
-        (
-            "byte_diffs",
-            View::List(detail.byte_diffs.iter().map(byte_diff).collect()),
-        ),
-        (
-            "byte_diffs_truncated",
-            View::Bool(detail.byte_diffs_truncated),
-        ),
-    ])
+    ImageCheck {
+        module: detail.module.clone(),
+        short_name: detail.short_name.clone(),
+        base_address: hex(&detail.base_address),
+        sections: detail.sections.iter().map(section_result).collect(),
+        genuine_mismatched_bytes: detail.genuine_mismatched_bytes,
+        total_mismatched_bytes: detail.total_mismatched_bytes,
+        self_patches: self_patch_counts(&detail.self_patches),
+        mismatch_ranges: detail.mismatch_ranges.iter().map(mismatch_range).collect(),
+        mismatch_range_overflow: detail.mismatch_range_overflow,
+        all_mismatch_ranges: detail
+            .all_mismatch_ranges
+            .iter()
+            .map(mismatch_range)
+            .collect(),
+        all_mismatch_range_overflow: detail.all_mismatch_range_overflow,
+        self_patch_ranges: detail
+            .self_patch_ranges
+            .iter()
+            .map(self_patch_range)
+            .collect(),
+        self_patch_range_overflow: detail.self_patch_range_overflow,
+        byte_diffs: detail.byte_diffs.iter().map(byte_diff).collect(),
+        byte_diffs_truncated: detail.byte_diffs_truncated,
+    }
+    .into_view()
 }

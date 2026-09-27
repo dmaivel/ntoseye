@@ -182,7 +182,10 @@ impl Inspect {
 
     /// Decode `nt!NtGlobalFlag` and the current process's
     /// `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
-    fn global_flags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn global_flags<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::process::py::GlobalFlags>> {
         self.record(py, |session| {
             let detail = session.target.global_flags().map_err(err)?;
             Ok(view::process::global_flags(&detail))
@@ -193,7 +196,11 @@ impl Inspect {
     /// processes assigned to it (`!job`). `address` is the job, or a process
     /// or thread whose job to decode; `None` is the current process's job.
     #[pyo3(signature = (address=None))]
-    fn job<'py>(&self, py: Python<'py>, address: Option<u64>) -> PyResult<Bound<'py, Record>> {
+    fn job<'py>(
+        &self,
+        py: Python<'py>,
+        address: Option<u64>,
+    ) -> PyResult<Bound<'py, view::process::py::Job>> {
         self.record(py, |session| {
             let target = &session.target;
             let job = target.job_address(address.map(VirtAddr)).map_err(err)?;
@@ -206,7 +213,11 @@ impl Inspect {
     /// referenced, found by scanning nonpaged pool (`!zombies`). `flags`: 1
     /// processes, 2 threads, 3 both.
     #[pyo3(signature = (flags=1))]
-    fn zombies<'py>(&self, py: Python<'py>, flags: u64) -> PyResult<Bound<'py, Record>> {
+    fn zombies<'py>(
+        &self,
+        py: Python<'py>,
+        flags: u64,
+    ) -> PyResult<Bound<'py, view::process::py::Zombies>> {
         let kinds = ZombieKinds::from_flags(flags).map_err(err)?;
         self.record(py, |session| {
             let detail = session.target.zombies(kinds).map_err(err)?;
@@ -567,7 +578,7 @@ impl Inspect {
         py: Python<'py>,
         process: PyRef<'_, Process>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::usermode::py::Peb>> {
         process
             .owner
             .require_argument_of(py, &self.owner, "process")?;
@@ -589,7 +600,7 @@ impl Inspect {
         py: Python<'py>,
         thread: PyRef<'_, Thread>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::usermode::py::Teb>> {
         thread
             .owner
             .require_argument_of(py, &self.owner, "thread")?;

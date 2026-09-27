@@ -307,7 +307,10 @@ impl Thread {
     }
 
     /// Decode the thread's Win32 last-error and NTSTATUS values (`!gle`).
-    fn last_error<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn last_error<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::usermode::py::LastError>> {
         let context = self.context(self.process_info(py)?);
         let view = self.owner.with_in(py, &context, |session| {
             let detail = session.target.last_error().map_err(err)?;
@@ -317,7 +320,10 @@ impl Thread {
     }
 
     /// Thread summary and saved scheduling details (`!thread`).
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn inspect<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::process::py::ThreadOverview>> {
         let active = self.cpu_id(py)?;
         view_record(py, &view::process::thread(&self.info, active.as_deref()))
     }

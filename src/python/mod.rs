@@ -339,6 +339,11 @@ pub mod _ntoseye {
         ObjectDirectoryEntry, PoolIrp, ResourceList, ResourceOwner, SsdtEntry, SsdtTable,
     };
     #[pymodule_export]
+    use crate::view::process::py::{
+        GlobalFlag, GlobalFlags, Job, JobAccounting, JobLimits, ProcessGlobalFlags,
+        ProcessIdentity, ThreadOverview, ZombieProcess, ZombieThread, Zombies,
+    };
+    #[pymodule_export]
     use crate::view::py::ListEnd;
     #[pymodule_export]
     use crate::view::sched::py::{
@@ -348,6 +353,12 @@ pub mod _ntoseye {
         ThreadSummary, TimerBucketEnd, TimerTable, TimerTableEntry, UniqStackGroup, UniqStackScope,
         UniqStacks, UnwalkedThread, WorkItem, WorkQueue, WorkQueuePriority, WorkQueues,
         WorkerThread,
+    };
+    #[pymodule_export]
+    use crate::view::usermode::py::{
+        ImageByteDiff, ImageCheck, ImageMismatchRange, ImageSectionCheck, ImageSelfPatchCounts,
+        ImageSelfPatchRange, LastError, LastError32, LoaderListHead, LoaderLists, LoaderModule,
+        LoaderModules, LoaderTerminations, Peb, Peb32, ProcessParameters, Teb, Teb32,
     };
 
     /// The ntoseye release this extension was built as.
