@@ -75,7 +75,7 @@ PDB enum fields return cached `IntEnum` members when the value is defined; other
 ## Secure kernel (VTL1)
 
 :::{important}
-VTL1 inspection is experimental; see [Secure kernel (VTL1)](../platforms/vbs.md) for how it works and where it has been tested.
+VTL1 inspection is experimental; see [VBS and the Windows hypervisor](../platforms/vbs.md) for what it supports on which guests and hosts.
 :::
 
 With VBS running, `dbg.secure_kernel` is the secure kernel, discovered from host memory on first use (the `memory` and `gdb` backends, or `kd`/`kdnet` reading host memory). It raises `NtoseyeError` when VBS is not running or the backend cannot reach VTL1 memory. Its `memory`, `symbols`, `types`, and `modules` are bound to the secure kernel's system address space, as `proc.memory` is to a process's; `trustlets` lists the secure kernel's processes, each with the same views bound to its own address space and `process` naming its NT side.

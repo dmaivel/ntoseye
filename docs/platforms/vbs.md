@@ -4,14 +4,23 @@ With virtualization-based security (VBS) running, Windows runs a second kernel, 
 The Python SDK exposes the same views as [`dbg.secure_kernel`](../scripting/sdk.md#secure-kernel-vtl1).
 
 :::{important}
-VTL1 inspection is experimental. It relies on undocumented secure-kernel structures, finds them heuristically, and has been tested live on a single guest: Windows 11 10.0.26100 under QEMU/KVM, with memory integrity (HVCI) both off and on. It may fail on other builds or hosts, and it refuses rather than guesses when a structure is not recognized.
+Everything on this page needs an **AMD64 guest**; ARM64 guests are not supported. The host CPU matters too:
+
+| Feature | Backends | Intel host | AMD host |
+| --- | --- | --- | --- |
+| VTL1 memory, symbols, and {command}`!trustlets` | `memory`, `gdb`; `kd`/`kdnet` reading host memory | Supported | Untested |
+| VTL1 breakpoints and stepping | `gdb` on QEMU/KVM | Supported | Untested |
+| Stepping NT while the Windows hypervisor runs | `gdb` | Supported | Untested |
+| [Where NT left off](#where-nt-left-off-under-the-hypervisor) under the hypervisor | `gdb` | Supported (needs `hv-evmcs`) | Not supported |
+
+All of it was tested on one host, a Core i9-14900F under QEMU/KVM, with Windows 11 guests (10.0.26100 and 10.0.26200) with memory integrity (HVCI) both off and on. VTL1 inspection is experimental: it relies on undocumented secure-kernel structures and finds them heuristically, so it may fail on other builds, and it refuses rather than guesses when a structure is not recognized.
 :::
 
 ## Requirements
 
 VTL1 requires direct host memory. Inspection works with the `memory` and `gdb` backends; `kd` and `kdnet` can inspect VTL1 only while reads come from host memory (`--memory-source host`, or `auto` once the host mapping matched), and cannot control VTL1 execution. Crash dumps, `--memory-source kd`, and ARM64 targets are unsupported. Memory integrity (HVCI) is not required.
 
-VBS itself needs nested virtualization exposed to the VM; the [KVM/QEMU setup](../setup/kvm-qemu.md#virtualization-based-security-vbs) covers the tested CPU model.
+VBS itself needs nested virtualization exposed to the VM; the [KVM/QEMU setup](../setup/kvm-qemu.md#virtualization-based-security-vbs) gives a CPU model that works.
 
 ## Inspecting VTL1 memory
 
@@ -50,11 +59,11 @@ bc *
 
 `ba e1` uses QEMU's host debug-register breakpoint (`Z1`), without patching secure code. Breakpoints apply to all vCPUs and share the four hardware slots with other hardware breakpoints. `/c` and register conditions can filter hits; NT `/p` and `/t` filters cannot describe secure-kernel execution and are refused. Secure-system and trustlet roots are recognized by their mapping of the secure kernel. Stops show `VTL1`, real CPU registers, and secure-kernel stack frames; no NT thread is attributed to that CPU. `.vtl 0` leaves an explicit memory view; it does not move a CPU stopped in VTL1 back into NT.
 
-At a VTL1 stop, {command}`t`, {command}`p`, {command}`gu`, {command}`pa`/{command}`ta`, {command}`wt`, and `g <address>` run through secure-kernel code using free debug-register slots: a step takes one per place the instruction can continue at, a run-to one for its target (see [stepping under the Windows hypervisor](../internals/vbs.md#stepping-without-the-trap-flag)). The `.vtl 1` memory view accepts only plain {command}`g`. Software breakpoints in known secure modules, secure memory/register writes, data watches, and trustlet user-code breakpoints are not supported. Hardware sites resolve once and must be recreated after a reboot. Avoid stopping for long periods: the whole VM is halted. This path was exercised on the same Windows 11 QEMU/KVM guest with HVCI on and off; that is not a guarantee against integrity checks or different nested-virtualization behavior on other hosts.
+At a VTL1 stop, {command}`t`, {command}`p`, {command}`gu`, {command}`pa`/{command}`ta`, {command}`wt`, and `g <address>` run through secure-kernel code using free debug-register slots: a step takes one per place the instruction can continue at, a run-to one for its target (see [stepping under the Windows hypervisor](../internals/vbs.md#stepping-without-the-trap-flag)). The `.vtl 1` memory view accepts only plain {command}`g`. Software breakpoints in known secure modules, secure memory/register writes, data watches, and trustlet user-code breakpoints are not supported. Hardware sites resolve once and must be recreated after a reboot. Avoid stopping for long periods: the whole VM is halted.
 
-Hardware execution breakpoints were also exercised at the running `hvix64` idle address, with repeated hits and continue. Use {command}`~` and {command}`vcpu` to select its register/address-space context, then `ba e1 <address>`; no software code patch is needed. These are linear-address breakpoints, not VTL-tagged breakpoints, and use the same four hardware slots across vCPUs.
+Hardware execution breakpoints also work in the Windows hypervisor itself (`hvix64`). Use {command}`~` and {command}`vcpu` to select its register/address-space context, then `ba e1 <address>`; no software code patch is needed. These are linear-address breakpoints, not VTL-tagged breakpoints, and use the same four hardware slots across vCPUs.
 
-Hardware breakpoints avoid integrity-sensitive code writes, but they are not invisible or side-effect-free. KVM owns the debug-register breakpoint state while host debugging is active. Upstream [nested VMX handling](https://github.com/torvalds/linux/blob/master/arch/x86/kvm/vmx/nested.c) documents an interaction that can lose L1's own DR7 state with `KVM_GUESTDBG_USE_HW_BP`; do not assume simultaneous guest/hypervisor hardware debugging preserves both debuggers' state. The tested guest remained responsive, including with HVCI enabled; other kernel/QEMU versions and hosts remain unverified.
+Hardware breakpoints avoid integrity-sensitive code writes, but they are not invisible or side-effect-free. KVM owns the debug-register breakpoint state while host debugging is active. Upstream [nested VMX handling](https://github.com/torvalds/linux/blob/master/arch/x86/kvm/vmx/nested.c) documents an interaction that can lose L1's own DR7 state with `KVM_GUESTDBG_USE_HW_BP`; do not assume simultaneous guest/hypervisor hardware debugging preserves both debuggers' state.
 
 ## Trustlet enumeration
 
@@ -64,7 +73,7 @@ Hardware breakpoints avoid integrity-sensitive code writes, but they are not inv
 
 With VBS running, the GDB stub reports what each vCPU was executing when it halted, and an idle vCPU is usually inside the Windows hypervisor itself, with its own CR3. `ntoseye` names such a stop by the image it is in: the context reads `hypervisor` (or `VTL1` for the secure kernel), and code and stack frames read `hvix64+0x…`. Microsoft publishes no symbols for this hypervisor build and its address space does not map its unwind data, so hypervisor frames past the first are stack-scan guesses (`[scan]`). That CR3 maps no NT memory, so such a stop is inspected where NT left off instead ([below](#where-nt-left-off-under-the-hypervisor)). {command}`bp` and the bugcheck trap work whichever address space the vCPU stopped in ([how](../internals/vbs.md#breakpoints-while-vcpus-are-outside-nt)).
 
-Hyper-V's NT-side drivers use ordinary NT module/symbol inspection. The hypervisor itself has raw memory/register inspection, image-plus-offset stack labels, and the [VTL state it saved](#where-nt-left-off-under-the-hypervisor) for each vCPU halted in it, not structured partition or virtual-processor enumeration. Public symbols/unwind data are unavailable for the tested hypervisor build, so this does not provide full Hyper-V internals or reliable unwinding there.
+Hyper-V's NT-side drivers use ordinary NT module/symbol inspection. The hypervisor itself has raw memory/register inspection, image-plus-offset stack labels, and the [VTL state it saved](#where-nt-left-off-under-the-hypervisor) for each vCPU halted in it, not structured partition or virtual-processor enumeration. Microsoft publishes no symbols or unwind data for the hypervisor, so this does not provide full Hyper-V internals or reliable unwinding there.
 
 :::{important}
 While Windows runs its own hypervisor (VBS, Hyper-V, WSL2), the `gdb` backend steps without the trap flag, which can freeze such a guest ([how](../internals/vbs.md#stepping-without-the-trap-flag)). Stepping and resuming from breakpoints work as usual, through `syscall`, `sysret`, `iretq`, `int`, hypercalls, and far transfers too. One difference remains: a step occasionally ends early, in an interrupt handler or in another thread that handler switched to, with a notice saying so (about 2 in 1,000 steps in kernel code); {command}`g` resumes.
@@ -80,4 +89,4 @@ Such a vCPU runs hypervisor code, so it is not stepped ({command}`t`, {command}`
 
 The NT thread running on that processor starts from the same saved state wherever it is the subject: {command}`!thread` shows its stack from there (`k-stack (saved VTL0 context)`), {command}`.thread` selects it as that thread's register context, and so does the SDK's `Thread.backtrace()`. The stacks {command}`!running` `-t`, {command}`!stacks`, {command}`!process` and {command}`!analyze` `-hang` list for running threads start there too. 
 
-The pages are found by scanning host RAM once per boot, the first time a stop, {command}`~`, or {command}`.vtlcxr` meets a vCPU in the hypervisor (about 0.6 s for an 8 GiB guest), and once more for a vCPU the scan found no pages for, which a stop early in boot can make. A saved state that fails validation is refused rather than shown ([how](../internals/vbs.md#reading-the-saved-vtl-state)). Tested on a Core i9-14900F host with a 4-vCPU Windows 11 guest; AMD hosts, whose nested state uses a different structure, are not supported.
+The pages are found by scanning host RAM once per boot, the first time a stop, {command}`~`, or {command}`.vtlcxr` meets a vCPU in the hypervisor (about 0.6 s for an 8 GiB guest), and once more for a vCPU the scan found no pages for, which a stop early in boot can make. A saved state that fails validation is refused rather than shown ([how](../internals/vbs.md#reading-the-saved-vtl-state)). AMD hosts are not supported: the Windows hypervisor uses eVMCS only on Intel (VMX); on AMD its nested state is a VMCB.
