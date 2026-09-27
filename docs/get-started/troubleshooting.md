@@ -34,8 +34,6 @@ Common problems, by symptom. Integration-specific problems are covered with each
 
 **Breakpoints fail at some addresses after a session was killed.** KD has a 32-entry breakpoint table, and a session killed with `SIGKILL` leaves its entries installed. The next attach reclaims entries no live session owns; see [Breakpoints](../using/breakpoints.md).
 
-**A step is refused under VBS.** With Windows running its own hypervisor, the `gdb` backend cannot step `syscall`, `sysret`, `int`, or far transfers; use `kd` or `kdnet` for those. See [VBS and the Windows hypervisor](../platforms/vbs.md).
-
 ## Memory
 
 **A read fails on a page that should exist.** The page may be paged out to disk. {command}`.pagein` asks the guest to bring it back; see [paged-out memory](../using/memory.md#paged-out-memory).

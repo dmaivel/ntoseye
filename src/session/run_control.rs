@@ -252,6 +252,7 @@ impl Session {
                 &self.register_map,
                 &self.target,
                 &mut self.breakpoints,
+                &self.current_thread,
             )?;
         }
         for id in self.breakpoints.one_shot_hit_ids() {

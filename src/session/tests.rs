@@ -935,9 +935,14 @@ fn a_target_owned_breakpoint_is_stepped_over_and_written_back() {
     manager.insert_for_test(1, VirtAddr(0x1000), true, None);
     let register_map = backend.register_map().clone();
 
-    let stepped =
-        step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
-            .unwrap();
+    let stepped = step_over_current_breakpoint(
+        &mut backend,
+        &register_map,
+        &session.target,
+        &mut manager,
+        "p01.01",
+    )
+    .unwrap();
 
     assert_eq!(stepped, Some(RunPast::Reached));
     assert_eq!(backend.get("rip"), 0x1001);
@@ -970,9 +975,14 @@ fn a_site_under_the_windows_hypervisor_is_run_past_without_a_step() {
     manager.insert_for_test(1, VirtAddr(0x1000), true, None);
     let register_map = backend.register_map().clone();
 
-    let passed =
-        step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
-            .unwrap();
+    let passed = step_over_current_breakpoint(
+        &mut backend,
+        &register_map,
+        &session.target,
+        &mut manager,
+        "p01.01",
+    )
+    .unwrap();
 
     assert_eq!(passed, Some(RunPast::Reached));
     assert_eq!(backend.get("rip"), 0x1003);
@@ -1007,8 +1017,14 @@ fn a_site_that_cannot_be_run_past_is_rearmed_and_reported() {
     let register_map = backend.register_map().clone();
 
     assert!(
-        step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
-            .is_err()
+        step_over_current_breakpoint(
+            &mut backend,
+            &register_map,
+            &session.target,
+            &mut manager,
+            "p01.01",
+        )
+        .is_err()
     );
     assert!(manager.list()[0].enabled);
     assert_eq!(
@@ -1037,11 +1053,42 @@ fn successors_cover_both_branch_arms_and_resolve_returns_and_indirect_calls() {
     let register_map = backend.register_map().clone();
     let regs = backend.read_registers().unwrap();
     let successors =
-        |rip| site_successors(&session.target, &register_map, &regs, rip, None).unwrap();
+        |rip| site_successors(&session.target, &register_map, "p01.01", &regs, rip, None).unwrap();
 
     assert_eq!(successors(0x1000), [0x1002, 0x1012]);
     assert_eq!(successors(0x1010), [0x2222]);
     assert_eq!(successors(0x1020), [0x3333]);
+}
+
+/// Transfers whose target is not a branch operand: `sysret` returns to RCX,
+/// `iretq` pops an 8-byte RIP and a 64-bit-mode `retf` a 4-byte one, a far
+/// `jmp [m16:32]` reads a 4-byte offset, and a hypercall comes back to the
+/// next instruction.
+#[test]
+fn successors_follow_privilege_and_far_transfers() {
+    let mut memory = vec![0x90u8; 0x80];
+    memory[..3].copy_from_slice(&[0x48, 0x0f, 0x07]); // sysretq
+    memory[0x08..0x0a].copy_from_slice(&[0x48, 0xcf]); // iretq
+    memory[0x10] = 0xcb; // retf
+    memory[0x18..0x1b].copy_from_slice(&[0x0f, 0x01, 0xc1]); // vmcall
+    memory[0x20..0x22].copy_from_slice(&[0xff, 0x2b]); // jmp far [rbx]
+    memory[0x40..0x48].copy_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes());
+    memory[0x50..0x58].copy_from_slice(&0x5555_6666_7777_8888u64.to_le_bytes());
+    let session = session_over_memory(0x1000, &memory);
+    let mut backend = MockBackend::default();
+    backend.set("rsp", 0x1040);
+    backend.set("rbx", 0x1050);
+    backend.set("rcx", 0x7ff0_1234);
+    let register_map = backend.register_map().clone();
+    let regs = backend.read_registers().unwrap();
+    let successors =
+        |rip| site_successors(&session.target, &register_map, "p01.01", &regs, rip, None).unwrap();
+
+    assert_eq!(successors(0x1000), [0x7ff0_1234]);
+    assert_eq!(successors(0x1008), [0x1111_2222_3333_4444]);
+    assert_eq!(successors(0x1010), [0x3333_4444]);
+    assert_eq!(successors(0x1018), [0x101b]);
+    assert_eq!(successors(0x1020), [0x7777_8888]);
 }
 
 fn stepping_session(code: &[u8], backend: MockBackend) -> Session {

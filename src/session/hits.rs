@@ -115,6 +115,7 @@ impl Session {
             &self.register_map,
             &self.target,
             &mut self.breakpoints,
+            &self.current_thread,
         )?;
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;

@@ -6,14 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use iced_x86::{
-    Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
+    Code, Decoder, DecoderOptions, FlowControl, Instruction, MemorySize, Mnemonic, OpKind, Register,
 };
 
 use crate::backend::MemoryOps;
 use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
-    clear_trap_flag,
+    clear_trap_flag, processor_index_from_backend_thread_id,
 };
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
@@ -22,8 +22,8 @@ use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
     STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
 };
-use crate::target::Target;
-use crate::types::{Arch, VirtAddr};
+use crate::target::{DiagnosticValue, Target};
+use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
     build_stacktrace, format_symbol, preferred_code_dtb, resolve_thread_trace_context, thread_root,
 };
@@ -56,6 +56,7 @@ impl Session {
             &self.register_map,
             &self.target,
             &mut self.breakpoints,
+            &self.current_thread,
         )? {
             Some(stepped) => stepped,
             None if self.backend.single_step_unsafe() => step_without_trap(
@@ -63,6 +64,7 @@ impl Session {
                 &self.register_map,
                 &self.target,
                 &self.breakpoints,
+                &self.current_thread,
             )?,
             None => {
                 step_one_and_clear_tf(self.backend.as_mut(), &self.register_map)?;
@@ -523,13 +525,15 @@ pub fn step_one_and_clear_tf(
 /// was no breakpoint to step over. A stale breakpoint (its address space gone) is silently
 /// discarded. A target that owns its sites (KD) has already dropped the one
 /// at the PC while reporting the stop, so the disable is a no-op there and
-/// the re-enable is what writes it back. Callers must have selected the
-/// desired thread first. Shared by the REPL and [`Session::step`].
+/// the re-enable is what writes it back. Callers must have selected
+/// `thread`, the backend thread to step, first. Shared by the REPL and
+/// [`Session::step`].
 pub fn step_over_current_breakpoint(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     debugger: &Target,
     breakpoints: &mut BreakpointManager,
+    thread: &str,
 ) -> Result<Option<RunPast>> {
     let regs = backend.read_registers()?;
     let rip = register_map.read_u64("rip", &regs)?;
@@ -555,7 +559,7 @@ pub fn step_over_current_breakpoint(
     }
 
     let stepped = if backend.single_step_unsafe() {
-        run_past_site(backend, register_map, debugger, &regs, rip, cr3)
+        run_past_site(backend, register_map, debugger, thread, &regs, rip, cr3)
     } else {
         step_one_and_clear_tf(backend, register_map).map(|()| RunPast::Reached)
     };
@@ -571,6 +575,15 @@ pub fn step_over_current_breakpoint(
         Err(err) => return stepped.and(Err(err)),
     }
     stepped.map(Some)
+}
+
+/// Where a vCPU on root `cr3` (or, without one, the module of `rip`) reads
+/// its code and stack.
+fn code_root(debugger: &Target, cr3: Option<u64>, rip: u64) -> Dtb {
+    match cr3 {
+        Some(cr3) => thread_root(debugger, cr3),
+        None => preferred_code_dtb(&resolve_thread_trace_context(debugger, 0), rip),
+    }
 }
 
 /// Where a vCPU executing one instruction ended up.
@@ -600,11 +613,12 @@ fn run_past_site(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     debugger: &Target,
+    thread: &str,
     regs: &[u8],
     rip: u64,
     cr3: Option<u64>,
 ) -> Result<RunPast> {
-    let successors = site_successors(debugger, register_map, regs, rip, cr3)?;
+    let successors = site_successors(debugger, register_map, thread, regs, rip, cr3)?;
     run_past(
         backend,
         register_map,
@@ -623,13 +637,14 @@ fn step_without_trap(
     register_map: &RegisterMap,
     debugger: &Target,
     breakpoints: &BreakpointManager,
+    thread: &str,
 ) -> Result<RunPast> {
     let regs = backend.read_registers()?;
     let rip = register_map.read_u64("rip", &regs)?;
     let cr3 = register_map
         .read_u64(debugger.arch().dtb_register(), &regs)
         .ok();
-    let successors = site_successors(debugger, register_map, &regs, rip, cr3)?;
+    let successors = site_successors(debugger, register_map, thread, &regs, rip, cr3)?;
     let secure = debugger.is_secure_address(VirtAddr(rip))
         || cr3.is_some_and(|cr3| debugger.recognize_secure_root(cr3))
         || successors
@@ -736,21 +751,19 @@ fn run_to_successors(
 
 /// Every address execution can continue at after the instruction at `rip`,
 /// decoded from the guest (the site is already lifted) and resolved against
-/// the stopped vCPU's registers and memory.
+/// the stopped vCPU's registers and memory. `thread` is the backend thread
+/// of that vCPU, whose processor's IDT an interrupt goes through.
 pub fn site_successors(
     debugger: &Target,
     register_map: &RegisterMap,
+    thread: &str,
     regs: &[u8],
     rip: u64,
     cr3: Option<u64>,
 ) -> Result<Vec<u64>> {
     // The vCPU fetches the instruction and follows its pointers through its
     // own root. Without one, a module's own root serves its code.
-    let dtb = match cr3 {
-        Some(cr3) => thread_root(debugger, cr3),
-        None => preferred_code_dtb(&resolve_thread_trace_context(debugger, 0), rip),
-    };
-    let memory = debugger.address_space(dtb);
+    let memory = debugger.address_space(code_root(debugger, cr3, rip));
     let mut bytes = [0u8; 16];
     memory.read_bytes(VirtAddr(rip), &mut bytes)?;
     let bitness = debugger.code_bitness(VirtAddr(rip));
@@ -760,8 +773,7 @@ pub fn site_successors(
             "failed to decode instruction at {rip:#x}"
         )));
     }
-    let width = if bitness == 32 { 4 } else { 8 };
-    let pointer = |address: u64| -> Result<u64> {
+    let pointer = |address: u64, width: usize| -> Result<u64> {
         let mut value = [0u8; 8];
         memory.read_bytes(VirtAddr(address), &mut value[..width])?;
         Ok(u64::from_le_bytes(value))
@@ -782,38 +794,169 @@ pub fn site_successors(
             format!("{:?}", instruction.mnemonic()).to_ascii_lowercase()
         ))
     };
-    let successors = match instruction.flow_control() {
-        FlowControl::Next => vec![instruction.next_ip()],
-        FlowControl::ConditionalBranch => {
-            vec![instruction.next_ip(), instruction.near_branch_target()]
-        }
-        FlowControl::UnconditionalBranch | FlowControl::Call
-            if instruction.op0_kind() != OpKind::FarBranch16
-                && instruction.op0_kind() != OpKind::FarBranch32 =>
-        {
-            vec![instruction.near_branch_target()]
-        }
-        FlowControl::IndirectBranch | FlowControl::IndirectCall => {
-            vec![indirect_target(&instruction, &register, &pointer).ok_or_else(unsupported)??]
-        }
-        FlowControl::Return => vec![pointer(register(Register::RSP)?)?],
-        _ => return Err(unsupported()),
+    let handler = |vector: u8, checks_privilege: bool| {
+        interrupt_handler(
+            debugger,
+            register_map,
+            regs,
+            thread,
+            vector,
+            checks_privilege,
+        )
     };
-    let mut successors = successors;
+    let top_of_stack = |width: usize| pointer(register(Register::RSP)?, width);
+    let mut successors = match instruction.code() {
+        Code::Syscall => vec![system_call_entry(debugger, bitness)?],
+        // `sysret` returns to RCX, `sysexit` to RDX; the 32-bit forms to
+        // their low halves.
+        Code::Sysretq => vec![register_map.read_u64("rcx", regs)?],
+        Code::Sysretd => vec![register_map.read_u64("rcx", regs)? & 0xffff_ffff],
+        Code::Sysexitq => vec![register_map.read_u64("rdx", regs)?],
+        Code::Sysexitd => vec![register_map.read_u64("rdx", regs)? & 0xffff_ffff],
+        // A hypercall returns to the next instruction.
+        Code::Vmcall | Code::Vmmcall => vec![instruction.next_ip()],
+        Code::Iretw | Code::Retfw | Code::Retfw_imm16 => vec![top_of_stack(2)?],
+        Code::Iretd | Code::Retfd | Code::Retfd_imm16 => vec![top_of_stack(4)?],
+        Code::Iretq | Code::Retfq | Code::Retfq_imm16 => vec![top_of_stack(8)?],
+        Code::Int_imm8 => vec![handler(instruction.immediate8(), true)?],
+        Code::Int3 => vec![handler(3, true)?],
+        Code::Int1 => vec![handler(1, false)?],
+        Code::Into => {
+            let overflow = register_map.read_u64("eflags", regs)? & (1 << 11) != 0;
+            vec![if overflow {
+                handler(4, true)?
+            } else {
+                instruction.next_ip()
+            }]
+        }
+        Code::Jmp_ptr1616 | Code::Call_ptr1616 => vec![u64::from(instruction.far_branch16())],
+        Code::Jmp_ptr1632 | Code::Call_ptr1632 => vec![u64::from(instruction.far_branch32())],
+        _ => match instruction.flow_control() {
+            FlowControl::Next => vec![instruction.next_ip()],
+            FlowControl::ConditionalBranch => {
+                vec![instruction.next_ip(), instruction.near_branch_target()]
+            }
+            FlowControl::UnconditionalBranch | FlowControl::Call
+                if instruction.is_jmp_short_or_near() || instruction.is_call_near() =>
+            {
+                vec![instruction.near_branch_target()]
+            }
+            FlowControl::IndirectBranch | FlowControl::IndirectCall => {
+                vec![
+                    indirect_target(&instruction, &register, &pointer)
+                        .ok_or_else(unsupported)??,
+                ]
+            }
+            FlowControl::Return if instruction.mnemonic() == Mnemonic::Ret => {
+                vec![top_of_stack(if bitness == 64 { 8 } else { 4 })?]
+            }
+            // `ud0`/`ud1`/`ud2` raise the invalid-opcode fault.
+            FlowControl::Exception
+                if matches!(
+                    instruction.mnemonic(),
+                    Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2
+                ) =>
+            {
+                vec![handler(6, false)?]
+            }
+            _ => return Err(unsupported()),
+        },
+    };
     successors.dedup();
     Ok(successors)
 }
 
+/// Where `syscall` enters the kernel: the `LSTAR` (64-bit) or `CSTAR`
+/// (compatibility mode) entry NT programs, which is the KVA-shadow copy
+/// while that mitigation runs. The GDB stub reads no MSR, so it is taken
+/// from the kernel's own choice.
+fn system_call_entry(debugger: &Target, bitness: u32) -> Result<u64> {
+    let nt = &debugger
+        .guest
+        .as_ref()
+        .ok_or_else(|| Error::DebugInfo("no kernel to find the system call entry in".into()))?
+        .ntoskrnl;
+    let shadow = nt
+        .symbol("KiKvaShadow")
+        .and_then(|flag| flag.read::<u8>())
+        .is_ok_and(|flag| flag != 0);
+    let entry = match (bitness, shadow) {
+        (64, true) => "KiSystemCall64Shadow",
+        (64, false) => "KiSystemCall64",
+        (_, true) => "KiSystemCall32Shadow",
+        (_, false) => "KiSystemCall32",
+    };
+    Ok(nt.symbol(entry)?.address().0)
+}
+
+/// Where an `int`-class instruction on the vCPU with registers `regs`
+/// continues: vector `vector`'s handler in its processor's IDT, or, when
+/// the gate is absent, the not-present fault's (11), and when
+/// `checks_privilege` and the gate's DPL is below the current privilege
+/// level, the general-protection fault's (13).
+fn interrupt_handler(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    thread: &str,
+    vector: u8,
+    checks_privilege: bool,
+) -> Result<u64> {
+    let processor = processor_index_from_backend_thread_id(thread).ok_or_else(|| {
+        Error::DebugInfo(format!("{thread} names no processor whose IDT to read"))
+    })?;
+    let gate = |vector: u8| -> Result<(u64, u8, bool)> {
+        let detail = debugger.inspect_idt(processor, Some(u16::from(vector)))?;
+        let entry = detail.entries.into_iter().next().ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "processor {processor}'s IDT has no vector {vector:#x}"
+            ))
+        })?;
+        let available = |field: &str| {
+            Error::DebugInfo(format!("IDT vector {vector:#x}'s {field} is unreadable"))
+        };
+        match (entry.handler, entry.dpl, entry.present) {
+            (
+                DiagnosticValue::Available(handler),
+                DiagnosticValue::Available(dpl),
+                DiagnosticValue::Available(present),
+            ) => Ok((handler.0, dpl, present)),
+            (DiagnosticValue::Unavailable(error), _, _) => Err(Error::DebugInfo(format!(
+                "{}: {error}",
+                available("handler")
+            ))),
+            _ => Err(available("gate")),
+        }
+    };
+    let (handler, dpl, present) = gate(vector)?;
+    let privilege = register_map.read_u64("cs", regs)? as u8 & 3;
+    if checks_privilege && privilege > dpl {
+        return gate(13).map(|(handler, ..)| handler);
+    }
+    if !present {
+        return gate(11).map(|(handler, ..)| handler);
+    }
+    Ok(handler)
+}
+
 /// Where an indirect `jmp`/`call` goes: a register, or a pointer in memory
-/// without a segment override. `None` for forms this does not evaluate.
+/// (the offset of a far one) without a segment override, read `width`
+/// bytes wide by `pointer`. `None` for forms this does not evaluate.
 fn indirect_target(
     instruction: &Instruction,
     register: &impl Fn(Register) -> Result<u64>,
-    pointer: &impl Fn(u64) -> Result<u64>,
+    pointer: &impl Fn(u64, usize) -> Result<u64>,
 ) -> Option<Result<u64>> {
     match instruction.op0_kind() {
         OpKind::Register => Some(register(instruction.op0_register())),
         OpKind::Memory if !matches!(instruction.segment_prefix(), Register::FS | Register::GS) => {
+            let width = match instruction.memory_size() {
+                // A far pointer is its offset, then a 2-byte selector.
+                MemorySize::SegPtr16 => 2,
+                MemorySize::SegPtr32 => 4,
+                MemorySize::SegPtr64 => 8,
+                size => size.size().min(8),
+            };
             let address = (|| {
                 let base = match instruction.memory_base() {
                     Register::None => 0,
@@ -830,6 +973,7 @@ fn indirect_target(
                 pointer(
                     base.wrapping_add(index)
                         .wrapping_add(instruction.memory_displacement64()),
+                    width,
                 )
             })();
             Some(address)
