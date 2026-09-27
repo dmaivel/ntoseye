@@ -2,6 +2,7 @@
 
 use super::Args;
 use crate::error::Result;
+use crate::target::zombies::ZombieKinds;
 use crate::view::{self, View};
 
 pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
@@ -34,13 +35,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             Ok(view::process::job(&target.inspect_job(job)?))
         })(),
         "!zombies" | "zombies" => (|| {
-            let flags = args.opt_value(0)?.unwrap_or(1);
-            let kinds = crate::target::zombies::ZombieKinds::from_flags(flags);
-            if !kinds.processes && !kinds.threads {
-                return Err(crate::error::Error::InvalidArgument(format!(
-                    "flags {flags:#x} select nothing: 1 processes, 2 threads, 3 both"
-                )));
-            }
+            let kinds = ZombieKinds::from_flags(args.opt_value(0)?.unwrap_or(1))?;
             Ok(view::process::zombies(&args.target().zombies(kinds)?))
         })(),
         // Only the display form; a change falls through to the REPL command.

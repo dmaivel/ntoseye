@@ -44,11 +44,17 @@ pub struct ZombieKinds {
 }
 
 impl ZombieKinds {
-    pub fn from_flags(flags: u64) -> Self {
-        Self {
+    /// The kinds `flags` selects; an error when it selects neither.
+    pub fn from_flags(flags: u64) -> Result<Self> {
+        if flags & 3 == 0 {
+            return Err(Error::InvalidArgument(format!(
+                "flags {flags:#x} select nothing: 1 processes, 2 threads, 3 both"
+            )));
+        }
+        Ok(Self {
             processes: flags & 1 != 0,
             threads: flags & 2 != 0,
-        }
+        })
     }
 }
 

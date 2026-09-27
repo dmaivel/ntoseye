@@ -192,12 +192,7 @@ impl Inspect {
     /// processes, 2 threads, 3 both.
     #[pyo3(signature = (flags=1))]
     fn zombies<'py>(&self, py: Python<'py>, flags: u64) -> PyResult<Bound<'py, Record>> {
-        let kinds = ZombieKinds::from_flags(flags);
-        if !kinds.processes && !kinds.threads {
-            return Err(raise(format!(
-                "flags {flags:#x} select nothing: 1 processes, 2 threads, 3 both"
-            )));
-        }
+        let kinds = ZombieKinds::from_flags(flags).map_err(err)?;
         self.record(py, |session| {
             let detail = session.target.zombies(kinds).map_err(err)?;
             Ok(view::process::zombies(&detail))

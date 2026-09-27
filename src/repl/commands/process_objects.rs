@@ -140,12 +140,7 @@ impl ReplState<'_> {
             Some(None) => return Ok(()),
             None => 1,
         };
-        let kinds = ZombieKinds::from_flags(flags);
-        if !kinds.processes && !kinds.threads {
-            error!("!zombies: flags {flags:#x} select nothing: 1 processes, 2 threads, 3 both");
-            return Ok(());
-        }
-        match self.ctx.target.zombies(kinds) {
+        match ZombieKinds::from_flags(flags).and_then(|kinds| self.ctx.target.zombies(kinds)) {
             Ok(detail) => print_zombies(&detail),
             Err(error) => error!("{error}"),
         }
