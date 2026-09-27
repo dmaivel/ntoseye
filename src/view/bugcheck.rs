@@ -2,120 +2,316 @@
 //! decoded trap frames and exception records.
 
 use super::View;
-use crate::bugchecks::{BugcheckAnalysis, BugcheckTrapFrame};
-use crate::session::ExceptionRecord;
+use super::shape::{Hex, ViewValue, shapes};
+use crate::bugchecks::{self, BugcheckAnalysis};
+use crate::session;
 use crate::trapframe::{KtrapFrame, KtrapFrameData};
 use crate::triage_report::exception_code_name;
+#[cfg(feature = "python-stubs")]
+use pyo3::type_hint_union;
+
+shapes! {
+    /// A decoded bugcheck (BSOD): its code, the four parameters, and the
+    /// faulting instruction when one was identified.
+    Bugcheck {
+        /// The bugcheck code.
+        code: u32,
+        /// The code as zero-padded hex text (`0x0000000a`).
+        code_hex: String,
+        /// The symbolic name (`IRQL_NOT_LESS_OR_EQUAL`).
+        name: String,
+        /// What the bugcheck means; `None` for a code without a description.
+        description: Option<String>,
+        /// The driver responsible, from the dump's record or the fault site.
+        driver: Option<String>,
+        /// Where the data was found instead of its usual place (a pointer in
+        /// `nt!KiBugCheckData` to the real slots); `None` normally.
+        source: Option<String>,
+        /// The four bugcheck parameters, each with its meaning for this code.
+        args: Vec<BugcheckArgument>,
+        /// The faulting instruction; `None` when none was identified.
+        fault: Option<BugcheckFault>,
+        /// Trap frames the parameters point to.
+        trap_frames: Vec<BugcheckTrapFrame>,
+    }
+
+    /// One bugcheck parameter and what it means for the code.
+    BugcheckArgument {
+        /// The parameter's position, 1 to 4.
+        index: usize,
+        value: Hex,
+        /// What this parameter holds for the bugcheck code; empty when the
+        /// code documents none.
+        description: String,
+    }
+
+    /// The instruction a bugcheck faulted at.
+    BugcheckFault {
+        /// The faulting instruction pointer.
+        ip: Hex,
+        /// The symbol at `ip`.
+        symbol: String,
+        /// The driver containing `ip`; `None` outside every loaded driver.
+        driver: Option<String>,
+    }
+
+    /// The x64 registers a `_KTRAP_FRAME` saved. A register the frame's entry
+    /// does not write is `None`; the nonvolatile r12-r15 live in the
+    /// `_KEXCEPTION_FRAME`, not here.
+    Amd64TrapFrame {
+        /// The entry that built the frame: `interrupt`, `exception`,
+        /// `system call` or `Zw call`; `None` when unknown, and then only
+        /// the machine frame and rbp are trusted.
+        kind: Option<&'static str>,
+        rax: Option<Hex>,
+        rbx: Option<Hex>,
+        rcx: Option<Hex>,
+        rdx: Option<Hex>,
+        rsi: Option<Hex>,
+        rdi: Option<Hex>,
+        rbp: Hex,
+        rsp: Hex,
+        r8: Option<Hex>,
+        r9: Option<Hex>,
+        r10: Option<Hex>,
+        r11: Option<Hex>,
+        rip: Hex,
+        cs: Hex,
+        ss: Option<Hex>,
+        eflags: Hex,
+        /// The exception's error code; stale for a vector that carries none.
+        error_code: Option<Hex>,
+        /// The mode the trap came from: 0 kernel, 1 user.
+        previous_mode: u8,
+        /// The IRQL before the trap; only interrupts record it.
+        previous_irql: Option<u8>,
+    }
+
+    /// The ARM64 registers a `_KTRAP_FRAME` saved. The frame holds x0-x18,
+    /// fp (x29) and lr (x30); x19-x28 are `None`.
+    Arm64TrapFrame {
+        x0: Option<Hex>,
+        x1: Option<Hex>,
+        x2: Option<Hex>,
+        x3: Option<Hex>,
+        x4: Option<Hex>,
+        x5: Option<Hex>,
+        x6: Option<Hex>,
+        x7: Option<Hex>,
+        x8: Option<Hex>,
+        x9: Option<Hex>,
+        x10: Option<Hex>,
+        x11: Option<Hex>,
+        x12: Option<Hex>,
+        x13: Option<Hex>,
+        x14: Option<Hex>,
+        x15: Option<Hex>,
+        x16: Option<Hex>,
+        x17: Option<Hex>,
+        x18: Option<Hex>,
+        x19: Option<Hex>,
+        x20: Option<Hex>,
+        x21: Option<Hex>,
+        x22: Option<Hex>,
+        x23: Option<Hex>,
+        x24: Option<Hex>,
+        x25: Option<Hex>,
+        x26: Option<Hex>,
+        x27: Option<Hex>,
+        x28: Option<Hex>,
+        x29: Option<Hex>,
+        x30: Option<Hex>,
+        fp: Hex,
+        lr: Hex,
+        sp: Hex,
+        pc: Hex,
+        cpsr: Option<Hex>,
+        esr: Option<Hex>,
+        /// The faulting data address (FAR).
+        fault_address: Option<Hex>,
+        /// The mode the trap came from: 0 kernel, 1 user.
+        previous_mode: Option<u8>,
+        /// The IRQL before the trap.
+        previous_irql: Option<u8>,
+        /// Breakpoint control registers.
+        bcr: Vec<Option<Hex>>,
+        /// Breakpoint value registers.
+        bvr: Vec<Option<Hex>>,
+        /// Watchpoint control registers.
+        wcr: Vec<Option<Hex>>,
+        /// Watchpoint value registers.
+        wvr: Vec<Option<Hex>>,
+    }
+
+    /// A decoded `EXCEPTION_RECORD64` (`.exr`).
+    ExceptionRecord {
+        /// Where the record was read from; `None` for the current event's
+        /// record, reconstructed from the stop rather than read from memory.
+        record_address: Option<Hex>,
+        /// The exception code (NTSTATUS).
+        code: Hex,
+        /// The code's symbolic name.
+        code_name: String,
+        flags: Hex,
+        /// The address of a nested `EXCEPTION_RECORD`, or 0.
+        nested: Hex,
+        /// Where the exception occurred.
+        exception_address: Hex,
+        /// The exception's `ExceptionInformation` parameters.
+        parameters: Vec<Hex>,
+    }
+
+    /// A decoded `_KTRAP_FRAME` (`.trap`).
+    TrapFrame {
+        /// Where the frame was read from.
+        address: Hex,
+        /// The symbol at the interrupted instruction.
+        rip_symbol: Option<String>,
+        /// The saved registers, by architecture.
+        frame: KtrapFrameRegisters,
+    }
+
+    /// A trap frame a bugcheck parameter points to: either its decoded
+    /// registers or why decoding failed.
+    BugcheckTrapFrame {
+        /// Where the frame was read from.
+        address: Hex,
+        /// The symbol at the interrupted instruction.
+        rip_symbol: Option<String>,
+        /// The saved registers; `None` when decoding failed.
+        frame: Option<KtrapFrameRegisters>,
+        /// Why decoding failed; `None` when it succeeded.
+        error: Option<String>,
+    }
+}
+
+/// A `_KTRAP_FRAME`'s registers, as the frame's architecture names them.
+pub enum KtrapFrameRegisters {
+    Amd64(Amd64TrapFrame),
+    Arm64(Box<Arm64TrapFrame>),
+}
+
+impl ViewValue for KtrapFrameRegisters {
+    fn into_view(self) -> View {
+        match self {
+            Self::Amd64(frame) => frame.into_view(),
+            Self::Arm64(frame) => frame.into_view(),
+        }
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: pyo3::inspect::PyStaticExpr =
+        type_hint_union!(Amd64TrapFrame::HINT, Arm64TrapFrame::HINT);
+}
 
 /// A decoded bugcheck (BSOD): code/name/description, its four parameters, and the
 /// faulting instruction when one was identified.
-pub fn bugcheck(a: &BugcheckAnalysis) -> View {
-    let args = a
-        .args
-        .iter()
-        .enumerate()
-        .map(|(i, arg)| {
-            View::Object(vec![
-                ("index", View::Num((i + 1) as u64)),
-                ("value", View::Hex(arg.value)),
-                ("description", View::Str(arg.description.clone())),
-            ])
-        })
-        .collect();
-    let fault = a.fault.as_ref().map_or(View::Null, |f| {
-        View::Object(vec![
-            ("ip", View::Hex(f.ip)),
-            ("symbol", View::Str(f.symbol.clone())),
-            ("driver", View::OptStr(f.driver.clone())),
-        ])
-    });
-    let trap_frames = a.trap_frames.iter().map(bugcheck_trap_frame).collect();
-    View::Object(vec![
-        ("code", View::Num(a.code as u64)),
-        ("code_hex", View::Str(format!("{:#010x}", a.code))),
-        ("name", View::Str(a.name.clone())),
-        ("description", View::OptStr(a.description.clone())),
-        ("driver", View::OptStr(a.driver.clone())),
-        ("source", View::OptStr(a.source.clone())),
-        ("args", View::List(args)),
-        ("fault", fault),
-        ("trap_frames", View::List(trap_frames)),
-    ])
+pub fn bugcheck(a: &BugcheckAnalysis) -> Bugcheck {
+    Bugcheck {
+        code: a.code,
+        code_hex: format!("{:#010x}", a.code),
+        name: a.name.clone(),
+        description: a.description.clone(),
+        driver: a.driver.clone(),
+        source: a.source.clone(),
+        args: a
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| BugcheckArgument {
+                index: i + 1,
+                value: Hex(arg.value),
+                description: arg.description.clone(),
+            })
+            .collect(),
+        fault: a.fault.as_ref().map(|f| BugcheckFault {
+            ip: Hex(f.ip),
+            symbol: f.symbol.clone(),
+            driver: f.driver.clone(),
+        }),
+        trap_frames: a.trap_frames.iter().map(bugcheck_trap_frame).collect(),
+    }
 }
 
-fn ktrap_frame_registers(frame: &KtrapFrame) -> View {
+fn ktrap_frame_registers(frame: &KtrapFrame) -> KtrapFrameRegisters {
+    let hex = |value: Option<u64>| value.map(Hex);
     match &frame.data {
-        KtrapFrameData::Amd64(frame) => View::Object(vec![
-            (
-                "kind",
-                View::OptStr(frame.kind.map(|kind| kind.as_str().to_string())),
-            ),
-            ("rax", View::OptHex(frame.rax)),
-            ("rbx", View::OptHex(frame.rbx)),
-            ("rcx", View::OptHex(frame.rcx)),
-            ("rdx", View::OptHex(frame.rdx)),
-            ("rsi", View::OptHex(frame.rsi)),
-            ("rdi", View::OptHex(frame.rdi)),
-            ("rbp", View::Hex(frame.rbp)),
-            ("rsp", View::Hex(frame.rsp)),
-            ("r8", View::OptHex(frame.r8)),
-            ("r9", View::OptHex(frame.r9)),
-            ("r10", View::OptHex(frame.r10)),
-            ("r11", View::OptHex(frame.r11)),
-            ("rip", View::Hex(frame.rip)),
-            ("cs", View::Hex(frame.cs as u64)),
-            ("ss", View::OptHex(frame.ss.map(u64::from))),
-            ("eflags", View::Hex(frame.eflags as u64)),
-            ("error_code", View::OptHex(frame.error_code)),
-            ("previous_mode", View::Num(frame.previous_mode as u64)),
-            (
-                "previous_irql",
-                View::OptNum(frame.previous_irql.map(u64::from)),
-            ),
-        ]),
+        KtrapFrameData::Amd64(frame) => KtrapFrameRegisters::Amd64(Amd64TrapFrame {
+            kind: frame.kind.map(|kind| kind.as_str()),
+            rax: hex(frame.rax),
+            rbx: hex(frame.rbx),
+            rcx: hex(frame.rcx),
+            rdx: hex(frame.rdx),
+            rsi: hex(frame.rsi),
+            rdi: hex(frame.rdi),
+            rbp: Hex(frame.rbp),
+            rsp: Hex(frame.rsp),
+            r8: hex(frame.r8),
+            r9: hex(frame.r9),
+            r10: hex(frame.r10),
+            r11: hex(frame.r11),
+            rip: Hex(frame.rip),
+            cs: Hex(frame.cs.into()),
+            ss: hex(frame.ss.map(u64::from)),
+            eflags: Hex(frame.eflags.into()),
+            error_code: hex(frame.error_code),
+            previous_mode: frame.previous_mode,
+            previous_irql: frame.previous_irql,
+        }),
         KtrapFrameData::Arm64(frame) => {
-            const X_NAMES: [&str; 31] = [
-                "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
-                "x13", "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24",
-                "x25", "x26", "x27", "x28", "x29", "x30",
-            ];
-            let mut fields = Vec::with_capacity(31 + 9);
-            for (index, name) in X_NAMES.iter().enumerate() {
-                let value = match index {
-                    0..=18 => Some(frame.x[index]),
-                    29 => Some(frame.fp),
-                    30 => Some(frame.lr),
-                    _ => None,
-                };
-                fields.push((*name, value.map_or(View::Null, View::Hex)));
-            }
-            fields.extend([
-                ("fp", View::Hex(frame.fp)),
-                ("lr", View::Hex(frame.lr)),
-                ("sp", View::Hex(frame.sp)),
-                ("pc", View::Hex(frame.pc)),
-                ("cpsr", View::OptHex(frame.cpsr)),
-                ("esr", View::OptHex(frame.esr)),
-                ("fault_address", View::OptHex(frame.fault_address)),
-                (
-                    "previous_mode",
-                    View::OptNum(frame.previous_mode.map(u64::from)),
-                ),
-                (
-                    "previous_irql",
-                    View::OptNum(frame.previous_irql.map(u64::from)),
-                ),
-            ]);
-            let registers = |values: &[Option<u64>]| {
-                View::List(values.iter().copied().map(View::OptHex).collect())
+            let x = |index: usize| match index {
+                0..=18 => Some(Hex(frame.x[index])),
+                29 => Some(Hex(frame.fp)),
+                30 => Some(Hex(frame.lr)),
+                _ => None,
             };
-            fields.extend([
-                ("bcr", registers(&frame.bcr)),
-                ("bvr", registers(&frame.bvr)),
-                ("wcr", registers(&frame.wcr)),
-                ("wvr", registers(&frame.wvr)),
-            ]);
-            View::Object(fields)
+            let registers =
+                |values: &[Option<u64>]| values.iter().copied().map(hex).collect::<Vec<_>>();
+            KtrapFrameRegisters::Arm64(Box::new(Arm64TrapFrame {
+                x0: x(0),
+                x1: x(1),
+                x2: x(2),
+                x3: x(3),
+                x4: x(4),
+                x5: x(5),
+                x6: x(6),
+                x7: x(7),
+                x8: x(8),
+                x9: x(9),
+                x10: x(10),
+                x11: x(11),
+                x12: x(12),
+                x13: x(13),
+                x14: x(14),
+                x15: x(15),
+                x16: x(16),
+                x17: x(17),
+                x18: x(18),
+                x19: x(19),
+                x20: x(20),
+                x21: x(21),
+                x22: x(22),
+                x23: x(23),
+                x24: x(24),
+                x25: x(25),
+                x26: x(26),
+                x27: x(27),
+                x28: x(28),
+                x29: x(29),
+                x30: x(30),
+                fp: Hex(frame.fp),
+                lr: Hex(frame.lr),
+                sp: Hex(frame.sp),
+                pc: Hex(frame.pc),
+                cpsr: hex(frame.cpsr),
+                esr: hex(frame.esr),
+                fault_address: hex(frame.fault_address),
+                previous_mode: frame.previous_mode,
+                previous_irql: frame.previous_irql,
+                bcr: registers(&frame.bcr),
+                bvr: registers(&frame.bvr),
+                wcr: registers(&frame.wcr),
+                wvr: registers(&frame.wvr),
+            }))
         }
     }
 }
@@ -123,52 +319,46 @@ fn ktrap_frame_registers(frame: &KtrapFrame) -> View {
 /// A decoded `EXCEPTION_RECORD64` (`.exr`). `record_address` is where the
 /// record was read from; `None` for the current event's record, which is
 /// reconstructed from the stop rather than read from guest memory.
-pub fn exception_record(record_address: Option<u64>, record: &ExceptionRecord) -> View {
-    View::Object(vec![
-        ("record_address", View::OptHex(record_address)),
-        ("code", View::Hex(u64::from(record.code))),
-        (
-            "code_name",
-            View::Str(exception_code_name(record.code).to_string()),
-        ),
-        ("flags", View::Hex(u64::from(record.flags))),
-        ("nested", View::Hex(record.nested)),
-        ("exception_address", View::Hex(record.address)),
-        (
-            "parameters",
-            View::List(record.parameters.iter().copied().map(View::Hex).collect()),
-        ),
-    ])
+pub fn exception_record(record_address: Option<u64>, record: &session::ExceptionRecord) -> View {
+    ExceptionRecord {
+        record_address: record_address.map(Hex),
+        code: Hex(record.code.into()),
+        code_name: exception_code_name(record.code).to_string(),
+        flags: Hex(record.flags.into()),
+        nested: Hex(record.nested),
+        exception_address: Hex(record.address),
+        parameters: record.parameters.iter().copied().map(Hex).collect(),
+    }
+    .into_view()
 }
 
 /// A decoded `_KTRAP_FRAME` shared by structured host APIs.
 pub fn trap_frame(frame: &KtrapFrame, rip_symbol: Option<String>) -> View {
-    View::Object(vec![
-        ("address", View::Hex(frame.address)),
-        ("rip_symbol", View::OptStr(rip_symbol)),
-        ("frame", ktrap_frame_registers(frame)),
-    ])
+    TrapFrame {
+        address: Hex(frame.address),
+        rip_symbol,
+        frame: ktrap_frame_registers(frame),
+    }
+    .into_view()
 }
 
 /// A trap frame carried by a bugcheck parameter: its address, the symbol at
 /// the interrupted `rip`, and either the decoded `_KTRAP_FRAME` registers or
 /// the reason decoding failed.
-pub fn bugcheck_trap_frame(tf: &BugcheckTrapFrame) -> View {
-    View::Object(vec![
-        ("address", View::Hex(tf.address)),
-        ("rip_symbol", View::OptStr(tf.rip_symbol.clone())),
-        (
-            "frame",
-            tf.frame.as_ref().map_or(View::Null, ktrap_frame_registers),
-        ),
-        ("error", View::OptStr(tf.error.clone())),
-    ])
+pub fn bugcheck_trap_frame(tf: &bugchecks::BugcheckTrapFrame) -> BugcheckTrapFrame {
+    BugcheckTrapFrame {
+        address: Hex(tf.address),
+        rip_symbol: tf.rip_symbol.clone(),
+        frame: tf.frame.as_ref().map(ktrap_frame_registers),
+        error: tf.error.clone(),
+    }
 }
 
 #[cfg(all(test, feature = "mcp"))]
 mod tests {
     use super::bugcheck_trap_frame;
     use crate::bugchecks::BugcheckTrapFrame;
+    use crate::view::shape::ViewValue;
     use crate::view::to_json;
 
     #[test]
@@ -178,7 +368,8 @@ mod tests {
             frame: None,
             rip_symbol: None,
             error: Some("type `_KTRAP_FRAME` not found".to_string()),
-        });
+        })
+        .into_view();
         let json = to_json(&view);
         assert!(json["frame"].is_null());
         assert_eq!(json["error"], "type `_KTRAP_FRAME` not found");

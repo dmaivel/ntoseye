@@ -2,44 +2,273 @@
 //! dump metadata, failure signature, and findings it aggregates.
 
 use super::View;
-use super::bugcheck::bugcheck;
+use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::{run_status, stack_frame};
-use super::module::module;
-use super::shape::ViewValue;
-use crate::dmp::{DmpException, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
+use super::module::loaded_module;
+use super::shape::{Hex, Omit, ViewValue, shapes};
+use crate::dmp::{self, DmpException, DmpSystemInfo, TriageCrashInfo};
 use crate::triage::TriagePrcbInfo;
 use crate::triage_report::{
     BlackboxFinding, BlackboxKind, BlackboxState, CulpritAttribution, CulpritConfidence,
-    CulpritEvidenceKind, FailureCodeKind, FailureSignature, FailureSignatureSource, TriageReport,
-    VerifierFinding, WheaFinding, WheaRecordState, WheaSectionKind, exception_code_name,
-    time::filetime_to_iso,
+    CulpritEvidenceKind, FailureCodeKind, FailureSignatureSource, WheaFinding, WheaRecordState,
+    WheaSectionKind, exception_code_name, time::filetime_to_iso,
+};
+use crate::triage_report::{
+    FailureSignature as SignatureDetail, TriageReport as ReportDetail,
+    VerifierFinding as VerifierFindingDetail,
 };
 
-pub fn dump_exception(exception: &DmpException) -> View {
-    View::Object(vec![
-        ("code", View::Num(exception.code.into())),
-        ("code_hex", View::Hex(exception.code.into())),
-        (
-            "code_name",
-            View::Str(exception_code_name(exception.code).to_string()),
-        ),
-        ("flags", View::Num(exception.flags.into())),
-        ("address", View::Hex(exception.address)),
-        (
-            "parameters",
-            View::List(
-                exception
-                    .parameters
-                    .iter()
-                    .copied()
-                    .map(View::Hex)
-                    .collect(),
-            ),
-        ),
-    ])
+shapes! {
+    /// The exception a crash dump recorded.
+    DumpException {
+        /// The exception code (NTSTATUS).
+        code: u32,
+        /// The same code, as hex.
+        code_hex: Hex,
+        /// The code's symbolic name.
+        code_name: String,
+        flags: u32,
+        /// Where the exception occurred.
+        address: Hex,
+        /// The exception's `ExceptionInformation` parameters.
+        parameters: Vec<Hex>,
+    }
+
+    /// The system a crash dump was taken from, from its system-info stream.
+    DumpSystemInfo {
+        major_version: u32,
+        /// The build number (the stream's minor version).
+        build: u32,
+        service_pack_build: u32,
+        /// The machine type (`IMAGE_FILE_MACHINE_*`).
+        machine_image_type: Hex,
+        /// `I386`, `AMD64`, `ARM64`, or `Unknown`.
+        machine: &'static str,
+        /// When the dump was taken (ISO 8601 UTC); `None` when unrecorded.
+        system_time: Option<String>,
+        /// Seconds the system had been up; `None` when unrecorded.
+        system_up_time_secs: Option<u64>,
+        /// `Workstation`, `DomainController`, `Server`, or `Unknown`.
+        product_type: &'static str,
+        /// The product suite (`VER_SUITE_*`) bits.
+        suite_mask: Hex,
+    }
+
+    /// The process and thread a triage dump recorded as crashing. The
+    /// fields after `thread_id` are absent when the dump does not record
+    /// them.
+    CrashContext {
+        process_name: Option<String>,
+        process_id: Option<u64>,
+        thread_id: Option<u64>,
+        parent_process_id: Omit<u64>,
+        /// The process's exit status (NTSTATUS).
+        exit_status: Omit<Hex>,
+        /// When the process was created (ISO 8601 UTC); `None` when absent
+        /// or the recorded time does not convert.
+        create_time: Omit<Option<String>>,
+        /// The thread's exit status (NTSTATUS).
+        thread_exit_status: Omit<Hex>,
+    }
+
+    /// The crashing processor's `_KPRCB` essentials a triage dump recorded.
+    TriagePrcb {
+        /// The `_KTHREAD` running on the processor.
+        current_thread: Hex,
+        processor_number: u16,
+        /// The processor's clock speed in MHz.
+        mhz: u32,
+        cpu_type: u16,
+        /// The CPU vendor (`GenuineIntel`, `AuthenticAMD`, ...).
+        vendor_string: String,
+    }
+
+    /// A deterministic, address-independent identity for comparing failures.
+    FailureSignature {
+        /// `bugcheck` or `exception`.
+        code_kind: &'static str,
+        /// The bugcheck or exception code.
+        code: Hex,
+        /// Where the failing location came from: `bugcheck_fault`,
+        /// `exception_address`, `current_instruction`, `top_frame`, or
+        /// `code_only`.
+        source: &'static str,
+        /// The module at the failing location.
+        module: Option<String>,
+        /// The symbol at the failing location.
+        symbol: Option<String>,
+        /// The ordered parts `bucket` is formed from.
+        components: Vec<String>,
+        /// The failure bucket.
+        bucket: String,
+    }
+
+    /// The module the available evidence blames for the crash.
+    Culprit {
+        module: String,
+        /// `low`, `medium`, or `high`.
+        confidence: &'static str,
+        /// What points at the module.
+        evidence: Vec<CulpritEvidence>,
+    }
+
+    /// One piece of evidence behind a culprit attribution.
+    CulpritEvidence {
+        /// `recorded_broken_driver`, `recorded_bugcheck_driver`,
+        /// `bugcheck_fault_address`, `exception_address`,
+        /// `current_instruction`, or `top_frame`.
+        kind: &'static str,
+        detail: String,
+        /// The address the evidence rests on, when it is one.
+        address: Option<Hex>,
+    }
+
+    /// A Driver Verifier bugcheck, decoded by its subcode.
+    VerifierFinding {
+        bugcheck_code: Hex,
+        bugcheck_name: String,
+        /// The verifier subcode (the first bugcheck parameter).
+        subcode: Hex,
+        /// Whether the subcode is one this decoder knows.
+        known_subcode: bool,
+        /// What the subcode means, or `unknown verifier subcode`.
+        subcode_description: String,
+        /// The driver the violation is attributed to.
+        associated_driver: Option<String>,
+        /// The bugcheck parameters, described for the subcode.
+        arguments: Vec<VerifierFindingArgument>,
+        /// The addresses the parameters name, by role.
+        addresses: Vec<VerifierFindingAddress>,
+    }
+
+    /// A verifier bugcheck parameter and what it means for the subcode.
+    VerifierFindingArgument {
+        value: Hex,
+        description: String,
+    }
+
+    /// An address a verifier bugcheck names, and its role.
+    VerifierFindingAddress {
+        role: String,
+        address: Hex,
+    }
+
+    /// The WHEA error record a hardware-error bugcheck carries. When the
+    /// record could not be decoded, `reason` says why and the decoded fields
+    /// are absent; otherwise `reason` is absent.
+    WheaRecord {
+        /// Where the record lives; `None` when the bugcheck names none.
+        record_address: Option<Hex>,
+        /// Whether the record decoded.
+        available: bool,
+        /// Why the record could not be decoded.
+        reason: Omit<String>,
+        revision: Omit<Hex>,
+        /// The record's error severity (`WHEA_ERROR_SEVERITY`).
+        severity: Omit<u32>,
+        /// The record's length in bytes.
+        length: Omit<u32>,
+        /// How many sections the record has; `sections` holds at most 64.
+        sections_total: Omit<usize>,
+        sections: Omit<Vec<WheaSection>>,
+    }
+
+    /// One section of a WHEA error record.
+    WheaSection {
+        /// The section's offset in the record, in bytes.
+        offset: u32,
+        /// The section's length in bytes.
+        length: u32,
+        /// The section's error severity.
+        severity: u32,
+        /// The section type GUID.
+        section_type: String,
+        /// `processor_generic`, `memory`, `pci_express`, `x64_processor`, or
+        /// `unknown`.
+        kind: &'static str,
+    }
+
+    /// A blackbox stream (pnp, ntfs, bsd, winlogon) of a crash dump. Its
+    /// payload is never parsed.
+    BlackboxStream {
+        /// `pnp`, `ntfs`, `bsd`, or `winlogon`.
+        kind: &'static str,
+        /// The stream's recorded name.
+        name: String,
+        /// The stream's size in bytes, when recorded.
+        size: Option<u64>,
+        /// `True` when the stream is recorded; `None` when the dump exposes
+        /// no stream directory to tell.
+        present: Option<bool>,
+        /// Whether the payload is available; always `False`.
+        available: bool,
+        /// Whether the payload was parsed; always `False`.
+        parsed: bool,
+        /// Why the payload is not available.
+        reason: String,
+    }
+
+    /// A driver the crash dump records as recently unloaded.
+    UnloadedDriver {
+        name: String,
+        start_address: Hex,
+        end_address: Hex,
+    }
+
+    /// The one-shot crash triage report (`!analyze`): run status, bugcheck
+    /// or exception, backtrace, modules, dump records, and findings.
+    TriageReport {
+        /// The target's run status.
+        status: super::execution::RunStatus,
+        /// The bugcheck, when the target is bugchecking.
+        bugcheck: Option<Bugcheck>,
+        /// The exception a dump recorded.
+        exception: Option<DumpException>,
+        /// The dump's system information.
+        system_info: Option<DumpSystemInfo>,
+        /// The current thread's stack; `None` while running or when the
+        /// unwind failed (see `warnings`).
+        backtrace: Option<Vec<super::execution::StackFrame>>,
+        /// Loaded modules, capped by the caller (see `modules_total`).
+        modules: Vec<super::module::LoadedModule>,
+        /// How many modules are loaded.
+        modules_total: usize,
+        unloaded_drivers: Vec<UnloadedDriver>,
+        /// The crashing process and thread a triage dump recorded.
+        crash_context: Option<CrashContext>,
+        /// The crashing processor a triage dump recorded.
+        prcb: Option<TriagePrcb>,
+        /// The driver the dump records as broken.
+        broken_driver: Option<String>,
+        /// Whether the dump's triage data overflowed; `None` for a target
+        /// that is not a dump.
+        triage_overflowed: Option<bool>,
+        failure_signature: Option<FailureSignature>,
+        /// The module the evidence blames; `None` when it names no
+        /// non-kernel module.
+        culprit: Option<Culprit>,
+        /// The Driver Verifier violation, for a verifier bugcheck.
+        verifier: Option<VerifierFinding>,
+        /// The hardware error record, for a WHEA bugcheck.
+        whea: Option<WheaRecord>,
+        blackboxes: Vec<BlackboxStream>,
+        /// Best-effort collection failures that did not prevent the report.
+        warnings: Vec<String>,
+    }
 }
 
-pub fn system_info(info: &DmpSystemInfo) -> View {
+pub fn dump_exception(exception: &DmpException) -> DumpException {
+    DumpException {
+        code: exception.code,
+        code_hex: Hex(exception.code.into()),
+        code_name: exception_code_name(exception.code).to_string(),
+        flags: exception.flags,
+        address: Hex(exception.address),
+        parameters: exception.parameters.iter().copied().map(Hex).collect(),
+    }
+}
+
+pub fn system_info(info: &DmpSystemInfo) -> DumpSystemInfo {
     let product = match info.product_type {
         1 => "Workstation",
         2 => "DomainController",
@@ -52,71 +281,46 @@ pub fn system_info(info: &DmpSystemInfo) -> View {
         0xAA64 => "ARM64",
         _ => "Unknown",
     };
-    View::Object(vec![
-        ("major_version", View::Num(info.major_version.into())),
-        ("build", View::Num(info.minor_version.into())),
-        (
-            "service_pack_build",
-            View::Num(info.service_pack_build.into()),
-        ),
-        (
-            "machine_image_type",
-            View::Hex(info.machine_image_type.into()),
-        ),
-        ("machine", View::Str(machine.to_string())),
-        (
-            "system_time",
-            View::OptStr(
-                (info.system_time != 0)
-                    .then(|| filetime_to_iso(info.system_time as u64))
-                    .flatten(),
-            ),
-        ),
-        (
-            "system_up_time_secs",
-            View::OptNum(
-                (info.system_up_time > 0)
-                    .then(|| u64::try_from(info.system_up_time / 10_000_000).ok())
-                    .flatten(),
-            ),
-        ),
-        ("product_type", View::Str(product.to_string())),
-        ("suite_mask", View::Hex(info.suite_mask.into())),
-    ])
+    DumpSystemInfo {
+        major_version: info.major_version,
+        build: info.minor_version,
+        service_pack_build: info.service_pack_build,
+        machine_image_type: Hex(info.machine_image_type.into()),
+        machine,
+        system_time: (info.system_time != 0)
+            .then(|| filetime_to_iso(info.system_time as u64))
+            .flatten(),
+        system_up_time_secs: (info.system_up_time > 0)
+            .then(|| u64::try_from(info.system_up_time / 10_000_000).ok())
+            .flatten(),
+        product_type: product,
+        suite_mask: Hex(info.suite_mask.into()),
+    }
 }
 
-pub fn crash_context(context: &TriageCrashInfo) -> View {
-    let mut fields = vec![
-        ("process_name", View::OptStr(context.process_name.clone())),
-        ("process_id", View::OptNum(context.process_id)),
-        ("thread_id", View::OptNum(context.thread_id)),
-    ];
-    if let Some(parent_process_id) = context.parent_process_id {
-        fields.push(("parent_process_id", View::Num(parent_process_id)));
+pub fn crash_context(context: &TriageCrashInfo) -> CrashContext {
+    CrashContext {
+        process_name: context.process_name.clone(),
+        process_id: context.process_id,
+        thread_id: context.thread_id,
+        parent_process_id: Omit(context.parent_process_id),
+        exit_status: Omit(context.exit_status.map(|status| Hex(status as u64))),
+        create_time: Omit(context.create_time.map(filetime_to_iso)),
+        thread_exit_status: Omit(context.thread_exit_status.map(|status| Hex(status as u64))),
     }
-    if let Some(exit_status) = context.exit_status {
-        fields.push(("exit_status", View::Hex(exit_status as u64)));
-    }
-    if let Some(create_time) = context.create_time {
-        fields.push(("create_time", View::OptStr(filetime_to_iso(create_time))));
-    }
-    if let Some(exit_status) = context.thread_exit_status {
-        fields.push(("thread_exit_status", View::Hex(exit_status as u64)));
-    }
-    View::Object(fields)
 }
 
-pub fn prcb(prcb: &TriagePrcbInfo) -> View {
-    View::Object(vec![
-        ("current_thread", View::Hex(prcb.current_thread)),
-        ("processor_number", View::Num(prcb.processor_number.into())),
-        ("mhz", View::Num(prcb.mhz.into())),
-        ("cpu_type", View::Num(prcb.cpu_type.into())),
-        ("vendor_string", View::Str(prcb.vendor_string.clone())),
-    ])
+pub fn prcb(prcb: &TriagePrcbInfo) -> TriagePrcb {
+    TriagePrcb {
+        current_thread: Hex(prcb.current_thread),
+        processor_number: prcb.processor_number,
+        mhz: prcb.mhz,
+        cpu_type: prcb.cpu_type,
+        vendor_string: prcb.vendor_string.clone(),
+    }
 }
 
-fn failure_signature(signature: &FailureSignature) -> View {
+fn failure_signature(signature: &SignatureDetail) -> FailureSignature {
     let code_kind = match signature.code_kind {
         FailureCodeKind::Bugcheck => "bugcheck",
         FailureCodeKind::Exception => "exception",
@@ -128,158 +332,119 @@ fn failure_signature(signature: &FailureSignature) -> View {
         FailureSignatureSource::TopFrame => "top_frame",
         FailureSignatureSource::CodeOnly => "code_only",
     };
-    View::Object(vec![
-        ("code_kind", View::Str(code_kind.to_string())),
-        ("code", View::Hex(signature.code.into())),
-        ("source", View::Str(source.to_string())),
-        ("module", View::OptStr(signature.module.clone())),
-        ("symbol", View::OptStr(signature.symbol.clone())),
-        (
-            "components",
-            View::List(
-                signature
-                    .components
-                    .iter()
-                    .cloned()
-                    .map(View::Str)
-                    .collect(),
-            ),
-        ),
-        ("bucket", View::Str(signature.bucket.clone())),
-    ])
+    FailureSignature {
+        code_kind,
+        code: Hex(signature.code.into()),
+        source,
+        module: signature.module.clone(),
+        symbol: signature.symbol.clone(),
+        components: signature.components.clone(),
+        bucket: signature.bucket.clone(),
+    }
 }
 
-fn culprit(culprit: &CulpritAttribution) -> View {
+fn culprit(culprit: &CulpritAttribution) -> Culprit {
     let confidence = match culprit.confidence {
         CulpritConfidence::Low => "low",
         CulpritConfidence::Medium => "medium",
         CulpritConfidence::High => "high",
     };
-    View::Object(vec![
-        ("module", View::Str(culprit.module.clone())),
-        ("confidence", View::Str(confidence.to_string())),
-        (
-            "evidence",
-            View::List(
-                culprit
-                    .evidence
-                    .iter()
-                    .map(|evidence| {
-                        let kind = match evidence.kind {
-                            CulpritEvidenceKind::RecordedBrokenDriver => "recorded_broken_driver",
-                            CulpritEvidenceKind::RecordedBugcheckDriver => {
-                                "recorded_bugcheck_driver"
-                            }
-                            CulpritEvidenceKind::BugcheckFaultAddress => "bugcheck_fault_address",
-                            CulpritEvidenceKind::ExceptionAddress => "exception_address",
-                            CulpritEvidenceKind::CurrentInstruction => "current_instruction",
-                            CulpritEvidenceKind::TopFrame => "top_frame",
-                        };
-                        View::Object(vec![
-                            ("kind", View::Str(kind.to_string())),
-                            ("detail", View::Str(evidence.detail.clone())),
-                            ("address", View::OptHex(evidence.address)),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-    ])
-}
-
-fn verifier(verifier: &VerifierFinding) -> View {
-    View::Object(vec![
-        ("bugcheck_code", View::Hex(verifier.bugcheck_code.into())),
-        ("bugcheck_name", View::Str(verifier.bugcheck_name.clone())),
-        ("subcode", View::Hex(verifier.subcode)),
-        ("known_subcode", View::Bool(verifier.known_subcode)),
-        (
-            "subcode_description",
-            View::Str(verifier.subcode_description.clone()),
-        ),
-        (
-            "associated_driver",
-            View::OptStr(verifier.associated_driver.clone()),
-        ),
-        (
-            "arguments",
-            View::List(
-                verifier
-                    .arguments
-                    .iter()
-                    .map(|argument| {
-                        View::Object(vec![
-                            ("value", View::Hex(argument.value)),
-                            ("description", View::Str(argument.description.clone())),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-        (
-            "addresses",
-            View::List(
-                verifier
-                    .addresses
-                    .iter()
-                    .map(|address| {
-                        View::Object(vec![
-                            ("role", View::Str(address.role.clone())),
-                            ("address", View::Hex(address.address)),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-    ])
-}
-
-fn whea(whea: &WheaFinding) -> View {
-    const SECTION_LIMIT: usize = 64;
-    match &whea.state {
-        WheaRecordState::Unavailable { reason } => View::Object(vec![
-            ("record_address", View::OptHex(whea.record_address)),
-            ("available", View::Bool(false)),
-            ("reason", View::Str(reason.clone())),
-        ]),
-        WheaRecordState::Decoded(record) => View::Object(vec![
-            ("record_address", View::OptHex(whea.record_address)),
-            ("available", View::Bool(true)),
-            ("revision", View::Hex(record.revision.into())),
-            ("severity", View::Num(record.severity.into())),
-            ("length", View::Num(record.length.into())),
-            ("sections_total", View::Num(record.sections.len() as u64)),
-            (
-                "sections",
-                View::List(
-                    record
-                        .sections
-                        .iter()
-                        .take(SECTION_LIMIT)
-                        .map(|section| {
-                            let kind = match section.kind {
-                                WheaSectionKind::ProcessorGeneric => "processor_generic",
-                                WheaSectionKind::Memory => "memory",
-                                WheaSectionKind::PciExpress => "pci_express",
-                                WheaSectionKind::X64Processor => "x64_processor",
-                                WheaSectionKind::Unknown => "unknown",
-                            };
-                            View::Object(vec![
-                                ("offset", View::Num(section.offset.into())),
-                                ("length", View::Num(section.length.into())),
-                                ("severity", View::Num(section.severity.into())),
-                                ("section_type", View::Str(section.section_type.clone())),
-                                ("kind", View::Str(kind.to_string())),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-        ]),
+    Culprit {
+        module: culprit.module.clone(),
+        confidence,
+        evidence: culprit
+            .evidence
+            .iter()
+            .map(|evidence| CulpritEvidence {
+                kind: match evidence.kind {
+                    CulpritEvidenceKind::RecordedBrokenDriver => "recorded_broken_driver",
+                    CulpritEvidenceKind::RecordedBugcheckDriver => "recorded_bugcheck_driver",
+                    CulpritEvidenceKind::BugcheckFaultAddress => "bugcheck_fault_address",
+                    CulpritEvidenceKind::ExceptionAddress => "exception_address",
+                    CulpritEvidenceKind::CurrentInstruction => "current_instruction",
+                    CulpritEvidenceKind::TopFrame => "top_frame",
+                },
+                detail: evidence.detail.clone(),
+                address: evidence.address.map(Hex),
+            })
+            .collect(),
     }
 }
 
-fn blackbox(blackbox: &BlackboxFinding) -> View {
+fn verifier(verifier: &VerifierFindingDetail) -> VerifierFinding {
+    VerifierFinding {
+        bugcheck_code: Hex(verifier.bugcheck_code.into()),
+        bugcheck_name: verifier.bugcheck_name.clone(),
+        subcode: Hex(verifier.subcode),
+        known_subcode: verifier.known_subcode,
+        subcode_description: verifier.subcode_description.clone(),
+        associated_driver: verifier.associated_driver.clone(),
+        arguments: verifier
+            .arguments
+            .iter()
+            .map(|argument| VerifierFindingArgument {
+                value: Hex(argument.value),
+                description: argument.description.clone(),
+            })
+            .collect(),
+        addresses: verifier
+            .addresses
+            .iter()
+            .map(|address| VerifierFindingAddress {
+                role: address.role.clone(),
+                address: Hex(address.address),
+            })
+            .collect(),
+    }
+}
+
+fn whea(whea: &WheaFinding) -> WheaRecord {
+    const SECTION_LIMIT: usize = 64;
+    let record_address = whea.record_address.map(Hex);
+    match &whea.state {
+        WheaRecordState::Unavailable { reason } => WheaRecord {
+            record_address,
+            available: false,
+            reason: Omit(Some(reason.clone())),
+            revision: Omit(None),
+            severity: Omit(None),
+            length: Omit(None),
+            sections_total: Omit(None),
+            sections: Omit(None),
+        },
+        WheaRecordState::Decoded(record) => WheaRecord {
+            record_address,
+            available: true,
+            reason: Omit(None),
+            revision: Omit(Some(Hex(record.revision.into()))),
+            severity: Omit(Some(record.severity)),
+            length: Omit(Some(record.length)),
+            sections_total: Omit(Some(record.sections.len())),
+            sections: Omit(Some(
+                record
+                    .sections
+                    .iter()
+                    .take(SECTION_LIMIT)
+                    .map(|section| WheaSection {
+                        offset: section.offset,
+                        length: section.length,
+                        severity: section.severity,
+                        section_type: section.section_type.clone(),
+                        kind: match section.kind {
+                            WheaSectionKind::ProcessorGeneric => "processor_generic",
+                            WheaSectionKind::Memory => "memory",
+                            WheaSectionKind::PciExpress => "pci_express",
+                            WheaSectionKind::X64Processor => "x64_processor",
+                            WheaSectionKind::Unknown => "unknown",
+                        },
+                    })
+                    .collect(),
+            )),
+        },
+    }
+}
+
+fn blackbox(blackbox: &BlackboxFinding) -> BlackboxStream {
     let kind = match blackbox.kind {
         BlackboxKind::Pnp => "pnp",
         BlackboxKind::Ntfs => "ntfs",
@@ -293,130 +458,60 @@ fn blackbox(blackbox: &BlackboxFinding) -> View {
             "stream payload is not exposed by the dump parser".to_string(),
         ),
     };
-    View::Object(vec![
-        ("kind", View::Str(kind.to_string())),
-        ("name", View::Str(blackbox.name.clone())),
-        ("size", View::OptNum(blackbox.size)),
-        ("present", View::OptBool(present)),
-        ("available", View::Bool(false)),
-        ("parsed", View::Bool(false)),
-        ("reason", View::Str(reason)),
-    ])
+    BlackboxStream {
+        kind,
+        name: blackbox.name.clone(),
+        size: blackbox.size,
+        present,
+        available: false,
+        parsed: false,
+        reason,
+    }
 }
 
-fn unloaded_driver(driver: &UnloadedDriver) -> View {
-    View::Object(vec![
-        ("name", View::Str(driver.name.clone())),
-        ("start_address", View::Hex(driver.start_address)),
-        ("end_address", View::Hex(driver.end_address)),
-    ])
+fn unloaded_driver(driver: &dmp::UnloadedDriver) -> UnloadedDriver {
+    UnloadedDriver {
+        name: driver.name.clone(),
+        start_address: Hex(driver.start_address),
+        end_address: Hex(driver.end_address),
+    }
 }
 
 /// Canonical structured crash-triage shape used by MCP and Python. The caller
 /// chooses its module cap; all other collections are already bounded by the
 /// presentation-free report builder.
-pub fn triage_report(report: &TriageReport, module_limit: usize) -> View {
-    View::Object(vec![
-        ("status", run_status(&report.status).into_view()),
-        (
-            "bugcheck",
-            report.bugcheck.as_ref().map(bugcheck).unwrap_or(View::Null),
-        ),
-        (
-            "exception",
-            report
-                .exception
-                .as_ref()
-                .map(dump_exception)
-                .unwrap_or(View::Null),
-        ),
-        (
-            "system_info",
-            report
-                .system_info
-                .as_ref()
-                .map(system_info)
-                .unwrap_or(View::Null),
-        ),
-        (
-            "backtrace",
-            report
-                .backtrace
-                .as_ref()
-                .map(|trace| {
-                    View::List(
-                        trace
-                            .frames
-                            .iter()
-                            .map(|frame| stack_frame(frame).into_view())
-                            .collect(),
-                    )
-                })
-                .unwrap_or(View::Null),
-        ),
-        (
-            "modules",
-            View::List(
-                report
-                    .modules
-                    .iter()
-                    .take(module_limit)
-                    .map(module)
-                    .collect(),
-            ),
-        ),
-        ("modules_total", View::Num(report.modules.len() as u64)),
-        (
-            "unloaded_drivers",
-            View::List(
-                report
-                    .unloaded_drivers
-                    .iter()
-                    .map(unloaded_driver)
-                    .collect(),
-            ),
-        ),
-        (
-            "crash_context",
-            report
-                .crash_context
-                .as_ref()
-                .map(crash_context)
-                .unwrap_or(View::Null),
-        ),
-        ("prcb", report.prcb.as_ref().map(prcb).unwrap_or(View::Null)),
-        ("broken_driver", View::OptStr(report.broken_driver.clone())),
-        ("triage_overflowed", View::OptBool(report.triage_overflowed)),
-        (
-            "failure_signature",
-            report
-                .failure_signature
-                .as_ref()
-                .map(failure_signature)
-                .unwrap_or(View::Null),
-        ),
-        (
-            "culprit",
-            report.culprit.as_ref().map(culprit).unwrap_or(View::Null),
-        ),
-        (
-            "verifier",
-            report.verifier.as_ref().map(verifier).unwrap_or(View::Null),
-        ),
-        ("whea", report.whea.as_ref().map(whea).unwrap_or(View::Null)),
-        (
-            "blackboxes",
-            View::List(report.blackboxes.iter().map(blackbox).collect()),
-        ),
-        (
-            "warnings",
-            View::List(
-                report
-                    .warnings
-                    .iter()
-                    .map(|warning| View::Str(warning.clone()))
-                    .collect(),
-            ),
-        ),
-    ])
+pub fn triage_report(report: &ReportDetail, module_limit: usize) -> View {
+    TriageReport {
+        status: run_status(&report.status),
+        bugcheck: report.bugcheck.as_ref().map(bugcheck),
+        exception: report.exception.as_ref().map(dump_exception),
+        system_info: report.system_info.as_ref().map(system_info),
+        backtrace: report
+            .backtrace
+            .as_ref()
+            .map(|trace| trace.frames.iter().map(stack_frame).collect()),
+        modules: report
+            .modules
+            .iter()
+            .take(module_limit)
+            .map(loaded_module)
+            .collect(),
+        modules_total: report.modules.len(),
+        unloaded_drivers: report
+            .unloaded_drivers
+            .iter()
+            .map(unloaded_driver)
+            .collect(),
+        crash_context: report.crash_context.as_ref().map(crash_context),
+        prcb: report.prcb.as_ref().map(prcb),
+        broken_driver: report.broken_driver.clone(),
+        triage_overflowed: report.triage_overflowed,
+        failure_signature: report.failure_signature.as_ref().map(failure_signature),
+        culprit: report.culprit.as_ref().map(culprit),
+        verifier: report.verifier.as_ref().map(verifier),
+        whea: report.whea.as_ref().map(whea),
+        blackboxes: report.blackboxes.iter().map(blackbox).collect(),
+        warnings: report.warnings.clone(),
+    }
+    .into_view()
 }

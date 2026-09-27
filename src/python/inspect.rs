@@ -23,6 +23,7 @@ use crate::types::VirtAddr;
 use crate::view::hardware;
 use crate::view::mm;
 use crate::view::sched;
+use crate::view::shape::ViewValue;
 use crate::view::{self, View};
 
 /// System-wide reports and decode-by-address helpers (`dbg.inspect`); the
@@ -637,7 +638,11 @@ impl Inspect {
     }
 
     /// Decode a `_KTRAP_FRAME` at `address` (`.trap`).
-    fn trap_frame<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn trap_frame<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::bugcheck::py::TrapFrame>> {
         self.record(py, |session| {
             trap_frame_view(&session.target, Some(VirtAddr(address)))
         })
@@ -702,7 +707,11 @@ impl Inspect {
     }
 
     /// Decode an `EXCEPTION_RECORD64` (`.exr`).
-    fn exception_record<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn exception_record<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::bugcheck::py::ExceptionRecord>> {
         self.record(py, |session| {
             let record = session
                 .read_exception_record(VirtAddr(address))
@@ -1115,7 +1124,7 @@ impl Inspect {
     }
 
     /// Report Driver Verifier configuration and statistics (`!verifier`).
-    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::meta::py::Verifier>> {
         self.record(py, |session| {
             let detail = session.target.verifier_status().map_err(err)?;
             Ok(view::meta::verifier(&detail))
@@ -1123,7 +1132,7 @@ impl Inspect {
     }
 
     /// Target, kernel, symbol, processor, and debugger version information (`vertarget`).
-    fn version<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn version<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::meta::py::TargetVersion>> {
         self.record(py, |session| {
             let detail = session.target_version().map_err(err)?;
             Ok(view::meta::target_version(&detail))
@@ -1131,7 +1140,7 @@ impl Inspect {
     }
 
     /// Report target system time and uptime (`.time`).
-    fn time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::meta::py::TargetTime>> {
         self.record(py, |session| {
             let detail = session.target.target_time().map_err(err)?;
             Ok(view::meta::target_time(&detail))
@@ -1139,11 +1148,14 @@ impl Inspect {
     }
 
     /// Analyze the current bugcheck, or return `None` when the target is not bugchecking.
-    fn bugcheck<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Record>>> {
+    fn bugcheck<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, view::bugcheck::py::Bugcheck>>> {
         let detail = self.owner.with_in(py, &Context::default(), |session| {
             Ok(current_bugcheck(&session.target)
                 .or_else(|| bugcheck_from_dump_info(&session.target))
-                .map(|analysis| view::bugcheck::bugcheck(&analysis)))
+                .map(|analysis| view::bugcheck::bugcheck(&analysis).into_view()))
         })?;
         detail
             .as_ref()
@@ -1152,7 +1164,7 @@ impl Inspect {
     }
 
     /// Build the structured one-shot crash/debug report (`!analyze`).
-    fn triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::triage::py::TriageReport>> {
         self.record(py, |session| {
             let report = TriageReport::build(session);
             Ok(view::triage::triage_report(&report, usize::MAX))

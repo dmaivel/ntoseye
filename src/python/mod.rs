@@ -50,7 +50,7 @@ pub mod types;
 use args::{AttachBackend, MemorySource};
 use handle::Actor;
 pub use handle::Debugger;
-use record::{PlainDict, Record};
+use record::PlainDict;
 
 /// Sanity caps for the raw byte APIs. The SDK is local and trusted, but an
 /// accidental huge length (`read(addr, 10**12)`) would allocate before the
@@ -163,7 +163,7 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
     }
 }
 
-/// Render a neutral [`View`] object into a [`Record`] (the shared shape with
+/// Render a neutral [`View`] object into a [`Record`](record::Record) (the shared shape with
 /// the MCP surface; here addresses come through as ints, there as hex).
 pub fn view_record<'py, T: PyTypeCheck>(py: Python<'py>, v: &View) -> PyResult<Bound<'py, T>> {
     view::to_py(py, v, PyShape::Records)?
@@ -180,7 +180,7 @@ pub fn view_dict<'py>(py: Python<'py>, v: &View) -> PyResult<PlainDict<'py>> {
         .map_err(|e| raise(e.to_string()))
 }
 
-/// Render a neutral [`View`] list of objects into [`Record`]s.
+/// Render a neutral [`View`] list of objects into [`Record`](record::Record)s.
 pub fn view_records<'py, T: PyTypeCheck>(
     py: Python<'py>,
     v: &View,
@@ -246,7 +246,7 @@ fn attach(
 /// Decode an NTSTATUS, Win32, or HRESULT code to its name and description
 /// (`!error`). Needs no target.
 #[pyfunction]
-fn decode_error(py: Python<'_>, code: u64) -> PyResult<Bound<'_, Record>> {
+fn decode_error(py: Python<'_>, code: u64) -> PyResult<Bound<'_, view::meta::py::ErrorCode>> {
     view_record(py, &view::meta::error_code(&decode_error_code(code)))
 }
 
@@ -306,6 +306,11 @@ pub mod _ntoseye {
     #[pymodule_export]
     use crate::view::backend::py::{BackendCapability, DebugLog, DebugLogLine};
     #[pymodule_export]
+    use crate::view::bugcheck::py::{
+        Amd64TrapFrame, Arm64TrapFrame, Bugcheck, BugcheckArgument, BugcheckFault,
+        BugcheckTrapFrame, ExceptionRecord, TrapFrame,
+    };
+    #[pymodule_export]
     use crate::view::cpu::py::{
         CpuFeatureBits, CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt,
         IdtGate, Irql, Pcr, Prcb, ProcessorStateArea, SpecialRegistersArea,
@@ -342,6 +347,11 @@ pub mod _ntoseye {
         HeapPageRange, HeapStats, HeapSummary, HeapWalkStop, LfhSubsegment, NtHeap, NtHeapEntry,
         NtHeapSegment, NtLfhUserBlocks, NtUncommittedRange, NtVirtualBlock, SegmentHeap,
         SegmentHeapContext, SegmentHeapKeys, SegmentHeapPageSegment, VsChunk, VsSubsegment,
+    };
+    #[pymodule_export]
+    use crate::view::meta::py::{
+        ErrorCode, TargetDump, TargetKernel, TargetTime, TargetVersion, Verifier, VerifierDriver,
+        VerifierDriverSummary, VerifierStatistics, VerifierSuspectDriver,
     };
     #[pymodule_export]
     use crate::view::mm::py::{
@@ -398,6 +408,12 @@ pub mod _ntoseye {
     use crate::view::symbols::py::{
         Field, LocalVariableLocation, NearestSymbol, ProcedureLocal, SourceLocation, Symbol,
         SymbolCandidate, SymbolSearchMatch, TypeLayout,
+    };
+    #[pymodule_export]
+    use crate::view::triage::py::{
+        BlackboxStream, CrashContext, Culprit, CulpritEvidence, DumpException, DumpSystemInfo,
+        FailureSignature, TriagePrcb, TriageReport, UnloadedDriver, VerifierFinding,
+        VerifierFindingAddress, VerifierFindingArgument, WheaRecord, WheaSection,
     };
     #[pymodule_export]
     use crate::view::usermode::py::{

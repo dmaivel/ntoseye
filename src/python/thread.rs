@@ -298,7 +298,10 @@ impl Thread {
     }
 
     /// Decode the saved `_KTRAP_FRAME` (`!trap`).
-    fn trap_frame<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn trap_frame<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::bugcheck::py::TrapFrame>> {
         let context = self.context(self.process_info(py)?);
         let view = self.owner.with_in(py, &context, |session| {
             trap_frame_view(&session.target, self.info.trap_frame)

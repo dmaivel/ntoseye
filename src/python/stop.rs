@@ -4,7 +4,7 @@ use pyo3::types::PyDict;
 use super::breakpoints::{self, Breakpoint};
 use super::handle::{Debugger, Owner};
 use super::process::Process;
-use super::record::{PlainDict, Record};
+use super::record::PlainDict;
 use super::thread::{Cpu, Thread};
 use super::{raise, view_record};
 use crate::breakpoints::Breakpoint as CoreBreakpoint;
@@ -14,6 +14,7 @@ use crate::session::{ContinueOutcome, ExceptionRecord};
 use crate::target::ThreadInfo;
 use crate::unwind::try_format_symbol_at;
 use crate::view;
+use crate::view::shape::ViewValue;
 
 /// Rust-only snapshot backing the shared properties of a typed stop.
 #[pyclass(name = "_StopContext", module = "ntoseye")]
@@ -58,7 +59,7 @@ pub enum Stop {
     /// The guest is bugchecking (BSOD); `info` is the bugcheck analysis.
     Bugcheck {
         /// The bugcheck analysis (`!analyze`'s code, parameters, and culprit).
-        info: Option<Py<Record>>,
+        info: Option<Py<view::bugcheck::py::Bugcheck>>,
         _context: Py<StopContext>,
     },
     /// The guest rebooted; every earlier handle is now stale. While `coherent`
@@ -161,7 +162,10 @@ impl Stop {
     }
 
     /// Decode the current exception record (`.exr -1`).
-    fn record<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn record<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::bugcheck::py::ExceptionRecord>> {
         let context = self.check_context(py)?;
         if !matches!(self, Self::Exception { .. }) {
             return Err(raise("record() is only available on Stop.Exception"));
@@ -357,7 +361,7 @@ pub fn from_outcome(
                     .map(|info| analyze_bugcheck(&session.target, info))
                     .or_else(|| current_bugcheck(&session.target))
                     .or_else(|| bugcheck_from_dump_info(&session.target));
-                Ok(analysis.map(|analysis| view::bugcheck::bugcheck(&analysis)))
+                Ok(analysis.map(|analysis| view::bugcheck::bugcheck(&analysis).into_view()))
             })?;
             let info = bugcheck
                 .as_ref()

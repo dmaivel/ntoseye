@@ -414,7 +414,10 @@ impl Module {
     }
 
     /// Return verifier data for this driver module.
-    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn verifier<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::meta::py::VerifierDriver>> {
         // Driver Verifier is NT's; it never tracks secure-kernel modules.
         self.space.require_nt("verifier")?;
         let name = self.info.short_name.clone();
