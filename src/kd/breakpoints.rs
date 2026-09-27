@@ -303,6 +303,7 @@ impl KdBackend {
         }
         self.bp_handles.remove(&addr);
         self.managed_bp_addresses.remove(&addr);
+        self.retired_bp_addresses.insert(addr);
         Ok(())
     }
 }

@@ -202,14 +202,16 @@ fn kd_initial_timeout_rejects_invalid_values() {
 }
 
 #[test]
-fn continue_drains_in_place_rebreak_and_stale_breakin() {
+fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() {
     let resumed_from = 0xffff_f800_0013_40c4;
     let breakin = 0xffff_f800_002f_90d0;
+    let retired = 0xffff_f802_c2c9_6460;
     let drain = |managed: &[u64]| {
         ContinueDrain::new(
             resumed_from,
             managed.iter().copied().collect(),
             HashSet::from([breakin]),
+            HashSet::from([retired]),
             context::build_register_map(),
             None,
         )
@@ -235,6 +237,11 @@ fn continue_drains_in_place_rebreak_and_stale_breakin() {
     assert!(drain(&[]).is_spurious(&stop_at(STATUS_BREAKPOINT, breakin)));
 
     assert!(!drain(&[breakin]).is_spurious(&stop_at(STATUS_BREAKPOINT, breakin)));
+
+    // A processor that hit a breakpoint just before it was removed reports
+    // the trap after the resume; once the address is ours again it is a hit.
+    assert!(drain(&[]).is_spurious(&stop_at(STATUS_BREAKPOINT, retired)));
+    assert!(!drain(&[retired]).is_spurious(&stop_at(STATUS_BREAKPOINT, retired)));
 
     assert!(!drain(&[]).is_spurious(&stop_at(STATUS_BREAKPOINT, 0xdead_0000)));
     assert!(!drain(&[]).is_spurious(&stop_at(STATUS_SINGLE_STEP, resumed_from)));
@@ -306,6 +313,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
     let real_stop = 0xfffff800_cafe0000;
     let drain = ContinueDrain::new(
         resumed_from,
+        HashSet::new(),
         HashSet::new(),
         HashSet::new(),
         context::build_register_map(),

@@ -312,6 +312,9 @@ pub struct KdBackend {
     bp_handles: HashMap<u64, u32>,
     managed_bp_addresses: HashSet<u64>,
     breakin_addresses: HashSet<u64>,
+    /// Our breakpoints removed since the target last resumed; see
+    /// [`ContinueDrain`].
+    retired_bp_addresses: HashSet<u64>,
     /// A break-in we sent was answered by another stop (a module-load
     /// notification or a breakpoint hit that raced it), so the target still
     /// holds it: the next unmanaged `STATUS_BREAKPOINT` is that break-in,
@@ -593,6 +596,7 @@ impl DebugBackend for KdBackend {
 
     fn note_breakpoint_uninstalled(&mut self, addr: u64) {
         self.managed_bp_addresses.remove(&addr);
+        self.retired_bp_addresses.insert(addr);
     }
 
     /// The target's `KdpBreakpointTable` owns every site written through

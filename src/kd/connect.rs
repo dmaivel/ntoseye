@@ -201,6 +201,7 @@ impl KdBackend {
             last_rip: initial_stop.program_counter,
             bp_handles: HashMap::new(),
             managed_bp_addresses: HashSet::new(),
+            retired_bp_addresses: HashSet::new(),
             breakin_addresses,
             late_breakin: !initial_breakin,
             pending_write_breakpoint: None,

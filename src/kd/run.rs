@@ -77,6 +77,7 @@ impl KdBackend {
             self.bp_handles.clear();
             self.managed_bp_addresses.clear();
             self.breakin_addresses.clear();
+            self.retired_bp_addresses.clear();
             self.late_breakin = false;
             self.pending_write_breakpoint = None;
         } else if stop.is_bugcheck {
@@ -323,6 +324,7 @@ impl KdBackend {
             self.last_rip,
             self.managed_bp_addresses.clone(),
             self.breakin_addresses.clone(),
+            std::mem::take(&mut self.retired_bp_addresses),
             self.register_map.clone(),
             self.surface_break_at,
         );

@@ -675,12 +675,16 @@ pub fn advance_pc_past_breakpoint(
 
 /// Stops the pump absorbs right after a continue: a stale break-in byte makes
 /// the kernel re-break at the resumed-from instruction or the KD break-in
-/// instruction. Managed breakpoints, stops after the window closes, and stops
-/// the foreground asked for are never absorbed.
+/// instruction, and a processor that hit one of our breakpoints just before
+/// the host removed it reports that trap once it runs again. Managed
+/// breakpoints, stops after the window closes, and stops the foreground asked
+/// for are never absorbed.
 pub struct ContinueDrain {
     resumed_from_rip: u64,
     managed_bp_addresses: HashSet<u64>,
     breakin_addresses: HashSet<u64>,
+    /// Our breakpoints removed while the target was halted.
+    retired_bp_addresses: HashSet<u64>,
     register_map: RegisterMap,
     deadline: Instant,
     remaining: u32,
@@ -700,6 +704,7 @@ impl ContinueDrain {
         resumed_from_rip: u64,
         managed_bp_addresses: HashSet<u64>,
         breakin_addresses: HashSet<u64>,
+        retired_bp_addresses: HashSet<u64>,
         register_map: RegisterMap,
         surface_address: Option<u64>,
     ) -> Self {
@@ -707,6 +712,7 @@ impl ContinueDrain {
             resumed_from_rip,
             managed_bp_addresses,
             breakin_addresses,
+            retired_bp_addresses,
             register_map,
             deadline: Instant::now() + Self::WINDOW,
             remaining: Self::MAX_ABSORBED,
@@ -737,6 +743,7 @@ impl ContinueDrain {
         }
         stop.program_counter == self.resumed_from_rip
             || self.breakin_addresses.contains(&stop.program_counter)
+            || self.retired_bp_addresses.contains(&stop.program_counter)
     }
 
     /// Resume past an absorbed stop, always as handled: it is debugger noise
