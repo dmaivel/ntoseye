@@ -326,15 +326,33 @@ impl Session {
     /// selected context (`.cxr`, `.trap`, a thread's saved VTL0 state) seeds
     /// the walk in place of the vCPU or a parked thread; otherwise a parked
     /// Windows thread is walked from its saved context without touching the
-    /// backend vCPU.
+    /// backend vCPU, and failing both, the vCPU's registers are read.
     pub fn recovered_backtrace(
         &mut self,
         limit: usize,
     ) -> Result<(RecoveredStackTrace, HashMap<String, u64>, bool)> {
-        if self.target.selected_frame.is_none()
-            && let Some(thread) = self.parked_windows_thread()
+        if let Some(selected) = self
+            .target
+            .selected_frame
+            .as_ref()
+            .filter(|selected| selected.thread.is_none())
         {
-            let recovered = build_parked_thread_recovered_stack(&self.target, thread, limit)?;
+            let seed = if selected.seed_registers.is_empty() {
+                &selected.registers
+            } else {
+                &selected.seed_registers
+            };
+            let seed = seed.clone();
+            let trace = build_stacktrace_with_register_values(
+                &self.target,
+                &self.register_map,
+                &seed,
+                limit,
+            );
+            return Ok((trace, seed, selected.seed_live));
+        }
+        if let Some(thread) = self.parked_thread_now()? {
+            let recovered = build_parked_thread_recovered_stack(&self.target, &thread, limit)?;
             // The walk's own first frame is the only register context a parked
             // thread has; there is no live file to seed from.
             let seed = recovered
@@ -345,7 +363,40 @@ impl Session {
                 .unwrap_or_default();
             return Ok((recovered.stacktrace, seed, false));
         }
-        self.recovered_live_trace(limit)
+        let registers = self.read_registers()?;
+        let seed = self.register_map.to_hashmap(&registers);
+        let trace = build_thread_stacktrace(
+            &self.target,
+            &self.register_map,
+            &registers,
+            self.target.windows_thread_selection.as_ref(),
+            limit,
+        );
+        Ok((trace, seed, true))
+    }
+
+    /// The selected parked thread as it is now. A halted target's cannot
+    /// have changed since `.thread` read it. A running one's is read again,
+    /// since reads are live and the thread may since have run, waited
+    /// somewhere else, or exited; the selection keeps what was read.
+    fn parked_thread_now(&mut self) -> Result<Option<ThreadInfo>> {
+        let Some(thread) = self.parked_windows_thread().cloned() else {
+            return Ok(None);
+        };
+        if !self.backend.is_running() {
+            return Ok(Some(thread));
+        }
+        let now = self
+            .target
+            .thread_info_from_ethread(thread.ethread)
+            .map_err(|error| {
+                Error::DebugInfo(format!(
+                    "the selected thread {:#x} can no longer be read: {error}",
+                    thread.ethread.0
+                ))
+            })?;
+        self.target.windows_thread_selection = Some(now.clone());
+        Ok(Some(now))
     }
 
     /// [`Self::recovered_backtrace`]'s frames alone, up to `limit`.

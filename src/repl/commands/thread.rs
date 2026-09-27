@@ -52,9 +52,8 @@ repl_command! {
     names: [".thread"],
     usage: ".thread [ethread|tid]",
     summary: "Switch the register and stack context to a Windows thread.",
-    details: "A running thread switches to its vCPU. When that vCPU is halted in the Windows hypervisor (VBS), the context is the VTL0 state the hypervisor saved, where NT left off, as `.vtlcxr` selects it; without it (no hv-evmcs) the vCPU's registers are the context. A thread not running is selected stack only, with its process's address space as the memory scope, so `.trap` and `.cxr` on it read and walk that process. With no argument, returns to the current vCPU's context: its registers, or where NT left off when it is halted in the Windows hypervisor.",
+    details: "A running thread switches to its vCPU. When that vCPU is halted in the Windows hypervisor (VBS), the context is the VTL0 state the hypervisor saved, where NT left off, as `.vtlcxr` selects it; without it (no hv-evmcs) the vCPU's registers are the context. A thread not running is selected stack only, with its process's address space as the memory scope, so `k`, `.frame`, and `r` of a selected frame walk its saved stack, and `.trap` and `.cxr` on it read and walk that process. While the target runs (always, on the memory backend) every thread is selected stack only, and each walk reads the thread as it is then. With no argument, returns to the current vCPU's context: its registers, or where NT left off when it is halted in the Windows hypervisor.",
     completion: Thread,
-    run_state: Halted,
 }
 
 fn thread_state_label(thread: &ThreadInfo) -> String {
@@ -508,7 +507,11 @@ impl ReplState<'_> {
                 return Ok(());
             }
             self.caches.refresh_symbol_context(&self.ctx.target);
-            outln!("reset thread context to {}\n", current);
+            if self.ctx.backend.is_running() {
+                outln!("cleared the thread selection\n");
+            } else {
+                outln!("reset thread context to {}\n", current);
+            }
             return Ok(());
         };
 

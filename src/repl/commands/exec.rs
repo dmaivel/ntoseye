@@ -234,7 +234,7 @@ impl ReplState<'_> {
         };
         let name = spec.names[0];
         let moves = spec.run != RunEffect::None;
-        let needs_halt = spec.run_state == Some(RunState::Halted);
+        let needs_halt = crate::repl::command::needs_halt(self, spec);
         if self.ctx.backend.is_running() && (moves || needs_halt) {
             self.collect_stop()?;
             if self.ctx.backend.is_running() {

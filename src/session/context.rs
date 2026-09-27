@@ -10,10 +10,7 @@ use crate::memory::DTB_IDENTITY;
 use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
-use crate::unwind::{
-    RecoveredStackTrace, build_stacktrace_with_register_values, build_thread_stacktrace,
-    resolve_thread_trace_context_at, saved_vtl_summary, try_format_symbol,
-};
+use crate::unwind::{resolve_thread_trace_context_at, saved_vtl_summary, try_format_symbol};
 
 pub(super) fn update_target_context_from_registers(
     target: &mut Target,
@@ -125,9 +122,16 @@ impl Session {
 
     /// Make `thread` the inspection context (`.thread`): a thread that is on
     /// a vCPU switches to that vCPU (see [`Self::select_running_windows_thread`]);
-    /// any other thread is parked (stack-only, no coherent register file).
+    /// any other thread is parked (stack-only, no coherent register file),
+    /// and so is every thread while the target runs: there is no vCPU to
+    /// switch to, and the thread's stack is walked from memory as it is when
+    /// walked.
     pub fn select_windows_thread(&mut self, thread: &ThreadInfo) -> Result<ThreadContext> {
-        let active = self.active_thread_map();
+        let active = if self.backend.is_running() {
+            HashMap::new()
+        } else {
+            self.active_thread_map()
+        };
         match active.get(&thread.ethread.0) {
             Some((vcpu, _)) => {
                 let vcpu = vcpu.clone();
@@ -200,6 +204,14 @@ impl Session {
     /// Drop any Windows-thread selection and return to the backend's current
     /// vCPU context and the thread it is running (`.thread` with no argument).
     pub fn reset_windows_thread(&mut self) -> Result<()> {
+        // A running target has no vCPU to switch back to; dropping the
+        // thread returns inspection to the attached process or the kernel.
+        if self.backend.is_running() {
+            self.target.selected_frame = None;
+            self.target.clear_context_dtb_override();
+            self.refresh_context_for_current_thread();
+            return Ok(());
+        }
         let current = self.current_thread.clone();
         self.set_current_thread(&current)
     }
@@ -232,16 +244,16 @@ impl Session {
         switched
     }
 
-    /// Select stack frame `index` (`.frame N`) of the current live thread as
-    /// the inspection context, so registers, locals, and expressions see that
-    /// frame's recovered register file. Returns the frame. A parked thread has
-    /// no register file to unwind from and is refused.
+    /// Select stack frame `index` (`.frame N`) of the current context's stack
+    /// ([`Self::recovered_backtrace`]: a vCPU's, or a parked thread's) as the
+    /// inspection context, so registers, locals, and expressions see that
+    /// frame's recovered register file. Returns the frame.
     pub fn select_frame_index(&mut self, index: usize) -> Result<SelectedFrame> {
         const MAX_FRAME_INDEX: usize = 4096;
         if index > MAX_FRAME_INDEX {
             return Err(Error::InvalidArgument("frame index is too large".into()));
         }
-        let (trace, seed, live) = self.recovered_live_trace(index.saturating_add(1))?;
+        let (trace, seed, live) = self.recovered_backtrace(index.saturating_add(1))?;
         let selected = SelectedFrame::from_recovered(&trace, index, Some(&seed), live)
             .ok_or_else(|| Error::DebugInfo(format!("frame {index} is unavailable")))?;
         self.select_frame(selected.clone());
@@ -272,46 +284,6 @@ impl Session {
         if self.target.selected_frame.take().is_some() {
             self.restore_live_register_cache();
         }
-    }
-
-    /// Unwind `limit` frames from the current context: the selected frame's
-    /// seed registers when one is selected, else the live vCPU file. Returns
-    /// the trace, the seed register values, and whether that seed is the
-    /// vCPU's own register file (a `.cxr`/`.trap` context is not).
-    pub fn recovered_live_trace(
-        &mut self,
-        limit: usize,
-    ) -> Result<(RecoveredStackTrace, HashMap<String, u64>, bool)> {
-        if let Some(selected) = self.target.selected_frame.as_ref() {
-            let seed = if selected.seed_registers.is_empty() {
-                &selected.registers
-            } else {
-                &selected.seed_registers
-            };
-            let seed = seed.clone();
-            let trace = build_stacktrace_with_register_values(
-                &self.target,
-                &self.register_map,
-                &seed,
-                limit,
-            );
-            return Ok((trace, seed, selected.seed_live));
-        }
-        if self.parked_windows_thread().is_some() {
-            return Err(Error::DebugInfo(
-                "frame selection requires a live register context; use `vcpu <id>`".into(),
-            ));
-        }
-        let registers = self.read_registers()?;
-        let seed = self.register_map.to_hashmap(&registers);
-        let trace = build_thread_stacktrace(
-            &self.target,
-            &self.register_map,
-            &registers,
-            self.target.windows_thread_selection.as_ref(),
-            limit,
-        );
-        Ok((trace, seed, true))
     }
 
     /// Whether the current vCPU is halted in the Windows hypervisor's code.

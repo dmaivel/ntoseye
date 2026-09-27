@@ -32,7 +32,7 @@ repl_command! {
     summary: "Select or display a stack frame.",
     details: "N is a zero-based frame number; /r also displays its recovered registers.",
     completion: Expression,
-    run_state: Halted,
+    run_state: HaltedOrParkedThread,
 }
 
 repl_command! {
@@ -76,7 +76,7 @@ repl_command! {
     usage: "r [register[=expression]]",
     summary: "Display CPU registers or assign one register.",
     details: "A 128-bit register (xmm0, ARM64 v0) displays at full width; assign its 64-bit halves (xmm0l/xmm0h, v0l/v0h). A vCPU stopped in VTL1 shows its VTL1 registers read-only; the .vtl 1 memory view has none.",
-    run_state: Halted,
+    run_state: HaltedOrParkedThread,
 }
 
 repl_command! {
@@ -84,7 +84,7 @@ repl_command! {
     names: ["kn", "k", "kb", "kp", "kv"],
     usage: "kn|k|kb|kp|kv [count]",
     summary: "Display a stack; kp adds PDB parameter locations and kv provenance.",
-    run_state: Halted,
+    run_state: HaltedOrParkedThread,
 }
 
 repl_command! {
@@ -166,7 +166,7 @@ impl ReplState<'_> {
                 self.print_selected_frame(frame, show_registers);
                 return Ok(());
             }
-            let Some((recovered, seed, live)) = self.recovered_live_trace(1)? else {
+            let Some((recovered, seed, live)) = self.recovered_trace(1)? else {
                 return Ok(());
             };
             let Some(selected) = SelectedFrame::from_recovered(&recovered, 0, Some(&seed), live)
@@ -183,7 +183,7 @@ impl ReplState<'_> {
         }
 
         let limit = index.saturating_add(1);
-        let Some((recovered, seed, live)) = self.recovered_live_trace(limit)? else {
+        let Some((recovered, seed, live)) = self.recovered_trace(limit)? else {
             return Ok(());
         };
         let Some(selected) = SelectedFrame::from_recovered(&recovered, index, Some(&seed), live)
@@ -196,8 +196,8 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn recovered_live_trace(&mut self, limit: usize) -> Result<Option<SeededTrace>> {
-        match self.ctx.recovered_live_trace(limit) {
+    fn recovered_trace(&mut self, limit: usize) -> Result<Option<SeededTrace>> {
+        match self.ctx.recovered_backtrace(limit) {
             Ok(trace) => Ok(Some(trace)),
             Err(error) => {
                 error!("{}", error);
@@ -686,7 +686,30 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let trace = if let Some(selected) = self.ctx.target.selected_frame.as_ref() {
+        let trace = if let Some(selected) = self
+            .ctx
+            .target
+            .selected_frame
+            .as_ref()
+            .filter(|selected| selected.thread.is_some())
+        {
+            // A frame of a parked thread's walk: its frames from there on are
+            // that walk's, not a new walk from the frame's registers.
+            let skip = selected.index;
+            match self
+                .ctx
+                .recovered_backtrace(skip.saturating_add(frame_limit))
+            {
+                Ok((mut trace, _, _)) => {
+                    trace.frames.drain(..skip.min(trace.frames.len()));
+                    trace
+                }
+                Err(error) => {
+                    error!("failed to unwind parked thread stack: {error}");
+                    return Ok(());
+                }
+            }
+        } else if let Some(selected) = self.ctx.target.selected_frame.as_ref() {
             build_stacktrace_with_register_values(
                 &self.ctx.target,
                 &self.ctx.register_map,

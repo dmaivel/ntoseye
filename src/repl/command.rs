@@ -28,6 +28,11 @@ pub struct CommandSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Halted,
+    /// Halted, unless the context is a parked Windows thread (`.thread`)
+    /// and no vCPU's registers: its stack, frames, and their recovered
+    /// registers are read from memory, which a running target (and the
+    /// memory backend, which always runs) serves live.
+    HaltedOrParkedThread,
     Running,
 }
 
@@ -378,12 +383,26 @@ pub fn report_command_parse_error(line: &str, err: CommandParseError) {
     );
 }
 
+/// Whether `spec` needs the target halted now, given the selected context.
+pub fn needs_halt(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
+    match spec.run_state {
+        Some(RunState::Halted) => true,
+        Some(RunState::HaltedOrParkedThread) => state.ctx.parked_windows_thread().is_none(),
+        Some(RunState::Running) | None => false,
+    }
+}
+
 pub fn check_run_state(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
     match spec.run_state {
-        Some(RunState::Halted) if state.ctx.backend.is_running() => {
+        _ if needs_halt(state, spec) && state.ctx.backend.is_running() => {
+            let or_thread = if spec.run_state == Some(RunState::HaltedOrParkedThread) {
+                ", or a thread selected with `.thread`"
+            } else {
+                ""
+            };
             match halt_unreachable_reason(&*state.ctx.backend) {
-                Some(reason) => error!("this command needs a halted target; {reason}"),
-                None => error!("VM is running"),
+                Some(reason) => error!("this command needs a halted target{or_thread}; {reason}"),
+                None => error!("VM is running; this command needs a halted target{or_thread}"),
             }
             return false;
         }
@@ -506,6 +525,7 @@ macro_rules! repl_command {
 
     (@run_state) => { None };
     (@run_state Halted) => { Some($crate::repl::RunState::Halted) };
+    (@run_state HaltedOrParkedThread) => { Some($crate::repl::RunState::HaltedOrParkedThread) };
     (@run_state Running) => { Some($crate::repl::RunState::Running) };
 
     (@run) => { $crate::repl::RunEffect::None };

@@ -150,6 +150,9 @@ pub struct SelectedFrame {
     /// with no walk behind it (`.cxr`, `.trap`) takes its root from its
     /// registers instead, and without one keeps the current scope.
     pub dtb: Option<Dtb>,
+    /// The parked thread whose walk this frame is from
+    /// ([`RecoveredStackTrace::thread`]); `.frame N` walks it again.
+    pub thread: Option<VirtAddr>,
 }
 
 impl SelectedFrame {
@@ -184,6 +187,7 @@ impl SelectedFrame {
                 .unwrap_or_else(|| frame.registers.clone()),
             seed_live,
             dtb: Some(trace.dtb),
+            thread: trace.thread,
         })
     }
 
@@ -210,6 +214,7 @@ impl SelectedFrame {
             seed_registers,
             seed_live: false,
             dtb: None,
+            thread: None,
         }
     }
 }

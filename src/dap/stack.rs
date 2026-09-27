@@ -163,6 +163,7 @@ impl Server {
                 seed_registers: seed.clone(),
                 seed_live,
                 dtb: recovered.dtb,
+                thread_walk: recovered.thread,
             });
         }
         Ok(())
@@ -251,6 +252,7 @@ impl Server {
             seed_registers: frame.seed_registers.clone(),
             seed_live: frame.seed_live,
             dtb: Some(frame.dtb),
+            thread: frame.thread_walk,
         };
         if let Some(session) = self.session.as_mut() {
             session.select_frame(selected);

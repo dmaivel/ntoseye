@@ -145,6 +145,12 @@ pub struct RecoveredStackTrace {
     /// ([`ThreadTraceContext::dtb`]), which is what a frame's locals and
     /// their values live in.
     pub dtb: Dtb,
+    /// The parked thread (ETHREAD) whose saved context the walk started
+    /// from, `None` for a walk seeded from registers. Selecting another of
+    /// its frames walks the thread again, as `k` does, rather than walking
+    /// from its first frame's registers, which would miss what only the
+    /// thread walk adds (its WOW64 x86 frames).
+    pub thread: Option<VirtAddr>,
 }
 
 impl RecoveredStackTrace {
@@ -153,6 +159,7 @@ impl RecoveredStackTrace {
             frames: Vec::new(),
             truncated: 0,
             dtb: trace.dtb(),
+            thread: None,
         }
     }
 
@@ -831,6 +838,7 @@ pub fn build_parked_thread_recovered_stack(
                     HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                 );
                 wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
+                stacktrace.thread = Some(thread.ethread);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::ContextSwitch { kernel_stack },
                     stacktrace,
@@ -860,6 +868,7 @@ pub fn build_parked_thread_recovered_stack(
                     HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                 );
                 wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
+                stacktrace.thread = Some(thread.ethread);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::TrapFrame { address },
                     stacktrace,

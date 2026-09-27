@@ -77,6 +77,10 @@ struct FrameRef {
     /// A parked thread's frames belong to its own process, whatever the
     /// console's inspection context is.
     dtb: Dtb,
+    /// The parked thread the walk started from, so selecting the frame lets
+    /// the console's `.frame N` walk that thread again
+    /// ([`crate::unwind::RecoveredStackTrace::thread`]).
+    thread_walk: Option<VirtAddr>,
 }
 
 /// What a `variablesReference` refers to: one of a frame's scopes, or an
