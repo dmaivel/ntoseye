@@ -997,7 +997,7 @@ mod tests {
         let path = dir.join("loop.txt");
         std::fs::write(
             &path,
-            "$$ count to ${$arg1}\n.for (r $t0 = 0; @$t0 < ${$arg1}; r $t0 = @$t0 + 1)\n{\n  .printf \"%d\\n\" @$t0\n}\n",
+            "$$ count to ${$arg1}\n.for (r $t0 = 0; @$t0 < ${$arg1}; r $t0 = @$t0 + 1)\n{\n  $$ don't touch rcx\n  .printf \"%d\\n\" @$t0\n}\n",
         )
         .unwrap();
         let (flow, text) = interactive(&format!("$$>a<\"{}\" 2; .echo after", path.display()));
@@ -1014,6 +1014,8 @@ mod tests {
     fn comments_end_where_windbg_ends_them() {
         let (_, text) = interactive("$$ don't run this; .echo ran; * .echo not; .echo either");
         assert_eq!(text, "ran\n");
+        let (_, text) = interactive(".if (1) { $$ don't do this ; .echo x }");
+        assert_eq!(text, "x\n");
     }
 
     #[test]

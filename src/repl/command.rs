@@ -232,17 +232,6 @@ pub fn split_command_list(line: &str) -> std::result::Result<Vec<&str>, CommandP
             commands.push(line[start..].trim());
             return Ok(commands);
         }
-        // A `$$` comment ends at the next `;`, whatever quotes it holds, so
-        // `$$ don't` is a comment and not an unterminated string.
-        if line[start..].starts_with("$$") && is_comment(&line[start..]) {
-            match line[start..].find(';') {
-                Some(offset) => {
-                    start += offset + 1;
-                    continue;
-                }
-                None => return Ok(commands),
-            }
-        }
 
         let mut depth = 0usize;
         let scan = scan_unquoted(&line[start..], |_, ch| {
@@ -341,11 +330,15 @@ pub enum Unquoted {
 /// Call `visit` with each character of `text` outside quoted strings and its
 /// byte offset, until it returns `true`. Quote characters are not visited.
 /// Inside quotes a backslash escapes the next character, so `"a\"b"` is one
-/// string. The command-list splitter and `.foreach`'s block scanner share
-/// this, so they agree on where a quoted string ends.
+/// string. A `$$` comment where a command starts (at the start of `text`, or
+/// after `;` or `{`) opens no quotes up to its `;`, so `{ $$ don't ; k }` is
+/// one block. The command-list splitter and the block scanners share this, so
+/// they agree on where a quoted string ends.
 pub fn scan_unquoted(text: &str, mut visit: impl FnMut(usize, char) -> bool) -> Unquoted {
     let mut quote = None;
     let mut escaped = false;
+    let mut command_start = true;
+    let mut comment = false;
     for (offset, ch) in text.char_indices() {
         if let Some((active, _)) = quote {
             if escaped {
@@ -357,7 +350,16 @@ pub fn scan_unquoted(text: &str, mut visit: impl FnMut(usize, char) -> bool) -> 
             }
             continue;
         }
-        if matches!(ch, '"' | '\'') {
+        if command_start && !ch.is_whitespace() {
+            command_start = false;
+            comment = text[offset..].starts_with("$$") && is_comment(&text[offset..]);
+        }
+        match ch {
+            ';' => (command_start, comment) = (true, false),
+            '{' if !comment => command_start = true,
+            _ => {}
+        }
+        if matches!(ch, '"' | '\'') && !comment {
             quote = Some((ch, offset));
         } else if visit(offset, ch) {
             return Unquoted::Stopped(offset);
