@@ -588,6 +588,35 @@ impl Inspect {
         })
     }
 
+    /// Decode a section's `_CONTROL_AREA`, its segment, and its subsections
+    /// (`!ca`).
+    fn control_area<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session
+                .target
+                .inspect_control_area(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::fs::control_area(&detail))
+        })
+    }
+
+    /// Decode a volume parameter block (`!vpb`).
+    fn vpb<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session.target.inspect_vpb(VirtAddr(address)).map_err(err)?;
+            Ok(view::fs::vpb(&detail))
+        })
+    }
+
+    /// The cache manager's mapped views per file, from its VACB arrays
+    /// (`!filecache`).
+    fn file_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session.target.file_cache().map_err(err)?;
+            Ok(view::fs::file_cache(&detail))
+        })
+    }
+
     /// Report system memory, pool, PTE, and page-file counters (`!vm`).
     #[pyo3(signature = (include_processes=true))]
     fn vm<'py>(&self, py: Python<'py>, include_processes: bool) -> PyResult<Bound<'py, Record>> {

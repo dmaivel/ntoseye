@@ -16,6 +16,7 @@ mod exceptions;
 mod exec;
 mod foreach;
 mod frames;
+mod fs;
 mod heap;
 mod image;
 mod memory;

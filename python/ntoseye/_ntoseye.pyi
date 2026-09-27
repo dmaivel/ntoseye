@@ -865,6 +865,11 @@ class Inspect:
         """
         Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).
         """
+    def control_area(self, /, address: int) -> Record:
+        """
+        Decode a section's `_CONTROL_AREA`, its segment, and its subsections
+        (`!ca`).
+        """
     def device(self, /, address: int) -> Device:
         """
         Return a handle for the `_DEVICE_OBJECT` at `address` (`!devobj`).
@@ -904,6 +909,11 @@ class Inspect:
     def exception_record(self, /, address: int) -> Record:
         """
         Decode an `EXCEPTION_RECORD64` (`.exr`).
+        """
+    def file_cache(self, /) -> Record:
+        """
+        The cache manager's mapped views per file, from its VACB arrays
+        (`!filecache`).
         """
     def file_object(self, /, address: int) -> Record:
         """
@@ -1086,6 +1096,10 @@ class Inspect:
     def vm(self, /, include_processes: bool = True) -> Record:
         """
         Report system memory, pool, PTE, and page-file counters (`!vm`).
+        """
+    def vpb(self, /, address: int) -> Record:
+        """
+        Decode a volume parameter block (`!vpb`).
         """
     def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[str] |None = None) -> Record:
         """

@@ -8,6 +8,7 @@
 mod cpu;
 mod etw;
 mod execution;
+mod fs;
 mod heap;
 mod meta;
 mod mm;
@@ -31,7 +32,7 @@ use crate::view::View;
 type Handler = fn(&str, &mut Args<'_, '_>) -> Option<Result<View>>;
 
 /// Every domain's decoder; command names are disjoint across domains.
-const HANDLERS: [Handler; 13] = [
+const HANDLERS: [Handler; 14] = [
     object::command,
     process::command,
     execution::command,
@@ -44,6 +45,7 @@ const HANDLERS: [Handler; 13] = [
     security::command,
     pnp::command,
     etw::command,
+    fs::command,
     meta::command,
 ];
 

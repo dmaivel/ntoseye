@@ -3,6 +3,7 @@ pub mod bugcheck;
 pub mod cpu;
 pub mod etw;
 pub mod execution;
+pub mod fs;
 pub mod heap;
 pub mod meta;
 pub mod mm;
