@@ -137,65 +137,18 @@ repl_command! {
 
 repl_command! {
     cmd_dpp;
-    names: ["dpp", "dqp"],
-    usage: "dpp <address> [L<count>|length|end]",
-    summary: "Display pointers, dereference them, and annotate symbols.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_ddp;
-    names: ["ddp"],
-    usage: "ddp <address> [L<count>|length|end]",
-    summary: "Display doublewords as pointers, each followed by the doubleword it points to.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_dqa;
-    names: ["dqa", "dpa"],
-    usage: "dqa <address> [L<count>|length|end]",
-    summary: "Display pointers, each followed by the ASCII string it points to.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_dqu;
-    names: ["dqu", "dpu"],
-    usage: "dqu <address> [L<count>|length|end]",
-    summary: "Display pointers, each followed by the UTF-16 string it points to.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_dda;
-    names: ["dda"],
-    usage: "dda <address> [L<count>|length|end]",
-    summary: "Display doublewords as pointers, each followed by the ASCII string it points to.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_ddu;
-    names: ["ddu"],
-    usage: "ddu <address> [L<count>|length|end]",
-    summary: "Display doublewords as pointers, each followed by the UTF-16 string it points to.",
+    names: ["dpp", "dqp", "ddp", "dqa", "dpa", "dda", "dqu", "dpu", "ddu"],
+    usage: "dpp|ddp|dqa|dda|dqu|ddu <address> [L<count>|length|end]",
+    summary: "Display pointers, each followed by the value (d*p), ASCII string (d*a), or UTF-16 string (d*u) it points to.",
+    details: "dd* reads doubleword pointers; dq* and its dp* aliases read quadwords. d*p annotates symbols.",
     completion: Expression,
 }
 
 repl_command! {
     cmd_df;
-    names: ["df"],
-    usage: "df <address> [L<count>|length|end]",
-    summary: "Display memory as single-precision (4-byte) floating-point numbers.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_dd_double;
-    names: ["dD"],
-    usage: "dD <address> [L<count>|length|end]",
-    summary: "Display memory as double-precision (8-byte) floating-point numbers.",
+    names: ["df", "dD"],
+    usage: "df|dD <address> [L<count>|length|end]",
+    summary: "Display memory as single-precision (df, 4-byte) or double-precision (dD, 8-byte) floating-point numbers.",
     completion: Expression,
 }
 
@@ -299,19 +252,10 @@ repl_command! {
 
 repl_command! {
     cmd_ef;
-    names: ["ef"],
-    usage: "ef <address> <number...>",
-    summary: "Write one or more single-precision (4-byte) floating-point numbers to memory.",
+    names: ["ef", "eD"],
+    usage: "ef|eD <address> <number...>",
+    summary: "Write single-precision (ef, 4-byte) or double-precision (eD, 8-byte) floating-point numbers to memory.",
     details: "Numbers are decimal floating-point literals (`ef @rcx 1.5 -2 3e-4`), whatever the radix.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_ed_double;
-    names: ["eD"],
-    usage: "eD <address> <number...>",
-    summary: "Write one or more double-precision (8-byte) floating-point numbers to memory.",
-    details: "Numbers are decimal floating-point literals (`eD @rcx 1.5 -2 3e-4`), whatever the radix.",
     completion: Expression,
 }
 
@@ -539,17 +483,13 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    /// `ef`/`eD`: write decimal floating-point literals as `size`-byte values.
-    fn write_float_command(
-        &mut self,
-        invocation: &CommandInvocation<'_>,
-        command: &str,
-        size: usize,
-    ) -> Result<()> {
+    /// `ef`/`eD`: write decimal floating-point literals as 4-/8-byte values.
+    fn cmd_ef(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if invocation.argv.len() < 2 {
-            outln!("{}\n", command_help(command));
+            outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
+        let single = invocation.name == "ef";
         let Some(address) = self.eval_or_report(invocation.arg(0).unwrap()) else {
             return Ok(());
         };
@@ -560,7 +500,7 @@ impl ReplState<'_> {
                 error!("invalid floating-point number '{text}'");
                 return Ok(());
             };
-            if size == 4 {
+            if single {
                 let value = value as f32;
                 bytes.extend(value.to_le_bytes());
                 formatted_values.push(format_float(value));
@@ -569,7 +509,7 @@ impl ReplState<'_> {
                 formatted_values.push(format_float(value));
             }
         }
-        let noun = if size == 4 { "float" } else { "double" };
+        let noun = if single { "float" } else { "double" };
         self.write_encoded(address, &bytes, &formatted_values, noun);
         Ok(())
     }
@@ -810,50 +750,30 @@ impl ReplState<'_> {
         self.display_memory_command(&invocation, 128, 1, MemoryDisplayMode::binary())
     }
 
-    fn cmd_dpp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_pointers(&invocation, 8, 8, Pointee::Value)
-    }
-
-    fn cmd_ddp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_pointers(&invocation, 4, 16, Pointee::Value)
-    }
-
-    fn cmd_dqa(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_pointers(&invocation, 8, 8, Pointee::String { char_size: 1 })
-    }
-
-    fn cmd_dqu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_pointers(&invocation, 8, 8, Pointee::String { char_size: 2 })
-    }
-
-    fn cmd_dda(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_pointers(&invocation, 4, 16, Pointee::String { char_size: 1 })
-    }
-
-    fn cmd_ddu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_pointers(&invocation, 4, 16, Pointee::String { char_size: 2 })
-    }
-
     fn cmd_df(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_memory_command(&invocation, 16, 4, MemoryDisplayMode::floats())
+        if invocation.name == "df" {
+            self.display_memory_command(&invocation, 16, 4, MemoryDisplayMode::floats())
+        } else {
+            self.display_memory_command(&invocation, 6, 8, MemoryDisplayMode::doubles())
+        }
     }
 
-    fn cmd_dd_double(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.display_memory_command(&invocation, 6, 8, MemoryDisplayMode::doubles())
-    }
-
-    /// The `d*p`, `d*a`, and `d*u` family: each `item_size`-byte value as a
-    /// pointer, followed by what it points to.
-    fn display_pointers(
-        &self,
-        invocation: &CommandInvocation<'_>,
-        item_size: usize,
-        default_count: u64,
-        pointee: Pointee,
-    ) -> Result<()> {
+    /// The `d*p`, `d*a`, and `d*u` family: each doubleword (`dd*`) or
+    /// quadword as a pointer, followed by what it points to.
+    fn cmd_dpp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let (item_size, default_count) = if invocation.name.starts_with("dd") {
+            (4, 16)
+        } else {
+            (8, 8)
+        };
+        let pointee = match invocation.name.as_bytes()[2] {
+            b'a' => Pointee::String { char_size: 1 },
+            b'u' => Pointee::String { char_size: 2 },
+            _ => Pointee::Value,
+        };
         let width = item_size * 2;
         self.visit_symbol_values(
-            invocation,
+            &invocation,
             item_size,
             default_count,
             |state, address, chunk, readable, trace| {
@@ -1451,14 +1371,6 @@ impl ReplState<'_> {
             |value| value.to_le_bytes().to_vec(),
             |value| format!("{:#x}", value),
         )
-    }
-
-    fn cmd_ef(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.write_float_command(&invocation, "ef", 4)
-    }
-
-    fn cmd_ed_double(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.write_float_command(&invocation, "eD", 8)
     }
 
     fn write_string_command(
