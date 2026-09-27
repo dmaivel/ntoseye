@@ -930,6 +930,21 @@ class Inspect:
         """
         Decode `nt!NtGlobalFlag` and the current process's
         `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
+    def flt_filters(self, /) -> Record:
+        """
+        The registered minifilters of each filter manager frame, with their
+        instances (`!fltkd.filters`).
+        """
+    def flt_instances(self, /, filter: int |str |None = None) -> Record:
+        """
+        Minifilter instances with their filter and volume, all or those of
+        one filter named by name or `_FLT_FILTER` address
+        (`!fltkd.instances`).
+        """
+    def flt_volumes(self, /) -> Record:
+        """
+        The volumes of each filter manager frame, with the instances on them
+        (`!fltkd.volumes`).
         """
     def irp(self, /, address: int) -> Record:
         """

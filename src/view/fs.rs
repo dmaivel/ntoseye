@@ -1,7 +1,10 @@
 //! Neutral value-tree views for the file-system inspectors: control areas,
-//! VPBs, and the file cache.
+//! VPBs, the file cache, and the filter manager.
 
 use super::{View, diagnostic};
+use crate::target::fltmgr::{
+    FltFilterDetail, FltFrame, FltFrames, FltInstanceDetail, FltVolumeDetail,
+};
 use crate::target::fs::{
     CachedFile, ControlAreaDetail, FileCacheDetail, SegmentDetail, SubsectionDetail, VpbDetail,
 };
@@ -130,4 +133,93 @@ pub fn file_cache(detail: &FileCacheDetail) -> View {
         ("file_count", View::Num(detail.file_count)),
         ("interrupted", View::Bool(detail.interrupted)),
     ])
+}
+
+fn flt_instance(instance: &FltInstanceDetail) -> View {
+    View::Object(vec![
+        ("address", View::Hex(instance.address.0)),
+        ("name", View::Str(instance.name.clone())),
+        ("altitude", View::Str(instance.altitude.clone())),
+        ("filter", View::Hex(instance.filter.0)),
+        ("filter_name", View::OptStr(instance.filter_name.clone())),
+        ("volume", View::Hex(instance.volume.0)),
+        ("volume_name", View::OptStr(instance.volume_name.clone())),
+    ])
+}
+
+fn flt_instances_list(
+    instances: &[FltInstanceDetail],
+    stopped: &Option<String>,
+) -> [(&'static str, View); 2] {
+    [
+        (
+            "instances",
+            View::List(instances.iter().map(flt_instance).collect()),
+        ),
+        ("instances_stopped", View::OptStr(stopped.clone())),
+    ]
+}
+
+fn flt_filter(filter: &FltFilterDetail) -> View {
+    let mut fields = vec![
+        ("address", View::Hex(filter.address.0)),
+        ("name", View::Str(filter.name.clone())),
+        ("altitude", View::Str(filter.altitude.clone())),
+        ("driver_object", View::Hex(filter.driver_object.0)),
+    ];
+    fields.extend(flt_instances_list(
+        &filter.instances,
+        &filter.instances_stopped,
+    ));
+    View::Object(fields)
+}
+
+fn flt_volume(volume: &FltVolumeDetail) -> View {
+    let mut fields = vec![
+        ("address", View::Hex(volume.address.0)),
+        ("device_name", View::Str(volume.device_name.clone())),
+        ("file_system", View::OptStr(volume.file_system.clone())),
+    ];
+    fields.extend(flt_instances_list(
+        &volume.instances,
+        &volume.instances_stopped,
+    ));
+    View::Object(fields)
+}
+
+/// The frames of a `!fltkd.*` listing, each with its `items` rendered by
+/// `item` under the key `key`.
+fn flt_frames<T>(detail: &FltFrames<T>, key: &'static str, item: fn(&T) -> View) -> View {
+    let frame = |frame: &FltFrame<T>| {
+        View::Object(vec![
+            ("address", View::Hex(frame.address.0)),
+            ("frame_id", View::Num(frame.frame_id)),
+            (key, View::List(frame.items.iter().map(item).collect())),
+            ("stopped", View::OptStr(frame.stopped.clone())),
+        ])
+    };
+    View::Object(vec![
+        (
+            "frames",
+            View::List(detail.frames.iter().map(frame).collect()),
+        ),
+        ("stopped", View::OptStr(detail.stopped.clone())),
+    ])
+}
+
+/// Render `!fltkd.filters`: frames, each with its filters and their
+/// instances.
+pub fn flt_filters(detail: &FltFrames<FltFilterDetail>) -> View {
+    flt_frames(detail, "filters", flt_filter)
+}
+
+/// Render `!fltkd.instances`: frames, each with its instances.
+pub fn flt_instances(detail: &FltFrames<FltInstanceDetail>) -> View {
+    flt_frames(detail, "instances", flt_instance)
+}
+
+/// Render `!fltkd.volumes`: frames, each with its volumes and the instances
+/// on them.
+pub fn flt_volumes(detail: &FltFrames<FltVolumeDetail>) -> View {
+    flt_frames(detail, "volumes", flt_volume)
 }

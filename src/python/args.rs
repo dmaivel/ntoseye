@@ -211,6 +211,13 @@ impl LoggerArg {
     }
 }
 
+/// A minifilter by its `_FLT_FILTER` address or its name (`"WdFilter"`).
+#[derive(FromPyObject)]
+pub enum FltFilterArg {
+    Address(u64),
+    Name(String),
+}
+
 /// An executive object by body or header address, or by object namespace
 /// path (`\\Driver\\ACPI`).
 #[derive(FromPyObject)]

@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use super::args::{ApcTarget, DeviceArg, LoggerArg, ObjectArg};
+use super::args::{ApcTarget, DeviceArg, FltFilterArg, LoggerArg, ObjectArg};
 use super::context::{Context, in_context};
 use super::handle::Owner;
 use super::module::Device;
@@ -9,6 +9,7 @@ use super::record::Record;
 use super::thread::{Frame, Thread, process_for_thread, trap_frame_view};
 use super::{err, raise, view_record, view_records};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
+use crate::error::Error;
 use crate::expr::NumberRadix;
 use crate::session::Session;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
@@ -614,6 +615,51 @@ impl Inspect {
         self.record(py, |session| {
             let detail = session.target.file_cache().map_err(err)?;
             Ok(view::fs::file_cache(&detail))
+        })
+    }
+
+    /// The registered minifilters of each filter manager frame, with their
+    /// instances (`!fltkd.filters`).
+    fn flt_filters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session.target.flt_filters().map_err(err)?;
+            Ok(view::fs::flt_filters(&detail))
+        })
+    }
+
+    /// Minifilter instances with their filter and volume, all or those of
+    /// one filter named by name or `_FLT_FILTER` address
+    /// (`!fltkd.instances`).
+    #[pyo3(signature = (filter=None))]
+    fn flt_instances<'py>(
+        &self,
+        py: Python<'py>,
+        filter: Option<FltFilterArg>,
+    ) -> PyResult<Bound<'py, Record>> {
+        let (text, address) = match filter {
+            Some(FltFilterArg::Address(address)) => (Some(format!("{address:#x}")), Some(address)),
+            Some(FltFilterArg::Name(name)) => (Some(name), None),
+            None => (None, None),
+        };
+        self.record(py, |session| {
+            let detail = session
+                .target
+                .flt_instances(text.as_deref(), |_| {
+                    address
+                        .map(VirtAddr)
+                        .ok_or_else(|| Error::InvalidArgument("not a filter address".into()))
+                })
+                .map_err(err)?;
+            Ok(view::fs::flt_instances(&detail))
+        })
+    }
+
+    /// The volumes of each filter manager frame, with the instances on them
+    /// (`!fltkd.volumes`).
+    fn flt_volumes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session.target.flt_volumes().map_err(err)?;
+            Ok(view::fs::flt_volumes(&detail))
         })
     }
 
