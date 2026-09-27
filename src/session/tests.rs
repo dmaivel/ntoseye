@@ -236,6 +236,9 @@ impl DebugBackend for MockBackend {
     fn single_step_unsafe(&self) -> bool {
         self.single_step_unsafe
     }
+    fn halts_in_windows_hypervisor(&self) -> bool {
+        self.single_step_unsafe
+    }
     /// The lone vCPU reaches `lands_at` and reports a breakpoint there.
     fn continue_current_thread(&mut self) -> Result<()> {
         self.running = true;

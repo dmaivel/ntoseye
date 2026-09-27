@@ -173,7 +173,10 @@ impl Session {
     /// left off (the saved VTL0 state; `.cxr` returns to the hypervisor's).
     /// Leaves an existing selection or a parked thread alone.
     pub(super) fn select_stop_context_default(&mut self) {
-        if self.parked_windows_thread.is_none() && !self.backend.is_running() {
+        if self.parked_windows_thread.is_none()
+            && !self.backend.is_running()
+            && self.backend.halts_in_windows_hypervisor()
+        {
             self.target.select_saved_vtl0(&self.current_thread);
         }
     }
@@ -288,7 +291,7 @@ impl Session {
 
     /// Whether the current vCPU is halted in the Windows hypervisor's code.
     pub(super) fn vcpu_halted_in_hypervisor(&mut self) -> Result<bool> {
-        if self.backend.is_running() {
+        if self.backend.is_running() || !self.backend.halts_in_windows_hypervisor() {
             return Ok(false);
         }
         let registers = self

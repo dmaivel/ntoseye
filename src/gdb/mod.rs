@@ -1162,6 +1162,10 @@ impl DebugBackend for GdbClient {
         self.windows_hypervisor = running;
     }
 
+    fn halts_in_windows_hypervisor(&self) -> bool {
+        self.windows_hypervisor
+    }
+
     fn single_step_unsafe(&self) -> bool {
         self.windows_hypervisor
     }

@@ -762,6 +762,13 @@ pub trait DebugBackend {
     /// GDB stub) whether Windows runs nested under its own hypervisor.
     fn set_windows_hypervisor(&mut self, _running: bool) {}
 
+    /// Whether a halted vCPU can be inside the Windows hypervisor: the
+    /// backend halts the VM's vCPUs themselves and Windows runs under its own
+    /// hypervisor. A backend inside Windows (KD) only stops in NT.
+    fn halts_in_windows_hypervisor(&self) -> bool {
+        false
+    }
+
     /// Whether a single step is unsafe on this target; see
     /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]. Steps and breakpoints are then run
     /// past with [`Self::continue_current_thread`] to temporary sites instead.
