@@ -20,6 +20,9 @@ mod pool;
 mod sysptes;
 mod vad;
 mod vm;
+mod vprot;
+
+pub use vprot::{memory_state_name, memory_type_name, page_protection_name};
 
 const MAX_MI_FIELDS: usize = 64;
 
@@ -617,6 +620,29 @@ impl VadType {
             Self::Unknown(raw) => raw,
         }
     }
+}
+
+/// `!vprot`: what `VirtualQuery` reports for an address. `state`, `protect`,
+/// `allocation_protect`, and `kind` are the `MEM_*` and `PAGE_*` values.
+#[derive(Debug, Clone)]
+pub struct VprotDetail {
+    pub process: ProcessInfo,
+    pub address: VirtAddr,
+    pub base_address: VirtAddr,
+    /// The VAD's start; zero for free memory.
+    pub allocation_base: VirtAddr,
+    pub allocation_protect: u32,
+    /// From `base_address` to the first page whose state or protection
+    /// differs, or the end of the VAD.
+    pub region_size: u64,
+    pub state: u32,
+    pub protect: u32,
+    pub kind: u32,
+    /// The VAD node, `None` for free memory.
+    pub vad: Option<VirtAddr>,
+    /// The scan stopped at its bound or an unreadable page table before the
+    /// region ended, so `region_size` is a lower bound.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]

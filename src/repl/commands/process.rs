@@ -161,7 +161,7 @@ fn print_process_detail(process: &ProcessInfo, detail: &ProcessDetail) {
 }
 
 impl ReplState<'_> {
-    pub(super) fn current_process_context(&self, processes: &[ProcessInfo]) -> Option<ProcessInfo> {
+    pub(crate) fn current_process_context(&self, processes: &[ProcessInfo]) -> Option<ProcessInfo> {
         if let Some(process) = self.ctx.target.attached_process() {
             return Some(process.clone());
         }

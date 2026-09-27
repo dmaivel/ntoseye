@@ -56,6 +56,15 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let detail = args.target().ptov(physical)?;
             Ok(view::mm::ptov(&detail))
         }),
+        "!vprot" | "vprot" => args.addr(0).and_then(|address| {
+            let processes = args.target().matching_processes(None)?;
+            let process = args
+                .state
+                .current_process_context(&processes)
+                .ok_or_else(|| Error::DebugInfo("!vprot needs a process context".into()))?;
+            let detail = args.target().virtual_query(&process, address)?;
+            Ok(view::mm::vprot(&detail))
+        }),
         "!pool" | "pool" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_pool(address)?;
             Ok(view::mm::pool_page(&detail))

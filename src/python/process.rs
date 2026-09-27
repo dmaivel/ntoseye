@@ -270,6 +270,20 @@ impl Process {
         })
     }
 
+    /// The region holding `address` as `VirtualQuery` reports it (`!vprot`):
+    /// base, allocation base and protection, region size, state, protection,
+    /// and type.
+    fn protection<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+        let info = self.info.clone();
+        let detail = self.owner.with_in(py, &self.context(), |session| {
+            session
+                .target
+                .virtual_query(&info, VirtAddr(address))
+                .map_err(err)
+        })?;
+        view_record(py, &view::mm::vprot(&detail))
+    }
+
     /// The process token and its security information.
     fn token<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {

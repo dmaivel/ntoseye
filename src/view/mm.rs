@@ -10,7 +10,8 @@ use crate::target::mm::{
     PoolFindMatch, PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail,
     ProcessMemoryUsage, PteLevel, PteWalk, PtovDetail, PtovMapping, SystemMemorySummary,
     SystemPteTypeDetail, SystemPtesDetail, VadProtection, VadType, VmCounter, VmDetail,
-    VmPoolDetail, VmPteDetail, VtopDetail, VtopLevel,
+    VmPoolDetail, VmPteDetail, VprotDetail, VtopDetail, VtopLevel, memory_state_name,
+    memory_type_name, page_protection_name,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
 use crate::types::{PageTableLevel, PteAttributes, VirtAddr};
@@ -610,6 +611,40 @@ pub fn memory_region(r: &MemoryRegionInfo) -> View {
         ("private_memory", View::OptBool(r.private_memory)),
         ("commit_charge", View::OptNum(r.commit_charge)),
         ("details", View::OptStr(r.details.clone())),
+    ])
+}
+
+/// Render `!vprot`: the `VirtualQuery` fields, each `MEM_*`/`PAGE_*` value
+/// beside its name.
+pub fn vprot(detail: &VprotDetail) -> View {
+    View::Object(vec![
+        ("process", process(&detail.process)),
+        ("address", View::Hex(detail.address.0)),
+        ("base_address", View::Hex(detail.base_address.0)),
+        ("allocation_base", View::Hex(detail.allocation_base.0)),
+        (
+            "allocation_protect",
+            View::Hex(detail.allocation_protect.into()),
+        ),
+        (
+            "allocation_protect_name",
+            View::Str(page_protection_name(detail.allocation_protect)),
+        ),
+        ("region_size", View::Hex(detail.region_size)),
+        ("state", View::Hex(detail.state.into())),
+        (
+            "state_name",
+            View::Str(memory_state_name(detail.state).into()),
+        ),
+        ("protect", View::Hex(detail.protect.into())),
+        (
+            "protect_name",
+            View::Str(page_protection_name(detail.protect)),
+        ),
+        ("type", View::Hex(detail.kind.into())),
+        ("type_name", View::Str(memory_type_name(detail.kind).into())),
+        ("vad", View::OptHex(detail.vad.map(|vad| vad.0))),
+        ("truncated", View::Bool(detail.truncated)),
     ])
 }
 

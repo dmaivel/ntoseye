@@ -9,7 +9,10 @@ use owo_colors::OwoColorize;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::memory::PAGE_SIZE;
-use crate::target::mm::{MemoryRegionInfo, VadProtection, VadType};
+use crate::target::mm::{
+    MemoryRegionInfo, VadProtection, VadType, VprotDetail, memory_state_name, memory_type_name,
+    page_protection_name,
+};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -33,6 +36,15 @@ repl_command! {
     names: ["!address", "address"],
     usage: "!address <address-expression>",
     summary: "Describe what an address belongs to (module+section, or VAD region).",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_vprot;
+    names: ["!vprot", "vprot"],
+    usage: "!vprot <address>",
+    summary: "Show the region, state, protection, and type of a user address, as VirtualQuery reports them.",
+    details: "The address is looked up in the current process context (`.process /p <pid>` selects one). The VAD holding it gives AllocationBase, AllocationProtect, and Type; each page's state and protection come from its PTE, or for a page without one from the VAD (private memory) or its prototype PTE (a section view). RegionSize runs from the address's page to the first page that differs; an address in no VAD is MEM_FREE up to the next VAD. The scan is bounded to 262,144 page-table steps.",
     completion: Expression,
 }
 
@@ -268,6 +280,29 @@ impl ReplState<'_> {
         Ok(())
     }
 
+    fn cmd_vprot(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let expr = require_arg!(invocation, 0, "!vprot");
+        let Some(address) = self.eval_or_report(expr) else {
+            return Ok(());
+        };
+        let processes = match self.ctx.target.matching_processes(None) {
+            Ok(processes) => processes,
+            Err(error) => {
+                error!("failed to enumerate processes: {error}");
+                return Ok(());
+            }
+        };
+        let Some(process) = self.current_process_context(&processes) else {
+            error!("!vprot needs a process context (.process /p <pid>)");
+            return Ok(());
+        };
+        match self.ctx.target.virtual_query(&process, address) {
+            Ok(detail) => print_vprot(&detail),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
     fn cmd_address(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let Some(expr) = invocation.arg(0) else {
             outln!("{}\n", command_help("address"));
@@ -332,6 +367,47 @@ impl ReplState<'_> {
 
         Ok(())
     }
+}
+
+fn print_vprot(detail: &VprotDetail) {
+    outln!(
+        "{} {} ({})",
+        ui::label("process"),
+        detail.process.name,
+        ui::Value(detail.process.pid)
+    );
+    outln!("BaseAddress:       {}", ui::addr(detail.base_address.0));
+    outln!("AllocationBase:    {}", ui::addr(detail.allocation_base.0));
+    outln!(
+        "AllocationProtect: {:08x}  {}",
+        detail.allocation_protect,
+        page_protection_name(detail.allocation_protect)
+    );
+    outln!(
+        "RegionSize:        {:016x}{}",
+        detail.region_size,
+        if detail.truncated {
+            "  (scan bound reached; at least this much)"
+        } else {
+            ""
+        }
+    );
+    outln!(
+        "State:             {:08x}  {}",
+        detail.state,
+        memory_state_name(detail.state)
+    );
+    outln!(
+        "Protect:           {:08x}  {}",
+        detail.protect,
+        page_protection_name(detail.protect)
+    );
+    outln!(
+        "Type:              {:08x}  {}",
+        detail.kind,
+        memory_type_name(detail.kind)
+    );
+    outln!();
 }
 
 #[cfg(test)]

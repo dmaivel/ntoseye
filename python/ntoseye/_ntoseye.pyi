@@ -1545,6 +1545,12 @@ class Process:
         """
         The parent process identifier.
         """
+    def protection(self, /, address: int) -> Record:
+        """
+        The region holding `address` as `VirtualQuery` reports it (`!vprot`):
+        base, allocation base and protection, region size, state, protection,
+        and type.
+        """
     @property
     def regions(self, /) -> Regions:
         """

@@ -568,6 +568,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!ptov", "memory manager"),
     ("!sysptes", "memory manager"),
     ("!vm", "memory manager"),
+    ("!vprot", "memory manager"),
     ("!vtop", "memory manager"),
     ("callbacks", "objects and I/O"),
     ("!alpc", "objects and I/O"),
