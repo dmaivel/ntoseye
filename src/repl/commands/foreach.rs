@@ -734,7 +734,13 @@ impl ReplState<'_> {
         let previous = self.ctx.target.selected_frame.clone();
         let Some(command) = command else {
             let selected = previous.as_ref().map(|frame| frame.index);
-            print_indexed_stacktrace(&trace, FOR_EACH_FRAME_LIMIT, 0, false, selected);
+            print_indexed_stacktrace(
+                &trace,
+                FOR_EACH_FRAME_LIMIT,
+                0,
+                crate::repl::disasm::StackColumns::default(),
+                selected,
+            );
             outln!();
             return Ok(Flow::Continue);
         };

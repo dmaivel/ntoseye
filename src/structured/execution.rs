@@ -21,7 +21,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .map(view::execution::breakpoint)
                 .collect(),
         )),
-        "k" | "kn" | "kb" | "kp" | "kv" => args.opt_value(0).and_then(|count| {
+        "k" | "kn" | "kb" | "kp" | "kv" | "kf" => args.opt_value(0).and_then(|count| {
             let trace = args
                 .state
                 .ctx

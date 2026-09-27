@@ -452,6 +452,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("gn", "execution and stack"),
     ("gu", "execution and stack"),
     ("kn", "execution and stack"),
+    ("kd", "execution and stack"),
     ("pa", "execution and stack"),
     ("p", "execution and stack"),
     ("pc", "execution and stack"),

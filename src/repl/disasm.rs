@@ -423,7 +423,7 @@ pub fn print_stacktrace(
 
 /// Render an already-collected stack trace in the same layout as [`print_stacktrace`].
 pub fn print_stacktrace_data(stacktrace: &StackTrace, display_limit: usize, embedded: bool) {
-    print_stacktrace_data_impl(stacktrace, display_limit, embedded, false);
+    print_stacktrace_data_with(stacktrace, display_limit, embedded, StackColumns::default());
 }
 
 pub fn print_stacktrace_data_with_provenance(
@@ -431,7 +431,29 @@ pub fn print_stacktrace_data_with_provenance(
     display_limit: usize,
     embedded: bool,
 ) {
-    print_stacktrace_data_impl(stacktrace, display_limit, embedded, true);
+    let columns = StackColumns {
+        provenance: true,
+        ..StackColumns::default()
+    };
+    print_stacktrace_data_with(stacktrace, display_limit, embedded, columns);
+}
+
+/// The optional columns of the `k` family: `kv`'s provenance and `kf`'s
+/// frame sizes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StackColumns {
+    pub provenance: bool,
+    pub frame_size: bool,
+}
+
+/// `kf`'s memory column: how many stack bytes separate a frame from the one
+/// before it. Blank for the first frame and where the stack pointer drops,
+/// which is a switch to another stack rather than a frame size.
+pub fn frame_size_cell(previous_sp: Option<u64>, sp: u64) -> String {
+    match previous_sp.and_then(|previous| sp.checked_sub(previous)) {
+        Some(size) => format!("{size:>8x}"),
+        None => format!("{:8}", ""),
+    }
 }
 
 fn format_source_location(location: &SourceLocation) -> String {
@@ -446,11 +468,11 @@ fn format_source_location(location: &SourceLocation) -> String {
     }
 }
 
-fn print_stacktrace_data_impl(
+pub fn print_stacktrace_data_with(
     stacktrace: &StackTrace,
     display_limit: usize,
     embedded: bool,
-    show_provenance: bool,
+    columns: StackColumns,
 ) {
     let indent = if embedded { "  " } else { "" };
     if embedded {
@@ -460,10 +482,23 @@ fn print_stacktrace_data_impl(
     let shown = stacktrace.frames.len().min(display_limit);
 
     for (num, frame) in stacktrace.frames.iter().take(shown).enumerate() {
-        outln!(
-            "{indent}{}",
-            format_stack_frame(Some(num), frame, !embedded, show_provenance)
-        );
+        if columns.frame_size {
+            let previous_sp = num
+                .checked_sub(1)
+                .and_then(|previous| stacktrace.frames.get(previous))
+                .map(|previous| previous.sp);
+            outln!(
+                "{indent}{} {} {}",
+                ui::muted(&format!("#{num:<2}")),
+                frame_size_cell(previous_sp, frame.sp),
+                format_stack_frame(None, frame, !embedded, columns.provenance)
+            );
+        } else {
+            outln!(
+                "{indent}{}",
+                format_stack_frame(Some(num), frame, !embedded, columns.provenance)
+            );
+        }
     }
 
     let hidden = stacktrace.frames.len().saturating_sub(display_limit) + stacktrace.truncated;

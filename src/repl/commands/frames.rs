@@ -81,9 +81,20 @@ repl_command! {
 
 repl_command! {
     cmd_k;
-    names: ["kn", "k", "kb", "kp", "kv"],
-    usage: "kn|k|kb|kp|kv [count]",
-    summary: "Display a stack; kp adds PDB parameter locations and kv provenance.",
+    names: ["kn", "k", "kb", "kp", "kv", "kf"],
+    usage: "kn|k|kb|kp|kv|kf [count]",
+    summary: "Display a stack; kp adds PDB parameter locations, kv provenance, and kf frame sizes.",
+    details: "kf's column after the frame number is the stack memory between the frame and the one before it, in hex; it is blank for the first frame and where the walk moves to another stack.",
+    run_state: HaltedOrParkedThread,
+}
+
+repl_command! {
+    cmd_kd;
+    names: ["kd"],
+    usage: "kd [count]",
+    summary: "Display raw stack words from the stack pointer, annotating values that resolve to symbols.",
+    details: "`dps @$csp L<count>`: one pointer-sized word a line from the selected frame's stack pointer, 20 words by default. Finds return addresses where the unwinder can't.",
+    completion: Expression,
     run_state: HaltedOrParkedThread,
 }
 
@@ -659,6 +670,10 @@ impl ReplState<'_> {
     }
 
     fn cmd_k(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let columns = StackColumns {
+            provenance: invocation.name.eq_ignore_ascii_case("kv"),
+            frame_size: invocation.name.eq_ignore_ascii_case("kf"),
+        };
         let frame_limit = match invocation.arg(0) {
             Some(count) => match self.eval_or_report(count) {
                 Some(count) => usize::try_from(count.0).unwrap_or(usize::MAX).min(4096),
@@ -674,11 +689,7 @@ impl ReplState<'_> {
                     return Ok(());
                 }
             };
-            if invocation.name.eq_ignore_ascii_case("kv") {
-                print_stacktrace_data_with_provenance(&trace, frame_limit, false);
-            } else {
-                print_stacktrace_data(&trace, frame_limit, false);
-            }
+            print_stacktrace_data_with(&trace, frame_limit, false, columns);
             if invocation.name.eq_ignore_ascii_case("kp") {
                 self.print_stack_parameters(&trace, 0)?;
             }
@@ -751,7 +762,7 @@ impl ReplState<'_> {
             &trace,
             frame_limit,
             offset,
-            invocation.name.eq_ignore_ascii_case("kv"),
+            columns,
             self.ctx.target.selected_frame.as_ref().map(|_| offset),
         );
         if invocation.name.eq_ignore_ascii_case("kp") {
@@ -768,6 +779,51 @@ impl ReplState<'_> {
         outln!();
 
         Ok(())
+    }
+
+    fn cmd_kd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        const DEFAULT_WORDS: u64 = 20;
+        let words = match invocation.arg(0) {
+            Some(count) => match self.eval_or_report(count) {
+                Some(count) if count.0 > 0 => count.0,
+                Some(_) => {
+                    error!("word count must be positive");
+                    return Ok(());
+                }
+                None => return Ok(()),
+            },
+            None => DEFAULT_WORDS,
+        };
+        // A parked thread has no register file; its stack starts where its
+        // walk does.
+        let sp = self.ctx.target.builtin_variable_value("csp").or_else(|| {
+            self.ctx.parked_windows_thread()?;
+            self.ctx
+                .backtrace(1)
+                .ok()?
+                .frames
+                .first()
+                .map(|frame| frame.sp)
+        });
+        let Some(sp) = sp else {
+            error!("the stack pointer is unavailable");
+            return Ok(());
+        };
+        let Some(end) = words
+            .checked_mul(8)
+            .and_then(|length| sp.checked_add(length))
+        else {
+            error!(
+                "{words:#x} words from {} overflow the address space",
+                ui::addr(sp)
+            );
+            return Ok(());
+        };
+        let range = AddressRange {
+            start: VirtAddr(sp),
+            end: VirtAddr(end),
+        };
+        self.display_symbol_range(&range, 8)
     }
 
     fn cmd_trap(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -884,7 +940,7 @@ pub fn print_indexed_stacktrace(
     trace: &RecoveredStackTrace,
     display_limit: usize,
     frame_offset: usize,
-    show_provenance: bool,
+    columns: StackColumns,
     selected_index: Option<usize>,
 ) {
     for (index, recovered) in trace.frames.iter().take(display_limit).enumerate() {
@@ -900,8 +956,17 @@ pub fn print_indexed_stacktrace(
         } else {
             ui::symbol(&frame.symbol)
         };
-        let provenance = if show_provenance {
+        let provenance = if columns.provenance {
             format!("  [{}]", frame.source.as_str())
+        } else {
+            String::new()
+        };
+        let frame_size = if columns.frame_size {
+            let previous_sp = index
+                .checked_sub(1)
+                .and_then(|previous| trace.frames.get(previous))
+                .map(|previous| previous.frame.sp);
+            format!("{} ", frame_size_cell(previous_sp, frame.sp))
         } else {
             String::new()
         };
@@ -911,9 +976,10 @@ pub fn print_indexed_stacktrace(
             .map(|location| format!("  [{}:{}]", location.file, location.line))
             .unwrap_or_default();
         outln!(
-            "{}{:02} {}  {}{}{}",
+            "{}{:02} {}{}  {}{}{}",
             marker,
             global_index,
+            frame_size,
             ui::addr(frame.sp),
             ui::addr(frame.ip),
             if symbol.is_empty() {
