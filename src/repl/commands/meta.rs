@@ -13,6 +13,7 @@ use crate::target::meta::{
     ErrorCodeDetail, TargetTimeDetail, TargetVersionDetail, decode_error_code,
     decode_error_code_as_ntstatus,
 };
+use crate::triage_report::time::filetime_to_iso;
 use crate::types::{Arch, CodeMachine, VirtAddr};
 
 use crate::repl::*;
@@ -62,6 +63,13 @@ repl_command! {
     usage: ".echo <text>",
     summary: "Print text without expression interpretation.",
     style: ExpressionTail,
+}
+
+repl_command! {
+    cmd_echotime();
+    names: [".echotime"],
+    usage: ".echotime",
+    summary: "Print the host's current date and time, in UTC.",
 }
 
 repl_command! {
@@ -204,6 +212,20 @@ impl ReplState<'_> {
         let detail = self.ctx.target.target_time()?;
         print_target_time(&detail);
         outln!();
+        Ok(())
+    }
+
+    fn cmd_echotime(&mut self) -> Result<()> {
+        const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| u64::try_from(since.as_nanos() / 100).ok())
+            .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH)?));
+        match now {
+            Some(now) => outln!("Debugger (not debuggee) time: {now}\n"),
+            None => error!("the host clock is outside the representable range"),
+        }
         Ok(())
     }
 
@@ -619,6 +641,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!dbgprint", "target control"),
     (".cls", "session"),
     (".echo", "session"),
+    (".echotime", "session"),
     (".printf", "session"),
     (".foreach", "session"),
     (".if", "session"),
