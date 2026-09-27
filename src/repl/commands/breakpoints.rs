@@ -99,6 +99,15 @@ repl_command! {
 }
 
 repl_command! {
+    cmd_bsc;
+    names: ["bsc"],
+    usage: "bsc <id> <condition> [\"commands\"]",
+    summary: "Set a breakpoint's condition and commands together.",
+    details: "WinDbg's update-conditional-breakpoint: the breakpoint stops only when <condition> is nonzero and then runs the quoted commands, separated by semicolons (`bsc 0 @rcx==4 \"k; g\"`). Without commands, any it had are removed.",
+    completion: [Breakpoint, Expression],
+}
+
+repl_command! {
     cmd_bs;
     names: ["bs", "bpa"],
     usage: "bs <id> <commands|clear>",
@@ -1055,6 +1064,47 @@ impl ReplState<'_> {
         let action = (!text.eq_ignore_ascii_case("clear")).then_some(text);
         match self.ctx.breakpoints.set_action(id, action) {
             Ok(()) => outln!("breakpoint {} action updated\n", ui::bp_id(id)),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
+    fn cmd_bsc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(id) = Self::breakpoint_id_arg(&invocation, "bsc") else {
+            return Ok(());
+        };
+        // A quoted last argument is the commands; everything between is the
+        // condition, which may itself contain spaces.
+        let rest = invocation.argv.get(1..).unwrap_or(&[]);
+        let (condition_args, action) = match rest.split_last() {
+            Some((Cow::Owned(commands), condition)) => (
+                condition,
+                Some(commands.clone()).filter(|text| !text.is_empty()),
+            ),
+            _ => (rest, None),
+        };
+        let condition = join_breakpoint_args(condition_args);
+        if condition.is_empty() {
+            outln!("{}\n", command_help("bsc"));
+            return Ok(());
+        }
+        let expr = match compile_repl_condition(Some(&condition), self.radix) {
+            Ok(expr) => expr,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let updated = self
+            .ctx
+            .breakpoints
+            .set_condition(id, Some(condition), expr)
+            .and_then(|()| self.ctx.breakpoints.set_action(id, action));
+        match updated {
+            Ok(()) => outln!(
+                "breakpoint {} condition and commands updated\n",
+                ui::bp_id(id)
+            ),
             Err(error) => error!("{error}"),
         }
         Ok(())

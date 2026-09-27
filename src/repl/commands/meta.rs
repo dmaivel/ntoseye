@@ -490,6 +490,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("bpp", "breakpoints and events"),
     ("br", "breakpoints and events"),
     ("bs", "breakpoints and events"),
+    ("bsc", "breakpoints and events"),
     ("bu", "breakpoints and events"),
     ("sx", "breakpoints and events"),
     ("sxd", "breakpoints and events"),
