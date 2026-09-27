@@ -18,6 +18,11 @@ from ntoseye import Debugger, Stop
 # Called on every context switch, so a running guest hits it at once.
 HOT = "nt!KiSwapContext"
 
+# How a step under VBS reports that its vCPU, run alone, entered the Windows
+# hypervisor to wait on the held ones; a scenario it hits is run again.
+HYPERVISOR_WAIT = "entered the Windows hypervisor before finishing the step"
+ATTEMPTS = 3
+
 
 @contextmanager
 def ctrl_c_after(seconds: float) -> Iterator[None]:
@@ -86,9 +91,12 @@ def test_run_to_symbol_stops_there(halted: Debugger) -> None:
 
 
 def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
-    require_single_step(halted)
-    # gdb single-steps at a few hundred instructions a second.
-    trace = halted.trace_calls(limit=2_000)
+    for _ in range(ATTEMPTS):
+        require_single_step(halted)
+        # gdb single-steps at a few hundred instructions a second.
+        trace = halted.trace_calls(limit=2_000)
+        if not (trace.end == "failed" and HYPERVISOR_WAIT in (trace.error or "")):
+            break
     assert trace.end in ("returned", "limit")
     assert trace.instructions > 0
 
@@ -181,6 +189,16 @@ def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debu
 def test_secure_steps_use_hardware_sites_and_leave_code_unchanged(halted: Debugger) -> None:
     sk = gdb_secure_kernel(halted)
     address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
+    for attempt in range(ATTEMPTS):
+        try:
+            secure_step_scenario(halted, address)
+            return
+        except ntoseye.NtoseyeError as error:
+            if HYPERVISOR_WAIT not in str(error) or attempt == ATTEMPTS - 1:
+                raise
+
+
+def secure_step_scenario(halted: Debugger, address: int) -> None:
     bp = halted.breakpoints.add(address, hardware=True)
     try:
         assert isinstance(halted.run(timeout=10.0), Stop.Breakpoint)

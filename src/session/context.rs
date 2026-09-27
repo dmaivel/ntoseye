@@ -287,7 +287,7 @@ impl Session {
     }
 
     /// Whether the current vCPU is halted in the Windows hypervisor's code.
-    fn vcpu_halted_in_hypervisor(&mut self) -> Result<bool> {
+    pub(super) fn vcpu_halted_in_hypervisor(&mut self) -> Result<bool> {
         if self.backend.is_running() {
             return Ok(false);
         }

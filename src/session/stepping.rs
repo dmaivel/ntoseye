@@ -80,6 +80,16 @@ impl Session {
         self.refresh_context_for_current_thread();
         let rip = self.current_rip();
         self.current_stop = Some(ContinueOutcome::Step { rip });
+        // Under VBS the vCPU steps alone; an interrupt taken first can leave
+        // it in the Windows hypervisor, waiting on the vCPUs held meanwhile.
+        // Nothing can be stepped from there.
+        if self.vcpu_halted_in_hypervisor()? {
+            return Err(Error::DebugInfo(format!(
+                "{} entered the Windows hypervisor before finishing the step, and waits there \
+                 on the other vCPUs; the context shows where NT left off. Resume with g",
+                self.current_thread
+            )));
+        }
         Ok(rip)
     }
 
