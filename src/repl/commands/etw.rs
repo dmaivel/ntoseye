@@ -43,6 +43,14 @@ repl_command! {
     details: "Walks every buffer on the session's GlobalList (each processor's current buffer, buffers waiting to be flushed, and free buffers whose events were already delivered but not yet overwritten) and decodes each event record by its trace header: EVENT_HEADER (manifest and TraceLogging providers: provider GUID, event id, version, opcode, task, level, keyword), EVENT_TRACE_HEADER (classic providers), SYSTEM_TRACE_HEADER and PERFINFO_TRACE_HEADER (kernel events: group and hook id), and MESSAGE_TRACE_HEADER (WPP: message GUID and number). Each event is printed as [cpu]pid.tid::time (hex ids, UTC time converted from the session's clock) with its payload in hex (the first 256 bytes). -t count keeps the most recent count events. WPP messages are printed raw: their trace message format lives only in the provider's private PDB. A buffer whose records stop making sense is reported with the offset, not resynchronized.",
 }
 
+repl_command! {
+    cmd_wmitrace_logsave;
+    names: ["!wmitrace.logsave", "wmitrace.logsave"],
+    usage: "!wmitrace.logsave <logger-id|logger-name|context-address> <file>",
+    summary: "Save an ETW trace session's in-memory buffers as an .etl file on the host.",
+    details: "Writes an .etl file that ETW consumers such as tracerpt open: a header buffer holding the logfile header event (TRACE_LOGFILE_HEADER: buffer size, OS version and build, processor count, timer resolution, CPU speed, boot time, QPC frequency, the session's start reference and clock type, and its names), then every buffer on the session's GlobalList that holds events, sealed as the logger flushes one (valid length set, the rest filled with 0xff). Buffers already flushed to the session's own log file are included when their events are still in memory. The time zone records only the current bias, and a compressed buffer is refused.",
+}
+
 impl ReplState<'_> {
     fn cmd_wmitrace_strdump(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         match invocation.arg(0) {
@@ -285,6 +293,34 @@ impl ReplState<'_> {
             outln!("  {}", ui::muted(note));
         }
         outln!();
+        Ok(())
+    }
+
+    fn cmd_wmitrace_logsave(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let (Some(logger), Some(path)) = (invocation.arg(0), invocation.arg(1)) else {
+            outln!("{}\n", command_help("!wmitrace.logsave"));
+            return Ok(());
+        };
+        let file = match self.ctx.target.etw_log_file(logger, self.radix) {
+            Ok(file) => file,
+            Err(e) => {
+                error!("{e}");
+                return Ok(());
+            }
+        };
+        if let Err(e) = std::fs::write(path, &file.bytes) {
+            error!("failed to write '{path}': {e}");
+            return Ok(());
+        }
+        outln!(
+            "wrote logger {:#04x} '{}' to '{}': header buffer and {} buffers of {:#x} bytes ({:#x} bytes)\n",
+            file.logger.logger_id,
+            file.logger.name,
+            path,
+            file.buffers,
+            file.logger.buffer_size,
+            file.bytes.len()
+        );
         Ok(())
     }
 }

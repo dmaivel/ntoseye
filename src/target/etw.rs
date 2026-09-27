@@ -1241,6 +1241,312 @@ impl Target {
     }
 }
 
+/// `!wmitrace.logsave`: a logger's in-memory buffers as an .etl file.
+#[derive(Debug, Clone)]
+pub struct EtwLogFile {
+    pub logger: EtwLogger,
+    /// Buffers with events written after the header buffer.
+    pub buffers: usize,
+    pub bytes: Vec<u8>,
+}
+
+/// What the logfile header event records besides the logger's own fields.
+#[derive(Debug, Clone, Copy)]
+struct LogFileSystem {
+    major_version: u8,
+    minor_version: u8,
+    build_number: u32,
+    processors: u32,
+    timer_resolution: u32,
+    cpu_mhz: u32,
+    boot_time: u64,
+    qpc_frequency: u64,
+    end_time: u64,
+    /// UTC minus local time, in minutes.
+    time_zone_bias: i32,
+}
+
+/// `WMI_LOG_TYPE_HEADER`: the hook id of the logfile header event.
+const WMI_LOG_TYPE_HEADER: u16 = 0x0000;
+/// `ETW_BUFFER_FLAG_FLUSH_MARKER | ETW_BUFFER_FLAG_PROC_INDEX`, as the kernel
+/// marks the header buffer it writes.
+const HEADER_BUFFER_FLAG: u16 = 0x0021;
+/// `ETW_BUFFER_FLAG_PROC_INDEX`: `ClientContext` holds a processor index.
+const DATA_BUFFER_FLAG: u16 = 0x0020;
+/// `ETW_BUFFER_TYPE_HEADER`.
+const HEADER_BUFFER_TYPE: u16 = 4;
+/// `ETW_BUFFER_TYPE_GENERIC`.
+const DATA_BUFFER_TYPE: u16 = 0;
+/// `sizeof(TRACE_LOGFILE_HEADER64)`.
+const TRACE_LOGFILE_HEADER64_SIZE: usize = 0x118;
+/// `EVENT_TRACE_REAL_TIME_MODE | STOP_ON_HYBRID_SHUTDOWN |
+/// PERSIST_ON_HYBRID_SHUTDOWN`: modes the kernel clears from the header's
+/// LogFileMode.
+const LOGFILE_MODE_CLEARED: u32 = 0x0000_0100 | 0x0040_0000 | 0x0080_0000;
+
+fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
+    bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], at: usize, value: u64) {
+    bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn utf16z(text: &str) -> Vec<u8> {
+    text.encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+/// Offsets in `_WMI_BUFFER_HEADER` that an .etl buffer's header needs.
+struct BufferHeaderOffsets {
+    size: usize,
+    buffer_size: usize,
+    saved_offset: usize,
+    current_offset: usize,
+    logger_id: usize,
+    state: usize,
+    offset: usize,
+    buffer_flag: usize,
+    buffer_type: usize,
+}
+
+impl BufferHeaderOffsets {
+    fn from_pdb(buffer: &TypeInfo, context: &TypeInfo) -> Result<Self> {
+        let off =
+            |ti: &TypeInfo, name: &str| -> Result<usize> { Ok(ti.field(name)?.offset as usize) };
+        Ok(Self {
+            size: buffer.size,
+            buffer_size: off(buffer, "BufferSize")?,
+            saved_offset: off(buffer, "SavedOffset")?,
+            current_offset: off(buffer, "CurrentOffset")?,
+            logger_id: off(buffer, "ClientContext")? + off(context, "LoggerId")?,
+            state: off(buffer, "State")?,
+            offset: off(buffer, "Offset")?,
+            buffer_flag: off(buffer, "BufferFlag")?,
+            buffer_type: off(buffer, "BufferType")?,
+        })
+    }
+
+    /// Mark `buffer` as flushed with `used` valid bytes, as the logger
+    /// writes it to its file: the rest of the buffer is filled with 0xff.
+    fn seal(&self, buffer: &mut [u8], used: usize, state: u32, flag: u16, kind: u16) {
+        put_u32(buffer, self.saved_offset, used as u32);
+        put_u32(buffer, self.current_offset, used as u32);
+        put_u32(buffer, self.offset, used as u32);
+        put_u32(buffer, self.state, state);
+        put_u16(buffer, self.buffer_flag, flag);
+        put_u16(buffer, self.buffer_type, kind);
+        buffer[used..].fill(0xff);
+    }
+}
+
+/// The header buffer that begins an .etl file: a `WMI_BUFFER_HEADER` and
+/// the `WMI_LOG_TYPE_HEADER` event, a `SYSTEM_TRACE_HEADER` followed by a
+/// `TRACE_LOGFILE_HEADER64` and the logger and log file names. Laid out as
+/// the kernel writes it (checked against a 26200 kernel's own .etl).
+fn logfile_header_buffer(
+    logger: &EtwLogger,
+    system: &LogFileSystem,
+    offsets: &BufferHeaderOffsets,
+    flush_state: u32,
+    buffers_written: u32,
+) -> Result<Vec<u8>> {
+    let size = logger.buffer_size as usize;
+    let mut buffer = vec![0u8; size];
+    put_u32(&mut buffer, offsets.buffer_size, logger.buffer_size);
+    put_u16(&mut buffer, offsets.logger_id, logger.logger_id as u16);
+
+    let logger_name = utf16z(&logger.name);
+    let file_name = utf16z(&logger.log_file_name);
+    let event_size = 0x20 + TRACE_LOGFILE_HEADER64_SIZE + logger_name.len() + file_name.len();
+    let event = offsets.size;
+    let used = align8(event + event_size);
+    if event_size > usize::from(u16::MAX) || used > size {
+        return Err(Error::DebugInfo(format!(
+            "the logfile header event ({event_size:#x} bytes) does not fit a {size:#x}-byte buffer"
+        )));
+    }
+    // SYSTEM_TRACE_HEADER: version 2, TRACE_HEADER_TYPE_SYSTEM64, flags
+    // 0xc0; the thread, process and CPU times stay 0.
+    put_u32(&mut buffer, event, 0xc002_0002);
+    put_u16(&mut buffer, event + 4, event_size as u16);
+    put_u16(&mut buffer, event + 6, WMI_LOG_TYPE_HEADER);
+    put_u64(&mut buffer, event + 0x10, logger.reference_clock);
+
+    let h = event + 0x20;
+    // Layout 1.5 (QPC and platform clock in the header), 2.0 for buffers
+    // over 1 MB, compressed loggers or more than 256 processors.
+    let sub_version: u16 = if logger.buffer_size > 1 << 20
+        || logger.logger_mode & 0x0400_0000 != 0
+        || system.processors > 256
+    {
+        0x0002
+    } else {
+        0x0501
+    };
+    put_u32(&mut buffer, h, logger.buffer_size);
+    buffer[h + 4] = system.major_version;
+    buffer[h + 5] = system.minor_version;
+    put_u16(&mut buffer, h + 6, sub_version);
+    put_u32(&mut buffer, h + 0x08, system.build_number);
+    put_u32(&mut buffer, h + 0x0c, system.processors);
+    put_u64(&mut buffer, h + 0x10, system.end_time);
+    put_u32(&mut buffer, h + 0x18, system.timer_resolution);
+    put_u32(&mut buffer, h + 0x1c, logger.maximum_file_size);
+    put_u32(
+        &mut buffer,
+        h + 0x20,
+        logger.logger_mode & !LOGFILE_MODE_CLEARED,
+    );
+    put_u32(&mut buffer, h + 0x24, buffers_written);
+    put_u32(&mut buffer, h + 0x28, 1); // StartBuffers
+    put_u32(&mut buffer, h + 0x2c, 8); // PointerSize
+    put_u32(&mut buffer, h + 0x30, logger.events_lost);
+    put_u32(&mut buffer, h + 0x34, system.cpu_mhz);
+    // LoggerName/LogFileName (0x38/0x40) hold platform timer sources, not
+    // known here; TimeZone (0x48) gets only the bias.
+    put_u32(&mut buffer, h + 0x48, system.time_zone_bias as u32);
+    put_u64(&mut buffer, h + 0xf8, system.boot_time);
+    put_u64(&mut buffer, h + 0x100, system.qpc_frequency);
+    put_u64(&mut buffer, h + 0x108, logger.reference_system_time);
+    put_u32(&mut buffer, h + 0x110, logger.clock.raw());
+    put_u32(&mut buffer, h + 0x114, logger.log_buffers_lost);
+    let names = h + TRACE_LOGFILE_HEADER64_SIZE;
+    buffer[names..names + logger_name.len()].copy_from_slice(&logger_name);
+    let names = names + logger_name.len();
+    buffer[names..names + file_name.len()].copy_from_slice(&file_name);
+
+    offsets.seal(
+        &mut buffer,
+        used,
+        flush_state,
+        HEADER_BUFFER_FLAG,
+        HEADER_BUFFER_TYPE,
+    );
+    Ok(buffer)
+}
+
+impl Target {
+    /// `!wmitrace.logsave`: the logger `text` names as an .etl file: a header
+    /// buffer, then each of its buffers that holds events, sealed as the
+    /// logger flushes them.
+    pub fn etw_log_file(&self, text: &str, radix: NumberRadix) -> Result<EtwLogFile> {
+        let logger = self.etw_logger(text, radix)?;
+        let types = self.etw_types()?;
+        if logger.buffer_size > MAX_BUFFER_SIZE {
+            return Err(Error::DebugInfo(format!(
+                "logger {:#x}'s BufferSize {:#x} is beyond ETW's 16 MB limit",
+                logger.logger_id, logger.buffer_size
+            )));
+        }
+        let buffers = self.read_etw_buffers(&types, &logger)?;
+        let guest = self.guest()?;
+        let kernel = guest.ntoskrnl.types();
+        let offsets =
+            BufferHeaderOffsets::from_pdb(&types.buffer, &*kernel.layout("_ETW_BUFFER_CONTEXT")?)?;
+        let states = guest
+            .ntoskrnl
+            .guid
+            .and_then(|guid| self.symbols.enum_variants(guid, "_ETW_BUFFER_STATE"))
+            .unwrap_or_default();
+        let state = |name: &str| {
+            states
+                .iter()
+                .find(|(variant, _)| variant == name)
+                .map(|(_, value)| *value)
+                .ok_or_else(|| {
+                    Error::DebugInfo(format!("_ETW_BUFFER_STATE has no {name} in the PDB"))
+                })
+        };
+        let flush_state = state("EtwBufferStateFlush")? as u32;
+        let compressed = state("EtwBufferStateCompressed").ok();
+        if let Some(buffer) = buffers
+            .iter()
+            .find(|buffer| Some(i64::from(buffer.state)) == compressed)
+        {
+            return Err(Error::DebugInfo(format!(
+                "buffer {:#x} of logger {:#x} is compressed; an .etl of it would need \
+                 the logger's compression state",
+                buffer.address.0, logger.logger_id
+            )));
+        }
+
+        let kuser = KuserSharedData::new(self);
+        let symbol_u32 = |name: &str| -> Result<u32> { guest.ntoskrnl.symbol(name)?.read() };
+        let missing =
+            |what: &str| Error::DebugInfo(format!("KUSER_SHARED_DATA.{what} is unreadable"));
+        let system = LogFileSystem {
+            major_version: kuser
+                .nt_major_version()
+                .ok_or_else(|| missing("NtMajorVersion"))? as u8,
+            minor_version: kuser
+                .nt_minor_version()
+                .ok_or_else(|| missing("NtMinorVersion"))? as u8,
+            build_number: (kuser
+                .nt_build_number()
+                .ok_or_else(|| missing("NtBuildNumber"))?
+                & 0xffff) as u32,
+            processors: symbol_u32("KeNumberProcessors")?,
+            timer_resolution: symbol_u32("KeMaximumIncrement")?,
+            cpu_mhz: self.processor_mhz()? as u32,
+            boot_time: guest.ntoskrnl.symbol("KeBootTime")?.read()?,
+            qpc_frequency: kuser
+                .qpc_frequency()
+                .ok_or_else(|| missing("QpcFrequency"))?,
+            end_time: kuser.system_time().ok_or_else(|| missing("SystemTime"))?,
+            time_zone_bias: (kuser
+                .time_zone_bias()
+                .ok_or_else(|| missing("TimeZoneBias"))?
+                / 600_000_000) as i32,
+        };
+
+        let size = logger.buffer_size as usize;
+        let memory = self.kernel_address_space();
+        let mut data_buffers = Vec::new();
+        for buffer in buffers
+            .iter()
+            .filter(|b| b.data_end as usize > offsets.size)
+        {
+            if self.interrupted() {
+                return Err(Error::DebugInfo("interrupted".into()));
+            }
+            let mut bytes = vec![0u8; size];
+            memory.read_bytes(buffer.address, &mut bytes)?;
+            offsets.seal(
+                &mut bytes,
+                buffer.data_end as usize,
+                flush_state,
+                DATA_BUFFER_FLAG,
+                DATA_BUFFER_TYPE,
+            );
+            data_buffers.push(bytes);
+        }
+        let header = logfile_header_buffer(
+            &logger,
+            &system,
+            &offsets,
+            flush_state,
+            data_buffers.len() as u32 + 1,
+        )?;
+        let mut bytes = Vec::with_capacity(size * (data_buffers.len() + 1));
+        bytes.extend(header);
+        for buffer in &data_buffers {
+            bytes.extend_from_slice(buffer);
+        }
+        Ok(EtwLogFile {
+            logger,
+            buffers: data_buffers.len(),
+            bytes,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

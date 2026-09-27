@@ -36,6 +36,12 @@ impl<'a> KuserSharedData<'a> {
         self.u64_field("SystemTime")
     }
 
+    /// UTC minus local time, in 100 ns units (the low 64 bits of the
+    /// `KSYSTEM_TIME`).
+    pub fn time_zone_bias(&self) -> Option<i64> {
+        self.u64_field("TimeZoneBias").map(|bias| bias as i64)
+    }
+
     /// `QueryPerformanceCounter` ticks per second.
     pub fn qpc_frequency(&self) -> Option<u64> {
         self.u64_field("QpcFrequency")

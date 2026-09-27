@@ -550,6 +550,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!verifier", "analysis"),
     ("!wmitrace.logdump", "analysis"),
     ("!wmitrace.logger", "analysis"),
+    ("!wmitrace.logsave", "analysis"),
     ("!wmitrace.strdump", "analysis"),
     ("?", "symbols, types, and expressions"),
     ("dt", "symbols, types, and expressions"),
