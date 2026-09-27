@@ -11,8 +11,9 @@ use crate::session::Session;
 use crate::target::sched::{
     ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
     MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UniqStackDetail,
-    UniqStackScope, UnwalkedThread, available, frame_details, frame_symbol_matches, group_stacks,
-    select_threads, thread_summary, unavailable, walk_list_nodes,
+    UniqStackScope, UnwalkedThread, available, findstack_level_error, frame_details,
+    frame_symbol_matches, group_stacks, select_threads, thread_summary, unavailable,
+    walk_list_nodes,
 };
 use crate::target::workqueue::ExQueueDetail;
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
@@ -339,6 +340,9 @@ impl Session {
                 "!findstack needs a symbol or module".into(),
             ));
         }
+        if level > 2 {
+            return Err(findstack_level_error(level));
+        }
         let (threads, active_vcpus) = self.windows_threads()?;
         let scanned_threads = threads.len();
         let mut matched = Vec::new();
@@ -374,7 +378,7 @@ impl Session {
         );
         Ok(FindStackDetail {
             pattern: pattern.to_string(),
-            level: level.min(2),
+            level,
             scanned_threads,
             interrupted,
             threads: matched,

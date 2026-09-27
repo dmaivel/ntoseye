@@ -475,16 +475,17 @@ pub fn frame_symbol_matches(pattern: &str, symbol: &str) -> bool {
     }
 }
 
-/// `!findstack`'s display level: WinDbg's default is 1.
+/// `!findstack`'s display level argument: WinDbg's default is 1. The range
+/// is checked by [`Session::inspect_findstack`](crate::session::Session::inspect_findstack).
 pub fn findstack_level(text: Option<&str>) -> Result<u8> {
     match text {
-        None | Some("1") => Ok(1),
-        Some("0") => Ok(0),
-        Some("2") => Ok(2),
-        Some(other) => Err(Error::InvalidArgument(format!(
-            "display level must be 0, 1, or 2, not '{other}'"
-        ))),
+        None => Ok(1),
+        Some(text) => text.parse().map_err(|_| findstack_level_error(text)),
     }
+}
+
+pub fn findstack_level_error(level: impl std::fmt::Display) -> Error {
+    Error::InvalidArgument(format!("display level must be 0, 1, or 2, not '{level}'"))
 }
 
 /// Group walked stacks by their frames' instruction pointers and truncation,

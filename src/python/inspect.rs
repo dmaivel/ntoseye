@@ -1,4 +1,3 @@
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::args::{ApcTarget, DeviceArg, LoggerArg, ObjectArg};
@@ -339,11 +338,6 @@ impl Inspect {
         symbol: &str,
         level: u8,
     ) -> PyResult<Bound<'py, Record>> {
-        if level > 2 {
-            return Err(PyValueError::new_err(format!(
-                "level must be 0, 1, or 2, not {level}"
-            )));
-        }
         self.record(py, |session| {
             let detail = session.inspect_findstack(symbol, level).map_err(err)?;
             Ok(view::sched::findstack(&detail))
