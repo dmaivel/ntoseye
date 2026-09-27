@@ -945,6 +945,10 @@ class Inspect:
         """
         The volumes of each filter manager frame, with the instances on them
         (`!fltkd.volumes`).
+    def ipi(self, /, processor: int |None = None) -> Record:
+        """
+        Report interprocessor-interrupt state for every processor or one
+        (`!ipi`).
         """
     def irp(self, /, address: int) -> Record:
         """
@@ -1029,6 +1033,10 @@ class Inspect:
         """
         Check the block headers of the pool page containing `address` and
         report the first inconsistency (`!poolval`).
+    def queued_locks(self, /) -> Record:
+        """
+        Report which processors own or wait for each numbered queued spinlock
+        (`!qlocks`).
         """
     def ready(self, /, processor: int |None = None) -> Record:
         """

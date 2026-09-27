@@ -9,6 +9,7 @@ mod cpu;
 mod etw;
 mod execution;
 mod fs;
+mod hardware;
 mod heap;
 mod meta;
 mod mm;
@@ -32,7 +33,7 @@ use crate::view::View;
 type Handler = fn(&str, &mut Args<'_, '_>) -> Option<Result<View>>;
 
 /// Every domain's decoder; command names are disjoint across domains.
-const HANDLERS: [Handler; 14] = [
+const HANDLERS: [Handler; 15] = [
     object::command,
     process::command,
     execution::command,
@@ -47,6 +48,7 @@ const HANDLERS: [Handler; 14] = [
     etw::command,
     fs::command,
     meta::command,
+    hardware::command,
 ];
 
 /// Dispatch `line` to its structured decoding, if it has one.

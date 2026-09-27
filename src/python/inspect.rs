@@ -326,6 +326,25 @@ impl Inspect {
         })
     }
 
+    /// Report which processors own or wait for each numbered queued spinlock
+    /// (`!qlocks`).
+    fn queued_locks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session.target.queued_locks().map_err(err)?;
+            Ok(view::hardware::queued_locks(&detail))
+        })
+    }
+
+    /// Report interprocessor-interrupt state for every processor or one
+    /// (`!ipi`).
+    #[pyo3(signature = (processor=None))]
+    fn ipi<'py>(&self, py: Python<'py>, processor: Option<u16>) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session.target.ipi_state(processor).map_err(err)?;
+            Ok(view::hardware::ipi(&detail))
+        })
+    }
+
     /// Report the executive worker queues, their pending work items, and
     /// worker threads (`!exqueue`). `include_stacks` adds each worker's stack;
     /// `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`) restricts

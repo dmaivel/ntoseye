@@ -17,6 +17,7 @@ mod exec;
 mod foreach;
 mod frames;
 mod fs;
+mod hardware;
 mod heap;
 mod image;
 mod memory;

@@ -4,6 +4,7 @@ pub mod cpu;
 pub mod etw;
 pub mod execution;
 pub mod fs;
+pub mod hardware;
 pub mod heap;
 pub mod meta;
 pub mod mm;

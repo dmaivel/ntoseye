@@ -9,6 +9,7 @@ pub mod etw;
 pub mod fltmgr;
 pub mod fs;
 pub mod gflag;
+pub mod hang;
 pub mod heap;
 pub mod htrace;
 pub mod image;

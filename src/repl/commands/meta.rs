@@ -560,6 +560,8 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!timer", "cpu"),
     ("!ca", "memory manager"),
     ("!filecache", "memory manager"),
+    ("!qlocks", "cpu"),
+    ("!ipi", "cpu"),
     ("!lookaside", "memory manager"),
     ("!mdl", "memory manager"),
     ("!memusage", "memory manager"),
