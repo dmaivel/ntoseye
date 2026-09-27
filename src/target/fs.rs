@@ -294,7 +294,8 @@ impl Target {
 
     /// `!filecache`: walk the cache manager's VACB arrays (`CcVacbArrays`
     /// up to `CcVacbArraysHighestUsedIndex`), count each shared cache map's
-    /// mapped views and the present pages in them, and name its file.
+    /// mapped views and the present pages in them, and name the files of
+    /// the 1,024 with the most.
     pub fn file_cache(&self) -> Result<FileCacheDetail> {
         let guest = self.guest()?;
         let ntos = &guest.ntoskrnl;
@@ -356,45 +357,51 @@ impl Target {
         }
 
         let active_vacbs: u64 = views.values().map(|bases| bases.len() as u64).sum();
+        let mut maps: Vec<(u64, u64, u64)> = views
+            .iter()
+            .map(|(map, bases)| {
+                let mut valid = 0;
+                for base in bases {
+                    let _ = memory.for_each_present_page(
+                        *base,
+                        *base + VACB_MAPPING_GRANULARITY,
+                        |_, _, length| {
+                            valid += length;
+                            ControlFlow::Continue(())
+                        },
+                    );
+                }
+                (*map, bases.len() as u64, valid)
+            })
+            .collect();
+        let valid_bytes = maps.iter().map(|(.., valid)| valid).sum();
+        maps.sort_by_key(|(.., valid)| Reverse(*valid));
+        maps.truncate(MAX_CACHED_FILES);
         let map_layout = types.layout("_SHARED_CACHE_MAP")?;
-        let mut files = Vec::with_capacity(views.len());
-        let mut valid_bytes = 0;
-        for (map, bases) in &views {
-            let mut valid = 0;
-            for base in bases {
-                let _ = memory.for_each_present_page(
-                    *base,
-                    *base + VACB_MAPPING_GRANULARITY,
-                    |_, _, length| {
-                        valid += length;
-                        ControlFlow::Continue(())
-                    },
-                );
-            }
-            valid_bytes += valid;
-            let map_ref = types
-                .struct_with_layout(map_layout.clone(), VirtAddr(*map))
-                .prefetch();
-            let file_object = map_ref
-                .read_uint("FileObjectFastRef")
-                .map(fast_ref_address)
-                .unwrap_or(VirtAddr(0));
-            let read = |name: &str| DiagnosticValue::from_result(map_ref.read_uint(name));
-            files.push(CachedFile {
-                shared_cache_map: VirtAddr(*map),
-                file_object,
-                file_name: DiagnosticValue::from_result(self.file_object_name(file_object)),
-                file_size: read("FileSize"),
-                valid_data_length: read("ValidDataLength"),
-                open_count: read("OpenCount"),
-                dirty_pages: read("DirtyPages"),
-                mapped_vacbs: bases.len() as u64,
-                valid_bytes: valid,
-            });
-        }
-        files.sort_by_key(|file| Reverse(file.valid_bytes));
-        let file_count = files.len() as u64;
-        files.truncate(MAX_CACHED_FILES);
+        let files = maps
+            .into_iter()
+            .map(|(map, mapped_vacbs, valid)| {
+                let map_ref = types
+                    .struct_with_layout(map_layout.clone(), VirtAddr(map))
+                    .prefetch();
+                let file_object = map_ref
+                    .read_uint("FileObjectFastRef")
+                    .map(fast_ref_address)
+                    .unwrap_or(VirtAddr(0));
+                let read = |name: &str| DiagnosticValue::from_result(map_ref.read_uint(name));
+                CachedFile {
+                    shared_cache_map: VirtAddr(map),
+                    file_object,
+                    file_name: DiagnosticValue::from_result(self.file_object_name(file_object)),
+                    file_size: read("FileSize"),
+                    valid_data_length: read("ValidDataLength"),
+                    open_count: read("OpenCount"),
+                    dirty_pages: read("DirtyPages"),
+                    mapped_vacbs,
+                    valid_bytes: valid,
+                }
+            })
+            .collect();
         Ok(FileCacheDetail {
             vacb_arrays,
             free_vacbs,
@@ -402,7 +409,7 @@ impl Target {
             mapped_bytes: active_vacbs * VACB_MAPPING_GRANULARITY,
             valid_bytes,
             files,
-            file_count,
+            file_count: views.len() as u64,
             interrupted,
         })
     }
