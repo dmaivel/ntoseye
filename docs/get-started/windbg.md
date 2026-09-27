@@ -6,7 +6,8 @@
 
 - **Command names and syntax.** {command}`bp`, {command}`kn`, {command}`dt`, {command}`!process`, {command}`lm`, {command}`u`, the `d*` and `e*` families, {command}`.reload`, {command}`.sympath`, {command}`!analyze`, and so on. The [command reference](../reference/commands/index.md) lists every one.
 - **MASM expressions** with WinDbg's hexadecimal default radix: `poi()`, `by`/`wo`/`dwo`/`qwo`, `@rax`, `$ip`/`$proc`/`$thread` and the other pseudo-registers, `@$name`, separated addresses like ``fffff803`1a2b3c4d``. See [Expressions](../reference/expressions.md).
-- **The breakpoint grammar:** pass counts, `if <expr>` conditions, `do "<commands>"` actions with a trailing `gc`, `/1`, `/p`, `/t`. See [Breakpoints](../using/breakpoints.md).
+- **The breakpoint grammar:** pass counts, `if <expr>` conditions, `do "<commands>"` actions that resume with `g` or `gc`, `/1`, `/p`, `/t`. See [Breakpoints](../using/breakpoints.md).
+- **Command programs and scripts:** `.if`/`.elsif`/`.else`, `.while`, `.for`, `.do`, `.break`, `.continue`, `.block`, `j`, `.foreach`, the `!for_each_*` commands, `$t0`-`$t19`, and script files run with `$<`, `$$<`, `$><`, `$$><`, and `$$>a<` (with `${$arg1}` and `${/d:$arg1}`).
 - **Address ranges:** `L<count>`, `L?<count>`, `L-<count>`, and an end address, which is included (`db nt nt+7` shows 8 bytes).
 - **Symbols.** Microsoft's symbol server is the default, and the cache under `~/.ntoseye/symbols` uses the `symstore` layout that WinDbg reads too.
 - **{command}`.kdfiles`** reads WinDbg's driver replacement map files. See [Driver replacement](../using/kdfiles.md).
@@ -22,12 +23,16 @@
 | `.process /i` (invasive switch, then `g`) | {command}`.process` switches immediately, with or without `/i`: `ntoseye` reads any process's memory through its page tables. `attach <pid>` is the same. |
 | `!wmitrace.searchpath`, `!wmitrace.tmffile` (WPP message formatting) | {command}`!wmitrace.logdump` shows each event's provider or WPP message GUID and its raw payload; WPP messages are not formatted. |
 | `.detach` | Not available. {command}`q` (also spelled `qd`) removes the session's breakpoints and exits with the guest running. |
+| `a` (assemble), `.fnret`, `!for_each_local` | Not available: `ntoseye` does not assemble code, and public symbols carry no return or local types. Write bytes with {command}`eb`. |
+| `!wdfkd.*`, `!rcdrkd.*`, `!ndiskd.*`, `!apic`, `!ioapic`, `!sysinfo` | Not available. |
 | `~` lists threads of a user-mode process | {command}`~` lists processors (vCPUs), `~Ns` selects one. Windows threads are {command}`threads` and {command}`!thread`. |
 
 ## Behaves differently
 
 - **Breakpoint scoping is a filter.** `bp /p <pid>` and `/t` are checked by `ntoseye` when a breakpoint hits; the breakpoint itself is global, so a breakpoint in a shared DLL traps every process that runs it, and hits outside the scope are resumed silently. [Breakpoints in shared pages](../using/breakpoints.md#user-mode-breakpoints-in-shared-pages) explains the cost. `/c <processor>` scopes to one processor and has no WinDbg equivalent.
 - **{command}`!uniqstack` groups kernel threads.** WinDbg's user-mode {command}`!uniqstack` groups one process's threads; here it groups the `.process` process's threads or every thread in the system, and a stack includes the user frames below a system call.
+- **{command}`.shell` runs only at the interactive prompt.** It is refused in breakpoint actions and exception commands, and from MCP, DAP, and the SDK, so a client cannot start host programs.
+- **Some hardware access depends on the backend.** Port I/O ({command}`ib`, {command}`ob`, and their word and dword forms) needs the `kd` or `kdnet` backend; {command}`!pci` reads configuration space over `kd`, `kdnet`, or `gdb`, not from memory alone. {command}`!pcitree` works everywhere.
 - **Some backends need no debugger in Windows.** Over the `gdb` and `memory` backends Windows boots normally, without `bcdedit /debug`, so it does not know it is being debugged and behaves as it does in production. See [Choosing a backend](../setup/backends.md).
 
 ## Only in ntoseye
