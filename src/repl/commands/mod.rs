@@ -285,25 +285,24 @@ impl ReplState<'_> {
                     handler(self)?;
                 }
                 CommandHandler::Args(handler) => {
-                    let invocation = match parsed.invocation(spec.style) {
-                        Ok(invocation) => invocation,
-                        Err(err) => {
-                            report_command_parse_error(line, err);
-                            return Ok(Flow::Continue);
-                        }
+                    let Some(invocation) = invocation_or_report(line, &parsed, spec.style) else {
+                        return Ok(Flow::Continue);
                     };
                     handler(self, invocation)?;
+                }
+                CommandHandler::ArgsFlow(handler) => {
+                    let Some(invocation) = invocation_or_report(line, &parsed, spec.style) else {
+                        return Ok(Flow::Continue);
+                    };
+                    return handler(self, invocation);
                 }
             }
             return Ok(spec.flow);
         }
 
-        let invocation = match parsed.invocation(CommandStyle::StructuredArgs) {
-            Ok(invocation) => invocation,
-            Err(err) => {
-                report_command_parse_error(line, err);
-                return Ok(Flow::Continue);
-            }
+        let Some(invocation) = invocation_or_report(line, &parsed, CommandStyle::StructuredArgs)
+        else {
+            return Ok(Flow::Continue);
         };
 
         match self.aliases.expand(invocation.name, &invocation.argv) {
@@ -327,5 +326,20 @@ impl ReplState<'_> {
         }
         self.cmd_user(invocation)?;
         Ok(Flow::Continue)
+    }
+}
+
+/// `parsed`'s arguments split as `style` says; a malformed line is reported.
+fn invocation_or_report<'a>(
+    line: &str,
+    parsed: &ParsedCommand<'a>,
+    style: CommandStyle,
+) -> Option<CommandInvocation<'a>> {
+    match parsed.invocation(style) {
+        Ok(invocation) => Some(invocation),
+        Err(err) => {
+            report_command_parse_error(line, err);
+            None
+        }
     }
 }

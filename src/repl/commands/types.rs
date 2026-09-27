@@ -38,11 +38,11 @@ repl_command! {
 }
 
 repl_command! {
-    cmd_list_command;
+    cmd_list_command -> Flow;
     names: ["!list"],
     usage: "!list -t [module!]<type>.<field> -x \"<commands>\" <address>",
     summary: "Run commands for every element of a typed LIST_ENTRY chain.",
-    details: "The element address is available as $extret, @extret, or @$extret in each command. Walks stop at the head, repeated links, or 4096 elements. The address given is the first element, like WinDbg, so the walk emits every node up to the return to that address. A list head and a record link are indistinguishable in memory, so starting at a list head (rather than `poi(ListHead)`) treats the head as one pseudo-record instead of dropping a real record; an empty list, whose link points at itself, runs nothing. The walk keeps whatever it collected and reports null links, cycles, unreadable links, and reaching the entry bound.",
+    details: "The element address is available as $extret, @extret, or @$extret in each command. Walks stop at the head, repeated links, or 4096 elements. The address given is the first element, like WinDbg, so the walk emits every node up to the return to that address. A list head and a record link are indistinguishable in memory, so starting at a list head (rather than `poi(ListHead)`) treats the head as one pseudo-record instead of dropping a real record; an empty list, whose link points at itself, runs nothing. The walk keeps whatever it collected and reports null links, cycles, unreadable links, and reaching the entry bound. Ctrl+C stops the commands between elements. A command the session refuses (a resume inside a breakpoint action, say) ends them and the rest of the command line; a command that only reports an error does not.",
     completion: Expression,
 }
 
@@ -736,7 +736,7 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn cmd_list_command(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+    fn cmd_list_command(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
         let mut type_field = None;
         let mut commands = None;
         let mut positional = Vec::new();
@@ -746,7 +746,7 @@ impl ReplState<'_> {
                 "-t" => {
                     let Some(value) = invocation.arg(index + 1) else {
                         error!("!list: missing type after -t");
-                        return Ok(());
+                        return Ok(Flow::Continue);
                     };
                     type_field = Some(value.to_string());
                     index += 2;
@@ -754,14 +754,14 @@ impl ReplState<'_> {
                 "-x" => {
                     let Some(value) = invocation.arg(index + 1) else {
                         error!("!list: missing commands after -x");
-                        return Ok(());
+                        return Ok(Flow::Continue);
                     };
                     commands = Some(value.to_string());
                     index += 2;
                 }
                 arg if arg.starts_with('-') => {
                     error!("!list: unknown option `{arg}`");
-                    return Ok(());
+                    return Ok(Flow::Continue);
                 }
                 arg => {
                     positional.push(arg.to_string());
@@ -771,84 +771,79 @@ impl ReplState<'_> {
         }
         let Some(type_field) = type_field else {
             outln!("{}\n", command_help("!list"));
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         let Some(commands) = commands else {
             outln!("{}\n", command_help("!list"));
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         let Some(address_text) = positional.first() else {
             outln!("{}\n", command_help("!list"));
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         if positional.len() > 1 {
             error!("!list accepts one list head address");
-            return Ok(());
+            return Ok(Flow::Continue);
         }
         let Some((type_name, field_name)) = type_field.rsplit_once('.') else {
             error!("!list -t expects [module!]<type>.<field>");
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         let path = match parse_field_path(field_name) {
             Ok(path) => path,
             Err(error) => {
                 error!("!list: {}", error);
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
         let type_info = match self.lookup_type(type_name) {
             Some(type_info) => type_info,
             None => {
                 error!("!list: type `{}` not found", type_name);
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
         let head = match self.eval_or_report(address_text) {
             Some(address) if !address.is_zero() => address,
             Some(_) => {
                 error!("!list requires a nonzero list head address");
-                return Ok(());
+                return Ok(Flow::Continue);
             }
-            None => return Ok(()),
+            None => return Ok(Flow::Continue),
         };
         let resolved = match self.resolve_field_path(type_info.as_ref(), &path) {
             Ok(path) => path,
             Err(error) => {
                 error!("!list -t {}: {}", type_field, error);
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
         let (link_offset, next_offset, pointer_size) = match self.list_offsets(&resolved) {
             Ok(offsets) => offsets,
             Err(error) => {
                 error!("!list -t {}: {}", type_field, error);
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
         let (records, termination) =
             self.collect_typed_list(head, link_offset, next_offset, pointer_size);
         let command = commands.replace("@$extret", "@extret");
-        for record in records {
-            self.ctx.target.user_vars.insert(
-                "extret".to_string(),
-                UserVar {
-                    value: record.0,
-                    source: "!list element".to_string(),
-                },
-            );
-            match self.dispatch_line(&command) {
-                Ok(Flow::Quit) => break,
-                Ok(Flow::Continue | Flow::Denied) => {}
-                Err(error) => {
-                    error!("!list command failed at {}: {}", ui::addr(record.0), error);
-                    break;
-                }
-            }
-        }
+        let flow = self.in_command_loop("!list", |state| {
+            state.run_iterations("!list", records.len(), |state, index| {
+                state.ctx.target.user_vars.insert(
+                    "extret".to_string(),
+                    UserVar {
+                        value: records[index].0,
+                        source: "!list element".to_string(),
+                    },
+                );
+                Some(Cow::Borrowed(command.as_str()))
+            })
+        })?;
         if let Some(stop) = termination.diagnostic() {
             outln!("!list: list walk stopped: {stop}");
         }
-        Ok(())
+        Ok(flow)
     }
 }
 

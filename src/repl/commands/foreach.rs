@@ -5,6 +5,7 @@
 //! the path a typed line takes, so its output reaches whichever host is
 //! capturing (the REPL, MCP's `command` tool, DAP's evaluate).
 
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 
@@ -35,39 +36,39 @@ const DEBUG_SYMTYPE_PDB: u64 = 3;
 const DEBUG_SYMTYPE_DEFERRED: u64 = 5;
 
 repl_command! {
-    cmd_foreach;
+    cmd_foreach -> Flow;
     names: [".foreach"],
     usage: ".foreach [/pS n] [/ps n] ( Variable { InCommands } ) { OutCommands } | .foreach [options] /s ( Variable \"InString\" ) { OutCommands } | .foreach [options] /f ( Variable \"InFile\" ) { OutCommands }",
     summary: "Run commands once for each token of a command's output, a string, or a file.",
-    details: "InCommands run first with their output hidden; that output (or InString, or the text of InFile) is split at spaces, tabs, and line breaks, and OutCommands run once per token with each whole-word occurrence of Variable replaced by it. Variable must stand alone between spaces (or at an end of OutCommands) to be replaced; `${Variable}` replaces it anywhere, even inside other text. /pS n skips the first n tokens, and /ps n skips n tokens after each one used: `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token... The skip counts are expressions in the current radix. OutCommands can hold several `;`-separated commands, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop; a command that fails or is refused ends it.",
+    details: "InCommands run first with their output hidden; that output (or InString, or the text of InFile) is split at spaces, tabs, and line breaks, and OutCommands run once per token with each whole-word occurrence of Variable replaced by it. Variable must stand alone between spaces (or at an end of OutCommands) to be replaced; `${Variable}` replaces it anywhere, even inside other text. /pS n skips the first n tokens, and /ps n skips n tokens after each one used: `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token... The skip counts are expressions in the current radix. OutCommands can hold several `;`-separated commands, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
     completion: Expression,
     style: ExpressionTail,
 }
 
 repl_command! {
-    cmd_for_each_process;
+    cmd_for_each_process -> Flow;
     names: ["!for_each_process"],
     usage: "!for_each_process [\"CommandString\"]",
     summary: "Run commands once for each process in the target.",
-    details: "In CommandString, each whole-word `@#Process` (or `${@#Process}` anywhere) is replaced by the process's EPROCESS address. Several commands are separated by `;` and the string quoted. Without CommandString, runs `!process @#Process 0` for every process. The process context (`.process`, `$proc`) is not changed; `.process /p @#Process` in CommandString switches it, and the switch stays. Processes are the ones `ps` lists, in its order. Ctrl+C stops the loop; a command that fails or is refused ends it.",
+    details: "In CommandString, each whole-word `@#Process` (or `${@#Process}` anywhere) is replaced by the process's EPROCESS address. Several commands are separated by `;` and the string quoted. Without CommandString, runs `!process @#Process 0` for every process. The process context (`.process`, `$proc`) is not changed; `.process /p @#Process` in CommandString switches it, and the switch stays. Processes are the ones `ps` lists, in its order. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
     style: ExpressionTail,
 }
 
 repl_command! {
-    cmd_for_each_thread;
+    cmd_for_each_thread -> Flow;
     names: ["!for_each_thread"],
     usage: "!for_each_thread [\"CommandString\"]",
     summary: "Run commands once for each thread in the target, or in the `.process` process.",
-    details: "In CommandString, each whole-word `@#Thread` (or `${@#Thread}` anywhere) is replaced by the thread's ETHREAD address. Several commands are separated by `;` and the string quoted. Without CommandString, runs `!thread @#Thread 2` for every thread. With a process selected by `.process`, only that process's threads are visited; otherwise every thread `threads` lists. The thread context (`.thread`, `$thread`) is not changed. Ctrl+C stops the loop; a command that fails or is refused ends it.",
+    details: "In CommandString, each whole-word `@#Thread` (or `${@#Thread}` anywhere) is replaced by the thread's ETHREAD address. Several commands are separated by `;` and the string quoted. Without CommandString, runs `!thread @#Thread 2` for every thread. With a process selected by `.process`, only that process's threads are visited; otherwise every thread `threads` lists. The thread context (`.thread`, `$thread`) is not changed. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
     style: ExpressionTail,
 }
 
 repl_command! {
-    cmd_for_each_module;
+    cmd_for_each_module -> Flow;
     names: ["!for_each_module"],
     usage: "!for_each_module [\"CommandString\"]",
     summary: "Run commands once for each loaded module `lm` lists.",
-    details: "Visits the modules of the current scope in `lm` order: the `.process` process's, else the kernel's (the secure kernel's under `.vtl 1`). CommandString may use these aliases, each replaced as a whole word or anywhere as `${@#Name}`, case-sensitively: @#ModuleIndex (0-based position), @#ModuleName (the `module!` name `lm` shows), @#ImageName (the image name `lm` shows), @#LoadedImageName (the loader's full path when known, else the image name), @#SymbolFileName (the local PDB the symbols came from, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while fetching, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (string length plus one). Numbers are 0x-prefixed hex, so they read the same in any radix. A module lacking a value an alias names (no timestamp, no version resource) is reported and skipped. Without CommandString, runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop; a command that fails or is refused ends it.",
+    details: "Visits the modules of the current scope in `lm` order: the `.process` process's, else the kernel's (the secure kernel's under `.vtl 1`). CommandString may use these aliases, each replaced as a whole word or anywhere as `${@#Name}`, case-sensitively: @#ModuleIndex (0-based position), @#ModuleName (the `module!` name `lm` shows), @#ImageName (the image name `lm` shows), @#LoadedImageName (the loader's full path when known, else the image name), @#SymbolFileName (the local PDB the symbols came from, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while fetching, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (string length plus one). Numbers are 0x-prefixed hex, so they read the same in any radix. A module lacking a value an alias names (no timestamp, no version resource) is reported and skipped. Without CommandString, runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
     style: ExpressionTail,
 }
 
@@ -390,26 +391,29 @@ fn single_alias<'a>(
 }
 
 impl ReplState<'_> {
-    /// Enter a command loop, refusing past the nesting limit. The outermost
-    /// loop drops a Ctrl+C left over from before it started.
-    fn enter_command_loop(&mut self, name: &str) -> bool {
+    /// Run `body` as one command loop. Past the nesting limit the loop is
+    /// refused, and the refusal ends every loop around it. The outermost loop
+    /// drops a Ctrl+C left over from before it started.
+    pub(super) fn in_command_loop(
+        &mut self,
+        name: &str,
+        body: impl FnOnce(&mut Self) -> Result<Flow>,
+    ) -> Result<Flow> {
         if self.command_loop_depth >= COMMAND_LOOP_DEPTH_LIMIT {
             error!("{name}: command loops nested more than {COMMAND_LOOP_DEPTH_LIMIT} deep");
-            return false;
+            return Ok(Flow::Denied);
         }
         if self.command_loop_depth == 0 {
             self.ctx.target.interrupt.store(false, Ordering::SeqCst);
         }
         self.command_loop_depth += 1;
-        true
-    }
-
-    fn leave_command_loop(&mut self) {
+        let flow = body(self);
         self.command_loop_depth -= 1;
         // A Ctrl+C that stopped the loops is spent once the outermost ends.
         if self.command_loop_depth == 0 {
             self.ctx.target.interrupt.store(false, Ordering::SeqCst);
         }
+        flow
     }
 
     /// Ctrl+C, or a remote host cancelling the call (client gone, shutdown).
@@ -421,57 +425,61 @@ impl ReplState<'_> {
                 .is_some_and(|budget| budget.cancel.load(Ordering::Relaxed))
     }
 
-    /// Run one iteration's commands; `false` ends the loop.
-    fn run_loop_commands(&mut self, name: &str, commands: &str) -> bool {
-        match self.dispatch_line(commands) {
-            Ok(Flow::Continue) => true,
-            Ok(Flow::Denied) => false,
-            Ok(Flow::Quit) => {
-                error!("{name}: quit is ignored inside a command loop");
-                false
+    /// Run `count` iterations of a loop, each dispatching the commands
+    /// `commands(state, index)` gives; `None` skips the iteration. Ctrl+C
+    /// stops the loop between iterations. A refused command ends it and is
+    /// passed on, so the rest of the line is abandoned as it is for a
+    /// refused command typed alone; so is an internal error.
+    pub(super) fn run_iterations<'c>(
+        &mut self,
+        name: &str,
+        count: usize,
+        mut commands: impl FnMut(&mut Self, usize) -> Option<Cow<'c, str>>,
+    ) -> Result<Flow> {
+        for index in 0..count {
+            if self.command_loop_cancelled() {
+                outln!("{name}: interrupted after {index} of {count}");
+                break;
             }
-            Err(error) => {
-                error!("{name}: '{commands}' failed: {error}");
-                false
+            let Some(commands) = commands(self, index) else {
+                continue;
+            };
+            match self.dispatch_line(&commands)? {
+                Flow::Continue => {}
+                Flow::Denied => return Ok(Flow::Denied),
+                Flow::Quit => {
+                    error!("{name}: quit is ignored inside a command loop");
+                    return Ok(Flow::Denied);
+                }
             }
         }
+        Ok(Flow::Continue)
     }
 
-    /// Run `command` once per item, with `aliases(item)` resolving its
-    /// names. An item whose aliases cannot all be resolved is reported and
-    /// skipped.
-    fn repeat_command<T>(
+    /// Run `command` once per item, with the resolver `aliases` builds for
+    /// each item replacing its names. An item whose aliases cannot all be
+    /// resolved is reported and skipped.
+    fn repeat_command<'i, T, A>(
         &mut self,
         name: &str,
         command: &str,
-        items: &[T],
-        mut aliases: impl FnMut(
-            &Self,
-            usize,
-            &T,
-            &str,
-        ) -> std::result::Result<Option<String>, MissingValue>,
-    ) {
-        if !self.enter_command_loop(name) {
-            return;
-        }
-        for (index, item) in items.iter().enumerate() {
-            if self.command_loop_cancelled() {
-                outln!("{name}: interrupted after {index} of {}", items.len());
-                break;
-            }
-            let expanded = match substitute(command, |alias| aliases(self, index, item, alias)) {
-                Ok(expanded) => expanded,
-                Err(MissingValue(reason)) => {
-                    error!("{name}: skipped: {reason}");
-                    continue;
+        items: &'i [T],
+        mut aliases: impl FnMut(&Self, usize, &'i T) -> A,
+    ) -> Result<Flow>
+    where
+        A: FnMut(&str) -> std::result::Result<Option<String>, MissingValue>,
+    {
+        self.in_command_loop(name, |state| {
+            state.run_iterations(name, items.len(), |state, index| {
+                match substitute(command, aliases(state, index, &items[index])) {
+                    Ok(expanded) => Some(Cow::Owned(expanded)),
+                    Err(MissingValue(reason)) => {
+                        error!("{name}: skipped: {reason}");
+                        None
+                    }
                 }
-            };
-            if !self.run_loop_commands(name, &expanded) {
-                break;
-            }
-        }
-        self.leave_command_loop();
+            })
+        })
     }
 
     /// A skip count: an expression in the current radix.
@@ -494,85 +502,73 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_foreach(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+    fn cmd_foreach(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
         if invocation.raw_tail.is_empty() {
             outln!("{}\n", command_help(invocation.name));
-            return Ok(());
+            return Ok(Flow::Continue);
         }
         let spec = match parse_foreach(invocation.raw_tail) {
             Ok(spec) => spec,
             Err(error) => {
                 error!(".foreach: {error}");
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
         let (Some(initial_skip), Some(skip)) = (
             self.foreach_count("/pS", spec.initial_skip),
             self.foreach_count("/ps", spec.skip),
         ) else {
-            return Ok(());
+            return Ok(Flow::Continue);
         };
-        if !self.enter_command_loop(".foreach") {
-            return Ok(());
-        }
-        let input = match &spec.source {
-            ForeachSource::Commands(commands) => {
-                let (flow, text) = output::capture(|| self.dispatch_line(commands));
-                match flow {
-                    Ok(Flow::Continue) => Some(text),
-                    Ok(Flow::Denied) => None,
-                    Ok(Flow::Quit) => {
-                        error!(".foreach: quit is ignored inside a command loop");
-                        None
+        self.in_command_loop(".foreach", |state| {
+            let input = match &spec.source {
+                ForeachSource::Commands(commands) => {
+                    let (flow, text) = output::capture(|| state.dispatch_line(commands));
+                    if !matches!(flow, Ok(Flow::Continue)) {
+                        // The InCommands did not finish: show what they said,
+                        // since their refusal or failure is in it.
+                        out!("{text}");
                     }
+                    match flow? {
+                        Flow::Continue => Cow::Owned(text),
+                        Flow::Denied => return Ok(Flow::Denied),
+                        Flow::Quit => {
+                            error!(".foreach: quit is ignored inside a command loop");
+                            return Ok(Flow::Denied);
+                        }
+                    }
+                }
+                ForeachSource::String(text) => Cow::Borrowed(text.as_str()),
+                ForeachSource::File(path) => match std::fs::read_to_string(path) {
+                    Ok(text) => Cow::Owned(text),
                     Err(error) => {
-                        error!(".foreach: InCommands '{commands}' failed: {error}");
-                        None
+                        error!(".foreach: failed to read '{path}': {error}");
+                        return Ok(Flow::Continue);
                     }
-                }
-            }
-            ForeachSource::String(text) => Some(text.clone()),
-            ForeachSource::File(path) => match std::fs::read_to_string(path) {
-                Ok(text) => Some(text),
-                Err(error) => {
-                    error!(".foreach: failed to read '{path}': {error}");
-                    None
-                }
-            },
-        };
-        if let Some(input) = input {
+                },
+            };
             let tokens = foreach_tokens(&input, initial_skip, skip);
-            for (index, token) in tokens.iter().enumerate() {
-                if self.command_loop_cancelled() {
-                    outln!(".foreach: interrupted after {index} of {}", tokens.len());
-                    break;
-                }
-                let Ok(commands) = substitute(spec.body, single_alias(spec.variable, token));
-                if !self.run_loop_commands(".foreach", &commands) {
-                    break;
-                }
-            }
-        }
-        self.leave_command_loop();
-        Ok(())
+            state.run_iterations(".foreach", tokens.len(), |_, index| {
+                let Ok(commands) =
+                    substitute(spec.body, single_alias(spec.variable, tokens[index]));
+                Some(Cow::Owned(commands))
+            })
+        })
     }
 
-    fn cmd_for_each_process(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+    fn cmd_for_each_process(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
         let Some(command) = self.for_each_command(&invocation, DEFAULT_PROCESS_COMMAND) else {
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         let processes = match self.ctx.target.matching_processes(None) {
             Ok(processes) => processes,
             Err(error) => {
                 error!("!for_each_process: failed to enumerate processes: {error}");
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
-        self.repeat_command(
-            invocation.name,
-            &command,
-            &processes,
-            |_, _, process, alias| {
+        self.repeat_command(invocation.name, &command, &processes, |_, _, process| {
+            move |alias: &str| {
                 if alias != "@#Process" {
                     return Ok(None);
                 }
@@ -584,14 +580,13 @@ impl ReplState<'_> {
                     )));
                 }
                 Ok(Some(hex(process.eprocess_va.0)))
-            },
-        );
-        Ok(())
+            }
+        })
     }
 
-    fn cmd_for_each_thread(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+    fn cmd_for_each_thread(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
         let Some(command) = self.for_each_command(&invocation, DEFAULT_THREAD_COMMAND) else {
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         let threads = match self.ctx.target.attached_process().cloned() {
             Some(process) => self
@@ -609,19 +604,22 @@ impl ReplState<'_> {
             Ok(threads) => threads,
             Err(error) => {
                 error!("!for_each_thread: failed to enumerate threads: {error}");
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
-        let thread_alias = |_: &Self, _: usize, thread: &ThreadInfo, alias: &str| {
-            Ok((alias == "@#Thread").then(|| hex(thread.ethread.0)))
-        };
-        self.repeat_command(invocation.name, &command, &threads, thread_alias);
-        Ok(())
+        self.repeat_command(
+            invocation.name,
+            &command,
+            &threads,
+            |_, _, thread: &ThreadInfo| {
+                move |alias: &str| Ok((alias == "@#Thread").then(|| hex(thread.ethread.0)))
+            },
+        )
     }
 
-    fn cmd_for_each_module(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+    fn cmd_for_each_module(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
         let Some(command) = self.for_each_command(&invocation, DEFAULT_MODULE_COMMAND) else {
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         // Version resources cost reads per module; only fetch them for a
         // command that names them.
@@ -635,7 +633,7 @@ impl ReplState<'_> {
             Ok(modules) => modules,
             Err(error) => {
                 error!("!for_each_module: failed to list modules: {error}");
-                return Ok(());
+                return Ok(Flow::Continue);
             }
         };
         let dtb = self.ctx.target.process_dtb();
@@ -645,9 +643,9 @@ impl ReplState<'_> {
             invocation.name,
             &command,
             &modules,
-            |state, index, module, alias| {
+            |state, index, module| {
                 let symbols = &state.ctx.target.symbols;
-                ModuleAliases {
+                let aliases = ModuleAliases {
                     index,
                     module,
                     user_mode,
@@ -655,11 +653,10 @@ impl ReplState<'_> {
                         .module_pdb_path(dtb, module.base_address)
                         .map(|path| path.display().to_string()),
                     symbol_status: symbols.module_symbol_status(dtb, module.base_address),
-                }
-                .resolve(alias)
+                };
+                move |alias: &str| aliases.resolve(alias)
             },
-        );
-        Ok(())
+        )
     }
 
     /// The command a `!for_each_*` runs: its CommandString, else `default`.
@@ -686,6 +683,67 @@ impl ReplState<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::capture;
+    use crate::session::session_over_memory;
+
+    /// Run `line` as a typed line in `context`; its flow and output.
+    fn run(line: &str, context: DispatchContext) -> (Flow, String) {
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        state.context = context;
+        let (flow, text) = capture(|| state.dispatch_line(line));
+        (flow.unwrap(), text)
+    }
+
+    #[test]
+    fn out_commands_keep_their_semicolons_and_the_line_goes_on_once() {
+        let (flow, text) = run(
+            ".foreach /s (x \"a b\") {.echo x ; .echo -}; .echo done",
+            DispatchContext::Interactive,
+        );
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(text, "a\n-\nb\n-\ndone\n");
+    }
+
+    #[test]
+    fn nested_loops_run_the_inner_loop_per_outer_token() {
+        let (flow, text) = run(
+            ".foreach /s (x \"1 2\") {.foreach /s (y \"a b\") {.echo x y}}",
+            DispatchContext::Interactive,
+        );
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(text, "1 a\n1 b\n2 a\n2 b\n");
+    }
+
+    #[test]
+    fn a_refused_command_ends_the_loop_and_the_line() {
+        // A breakpoint action may not resume; the refused `g` must stop the
+        // loop and the rest of the line, as it would typed alone.
+        let (flow, text) = run(
+            ".foreach /s (x \"1 2\") {.echo x ; g}; .echo after",
+            DispatchContext::BreakpointAction,
+        );
+        assert_eq!(flow, Flow::Denied);
+        assert!(text.starts_with("1\n"), "{text}");
+        assert!(!text.contains("2\n") && !text.contains("after"), "{text}");
+    }
+
+    #[test]
+    fn the_nesting_limit_ends_every_enclosing_loop() {
+        let depth = COMMAND_LOOP_DEPTH_LIMIT + 1;
+        let mut line = ".echo innermost".to_string();
+        for _ in 0..depth {
+            line = format!(".foreach /s (x \"1 2\") {{{line}}}");
+        }
+        line.push_str("; .echo after");
+        let (flow, text) = run(&line, DispatchContext::Interactive);
+        assert_eq!(flow, Flow::Denied);
+        assert_eq!(text.matches("error:").count(), 1, "{text}");
+        assert!(
+            !text.contains("innermost") && !text.contains("after"),
+            "{text}"
+        );
+    }
 
     fn sub(text: &str, var: &str, value: &str) -> String {
         let Ok(out) = substitute(text, single_alias(var, value));

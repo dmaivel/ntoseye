@@ -80,6 +80,10 @@ impl CompletionSpec {
 #[derive(Clone, Copy)]
 pub enum CommandHandler {
     Args(fn(&mut ReplState<'_>, CommandInvocation<'_>) -> Result<()>),
+    /// A command that dispatches other commands (`.foreach`, `!list -x`) and
+    /// passes on how they ended, so a refusal inside it abandons the rest of
+    /// the line and reaches the host as one typed directly would.
+    ArgsFlow(fn(&mut ReplState<'_>, CommandInvocation<'_>) -> Result<Flow>),
     NoArgs(fn(&mut ReplState<'_>) -> Result<()>),
 }
 
@@ -460,6 +464,17 @@ macro_rules! repl_command {
         $crate::repl_command! {
             @register
             $crate::repl::CommandHandler::Args(|state, invocation| state.$method(invocation));
+            $($body)*
+        }
+    };
+
+    (
+        $method:ident -> Flow;
+        $($body:tt)*
+    ) => {
+        $crate::repl_command! {
+            @register
+            $crate::repl::CommandHandler::ArgsFlow(|state, invocation| state.$method(invocation));
             $($body)*
         }
     };
