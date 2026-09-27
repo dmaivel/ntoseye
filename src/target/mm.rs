@@ -355,8 +355,8 @@ pub struct MdlDetail {
     /// Where the PFN array starts (just past the header).
     pub pfn_array: VirtAddr,
     pub pfns: Vec<u64>,
-    /// Fewer PFNs are listed than the buffer spans (a requested count or the
-    /// display bound).
+    /// Fewer PFNs are listed than the buffer spans: a smaller count was
+    /// requested.
     pub truncated: bool,
 }
 

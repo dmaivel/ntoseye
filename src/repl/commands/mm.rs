@@ -103,7 +103,7 @@ repl_command! {
     names: ["!mdl", "mdl"],
     usage: "!mdl <address> [pfn-count]",
     summary: "Decode a memory descriptor list and the page frames it describes.",
-    details: "Shows the _MDL header (Next, Size, MdlFlags by MDL_* name, Process, MappedSystemVa, StartVa, ByteCount, ByteOffset) and the PFN array after it. The PFN count defaults to the pages ByteCount spans from ByteOffset; a pfn-count overrides it. Either is bounded by the slots Size leaves after the header and by 65,536. A header whose Size, ByteOffset, or span cannot describe an MDL is refused. Next is not followed; run !mdl on it for a chained MDL.",
+    details: "Shows the _MDL header (Next, Size, MdlFlags by MDL_* name, Process, MappedSystemVa, StartVa, ByteCount, ByteOffset) and the PFN array after it. The PFN count defaults to the pages ByteCount spans from ByteOffset; a pfn-count overrides it. Either is bounded by the slots Size leaves after the header. A header whose Size, ByteOffset, or span cannot describe an MDL is refused. Next is not followed; run !mdl on it for a chained MDL.",
     completion: Expression,
 }
 

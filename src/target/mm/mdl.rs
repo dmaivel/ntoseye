@@ -7,9 +7,6 @@ use crate::memory::PAGE_SIZE;
 use crate::target::Target;
 use crate::types::VirtAddr;
 
-/// Most PFNs `!mdl` lists (256 MiB of 4 KiB pages).
-const MAX_MDL_PFNS: u64 = 0x10000;
-
 /// `sizeof(PFN_NUMBER)` on 64-bit Windows (a `ULONG_PTR`).
 const PFN_NUMBER_SIZE: u64 = 8;
 
@@ -56,7 +53,7 @@ fn mdl_spanned_pages(byte_offset: u32, byte_count: u32) -> u64 {
 impl Target {
     /// Decode the `_MDL` at `address` and read the PFNs after its header.
     /// `pfn_count` overrides the count the buffer spans; either is bounded by
-    /// the slots `Size` holds and 65,536. A header whose `Size`,
+    /// the slots `Size` holds. A header whose `Size`,
     /// `ByteOffset`, or span cannot describe an MDL is refused rather than
     /// guessed at.
     pub fn inspect_mdl(&self, address: VirtAddr, pfn_count: Option<u64>) -> Result<MdlDetail> {
@@ -89,10 +86,7 @@ impl Target {
                  pages, but Size {size:#x} holds {capacity} PFNs"
             )));
         }
-        let shown = pfn_count
-            .unwrap_or(spanned_pages)
-            .min(capacity)
-            .min(MAX_MDL_PFNS);
+        let shown = pfn_count.unwrap_or(spanned_pages).min(capacity);
         let pfn_array = address + header_size;
         let mut raw = vec![0u8; (shown * PFN_NUMBER_SIZE) as usize];
         guest
