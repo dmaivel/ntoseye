@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::cpu_state;
-use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::Image;
 use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
@@ -1271,12 +1271,7 @@ impl Session {
         if self.backend.is_running() {
             return Err(Error::TargetRunning(MSRS_NEED_HALT));
         }
-        if !self
-            .backend
-            .capabilities()
-            .iter()
-            .any(|capability| capability.capability == DebugCapability::Msr && capability.supported)
-        {
+        if !self.backend.supports_msr() {
             return Err(Error::NotSupported);
         }
         self.backend.read_msr(processor, msr)
@@ -1303,12 +1298,7 @@ impl Session {
         {
             return Err(Error::DebugInfo("VTL1 MSRs are read-only".into()));
         }
-        if !self
-            .backend
-            .capabilities()
-            .iter()
-            .any(|capability| capability.capability == DebugCapability::Msr && capability.supported)
-        {
+        if !self.backend.supports_msr() {
             return Err(Error::NotSupported);
         }
         self.backend.write_msr(processor, msr, value)
@@ -1322,9 +1312,7 @@ impl Session {
                 "ARM64 has no I/O-port space; devices are memory-mapped".into(),
             ));
         }
-        if !self.backend.capabilities().iter().any(|capability| {
-            capability.capability == DebugCapability::IoPorts && capability.supported
-        }) {
+        if !self.backend.supports_io_ports() {
             return Err(Error::DebugInfo(format!(
                 "the {} backend has no I/O-port access; ports are read and written through \
                  the Windows KD protocol (the kd and kdnet backends)",
@@ -1347,15 +1335,15 @@ impl Session {
 
     /// Write `value` as `size` (1, 2, or 4) bytes to I/O port `port` on the
     /// current processor (`ob`/`ow`/`od`).
-    pub fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {
+    pub fn write_io_port(&mut self, port: u64, size: u8, value: u64) -> Result<()> {
         validate_io_port(port, size)?;
-        if size < 4 && u64::from(value) >> (u32::from(size) * 8) != 0 {
+        if value >> (u32::from(size) * 8) != 0 {
             return Err(Error::InvalidArgument(format!(
                 "{value:#x} does not fit in {size} byte(s)"
             )));
         }
         self.check_io_ports()?;
-        self.backend.write_io_port(port, size, value)
+        self.backend.write_io_port(port, size, value as u32)
     }
 }
 

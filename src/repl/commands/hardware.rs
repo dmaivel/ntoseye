@@ -50,12 +50,16 @@ repl_command! {
     completion: Expression,
 }
 
+const PORT_READ_DETAILS: &str = "Reads the port (a byte for ib, a word for iw, a dword for id) on the current processor through the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target; the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. Reading a port can change device state (a FIFO or status latch), as it does on real hardware.";
+
+const PORT_WRITE_DETAILS: &str = "Writes the value to the port (a byte for ob, a word for ow, a dword for od) on the current processor through the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size and the value must fit in it.";
+
 repl_command! {
     cmd_ib;
     names: ["ib"],
     usage: "ib <port>",
     summary: "Read a byte from an I/O port.",
-    details: "Reads 1 byte(s) from the I/O port on the current processor through the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target; the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. Reading a port can change device state (a FIFO or status latch), as it does on real hardware.",
+    details: PORT_READ_DETAILS,
     completion: Expression,
 }
 
@@ -64,7 +68,7 @@ repl_command! {
     names: ["ob"],
     usage: "ob <port> <value>",
     summary: "Write a byte to an I/O port.",
-    details: "Writes 1 byte(s) to the I/O port on the current processor through the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size and the value must fit in it.",
+    details: PORT_WRITE_DETAILS,
     completion: Expression,
 }
 
@@ -73,7 +77,7 @@ repl_command! {
     names: ["iw"],
     usage: "iw <port>",
     summary: "Read a word from an I/O port.",
-    details: "Reads 2 byte(s) from the I/O port on the current processor through the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target; the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. Reading a port can change device state (a FIFO or status latch), as it does on real hardware.",
+    details: PORT_READ_DETAILS,
     completion: Expression,
 }
 
@@ -82,7 +86,7 @@ repl_command! {
     names: ["ow"],
     usage: "ow <port> <value>",
     summary: "Write a word to an I/O port.",
-    details: "Writes 2 byte(s) to the I/O port on the current processor through the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size and the value must fit in it.",
+    details: PORT_WRITE_DETAILS,
     completion: Expression,
 }
 
@@ -91,7 +95,7 @@ repl_command! {
     names: ["id"],
     usage: "id <port>",
     summary: "Read a dword from an I/O port.",
-    details: "Reads 4 byte(s) from the I/O port on the current processor through the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target; the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. Reading a port can change device state (a FIFO or status latch), as it does on real hardware.",
+    details: PORT_READ_DETAILS,
     completion: Expression,
 }
 
@@ -100,7 +104,7 @@ repl_command! {
     names: ["od"],
     usage: "od <port> <value>",
     summary: "Write a dword to an I/O port.",
-    details: "Writes 4 byte(s) to the I/O port on the current processor through the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size and the value must fit in it.",
+    details: PORT_WRITE_DETAILS,
     completion: Expression,
 }
 
@@ -157,13 +161,6 @@ impl ReplState<'_> {
             return Ok(());
         };
         let Some(VirtAddr(value)) = self.eval_or_report(value) else {
-            return Ok(());
-        };
-        let Ok(value) = u32::try_from(value) else {
-            error!(
-                "{}: {value:#x} does not fit in {size} byte(s)",
-                invocation.name
-            );
             return Ok(());
         };
         if let Err(error) = self.ctx.write_io_port(port, size, value) {

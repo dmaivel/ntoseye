@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use crate::backend::MemoryOps;
-use crate::dbg_backend::{DebugCapability, PciConfigAddress};
+use crate::dbg_backend::PciConfigAddress;
 use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::target::Target;
@@ -1064,9 +1064,7 @@ impl Session {
     /// Refuse a configuration-space read the backend cannot make, saying why,
     /// or one the target cannot take while running.
     fn check_pci_config(&self) -> Result<()> {
-        if !self.backend.capabilities().iter().any(|capability| {
-            capability.capability == DebugCapability::PciConfig && capability.supported
-        }) {
+        if !self.backend.supports_pci_config() {
             return Err(Error::DebugInfo(format!(
                 "the {} backend cannot read PCI configuration space: it is device registers \
                  (the ECAM window or ports 0xcf8/0xcfc), not the RAM this backend reads; use \
