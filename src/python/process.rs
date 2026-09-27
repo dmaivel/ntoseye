@@ -8,7 +8,7 @@ use pyo3::types::{PyAny, PyDict};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{HeapIterator, MemoryRegionIterator, ProcessIterator};
-use super::memory::{Memory, MemoryRegion};
+use super::memory::Memory;
 use super::module::Modules;
 use super::record::{PlainDict, Record};
 use super::symbols::{self, Symbols};
@@ -21,6 +21,7 @@ use crate::target::mm::MemoryRegionInfo;
 use crate::target::sched::ApcSelector;
 use crate::types::VirtAddr;
 use crate::view;
+use crate::view::mm::py::{MemoryBasicInformation, MemoryRegion};
 
 /// Running processes keyed by PID (`dbg.processes`). Iterating walks the
 /// process list afresh; `find(name)` matches image names.
@@ -273,7 +274,11 @@ impl Process {
     /// The region holding `address` as `VirtualQuery` reports it (`!vprot`):
     /// base, allocation base and protection, region size, state, protection,
     /// and type.
-    fn protection<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn protection<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, MemoryBasicInformation>> {
         let info = self.info.clone();
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
@@ -400,15 +405,15 @@ impl Regions {
 #[pymethods]
 impl Regions {
     /// Find the VAD region containing `addr`, or return `None`.
-    fn at(&self, py: Python<'_>, addr: u64) -> PyResult<Option<MemoryRegion>> {
-        Ok(self
-            .snapshot(py)?
-            .into_iter()
+    fn at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Option<Bound<'py, MemoryRegion>>> {
+        self.snapshot(py)?
+            .iter()
             .find(|region| addr >= region.start.0 && addr < region.end.0)
-            .map(MemoryRegion::from))
+            .map(|region| view_record(py, &view::mm::memory_region(region)))
+            .transpose()
     }
 
-    fn __getitem__(&self, py: Python<'_>, addr: u64) -> PyResult<MemoryRegion> {
+    fn __getitem__<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, MemoryRegion>> {
         self.at(py, addr)?
             .ok_or_else(|| PyKeyError::new_err(format!("no VAD region contains {addr:#x}")))
     }
@@ -418,8 +423,14 @@ impl Regions {
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<MemoryRegionIterator> {
-        let regions = self.snapshot(py)?.into_iter().map(MemoryRegion::from);
-        Ok(MemoryRegionIterator::new(regions.collect()))
+        let regions = self
+            .snapshot(py)?
+            .iter()
+            .map(|region| {
+                view_record::<MemoryRegion>(py, &view::mm::memory_region(region)).map(Bound::unbind)
+            })
+            .collect::<PyResult<_>>()?;
+        Ok(MemoryRegionIterator::new(regions))
     }
 
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {

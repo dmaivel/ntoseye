@@ -7,11 +7,11 @@ use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
 
 use super::breakpoints::Breakpoint;
-use super::memory::MemoryRegion;
 use super::module::{Driver, Module};
 use super::process::{Heap, Process};
 use super::thread::{Cpu, Thread};
 use crate::view::execution::py::ExceptionPolicy;
+use crate::view::mm::py::MemoryRegion;
 
 macro_rules! typed_iterator {
     ($(#[$doc:meta])* $name:ident($item:ty)) => {
@@ -66,7 +66,7 @@ typed_iterator! {
 }
 typed_iterator! {
     /// Iterator over `proc.regions`.
-    MemoryRegionIterator(MemoryRegion)
+    MemoryRegionIterator(Py<MemoryRegion>)
 }
 typed_iterator! {
     /// Iterator over `proc.heaps`.

@@ -284,7 +284,7 @@ pub mod _ntoseye {
         MemoryRegionIterator, ModuleIterator, NameIterator, ProcessIterator, ThreadIterator,
     };
     #[pymodule_export]
-    use super::memory::{AddressModule, Memory, MemoryRegion, MemorySearchMatch};
+    use super::memory::Memory;
     #[pymodule_export]
     use super::module::{Device, Driver, Drivers, Module, Modules};
     #[pymodule_export]
@@ -328,6 +328,16 @@ pub mod _ntoseye {
         HeapPageRange, HeapStats, HeapSummary, HeapWalkStop, LfhSubsegment, NtHeap, NtHeapEntry,
         NtHeapSegment, NtLfhUserBlocks, NtUncommittedRange, NtVirtualBlock, SegmentHeap,
         SegmentHeapContext, SegmentHeapKeys, SegmentHeapPageSegment, VsChunk, VsSubsegment,
+    };
+    #[pymodule_export]
+    use crate::view::mm::py::{
+        AddressDescription, AddressModule, AddressTranslation, BigPoolAllocation, CacheAttribute,
+        LookasideList, LookasideLists, Mdl, MemoryBasicInformation, MemoryRegion,
+        MemorySearchMatch, PageLocation, PageTableEntry, Pfn, PfnSelector, PhysicalMapping,
+        PoolBlock, PoolMatch, PoolPage, PoolProblem, PoolRangeScan, PoolRegion, PoolSearch,
+        PoolTag, PoolTagUsage, PoolUsage, PoolValidation, ProcessMemoryUsage, PteWalk,
+        ReverseTranslation, SystemMemoryUsage, SystemPteRun, SystemPteType, SystemPtes, VmCounter,
+        VmPool, VmPte, VmStatistics,
     };
     #[pymodule_export]
     use crate::view::module::py::{

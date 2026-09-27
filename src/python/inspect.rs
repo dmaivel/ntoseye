@@ -21,6 +21,7 @@ use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::hardware;
+use crate::view::mm;
 use crate::view::sched;
 use crate::view::{self, View};
 
@@ -288,7 +289,11 @@ impl Inspect {
 
     /// Return bounded system and per-process memory-use counters (`!memusage`).
     #[pyo3(signature = (process_limit=64))]
-    fn memusage<'py>(&self, py: Python<'py>, process_limit: usize) -> PyResult<Bound<'py, Record>> {
+    fn memusage<'py>(
+        &self,
+        py: Python<'py>,
+        process_limit: usize,
+    ) -> PyResult<Bound<'py, mm::py::SystemMemoryUsage>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -775,7 +780,11 @@ impl Inspect {
 
     /// Report system memory, pool, PTE, and page-file counters (`!vm`).
     #[pyo3(signature = (include_processes=true))]
-    fn vm<'py>(&self, py: Python<'py>, include_processes: bool) -> PyResult<Bound<'py, Record>> {
+    fn vm<'py>(
+        &self,
+        py: Python<'py>,
+        include_processes: bool,
+    ) -> PyResult<Bound<'py, mm::py::VmStatistics>> {
         self.record(py, |session| {
             let detail = session.target.inspect_vm(include_processes).map_err(err)?;
             Ok(view::mm::vm(&detail))
@@ -789,7 +798,7 @@ impl Inspect {
         py: Python<'py>,
         value: u64,
         physical_address: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, mm::py::Pfn>> {
         let selector = if physical_address {
             PfnSelector::PhysicalAddress(value)
         } else {
@@ -802,7 +811,7 @@ impl Inspect {
     }
 
     /// Decode the pool page or big-pool allocation containing `address` (`!pool`).
-    fn pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, mm::py::PoolPage>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -814,7 +823,11 @@ impl Inspect {
 
     /// Check the block headers of the pool page containing `address` and
     /// report the first inconsistency (`!poolval`).
-    fn pool_validate<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn pool_validate<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, mm::py::PoolValidation>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -832,7 +845,7 @@ impl Inspect {
         tag: Option<&str>,
         sort: &str,
         include_counts: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, mm::py::PoolUsage>> {
         let sort = match sort {
             "tag" => PoolUsageSort::Tag,
             "nonpaged" => PoolUsageSort::NonPagedBytes,
@@ -859,7 +872,7 @@ impl Inspect {
         py: Python<'py>,
         tag: &str,
         pool_type: Option<&str>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, mm::py::PoolSearch>> {
         let pool_type = match pool_type {
             None => None,
             Some("nonpaged") => Some(PoolType::NonPaged),
@@ -877,7 +890,7 @@ impl Inspect {
     }
 
     /// List exported nonpaged and paged `GENERAL_LOOKASIDE` lists (`!lookaside`).
-    fn lookasides<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn lookasides<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, mm::py::LookasideLists>> {
         self.record(py, |session| {
             let detail = session.target.lookaside_lists().map_err(err)?;
             Ok(view::mm::lookaside_lists(&detail))
@@ -885,7 +898,11 @@ impl Inspect {
     }
 
     /// Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
-    fn lookaside<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn lookaside<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, mm::py::LookasideList>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -903,7 +920,7 @@ impl Inspect {
         py: Python<'py>,
         address: u64,
         pfn_count: Option<u64>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, mm::py::Mdl>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -916,7 +933,11 @@ impl Inspect {
     /// Report system PTE usage from each `_MI_SYSTEM_PTE_TYPE` bitmap
     /// allocator (`!sysptes`); `free_runs` lists each allocator's free blocks.
     #[pyo3(signature = (free_runs=false))]
-    fn system_ptes<'py>(&self, py: Python<'py>, free_runs: bool) -> PyResult<Bound<'py, Record>> {
+    fn system_ptes<'py>(
+        &self,
+        py: Python<'py>,
+        free_runs: bool,
+    ) -> PyResult<Bound<'py, mm::py::SystemPtes>> {
         self.record(py, |session| {
             let detail = session
                 .target

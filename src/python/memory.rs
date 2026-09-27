@@ -1,25 +1,24 @@
 //! Address-space-bound memory operations for the Python SDK.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::PyBytes;
 
 use super::context::Space;
 use super::handle::{Owner, require_halted};
-use super::record::{PlainDict, Record};
+use super::record::Record;
 use super::symbols::load_scope_symbols;
-use super::{MAX_READ_LEN, err, raise, view_dict, view_record, view_records};
+use super::{MAX_READ_LEN, err, raise, view_record, view_records};
 use crate::backend::MemoryOps;
 use crate::layout::utf16le_lossy;
 use crate::memory::pattern_offsets;
 use crate::target::MAX_SEARCH_BYTES;
-use crate::target::MemorySearchMatch as CoreMemorySearchMatch;
-use crate::target::mm::{
-    AddressModule as CoreAddressModule, MemoryRegionInfo, VadProtection, VadType,
-};
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
 use crate::view;
 use crate::view::execution::py::{DisassembledInstruction, FunctionEntry};
+use crate::view::mm::py::{
+    AddressDescription, AddressTranslation, MemorySearchMatch, ReverseTranslation,
+};
 use crate::view::shape::ViewValue;
 
 /// A guest address space: `dbg.memory` (kernel), `proc.memory`, `dbg.physical`.
@@ -242,13 +241,13 @@ impl Memory {
     /// virtual space unreadable pages are skipped, this session's own
     /// breakpoints read as the code they replaced, and at most 4096 matches
     /// are returned.
-    fn search(
+    fn search<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         pattern: &[u8],
         start: u64,
         length: usize,
-    ) -> PyResult<Vec<MemorySearchMatch>> {
+    ) -> PyResult<Vec<Bound<'py, MemorySearchMatch>>> {
         check_search_len(length)?;
         if pattern.is_empty() || pattern.len() > length {
             return Ok(Vec::new());
@@ -256,7 +255,7 @@ impl Memory {
         let context = self.space.context();
         let physical = matches!(self.space, Space::Physical);
         let secure = matches!(self.space, Space::Secure(_));
-        self.owner.with_in(py, &context, move |session| {
+        let matches = self.owner.with_in(py, &context, move |session| {
             if physical {
                 let mut bytes = vec![0; length];
                 session
@@ -264,7 +263,14 @@ impl Memory {
                     .read_physical(start, &mut bytes)
                     .map_err(err)?;
                 Ok(pattern_offsets(&bytes, pattern)
-                    .map(|offset| MemorySearchMatch::physical(start, offset))
+                    .map(|offset| {
+                        view::mm::undescribed_search_match(
+                            start.wrapping_add(offset as u64),
+                            offset as u64,
+                            None,
+                            "physical",
+                        )
+                    })
                     .collect())
             } else {
                 let hits = session
@@ -275,17 +281,15 @@ impl Memory {
                     // NT's region descriptions do not cover VTL1 addresses.
                     return Ok(hits
                         .into_iter()
-                        .map(|address| MemorySearchMatch {
-                            address,
-                            offset: address.wrapping_sub(start),
-                            symbol: session
-                                .target
-                                .closest_symbol_current_context(VirtAddr(address)),
-                            kind: "vtl1".to_string(),
-                            module: None,
-                            section: None,
-                            va_type: None,
-                            region: None,
+                        .map(|address| {
+                            view::mm::undescribed_search_match(
+                                address,
+                                address.wrapping_sub(start),
+                                session
+                                    .target
+                                    .closest_symbol_current_context(VirtAddr(address)),
+                                "vtl1",
+                            )
                         })
                         .collect());
                 }
@@ -295,12 +299,13 @@ impl Memory {
                     .map(|matches| {
                         matches
                             .into_iter()
-                            .map(MemorySearchMatch::from_core)
+                            .map(|hit| view::mm::memory_search_match(&hit))
                             .collect()
                     })
                     .map_err(err)
             }
-        })
+        })?;
+        view_records(py, &view::View::List(matches))
     }
 
     /// Translate a virtual address through this space's page tables (`!vtop`).
@@ -316,7 +321,11 @@ impl Memory {
     }
 
     /// The full page-table walk and final translation (`!pte` + `!vtop`).
-    fn translation<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
+    fn translation<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Bound<'py, AddressTranslation>> {
         self.space.require_virtual()?;
         let detail = self.owner.with_in(py, &self.space.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
@@ -326,7 +335,11 @@ impl Memory {
     }
 
     /// Reverse-map a physical address through this space's page tables (`!ptov`).
-    fn ptov<'py>(&self, py: Python<'py>, physical: u64) -> PyResult<Bound<'py, Record>> {
+    fn ptov<'py>(
+        &self,
+        py: Python<'py>,
+        physical: u64,
+    ) -> PyResult<Bound<'py, ReverseTranslation>> {
         self.space.require_virtual()?;
         self.space.require_nt("ptov")?;
         let context = self.space.context();
@@ -369,7 +382,11 @@ impl Memory {
     }
 
     /// Describe the loaded module, kernel region, or process VAD containing `addr`.
-    fn describe<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
+    fn describe<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Bound<'py, AddressDescription>> {
         self.space.require_virtual()?;
         self.space.require_nt("describe")?;
         let context = self.space.context();
@@ -471,179 +488,4 @@ fn check_disassembly_count(count: usize) -> PyResult<()> {
         )));
     }
     Ok(())
-}
-
-/// One VAD/context region (`proc.regions` items, search-hit context).
-#[pyclass(frozen, get_all, module = "ntoseye", skip_from_py_object)]
-#[derive(Clone)]
-pub struct MemoryRegion {
-    /// First address of the region.
-    start: u64,
-    /// End of the region (exclusive).
-    end: u64,
-    /// The VAD protection value, when known.
-    protection: Option<u64>,
-    /// The VAD type, when known.
-    vad_type: Option<u64>,
-    /// Whether the region is private (not shared or mapped).
-    private_memory: Option<bool>,
-    /// Committed pages charged to the region.
-    commit_charge: Option<u64>,
-    /// A description: the mapped file, or the kernel region kind.
-    details: Option<String>,
-}
-
-impl From<MemoryRegionInfo> for MemoryRegion {
-    fn from(region: MemoryRegionInfo) -> Self {
-        Self {
-            start: region.start.0,
-            end: region.end.0,
-            protection: region.protection.map(VadProtection::raw),
-            vad_type: region.vad_type.map(VadType::raw),
-            private_memory: region.private_memory,
-            commit_charge: region.commit_charge,
-            details: region.details,
-        }
-    }
-}
-
-#[pymethods]
-impl MemoryRegion {
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let dict = PyDict::new(py);
-        dict.set_item("start", self.start)?;
-        dict.set_item("end", self.end)?;
-        dict.set_item("protection", self.protection)?;
-        dict.set_item("vad_type", self.vad_type)?;
-        dict.set_item("private_memory", self.private_memory)?;
-        dict.set_item("commit_charge", self.commit_charge)?;
-        dict.set_item("details", self.details.clone())?;
-        Ok(PlainDict(dict))
-    }
-
-    fn __repr__(&self) -> String {
-        format!("<MemoryRegion {:#x}..{:#x}>", self.start, self.end)
-    }
-}
-
-/// Loaded-module context for a structured memory-search hit.
-#[pyclass(frozen, get_all, module = "ntoseye", skip_from_py_object)]
-#[derive(Clone)]
-pub struct AddressModule {
-    /// The module's image name.
-    name: String,
-    /// The module's base address.
-    base: u64,
-    /// The module's image size.
-    size: u32,
-    /// The hit's offset from `base`.
-    offset: u64,
-}
-
-impl From<CoreAddressModule> for AddressModule {
-    fn from(module: CoreAddressModule) -> Self {
-        Self {
-            name: module.name,
-            base: module.base.0,
-            size: module.size,
-            offset: module.offset,
-        }
-    }
-}
-
-#[pymethods]
-impl AddressModule {
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let module = CoreAddressModule {
-            name: self.name.clone(),
-            base: VirtAddr(self.base),
-            size: self.size,
-            offset: self.offset,
-        };
-        view_dict(py, &view::mm::address_module(&module))
-    }
-
-    fn __repr__(&self) -> String {
-        format!("<AddressModule {} base={:#x}>", self.name, self.base)
-    }
-}
-
-/// A memory-search hit with symbol and location context.
-#[pyclass(frozen, get_all, module = "ntoseye", skip_from_py_object)]
-#[derive(Clone)]
-pub struct MemorySearchMatch {
-    /// Where the pattern matched.
-    address: u64,
-    /// The match's offset from the search start.
-    offset: u64,
-    /// The nearest symbol, if one resolved.
-    symbol: Option<String>,
-    /// What the address is: a module, a kernel region, a process VAD,
-    /// physical memory, or `vtl1`.
-    kind: String,
-    /// The module containing the match, if any.
-    module: Option<AddressModule>,
-    /// The module section containing the match, if any.
-    section: Option<String>,
-    /// The kernel virtual-address region type, for kernel addresses.
-    va_type: Option<String>,
-    /// The VAD region containing the match, for process addresses.
-    region: Option<MemoryRegion>,
-}
-
-impl MemorySearchMatch {
-    fn from_core(hit: CoreMemorySearchMatch) -> Self {
-        Self {
-            address: hit.address.0,
-            offset: hit.offset,
-            symbol: hit.symbol,
-            kind: hit.description.kind.to_string(),
-            module: hit.description.module.map(AddressModule::from),
-            section: hit.description.section,
-            va_type: hit.description.va_type,
-            region: hit.description.region.map(MemoryRegion::from),
-        }
-    }
-
-    fn physical(start: u64, offset: usize) -> Self {
-        Self {
-            address: start.wrapping_add(offset as u64),
-            offset: offset as u64,
-            symbol: None,
-            kind: "physical".to_string(),
-            module: None,
-            section: None,
-            va_type: None,
-            region: None,
-        }
-    }
-}
-
-#[pymethods]
-impl MemorySearchMatch {
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let dict = PyDict::new(py);
-        dict.set_item("address", self.address)?;
-        dict.set_item("offset", self.offset)?;
-        dict.set_item("symbol", self.symbol.clone())?;
-        dict.set_item("kind", &self.kind)?;
-        match &self.module {
-            Some(module) => dict.set_item("module", module.to_dict(py)?)?,
-            None => dict.set_item("module", py.None())?,
-        }
-        dict.set_item("section", self.section.clone())?;
-        dict.set_item("va_type", self.va_type.clone())?;
-        match &self.region {
-            Some(region) => dict.set_item("region", region.to_dict(py)?)?,
-            None => dict.set_item("region", py.None())?,
-        }
-        Ok(PlainDict(dict))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.symbol {
-            Some(symbol) => format!("<MemorySearchMatch {:#x} {}>", self.address, symbol),
-            None => format!("<MemorySearchMatch {:#x}>", self.address),
-        }
-    }
 }
