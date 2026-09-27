@@ -249,6 +249,29 @@ fn test_explicit_decimal_overrides_default_radix() {
     );
 }
 
+/// `0b` is no WinDbg prefix: in the hexadecimal radix it is a number like
+/// any other (`eb @rsp 0a 0b` writes 0x0b), and a binary one elsewhere.
+#[test]
+fn test_0b_is_hexadecimal_in_the_hexadecimal_radix() {
+    let parse = |text, radix| Expr::parse_with_radix(text, radix).unwrap();
+    assert_eq!(
+        parse("0b", NumberRadix::Hexadecimal),
+        Expr::Literal(VirtAddr(0xb))
+    );
+    assert_eq!(
+        parse("0b1f", NumberRadix::Hexadecimal),
+        Expr::Literal(VirtAddr(0xb1f))
+    );
+    assert_eq!(
+        parse("0y101", NumberRadix::Hexadecimal),
+        Expr::Literal(VirtAddr(0b101))
+    );
+    assert_eq!(
+        parse("0b101", NumberRadix::Decimal),
+        Expr::Literal(VirtAddr(0b101))
+    );
+}
+
 #[test]
 fn test_bare_hex_literal_fallback_requires_hex_letter() {
     assert_eq!(
