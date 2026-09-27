@@ -654,7 +654,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         device_or_node: DeviceArg<'_>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::pnp::py::DeviceStack>> {
         let address = match device_or_node {
             DeviceArg::Device(device) => {
                 device
@@ -1096,7 +1096,7 @@ impl Inspect {
         py: Python<'py>,
         node: Option<u64>,
         recurse: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::pnp::py::DevNode>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -1107,7 +1107,7 @@ impl Inspect {
     }
 
     /// Report device nodes with PnP problems (`!pnptriage`).
-    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::pnp::py::PnpTriage>> {
         self.record(py, |session| {
             let detail = session.target.pnp_triage().map_err(err)?;
             Ok(view::pnp::pnp_triage(&detail))

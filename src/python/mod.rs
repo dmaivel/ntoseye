@@ -368,6 +368,10 @@ pub mod _ntoseye {
         ObjectDirectoryEntry, PoolIrp, ResourceList, ResourceOwner, SsdtEntry, SsdtTable,
     };
     #[pymodule_export]
+    use crate::view::pnp::py::{
+        DevNode, DevNodeHistoryState, DevNodeSummary, DeviceStack, DeviceStackLayer, PnpTriage,
+    };
+    #[pymodule_export]
     use crate::view::process::py::{
         GlobalFlag, GlobalFlags, Job, JobAccounting, JobLimits, ProcessGlobalFlags,
         ProcessIdentity, ThreadOverview, ZombieProcess, ZombieThread, Zombies,
