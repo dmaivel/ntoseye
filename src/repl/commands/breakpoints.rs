@@ -8,7 +8,7 @@ use tabled::settings::Padding;
 use owo_colors::OwoColorize;
 
 use crate::breakpoints::{
-    BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec, ThreadScope,
+    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec, ThreadScope,
 };
 use crate::dbg_backend::HwBreakpointAccess;
 use crate::error::{Error, Result};
@@ -62,6 +62,14 @@ repl_command! {
     usage: "bl",
     summary: "List all breakpoints.",
     details: "The status column reads `e` enabled, `d` disabled, or `o` owed (a kernel code breakpoint waiting for its page to become resident).",
+}
+
+repl_command! {
+    cmd_bpcmds();
+    names: [".bpcmds"],
+    usage: ".bpcmds",
+    summary: "Print the commands that would recreate the current breakpoints.",
+    details: "One line per breakpoint, in ID order: `bp <address>` for an address breakpoint, `bu <symbol>` for a symbolic or source one (as `bm` creates), `ba <access><size> <address>` for a hardware one, with its /1, /p, /t, /c, condition (as /w), pass count, and command string. Run them again (paste them, or save them to a file for `$$<`) to set the same breakpoints. Unlike WinDbg's, the lines carry no breakpoint ID, since ntoseye's bp takes none; recreated breakpoints get fresh IDs, and a disabled one comes back enabled.",
 }
 
 repl_command! {
@@ -342,6 +350,74 @@ fn join_breakpoint_args(args: &[Cow<'_, str>]) -> String {
         .map(|arg| arg.as_ref())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The `bp`/`bu`/`ba` line that sets a breakpoint described as `args`
+/// again: what `.bpcmds` prints, parsed back by [`parse_breakpoint_arguments`].
+fn breakpoint_command_line(command: &str, args: &ParsedBreakpointArgs) -> String {
+    let mut line = command.to_string();
+    if args.one_shot {
+        line.push_str(" /1");
+    }
+    if let Some(pid) = args.pid {
+        line.push_str(&format!(" /p {pid}"));
+    }
+    if let Some(thread) = args.thread {
+        line.push_str(&format!(" /t {thread:#x}"));
+    }
+    if let Some(processor) = args.processor {
+        line.push_str(&format!(" /c {processor:#x}"));
+    }
+    if let Some(condition) = &args.condition {
+        line.push_str(&format!(" /w {}", quote_arg(condition)));
+    }
+    if let Some(access) = &args.access_spec {
+        line.push_str(&format!(" {access}"));
+    }
+    line.push_str(&format!(" {}", args.target));
+    // Zero and one both break on the first hit.
+    if args.pass_count > 1 {
+        line.push_str(&format!(" {:#x}", args.pass_count));
+    }
+    if let Some(action) = &args.action {
+        line.push_str(&format!(" {}", quote_arg(action)));
+    }
+    line
+}
+
+/// The command and arguments that set `bp` again; `None` for a debugger's
+/// internal stop.
+fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpointArgs)> {
+    if bp.temporary {
+        return None;
+    }
+    let (command, access_spec, target) = match (&bp.hardware, bp.specification()) {
+        (Some(hw), _) => (
+            "ba",
+            Some(format!("{}{}", hw.access.letter(), hw.len)),
+            format!("{:#x}", bp.address.0),
+        ),
+        (None, Some(spec)) => ("bu", None, spec.to_string()),
+        (None, None) => ("bp", None, format!("{:#x}", bp.address.0)),
+    };
+    let pid = match &bp.scope {
+        BreakpointScope::Process { pid, .. } => Some(*pid),
+        BreakpointScope::Kernel => None,
+    };
+    Some((
+        command,
+        ParsedBreakpointArgs {
+            target,
+            access_spec,
+            one_shot: bp.one_shot,
+            pid,
+            thread: bp.thread.as_ref().map(|thread| thread.ethread.0),
+            processor: bp.processor,
+            pass_count: bp.pass_count,
+            condition: bp.condition.clone(),
+            action: bp.action.clone(),
+        },
+    ))
 }
 
 fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection> {
@@ -987,6 +1063,15 @@ impl ReplState<'_> {
         Ok(())
     }
 
+    fn cmd_bpcmds(&mut self) -> Result<()> {
+        for bp in self.ctx.breakpoints.list() {
+            if let Some((command, args)) = recreate_breakpoint(bp) {
+                outln!("{}", breakpoint_command_line(command, &args));
+            }
+        }
+        Ok(())
+    }
+
     fn cmd_gc(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
         if !invocation.raw_tail.is_empty() {
             outln!("{}\n", command_help(invocation.name));
@@ -1227,5 +1312,47 @@ mod tests {
             parse_breakpoint_id_selectors(&["*"]).unwrap(),
             BreakpointIdSelection::All
         );
+    }
+
+    #[test]
+    fn bpcmds_lines_parse_back_to_the_same_breakpoint() {
+        let full = ParsedBreakpointArgs {
+            target: "0xfffff80000001000".to_string(),
+            access_spec: Some("w4".to_string()),
+            one_shot: true,
+            pid: Some(7952),
+            thread: Some(0xffffe0000badf00d),
+            processor: Some(3),
+            pass_count: 0x10,
+            condition: Some("poi(@rcx + 8) == 0 and @rdx != 1".to_string()),
+            action: Some(r#".printf "a\\b\n", @rcx; j (1) 'k' ; 'gc'"#.to_string()),
+        };
+        let bare = ParsedBreakpointArgs {
+            target: "nt!NtClose".to_string(),
+            access_spec: None,
+            one_shot: false,
+            pid: None,
+            thread: None,
+            processor: None,
+            pass_count: 0,
+            condition: None,
+            action: Some("gc".to_string()),
+        };
+        for (command, args) in [("ba", full), ("bu", bare)] {
+            let line = breakpoint_command_line(command, &args);
+            let parsed = parse_command(&line).unwrap().unwrap();
+            assert_eq!(parsed.name, command);
+            let invocation = parsed.invocation(CommandStyle::StructuredArgs).unwrap();
+            let reparsed = parse_breakpoint_arguments(
+                &invocation.argv,
+                NumberRadix::Decimal,
+                command,
+                args.access_spec.is_some(),
+            )
+            .unwrap();
+            assert_eq!(reparsed, args, "{line}");
+            // The line is one command, whatever `;` its strings hold.
+            assert_eq!(split_command_list(&line).unwrap(), vec![line.as_str()]);
+        }
     }
 }

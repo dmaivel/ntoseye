@@ -113,7 +113,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
 fn secure_hardware_workflow_command(spec: &CommandSpec) -> bool {
     matches!(
         spec.names[0],
-        "ba" | "bl" | "bc" | "bd" | "be" | "bpc" | "bs" | "br" | "bpp" | "g" | "gc"
+        "ba" | "bl" | ".bpcmds" | "bc" | "bd" | "be" | "bpc" | "bs" | "br" | "bpp" | "g" | "gc"
     )
 }
 

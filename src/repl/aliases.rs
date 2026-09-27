@@ -253,7 +253,7 @@ fn breaks_command_line(value: &str) -> bool {
 }
 
 /// `value` as one quoted argument, escaped as command arguments are.
-fn quote_arg(value: &str) -> String {
+pub fn quote_arg(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
