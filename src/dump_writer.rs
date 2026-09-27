@@ -623,7 +623,10 @@ fn physical_runs_from_symbol(target: &Target) -> Result<Option<Vec<(u64, u64)>>>
     Ok(Some(runs))
 }
 
-fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
+/// The guest's physical memory as `(first PFN, page count)` runs: the kernel's
+/// `MmPhysicalMemoryBlock`, else the hypervisor's RAM layout, else the
+/// backend's one RAM range.
+pub fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
     if let Some(runs) = physical_runs_from_symbol(target)? {
         return Ok(runs);
     }

@@ -1,7 +1,11 @@
 //! Reading guest memory in the target's scopes: address spaces and typed
 //! views over them, byte-pattern search, fields, and counted and C strings.
 
-use super::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, MemorySearchMatch, StringDescriptor, Target};
+use super::mm::PfnSelector;
+use super::{
+    CODE_BITNESS_AMD64, CODE_BITNESS_X86, DiagnosticValue, MemorySearchMatch, StringDescriptor,
+    Target,
+};
 use std::sync::atomic::Ordering;
 
 use crate::{
@@ -37,6 +41,45 @@ pub struct SearchResult {
 pub enum SearchStop {
     MatchLimit,
     Interrupted,
+}
+
+/// Pages [`Target::search_physical_pointer`] reads at a time.
+const PHYSICAL_SEARCH_CHUNK_PAGES: u64 = 256;
+
+/// What [`Target::search_physical_pointer`] found.
+#[derive(Debug, Default)]
+pub struct PhysicalSearchResult {
+    /// The PFN range searched, inclusive.
+    pub first_pfn: u64,
+    pub last_pfn: u64,
+    pub hits: Vec<PhysicalSearchHit>,
+    /// Pages of guest RAM in the range that were searched.
+    pub pages: u64,
+    /// Pages that could not be read and were skipped.
+    pub unreadable_pages: u64,
+    pub stopped: Option<SearchStop>,
+}
+
+/// A pointer-aligned value [`pointer_search_hit`] accepts.
+#[derive(Debug)]
+pub struct PhysicalSearchHit {
+    pub physical: u64,
+    pub value: u64,
+    /// The PTE mapping the page, from its PFN entry.
+    pub pte: Option<VirtAddr>,
+    /// The virtual address that PTE maps.
+    pub va: Option<VirtAddr>,
+}
+
+/// Whether `value` is a `!search` hit for `data`, as WinDbg defines one: an
+/// exact match; with no `delta`, a value one bit off; with a `delta`, a
+/// value within `delta` of `data`, or one bit off `data - delta`.
+pub fn pointer_search_hit(value: u64, data: u64, delta: u64) -> bool {
+    if delta == 0 {
+        return (value ^ data).count_ones() <= 1;
+    }
+    let low = data.saturating_sub(delta);
+    (low..=data.saturating_add(delta)).contains(&value) || (value ^ low).count_ones() == 1
 }
 
 /// What [`Target::compare`] found.
@@ -194,6 +237,107 @@ impl Target {
                 result.compared += 1;
             }
             offset += chunk_len;
+        }
+        Ok(result)
+    }
+
+    /// Search guest RAM from `first_pfn` through `last_pfn` (default: all of
+    /// it) for pointer-aligned values [`pointer_search_hit`] accepts for
+    /// `data` and `delta` (`!search`). Unreadable pages are skipped and
+    /// counted; the search stops after [`MAX_SEARCH_MATCHES`] hits or when the
+    /// host interrupts it. Each hit's page is looked up in the PFN database
+    /// for the PTE that maps it, and the virtual address that PTE maps.
+    pub fn search_physical_pointer(
+        &self,
+        data: u64,
+        delta: u64,
+        first_pfn: Option<u64>,
+        last_pfn: Option<u64>,
+    ) -> Result<PhysicalSearchResult> {
+        let runs = crate::dump_writer::physical_runs(self)?;
+        let first = first_pfn.or_else(|| runs.iter().map(|run| run.0).min());
+        let last = last_pfn.or_else(|| {
+            runs.iter()
+                .map(|(base, count)| base.saturating_add(count.saturating_sub(1)))
+                .max()
+        });
+        let (Some(first), Some(last)) = (first, last) else {
+            return Err(Error::DebugInfo(
+                "the target reports no physical memory".into(),
+            ));
+        };
+        if last < first {
+            return Err(Error::InvalidArgument(format!(
+                "end PFN {last:#x} is below start PFN {first:#x}"
+            )));
+        }
+        let page = PAGE_SIZE as u64;
+        let mut result = PhysicalSearchResult {
+            first_pfn: first,
+            last_pfn: last,
+            ..PhysicalSearchResult::default()
+        };
+        let mut buffer = vec![0u8; PHYSICAL_SEARCH_CHUNK_PAGES as usize * PAGE_SIZE];
+        'runs: for (base, count) in runs {
+            let mut pfn = base.max(first);
+            let end = base.saturating_add(count).min(last.saturating_add(1));
+            while pfn < end {
+                if self.interrupt.load(Ordering::Relaxed) {
+                    result.stopped = Some(SearchStop::Interrupted);
+                    break 'runs;
+                }
+                let pages = (end - pfn).min(PHYSICAL_SEARCH_CHUNK_PAGES);
+                let chunk = &mut buffer[..pages as usize * PAGE_SIZE];
+                let whole = self.read_physical(pfn * page, chunk).is_ok();
+                for (index, bytes) in chunk.as_chunks_mut::<PAGE_SIZE>().0.iter_mut().enumerate() {
+                    let page_pfn = pfn + index as u64;
+                    if !whole && self.read_physical(page_pfn * page, bytes).is_err() {
+                        result.unreadable_pages += 1;
+                        continue;
+                    }
+                    for (slot, word) in bytes.as_chunks::<8>().0.iter().enumerate() {
+                        let value = u64::from_le_bytes(*word);
+                        if !pointer_search_hit(value, data, delta) {
+                            continue;
+                        }
+                        if result.hits.len() == MAX_SEARCH_MATCHES {
+                            result.stopped = Some(SearchStop::MatchLimit);
+                            break 'runs;
+                        }
+                        result.hits.push(PhysicalSearchHit {
+                            physical: page_pfn * page + slot as u64 * 8,
+                            value,
+                            pte: None,
+                            va: None,
+                        });
+                    }
+                }
+                result.pages += pages;
+                pfn += pages;
+            }
+        }
+
+        let mut mapping: Option<(u64, Option<VirtAddr>)> = None;
+        for hit in &mut result.hits {
+            let pfn = hit.physical / page;
+            let pte = match mapping {
+                Some((cached, pte)) if cached == pfn => pte,
+                _ => {
+                    let pte = self
+                        .inspect_pfn(PfnSelector::Pfn(pfn))
+                        .ok()
+                        .and_then(|detail| match detail.pte_address {
+                            DiagnosticValue::Available(pte) if !pte.is_zero() => Some(pte),
+                            _ => None,
+                        });
+                    mapping = Some((pfn, pte));
+                    pte
+                }
+            };
+            hit.pte = pte;
+            hit.va = pte
+                .and_then(|pte| self.va_mapped_by_pte(pte))
+                .map(|va| va + (hit.physical % page));
         }
         Ok(result)
     }
@@ -411,5 +555,26 @@ mod tests {
         );
         assert_eq!(result.compared, 16 + MAX_SEARCH_MATCHES);
         assert_eq!(result.stopped, Some(SearchStop::MatchLimit));
+    }
+
+    /// WinDbg's `!search` criteria: without a delta, the value or one bit off
+    /// it; with one, the inclusive range around it, or one bit off its low
+    /// end, which clamps at zero rather than wrapping.
+    #[test]
+    fn pointer_search_hits_follow_windbg_delta_rules() {
+        let data = 0xffff_f804_9e00_1000;
+        assert!(pointer_search_hit(data, data, 0));
+        assert!(pointer_search_hit(data ^ (1 << 63), data, 0));
+        assert!(!pointer_search_hit(data ^ 0b11, data, 0));
+
+        assert!(pointer_search_hit(data - 8, data, 8));
+        assert!(pointer_search_hit(data + 8, data, 8));
+        assert!(!pointer_search_hit(data + 9, data, 8));
+        assert!(pointer_search_hit((data - 8) ^ (1 << 40), data, 8));
+        assert!(!pointer_search_hit(data ^ (1 << 40), data, 8));
+
+        assert!(pointer_search_hit(0, 4, 8));
+        assert!(pointer_search_hit(1 << 20, 4, 8));
+        assert!(!pointer_search_hit(u64::MAX, 4, 8));
     }
 }

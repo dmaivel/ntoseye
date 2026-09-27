@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::layout::ParsedType;
 use crate::memory::PAGE_SIZE;
 use crate::target::Target;
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 
 const PTE_TYPE: &str = "_MI_SYSTEM_PTE_TYPE";
 /// `MiState` members that hold `_MI_SYSTEM_PTE_TYPE` allocators.
@@ -102,6 +102,24 @@ fn pte_to_va(pte: VirtAddr, pte_base: VirtAddr) -> VirtAddr {
 }
 
 impl Target {
+    /// The virtual address the AMD64 PTE at `pte` maps, when `pte` lies in
+    /// NT's PTE self-map (one PML4 slot: 512 GiB of PTEs); `None` for a PTE
+    /// elsewhere, such as a prototype PTE, or without `MmPteBase`.
+    pub fn va_mapped_by_pte(&self, pte: VirtAddr) -> Option<VirtAddr> {
+        if self.arch() != Arch::Amd64 {
+            return None;
+        }
+        let pte_base: VirtAddr = self
+            .guest()
+            .ok()?
+            .ntoskrnl
+            .symbol("MmPteBase")
+            .ok()?
+            .read()
+            .ok()?;
+        (pte.0.wrapping_sub(pte_base.0) < 1 << 39).then(|| pte_to_va(pte, pte_base))
+    }
+
     /// Report each system-PTE bitmap allocator: its counters, the VA range
     /// it hands out, and the free runs its bitmap holds (listed when flag
     /// 0x1 is set). A build without `_MI_SYSTEM_PTE_TYPE` allocators

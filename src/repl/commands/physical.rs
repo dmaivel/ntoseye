@@ -2,10 +2,13 @@ use crate::repl::*;
 
 use crate::backend::MemoryOps;
 use crate::error::Result;
+use crate::target::{MAX_SEARCH_MATCHES, SearchStop};
 use crate::types::{PhysAddr, VirtAddr};
+use crate::ui;
 
 use super::memory::{MAX_DISPLAY_BYTES, parse_write_values};
-use crate::memory::read_page_chunks;
+use crate::memory::{PAGE_SIZE, read_page_chunks};
+use owo_colors::OwoColorize;
 
 repl_command! {
     cmd_phys_db;
@@ -60,6 +63,15 @@ repl_command! {
     names: ["!eq"],
     usage: "!eq <address> <value...>",
     summary: "Write one or more quadwords to guest-physical memory.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_phys_search;
+    names: ["!search"],
+    usage: "!search <value> [delta [start-pfn [end-pfn]]]",
+    summary: "Search guest-physical memory for a pointer-sized value.",
+    details: "Every pointer-aligned quadword in the PFN range (default: all RAM) is compared, and listed when it equals the value or, with no delta, is one bit off it; with a delta, when it lies within delta of the value or is one bit off value - delta, as WinDbg's !search does. Each hit shows its PFN, offset, the value, and, from the PFN database, the PTE mapping the page and the virtual address that PTE maps (blank when the PTE is not in the self-map). Unreadable pages are skipped and counted, and the search stops after 4096 hits or at Ctrl+C.",
     completion: Expression,
 }
 
@@ -172,5 +184,98 @@ impl ReplState<'_> {
         self.write_physical_command(&invocation, "!eq", "qword", |value| {
             value.to_le_bytes().to_vec()
         })
+    }
+
+    fn cmd_phys_search(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.is_empty() || invocation.argv.len() > 4 {
+            outln!("{}\n", command_help("!search"));
+            return Ok(());
+        }
+        let mut values = Vec::with_capacity(invocation.argv.len());
+        for arg in &invocation.argv {
+            let Some(value) = self.eval_or_report(arg) else {
+                return Ok(());
+            };
+            values.push(value.0);
+        }
+        let data = values[0];
+        let delta = values.get(1).copied().unwrap_or(0);
+        let low = data.saturating_sub(delta);
+        let high = data.saturating_add(delta);
+        let result = match self.ctx.target.search_physical_pointer(
+            data,
+            delta,
+            values.get(2).copied(),
+            values.get(3).copied(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        outln!(
+            "Searching PFNs in range {:x} - {:x} for [{} - {}]\n",
+            result.first_pfn,
+            result.last_pfn,
+            ui::addr(low),
+            ui::addr(high)
+        );
+        if !result.hits.is_empty() {
+            outln!(
+                "{:<10} {:<6} {:<16} {:<16} {:<16}",
+                "Pfn",
+                "Offset",
+                "Hit",
+                "Va",
+                "Pte"
+            );
+            let page = PAGE_SIZE as u64;
+            for hit in &result.hits {
+                let optional = |address: Option<VirtAddr>| {
+                    address.map_or_else(|| format!("{:16}", ""), |address| ui::addr(address.0))
+                };
+                let value = format!("{:016x}", hit.value);
+                outln!(
+                    "{:<10x} {:<6x} {} {} {}",
+                    hit.physical / page,
+                    hit.physical % page,
+                    if hit.value == data {
+                        value.bold().to_string()
+                    } else {
+                        value
+                    },
+                    optional(hit.va),
+                    optional(hit.pte)
+                );
+            }
+            outln!();
+        }
+        outln!(
+            "{} {} in {:#x} pages",
+            result.hits.len(),
+            if result.hits.len() == 1 {
+                "hit"
+            } else {
+                "hits"
+            },
+            result.pages
+        );
+        if result.unreadable_pages > 0 {
+            outln!(
+                "{}",
+                format!("{:#x} unreadable pages skipped", result.unreadable_pages).bright_black()
+            );
+        }
+        match result.stopped {
+            Some(SearchStop::MatchLimit) => outln!(
+                "{}",
+                format!("stopped after {MAX_SEARCH_MATCHES} hits").bright_black()
+            ),
+            Some(SearchStop::Interrupted) => outln!("{}", "interrupted".bright_black()),
+            None => {}
+        }
+        outln!();
+        Ok(())
     }
 }
