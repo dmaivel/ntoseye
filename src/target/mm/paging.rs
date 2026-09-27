@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail, VtopLevel};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::memory::{DTB_IDENTITY, PAGE_SIZE, PFN_MASK, Residency};
+use crate::memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE, PFN_MASK, Residency};
 use crate::target::Target;
 use crate::types::{Arch, Dtb, PageTableEntry, PageTableLevel, VirtAddr};
 
@@ -64,19 +64,15 @@ impl Target {
                 .pte
                 .as_ref()
                 .is_some_and(|level| level.value.is_transition());
-            let large_entry = walk
-                .pde
-                .as_ref()
-                .or(Some(&walk.ppe))
-                .is_some_and(|level| level.value.is_large_page());
+            let large_entry = walk.levels().any(|level| level.attributes.large_page);
             let large = physical.is_some() && large_entry;
-            let levels = [Some(walk.pxe), Some(walk.ppe), walk.pde, walk.pte]
-                .into_iter()
-                .flatten()
+            let levels = walk
+                .levels()
                 .map(|level| VtopLevel {
                     level: level.level,
                     address: level.address,
                     value: level.value.0,
+                    attributes: level.attributes.clone(),
                 })
                 .collect();
             return Ok(VtopDetail {
@@ -187,8 +183,11 @@ impl Target {
 
     fn pte_traverse_in(&self, dtb: Dtb, address: VirtAddr) -> Result<PteWalk> {
         // MmPteBase is a kernel VA valid in any NT root (the recursive PML4
-        // slot).
-        let memory = self.address_space(dtb);
+        // slot). It maps the root it is read through, so on ARM64, where a
+        // process's root is its TTBR1 as well as its TTBR0, the self-map is
+        // read through `dtb` for both halves; through the kernel's root it
+        // would show the kernel's (empty) user half.
+        let memory = AddressSpace::for_arch(&self.phys, dtb, dtb, self.arch());
 
         let pte_base: VirtAddr = self.guest()?.ntoskrnl.symbol("MmPteBase")?.read()?;
         let pde_base = pte_base + (pte_base.0 >> 9 & 0x7FFFFFFFFF);
@@ -198,56 +197,35 @@ impl Target {
         let pxe_address = VirtAddr(pxe_base.0 + (((address.0 >> 39) & 0x1FF) << 3));
         let ppe_address = VirtAddr((((address.0 & 0xFFFFFFFFFFFF) >> 30) << 3) + ppe_base.0);
 
-        let pxe_value: PageTableEntry = memory.read(pxe_address)?;
-        let ppe_value: PageTableEntry = memory.read(ppe_address)?;
-
-        let pxe = PteLevel {
-            level: PageTableLevel::Pxe,
-            address: pxe_address,
-            value: pxe_value,
+        let arch = self.arch();
+        let read_level = |level: PageTableLevel, at: VirtAddr| -> Result<PteLevel> {
+            let value: PageTableEntry = memory.read(at)?;
+            Ok(PteLevel {
+                level,
+                address: at,
+                value,
+                attributes: value.attributes(arch, level, address),
+            })
         };
-        let ppe = PteLevel {
-            level: PageTableLevel::Ppe,
-            address: ppe_address,
-            value: ppe_value,
+        // The walk ends at an entry that maps (a large page) or maps nothing:
+        // the self-map has no table below it to read.
+        let ends = |level: &PteLevel| level.attributes.large_page || !level.attributes.present;
+
+        let pxe = read_level(PageTableLevel::Pxe, pxe_address)?;
+        let ppe = if ends(&pxe) {
+            None
+        } else {
+            Some(read_level(PageTableLevel::Ppe, ppe_address)?)
         };
-
-        if ppe_value.is_large_page() {
-            return Ok(PteWalk {
-                address,
-                dtb,
-                pxe,
-                ppe,
-                pde: None,
-                pte: None,
-            });
-        }
-
         let pde_address = VirtAddr((((address.0 & 0xFFFFFFFFFFFF) >> 21) << 3) + pde_base.0);
-        let pde_value: PageTableEntry = memory.read(pde_address)?;
-        let pde = PteLevel {
-            level: PageTableLevel::Pde,
-            address: pde_address,
-            value: pde_value,
+        let pde = match &ppe {
+            Some(ppe) if !ends(ppe) => Some(read_level(PageTableLevel::Pde, pde_address)?),
+            _ => None,
         };
-
-        if pde_value.is_large_page() {
-            return Ok(PteWalk {
-                address,
-                dtb,
-                pxe,
-                ppe,
-                pde: Some(pde),
-                pte: None,
-            });
-        }
-
         let pte_address = VirtAddr(((address.0 & 0xFFFFFFFFFFFF) >> 12) << 3) + pte_base.0;
-        let pte_value: PageTableEntry = memory.read(pte_address)?;
-        let pte = PteLevel {
-            level: PageTableLevel::Pte,
-            address: pte_address,
-            value: pte_value,
+        let pte = match &pde {
+            Some(pde) if !ends(pde) => Some(read_level(PageTableLevel::Pte, pte_address)?),
+            _ => None,
         };
 
         Ok(PteWalk {
@@ -255,8 +233,8 @@ impl Target {
             dtb,
             pxe,
             ppe,
-            pde: Some(pde),
-            pte: Some(pte),
+            pde,
+            pte,
         })
     }
 }
@@ -284,6 +262,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         level: PageTableLevel::Pxe,
         address: VirtAddr(pml4_address),
         value: pml4e.0,
+        attributes: pml4e.attributes(Arch::Amd64, PageTableLevel::Pxe, va),
     });
     if !pml4e.is_present() {
         return Ok(VtopDetail {
@@ -305,6 +284,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         level: PageTableLevel::Ppe,
         address: VirtAddr(pdpt_address),
         value: pdpte.0,
+        attributes: pdpte.attributes(Arch::Amd64, PageTableLevel::Ppe, va),
     });
     if !pdpte.is_present() {
         return Ok(VtopDetail {
@@ -338,6 +318,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         level: PageTableLevel::Pde,
         address: VirtAddr(pde_address),
         value: pde.0,
+        attributes: pde.attributes(Arch::Amd64, PageTableLevel::Pde, va),
     });
     if !pde.is_present() {
         return Ok(VtopDetail {
@@ -371,6 +352,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         level: PageTableLevel::Pte,
         address: VirtAddr(pte_address),
         value: pte.0,
+        attributes: pte.attributes(Arch::Amd64, PageTableLevel::Pte, va),
     });
     // A transition leaf still names the frame the guest holds, and reads go
     // through it, so reporting it unmapped here would contradict them.

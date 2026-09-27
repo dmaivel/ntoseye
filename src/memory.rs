@@ -248,74 +248,28 @@ impl Translation {
         }
     }
 
-    /// AArch64 1 GiB block descriptor at level 1.
-    pub const fn arm64_huge(l0: PageTableEntry, l1: PageTableEntry, va: VirtAddr) -> Self {
-        let pxn = l0.arm64_table_is_pxn() || l1.arm64_is_pxn();
-        let uxn = l0.arm64_table_is_uxn() || l1.arm64_is_uxn();
-        Self {
-            address: l1.arm64_huge_block_frame() + va.huge_page_offset(),
-            large: true,
-            writable: l0.arm64_table_allows_write() && l1.arm64_is_writable(),
-            user: l0.arm64_table_allows_user() && l1.arm64_is_user(),
-            nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
-            uxn,
-            residency: Residency::Mapped,
-        }
-    }
-
-    /// AArch64 2 MiB block descriptor at level 2.
-    pub const fn arm64_large(
-        l0: PageTableEntry,
-        l1: PageTableEntry,
-        l2: PageTableEntry,
+    /// An AArch64 block (level 1 or 2) or page (level 3) descriptor
+    /// mapping `va` at `address`. Its permissions are the descriptor's own:
+    /// Windows sets `TCR_EL1.HPD`, so the table descriptors above keep their
+    /// own bits in APTable/PXNTable/UXNTable (a user page's level-0 entry has
+    /// APTable[0] set) and restrict nothing.
+    pub const fn arm64_mapping(
+        leaf: PageTableEntry,
+        address: PhysAddr,
+        large: bool,
         va: VirtAddr,
     ) -> Self {
-        let pxn = l0.arm64_table_is_pxn() || l1.arm64_table_is_pxn() || l2.arm64_is_pxn();
-        let uxn = l0.arm64_table_is_uxn() || l1.arm64_table_is_uxn() || l2.arm64_is_uxn();
         Self {
-            address: l2.arm64_large_block_frame() + va.large_page_offset(),
-            large: true,
-            writable: l0.arm64_table_allows_write()
-                && l1.arm64_table_allows_write()
-                && l2.arm64_is_writable(),
-            user: l0.arm64_table_allows_user()
-                && l1.arm64_table_allows_user()
-                && l2.arm64_is_user(),
-            nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
-            uxn,
-            residency: Residency::Mapped,
-        }
-    }
-
-    /// AArch64 4 KiB page descriptor at level 3.
-    pub const fn arm64_page(
-        l0: PageTableEntry,
-        l1: PageTableEntry,
-        l2: PageTableEntry,
-        l3: PageTableEntry,
-        va: VirtAddr,
-    ) -> Self {
-        let pxn = l0.arm64_table_is_pxn()
-            || l1.arm64_table_is_pxn()
-            || l2.arm64_table_is_pxn()
-            || l3.arm64_is_pxn();
-        let uxn = l0.arm64_table_is_uxn()
-            || l1.arm64_table_is_uxn()
-            || l2.arm64_table_is_uxn()
-            || l3.arm64_is_uxn();
-        Self {
-            address: l3.arm64_page_frame() + va.page_offset(),
-            large: false,
-            writable: l0.arm64_table_allows_write()
-                && l1.arm64_table_allows_write()
-                && l2.arm64_table_allows_write()
-                && l3.arm64_is_writable(),
-            user: l0.arm64_table_allows_user()
-                && l1.arm64_table_allows_user()
-                && l2.arm64_table_allows_user()
-                && l3.arm64_is_user(),
-            nx: if va.0 & (1 << 55) != 0 { pxn } else { uxn },
-            uxn,
+            address,
+            large,
+            writable: leaf.arm64_is_writable(),
+            user: leaf.arm64_is_user(),
+            nx: if va.0 & (1 << 55) != 0 {
+                leaf.arm64_is_pxn()
+            } else {
+                leaf.arm64_is_uxn()
+            },
+            uxn: leaf.arm64_is_uxn(),
             residency: Residency::Mapped,
         }
     }
@@ -394,7 +348,12 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(Walked::Unmapped(None));
         }
         if l1.arm64_is_block() {
-            return Ok(Walked::Mapped(Translation::arm64_huge(l0, l1, va)));
+            return Ok(Walked::Mapped(Translation::arm64_mapping(
+                l1,
+                l1.arm64_huge_block_frame() + va.huge_page_offset(),
+                true,
+                va,
+            )));
         }
 
         let Some(l2) = self.read_pt_entry(l1.arm64_page_frame(), va.pd_index())? else {
@@ -404,7 +363,12 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(Walked::Unmapped(None));
         }
         if l2.arm64_is_block() {
-            return Ok(Walked::Mapped(Translation::arm64_large(l0, l1, l2, va)));
+            return Ok(Walked::Mapped(Translation::arm64_mapping(
+                l2,
+                l2.arm64_large_block_frame() + va.large_page_offset(),
+                true,
+                va,
+            )));
         }
 
         let Some(l3) = self.read_pt_entry(l2.arm64_page_frame(), va.pt_index())? else {
@@ -421,7 +385,12 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             }
             return Ok(Walked::Unmapped(Some(l3)));
         }
-        Ok(Walked::Mapped(Translation::arm64_page(l0, l1, l2, l3, va)))
+        Ok(Walked::Mapped(Translation::arm64_mapping(
+            l3,
+            l3.arm64_page_frame() + va.page_offset(),
+            false,
+            va,
+        )))
     }
 
     pub fn virt_to_phys(&self, va: VirtAddr) -> Result<Option<Translation>> {
@@ -799,22 +768,14 @@ mod tests {
     #[test]
     fn arm64_block_translation_ignores_non_address_bits() {
         const NT: u64 = 1 << 16;
-        let table = PageTableEntry(0b11);
-
-        let huge = Translation::arm64_huge(
-            table,
-            PageTableEntry(0x4000_0000 | NT | 0b01),
-            VirtAddr(0x1234_5678),
+        assert_eq!(
+            PageTableEntry(0x4000_0000 | NT | 0b01).arm64_huge_block_frame(),
+            0x4000_0000
         );
-        let large = Translation::arm64_large(
-            table,
-            table,
-            PageTableEntry(0x0060_0000 | NT | 0b01),
-            VirtAddr(0x0012_3456),
+        assert_eq!(
+            PageTableEntry(0x0060_0000 | NT | 0b01).arm64_large_block_frame(),
+            0x0060_0000
         );
-
-        assert_eq!(huge.address, 0x4000_0000 + 0x1234_5678);
-        assert_eq!(large.address, 0x0060_0000 + 0x12_3456);
     }
 
     #[test]
@@ -899,32 +860,53 @@ mod tests {
         assert_eq!(read(0x6000), None);
     }
 
+    /// AP[1] (bit 6) opens a page to EL0 and AP[2] (bit 7) makes it
+    /// read-only; the execute-never bit that applies is UXN for a user
+    /// address and PXN for a kernel one. A Windows user page's level-0 entry
+    /// has APTable[0] set, which with hierarchical permissions on would
+    /// forbid EL0 access, so table bits must not restrict (Windows sets
+    /// `TCR_EL1.HPD`).
     #[test]
-    fn arm64_translation_applies_table_attribute_restrictions() {
-        let l0 = PageTableEntry(0b11 | (1 << 61) | (1 << 62) | (1 << 60));
-        let table = PageTableEntry(0b11);
-        let page = PageTableEntry(0b11 | (1 << 7) | 0x1234_5000);
+    fn arm64_permissions_come_from_the_mapping_descriptor() {
+        let read = |leaf: u64, va: u64| {
+            let mut data = vec![0u8; 0x7000];
+            let va = VirtAddr(va);
+            // A user page's real level-0 entry: APTable[0] (bit 61) and
+            // NSTable set.
+            for (table, index, next) in [
+                (0x1000usize, va.pml4_index(), 0x2000u64 | 0xa0e0 << 48),
+                (0x2000, va.pdpt_index(), 0x3000),
+                (0x3000, va.pd_index(), 0x4000),
+            ] {
+                let at = table + index * 8;
+                data[at..at + 8].copy_from_slice(&(next | 0b11).to_le_bytes());
+            }
+            let at = 0x4000 + va.pt_index() * 8;
+            data[at..at + 8].copy_from_slice(&(leaf | 0x6000 | 0b11).to_le_bytes());
+            let mem = FakePhysMem {
+                data,
+                invalid_pte_mask: 0,
+            };
+            AddressSpace::new_arm64(&mem, 0x1000, 0x1000)
+                .virt_to_phys(va)
+                .unwrap()
+                .unwrap()
+        };
+        const USER: u64 = 1 << 6;
+        const READ_ONLY: u64 = 1 << 7;
+        const PXN: u64 = 1 << 53;
+        const UXN: u64 = 1 << 54;
 
-        let translation = Translation::arm64_page(l0, table, table, page, VirtAddr(0x2000));
-
-        assert_eq!(translation.address, 0x1234_5000);
-        assert!(!translation.user);
-        assert!(!translation.writable);
-        assert!(translation.uxn);
-        assert!(translation.nx);
-    }
-
-    #[test]
-    fn arm64_translation_uses_pxn_for_kernel_addresses() {
-        let l0 = PageTableEntry(0b11 | (1 << 59));
-        let table = PageTableEntry(0b11);
-        let page = PageTableEntry(0b11 | 0x1234_5000);
-
-        let translation =
-            Translation::arm64_page(l0, table, table, page, VirtAddr(0xffff_f800_0000_2000));
-
-        assert!(translation.nx);
-        assert!(!translation.uxn);
+        // A thread's TEB: user, writable, never executed.
+        let teb = read(USER | UXN | PXN, 0x26f_4000);
+        assert_eq!(teb.address, 0x6000);
+        assert!(teb.user && teb.writable && teb.nx);
+        // User code: user, read-only, executable at EL0.
+        let code = read(USER | READ_ONLY | PXN, 0x7762_0000);
+        assert!(code.user && !code.writable && !code.nx);
+        // Kernel code: EL1 only, read-only, executable at EL1.
+        let kernel = read(READ_ONLY | UXN, 0xffff_f803_3f0e_b000);
+        assert!(!kernel.user && !kernel.writable && !kernel.nx && kernel.uxn);
     }
 
     struct CachingPhysMem {

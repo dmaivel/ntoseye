@@ -12,7 +12,7 @@ use crate::target::mm::{
     VmCounter, VmDetail, VmPoolDetail, VmPteDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
-use crate::types::PageTableEntry;
+use crate::types::{PageTableLevel, PteAttributes, VirtAddr};
 
 fn vm_counter(counter: &VmCounter) -> View {
     View::Object(vec![
@@ -191,18 +191,27 @@ pub fn pfn(detail: &PfnDetail) -> View {
 }
 
 fn vtop_level(level: &VtopLevel) -> View {
-    let value = PageTableEntry(level.value);
+    table_level(level.level, level.address, level.value, &level.attributes)
+}
+
+/// One page-table level (WinDbg-style flags), decoded for its architecture.
+fn table_level(
+    level: PageTableLevel,
+    address: VirtAddr,
+    value: u64,
+    attributes: &PteAttributes,
+) -> View {
     View::Object(vec![
-        ("level", View::Str(level.level.name().to_string())),
-        ("address", View::Hex(level.address.0)),
-        ("value", View::Hex(level.value)),
-        ("pfn", View::Hex(value.pfn())),
-        ("present", View::Bool(value.is_present())),
-        ("large_page", View::Bool(value.is_large_page())),
-        ("writable", View::Bool(value.is_writable())),
-        ("user", View::Bool(value.is_user())),
-        ("nx", View::Bool(value.is_nx())),
-        ("flags", View::Str(value.flags_for_level(level.level))),
+        ("level", View::Str(level.name().to_string())),
+        ("address", View::Hex(address.0)),
+        ("value", View::Hex(value)),
+        ("pfn", View::Hex(attributes.pfn)),
+        ("present", View::Bool(attributes.present)),
+        ("large_page", View::Bool(attributes.large_page)),
+        ("writable", View::Bool(attributes.writable)),
+        ("user", View::Bool(attributes.user)),
+        ("nx", View::Bool(attributes.nx)),
+        ("flags", View::Str(attributes.flags.clone())),
     ])
 }
 
@@ -542,35 +551,14 @@ pub fn memory_search_match(m: &MemorySearchMatch) -> View {
     ])
 }
 
-/// One page-table level (WinDbg-style flags).
 pub fn pte_level(pte: &PteLevel) -> View {
-    View::Object(vec![
-        ("level", View::Str(pte.level.name().to_string())),
-        ("address", View::Hex(pte.address.0)),
-        ("value", View::Hex(pte.value.0)),
-        ("pfn", View::Hex(pte.value.pfn())),
-        ("present", View::Bool(pte.value.is_present())),
-        ("large_page", View::Bool(pte.value.is_large_page())),
-        ("writable", View::Bool(pte.value.is_writable())),
-        ("user", View::Bool(pte.value.is_user())),
-        ("nx", View::Bool(pte.value.is_nx())),
-        ("flags", View::Str(pte.value.flags())),
-    ])
+    table_level(pte.level, pte.address, pte.value.0, &pte.attributes)
 }
 
 /// A full page-table walk: the walked address and DTB, then the levels that
 /// were reached (a large-page mapping short-circuits, so fewer levels).
 pub fn pte_walk(walk: &PteWalk) -> View {
-    let levels = [
-        Some(&walk.pxe),
-        Some(&walk.ppe),
-        walk.pde.as_ref(),
-        walk.pte.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(pte_level)
-    .collect();
+    let levels = walk.levels().map(pte_level).collect();
     View::Object(vec![
         ("address", View::Hex(walk.address.0)),
         ("dtb", View::Hex(walk.dtb)),

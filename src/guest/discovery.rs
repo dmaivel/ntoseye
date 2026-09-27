@@ -293,7 +293,7 @@ pub(super) fn find_ntoskrnl_va(
 }
 
 fn is_ntoskrnl_pte_arm64(phys: &PhysMem, pte: PageTableEntry) -> Result<bool> {
-    // Kernel code pages: AP[2]=0 (not user), PXN=0 (executable from EL1).
+    // Kernel code pages: AP[1]=0 (EL1 only), PXN=0 (executable from EL1).
     // (UXN is always set on Windows kernel pages, so it cannot identify code.)
     if pte.arm64_is_user() || !pte.arm64_is_pxn() {
         return Ok(false);

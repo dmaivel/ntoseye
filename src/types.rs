@@ -214,6 +214,21 @@ impl Arch {
 #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
 pub struct PageTableEntry(pub u64);
 
+/// A page-table entry decoded at its level; see
+/// [`PageTableEntry::attributes`]. For an entry pointing at a lower table,
+/// `writable`, `user`, and `nx` are the restrictions it places on what lies
+/// below.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PteAttributes {
+    pub present: bool,
+    pub large_page: bool,
+    pub writable: bool,
+    pub user: bool,
+    pub nx: bool,
+    pub pfn: u64,
+    pub flags: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageTableLevel {
     Pxe,
@@ -372,45 +387,103 @@ impl PageTableEntry {
         self.page_frame() >> 12
     }
 
-    pub fn flags(self) -> String {
-        // Without a level, render bit 7 as LargePage.
-        self.format_flags(true)
-    }
-
-    /// Format flags using the WinDbg !pte interpretation for a specific
-    /// level.  Bit 7 is LargePage only on PPE/PDE entries; on a leaf PTE it is
-    /// the PAT bit and is intentionally not rendered as `L`.
-    pub fn flags_for_level(self, level: PageTableLevel) -> String {
-        self.format_flags(matches!(level, PageTableLevel::Ppe | PageTableLevel::Pde))
-    }
-
-    fn format_flags(self, large_page_level: bool) -> String {
-        format!(
-            "{}{}{}{}{}{}{}{}{}{}{}",
-            if self.0 & (1 << 9) != 0 { 'C' } else { '-' }, // CopyOnWrite
-            if self.0 & (1 << 8) != 0 { 'G' } else { '-' }, // Global
-            if large_page_level && self.0 & (1 << 7) != 0 {
-                'L'
-            } else {
-                '-'
-            }, // LargePage (PAT on leaf PTEs)
-            if self.0 & (1 << 6) != 0 { 'D' } else { '-' }, // Dirty
-            if self.0 & (1 << 5) != 0 { 'A' } else { '-' }, // Accessed
-            if self.0 & (1 << 4) != 0 { 'N' } else { '-' }, // CacheDisable
-            if self.0 & (1 << 3) != 0 { 'T' } else { '-' }, // WriteThrough
-            if self.0 & (1 << 2) != 0 { 'U' } else { 'K' }, // Owner (User/Kernel)
-            if self.is_writable() { 'W' } else { 'R' },
-            if self.0 & (1 << 63) != 0 { '-' } else { 'E' }, // NoExecute (inverted)
-            if self.0 & 1 != 0 { 'V' } else { '-' },         // Valid
-        )
+    /// What this entry means at `level` of `arch`'s tables, for an entry
+    /// on the walk of `address`. The flags are WinDbg's `!pte` string
+    /// (`CGLDANTUWEV`, `-` for each clear bit, `K`/`R` for kernel and
+    /// read-only), filled from each architecture's own bits.
+    pub fn attributes(self, arch: Arch, level: PageTableLevel, address: VirtAddr) -> PteAttributes {
+        let upper_level = matches!(level, PageTableLevel::Ppe | PageTableLevel::Pde);
+        let bit = |n: u32| self.0 & (1 << n) != 0;
+        let (present, large_page, writable, user, nx, pfn) = match arch {
+            // Bit 7 is PS only above the leaf; in a PTE it is PAT.
+            Arch::Amd64 => (
+                self.is_present(),
+                upper_level && self.is_large_page(),
+                self.is_writable(),
+                self.is_user(),
+                self.is_nx(),
+                self.pfn(),
+            ),
+            Arch::Arm64 => {
+                let block = upper_level && self.arm64_is_block();
+                // A block or page descriptor maps; a table descriptor's
+                // permission bits are Windows' own (it sets
+                // `TCR_EL1.HPD`), so it restricts nothing below it.
+                let table = level != PageTableLevel::Pte && !block;
+                let kernel = address.0 & (1 << 55) != 0;
+                let (writable, user, nx) = if table {
+                    (true, !kernel, false)
+                } else {
+                    (
+                        self.arm64_is_writable(),
+                        self.arm64_is_user(),
+                        if kernel {
+                            self.arm64_is_pxn()
+                        } else {
+                            self.arm64_is_uxn()
+                        },
+                    )
+                };
+                // At the leaf only 0b11 is valid.
+                let present = if level == PageTableLevel::Pte {
+                    self.0 & 0b11 == 0b11
+                } else {
+                    self.arm64_is_valid()
+                };
+                (
+                    present,
+                    block,
+                    writable,
+                    user,
+                    nx,
+                    self.arm64_page_frame() >> 12,
+                )
+            }
+        };
+        let (copy_on_write, global, dirty, accessed, cache_disable, write_through) = match arch {
+            Arch::Amd64 => (bit(9), bit(8), bit(6), bit(5), bit(4), bit(3)),
+            // A mapping is global with nG (bit 11) clear, accessed with AF
+            // (bit 10) set, and written once writable with DBM (bit 51)
+            // set. Table descriptors have none of these.
+            Arch::Arm64 if level == PageTableLevel::Pte || large_page => {
+                (false, !bit(11), bit(51) && writable, bit(10), false, false)
+            }
+            Arch::Arm64 => (false, false, false, false, false, false),
+        };
+        let flag = |set: bool, letter: char| if set { letter } else { '-' };
+        let flags = [
+            flag(copy_on_write, 'C'),
+            flag(global, 'G'),
+            flag(large_page, 'L'),
+            flag(dirty, 'D'),
+            flag(accessed, 'A'),
+            flag(cache_disable, 'N'),
+            flag(write_through, 'T'),
+            if user { 'U' } else { 'K' },
+            if writable { 'W' } else { 'R' },
+            flag(!nx, 'E'),
+            flag(present, 'V'),
+        ]
+        .into_iter()
+        .collect();
+        PteAttributes {
+            present,
+            large_page,
+            writable,
+            user,
+            nx,
+            pfn,
+            flags,
+        }
     }
 
     // --- AArch64 stage-1 descriptor interpretation (4 KiB granule) ---
     //
     // bits[1:0]: 0b00 invalid, 0b01 block (L0-L2), 0b11 table (L0-L2) /
-    // page (L3). Leaf descriptors carry AP[2:1], PXN, and UXN; table
-    // descriptors carry the hierarchical APTable, PXNTable, and UXNTable
-    // restrictions. Output address bits \[47:12\] support a 48-bit PA space.
+    // page (L3). Block and page descriptors carry AP[2:1], PXN, and UXN.
+    // Windows disables hierarchical permissions (`TCR_EL1.HPD`), so a table
+    // descriptor's APTable/PXNTable/UXNTable bits restrict nothing. Output
+    // address bits \[47:12\] support a 48-bit PA space.
     pub const fn arm64_is_valid(self) -> bool {
         // 0b01 block, 0b11 table/page; 0b00 invalid, 0b10 reserved.
         self.0 & 0b01 != 0
@@ -437,8 +510,9 @@ impl PageTableEntry {
         self.arm64_page_frame() & !((1u64 << PDE_SHIFT) - 1)
     }
 
+    /// AP\[1\] (bit 6): EL0 may access the mapping.
     pub const fn arm64_is_user(self) -> bool {
-        self.0 & (1 << 7) != 0
+        self.0 & (1 << 6) != 0
     }
 
     /// Privileged execute-never (PXN, bit 53) on a block/page descriptor.
@@ -451,26 +525,9 @@ impl PageTableEntry {
         self.0 & (1 << 54) != 0
     }
 
+    /// AP\[2\] (bit 7) clear: the mapping is not read-only.
     pub const fn arm64_is_writable(self) -> bool {
-        self.0 & (1 << 6) == 0
-    }
-
-    /// APTable\[0\] (bit 61) forbids EL0 access through a child table.
-    pub const fn arm64_table_allows_user(self) -> bool {
-        self.0 & (1 << 61) == 0
-    }
-
-    /// APTable\[1\] (bit 62) makes child mappings read-only.
-    pub const fn arm64_table_allows_write(self) -> bool {
-        self.0 & (1 << 62) == 0
-    }
-
-    pub const fn arm64_table_is_pxn(self) -> bool {
-        self.0 & (1 << 59) != 0
-    }
-
-    pub const fn arm64_table_is_uxn(self) -> bool {
-        self.0 & (1 << 60) != 0
+        self.0 & (1 << 7) == 0
     }
 }
 

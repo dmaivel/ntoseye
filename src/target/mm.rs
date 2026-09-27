@@ -10,7 +10,7 @@ use crate::guest::ProcessInfo;
 use crate::layout::{ParsedType, TypeInfo};
 use crate::memory::PAGE_SIZE;
 use crate::target::pool::{PoolUsageRow, kernel_symbol_address, read_pool_field};
-use crate::types::{Dtb, PageTableEntry, PageTableLevel, VirtAddr};
+use crate::types::{Dtb, PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
 
 mod lookaside;
 mod paging;
@@ -118,6 +118,7 @@ pub struct VtopLevel {
     pub level: PageTableLevel,
     pub address: VirtAddr,
     pub value: u64,
+    pub attributes: PteAttributes,
 }
 
 /// Explicit page-table translation, including every readable level and the
@@ -602,6 +603,7 @@ pub struct PteLevel {
     pub level: PageTableLevel,
     pub address: VirtAddr,
     pub value: PageTableEntry,
+    pub attributes: PteAttributes,
 }
 
 pub struct PteWalk {
@@ -610,7 +612,23 @@ pub struct PteWalk {
     /// when attached, else the kernel), so callers know what was walked.
     pub dtb: Dtb,
     pub pxe: PteLevel,
-    pub ppe: PteLevel,
+    /// The levels below the PXE, each present only when the one above it
+    /// points at a table.
+    pub ppe: Option<PteLevel>,
     pub pde: Option<PteLevel>,
     pub pte: Option<PteLevel>,
+}
+
+impl PteWalk {
+    /// The levels reached, top down.
+    pub fn levels(&self) -> impl Iterator<Item = &PteLevel> {
+        [
+            Some(&self.pxe),
+            self.ppe.as_ref(),
+            self.pde.as_ref(),
+            self.pte.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
 }

@@ -9,11 +9,11 @@ use crate::memory::DTB_IDENTITY;
 use crate::repl::*;
 use crate::target::mm::{
     LookasideDetail, LookasideListsDetail, PfnDetail, PfnSelector, PoolFindDetail, PoolType,
-    PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, VmDetail, VtopDetail,
+    PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, VmDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::tag_string;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
-use crate::types::{PageTableEntry, PageTableLevel, VirtAddr};
+use crate::types::VirtAddr;
 use crate::ui;
 
 use super::diagnostics::{diagnostic_cell, diagnostic_metric_cell, print_memory_use_summary};
@@ -301,16 +301,16 @@ fn print_pfn(detail: &PfnDetail) {
     );
 }
 
-fn print_pte_entry(level: PageTableLevel, address: u64, raw: u64) {
-    let name = level.name();
-    let value = PageTableEntry(raw);
-    if value.is_present() {
+fn print_pte_entry(level: &VtopLevel) {
+    let name = level.level.name();
+    let (address, raw, attributes) = (level.address.0, level.value, &level.attributes);
+    if attributes.present {
         outln!(
             "  {name:<4} @ {} = {:016x}  pfn {:x}  flags {}",
             ui::addr(address),
             raw,
-            value.pfn(),
-            value.flags_for_level(level)
+            attributes.pfn,
+            attributes.flags
         );
     } else {
         outln!(
@@ -328,7 +328,7 @@ fn print_vtop(detail: &VtopDetail) {
         ui::addr(detail.dtb)
     );
     for level in &detail.levels {
-        print_pte_entry(level.level, level.address.0, level.value);
+        print_pte_entry(level);
     }
     match detail.physical {
         Some(physical) => outln!("  physical             : {}", ui::addr(physical)),
@@ -543,8 +543,9 @@ fn print_lookaside_lists(detail: &LookasideListsDetail) {
 /// names its frame with `invalid_pte_mask` (the L1TF swizzle) cleared.
 fn pte_level_cell(level: &PteLevel, invalid_pte_mask: u64) -> String {
     let value = level.value;
-    let decoded = if value.is_present() {
-        format!("pfn {:<5x} {:>11}", value.pfn(), value.flags())
+    let attributes = &level.attributes;
+    let decoded = if attributes.present {
+        format!("pfn {:<5x} {:>11}", attributes.pfn, attributes.flags)
     } else if value.is_transition() {
         format!(
             "transition pfn {:x}",
@@ -709,16 +710,6 @@ impl ReplState<'_> {
         };
         match self.ctx.target.pte_traverse(address) {
             Ok(result) => {
-                let mut levels = vec![result.pxe, result.ppe];
-
-                if let Some(x) = result.pde {
-                    levels.push(x);
-                }
-
-                if let Some(x) = result.pte {
-                    levels.push(x);
-                }
-
                 let header = format!(
                     "VA {}  DTB {}",
                     ui::addr(result.address.0),
@@ -727,8 +718,8 @@ impl ReplState<'_> {
                 let mut builder = Builder::default();
 
                 let mask = self.ctx.target.phys.invalid_pte_mask();
-                let row_strings: Vec<String> = levels
-                    .iter()
+                let row_strings: Vec<String> = result
+                    .levels()
                     .map(|level| pte_level_cell(level, mask))
                     .collect();
                 builder.push_record(row_strings);
