@@ -14,6 +14,7 @@ use crate::session::Session;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::sched::{ApcSelector, UniqStackScope};
+use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::{self, View};
@@ -181,6 +182,23 @@ impl Inspect {
             let job = target.job_address(address.map(VirtAddr)).map_err(err)?;
             let detail = target.inspect_job(job).map_err(err)?;
             Ok(view::process::job(&detail))
+        })
+    }
+
+    /// Exited processes and terminated threads whose objects are still
+    /// referenced, found by scanning nonpaged pool (`!zombies`). `flags`: 1
+    /// processes, 2 threads, 3 both.
+    #[pyo3(signature = (flags=1))]
+    fn zombies<'py>(&self, py: Python<'py>, flags: u64) -> PyResult<Bound<'py, Record>> {
+        let kinds = ZombieKinds::from_flags(flags);
+        if !kinds.processes && !kinds.threads {
+            return Err(raise(format!(
+                "flags {flags:#x} select nothing: 1 processes, 2 threads, 3 both"
+            )));
+        }
+        self.record(py, |session| {
+            let detail = session.target.zombies(kinds).map_err(err)?;
+            Ok(view::process::zombies(&detail))
         })
     }
 

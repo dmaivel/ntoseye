@@ -27,6 +27,7 @@ pub mod usermode;
 mod variables;
 mod vtl;
 pub mod workqueue;
+pub mod zombies;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
 pub use memory::{

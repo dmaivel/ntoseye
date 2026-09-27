@@ -943,6 +943,12 @@ class Inspect:
         processes assigned to it (`!job`). `address` is the job, or a process
         or thread whose job to decode; `None` is the current process's job.
         """
+    def zombies(self, /, flags: int = 1) -> Record:
+        """
+        Exited processes and terminated threads whose objects are still
+        referenced, found by scanning nonpaged pool (`!zombies`). `flags`: 1
+        processes, 2 threads, 3 both.
+        """
     def lookaside(self, /, address: int) -> Record:
         """
         Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).

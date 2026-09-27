@@ -1,5 +1,5 @@
-//! Process-state inspectors: job objects, global flags, handle traces, and
-//! ALPC ports.
+//! Process-state inspectors: job objects, global flags, handle traces, ALPC
+//! ports, and exited processes and threads still referenced.
 
 use crate::error::Result;
 use crate::expr::Expr;
@@ -9,9 +9,11 @@ use crate::target::alpc::{
     AlpcConnection, AlpcMessageDetail, AlpcPortDetail, AlpcPortKind, AlpcProcessPorts,
     lpc_message_type_name,
 };
+use crate::target::etw::format_filetime_precise;
 use crate::target::gflag::{GLOBAL_FLAGS, GlobalFlagChange, GlobalFlagsDetail, global_flags_set};
 use crate::target::htrace::{HandleTraceDetail, handle_trace_kind_name};
 use crate::target::job::{JobDetail, job_limit_flag_names};
+use crate::target::zombies::{MAX_ZOMBIES, ZombieKinds, ZombiesDetail};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -30,6 +32,15 @@ repl_command! {
     usage: "!gflag [[+|-]value | {+|-}abbreviation | -?]",
     summary: "Show or change nt!NtGlobalFlag; also shows the current process's PEB flags.",
     details: "Without an argument, decodes nt!NtGlobalFlag and the current process's _PEB.NtGlobalFlag by the GFlags names. `+` sets and `-` clears the bits of a value or of one flag named by its three-letter abbreviation (`!gflag +ust`); a bare value replaces nt!NtGlobalFlag. A change is one 4-byte write to nt!NtGlobalFlag, as `ed` makes; the PEB copy is not changed. `-?` lists the flags and their abbreviations.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_zombies;
+    names: ["!zombies", "zombies"],
+    usage: "!zombies [flags]",
+    summary: "List processes and threads that have exited but are still referenced.",
+    details: "Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects, finding each object's header by its decoded type, and lists the processes whose ExitTime is set and the threads in the Terminated state, with the object's handle and pointer counts: what still holds them is what keeps them in memory. Flags: 1 (the default) processes, 2 threads, 3 both. Stops after 4096 of either kind, or at Ctrl+C.",
     completion: Expression,
 }
 
@@ -118,6 +129,24 @@ impl ReplState<'_> {
         };
         match process.and_then(|process| target.handle_traces(&process, handle, max_traces)) {
             Ok(detail) => print_handle_traces(&detail),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
+    fn cmd_zombies(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let flags = match invocation.arg(0).map(|text| self.eval_or_report(text)) {
+            Some(Some(VirtAddr(flags))) => flags,
+            Some(None) => return Ok(()),
+            None => 1,
+        };
+        let kinds = ZombieKinds::from_flags(flags);
+        if !kinds.processes && !kinds.threads {
+            error!("!zombies: flags {flags:#x} select nothing: 1 processes, 2 threads, 3 both");
+            return Ok(());
+        }
+        match self.ctx.target.zombies(kinds) {
+            Ok(detail) => print_zombies(&detail),
             Err(error) => error!("{error}"),
         }
         Ok(())
@@ -577,5 +606,85 @@ fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
             format!(", {} unreadable", ports.skipped_entries)
         }
     );
+    outln!();
+}
+
+fn print_zombies(detail: &ZombiesDetail) {
+    let exited = |filetime: u64| {
+        format_filetime_precise(filetime).unwrap_or_else(|| format!("{filetime:#x}"))
+    };
+    if detail.kinds.processes {
+        outln!(
+            "Zombie processes: {} (and {} live process object(s) seen)",
+            detail.processes.len(),
+            detail.live_processes
+        );
+        if !detail.processes.is_empty() {
+            outln!(
+                "  {:<16}  {:>6}  {:<15}  {:<28}  {:<10}  {:>7}  {:>8}",
+                "EPROCESS",
+                "PID",
+                "Image",
+                "Exited",
+                "Status",
+                "Handles",
+                "Pointers"
+            );
+        }
+        for process in &detail.processes {
+            outln!(
+                "  {}  {:>6}  {:<15}  {:<28}  {:#010x}  {:>7}  {:>8}",
+                ui::addr(process.eprocess.0),
+                process.pid,
+                process.image,
+                exited(process.exit_time),
+                process.exit_status,
+                process.counts.handle_count,
+                process.counts.pointer_count
+            );
+        }
+    }
+    if detail.kinds.threads {
+        outln!(
+            "Zombie threads: {} (and {} live thread object(s) seen)",
+            detail.threads.len(),
+            detail.live_threads
+        );
+        if !detail.threads.is_empty() {
+            outln!(
+                "  {:<16}  {:<13}  {:<16}  {:<15}  {:<10}  {:>7}  {:>8}",
+                "ETHREAD",
+                "Cid",
+                "Process",
+                "Image",
+                "Status",
+                "Handles",
+                "Pointers"
+            );
+        }
+        for thread in &detail.threads {
+            outln!(
+                "  {}  {:<13}  {}  {:<15}  {:#010x}  {:>7}  {:>8}",
+                ui::addr(thread.ethread.0),
+                format!("{:x}.{:x}", thread.pid, thread.tid),
+                ui::addr(thread.process.0),
+                thread.image.as_deref().unwrap_or("?"),
+                thread.exit_status,
+                thread.counts.handle_count,
+                thread.counts.pointer_count
+            );
+        }
+    }
+    let region = format!(
+        "{} pages of nonpaged pool ({:#x} - {:#x}) scanned",
+        detail.scanned_pages, detail.region_start.0, detail.region_end.0
+    );
+    if detail.interrupted {
+        outln!("{region}; interrupted, so the lists are partial");
+    } else if detail.truncated {
+        outln!("{region}; stopped at {MAX_ZOMBIES} of one kind, so the lists are partial");
+    } else {
+        outln!("{region}");
+    }
     outln!();
 }

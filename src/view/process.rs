@@ -1,9 +1,10 @@
-//! Process, thread, job, and global-flag [`View`] builders.
+//! Process, thread, job, global-flag, and zombie [`View`] builders.
 
 use super::{View, diagnostic, list_termination};
 use crate::guest::ProcessInfo;
 use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
 use crate::target::job::{JobDetail, JobField, job_limit_flag_names};
+use crate::target::zombies::{ObjectCounts, ZombiesDetail};
 use crate::target::{ThreadInfo, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
 
@@ -138,5 +139,64 @@ pub fn global_flags(detail: &GlobalFlagsDetail) -> View {
                 ])
             }),
         ),
+    ])
+}
+
+/// `!zombies`: exited processes and terminated threads still referenced.
+/// `processes`/`threads` are `null` for a kind the flags did not ask for.
+pub fn zombies(detail: &ZombiesDetail) -> View {
+    let counts = |counts: &ObjectCounts| {
+        [
+            ("handle_count", View::Num(counts.handle_count as u64)),
+            ("pointer_count", View::Num(counts.pointer_count as u64)),
+        ]
+    };
+    let processes = detail.processes.iter().map(|process| {
+        let mut fields = vec![
+            ("eprocess", View::Hex(process.eprocess.0)),
+            ("pid", View::Num(process.pid)),
+            ("image", View::Str(process.image.clone())),
+            ("exit_time", View::Hex(process.exit_time)),
+            ("exit_status", View::Hex(u64::from(process.exit_status))),
+        ];
+        fields.extend(counts(&process.counts));
+        View::Object(fields)
+    });
+    let threads = detail.threads.iter().map(|thread| {
+        let mut fields = vec![
+            ("ethread", View::Hex(thread.ethread.0)),
+            ("pid", View::Num(thread.pid)),
+            ("tid", View::Num(thread.tid)),
+            ("process", View::Hex(thread.process.0)),
+            ("image", View::OptStr(thread.image.clone())),
+            ("exit_status", View::Hex(u64::from(thread.exit_status))),
+        ];
+        fields.extend(counts(&thread.counts));
+        View::Object(fields)
+    });
+    View::Object(vec![
+        (
+            "processes",
+            if detail.kinds.processes {
+                View::List(processes.collect())
+            } else {
+                View::Null
+            },
+        ),
+        (
+            "threads",
+            if detail.kinds.threads {
+                View::List(threads.collect())
+            } else {
+                View::Null
+            },
+        ),
+        ("live_processes", View::Num(detail.live_processes as u64)),
+        ("live_threads", View::Num(detail.live_threads as u64)),
+        ("region_start", View::Hex(detail.region_start.0)),
+        ("region_end", View::Hex(detail.region_end.0)),
+        ("scanned_pages", View::Num(detail.scanned_pages)),
+        ("interrupted", View::Bool(detail.interrupted)),
+        ("truncated", View::Bool(detail.truncated)),
     ])
 }
