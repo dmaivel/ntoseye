@@ -120,7 +120,7 @@ impl ReplState<'_> {
         ip
     }
 
-    fn print_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
+    pub fn print_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
         let symbol = self
             .ctx
             .target
@@ -196,7 +196,7 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn recovered_trace(&mut self, limit: usize) -> Result<Option<SeededTrace>> {
+    pub fn recovered_trace(&mut self, limit: usize) -> Result<Option<SeededTrace>> {
         match self.ctx.recovered_backtrace(limit) {
             Ok(trace) => Ok(Some(trace)),
             Err(error) => {
@@ -880,7 +880,7 @@ fn print_exception_record(address: u64, record: &ExceptionRecord) {
     outln!();
 }
 
-fn print_indexed_stacktrace(
+pub fn print_indexed_stacktrace(
     trace: &RecoveredStackTrace,
     display_limit: usize,
     frame_offset: usize,

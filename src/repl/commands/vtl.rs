@@ -124,7 +124,16 @@ fn secure_hardware_workflow_command(spec: &CommandSpec) -> bool {
 fn live_secure_vcpu_command(spec: &CommandSpec) -> bool {
     matches!(
         spec.names[0],
-        "r" | "kn" | ".frame" | "dv" | "~" | "vcpu" | "rdmsr" | "break" | "status" | ".lastevent"
+        "r" | "kn"
+            | ".frame"
+            | "!for_each_frame"
+            | "dv"
+            | "~"
+            | "vcpu"
+            | "rdmsr"
+            | "break"
+            | "status"
+            | ".lastevent"
     )
 }
 

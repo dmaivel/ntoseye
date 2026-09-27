@@ -14,13 +14,17 @@ use crate::expr::Expr;
 use crate::guest::ModuleInfo;
 use crate::output;
 use crate::symbols::ModuleSymbolStatus;
-use crate::target::ThreadInfo;
+use crate::target::{SelectedFrame, ThreadInfo};
 
+use crate::repl::commands::frames::print_indexed_stacktrace;
 use crate::repl::*;
 
 /// How deeply command loops may nest (a `.foreach` inside a `.foreach`, or an
 /// alias that runs a loop over itself).
 const COMMAND_LOOP_DEPTH_LIMIT: usize = 16;
+
+/// How many frames `!for_each_frame` visits, as many as WinDbg's `k` walks.
+const FOR_EACH_FRAME_LIMIT: usize = 256;
 
 /// WinDbg's defaults when `!for_each_*` is given no command.
 const DEFAULT_PROCESS_COMMAND: &str = "!process @#Process 0";
@@ -69,6 +73,16 @@ repl_command! {
     usage: "!for_each_module [\"CommandString\"]",
     summary: "Run commands once for each loaded module `lm` lists.",
     details: "Visits the modules of the current scope in `lm` order: the `.process` process's, else the kernel's (the secure kernel's under `.vtl 1`). CommandString may use these aliases, each replaced as a whole word or anywhere as `${@#Name}`, case-sensitively: @#ModuleIndex (0-based position), @#ModuleName (the `module!` name `lm` shows), @#ImageName (the image name `lm` shows), @#LoadedImageName (the loader's full path when known, else the image name), @#SymbolFileName (the local PDB the symbols came from, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while fetching, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (string length plus one). A value holding `;` or a quote goes in as a quoted string, so it cannot end the command it lands in and start another. Numbers are 0x-prefixed hex, so they read the same in any radix. A module lacking a value an alias names (no timestamp, no version resource) is reported and skipped. Without CommandString, runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
+    style: ExpressionTail,
+}
+
+repl_command! {
+    cmd_for_each_frame -> Flow;
+    names: ["!for_each_frame"],
+    usage: "!for_each_frame [\"CommandString\"]",
+    summary: "Run commands once for each frame of the current stack, with that frame selected.",
+    details: "Walks the stack `k` shows, up to 256 frames. Each frame is printed as `.frame` prints it, becomes the local context as with `.frame N` (so `r`, `dv`, and `@$frame` see it), and then CommandString runs; several commands are separated by `;` and the string quoted. Afterwards the local context is what it was before. Without CommandString, lists the frames and their indexes. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
+    run_state: HaltedOrParkedThread,
     style: ExpressionTail,
 }
 
@@ -700,6 +714,48 @@ impl ReplState<'_> {
                 None
             }
         }
+    }
+
+    fn cmd_for_each_frame(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
+        if invocation.raw_tail == "-?" {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(Flow::Continue);
+        }
+        let command = match command_string(invocation.raw_tail) {
+            Ok(command) => command,
+            Err(error) => {
+                error!("{}: {error}", invocation.name);
+                return Ok(Flow::Continue);
+            }
+        };
+        let Some((trace, seed, live)) = self.recovered_trace(FOR_EACH_FRAME_LIMIT)? else {
+            return Ok(Flow::Continue);
+        };
+        let previous = self.ctx.target.selected_frame.clone();
+        let Some(command) = command else {
+            let selected = previous.as_ref().map(|frame| frame.index);
+            print_indexed_stacktrace(&trace, FOR_EACH_FRAME_LIMIT, 0, false, selected);
+            outln!();
+            return Ok(Flow::Continue);
+        };
+        let name = invocation.name;
+        let flow = self.in_command_loop(name, |state| {
+            state.run_iterations(name, trace.frames.len(), |state, index| {
+                let Some(frame) = SelectedFrame::from_recovered(&trace, index, Some(&seed), live)
+                else {
+                    error!("{name}: skipped: frame {index} is unavailable");
+                    return None;
+                };
+                state.ctx.select_frame(frame.clone());
+                state.print_selected_frame(&frame, false);
+                Some(Cow::Borrowed(command.as_str()))
+            })
+        });
+        match previous {
+            Some(frame) => self.ctx.select_frame(frame),
+            None => self.ctx.clear_selected_frame(),
+        }
+        flow
     }
 }
 
