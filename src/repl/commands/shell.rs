@@ -44,7 +44,7 @@ impl ReplState<'_> {
     fn cmd_shell(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
         let tail = invocation.raw_tail.trim();
         let (commands, host_command) = match tail.strip_prefix("-ci") {
-            Some(rest) if rest.starts_with(char::is_whitespace) => {
+            Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
                 let Some((commands, rest)) = take_quoted(rest.trim_start()) else {
                     error!("{SHELL}: -ci takes the debugger commands in quotes");
                     return Ok(Flow::Continue);
@@ -76,8 +76,8 @@ impl ReplState<'_> {
 /// it writes.
 fn run_host_command(command: &str, input: Option<String>) {
     let child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
+        // `--` so a command starting with `-` is not read as sh options.
+        .args(["-c", "--", command])
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
