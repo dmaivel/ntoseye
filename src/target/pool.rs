@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::error::{Error, Result};
-use crate::layout::{FieldInfo, TypeInfo, le_uint};
+use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::memory::PAGE_SIZE;
 use crate::symbols::format_symbol_with_offset;
 use crate::target::Target;
+use crate::target::mm::find_mi_state_fields;
 use crate::types::VirtAddr;
 
 pub const POOL_ALIGN: u64 = 0x10;
@@ -736,27 +738,40 @@ pub fn pool_block_state(h: &PoolHeader) -> &'static str {
     }
 }
 
+/// Largest `_POOL_HEADER` [`parse_pool_header`] reads (16 bytes on x64).
+const MAX_POOL_HEADER_SIZE: usize = 0x20;
+
 pub fn parse_pool_header(
     debugger: &Target,
     layout: &PoolLayout,
     header: VirtAddr,
 ) -> Option<PoolHeader> {
-    let mem = debugger.kernel_address_space();
+    let mut bytes = [0u8; MAX_POOL_HEADER_SIZE];
+    let bytes = &mut bytes[..(layout.header_size as usize).min(MAX_POOL_HEADER_SIZE)];
+    debugger
+        .kernel_address_space()
+        .read_bytes(header, bytes)
+        .ok()?;
+    pool_header_in(layout, header, bytes)
+}
+
+/// The `_POOL_HEADER` at `header`, from `bytes` read there.
+fn pool_header_in(layout: &PoolLayout, header: VirtAddr, bytes: &[u8]) -> Option<PoolHeader> {
     let (previous_size, block_units, pool_type, tag) = if layout.pool_header_uses_struct {
-        let previous_size =
-            read_pool_field(&layout.pool_header, &mem, header, "PreviousSize")? as u8;
-        let block_units = read_pool_field(&layout.pool_header, &mem, header, "BlockSize")? as u8;
-        let pool_type = read_pool_field(&layout.pool_header, &mem, header, "PoolType")? as u8;
-        let tag = read_pool_field(&layout.pool_header, &mem, header, "PoolTag")? as u32;
-        (previous_size, block_units, pool_type, tag)
+        let field = |name| pool_field_from_buf(&layout.pool_header, bytes, name);
+        (
+            field("PreviousSize")? as u8,
+            field("BlockSize")? as u8,
+            field("PoolType")? as u8,
+            field("PoolTag")? as u32,
+        )
     } else {
-        let word0: u32 = mem.read(header).ok()?;
-        let tag: u32 = mem.read(header + layout.pool_tag_offset).ok()?;
+        let word0 = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?);
         (
             (word0 & 0xff) as u8,
             ((word0 >> 16) & 0xff) as u8,
             ((word0 >> 24) & 0xff) as u8,
-            tag,
+            pool_tag_in(layout, bytes)?,
         )
     };
     if block_units == 0 {
@@ -771,6 +786,14 @@ pub fn parse_pool_header(
         tag,
         synthetic_free: false,
     })
+}
+
+/// The tag of the `_POOL_HEADER` whose bytes begin `bytes`.
+fn pool_tag_in(layout: &PoolLayout, bytes: &[u8]) -> Option<u32> {
+    let at = layout.pool_tag_offset as usize;
+    Some(u32::from_le_bytes(
+        bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
 }
 
 pub fn pool_header_plausible(layout: &PoolLayout, h: &PoolHeader) -> bool {
@@ -795,27 +818,6 @@ pub fn try_pool_header_lax(
 ) -> Option<PoolHeader> {
     let h = parse_pool_header(debugger, layout, addr)?;
     pool_header_plausible(layout, &h).then_some(h)
-}
-
-pub fn gap_free_pool_block(
-    debugger: &Target,
-    layout: &PoolLayout,
-    header: VirtAddr,
-    size: u64,
-) -> PoolHeader {
-    let tag: u32 = debugger
-        .kernel_address_space()
-        .read(header + layout.pool_tag_offset)
-        .unwrap_or(0);
-    PoolHeader {
-        header,
-        body: header + layout.header_size,
-        size,
-        previous_size: 0,
-        pool_type: 0,
-        tag,
-        synthetic_free: true,
-    }
 }
 
 pub fn walk_pool_page_lax(
@@ -875,30 +877,55 @@ pub fn walk_pool_page_lax(
     blocks
 }
 
+/// The blocks of the pool page at `base`: every plausible header, overlaps
+/// dropped, with the gaps between them as free blocks.
 pub fn scan_pool_page_lax(
     debugger: &Target,
     layout: &PoolLayout,
     base: VirtAddr,
 ) -> Vec<PoolHeader> {
-    let Some(page_end) = base.0.checked_add(POOL_PAGE_SIZE) else {
+    let mut page = vec![0u8; PAGE_SIZE];
+    if debugger
+        .kernel_address_space()
+        .read_bytes(base, &mut page)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    pool_page_blocks(layout, base, &page)
+}
+
+/// [`scan_pool_page_lax`] of the page at `base` already read into `page`.
+pub fn pool_page_blocks(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec<PoolHeader> {
+    let Some(page_end) = base.0.checked_add(page.len() as u64) else {
         return Vec::new();
     };
-    let mut candidates = Vec::new();
-    let mut off = 0;
-    while off < POOL_PAGE_SIZE && !debugger.interrupted() {
-        let Some(addr) = base.0.checked_add(off).map(VirtAddr) else {
-            break;
-        };
-        if let Some(h) = try_pool_header_lax(debugger, layout, addr).filter(|h| {
-            h.header
-                .0
-                .checked_add(h.size)
-                .is_some_and(|end| end <= page_end)
-        }) {
-            candidates.push(h);
-        }
-        off += POOL_ALIGN;
-    }
+    let tag_at = |header: VirtAddr| {
+        page.get((header.0 - base.0) as usize..)
+            .and_then(|bytes| pool_tag_in(layout, bytes))
+            .unwrap_or(0)
+    };
+    let gap_free_block = |header: VirtAddr, size: u64| PoolHeader {
+        header,
+        body: header + layout.header_size,
+        size,
+        previous_size: 0,
+        pool_type: 0,
+        tag: tag_at(header),
+        synthetic_free: true,
+    };
+    let candidates: Vec<PoolHeader> = (0..page.len() as u64)
+        .step_by(POOL_ALIGN as usize)
+        .filter_map(|offset| {
+            pool_header_in(layout, base + offset, &page[offset as usize..]).filter(|h| {
+                pool_header_plausible(layout, h)
+                    && h.header
+                        .0
+                        .checked_add(h.size)
+                        .is_some_and(|end| end <= page_end)
+            })
+        })
+        .collect();
     let mut blocks = Vec::new();
     let mut cursor = base;
     for (i, h) in candidates.iter().copied().enumerate() {
@@ -919,7 +946,7 @@ pub fn scan_pool_page_lax(
                 .header
                 .0
                 .saturating_sub(h.header.0.saturating_add(POOL_ALIGN));
-            blocks.push(gap_free_pool_block(debugger, layout, h.header, free_size));
+            blocks.push(gap_free_block(h.header, free_size));
             cursor = VirtAddr(h.header.0.saturating_add(free_size));
         } else {
             if h.header > cursor {
@@ -928,7 +955,7 @@ pub fn scan_pool_page_lax(
                     .0
                     .saturating_sub(cursor.0.saturating_add(POOL_ALIGN));
                 if free_size >= POOL_ALIGN * 2 {
-                    blocks.push(gap_free_pool_block(debugger, layout, cursor, free_size));
+                    blocks.push(gap_free_block(cursor, free_size));
                 }
             }
             blocks.push(h);
@@ -936,6 +963,70 @@ pub fn scan_pool_page_lax(
         }
     }
     blocks
+}
+
+/// Each 16-byte-aligned slot of the pool page `page` read as a
+/// `_POOL_HEADER`: its offset and the tag it would carry. Segment-heap
+/// blocks still begin with a header carrying the tag, so a tag match marks
+/// a candidate where the block chain does not walk.
+pub fn pool_header_tags<'p>(
+    layout: &PoolLayout,
+    page: &'p [u8],
+) -> impl Iterator<Item = (u64, u32)> + 'p {
+    let tag_offset = layout.pool_tag_offset as usize;
+    (0..page.len())
+        .step_by(POOL_ALIGN as usize)
+        .filter_map(move |at| {
+            let tag = page.get(at + tag_offset..at + tag_offset + 4)?;
+            Some((at as u64, u32::from_le_bytes(tag.try_into().ok()?)))
+        })
+}
+
+/// How far [`scan_present_pool_pages`] got.
+pub struct PoolPageScan {
+    /// Present pages read (or found unreadable).
+    pub pages: u64,
+    /// The present page the scan stopped at, unread, when the visitor or a
+    /// host interrupt ended it early.
+    pub stopped_at: Option<VirtAddr>,
+}
+
+/// Read each present page of `[start, end)` and hand `visit` its address
+/// and bytes. The page tables are walked, so a region of terabytes mapped
+/// sparsely costs only its mapped pages. After `visit` returns `Break`, or
+/// once the host interrupts, the scan stops at the next present page.
+pub fn scan_present_pool_pages(
+    debugger: &Target,
+    start: VirtAddr,
+    end: VirtAddr,
+    mut visit: impl FnMut(VirtAddr, &[u8]) -> ControlFlow<()>,
+) -> Result<PoolPageScan> {
+    let mut scan = PoolPageScan {
+        pages: 0,
+        stopped_at: None,
+    };
+    let mut stop = false;
+    let mut page = vec![0u8; PAGE_SIZE];
+    debugger
+        .kernel_address_space()
+        .for_each_present_page(start, end, |va, physical, length| {
+            for offset in (0..length).step_by(PAGE_SIZE) {
+                if stop || debugger.interrupted() {
+                    scan.stopped_at = Some(va + offset);
+                    return ControlFlow::Break(());
+                }
+                scan.pages += 1;
+                if debugger
+                    .phys
+                    .read_bytes(physical + offset, &mut page)
+                    .is_ok()
+                {
+                    stop = visit(va + offset, &page).is_break();
+                }
+            }
+            ControlFlow::Continue(())
+        })?;
+    Ok(scan)
 }
 
 pub fn find_pool_block_index(blocks: &[PoolHeader], needle: &PoolHeader) -> Option<usize> {
@@ -979,35 +1070,146 @@ pub fn locate_pool_block_in_page(
     (vec![anchor], Some(0), base)
 }
 
+/// A pool with a virtual range of its own, and what locates that range.
+pub struct PoolRange {
+    pub name: &'static str,
+    /// The `_MI_ASSIGNED_REGION_TYPES` value naming its
+    /// `MiState.Vs.SystemVaRegions` entry, when it has one.
+    assigned_region: Option<&'static str>,
+    /// The `nt!Mm*Start`/`nt!Mm*End` globals of builds before those regions.
+    start_symbol: &'static str,
+    end_symbol: &'static str,
+}
+
+pub const NONPAGED_POOL: PoolRange = PoolRange {
+    name: "NonPagedPool",
+    assigned_region: Some("AssignedRegionNonPagedPool"),
+    start_symbol: "MmNonPagedPoolStart",
+    end_symbol: "MmNonPagedPoolEnd",
+};
+
+pub const PAGED_POOL: PoolRange = PoolRange {
+    name: "PagedPool",
+    assigned_region: Some("AssignedRegionPagedPool"),
+    start_symbol: "MmPagedPoolStart",
+    end_symbol: "MmPagedPoolEnd",
+};
+
+pub const SPECIAL_POOL: PoolRange = PoolRange {
+    name: "SpecialPool",
+    assigned_region: None,
+    start_symbol: "MmSpecialPoolStart",
+    end_symbol: "MmSpecialPoolEnd",
+};
+
+/// The virtual range `[start, end)` of `pool`. Windows 10 1803 and later
+/// give nonpaged and paged pool a fixed region each in
+/// `MiState.Vs.SystemVaRegions`, which the `MmNonPagedPoolStart`-style
+/// globals of older builds (or the `MiState` fields named like them) no
+/// longer describe; those are the fallback.
+pub fn pool_range(debugger: &Target, pool: &PoolRange) -> Result<(VirtAddr, VirtAddr)> {
+    let assigned = match pool.assigned_region {
+        Some(region) => assigned_system_va_region(debugger, region),
+        None => Err(Error::DebugInfo("no system-VA region of its own".into())),
+    };
+    let why = match assigned {
+        Ok(range) => return Ok(range),
+        Err(error) => error,
+    };
+    legacy_pool_range(debugger, pool).ok_or_else(|| {
+        Error::DebugInfo(format!(
+            "cannot locate {} ({why}; nor nt!{}/nt!{})",
+            pool.name, pool.start_symbol, pool.end_symbol
+        ))
+    })
+}
+
+/// Base and end of the `MiState.Vs.SystemVaRegions` entry `region` (an
+/// `_MI_ASSIGNED_REGION_TYPES` name).
+fn assigned_system_va_region(debugger: &Target, region: &str) -> Result<(VirtAddr, VirtAddr)> {
+    let ntos = &debugger.guest()?.ntoskrnl;
+    let types = ntos.types();
+    let missing = |why: String| {
+        Error::DebugInfo(format!(
+            "no {region} system-VA region, which Windows 10 1803 and later assign: {why}"
+        ))
+    };
+    let index = debugger
+        .symbols
+        .find_enum_across_modules(ntos.dtb(), "_MI_ASSIGNED_REGION_TYPES")
+        .and_then(|values| values.into_iter().find(|(name, _)| name == region))
+        .map(|(_, value)| value as u64)
+        .ok_or_else(|| missing("no _MI_ASSIGNED_REGION_TYPES value".into()))?;
+    let info = types
+        .layout("_MI_SYSTEM_INFORMATION")
+        .map_err(|error| missing(error.to_string()))?;
+    let visible = types
+        .layout("_MI_VISIBLE_STATE")
+        .map_err(|error| missing(error.to_string()))?;
+    let regions = visible
+        .field("SystemVaRegions")
+        .map_err(|error| missing(error.to_string()))?;
+    let count = match &regions.type_data {
+        ParsedType::Array(_, count) => u64::from(*count),
+        _ => return Err(missing("SystemVaRegions is not an array".into())),
+    };
+    if index >= count {
+        return Err(missing(format!("index {index} past {count} regions")));
+    }
+    let entry_size = regions.size / count;
+    let entry = ntos.symbol("MiState")?.address()
+        + info.field_offset("Vs")?
+        + regions.offset as u64
+        + index * entry_size;
+    let assignment = types.struct_at("_MI_SYSTEM_VA_ASSIGNMENT", entry)?;
+    let base = assignment.read_pointer("BaseAddress")?;
+    let size = assignment.read_uint("NumberOfBytes")?;
+    let end = base
+        .0
+        .checked_add(size)
+        .filter(|_| !base.is_zero() && size != 0)
+        .ok_or_else(|| missing("the region is not assigned".into()))?;
+    Ok((base, VirtAddr(end)))
+}
+
+/// `pool`'s range from its `nt!Mm*Start`/`nt!Mm*End` globals, else from the
+/// `MiState` fields named like them.
+fn legacy_pool_range(debugger: &Target, pool: &PoolRange) -> Option<(VirtAddr, VirtAddr)> {
+    let globals = read_kernel_global_u64(debugger, pool.start_symbol)
+        .and_then(|start| Ok((start, read_kernel_global_u64(debugger, pool.end_symbol)?)))
+        .ok()
+        .filter(|(start, end)| start < end);
+    let (start, end) = globals.or_else(|| {
+        let fields = find_mi_state_fields(debugger, &["pool", "start", "end"]);
+        // `MmPagedPoolStart` names `pagedpoolstart`, which a
+        // `NonPagedPoolStart` field also contains.
+        let field = |symbol: &str| {
+            let key = symbol.trim_start_matches("Mm").to_ascii_lowercase();
+            let shadowed = format!("non{key}");
+            fields.iter().find_map(|(name, value)| {
+                let name = name.to_ascii_lowercase();
+                (name.contains(&key) && !name.contains(&shadowed)).then_some(*value)
+            })
+        };
+        Some((field(pool.start_symbol)?, field(pool.end_symbol)?)).filter(|(s, e)| s < e)
+    })?;
+    Some((VirtAddr(start), VirtAddr(end)))
+}
+
+/// The pool range holding `addr`, if any: its name, start, and end.
 pub fn classify_pool_region(
     debugger: &Target,
     addr: VirtAddr,
 ) -> Option<(&'static str, VirtAddr, VirtAddr)> {
-    let dtb = debugger.current_dtb();
-    let mem = debugger.kernel_address_space();
-    let bound = |symbol: &str| {
-        let address = debugger
-            .symbols
-            .find_symbol_across_modules(dtb, &format!("nt!{symbol}"))
-            .ok()
-            .flatten()?;
-        mem.read::<u64>(address).ok().map(VirtAddr)
-    };
-    for (name, start, stop) in [
-        ("NonPagedPool", "MmNonPagedPoolStart", "MmNonPagedPoolEnd"),
-        ("PagedPool", "MmPagedPoolStart", "MmPagedPoolEnd"),
-        ("SpecialPool", "MmSpecialPoolStart", "MmSpecialPoolEnd"),
-    ] {
-        // A range whose symbols this build lacks says nothing about the
-        // others; keep looking.
-        let (Some(s), Some(e)) = (bound(start), bound(stop)) else {
-            continue;
-        };
-        if (s..e).contains(&addr) {
-            return Some((name, s, e));
-        }
-    }
-    None
+    // A range this build cannot locate says nothing about the others.
+    [NONPAGED_POOL, PAGED_POOL, SPECIAL_POOL]
+        .iter()
+        .find_map(|pool| {
+            let (start, end) = pool_range(debugger, pool).ok()?;
+            (start..end)
+                .contains(&addr)
+                .then_some((pool.name, start, end))
+        })
 }
 
 fn parse_big_pool_entry(

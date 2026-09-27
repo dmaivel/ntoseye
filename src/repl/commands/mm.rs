@@ -69,7 +69,7 @@ repl_command! {
     names: ["!poolfind", "poolfind"],
     usage: "!poolfind <tag> [0|1]",
     summary: "Find pool blocks with a matching tag.",
-    details: "The optional type selects nonpaged (0) or paged (1). Only virtual pool ranges and the big-page table are read; page scans are bounded and interruptible.",
+    details: "The optional type selects nonpaged (0) or paged (1). The mapped pages of the pool ranges (on Windows 10 1803 and later the fixed regions in MiState.Vs.SystemVaRegions, before that MmNonPagedPoolStart and friends) and the big-page table are read; the scan stops after 1,024 matches and is interruptible.",
     completion: Expression,
 }
 
@@ -633,10 +633,11 @@ fn print_pool_find(detail: &PoolFindDetail) {
                 m.pool_type.map_or("unknown", PoolType::name)
             );
         }
-        if range.bounded {
+        if let Some(stopped_at) = range.stopped_at {
             outln!(
-                "  {} scan bounded at {} pages",
+                "  {} scan stopped at {} after {} mapped pages",
                 range.name,
+                ui::addr(stopped_at.0),
                 range.scanned_pages
             );
         }

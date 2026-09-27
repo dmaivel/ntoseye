@@ -410,7 +410,7 @@ fn pool_range_scan(range: &PoolFindRange) -> View {
         ("end", View::Hex(range.end.0)),
         ("pages", View::Num(range.pages)),
         ("scanned_pages", View::Num(range.scanned_pages)),
-        ("bounded", View::Bool(range.bounded)),
+        ("stopped_at", View::OptHex(range.stopped_at.map(|at| at.0))),
     ])
 }
 

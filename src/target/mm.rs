@@ -173,13 +173,6 @@ impl PoolType {
             Self::Paged => "PagedPool",
         }
     }
-
-    fn kind(self) -> u64 {
-        match self {
-            Self::NonPaged => 0,
-            Self::Paged => 1,
-        }
-    }
 }
 
 /// A normal `_POOL_HEADER` block in a page.
@@ -302,9 +295,13 @@ pub struct PoolFindRange {
     pub name: String,
     pub start: VirtAddr,
     pub end: VirtAddr,
+    /// Pages the range spans, mapped or not.
     pub pages: u64,
+    /// Mapped pages read.
     pub scanned_pages: u64,
-    pub bounded: bool,
+    /// The mapped page the scan stopped at, unread, when the match bound or
+    /// an interrupt ended it early.
+    pub stopped_at: Option<VirtAddr>,
 }
 
 /// A decoded `_GENERAL_LOOKASIDE` record. Each counter is independently
@@ -485,7 +482,7 @@ fn nested_mi_state_fields(
     }
 }
 
-fn find_mi_state_fields(target: &Target, predicates: &[&str]) -> Vec<(String, u64)> {
+pub(crate) fn find_mi_state_fields(target: &Target, predicates: &[&str]) -> Vec<(String, u64)> {
     let Ok(base) = kernel_symbol_address(target, "MiState") else {
         return Vec::new();
     };

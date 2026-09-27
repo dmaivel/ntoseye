@@ -1,23 +1,24 @@
 //! The `!pool`, `!poolused`, and `!poolfind` inspectors, built on the pool
 //! decoding helpers in [`crate::target::pool`].
 
+use std::ops::ControlFlow;
+
 use super::{
     BigPoolDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange, PoolPageDetail,
-    PoolRegionDetail, PoolType, PoolUsageDetail, PoolUsageSort, find_mi_state_fields,
+    PoolRegionDetail, PoolType, PoolUsageDetail, PoolUsageSort,
 };
 use crate::error::Result;
 use crate::memory::PAGE_SIZE;
 use crate::symbols::glob_matches;
 use crate::target::Target;
 use crate::target::pool::{
-    BigPoolEntry, POOL_PAGE_SIZE, PoolHeader, annotate_near_symbol, big_pool_layout,
-    classify_pool_region, collect_pool_usage, find_big_pool, locate_pool_block_in_page,
-    pool_block_state, pool_layout, read_kernel_global_u64, scan_big_pool_entries,
-    scan_pool_page_lax, segment_heap_hint, tag_string,
+    BigPoolEntry, NONPAGED_POOL, PAGED_POOL, POOL_PAGE_SIZE, PoolHeader, annotate_near_symbol,
+    big_pool_layout, classify_pool_region, collect_pool_usage, find_big_pool,
+    locate_pool_block_in_page, pool_block_state, pool_layout, pool_page_blocks, pool_range,
+    scan_big_pool_entries, scan_present_pool_pages, segment_heap_hint, tag_string,
 };
 use crate::types::VirtAddr;
 
-const MAX_POOLFIND_PAGES: u64 = 16 * 1024;
 const MAX_POOLFIND_RESULTS: usize = 1024;
 const MAX_POOLUSED_ROWS: usize = 256;
 
@@ -140,43 +141,36 @@ impl Target {
         })
     }
 
-    /// Scan virtual pool ranges and `PoolBigPageTable` for a tag. The bounded
-    /// result records whether the scan reached a limit or was interrupted by
-    /// the host.
+    /// Scan the mapped pages of the pool ranges (see
+    /// [`pool_range`](crate::target::pool::pool_range)) and
+    /// `PoolBigPageTable` for a tag. The result is bounded to 1,024 matches
+    /// and records whether it reached that bound or the host interrupted.
     pub fn pool_find(&self, tag: &str, pool_type: Option<PoolType>) -> Result<PoolFindDetail> {
         let layout = pool_layout(self).ok();
         let mut matches = Vec::new();
         let mut ranges = Vec::new();
-        let mut truncated = false;
         if let Some(layout) = &layout {
-            for range in resolve_pool_ranges(self) {
-                if pool_type.is_some_and(|kind| range.kind != kind.kind()) {
+            for kind in [PoolType::NonPaged, PoolType::Paged] {
+                if pool_type.is_some_and(|wanted| wanted != kind) {
                     continue;
                 }
-                let Some(start) = range
-                    .start
+                let pool = match kind {
+                    PoolType::NonPaged => &NONPAGED_POOL,
+                    PoolType::Paged => &PAGED_POOL,
+                };
+                let Ok((start, end)) = pool_range(self, pool) else {
+                    continue;
+                };
+                let Some(start) = start
+                    .0
                     .checked_add(PAGE_SIZE as u64 - 1)
-                    .map(|value| value & !(PAGE_SIZE as u64 - 1))
+                    .map(|value| VirtAddr(value & !(PAGE_SIZE as u64 - 1)))
                 else {
                     continue;
                 };
-                let end = range.end & !(PAGE_SIZE as u64 - 1);
-                let pages = end.saturating_sub(start) / PAGE_SIZE as u64;
-                let scan_pages = pages.min(MAX_POOLFIND_PAGES);
-                let mut scanned_pages = 0;
-                for page in 0..scan_pages {
-                    if self.interrupted() || matches.len() >= MAX_POOLFIND_RESULTS {
-                        break;
-                    }
-                    let Some(base) = page
-                        .checked_mul(PAGE_SIZE as u64)
-                        .and_then(|offset| start.checked_add(offset))
-                        .map(VirtAddr)
-                    else {
-                        break;
-                    };
-                    scanned_pages += 1;
-                    for block in scan_pool_page_lax(self, layout, base) {
+                let end = VirtAddr(end.0 & !(PAGE_SIZE as u64 - 1));
+                let scan = scan_present_pool_pages(self, start, end, |page_va, page| {
+                    for block in pool_page_blocks(layout, page_va, page) {
                         if block.synthetic_free || !glob_matches(tag, &tag_string(block.tag), false)
                         {
                             continue;
@@ -187,7 +181,7 @@ impl Target {
                             PoolType::NonPaged
                         };
                         matches.push(PoolFindMatch {
-                            source: range.name.to_string(),
+                            source: pool.name.to_string(),
                             address: block.body,
                             size: block.size,
                             tag: block.tag,
@@ -199,19 +193,18 @@ impl Target {
                             index: None,
                         });
                         if matches.len() >= MAX_POOLFIND_RESULTS {
-                            break;
+                            return ControlFlow::Break(());
                         }
                     }
-                }
-                let range_bounded = scan_pages < pages;
-                truncated |= range_bounded;
+                    ControlFlow::Continue(())
+                })?;
                 ranges.push(PoolFindRange {
-                    name: range.name.to_string(),
-                    start: VirtAddr(start),
-                    end: VirtAddr(end),
-                    pages,
-                    scanned_pages,
-                    bounded: range_bounded,
+                    name: pool.name.to_string(),
+                    start,
+                    end,
+                    pages: end.0.saturating_sub(start.0) / PAGE_SIZE as u64,
+                    scanned_pages: scan.pages,
+                    stopped_at: scan.stopped_at,
                 });
                 if self.interrupted() || matches.len() >= MAX_POOLFIND_RESULTS {
                     break;
@@ -295,7 +288,7 @@ impl Target {
                 Err(error) => Some(format!("big-page layout unavailable: {error}")),
             }
         };
-        truncated |= matches.len() >= MAX_POOLFIND_RESULTS;
+        let truncated = matches.len() >= MAX_POOLFIND_RESULTS;
         let interrupted = self.interrupted();
         Ok(PoolFindDetail {
             tag: tag.to_string(),
@@ -342,82 +335,4 @@ fn big_pool_detail(target: VirtAddr, entry: &BigPoolEntry) -> BigPoolDetail {
         pool_flags: entry.pool_flags,
         slush_size: entry.slush_size,
     }
-}
-
-fn resolve_pool_ranges(target: &Target) -> Vec<PoolFindRangeInternal> {
-    let mut ranges = Vec::new();
-    if let Some(range) = pool_range(
-        target,
-        "NonPagedPool",
-        "MmNonPagedPoolStart",
-        "MmNonPagedPoolEnd",
-        0,
-    ) {
-        ranges.push(range);
-    } else if let Some(range) =
-        mi_state_pool_range(target, "nonpagedpoolstart", "nonpagedpoolend", 0)
-    {
-        ranges.push(range);
-    }
-    if let Some(range) = pool_range(target, "PagedPool", "MmPagedPoolStart", "MmPagedPoolEnd", 1) {
-        ranges.push(range);
-    } else if let Some(range) = mi_state_pool_range(target, "pagedpoolstart", "pagedpoolend", 1) {
-        ranges.push(range);
-    }
-    ranges
-}
-
-#[derive(Clone, Copy)]
-struct PoolFindRangeInternal {
-    name: &'static str,
-    start: u64,
-    end: u64,
-    kind: u64,
-}
-
-fn pool_range(
-    target: &Target,
-    name: &'static str,
-    start_symbol: &str,
-    end_symbol: &str,
-    kind: u64,
-) -> Option<PoolFindRangeInternal> {
-    let start = read_kernel_global_u64(target, start_symbol).ok()?;
-    let end = read_kernel_global_u64(target, end_symbol).ok()?;
-    (start < end).then_some(PoolFindRangeInternal {
-        name,
-        start,
-        end,
-        kind,
-    })
-}
-
-fn mi_state_pool_range(
-    target: &Target,
-    start_name: &str,
-    end_name: &str,
-    kind: u64,
-) -> Option<PoolFindRangeInternal> {
-    let fields = find_mi_state_fields(target, &["pool", "start", "end"]);
-    let start = fields.iter().find_map(|(name, value)| {
-        name.to_ascii_lowercase()
-            .contains(&start_name.to_ascii_lowercase())
-            .then_some(*value)
-    });
-    let end = fields.iter().find_map(|(name, value)| {
-        name.to_ascii_lowercase()
-            .contains(&end_name.to_ascii_lowercase())
-            .then_some(*value)
-    });
-    Some(PoolFindRangeInternal {
-        name: if kind == 0 {
-            "NonPagedPool"
-        } else {
-            "PagedPool"
-        },
-        start: start?,
-        end: end?,
-        kind,
-    })
-    .filter(|range| range.start < range.end)
 }
