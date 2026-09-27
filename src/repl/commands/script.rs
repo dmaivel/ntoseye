@@ -15,7 +15,7 @@ use crate::expr::{Expr, NumberRadix};
 use crate::target::{Target, UserVar};
 use crate::ui;
 
-use crate::repl::commands::foreach::{substitute, take_block};
+use crate::repl::commands::foreach::{substitute, take_delimited};
 use crate::repl::*;
 
 /// How often `.sleep` looks for Ctrl+C.
@@ -132,31 +132,6 @@ repl_command! {
     completion: Expression,
 }
 
-/// The inside of the `( ... )` at the start of `text`, and what follows it.
-/// Parentheses inside quoted strings do not count.
-fn take_parens(text: &str) -> std::result::Result<(&str, &str), String> {
-    if !text.starts_with('(') {
-        return Err("expected '('".to_string());
-    }
-    let mut depth = 0usize;
-    let scan = scan_unquoted(text, |_, ch| {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                // The opening parenthesis counted first, so this never underflows.
-                depth -= 1;
-                return depth == 0;
-            }
-            _ => {}
-        }
-        false
-    });
-    match scan {
-        Unquoted::Stopped(close) => Ok((&text[1..close], &text[close + 1..])),
-        Unquoted::End | Unquoted::OpenQuote(_) => Err("unbalanced '('".to_string()),
-    }
-}
-
 /// `text` past what may separate the parts of a statement: whitespace, and
 /// the `;` a joined script puts at each line break.
 fn skip_separators(text: &str) -> &str {
@@ -170,8 +145,8 @@ fn strip_token<'a>(text: &'a str, token: &str) -> Option<&'a str> {
 }
 
 fn condition_block(text: &str) -> std::result::Result<(&str, &str, &str), String> {
-    let (condition, rest) = take_parens(text.trim_start())?;
-    let (body, rest) = take_block(skip_separators(rest))?;
+    let (condition, rest) = take_delimited(text.trim_start(), '(', ')')?;
+    let (body, rest) = take_delimited(skip_separators(rest), '{', '}')?;
     Ok((condition.trim(), body, rest))
 }
 
@@ -196,8 +171,8 @@ fn parse_if(tail: &str) -> std::result::Result<IfStatement<'_>, String> {
             arms.push((condition, body));
             rest = after;
         } else if let Some(after) = strip_token(next, ".else") {
-            let (body, after) =
-                take_block(skip_separators(after)).map_err(|error| format!(".else: {error}"))?;
+            let (body, after) = take_delimited(skip_separators(after), '{', '}')
+                .map_err(|error| format!(".else: {error}"))?;
             otherwise = Some(body);
             rest = after;
             break;
@@ -238,33 +213,15 @@ fn parse_while(tail: &str) -> std::result::Result<LoopStatement<'_>, String> {
 }
 
 fn parse_for(tail: &str) -> std::result::Result<LoopStatement<'_>, String> {
-    let (header, rest) = take_parens(tail.trim_start())?;
-    let mut parts = Vec::with_capacity(3);
-    let mut start = 0;
-    let mut depth = 0usize;
-    let scan = scan_unquoted(header, |offset, ch| {
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ';' if depth == 0 => {
-                parts.push(header[start..offset].trim());
-                start = offset + 1;
-            }
-            _ => {}
-        }
-        false
-    });
-    if let Unquoted::OpenQuote(_) = scan {
-        return Err("unterminated quoted string".to_string());
-    }
-    parts.push(header[start..].trim());
+    let (header, rest) = take_delimited(tail.trim_start(), '(', ')')?;
+    let parts = split_top_level(header, ';').ok_or("unterminated quoted string")?;
     let [init, condition, step] = parts[..] else {
         return Err("expected (InitialCommand ; Condition ; IncrementCommand)".to_string());
     };
     if condition.is_empty() {
         return Err("missing Condition".to_string());
     }
-    let (body, rest) = take_block(skip_separators(rest))?;
+    let (body, rest) = take_delimited(skip_separators(rest), '{', '}')?;
     Ok(LoopStatement {
         init: Some(init),
         condition,
@@ -276,8 +233,8 @@ fn parse_for(tail: &str) -> std::result::Result<LoopStatement<'_>, String> {
 }
 
 fn parse_do(tail: &str) -> std::result::Result<LoopStatement<'_>, String> {
-    let (body, rest) = take_block(tail.trim_start())?;
-    let (condition, rest) = take_parens(skip_separators(rest))?;
+    let (body, rest) = take_delimited(tail.trim_start(), '{', '}')?;
+    let (condition, rest) = take_delimited(skip_separators(rest), '(', ')')?;
     Ok(LoopStatement {
         init: None,
         condition: condition.trim(),
@@ -625,7 +582,7 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(Flow::Continue);
         }
-        let (body, rest) = match take_block(invocation.raw_tail) {
+        let (body, rest) = match take_delimited(invocation.raw_tail, '{', '}') {
             Ok(block) => block,
             Err(error) => return Self::malformed(".block", error),
         };
@@ -734,13 +691,7 @@ impl ReplState<'_> {
 
     /// Echo a script's command after a prompt, as it would appear typed.
     fn echo_script_command(&self, command: &str) {
-        let thread = &self.ctx.current_thread;
-        let prompt = if thread.is_empty() {
-            "ntoseye>".to_string()
-        } else {
-            format!("{}:{thread}>", self.ctx.backend.name())
-        };
-        outln!("{} {command}", ui::muted(&prompt));
+        outln!("{} {command}", ui::muted(&self.plain_prompt()));
     }
 
     /// `r $tN` and `r $tN = expression`: show or set a user pseudo-register.

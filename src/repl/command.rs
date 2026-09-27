@@ -371,6 +371,31 @@ pub fn scan_unquoted(text: &str, mut visit: impl FnMut(usize, char) -> bool) -> 
     }
 }
 
+/// `text` split at each `sep` outside quotes and brackets, parts trimmed;
+/// `None` for an unterminated quote.
+pub fn split_top_level(text: &str, sep: char) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let scan = scan_unquoted(text, |offset, ch| {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == sep && depth == 0 => {
+                parts.push(text[start..offset].trim());
+                start = offset + 1;
+            }
+            _ => {}
+        }
+        false
+    });
+    if let Unquoted::OpenQuote(_) = scan {
+        return None;
+    }
+    parts.push(text[start..].trim());
+    Some(parts)
+}
+
 /// The quoted string that opens `text`, unescaped, and the text after its
 /// closing quote; `None` when `text` does not open with a quote or the quote
 /// is never closed. A backslash only escapes the quote or another backslash.

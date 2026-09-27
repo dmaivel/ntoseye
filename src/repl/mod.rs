@@ -493,6 +493,17 @@ impl<'a> ReplState<'a> {
         }
     }
 
+    /// The unstyled prompt, `ntoseye>` or `kd:p1.1>`, that the plain REPL
+    /// prints and a script echoes its commands after.
+    pub fn plain_prompt(&self) -> String {
+        let thread = &self.ctx.current_thread;
+        if thread.is_empty() {
+            "ntoseye>".to_string()
+        } else {
+            format!("{}:{thread}>", self.ctx.backend.name())
+        }
+    }
+
     /// Build a transient REPL state around an existing context for one-off
     /// command dispatch. Completion caches start empty (no live REPL to
     /// populate them). Output goes to stdout unless
@@ -857,12 +868,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 if termination_requested() {
                     break;
                 }
-                let prompt = if state.ctx.current_thread.is_empty() {
-                    "ntoseye>".to_string()
-                } else {
-                    format!("{backend_label}:{}>", state.ctx.current_thread)
-                };
-                outln!("{prompt}");
+                outln!("{}", state.plain_prompt());
                 io::stdout().flush()?;
 
                 buffer.clear();

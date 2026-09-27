@@ -117,29 +117,31 @@ fn quoted_arg(text: &str) -> std::result::Result<(String, &str), String> {
     take_quoted(text).ok_or_else(|| "unterminated quoted string".to_string())
 }
 
-/// The contents of the `{ ... }` block at the start of `text` and what
-/// follows it. Braces inside quoted strings do not count, so
-/// `{ .echo "}" }` is one block.
-pub fn take_block(text: &str) -> std::result::Result<(&str, &str), String> {
-    if !text.starts_with('{') {
-        return Err("expected '{'".to_string());
+/// The inside of the `open` ... `close` span at the start of `text` (a `{ }`
+/// block, a `( )` condition) and what follows it. Delimiters inside quoted
+/// strings do not count, so `{ .echo "}" }` is one block.
+pub fn take_delimited(
+    text: &str,
+    open: char,
+    close: char,
+) -> std::result::Result<(&str, &str), String> {
+    if !text.starts_with(open) {
+        return Err(format!("expected '{open}'"));
     }
     let mut depth = 0usize;
     let scan = scan_unquoted(text, |_, ch| {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                // The opening brace counted first, so this never underflows.
-                depth -= 1;
-                return depth == 0;
-            }
-            _ => {}
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            // The opening delimiter counted first, so this never underflows.
+            depth -= 1;
+            return depth == 0;
         }
         false
     });
     match scan {
-        Unquoted::Stopped(close) => Ok((&text[1..close], &text[close + 1..])),
-        Unquoted::End | Unquoted::OpenQuote(_) => Err("unbalanced '{'".to_string()),
+        Unquoted::Stopped(end) => Ok((&text[1..end], &text[end + 1..])),
+        Unquoted::End | Unquoted::OpenQuote(_) => Err(format!("unbalanced '{open}'")),
     }
 }
 
@@ -225,7 +227,8 @@ fn parse_foreach(tail: &str) -> std::result::Result<ForeachSpec<'_>, String> {
             ForeachSource::String(text)
         }
     } else {
-        let (commands, after) = take_block(rest).map_err(|error| format!("InCommands: {error}"))?;
+        let (commands, after) =
+            take_delimited(rest, '{', '}').map_err(|error| format!("InCommands: {error}"))?;
         rest = after;
         ForeachSource::Commands(commands.trim())
     };
@@ -235,7 +238,8 @@ fn parse_foreach(tail: &str) -> std::result::Result<ForeachSpec<'_>, String> {
         .strip_prefix(')')
         .ok_or("expected ')' after the input")?
         .trim_start();
-    let (body, after) = take_block(rest).map_err(|error| format!("OutCommands: {error}"))?;
+    let (body, after) =
+        take_delimited(rest, '{', '}').map_err(|error| format!("OutCommands: {error}"))?;
     if !after.trim().is_empty() {
         return Err(format!(
             "unexpected text after OutCommands: '{}'",
@@ -696,8 +700,9 @@ impl ReplState<'_> {
         )
     }
 
-    /// The command a `!for_each_*` runs: its CommandString, else `default`.
-    /// `None` when the invocation was only a help request or malformed.
+    /// The command a `!for_each_*` runs: its CommandString, else `default`
+    /// (`""` for none). `None` when the invocation was only a help request or
+    /// malformed.
     fn for_each_command(
         &self,
         invocation: &CommandInvocation<'_>,
@@ -717,22 +722,14 @@ impl ReplState<'_> {
     }
 
     fn cmd_for_each_frame(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        if invocation.raw_tail == "-?" {
-            outln!("{}\n", command_help(invocation.name));
+        let Some(command) = self.for_each_command(&invocation, "") else {
             return Ok(Flow::Continue);
-        }
-        let command = match command_string(invocation.raw_tail) {
-            Ok(command) => command,
-            Err(error) => {
-                error!("{}: {error}", invocation.name);
-                return Ok(Flow::Continue);
-            }
         };
         let Some((trace, seed, live)) = self.recovered_trace(FOR_EACH_FRAME_LIMIT)? else {
             return Ok(Flow::Continue);
         };
         let previous = self.ctx.target.selected_frame.clone();
-        let Some(command) = command else {
+        if command.is_empty() {
             let selected = previous.as_ref().map(|frame| frame.index);
             print_indexed_stacktrace(
                 &trace,
@@ -743,7 +740,7 @@ impl ReplState<'_> {
             );
             outln!();
             return Ok(Flow::Continue);
-        };
+        }
         let name = invocation.name;
         let flow = self.in_command_loop(name, |state| {
             state.run_iterations(name, trace.frames.len(), |state, index| {

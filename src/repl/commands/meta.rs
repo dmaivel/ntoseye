@@ -918,7 +918,9 @@ fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
     if let Some((format, rest)) = take_quoted(text.trim())
         && let Some(rest) = rest.trim_start().strip_prefix(',')
     {
-        return Some((format, split_printf_arguments(rest)?));
+        let args = split_top_level(rest, ',')?;
+        return (!args.contains(&""))
+            .then(|| (format, args.into_iter().map(String::from).collect()));
     }
     let line = format!(".printf {text}");
     let parsed = parse_command(&line).ok()??;
@@ -931,31 +933,6 @@ fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
         .map(|argument| argument.into_owned())
         .collect();
     Some((format, args))
-}
-
-/// `a, poi(b + 8), c` split at its top-level commas; `None` for an empty
-/// argument or an unterminated quote.
-fn split_printf_arguments(text: &str) -> Option<Vec<String>> {
-    let mut args = Vec::new();
-    let mut start = 0;
-    let mut depth = 0usize;
-    let scan = scan_unquoted(text, |offset, ch| {
-        match ch {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                args.push(text[start..offset].trim().to_string());
-                start = offset + 1;
-            }
-            _ => {}
-        }
-        false
-    });
-    if let Unquoted::OpenQuote(_) = scan {
-        return None;
-    }
-    args.push(text[start..].trim().to_string());
-    (!args.iter().any(String::is_empty)).then_some(args)
 }
 
 fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Option<String> {
