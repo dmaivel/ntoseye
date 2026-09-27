@@ -280,17 +280,19 @@ impl Target {
                 .frames
                 .into_iter()
                 .map(|frame| {
-                    let stopped = frame.stopped.clone();
+                    let mut stopped = frame.stopped.into_iter().collect::<Vec<_>>();
+                    let mut items = Vec::new();
+                    for filter in frame.items.into_iter().filter(selected) {
+                        if let Some(reason) = filter.instances_stopped {
+                            stopped.push(format!("{}: {reason}", filter.name));
+                        }
+                        items.extend(filter.instances);
+                    }
                     FltFrame {
                         address: frame.address,
                         frame_id: frame.frame_id,
-                        items: frame
-                            .items
-                            .into_iter()
-                            .filter(selected)
-                            .flat_map(|filter| filter.instances)
-                            .collect(),
-                        stopped,
+                        items,
+                        stopped: (!stopped.is_empty()).then(|| stopped.join("; ")),
                     }
                 })
                 .collect(),
