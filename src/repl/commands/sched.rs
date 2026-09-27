@@ -1058,7 +1058,7 @@ fn print_uniqstack(detail: &UniqStackDetail, options: UniqStackOptions) {
     outln!(
         "Total threads: {}, walked: {}, unique stacks: {}, threads sharing an earlier stack: {sharing}{}",
         detail.scanned_threads,
-        detail.scanned_threads - detail.unwalked.len(),
+        detail.walked_threads(),
         detail.groups.len(),
         if detail.interrupted {
             " (interrupted: not every thread was walked)"

@@ -411,6 +411,14 @@ pub struct UniqStackDetail {
     pub unwalked: Vec<UnwalkedThread>,
 }
 
+impl UniqStackDetail {
+    /// The threads whose stacks were walked and grouped: fewer than
+    /// `scanned_threads` less `unwalked` when the walk was interrupted.
+    pub fn walked_threads(&self) -> usize {
+        self.groups.iter().map(|group| group.threads.len()).sum()
+    }
+}
+
 /// A frame symbol (`nt!KeWaitForSingleObject+0x846`, `tcpip+0x1a2b`,
 /// `0xfffff80412345678`) split into its module and function, the offset
 /// dropped.

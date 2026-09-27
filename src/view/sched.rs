@@ -618,8 +618,9 @@ fn uniqstack_group(group: &UniqStackGroup) -> View {
 }
 
 /// `!uniqstack`; top-level keys: `scope` (`all` or a process's `pid` and
-/// `name`), `scanned_threads`, `interrupted`, `groups` (each with its
-/// `threads`, the first one's `frames`, and `thread_count`), and `unwalked`.
+/// `name`), `scanned_threads`, `walked_threads`, `interrupted`, `groups`
+/// (each with its `threads`, the first one's `frames`, and `thread_count`),
+/// and `unwalked`.
 pub fn uniqstack(detail: &UniqStackDetail) -> View {
     let scope = match &detail.scope {
         UniqStackScope::AllThreads => View::Object(vec![
@@ -636,6 +637,7 @@ pub fn uniqstack(detail: &UniqStackDetail) -> View {
     View::Object(vec![
         ("scope", scope),
         ("scanned_threads", View::Num(detail.scanned_threads as u64)),
+        ("walked_threads", View::Num(detail.walked_threads() as u64)),
         ("interrupted", View::Bool(detail.interrupted)),
         (
             "groups",
