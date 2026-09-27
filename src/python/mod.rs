@@ -310,6 +310,15 @@ pub mod _ntoseye {
     };
     #[pymodule_export]
     use crate::view::py::ListEnd;
+    #[pymodule_export]
+    use crate::view::sched::py::{
+        Apc, ApcQueues, ApcSelection, ApcThread, Dpc, DpcQueue, DpcQueues, FindStack,
+        FindStackThread, IoWorkItem, KernelTimer, ReadyQueue, ReadyQueues, ReadyThread,
+        RunningProcessor, RunningProcessors, SchedulerError, ThreadStack, ThreadStacks,
+        ThreadSummary, TimerBucketEnd, TimerTable, TimerTableEntry, UniqStackGroup, UniqStackScope,
+        UniqStacks, UnwalkedThread, WorkItem, WorkQueue, WorkQueuePriority, WorkQueues,
+        WorkerThread,
+    };
 
     /// The ntoseye release this extension was built as.
     #[pymodule_export]

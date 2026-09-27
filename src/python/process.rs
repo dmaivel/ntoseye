@@ -329,7 +329,7 @@ impl Process {
     }
 
     /// Decode kernel and user APC queues for this process (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::sched::py::ApcQueues>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
                 .inspect_apcs(ApcSelector::Process(self.info.pid))

@@ -21,6 +21,7 @@ use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::hardware;
+use crate::view::sched;
 use crate::view::{self, View};
 
 /// System-wide reports and decode-by-address helpers (`dbg.inspect`); the
@@ -295,7 +296,7 @@ impl Inspect {
         py: Python<'py>,
         include_idle: bool,
         include_stacks: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, sched::py::RunningProcessors>> {
         self.record(py, |session| {
             let detail = session
                 .inspect_running(include_idle, include_stacks)
@@ -306,7 +307,11 @@ impl Inspect {
 
     /// Read bounded dispatcher-ready queues for every processor or one (`!ready`).
     #[pyo3(signature = (processor=None))]
-    fn ready<'py>(&self, py: Python<'py>, processor: Option<u16>) -> PyResult<Bound<'py, Record>> {
+    fn ready<'py>(
+        &self,
+        py: Python<'py>,
+        processor: Option<u16>,
+    ) -> PyResult<Bound<'py, sched::py::ReadyQueues>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -317,7 +322,7 @@ impl Inspect {
     }
 
     /// Report DPCs queued on each processor (`!dpcs`).
-    fn dpcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn dpcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, sched::py::DpcQueues>> {
         self.record(py, |session| {
             let detail = session.target.inspect_dpc_queues().map_err(err)?;
             Ok(view::sched::dpc_queues(&detail))
@@ -395,7 +400,7 @@ impl Inspect {
         py: Python<'py>,
         include_stacks: bool,
         queue_types: Option<Vec<String>>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, sched::py::WorkQueues>> {
         let mut flags = if include_stacks { 0x4 } else { 0 };
         for name in queue_types.unwrap_or_default() {
             flags |= match name.as_str() {
@@ -416,7 +421,7 @@ impl Inspect {
     }
 
     /// Read bounded kernel timer-table entries and their DPCs (`!timer`).
-    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, sched::py::TimerTable>> {
         self.record(py, |session| {
             let detail = session.target.timer_list().map_err(err)?;
             Ok(view::sched::timer_list(&detail))
@@ -424,7 +429,11 @@ impl Inspect {
     }
 
     /// Decode a `_KTIMER` and its DPC (`!timer address`).
-    fn timer<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn timer<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, sched::py::KernelTimer>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -440,7 +449,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         target: Option<ApcTarget<'_>>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, sched::py::ApcQueues>> {
         let selector = match target {
             None => ApcSelector::All,
             Some(ApcTarget::Process(process)) => {
@@ -470,7 +479,7 @@ impl Inspect {
         py: Python<'py>,
         level: u8,
         filter: Option<&str>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, sched::py::ThreadStacks>> {
         self.record(py, |session| {
             let detail = session.inspect_stacks(level, filter).map_err(err)?;
             Ok(view::sched::stacks(&detail))
@@ -487,7 +496,7 @@ impl Inspect {
         py: Python<'py>,
         symbol: &str,
         level: u8,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, sched::py::FindStack>> {
         self.record(py, |session| {
             let detail = session.inspect_findstack(symbol, level).map_err(err)?;
             Ok(view::sched::findstack(&detail))
@@ -501,7 +510,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process: Option<PyRef<'_, Process>>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, sched::py::UniqStacks>> {
         let scope = match process {
             None => UniqStackScope::AllThreads,
             Some(process) => {

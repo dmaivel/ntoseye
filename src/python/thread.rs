@@ -286,7 +286,7 @@ impl Thread {
     }
 
     /// Decode this thread's APC lists (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::sched::py::ApcQueues>> {
         let context = self.context(self.process_info(py)?);
         let detail = self.owner.with_in(py, &context, |session| {
             session
