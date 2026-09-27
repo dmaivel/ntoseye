@@ -7,6 +7,7 @@ pub mod cpu;
 pub mod etw;
 pub mod heap;
 pub mod image;
+pub mod irpfind;
 mod lifecycle;
 mod list;
 mod memory;

@@ -4,6 +4,7 @@
 
 use super::process::process;
 use super::{View, diagnostic, list_termination};
+use crate::target::irpfind::{IrpFindDetail, IrpFindEntry, IrpPool};
 use crate::target::object::{
     DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, FileObjectDetail, HandleEntryDetail,
     HandleTableSummary, IoStackLocationInfo, IrpHit, IrpInfo, NotifyCallback, ObjectDetail,
@@ -440,5 +441,65 @@ pub fn resource_list(summary: &ResourceListSummary) -> View {
             View::List(summary.resources.iter().map(resource).collect()),
         ),
         ("termination", list_termination(&summary.termination)),
+    ])
+}
+
+fn irp_find_entry(entry: &IrpFindEntry) -> View {
+    View::Object(vec![
+        ("irp", irp(&entry.irp)),
+        (
+            "pool_header",
+            View::OptHex(entry.pool_header.map(|header| header.0)),
+        ),
+        ("tag", View::Str(entry.tag.clone())),
+        (
+            "original_file_object",
+            View::Hex(entry.original_file_object.0),
+        ),
+        (
+            "mdl_process",
+            View::OptHex(entry.mdl_process.map(|process| process.0)),
+        ),
+        ("driver", View::OptStr(entry.driver.clone())),
+        ("completed", View::Bool(entry.completed())),
+    ])
+}
+
+/// `!irpfind`; top-level keys: `pool`, `region_start`, `region_end`,
+/// `scan_start`, `criteria`, `scanned_pages`, `big_pool_status`, `irps`,
+/// `truncated`, `interrupted`, `restart`.
+pub fn irp_find(detail: &IrpFindDetail) -> View {
+    View::Object(vec![
+        (
+            "pool",
+            View::Str(match detail.pool {
+                IrpPool::NonPaged => "nonpaged".to_string(),
+                IrpPool::Paged => "paged".to_string(),
+            }),
+        ),
+        ("region_start", View::Hex(detail.region_start.0)),
+        ("region_end", View::Hex(detail.region_end.0)),
+        ("scan_start", View::Hex(detail.scan_start.0)),
+        (
+            "criteria",
+            detail.criteria.map_or(View::Null, |criteria| {
+                View::Object(vec![
+                    ("name", View::Str(criteria.name().to_string())),
+                    ("value", View::Hex(criteria.value())),
+                ])
+            }),
+        ),
+        ("scanned_pages", View::Num(detail.scanned_pages)),
+        ("big_pool_status", View::Str(detail.big_pool_status.clone())),
+        (
+            "irps",
+            View::List(detail.irps.iter().map(irp_find_entry).collect()),
+        ),
+        ("truncated", View::Bool(detail.truncated)),
+        ("interrupted", View::Bool(detail.interrupted)),
+        (
+            "restart",
+            View::OptHex(detail.restart.map(|restart| restart.0)),
+        ),
     ])
 }

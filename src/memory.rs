@@ -2,6 +2,7 @@ use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::types::*;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -406,6 +407,105 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         Ok(translation)
     }
 
+    /// Visit the present pages of `[start, end)`, reading each page table
+    /// once and nothing under an absent entry, so a sparse range of
+    /// terabytes costs only the tables that exist. `visit(va, physical,
+    /// length)` is called per 4 KiB page, and once per large or huge page
+    /// (clipped to the range); `ControlFlow::Break` ends the walk. Pages that
+    /// are not valid (transition, paged out) are not visited.
+    pub fn for_each_present_page(
+        &self,
+        start: VirtAddr,
+        end: VirtAddr,
+        mut visit: impl FnMut(VirtAddr, PhysAddr, u64) -> ControlFlow<()>,
+    ) -> Result<()> {
+        if start.0 >= end.0 {
+            return Ok(());
+        }
+        if self.dtb == DTB_IDENTITY {
+            let _ = visit(start, start.0, end.0 - start.0);
+            return Ok(());
+        }
+        // The table walk covers one 48-bit half: the upper half's addresses
+        // are sign-extended from bit 47.
+        let half = if start.0 & (1 << 47) != 0 {
+            0xffff_0000_0000_0000
+        } else {
+            0
+        };
+        let _ = self.visit_table(self.root_for(start), 0, half, start.0, end.0, &mut visit)?;
+        Ok(())
+    }
+
+    /// One table of [`Self::for_each_present_page`]: `level` 0 is the root,
+    /// covering from `base`; entries outside `[start, end)` are skipped.
+    fn visit_table(
+        &self,
+        table: PhysAddr,
+        level: u32,
+        base: u64,
+        start: u64,
+        end: u64,
+        visit: &mut impl FnMut(VirtAddr, PhysAddr, u64) -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>> {
+        let shift = 39 - 9 * level;
+        let span = 1u64 << shift;
+        let mut entries = [0u8; PAGE_SIZE];
+        match self.backend.read_page_table_bytes(table, &mut entries) {
+            Ok(()) => {}
+            Err(Error::BadPhysicalAddress(_)) => return Ok(ControlFlow::Continue(())),
+            Err(error) => return Err(error),
+        }
+        let first = (start.max(base) - base) >> shift;
+        let last = ((end - 1).min(base + ((span << 9) - 1)) - base) >> shift;
+        for index in first..=last {
+            let at = index as usize * 8;
+            let entry = PageTableEntry(u64::from_le_bytes(
+                entries[at..at + 8].try_into().expect("8-byte entry"),
+            ));
+            let entry_base = base + index * span;
+            let leaf = if self.arm64 {
+                match level {
+                    _ if !entry.arm64_is_valid() => continue,
+                    // Windows maps no 512 GiB level-0 blocks.
+                    0 if entry.arm64_is_block() => continue,
+                    1 if entry.arm64_is_block() => Some(entry.arm64_huge_block_frame()),
+                    2 if entry.arm64_is_block() => Some(entry.arm64_large_block_frame()),
+                    3 if entry.0 & 0b11 != 0b11 => continue,
+                    3 => Some(entry.arm64_page_frame()),
+                    _ => None,
+                }
+            } else {
+                match level {
+                    _ if !entry.is_present() => continue,
+                    1 if entry.is_large_page() => Some(entry.huge_page_frame()),
+                    2 if entry.is_large_page() => Some(entry.large_page_frame()),
+                    3 => Some(entry.page_frame()),
+                    _ => None,
+                }
+            };
+            let flow = match leaf {
+                Some(frame) => {
+                    let from = entry_base.max(start);
+                    let to = (entry_base + (span - 1)).min(end - 1);
+                    visit(VirtAddr(from), frame + (from - entry_base), to - from + 1)
+                }
+                None => {
+                    let next = if self.arm64 {
+                        entry.arm64_page_frame()
+                    } else {
+                        entry.page_frame()
+                    };
+                    self.visit_table(next, level + 1, entry_base, start, end, visit)?
+                }
+            };
+            if flow.is_break() {
+                return Ok(flow);
+            }
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+
     fn walk(&self, va: VirtAddr) -> Result<Option<Translation>> {
         if self.dtb == DTB_IDENTITY {
             return Ok(Some(Translation {
@@ -662,6 +762,60 @@ mod tests {
             },
             va,
         )
+    }
+
+    #[test]
+    fn present_page_walk_skips_absent_tables_and_clips_large_pages() {
+        // Kernel half: PML4[0x1f0] -> PDPT at 0x2000. PDPT[0] -> PD at
+        // 0x3000; PDPT[1] is absent. PD[0] -> PT at 0x4000 with PTE 2
+        // present and PTE 3 in transition; PD[1] is a 2 MiB page at
+        // 0x20_0000.
+        let mut data = vec![0u8; 0x5000];
+        let mut put = |table: usize, index: usize, value: u64| {
+            data[table + index * 8..table + index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put(0x1000, 0x1f0, 0x2000 | 0b11);
+        put(0x2000, 0, 0x3000 | 0b11);
+        put(0x3000, 0, 0x4000 | 0b11);
+        put(0x3000, 1, 0x20_0000 | 0x80 | 0b11);
+        put(0x4000, 2, 0x9000 | 0b11);
+        put(0x4000, 3, 0xa000 | (1 << 11));
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
+        let space = AddressSpace::new(&mem, 0x1000);
+        let base = 0xffff_f800_0000_0000u64;
+        let mut visits = Vec::new();
+        space
+            .for_each_present_page(
+                VirtAddr(base + 0x1000),
+                VirtAddr(base + 0x4000_0000 + 0x1000),
+                |va, physical, length| {
+                    visits.push((va.0 - base, physical, length));
+                    ControlFlow::Continue(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            visits,
+            [(0x2000, 0x9000, 0x1000), (0x20_0000, 0x20_0000, 0x20_0000)]
+        );
+
+        // A range starting inside the large page is clipped to it, and a
+        // break stops the walk.
+        let mut visits = Vec::new();
+        space
+            .for_each_present_page(
+                VirtAddr(base + 0x30_0000),
+                VirtAddr(base + 0x31_0000),
+                |va, physical, length| {
+                    visits.push((va.0 - base, physical, length));
+                    ControlFlow::Break(())
+                },
+            )
+            .unwrap();
+        assert_eq!(visits, [(0x30_0000, 0x30_0000, 0x1_0000)]);
     }
 
     /// A trimmed page keeps its frame on the standby list with the valid bit

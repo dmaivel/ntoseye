@@ -48,8 +48,8 @@ pub struct BigPoolEntry {
 /// we can decode each entry field-by-field or have to fall back to fixed offsets
 pub struct PoolLayout {
     pool_header: Arc<TypeInfo>,
-    header_size: u64,
-    pool_tag_offset: u64,
+    pub(crate) header_size: u64,
+    pub(crate) pool_tag_offset: u64,
     pool_header_uses_struct: bool,
     pub(crate) big_pool_type: Option<Arc<TypeInfo>>,
     pub(crate) big_pool_uses_struct: bool,

@@ -7,6 +7,7 @@ use owo_colors::OwoColorize;
 
 use crate::error::Result;
 use crate::expr::Expr;
+use crate::target::irpfind::{IrpCriteria, IrpFindDetail, IrpPool};
 use crate::target::{irp_major_function_name, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -50,6 +51,15 @@ repl_command! {
     usage: "irps [process-filter|driver-filter]",
     summary: "Discover in-flight IRPs from thread IrpLists and device CurrentIrp.",
     completion: Process,
+}
+
+repl_command! {
+    cmd_irpfind;
+    names: ["!irpfind", "irpfind"],
+    usage: "!irpfind [-v] [pool-type [restart-address [criteria data]]]",
+    summary: "Find IRPs by scanning pool for IoAllocateIrp's allocations.",
+    details: "Scans the pool region Windows 10 and later assign in MiState.Vs.SystemVaRegions, walking the page tables so only mapped pages are read, for 16-byte-aligned _POOL_HEADERs tagged Irp; big allocations come from PoolBigPageTable. A block counts when its body is a live _IRP: Type 6 (IoFreeIrp clears it), Size the header plus whole stack locations and at least IoSizeOfIrp(StackCount) (a lookaside IRP keeps its larger packet size), CurrentLocation at most StackCount + 1. Each IRP is listed with its thread (Tail.Overlay.Thread), the current stack location's major and minor function, device, and owning driver, and the process of its MDL; one whose CurrentLocation is past StackCount is listed as complete. -v adds the pool header, I/O status, PendingReturned, UserEvent, UserBuffer, the current location's file object and completion routine, and OriginalFileObject. pool-type is 0 (nonpaged, the default) or 1 (paged); 2 (special) and 4 (session) have no region of their own on these builds and are refused. restart-address resumes a scan from that page. Criteria follow WinDbg: arg (a stack location's Argument1-4), device (a stack location's DeviceObject), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess (MdlAddress->Process), thread (Tail.Overlay.Thread), userevent (UserEvent); use 0 as the restart address to scan the whole pool. The scan stops after 4,096 IRPs or on Ctrl-C and prints where to restart. IRPs a driver builds in its own allocations (IoInitializeIrp) carry that driver's tag and are not found; irps lists IRPs from thread IrpLists instead.",
+    completion: Expression,
 }
 
 repl_command! {
@@ -399,6 +409,172 @@ impl ReplState<'_> {
         outln!();
 
         Ok(())
+    }
+
+    fn cmd_irpfind(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let mut args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
+        let verbose = args
+            .first()
+            .is_some_and(|arg| arg.eq_ignore_ascii_case("-v"));
+        if verbose {
+            args.remove(0);
+        }
+        if args.len() == 3 || args.len() > 4 {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let mut values = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            // The criteria name is a word, not an expression.
+            if index == 2 {
+                continue;
+            }
+            let Some(VirtAddr(value)) = self.eval_or_report(arg) else {
+                return Ok(());
+            };
+            values.push(value);
+        }
+        let pool = match IrpPool::from_windbg(values.first().copied().unwrap_or(0)) {
+            Ok(pool) => pool,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let restart = values
+            .get(1)
+            .copied()
+            .filter(|value| *value != 0)
+            .map(VirtAddr);
+        let criteria = match (args.get(2), values.get(2)) {
+            (Some(name), Some(value)) => match IrpCriteria::parse(name, *value) {
+                Ok(criteria) => Some(criteria),
+                Err(error) => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            },
+            _ => None,
+        };
+        match self.ctx.target.irp_find(pool, restart, criteria) {
+            Ok(detail) => self.print_irp_find(&detail, verbose),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
+    fn print_irp_find(&self, detail: &IrpFindDetail, verbose: bool) {
+        outln!(
+            "Searching {} pool ({} : {}) for Tag: Irp",
+            detail.pool.name(),
+            ui::addr(detail.scan_start.0),
+            ui::addr(detail.region_end.0)
+        );
+        if let Some(criteria) = detail.criteria {
+            outln!(
+                "  only IRPs whose {} is {:#x}",
+                criteria.name(),
+                criteria.value()
+            );
+        }
+        outln!();
+        outln!(
+            "{:<16} [ {:<16} ] irpStack: (Mj,Mn)  {:<16} [Driver]  MDL Process",
+            "Irp",
+            "Thread",
+            "DevObj"
+        );
+        for entry in &detail.irps {
+            let irp = &entry.irp;
+            let head = format!("{} [{}]", ui::addr(irp.address.0), ui::addr(irp.thread.0));
+            if entry.completed() {
+                outln!(
+                    "{head} Irp is complete (CurrentLocation {} > StackCount {})",
+                    irp.current_location,
+                    irp.stack_count
+                );
+            } else if let Some(stack) = &irp.current_stack {
+                outln!(
+                    "{head} irpStack: ({:>2x},{:>2x})  {} [{}]  {}  IRP_MJ_{}",
+                    stack.major_function,
+                    stack.minor_function,
+                    ui::addr(stack.device_object.0),
+                    entry.driver.as_deref().unwrap_or("?"),
+                    entry
+                        .mdl_process
+                        .map(|process| ui::addr(process.0).to_string())
+                        .unwrap_or_default(),
+                    irp_major_function_name(stack.major_function)
+                );
+            } else {
+                outln!(
+                    "{head} current stack location {} of {} unreadable",
+                    irp.current_location,
+                    irp.stack_count
+                );
+            }
+            if verbose {
+                outln!(
+                    "    pool header {}  tag '{}'  size {:#x}  stack {}/{}  mode {}",
+                    entry
+                        .pool_header
+                        .map(|header| ui::addr(header.0).to_string())
+                        .unwrap_or_else(|| "(big pool)".to_string()),
+                    entry.tag,
+                    irp.size,
+                    irp.current_location,
+                    irp.stack_count,
+                    if irp.requestor_mode == 0 {
+                        "KernelMode"
+                    } else {
+                        "UserMode"
+                    }
+                );
+                outln!(
+                    "    IoStatus {}  PendingReturned {}  UserEvent {}  UserBuffer {}  MdlAddress {}",
+                    irp.io_status
+                        .map(|status| format!("{status:#x}"))
+                        .unwrap_or_else(|| "?".to_string()),
+                    if irp.pending_returned { "yes" } else { "no" },
+                    ui::addr(irp.user_event.0),
+                    ui::addr(irp.user_buffer.0),
+                    ui::addr(irp.mdl_address.0)
+                );
+                if let Some(stack) = irp.current_stack.as_ref().filter(|_| !entry.completed()) {
+                    outln!(
+                        "    stack location {}  FileObject {}  CompletionRoutine {}  Context {}",
+                        ui::addr(stack.address.0),
+                        ui::addr(stack.file_object.0),
+                        self.fmt_kernel_symbol(stack.completion_routine),
+                        ui::addr(stack.context.0)
+                    );
+                }
+                outln!(
+                    "    OriginalFileObject {}",
+                    ui::addr(entry.original_file_object.0)
+                );
+            }
+        }
+        outln!();
+        outln!(
+            "{} IRP(s) in {} mapped page(s); big pool: {}",
+            detail.irps.len(),
+            detail.scanned_pages,
+            detail.big_pool_status
+        );
+        if let Some(restart) = detail.restart {
+            outln!(
+                "{}; resume with !irpfind {} {}",
+                if detail.interrupted {
+                    "interrupted"
+                } else {
+                    "stopped after 4096 IRPs"
+                },
+                u8::from(detail.pool == IrpPool::Paged),
+                ui::addr(restart.0)
+            );
+        }
+        outln!();
     }
 
     fn cmd_object(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

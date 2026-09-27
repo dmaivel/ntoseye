@@ -904,6 +904,14 @@ class Inspect:
         """
         Decode an in-flight `_IRP` and its current I/O stack location (`!irp`).
         """
+    def irp_find(self, /, pool_type: str = "nonpaged", restart: int |None = None, criteria: str |None = None, value: int = 0) -> Record:
+        """
+        Find IRPs by scanning pool for `IoAllocateIrp`'s allocations
+        (`!irpfind`). `pool_type` is `"nonpaged"` or `"paged"`; `restart`
+        resumes from an address; `criteria` is one of WinDbg's (`"arg"`,
+        `"device"`, `"fileobject"`, `"mdlprocess"`, `"thread"`, `"userevent"`)
+        matched against `value`.
+        """
     def irps(self, /, filter: str |None = None) -> list[Record]:
         """
         Find in-flight IRPs, optionally filtered by process or driver (`irps`).

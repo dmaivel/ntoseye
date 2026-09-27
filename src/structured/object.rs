@@ -4,6 +4,7 @@
 
 use super::Args;
 use crate::error::{Error, Result};
+use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::types::VirtAddr;
 use crate::view::{self, View};
 
@@ -80,6 +81,10 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             .target()
             .dump_ssdt()
             .map(|tables| View::List(tables.iter().map(view::object::ssdt_table).collect())),
+        "!irpfind" | "irpfind" => args.irp_find().and_then(|(pool, restart, criteria)| {
+            let detail = args.target().irp_find(pool, restart, criteria)?;
+            Ok(view::object::irp_find(&detail))
+        }),
         "irps" => args
             .target()
             .discover_irps(argv.first().copied())
@@ -97,6 +102,35 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
 }
 
 impl Args<'_, '_> {
+    /// `!irpfind [-v] [pool-type [restart-address [criteria data]]]`; `-v`
+    /// changes only the text rendering.
+    fn irp_find(&self) -> Result<(IrpPool, Option<VirtAddr>, Option<IrpCriteria>)> {
+        let skip = usize::from(
+            self.argv
+                .first()
+                .is_some_and(|arg| arg.eq_ignore_ascii_case("-v")),
+        );
+        let rest = &self.argv[skip..];
+        if rest.len() == 3 || rest.len() > 4 {
+            return Err(Error::InvalidArgument(
+                "usage: !irpfind [-v] [pool-type [restart-address [criteria data]]]".into(),
+            ));
+        }
+        let pool = IrpPool::from_windbg(match rest.first() {
+            Some(text) => self.eval(text)?.0,
+            None => 0,
+        })?;
+        let restart = match rest.get(1) {
+            Some(text) => Some(self.eval(text)?).filter(|address| !address.is_zero()),
+            None => None,
+        };
+        let criteria = match (rest.get(2), rest.get(3)) {
+            (Some(name), Some(value)) => Some(IrpCriteria::parse(name, self.eval(value)?.0)?),
+            _ => None,
+        };
+        Ok((pool, restart, criteria))
+    }
+
     /// `!drvobj` takes an address expression or a driver name (`\\Driver\\Foo`
     /// or `Foo`).
     fn driver_object(&self) -> Result<VirtAddr> {

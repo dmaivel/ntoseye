@@ -12,6 +12,7 @@ use super::{err, raise, view_record, view_records};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::expr::NumberRadix;
 use crate::session::Session;
+use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::triage_report::TriageReport;
@@ -73,6 +74,42 @@ impl Inspect {
         self.list(py, |session| {
             let hits = session.target.discover_irps(filter).map_err(err)?;
             Ok(View::List(hits.iter().map(view::object::irp_hit).collect()))
+        })
+    }
+
+    /// Find IRPs by scanning pool for `IoAllocateIrp`'s allocations
+    /// (`!irpfind`). `pool_type` is `"nonpaged"` or `"paged"`; `restart`
+    /// resumes from an address; `criteria` is one of WinDbg's (`"arg"`,
+    /// `"device"`, `"fileobject"`, `"mdlprocess"`, `"thread"`, `"userevent"`)
+    /// matched against `value`.
+    #[pyo3(signature = (pool_type="nonpaged", restart=None, criteria=None, value=0))]
+    fn irp_find<'py>(
+        &self,
+        py: Python<'py>,
+        pool_type: &str,
+        restart: Option<u64>,
+        criteria: Option<&str>,
+        value: u64,
+    ) -> PyResult<Bound<'py, Record>> {
+        let pool = match pool_type {
+            "nonpaged" => IrpPool::NonPaged,
+            "paged" => IrpPool::Paged,
+            other => {
+                return Err(raise(format!(
+                    "unknown pool type '{other}' (nonpaged, paged)"
+                )));
+            }
+        };
+        let criteria = criteria
+            .map(|name| IrpCriteria::parse(name, value))
+            .transpose()
+            .map_err(err)?;
+        self.record(py, |session| {
+            let detail = session
+                .target
+                .irp_find(pool, restart.map(VirtAddr), criteria)
+                .map_err(err)?;
+            Ok(view::object::irp_find(&detail))
         })
     }
 
