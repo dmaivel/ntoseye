@@ -79,6 +79,8 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | ".printf"
             // Each command it runs passes this gate itself.
             | ".foreach"
+            // Walks `lm`'s list, the secure kernel's in VTL1.
+            | "!for_each_module"
             | ".cls"
             | ".logopen"
             | ".logappend"

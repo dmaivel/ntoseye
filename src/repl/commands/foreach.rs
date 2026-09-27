@@ -10,13 +10,29 @@ use std::sync::atomic::Ordering;
 
 use crate::error::Result;
 use crate::expr::Expr;
+use crate::guest::ModuleInfo;
 use crate::output;
+use crate::symbols::ModuleSymbolStatus;
+use crate::target::ThreadInfo;
 
 use crate::repl::*;
 
 /// How deeply command loops may nest (a `.foreach` inside a `.foreach`, or an
 /// alias that runs a loop over itself).
 const COMMAND_LOOP_DEPTH_LIMIT: usize = 16;
+
+/// WinDbg's defaults when `!for_each_*` is given no command.
+const DEFAULT_PROCESS_COMMAND: &str = "!process @#Process 0";
+const DEFAULT_THREAD_COMMAND: &str = "!thread @#Thread 2";
+const DEFAULT_MODULE_COMMAND: &str =
+    ".echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName";
+
+// dbgeng's DEBUG_MODULE_USER_MODE and DEBUG_SYMTYPE_* values, which
+// `@#Flags` and `@#SymbolType` report as WinDbg does.
+const DEBUG_MODULE_USER_MODE: u64 = 0x2;
+const DEBUG_SYMTYPE_NONE: u64 = 0;
+const DEBUG_SYMTYPE_PDB: u64 = 3;
+const DEBUG_SYMTYPE_DEFERRED: u64 = 5;
 
 repl_command! {
     cmd_foreach;
@@ -25,6 +41,33 @@ repl_command! {
     summary: "Run commands once for each token of a command's output, a string, or a file.",
     details: "InCommands run first with their output hidden; that output (or InString, or the text of InFile) is split at spaces, tabs, and line breaks, and OutCommands run once per token with each whole-word occurrence of Variable replaced by it. Variable must stand alone between spaces (or at an end of OutCommands) to be replaced; `${Variable}` replaces it anywhere, even inside other text. /pS n skips the first n tokens, and /ps n skips n tokens after each one used: `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token... The skip counts are expressions in the current radix. OutCommands can hold several `;`-separated commands, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop; a command that fails or is refused ends it.",
     completion: Expression,
+    style: ExpressionTail,
+}
+
+repl_command! {
+    cmd_for_each_process;
+    names: ["!for_each_process"],
+    usage: "!for_each_process [\"CommandString\"]",
+    summary: "Run commands once for each process in the target.",
+    details: "In CommandString, each whole-word `@#Process` (or `${@#Process}` anywhere) is replaced by the process's EPROCESS address. Several commands are separated by `;` and the string quoted. Without CommandString, runs `!process @#Process 0` for every process. The process context (`.process`, `$proc`) is not changed; `.process /p @#Process` in CommandString switches it, and the switch stays. Processes are the ones `ps` lists, in its order. Ctrl+C stops the loop; a command that fails or is refused ends it.",
+    style: ExpressionTail,
+}
+
+repl_command! {
+    cmd_for_each_thread;
+    names: ["!for_each_thread"],
+    usage: "!for_each_thread [\"CommandString\"]",
+    summary: "Run commands once for each thread in the target, or in the `.process` process.",
+    details: "In CommandString, each whole-word `@#Thread` (or `${@#Thread}` anywhere) is replaced by the thread's ETHREAD address. Several commands are separated by `;` and the string quoted. Without CommandString, runs `!thread @#Thread 2` for every thread. With a process selected by `.process`, only that process's threads are visited; otherwise every thread `threads` lists. The thread context (`.thread`, `$thread`) is not changed. Ctrl+C stops the loop; a command that fails or is refused ends it.",
+    style: ExpressionTail,
+}
+
+repl_command! {
+    cmd_for_each_module;
+    names: ["!for_each_module"],
+    usage: "!for_each_module [\"CommandString\"]",
+    summary: "Run commands once for each loaded module `lm` lists.",
+    details: "Visits the modules of the current scope in `lm` order: the `.process` process's, else the kernel's (the secure kernel's under `.vtl 1`). CommandString may use these aliases, each replaced as a whole word or anywhere as `${@#Name}`, case-sensitively: @#ModuleIndex (0-based position), @#ModuleName (the `module!` name `lm` shows), @#ImageName (the image name `lm` shows), @#LoadedImageName (the loader's full path when known, else the image name), @#SymbolFileName (the local PDB the symbols came from, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while fetching, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (string length plus one). Numbers are 0x-prefixed hex, so they read the same in any radix. A module lacking a value an alias names (no timestamp, no version resource) is reported and skipped. Without CommandString, runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop; a command that fails or is refused ends it.",
     style: ExpressionTail,
 }
 
@@ -46,6 +89,9 @@ struct ForeachSpec<'a> {
     source: ForeachSource<'a>,
     body: &'a str,
 }
+
+/// A value an alias names that the current item does not have.
+struct MissingValue(String);
 
 fn skip_ws(text: &str) -> &str {
     text.trim_start()
@@ -276,6 +322,103 @@ fn substitute<E>(
     Ok(out)
 }
 
+/// A `!for_each_*` CommandString: the tail unquoted when it is one quoted
+/// string, else the tail as it is; `None` for none.
+fn command_string(tail: &str) -> std::result::Result<Option<String>, String> {
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return Ok(None);
+    }
+    if !tail.starts_with('"') {
+        return Ok(Some(tail.to_string()));
+    }
+    let (command, rest) = take_quoted(tail)?;
+    if !rest.trim().is_empty() {
+        return Err(format!(
+            "unexpected text after the quoted command: '{}'",
+            rest.trim()
+        ));
+    }
+    Ok(Some(command))
+}
+
+fn hex(value: u64) -> String {
+    format!("{value:#x}")
+}
+
+/// Loaded-module name plus one, as dbgeng's `*NameSize` fields count it.
+fn name_size(name: &str) -> String {
+    hex(name.chars().count() as u64 + 1)
+}
+
+/// What each `!for_each_module` alias stands for, for one module.
+struct ModuleAliases<'a> {
+    index: usize,
+    module: &'a ModuleInfo,
+    user_mode: bool,
+    symbol_file: Option<String>,
+    symbol_status: Option<ModuleSymbolStatus>,
+}
+
+impl ModuleAliases<'_> {
+    fn loaded_image_name(&self) -> &str {
+        self.module.path.as_deref().unwrap_or(&self.module.name)
+    }
+
+    fn symbol_file_name(&self) -> &str {
+        self.symbol_file.as_deref().unwrap_or(&self.module.name)
+    }
+
+    fn missing(&self, what: &str) -> MissingValue {
+        MissingValue(format!("{} has no readable {what}", self.module.name))
+    }
+
+    fn resolve(&self, name: &str) -> std::result::Result<Option<String>, MissingValue> {
+        let module = self.module;
+        Ok(Some(match name {
+            "@#ModuleIndex" => hex(self.index as u64),
+            "@#ModuleName" => module.short_name.clone(),
+            "@#ImageName" => module.name.clone(),
+            "@#LoadedImageName" => self.loaded_image_name().to_string(),
+            "@#SymbolFileName" => self.symbol_file_name().to_string(),
+            "@#ModuleNameSize" => name_size(&module.short_name),
+            "@#ImageNameSize" => name_size(&module.name),
+            "@#LoadedImageNameSize" => name_size(self.loaded_image_name()),
+            "@#SymbolFileNameSize" => name_size(self.symbol_file_name()),
+            "@#Base" => hex(module.base_address.0),
+            "@#End" => hex(module.end_address().0),
+            "@#Size" => hex(u64::from(module.size)),
+            "@#TimeDateStamp" => hex(u64::from(
+                module
+                    .time_date_stamp
+                    .ok_or_else(|| self.missing("TimeDateStamp"))?,
+            )),
+            "@#Checksum" => hex(u64::from(
+                module.checksum.ok_or_else(|| self.missing("checksum"))?,
+            )),
+            "@#FileVersion" => module
+                .file_version
+                .clone()
+                .ok_or_else(|| self.missing("file version"))?,
+            "@#ProductVersion" => module
+                .product_version
+                .clone()
+                .ok_or_else(|| self.missing("product version"))?,
+            "@#Flags" => hex(if self.user_mode {
+                DEBUG_MODULE_USER_MODE
+            } else {
+                0
+            }),
+            "@#SymbolType" => hex(match self.symbol_status {
+                Some(ModuleSymbolStatus::Loaded) => DEBUG_SYMTYPE_PDB,
+                Some(ModuleSymbolStatus::Fetching) => DEBUG_SYMTYPE_DEFERRED,
+                _ => DEBUG_SYMTYPE_NONE,
+            }),
+            _ => return Ok(None),
+        }))
+    }
+}
+
 fn single_alias<'a>(
     alias: &'a str,
     value: &'a str,
@@ -331,6 +474,44 @@ impl ReplState<'_> {
         }
     }
 
+    /// Run `command` once per item, with `aliases(item)` resolving its
+    /// names. An item whose aliases cannot all be resolved is reported and
+    /// skipped.
+    fn repeat_command<T>(
+        &mut self,
+        name: &str,
+        command: &str,
+        items: &[T],
+        mut aliases: impl FnMut(
+            &Self,
+            usize,
+            &T,
+            &str,
+        ) -> std::result::Result<Option<String>, MissingValue>,
+    ) {
+        if !self.enter_command_loop(name) {
+            return;
+        }
+        for (index, item) in items.iter().enumerate() {
+            if self.command_loop_cancelled() {
+                outln!("{name}: interrupted after {index} of {}", items.len());
+                break;
+            }
+            let expanded = match substitute(command, |alias| aliases(self, index, item, alias)) {
+                Ok(expanded) => expanded,
+                Err(MissingValue(reason)) => {
+                    error!("{name}: skipped: {reason}");
+                    continue;
+                }
+            };
+            if !self.run_loop_commands(name, &expanded) {
+                break;
+            }
+        }
+        self.leave_command_loop();
+    }
+
+    /// A skip count: an expression in the current radix.
     fn foreach_count(&self, option: &str, text: Option<&str>) -> Option<usize> {
         let Some(text) = text else {
             return Some(0);
@@ -411,6 +592,131 @@ impl ReplState<'_> {
         }
         self.leave_command_loop();
         Ok(())
+    }
+
+    fn cmd_for_each_process(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(command) = self.for_each_command(&invocation, DEFAULT_PROCESS_COMMAND) else {
+            return Ok(());
+        };
+        let processes = match self.ctx.target.matching_processes(None) {
+            Ok(processes) => processes,
+            Err(error) => {
+                error!("!for_each_process: failed to enumerate processes: {error}");
+                return Ok(());
+            }
+        };
+        self.repeat_command(
+            invocation.name,
+            &command,
+            &processes,
+            |_, _, process, alias| {
+                if alias != "@#Process" {
+                    return Ok(None);
+                }
+                // A triage dump's one-process snapshot has no EPROCESS address.
+                if process.eprocess_va.is_zero() {
+                    return Err(MissingValue(format!(
+                        "{} (PID {}) has no known EPROCESS address",
+                        process.name, process.pid
+                    )));
+                }
+                Ok(Some(hex(process.eprocess_va.0)))
+            },
+        );
+        Ok(())
+    }
+
+    fn cmd_for_each_thread(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(command) = self.for_each_command(&invocation, DEFAULT_THREAD_COMMAND) else {
+            return Ok(());
+        };
+        let threads = match self.ctx.target.attached_process().cloned() {
+            Some(process) => self
+                .ctx
+                .target
+                .enumerate_threads_for_process_info(&process)
+                .map_err(|error| format!("{} (PID {}): {error}", process.name, process.pid)),
+            None => self
+                .ctx
+                .windows_threads()
+                .map(|(threads, _)| threads)
+                .map_err(|error| error.to_string()),
+        };
+        let threads = match threads {
+            Ok(threads) => threads,
+            Err(error) => {
+                error!("!for_each_thread: failed to enumerate threads: {error}");
+                return Ok(());
+            }
+        };
+        let thread_alias = |_: &Self, _: usize, thread: &ThreadInfo, alias: &str| {
+            Ok((alias == "@#Thread").then(|| hex(thread.ethread.0)))
+        };
+        self.repeat_command(invocation.name, &command, &threads, thread_alias);
+        Ok(())
+    }
+
+    fn cmd_for_each_module(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some(command) = self.for_each_command(&invocation, DEFAULT_MODULE_COMMAND) else {
+            return Ok(());
+        };
+        // Version resources cost reads per module; only fetch them for a
+        // command that names them.
+        let versions = command.contains("@#FileVersion") || command.contains("@#ProductVersion");
+        let modules = if versions {
+            self.ctx.target.modules_with_versions()
+        } else {
+            self.ctx.target.modules()
+        };
+        let modules = match modules {
+            Ok(modules) => modules,
+            Err(error) => {
+                error!("!for_each_module: failed to list modules: {error}");
+                return Ok(());
+            }
+        };
+        let dtb = self.ctx.target.process_dtb();
+        let user_mode = self.ctx.target.attached_process().is_some()
+            && !self.ctx.target.in_secure_address_space();
+        self.repeat_command(
+            invocation.name,
+            &command,
+            &modules,
+            |state, index, module, alias| {
+                let symbols = &state.ctx.target.symbols;
+                ModuleAliases {
+                    index,
+                    module,
+                    user_mode,
+                    symbol_file: symbols
+                        .module_pdb_path(dtb, module.base_address)
+                        .map(|path| path.display().to_string()),
+                    symbol_status: symbols.module_symbol_status(dtb, module.base_address),
+                }
+                .resolve(alias)
+            },
+        );
+        Ok(())
+    }
+
+    /// The command a `!for_each_*` runs: its CommandString, else `default`.
+    /// `None` when the invocation was only a help request or malformed.
+    fn for_each_command(
+        &self,
+        invocation: &CommandInvocation<'_>,
+        default: &str,
+    ) -> Option<String> {
+        if invocation.raw_tail == "-?" {
+            outln!("{}\n", command_help(invocation.name));
+            return None;
+        }
+        match command_string(invocation.raw_tail) {
+            Ok(command) => Some(command.unwrap_or_else(|| default.to_string())),
+            Err(error) => {
+                error!("{}: {error}", invocation.name);
+                None
+            }
+        }
     }
 }
 
@@ -547,5 +853,24 @@ mod tests {
         ] {
             assert!(parse_foreach(text).is_err(), "{text} parsed");
         }
+    }
+
+    #[test]
+    fn command_string_unquotes_one_quoted_string() {
+        assert_eq!(command_string("  ").unwrap(), None);
+        assert_eq!(
+            command_string(r#"".echo @#Process; r""#).unwrap(),
+            Some(".echo @#Process; r".to_string())
+        );
+        assert_eq!(
+            command_string(r#"".printf \"%p\\n\", @#Base""#).unwrap(),
+            Some(r#".printf "%p\n", @#Base"#.to_string())
+        );
+        assert_eq!(
+            command_string("!chkimg @#ModuleName").unwrap(),
+            Some("!chkimg @#ModuleName".to_string())
+        );
+        assert!(command_string(r#"".echo" extra"#).is_err());
+        assert!(command_string(r#"".echo"#).is_err());
     }
 }

@@ -101,6 +101,8 @@ pub struct SymbolStore {
 
     mmaps: DashMap<u128, Arc<Mmap>>,
     pdb_ages: DashMap<u128, u32>,
+    /// GUID -> the local PDB file it was loaded from.
+    pdb_paths: DashMap<u128, PathBuf>,
     /// GUID -> pointer width of the PDB's target machine (see
     /// [`TypeInfo::pointer_size`]).
     pdb_pointer_sizes: DashMap<u128, u8>,
@@ -594,6 +596,7 @@ impl SymbolStore {
             pdbs: DashMap::new(),
             mmaps: DashMap::new(),
             pdb_ages: DashMap::new(),
+            pdb_paths: DashMap::new(),
             pdb_pointer_sizes: DashMap::new(),
             index_build_results: DashMap::new(),
             index: DashMap::new(),
@@ -924,6 +927,7 @@ impl SymbolStore {
             }
             self.mmaps.remove(&guid);
             self.pdb_ages.remove(&guid);
+            self.pdb_paths.remove(&guid);
             self.index_build_results.remove(&guid);
             self.index.remove(&guid);
             self.index_types.remove(&guid);
@@ -1016,6 +1020,13 @@ impl SymbolStore {
             guid: module.guid,
             age,
         })
+    }
+
+    /// The local PDB file the module at `base_address` has its symbols from,
+    /// `None` while it has none loaded.
+    pub fn module_pdb_path(&self, dtb: Dtb, base_address: VirtAddr) -> Option<PathBuf> {
+        let module = self.modules.get(&Self::module_key(dtb, base_address))?;
+        self.pdb_paths.get(&module.guid).map(|path| path.clone())
     }
 
     pub fn set_module_symbol_source(

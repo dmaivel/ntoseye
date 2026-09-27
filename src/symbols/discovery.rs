@@ -538,6 +538,7 @@ impl SymbolStore {
             Entry::Vacant(entry) => {
                 self.mmaps.insert(expected.guid, mmap);
                 self.pdb_ages.insert(expected.guid, actual.age);
+                self.pdb_paths.insert(expected.guid, path.to_path_buf());
                 self.pdb_pointer_sizes.insert(expected.guid, pointer_size);
                 entry.insert(pdb.into());
             }
