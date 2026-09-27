@@ -43,7 +43,7 @@ repl_command! {
     names: ["!thread", "thread"],
     usage: "!thread [ethread|tid] [flags] [count]",
     summary: "Display a Windows thread and optionally its kernel stack.",
-    details: "The legacy `thread <tid> k|r [count]` forms remain available. A numeric flags value selects detail/stack output; unavailable fields are shown as `-`. A running thread whose vCPU is halted in the Windows hypervisor (VBS) is shown from the VTL0 state the hypervisor saved, as `.thread` selects it. While the target runs, the thread is shown but not selected, and a thread running on a processor has no stack.",
+    details: "The legacy `thread <tid> k|r [count]` forms remain available. A numeric flags value selects detail/stack output; count bounds the stack (32 frames by default, 16 for `k`); unavailable fields are shown as `-`. A running thread whose vCPU is halted in the Windows hypervisor (VBS) is shown from the VTL0 state the hypervisor saved, as `.thread` selects it. While the target runs, the thread is shown but not selected, and a thread running on a processor has no stack.",
     completion: [Thread, None, None],
 }
 
@@ -361,15 +361,13 @@ impl ReplState<'_> {
         });
         let default_stack = invocation.name == "!thread"
             && (action.is_none() || numeric_action.is_some_and(|flags| flags & 4 != 0));
-        let frame_limit = invocation
-            .arg(2)
-            .and_then(|count| {
-                Expr::eval_with_radix(count, &self.ctx.target, self.radix)
-                    .ok()
-                    .and_then(|value| usize::try_from(value.0).ok())
-            })
-            .unwrap_or(DEFAULT_THREAD_FRAME_LIMIT)
-            .max(1);
+        let count = invocation.arg(2).and_then(|count| {
+            Expr::eval_with_radix(count, &self.ctx.target, self.radix)
+                .ok()
+                .and_then(|value| usize::try_from(value.0).ok())
+        });
+        let frame_limit = count.unwrap_or(DEFAULT_THREAD_FRAME_LIMIT).max(1);
+        let stack_limit = count.unwrap_or(THREAD_STACK_LIMIT).max(1);
 
         // Selecting a thread lasts until the target resumes, so a running
         // target has nothing to select into: the thread is only shown.
@@ -386,7 +384,7 @@ impl ReplState<'_> {
             }
             if default_stack {
                 let vcpu = active.get(&thread.ethread.0).map(|(vcpu, _)| vcpu.as_str());
-                self.print_thread_kstack(thread, vcpu);
+                self.print_thread_kstack(thread, vcpu, stack_limit);
             }
             outln!();
             return Ok(());
@@ -402,7 +400,7 @@ impl ReplState<'_> {
             self.clear_selected_frame();
             self.caches.refresh_symbol_context(&self.ctx.target);
             if default_stack {
-                self.print_thread_kstack(thread, None);
+                self.print_thread_kstack(thread, None, stack_limit);
             } else {
                 match action {
                     Some("k") => match self.ctx.backtrace(frame_limit) {
@@ -446,7 +444,7 @@ impl ReplState<'_> {
         .as_str();
 
         if default_stack {
-            self.print_running_kstack(source);
+            self.print_running_kstack(source, stack_limit);
         } else {
             match action {
                 Some("k") => match self.ctx.backtrace(frame_limit) {
@@ -482,24 +480,21 @@ impl ReplState<'_> {
 
     /// `thread`'s stack as [`crate::session::Session::backtrace_thread`] walks
     /// it, without selecting it.
-    fn print_thread_kstack(&mut self, thread: &ThreadInfo, running_on: Option<&str>) {
-        match self
-            .ctx
-            .backtrace_thread(thread, running_on, THREAD_STACK_LIMIT)
-        {
+    fn print_thread_kstack(&mut self, thread: &ThreadInfo, running_on: Option<&str>, limit: usize) {
+        match self.ctx.backtrace_thread(thread, running_on, limit) {
             Ok(trace) => {
                 outln!("k-stack ({}):", trace.source.as_str());
-                print_stacktrace_data_with_provenance(&trace.stacktrace, THREAD_STACK_LIMIT, false);
+                print_stacktrace_data_with_provenance(&trace.stacktrace, limit, false);
             }
             Err(error) => error!("failed to unwind thread stack: {}", error),
         }
     }
 
-    fn print_running_kstack(&mut self, source: &str) {
-        match self.ctx.backtrace(THREAD_STACK_LIMIT) {
+    fn print_running_kstack(&mut self, source: &str, limit: usize) {
+        match self.ctx.backtrace(limit) {
             Ok(trace) => {
                 outln!("k-stack ({source}):");
-                print_stacktrace_data(&trace, THREAD_STACK_LIMIT, false);
+                print_stacktrace_data(&trace, limit, false);
             }
             Err(error) => error!("failed to unwind thread stack: {}", error),
         }
