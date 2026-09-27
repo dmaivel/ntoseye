@@ -268,10 +268,13 @@ fn print_queued_locks(detail: &QueuedLocksDetail) {
         .max()
         .unwrap_or(0)
         .max(9);
+    // A space before each processor number, however many digits it has.
+    let highest = detail.processors.iter().max().copied().unwrap_or(0);
+    let cell = highest.to_string().len().max(2) + 1;
     let columns: String = detail
         .processors
         .iter()
-        .map(|processor| format!("{processor:>3}"))
+        .map(|processor| format!("{processor:>cell$}"))
         .collect();
     outln!("    {:width$}  Processor Number", "");
     outln!("    {:width$}{columns}", "Lock Name");
@@ -281,7 +284,7 @@ fn print_queued_locks(detail: &QueuedLocksDetail) {
             .processors
             .iter()
             .map(|processor| {
-                let cell = lock
+                let text = lock
                     .holders
                     .iter()
                     .find(|holder| holder.processor == *processor)
@@ -290,10 +293,10 @@ fn print_queued_locks(detail: &QueuedLocksDetail) {
                         QueuedLockState::Waiting(order) => order.to_string(),
                         QueuedLockState::Corrupt(_) => "C".to_string(),
                     });
-                format!("{cell:>3}")
+                format!("{text:>cell$}")
             })
             .collect();
-        outln!("    {:width$}{}", lock.name, cells.trim_end());
+        outln!("{}", format!("    {:width$}{cells}", lock.name).trim_end());
     }
     outln!("");
     for lock in &detail.locks {
