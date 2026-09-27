@@ -29,7 +29,7 @@ KDNET uses the guest's virtual NIC instead of a serial device. Choose a macOS ho
 
 ## GDB stub
 
-Turn off "Use Hypervisor" in the VM's QEMU settings first. With HVF enabled, QEMU kills the VM as soon as a debugger asks it to trap debug exceptions (`HV_BAD_ARGUMENT` from `hv_vcpu_set_trap_debug_exceptions`, seen on UTM 4.7.5 and 5.0.5); the guest then runs under TCG instead, which is considerably slower but supports the backend fully.
+Turn off "Use Hypervisor" in the VM's QEMU settings first. With HVF enabled, QEMU before 10.1 kills the VM as soon as a debugger asks it to trap debug exceptions (`HV_BAD_ARGUMENT` from `hv_vcpu_set_trap_debug_exceptions`, [qemu#2895](https://gitlab.com/qemu-project/qemu/-/issues/2895); seen on UTM 4.7.5 and 5.0.5, which ships QEMU 10.0.12). The guest then runs under TCG instead, which is considerably slower but supports the backend fully. `ntoseye` refuses the `gdb` backend for a VM started with `-accel hvf` rather than let it be killed; once your UTM ships QEMU 10.1 or later, set `NTOSEYE_GDB_ON_HVF=1` to connect with HVF on (`sudo NTOSEYE_GDB_ON_HVF=1 ntoseye --backend gdb`, since `sudo` drops the caller's environment).
 
 Add to the VM's QEMU Arguments:
 

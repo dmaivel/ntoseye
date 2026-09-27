@@ -664,10 +664,11 @@ mod platform {
         }
 
         /// The host mapping guest reads are served from, for diagnostics.
-        /// Whether QEMU aborts this VM when a debugger enables guest debugging
-        /// through its GDB stub: it does under HVF (`hv_vcpu_set_trap_debug_exceptions`
-        /// fails, seen on UTM 4.7.5 and 5.0.5), so the `gdb` backend must not
-        /// connect to it. See the UTM setup guide.
+        /// Whether QEMU may abort this VM when a debugger enables guest
+        /// debugging through its GDB stub: QEMU before 10.1 does under HVF
+        /// (`hv_vcpu_set_trap_debug_exceptions` fails off the vCPU's thread,
+        /// qemu#2895; seen on UTM 4.7.5 and 5.0.5, which ships QEMU 10.0.12).
+        /// See the UTM setup guide.
         pub fn guest_debug_aborts_vm(&self) -> bool {
             runs_under_hvf(self.pid)
         }

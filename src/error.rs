@@ -161,10 +161,12 @@ pub enum Error {
     TaskForPidDenied { pid: i32, detail: String },
 
     #[error(
-        "the VM runs under HVF (QEMU's -accel hvf), and QEMU aborts such a VM as soon as a \
-         debugger connects to its GDB stub and enables guest debugging.\n\
+        "the VM runs under HVF (QEMU's -accel hvf), and QEMU before 10.1 (UTM 5.0.5 ships \
+         10.0.12) aborts such a VM as soon as a debugger connects to its GDB stub and enables \
+         guest debugging.\n\
          Turn off \"Use Hypervisor\" in the VM's QEMU settings in UTM to use the gdb backend, \
-         or use --backend memory, kd, or kdnet, which never enable it (see the UTM setup guide)"
+         or use --backend memory, kd, or kdnet, which never enable it (see the UTM setup guide). \
+         With QEMU 10.1 or later, set NTOSEYE_GDB_ON_HVF=1 to connect anyway"
     )]
     GdbAbortsHvfVm,
 

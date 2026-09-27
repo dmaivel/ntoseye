@@ -99,8 +99,12 @@ impl Session {
                     _ => PhysMem::live()?,
                 };
                 // Checked before the stub sees a packet: the first one already
-                // makes QEMU enable guest debugging.
-                if *backend == Backend::Gdb && phys.guest_debug_aborts_vm() {
+                // makes QEMU enable guest debugging. QEMU 10.1 fixed the
+                // abort; NTOSEYE_GDB_ON_HVF=1 is for a VM running a fixed one.
+                if *backend == Backend::Gdb
+                    && phys.guest_debug_aborts_vm()
+                    && std::env::var_os("NTOSEYE_GDB_ON_HVF").is_none_or(|value| value != "1")
+                {
                     return Err(Error::GdbAbortsHvfVm);
                 }
                 let endpoint = spec.endpoint();
