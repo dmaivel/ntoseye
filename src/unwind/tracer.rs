@@ -190,8 +190,9 @@ impl<'a> StackTracer<'a> {
             Some(image) => image,
             None => {
                 let (phys, dtb) = (Arc::clone(self.phys), module.dtb);
+                let (kernel_dtb, arch) = (self.target.kernel_dtb(), self.target.arch());
                 match read_pe_image(module.info.base_address, move |address, buf| {
-                    AddressSpace::new(&phys, dtb).read_bytes(address, buf)
+                    AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
                 }) {
                     Ok(img) => Arc::new(img),
                     Err(_) => {
