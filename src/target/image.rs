@@ -9,8 +9,11 @@ use crate::guest::ModuleInfo;
 use crate::pe::headers::{
     DebugRecord, ImageHeaders, ImportDescriptor, debug_directory, decode_headers, imports,
 };
-use crate::pe::{ImageExports, read_pe_exports};
+use crate::pe::{ImageExports, PeImage, read_pe_exports};
 use crate::types::{Dtb, VirtAddr};
+
+/// Where the kernel half of the address space begins.
+const KERNEL_SPACE_START: u64 = 0xffff_8000_0000_0000;
 
 /// Which parts of the image `!dh` shows (`-f`, `-s`, `-e`, `-i`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +102,49 @@ pub struct ImageHeadersDetail {
     pub imports: Option<DiagnosticValue<Vec<ImportDescriptor>>>,
 }
 
+/// What `!lmi` shows for one loaded module: its identity from the mapped
+/// headers and debug directory. Its symbol state is read from the symbol
+/// store under `dtb`, the address space the module's symbols load in.
+#[derive(Debug, Clone)]
+pub struct ModuleImageInfo {
+    pub module: ModuleInfo,
+    pub dtb: Dtb,
+    pub headers: ImageHeaders,
+    pub debug: DiagnosticValue<Vec<DebugRecord>>,
+}
+
 impl Target {
+    /// `!lmi <module|address>`: the loaded module `text` names (see
+    /// [`Self::resolve_image`]) with its headers and debug directory.
+    pub fn module_image_info(
+        &self,
+        text: &str,
+        eval: impl FnOnce(&str) -> Result<VirtAddr>,
+    ) -> Result<ModuleImageInfo> {
+        let (base, module) = self.resolve_image(text, eval)?;
+        let module = module.ok_or_else(|| {
+            Error::DebugInfo(format!("{:#x} is the base of no loaded module", base.0))
+        })?;
+        let dtb = if base.0 >= KERNEL_SPACE_START {
+            self.kernel_dtb()
+        } else {
+            self.process_dtb()
+        };
+        self.image_info(dtb, module)
+    }
+
+    /// [`ModuleImageInfo`] of `module`, loaded in `dtb`'s address space.
+    pub fn image_info(&self, dtb: Dtb, module: ModuleInfo) -> Result<ModuleImageInfo> {
+        let (image, headers) = self.decoded_image(dtb, module.base_address)?;
+        let debug = DiagnosticValue::from_result(debug_directory(&image, &headers));
+        Ok(ModuleImageInfo {
+            module,
+            dtb,
+            headers,
+            debug,
+        })
+    }
+
     /// `!dh [options] <module|address>`: parse the options, resolve the image
     /// (see [`Self::resolve_image`]), and decode it.
     pub fn inspect_image_headers(
@@ -199,15 +244,7 @@ impl Target {
         module: Option<&ModuleInfo>,
         parts: DhParts,
     ) -> Result<ImageHeadersDetail> {
-        let image = self.mapped_pe_image(dtb, base).map_err(|error| {
-            Error::DebugInfo(format!("cannot read PE headers at {:#x}: {error}", base.0))
-        })?;
-        let headers = decode_headers(image.headers()).map_err(|error| {
-            Error::DebugInfo(format!(
-                "{:#x} does not hold valid PE headers: {error}",
-                base.0
-            ))
-        })?;
+        let (image, headers) = self.decoded_image(dtb, base)?;
         let debug = parts
             .sections
             .then(|| DiagnosticValue::from_result(debug_directory(&image, &headers)));
@@ -226,6 +263,21 @@ impl Target {
             exports,
             imports,
         })
+    }
+
+    /// The image mapped at `base` in `dtb`'s address space and its decoded
+    /// headers.
+    fn decoded_image(&self, dtb: Dtb, base: VirtAddr) -> Result<(PeImage, ImageHeaders)> {
+        let image = self.mapped_pe_image(dtb, base).map_err(|error| {
+            Error::DebugInfo(format!("cannot read PE headers at {:#x}: {error}", base.0))
+        })?;
+        let headers = decode_headers(image.headers()).map_err(|error| {
+            Error::DebugInfo(format!(
+                "{:#x} does not hold valid PE headers: {error}",
+                base.0
+            ))
+        })?;
+        Ok((image, headers))
     }
 }
 

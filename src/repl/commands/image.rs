@@ -7,8 +7,9 @@ use crate::pe::headers::{
     section_characteristics, subsystem_name,
 };
 use crate::repl::*;
-use crate::target::DiagnosticValue;
-use crate::target::image::ImageHeadersDetail;
+use crate::symbols::ModuleSymbolStatus;
+use crate::target::image::{ImageHeadersDetail, ModuleImageInfo};
+use crate::target::{DiagnosticValue, Target};
 use crate::ui;
 
 repl_command! {
@@ -17,6 +18,15 @@ repl_command! {
     usage: "!dh [-f] [-s] [-e] [-i] [-a] <module|address>",
     summary: "Display a mapped PE image's headers.",
     details: "The image is a module name (`nt`, `hal`, `ntdll`, or its image name) in the `.process` module list and then the kernel's, or any address inside a loaded module, or the base of an image no loader list names (it must start with MZ). Without options it shows the file and section headers, as WinDbg does. -f: the file header, optional header (entry point, image base, subsystem, DLL characteristics, stack and heap sizes), and data directories (RVA and size; the security directory's is a file offset). -s: the section table with decoded flags, and the debug directory with its CodeView PDB name, GUID, and age. -e: the export directory and every export (ordinal, RVA, name or forwarder). -i: each import descriptor and its imports (hint and name or ordinal) with the address the loader bound in the IAT; a descriptor without an import name table shows the bound addresses alone, since its IAT no longer holds names. -a: all of these. Options combine (`-fs`, `-f -i`). A directory that does not read (a driver's import table lives in its INIT section, which is discarded after load) is reported as unavailable, and the rest is still shown; so is an import or module name that does not read. The headers are read from memory as mapped, so the values are what the loader left there.",
+    completion: [Symbol],
+}
+
+repl_command! {
+    cmd_lmi;
+    names: ["!lmi", "lmi"],
+    usage: "!lmi <module|address>",
+    summary: "Show a loaded module's image identity, debug directory, and symbol state.",
+    details: "The module is named as for !dh (`nt`, `ntdll`, an image name) or by any address inside it. Shows the base, image name and path, machine, time stamp, size, checksum, and characteristics from the mapped headers; the debug directory with the CodeView PDB name, GUID, and age; and whether symbols are loaded, where from, and the local PDB file.",
     completion: [Symbol],
 }
 
@@ -36,6 +46,69 @@ impl ReplState<'_> {
         }
         Ok(())
     }
+
+    fn cmd_lmi(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let text = require_arg!(invocation, 0, "!lmi");
+        let target = &self.ctx.target;
+        let radix = self.radix;
+        match target.module_image_info(text, |text| Expr::eval_with_radix(text, target, radix)) {
+            Ok(detail) => print_module_image_info(target, &detail),
+            Err(error) => error!("!lmi: {error}"),
+        }
+        Ok(())
+    }
+}
+
+fn print_module_image_info(target: &Target, detail: &ModuleImageInfo) {
+    let module = &detail.module;
+    let file = &detail.headers.file;
+    let optional = &detail.headers.optional;
+    outln!("Loaded Module Info: [{}]", module.short_name);
+    outln!("         Module: {}", module.short_name);
+    outln!("   Base Address: {}", ui::addr(module.base_address.0));
+    outln!("     Image Name: {}", module.name);
+    if let Some(path) = &module.path {
+        outln!("     Image Path: {path}");
+    }
+    outln!(
+        "   Machine Type: {} ({})",
+        file.machine,
+        machine_name(file.machine)
+    );
+    outln!("     Time Stamp: {:x}", file.time_date_stamp);
+    outln!("           Size: {:x}", optional.size_of_image);
+    outln!("       CheckSum: {:x}", optional.checksum);
+    outln!(
+        "Characteristics: {:x}  {}",
+        file.characteristics,
+        file_characteristics(file.characteristics).join(", ")
+    );
+    print_debug_directory(&detail.debug);
+    let symbols = &target.symbols;
+    let base = module.base_address;
+    let status = symbols.module_symbol_status(detail.dtb, base);
+    let source = symbols
+        .module_symbol_source(detail.dtb, base)
+        .map(|source| format!(" (from {})", source.label()))
+        .unwrap_or_default();
+    outln!(
+        "    Symbol Type: {}{source}",
+        status.as_ref().map_or("unknown", ModuleSymbolStatus::label)
+    );
+    if let Some(ModuleSymbolStatus::Failed(reason)) = &status {
+        outln!("                 {reason}");
+    }
+    if let Some(identity) = symbols.module_pdb_identity(detail.dtb, base) {
+        outln!(
+            "            PDB: GUID {:032X}, age {}",
+            identity.guid,
+            identity.age
+        );
+    }
+    if let Some(path) = symbols.module_pdb_path(detail.dtb, base) {
+        outln!("    Symbol File: {}", path.display());
+    }
+    outln!();
 }
 
 fn print_image_headers(detail: &ImageHeadersDetail) {

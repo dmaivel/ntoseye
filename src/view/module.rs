@@ -10,7 +10,7 @@ use crate::pe::headers::{
 };
 use crate::pe::{ExportDirectory, ImageExports};
 use crate::symbols::ModuleSymbolStatus;
-use crate::target::image::ImageHeadersDetail;
+use crate::target::image::{ImageHeadersDetail, ModuleImageInfo};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::Dtb;
 
@@ -532,4 +532,43 @@ pub fn image_headers(detail: &ImageHeadersDetail) -> View {
         ));
     }
     View::Object(fields)
+}
+
+/// Render `!lmi`: the module, its file-header identity, debug directory
+/// (with the CodeView PDB name, GUID, and age), and symbol state.
+pub fn module_image_info(target: &Target, detail: &ModuleImageInfo) -> View {
+    let file = &detail.headers.file;
+    let optional = &detail.headers.optional;
+    View::Object(vec![
+        ("module", module(&detail.module)),
+        ("machine", View::Hex(file.machine.into())),
+        ("machine_name", View::Str(machine_name(file.machine).into())),
+        ("time_date_stamp", View::Hex(file.time_date_stamp.into())),
+        ("size_of_image", View::Hex(optional.size_of_image.into())),
+        ("checksum", View::Hex(optional.checksum.into())),
+        ("characteristics", View::Hex(file.characteristics.into())),
+        (
+            "characteristics_names",
+            flag_list(file_characteristics(file.characteristics)),
+        ),
+        (
+            "debug_directory",
+            diagnostic(&detail.debug, |records| {
+                View::List(records.iter().map(debug_entry).collect())
+            }),
+        ),
+        (
+            "symbols",
+            module_symbols(target, &detail.module, detail.dtb),
+        ),
+        (
+            "symbol_file",
+            View::OptStr(
+                target
+                    .symbols
+                    .module_pdb_path(detail.dtb, detail.module.base_address)
+                    .map(|path| path.display().to_string()),
+            ),
+        ),
+    ])
 }

@@ -1367,6 +1367,13 @@ class Module:
         `MemoryAccessError` on an unreadable page unless `zero_fill` is set,
         which zeroes such pages instead (a kernel's discarded INIT section).
         """
+    def image_info(self, /) -> Record:
+        """
+        The module's image identity (`!lmi`): machine, time stamp, size,
+        checksum, and characteristics from its headers, the debug directory
+        with the CodeView PDB name, GUID, and age, and its symbol state and
+        local PDB file.
+        """
     def inspect(self, /) -> Record:
         """
         Symbol status, load diagnostics and PDB identity (`lmv`).

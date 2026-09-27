@@ -511,6 +511,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("lm", "processes and modules"),
     ("!dh", "processes and modules"),
     ("lmv", "processes and modules"),
+    ("!lmi", "processes and modules"),
     ("ps", "processes and modules"),
     ("!for_each_process", "processes and modules"),
     ("!for_each_thread", "processes and modules"),

@@ -361,6 +361,20 @@ impl Module {
         view_record(py, &view)
     }
 
+    /// The module's image identity (`!lmi`): machine, time stamp, size,
+    /// checksum, and characteristics from its headers, the debug directory
+    /// with the CodeView PDB name, GUID, and age, and its symbol state and
+    /// local PDB file.
+    fn image_info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+        let info = self.info.clone();
+        let view = self.owner.with_in(py, &self.context(), |session| {
+            let dtb = self.space.dtb(&session.target)?;
+            let detail = session.target.image_info(dtb, info).map_err(err)?;
+            Ok(view::module::module_image_info(&session.target, &detail))
+        })?;
+        view_record(py, &view)
+    }
+
     /// Fetch the matching image from the symbol server cache (`.fetchimage`).
     fn fetch_image(&self, py: Python<'_>) -> PyResult<String> {
         let name = self.info.name.clone();

@@ -30,6 +30,15 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             .target()
             .inspect_image_headers(argv, |text| args.eval(text))
             .map(|detail| view::module::image_headers(&detail)),
+        "!lmi" | "lmi" => match argv {
+            [text] => args
+                .target()
+                .module_image_info(text, |text| args.eval(text))
+                .map(|detail| view::module::module_image_info(args.target(), &detail)),
+            _ => Err(Error::InvalidArgument(
+                "!lmi takes one module name or address".into(),
+            )),
+        },
         "ln" => args.addr(0).map(|address| {
             view::symbols::nearest_symbol(
                 address,
