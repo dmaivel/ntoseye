@@ -204,19 +204,25 @@ pub const fn field_key(name: &'static str) -> &'static str {
     }
 }
 
-/// Whether a field named `key` would hide a `BaseRecord` method.
-pub const fn is_record_method(key: &str) -> bool {
-    const METHODS: [&str; 5] = ["keys", "values", "items", "get", "to_dict"];
-    let key = key.as_bytes();
+/// Whether a property named `name` would hide a `BaseRecord` method or is a
+/// Python keyword, which no attribute access can name.
+pub const fn is_reserved_property(name: &str) -> bool {
+    const RESERVED: [&str; 40] = [
+        "keys", "values", "items", "get", "to_dict", "False", "None", "True", "and", "as",
+        "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else",
+        "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+        "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+    ];
+    let name = name.as_bytes();
     let mut index = 0;
-    while index < METHODS.len() {
-        let method = METHODS[index].as_bytes();
-        if method.len() == key.len() {
+    while index < RESERVED.len() {
+        let reserved = RESERVED[index].as_bytes();
+        if reserved.len() == name.len() {
             let mut at = 0;
-            while at < key.len() && key[at] == method[at] {
+            while at < name.len() && name[at] == reserved[at] {
                 at += 1;
             }
-            if at == key.len() {
+            if at == name.len() {
                 return true;
             }
         }
@@ -230,8 +236,9 @@ pub const fn is_record_method(key: &str) -> bool {
 /// subclass in the invoking module's `py` submodule, with a property per
 /// field. Doc comments on the struct and its fields document the class and
 /// properties. A field named like a `BaseRecord` method (`keys`, `values`,
-/// `items`, `get`, `to_dict`) is a compile error: give it another name and
-/// keep its key with `=> "items"` after the type (`work_items: Vec<T> =>
+/// `items`, `get`, `to_dict`) or a Python keyword (`class`, `from`, ...) is a
+/// compile error: give it another name and keep its key with `=> "items"`
+/// after the type (`work_items: Vec<T> =>
 /// "items"`). Write a keyword as a raw identifier (`r#type`), whose key
 /// drops the `r#`. Methods after a `;` following the fields join the
 /// class's `#[pymethods]` (`fn __str__(slf: &Bound<'_, Self>) -> ...`), for
@@ -259,10 +266,14 @@ macro_rules! shapes {
 
             $(
                 const _: () = assert!(
-                    !$crate::view::shape::is_record_method(
+                    !$crate::view::shape::is_reserved_property(
                         $crate::view::shape::field_key(stringify!($field))
                     ),
-                    concat!("field `", stringify!($field), "` would hide a BaseRecord method"),
+                    concat!(
+                        "field `",
+                        stringify!($field),
+                        "` would hide a BaseRecord method or is a Python keyword"
+                    ),
                 );
             )*
 
