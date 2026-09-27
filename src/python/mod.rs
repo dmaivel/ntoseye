@@ -316,6 +316,12 @@ pub mod _ntoseye {
         StackFrame, UnwindHandler, VcpuStatus,
     };
     #[pymodule_export]
+    use crate::view::fs::py::{
+        CachedFile, ControlArea, ControlAreaSegment, FileCache, FltFilter, FltFilterFrame,
+        FltFilters, FltInstance, FltInstanceFrame, FltInstances, FltVolume, FltVolumeFrame,
+        FltVolumes, Subsection, Vpb,
+    };
+    #[pymodule_export]
     use crate::view::hardware::py::{
         IpiProcessor, IpiRequest, IpiState, PciBar, PciBus, PciBuses, PciCapability,
         PciConfigBytes, PciFunction, PciScan, PciSegment, PciTree, PciTreeDevice, ProcessorError,

@@ -713,7 +713,11 @@ impl Inspect {
 
     /// Decode a section's `_CONTROL_AREA`, its segment, and its subsections
     /// (`!ca`).
-    fn control_area<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn control_area<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::fs::py::ControlArea>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -724,7 +728,7 @@ impl Inspect {
     }
 
     /// Decode a volume parameter block (`!vpb`).
-    fn vpb<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn vpb<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, view::fs::py::Vpb>> {
         self.record(py, |session| {
             let detail = session.target.inspect_vpb(VirtAddr(address)).map_err(err)?;
             Ok(view::fs::vpb(&detail))
@@ -733,7 +737,7 @@ impl Inspect {
 
     /// The cache manager's mapped views per file, from its VACB arrays
     /// (`!filecache`).
-    fn file_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn file_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::fs::py::FileCache>> {
         self.record(py, |session| {
             let detail = session.target.file_cache().map_err(err)?;
             Ok(view::fs::file_cache(&detail))
@@ -742,7 +746,7 @@ impl Inspect {
 
     /// The registered minifilters of each filter manager frame, with their
     /// instances (`!fltkd.filters`).
-    fn flt_filters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn flt_filters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::fs::py::FltFilters>> {
         self.record(py, |session| {
             let detail = session.target.flt_filters().map_err(err)?;
             Ok(view::fs::flt_filters(&detail))
@@ -757,7 +761,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         filter: Option<FltFilterArg>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::fs::py::FltInstances>> {
         let (text, address) = match filter {
             Some(FltFilterArg::Address(address)) => (Some(format!("{address:#x}")), Some(address)),
             Some(FltFilterArg::Name(name)) => (Some(name), None),
@@ -778,7 +782,7 @@ impl Inspect {
 
     /// The volumes of each filter manager frame, with the instances on them
     /// (`!fltkd.volumes`).
-    fn flt_volumes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn flt_volumes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::fs::py::FltVolumes>> {
         self.record(py, |session| {
             let detail = session.target.flt_volumes().map_err(err)?;
             Ok(view::fs::flt_volumes(&detail))
