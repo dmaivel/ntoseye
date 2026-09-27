@@ -217,7 +217,10 @@ impl Symbols {
     }
 
     /// Reload symbols in this space and re-resolve symbolic breakpoints.
-    fn reload<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn reload<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::module::py::SymbolReloadReport>> {
         let report = scoped(py, &self.owner, &self.space, |session| {
             let report = session.target.reload_module_symbols(None).map_err(err)?;
             session

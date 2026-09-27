@@ -9,7 +9,7 @@ use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{DriverIterator, ModuleIterator};
 use super::record::{BaseRecord, PlainDict, Record};
-use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict, view_record};
+use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict, view_record, view_records};
 use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
@@ -17,7 +17,8 @@ use crate::pe;
 use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
-use crate::view::shape::ViewValue;
+use crate::view::module::{Export, Section};
+use crate::view::shape::{Hex, ViewValue};
 use crate::view::{self, View};
 use pelite::PeView;
 
@@ -139,7 +140,7 @@ impl Module {
         })
     }
 
-    fn section_data(&self, py: Python<'_>) -> PyResult<Vec<Section>> {
+    fn section_data(&self, py: Python<'_>) -> PyResult<Vec<View>> {
         let base = self.info.base_address;
         self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
@@ -169,10 +170,11 @@ impl Module {
                     });
                     Section {
                         name: header.name().map(str::to_owned).unwrap_or_default(),
-                        rva: u64::from(header.VirtualAddress),
-                        size: u64::from(header.VirtualSize.max(header.SizeOfRawData)),
+                        rva: Hex(header.VirtualAddress.into()),
+                        size: Hex(header.VirtualSize.max(header.SizeOfRawData).into()),
                         permissions,
                     }
+                    .into_view()
                 })
                 .collect())
         })
@@ -232,36 +234,46 @@ impl Module {
 
     /// PE sections and their mapped permissions.
     #[getter]
-    fn sections(&self, py: Python<'_>) -> PyResult<Vec<Section>> {
-        self.section_data(py)
+    fn sections<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, view::module::py::Section>>> {
+        view_records(py, &View::List(self.section_data(py)?))
     }
 
     /// Exports from the mapped PE export directory.
     #[getter]
-    fn exports(&self, py: Python<'_>) -> PyResult<Vec<Export>> {
+    fn exports<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, view::module::py::Export>>> {
         let base = self.info.base_address;
         let exports = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
             session.target.module_exports(dtb, base).map_err(err)
         })?;
-        Ok(exports
+        let exports = exports
             .into_iter()
-            .map(|export| Export {
-                name: export.name,
-                ordinal: export.ordinal,
-                address: export.address.map(|address| address.0),
-                forwarder: export.forwarder,
+            .map(|export| {
+                Export {
+                    name: export.name,
+                    ordinal: export.ordinal,
+                    address: export.address.map(|address| Hex(address.0)),
+                    forwarder: export.forwarder,
+                }
+                .into_view()
             })
-            .collect())
+            .collect();
+        view_records(py, &View::List(exports))
     }
 
     /// Module symbol and PDB identity (`lmv`).
     #[getter]
-    fn symbols<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn symbols<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::module::py::ModuleSymbols>> {
         let info = self.info.clone();
         let view = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
-            Ok(view::module::module_symbols(&session.target, &info, dtb))
+            Ok(view::module::module_symbols(&session.target, &info, dtb).into_view())
         })?;
         view_record(py, &view)
     }
@@ -309,22 +321,21 @@ impl Module {
                     })?;
                 Ok(view::usermode::loader_module(module).into_view())
             } else {
-                let mut fields = match view::module::module(&info) {
-                    View::Object(fields) => fields,
-                    _ => unreachable!(),
-                };
-                fields.push((
-                    "symbols",
-                    view::module::module_symbols(&session.target, &info, dtb),
-                ));
-                Ok(View::Object(fields))
+                Ok(view::module::module_with_symbols(
+                    &session.target,
+                    &info,
+                    dtb,
+                ))
             }
         })?;
         view_record(py, &view)
     }
 
     /// Select, fetch, and index symbols for this module (`ld`, `.reload`).
-    fn reload_symbols<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn reload_symbols<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::module::py::SymbolReloadReport>> {
         let name = self.info.short_name.clone();
         let report = self.owner.with_in(py, &self.context(), |session| {
             session
@@ -344,7 +355,7 @@ impl Module {
         py: Python<'py>,
         exports: bool,
         imports: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::module::py::ImageHeaders>> {
         let info = self.info.clone();
         let parts = DhParts {
             exports,
@@ -366,7 +377,10 @@ impl Module {
     /// checksum, and characteristics from its headers, the debug directory
     /// with the CodeView PDB name, GUID, and age, and its symbol state and
     /// local PDB file.
-    fn image_info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn image_info<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::module::py::ModuleImageInfo>> {
         let info = self.info.clone();
         let view = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
@@ -437,74 +451,6 @@ impl Module {
     }
 }
 
-/// One PE section: its name, RVA, mapped size, and `rwx` permissions.
-#[pyclass(frozen, get_all, module = "ntoseye")]
-pub struct Section {
-    /// The section name (`.text`).
-    pub name: String,
-    /// Its offset from the image base.
-    pub rva: u64,
-    /// Its mapped size.
-    pub size: u64,
-    /// Mapped permissions as `rwx`, `-` for a missing one.
-    pub permissions: String,
-}
-
-#[pymethods]
-impl Section {
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let out = PyDict::new(py);
-        out.set_item("name", &self.name)?;
-        out.set_item("rva", self.rva)?;
-        out.set_item("size", self.size)?;
-        out.set_item("permissions", &self.permissions)?;
-        Ok(PlainDict(out))
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "Section(name={:?}, rva={:#x}, size={:#x}, permissions={:?})",
-            self.name, self.rva, self.size, self.permissions
-        )
-    }
-}
-
-/// One PE export, by name or ordinal only; a forwarder has no address.
-#[pyclass(frozen, get_all, module = "ntoseye")]
-pub struct Export {
-    /// The export name, `None` for an ordinal-only export.
-    pub name: Option<String>,
-    /// The export ordinal.
-    pub ordinal: u32,
-    /// The exported address, `None` for a forwarder.
-    pub address: Option<u64>,
-    /// The forwarding target (`OTHER.Function`), for a forwarder.
-    pub forwarder: Option<String>,
-}
-
-#[pymethods]
-impl Export {
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let out = PyDict::new(py);
-        out.set_item("name", &self.name)?;
-        out.set_item("ordinal", self.ordinal)?;
-        out.set_item("address", self.address)?;
-        out.set_item("forwarder", &self.forwarder)?;
-        Ok(PlainDict(out))
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "Export(name={}, ordinal={}, address={}, forwarder={})",
-            python_str(self.name.as_deref()),
-            self.ordinal,
-            self.address
-                .map_or_else(|| "None".to_string(), |address| format!("{address:#x}")),
-            python_str(self.forwarder.as_deref())
-        )
-    }
-}
-
 #[pymethods]
 impl Modules {
     /// Look up a module by short name, case-insensitively (`"nt"` names ntoskrnl).
@@ -560,11 +506,6 @@ impl Modules {
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
         Ok(self.infos(py)?.len())
     }
-}
-
-/// `value` as Python's `repr` shows an optional string.
-fn python_str(value: Option<&str>) -> String {
-    value.map_or_else(|| "None".to_string(), |value| format!("{value:?}"))
 }
 
 fn module_matches(module: &ModuleInfo, query: &str) -> bool {

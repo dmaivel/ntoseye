@@ -286,7 +286,7 @@ pub mod _ntoseye {
     #[pymodule_export]
     use super::memory::{AddressModule, Memory, MemoryRegion, MemorySearchMatch};
     #[pymodule_export]
-    use super::module::{Device, Driver, Drivers, Export, Module, Modules, Section};
+    use super::module::{Device, Driver, Drivers, Module, Modules};
     #[pymodule_export]
     use super::process::{Heap, Heaps, Process, Processes, Regions};
     #[pymodule_export]
@@ -328,6 +328,13 @@ pub mod _ntoseye {
         HeapPageRange, HeapStats, HeapSummary, HeapWalkStop, LfhSubsegment, NtHeap, NtHeapEntry,
         NtHeapSegment, NtLfhUserBlocks, NtUncommittedRange, NtVirtualBlock, SegmentHeap,
         SegmentHeapContext, SegmentHeapKeys, SegmentHeapPageSegment, VsChunk, VsSubsegment,
+    };
+    #[pymodule_export]
+    use crate::view::module::py::{
+        CodeViewRecord, Export, ImageDataDirectory, ImageDebugEntry, ImageExport,
+        ImageExportDirectory, ImageExports, ImageFileHeader, ImageHeaders, ImageImport,
+        ImageImportDescriptor, ImageOptionalHeader, ImageSectionHeader, LoadedModule,
+        ModuleImageInfo, ModuleSymbols, Section, SymbolLoadDiagnostic, SymbolReloadReport,
     };
     #[pymodule_export]
     use crate::view::object::py::{
