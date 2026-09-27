@@ -983,10 +983,7 @@ pub fn print_indexed_stacktrace(
             String::new()
         };
         let frame_size = if columns.frame_size {
-            let previous_sp = index
-                .checked_sub(1)
-                .and_then(|previous| trace.frames.get(previous))
-                .map(|previous| previous.frame.sp);
+            let previous_sp = trace.frames.get(index.wrapping_sub(1)).map(|p| p.frame.sp);
             format!("{} ", frame_size_cell(previous_sp, frame.sp))
         } else {
             String::new()

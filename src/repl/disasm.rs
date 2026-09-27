@@ -483,10 +483,7 @@ pub fn print_stacktrace_data_with(
 
     for (num, frame) in stacktrace.frames.iter().take(shown).enumerate() {
         if columns.frame_size {
-            let previous_sp = num
-                .checked_sub(1)
-                .and_then(|previous| stacktrace.frames.get(previous))
-                .map(|previous| previous.sp);
+            let previous_sp = stacktrace.frames.get(num.wrapping_sub(1)).map(|p| p.sp);
             outln!(
                 "{indent}{} {} {}",
                 ui::muted(&format!("#{num:<2}")),
