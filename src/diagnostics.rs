@@ -38,18 +38,13 @@ pub fn eprint_note(message: impl Display) {
 
 fn print_labeled_stdout(label: &str, styled_label: &str, message: &str) {
     for line in labeled_lines(label, styled_label, message) {
-        outln!("{line}");
+        output::write_diagnostic_fmt(format_args!("{line}\n"), false);
     }
 }
 
 fn print_labeled_stderr(label: &str, styled_label: &str, message: &str) {
-    // A capturing host wants everything the user would have seen, errors
-    // included; stderr is only the right channel for an actual terminal.
-    if output::capturing() {
-        return print_labeled_stdout(label, styled_label, message);
-    }
     for line in labeled_lines(label, styled_label, message) {
-        output::write_stderr_fmt(format_args!("{line}\n"));
+        output::write_diagnostic_fmt(format_args!("{line}\n"), true);
     }
 }
 

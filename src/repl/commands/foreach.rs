@@ -40,7 +40,7 @@ repl_command! {
     names: [".foreach"],
     usage: ".foreach [/pS n] [/ps n] ( Variable { InCommands } ) { OutCommands } | .foreach [options] /s ( Variable \"InString\" ) { OutCommands } | .foreach [options] /f ( Variable \"InFile\" ) { OutCommands }",
     summary: "Run commands once for each token of a command's output, a string, or a file.",
-    details: "InCommands run first with their output hidden; that output (or InString, or the text of InFile) is split at spaces, tabs, and line breaks, and OutCommands run once per token with each whole-word occurrence of Variable replaced by it. Variable must stand alone between spaces (or at an end of OutCommands) to be replaced; `${Variable}` replaces it anywhere, even inside other text. /pS n skips the first n tokens, and /ps n skips n tokens after each one used: `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token... The skip counts are expressions in the current radix. OutCommands can hold several `;`-separated commands, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
+    details: "InCommands run first with their output hidden (errors and warnings they report are shown, not used as tokens); that output (or InString, or the text of InFile) is split at spaces, tabs, and line breaks, and OutCommands run once per token with each whole-word occurrence of Variable replaced by it. Variable must stand alone between spaces (or at an end of OutCommands) to be replaced; `${Variable}` replaces it anywhere, even inside other text. /pS n skips the first n tokens, and /ps n skips n tokens after each one used: `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token... The skip counts are expressions in the current radix. OutCommands can hold several `;`-separated commands, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop. A command the session refuses (a resume inside a breakpoint action, say) ends the loop and the rest of the command line; a command that only reports an error does not.",
     completion: Expression,
     style: ExpressionTail,
 }
@@ -523,7 +523,9 @@ impl ReplState<'_> {
         self.in_command_loop(".foreach", |state| {
             let input = match &spec.source {
                 ForeachSource::Commands(commands) => {
-                    let (flow, text) = output::capture(|| state.dispatch_line(commands));
+                    // Only regular output becomes tokens: errors and warnings
+                    // reach the user, not OutCommands.
+                    let (flow, text) = output::capture_output(|| state.dispatch_line(commands));
                     if !matches!(flow, Ok(Flow::Continue)) {
                         // The InCommands did not finish: show what they said,
                         // since their refusal or failure is in it.
@@ -713,6 +715,21 @@ mod tests {
         );
         assert_eq!(flow, Flow::Continue);
         assert_eq!(text, "1 a\n1 b\n2 a\n2 b\n");
+    }
+
+    #[test]
+    fn in_command_errors_are_shown_and_not_used_as_tokens() {
+        // The malformed inner `.foreach` reports an error and carries on.
+        let (flow, text) = run(
+            ".foreach (x {.echo a b; .foreach bad}) {.echo x}",
+            DispatchContext::Interactive,
+        );
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(text.matches("error:").count(), 1, "{text}");
+        assert!(
+            text.starts_with("error:") && text.ends_with("\na\nb\n"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -20,7 +20,15 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
 thread_local! {
-    static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    /// The active captures, innermost last.
+    static CAPTURES: RefCell<Vec<Capture>> = const { RefCell::new(Vec::new()) };
+}
+
+struct Capture {
+    text: Vec<u8>,
+    /// Whether errors and warnings land here too, or pass on to an
+    /// enclosing capture (or the terminal).
+    diagnostics: bool,
 }
 
 static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
@@ -113,20 +121,44 @@ pub fn log_input_line(line: &str) {
     log_text(&clean);
 }
 
+/// Append to the innermost capture that takes this kind of text; `false`
+/// when none does.
+fn append_to_capture(args: fmt::Arguments<'_>, diagnostic: bool) -> bool {
+    CAPTURES.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let Some(capture) = stack
+            .iter_mut()
+            .rev()
+            .find(|capture| !diagnostic || capture.diagnostics)
+        else {
+            return false;
+        };
+        // Vec<u8> writes cannot fail.
+        let _ = capture.text.write_fmt(args);
+        true
+    })
+}
+
 /// Backing call for `out!`/`outln!`: append to the active capture, else
 /// print to stdout.
 pub fn write_fmt(args: fmt::Arguments<'_>) {
     log_args(args);
-    let captured = CAPTURE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let Some(buf) = slot.as_mut() else {
-            return false;
-        };
-        // Vec<u8> writes cannot fail.
-        let _ = buf.write_fmt(args);
-        true
-    });
-    if !captured {
+    if !append_to_capture(args, false) {
+        print_stdout(args);
+    }
+}
+
+/// Backing call for errors and warnings: append to the innermost capture
+/// that takes diagnostics (a capturing host wants everything the user would
+/// have seen), else print to stderr or, for `to_stderr == false`, stdout.
+pub fn write_diagnostic_fmt(args: fmt::Arguments<'_>, to_stderr: bool) {
+    log_args(args);
+    if append_to_capture(args, true) {
+        return;
+    }
+    if to_stderr {
+        print_stderr(args);
+    } else {
         print_stdout(args);
     }
 }
@@ -137,11 +169,6 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
 pub fn write_stderr_fmt(args: fmt::Arguments<'_>) {
     log_args(args);
     print_stderr(args);
-}
-
-/// Whether this thread's REPL output is currently being captured.
-pub fn capturing() -> bool {
-    CAPTURE.with(|slot| slot.borrow().is_some())
 }
 
 /// `print!` that honors an active [`capture`].
@@ -162,29 +189,49 @@ macro_rules! outln {
     };
 }
 
-/// Restores the previous capture slot on drop, so a panic unwinding out of
-/// `f` (e.g. a Python exception converted at the boundary) cannot leave a
-/// stale buffer swallowing the REPL's output.
-struct Restore(Option<Vec<u8>>);
+/// Drops the captures from its depth on, so a panic unwinding out of `f`
+/// (e.g. a Python exception converted at the boundary) cannot leave a stale
+/// buffer swallowing the REPL's output.
+struct Restore(usize);
 
 impl Drop for Restore {
     fn drop(&mut self) {
-        CAPTURE.with(|slot| *slot.borrow_mut() = self.0.take());
+        CAPTURES.with(|stack| stack.borrow_mut().truncate(self.0));
     }
 }
 
-/// Run `f` with this thread's REPL output captured instead of printed.
-/// Returns `f`'s result and the captured text with terminal styling (ANSI
-/// CSI sequences) stripped, since a capturing host is never a terminal.
-pub fn capture<R>(f: impl FnOnce() -> R) -> (R, String) {
-    let previous = CAPTURE.with(|slot| slot.borrow_mut().replace(Vec::new()));
-    let restore = Restore(previous);
+fn capture_with<R>(diagnostics: bool, f: impl FnOnce() -> R) -> (R, String) {
+    let depth = CAPTURES.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        stack.push(Capture {
+            text: Vec::new(),
+            diagnostics,
+        });
+        stack.len() - 1
+    });
+    let restore = Restore(depth);
     let result = f();
-    let buf = CAPTURE
-        .with(|slot| slot.borrow_mut().take())
+    let text = CAPTURES
+        .with(|stack| stack.borrow_mut().drain(depth..).next())
+        .map(|capture| capture.text)
         .unwrap_or_default();
     drop(restore);
-    (result, strip_ansi(&String::from_utf8_lossy(&buf)))
+    (result, strip_ansi(&String::from_utf8_lossy(&text)))
+}
+
+/// Run `f` with this thread's REPL output, errors and warnings included,
+/// captured instead of printed. Returns `f`'s result and the captured text
+/// with terminal styling (ANSI CSI sequences) stripped, since a capturing
+/// host is never a terminal.
+pub fn capture<R>(f: impl FnOnce() -> R) -> (R, String) {
+    capture_with(true, f)
+}
+
+/// [`capture`] for a command whose output is data, not for the user
+/// (`.foreach`'s InCommands): errors and warnings skip this capture and
+/// reach whatever would have shown them without it.
+pub fn capture_output<R>(f: impl FnOnce() -> R) -> (R, String) {
+    capture_with(false, f)
 }
 
 /// Remove ANSI escape sequences: CSI (`ESC [ … final`) and OSC (`ESC ] … BEL`
@@ -250,6 +297,21 @@ mod tests {
             outln!("after");
         });
         assert_eq!(outer, "before\nafter\n");
+    }
+
+    #[test]
+    fn capture_output_passes_diagnostics_to_the_enclosing_capture() {
+        let (_, outer) = capture(|| {
+            let (_, inner) = capture_output(|| {
+                outln!("data");
+                write_diagnostic_fmt(format_args!("error: bad\n"), true);
+                let (_, innermost) =
+                    capture(|| write_diagnostic_fmt(format_args!("warning: kept\n"), false));
+                assert_eq!(innermost, "warning: kept\n");
+            });
+            assert_eq!(inner, "data\n");
+        });
+        assert_eq!(outer, "error: bad\n");
     }
 
     #[test]
