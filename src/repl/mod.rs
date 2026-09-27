@@ -43,6 +43,8 @@ use crate::output::log_input_line;
 use crate::python::embed;
 use crate::session::Session;
 use crate::symbols::ntoseye_home;
+#[cfg(all(unix, feature = "cli"))]
+use crate::target::InterruptRequester;
 #[cfg(feature = "cli")]
 use crate::target::Target;
 use crate::ui;
@@ -244,6 +246,10 @@ pub struct ReplState<'a> {
     /// Nested command loops (`.foreach`, `!for_each_*`). Bounded so an alias
     /// that loops over itself ends with an error instead of the stack.
     pub command_loop_depth: usize,
+    /// [`Target::interrupt_requests`] when the outermost command loop began;
+    /// a count past it means Ctrl+C was pressed during the loop, even if a
+    /// command inside it took the interrupt flag.
+    pub command_loop_interrupts: u64,
     pub radix: NumberRadix,
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
@@ -439,6 +445,7 @@ impl<'a> ReplState<'a> {
             aliases: store.aliases,
             event_command_depth: 0,
             command_loop_depth: 0,
+            command_loop_interrupts: 0,
             radix: store.radix,
             line: String::new(),
             context: store.context,
@@ -527,13 +534,13 @@ const TERMINATION_POLL: Duration = Duration::from_millis(100);
 /// the path that is already there, and the prompt then leaves through the same
 /// teardown as `q`.
 #[cfg(all(unix, feature = "cli"))]
-fn bridge_termination_to_interrupt(interrupt: Arc<AtomicBool>) {
+fn bridge_termination_to_interrupt(interrupt: InterruptRequester) {
     std::thread::spawn(move || {
         loop {
             // Re-raised every tick: a wait that takes the flag with `swap`
             // must not be the only one to see it.
             if termination_requested() {
-                interrupt.store(true, Ordering::SeqCst);
+                interrupt.raise();
             }
             std::thread::sleep(TERMINATION_POLL);
         }
@@ -601,13 +608,11 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     let debugger: &mut Target = &mut ctx.target;
     let client: &mut dyn DebugBackend = ctx.backend.as_mut();
 
-    let interrupt = Arc::clone(&debugger.interrupt);
-    ctrlc::set_handler(move || {
-        interrupt.store(true, Ordering::SeqCst);
-    })?;
+    let interrupt = debugger.interrupt_requester();
+    ctrlc::set_handler(move || interrupt.raise())?;
     install_termination_handler();
     #[cfg(unix)]
-    bridge_termination_to_interrupt(Arc::clone(&debugger.interrupt));
+    bridge_termination_to_interrupt(debugger.interrupt_requester());
 
     let backend_label = client.name();
 
@@ -804,6 +809,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         aliases,
         event_command_depth: 0,
         command_loop_depth: 0,
+        command_loop_interrupts: 0,
         radix: NumberRadix::Hexadecimal,
         line: String::new(),
         context: DispatchContext::Interactive,

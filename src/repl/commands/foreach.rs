@@ -393,7 +393,8 @@ fn single_alias<'a>(
 impl ReplState<'_> {
     /// Run `body` as one command loop. Past the nesting limit the loop is
     /// refused, and the refusal ends every loop around it. The outermost loop
-    /// drops a Ctrl+C left over from before it started.
+    /// drops a Ctrl+C left over from before it started and counts only the
+    /// ones after.
     pub(super) fn in_command_loop(
         &mut self,
         name: &str,
@@ -405,6 +406,7 @@ impl ReplState<'_> {
         }
         if self.command_loop_depth == 0 {
             self.ctx.target.interrupt.store(false, Ordering::SeqCst);
+            self.command_loop_interrupts = self.ctx.target.interrupt_requests();
         }
         self.command_loop_depth += 1;
         let flow = body(self);
@@ -416,9 +418,11 @@ impl ReplState<'_> {
         flow
     }
 
-    /// Ctrl+C, or a remote host cancelling the call (client gone, shutdown).
+    /// Ctrl+C since the outermost loop began (even one a command inside took
+    /// to stop itself), or a remote host cancelling the call (client gone,
+    /// shutdown).
     fn command_loop_cancelled(&self) -> bool {
-        self.ctx.target.interrupted()
+        self.ctx.target.interrupt_requests() != self.command_loop_interrupts
             || self
                 .stop_wait
                 .as_ref()
@@ -760,6 +764,30 @@ mod tests {
             !text.contains("innermost") && !text.contains("after"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn ctrl_c_taken_by_a_command_inside_still_ends_the_loop() {
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        let ctrl_c = state.ctx.target.interrupt_requester();
+        // Left over from before the loop: ignored.
+        ctrl_c.raise();
+        let (flow, text) = capture(|| {
+            state.in_command_loop("loop", |state| {
+                state.run_iterations("loop", 3, |state, index| {
+                    if index == 0 {
+                        // Pressed during the first iteration, whose command
+                        // took the flag to stop itself, as a stack walk does.
+                        ctrl_c.raise();
+                        state.ctx.target.interrupt.store(false, Ordering::SeqCst);
+                    }
+                    Some(Cow::Borrowed(".echo ran"))
+                })
+            })
+        });
+        assert_eq!(flow.unwrap(), Flow::Continue);
+        assert_eq!(text.matches("ran").count(), 1, "{text}");
     }
 
     fn sub(text: &str, var: &str, value: &str) -> String {

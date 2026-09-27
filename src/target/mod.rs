@@ -42,6 +42,26 @@ use crate::{
     unwind::RecoveredStackTrace,
 };
 
+/// A host's handle on [`Target::interrupt`], usable from any thread.
+#[derive(Clone)]
+pub struct InterruptRequester {
+    flag: Arc<AtomicBool>,
+    requests: Arc<AtomicU64>,
+}
+
+impl InterruptRequester {
+    /// Ask long-running work to stop, as Ctrl+C does.
+    pub fn raise(&self) {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Lower an interrupt the work it was meant for did not take.
+    pub fn clear(&self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct Target {
     pub phys: Arc<PhysMem>,
     pub symbols: Arc<SymbolStore>,
@@ -82,6 +102,11 @@ pub struct Target {
     /// once it is raised; the host sets it (Ctrl-C in the REPL) and clears it
     /// before the next command.
     pub interrupt: Arc<AtomicBool>,
+    /// How many times a host raised `interrupt` through an
+    /// [`InterruptRequester`]. Work that takes the flag (a stack walk, a
+    /// trace, a resume's wait) does not lower this, so a command loop can
+    /// still tell that Ctrl+C arrived during one of its commands.
+    interrupt_requests: Arc<AtomicU64>,
     /// Diagnostics raised while building or reloading the target (kernel
     /// discovery that fell back to bare memory access). Never printed here;
     /// the session forwards them to the host.
@@ -725,6 +750,21 @@ impl Target {
     /// Whether the host has asked long-running work to stop.
     pub fn interrupted(&self) -> bool {
         self.interrupt.load(Ordering::Relaxed)
+    }
+
+    /// What a host holds to raise the interrupt from another thread (a
+    /// Ctrl+C handler, a Python thread).
+    pub fn interrupt_requester(&self) -> InterruptRequester {
+        InterruptRequester {
+            flag: Arc::clone(&self.interrupt),
+            requests: Arc::clone(&self.interrupt_requests),
+        }
+    }
+
+    /// How many interrupts hosts have raised so far; a later value that
+    /// differs means one arrived in between.
+    pub fn interrupt_requests(&self) -> u64 {
+        self.interrupt_requests.load(Ordering::SeqCst)
     }
 
     /// Guest architecture: the discovered kernel's, else a dump's declared

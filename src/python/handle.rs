@@ -22,6 +22,7 @@ use crate::dbg_backend::halt_unreachable_reason;
 use crate::error::{Error, Result as CoreResult};
 use crate::repl::ReplStore;
 use crate::session::Session;
+use crate::target::InterruptRequester;
 
 /// How often an idle owner thread services the guest (see [`Actor`]); the
 /// MCP server uses the same cadence.
@@ -130,7 +131,7 @@ pub struct Actor {
     /// The session's interrupt request ([`crate::target::Target::interrupt`]),
     /// raised when the waiting Python thread gets a `KeyboardInterrupt`, as
     /// the REPL's Ctrl+C does: waits, steps, and traces end early.
-    interrupt: Arc<AtomicBool>,
+    interrupt: InterruptRequester,
     generation: Arc<AtomicU64>,
     thread: Shared<Option<JoinHandle<()>>>,
 }
@@ -147,7 +148,7 @@ impl Actor {
                 let mut session = match open() {
                     Ok(session) => {
                         let _ = opened.send(Ok((
-                            Arc::clone(&session.target.interrupt),
+                            session.target.interrupt_requester(),
                             session.target.generation_counter(),
                         )));
                         session
@@ -224,7 +225,7 @@ impl Actor {
                 Ok(value) => {
                     return match signal {
                         Some(error) => {
-                            self.interrupt.store(false, Ordering::SeqCst);
+                            self.interrupt.clear();
                             Err(error)
                         }
                         None => value,
@@ -234,7 +235,7 @@ impl Actor {
                     if signal.is_none()
                         && let Err(error) = py.check_signals()
                     {
-                        self.interrupt.store(true, Ordering::SeqCst);
+                        self.interrupt.raise();
                         signal = Some(error);
                     }
                 }
