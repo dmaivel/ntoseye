@@ -34,10 +34,7 @@ pub mod workqueue;
 pub mod zombies;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
-pub use memory::{
-    CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, PhysicalSearchHit, PhysicalSearchResult,
-    SearchResult, SearchStop, pointer_search_hit,
-};
+pub use memory::{CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, SearchResult, SearchStop};
 pub use vtl::{ForeignCode, ForeignModules, HYPERVISOR_CONTEXT, SavedVtlContext};
 
 use self::mm::AddressDescription;

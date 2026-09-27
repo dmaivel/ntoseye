@@ -43,9 +43,6 @@ pub enum SearchStop {
     Interrupted,
 }
 
-/// Pages [`Target::search_physical_pointer`] reads at a time.
-const PHYSICAL_SEARCH_CHUNK_PAGES: u64 = 256;
-
 /// What [`Target::search_physical_pointer`] found.
 #[derive(Debug, Default)]
 pub struct PhysicalSearchResult {
@@ -74,7 +71,7 @@ pub struct PhysicalSearchHit {
 /// Whether `value` is a `!search` hit for `data`, as WinDbg defines one: an
 /// exact match; with no `delta`, a value one bit off; with a `delta`, a
 /// value within `delta` of `data`, or one bit off `data - delta`.
-pub fn pointer_search_hit(value: u64, data: u64, delta: u64) -> bool {
+fn pointer_search_hit(value: u64, data: u64, delta: u64) -> bool {
     if delta == 0 {
         return (value ^ data).count_ones() <= 1;
     }
@@ -277,7 +274,7 @@ impl Target {
             last_pfn: last,
             ..PhysicalSearchResult::default()
         };
-        let mut buffer = vec![0u8; PHYSICAL_SEARCH_CHUNK_PAGES as usize * PAGE_SIZE];
+        let mut buffer = vec![0u8; SEARCH_CHUNK];
         'runs: for (base, count) in runs {
             let mut pfn = base.max(first);
             let end = base.saturating_add(count).min(last.saturating_add(1));
@@ -286,7 +283,7 @@ impl Target {
                     result.stopped = Some(SearchStop::Interrupted);
                     break 'runs;
                 }
-                let pages = (end - pfn).min(PHYSICAL_SEARCH_CHUNK_PAGES);
+                let pages = (end - pfn).min((SEARCH_CHUNK / PAGE_SIZE) as u64);
                 let chunk = &mut buffer[..pages as usize * PAGE_SIZE];
                 let whole = self.read_physical(pfn * page, chunk).is_ok();
                 for (index, bytes) in chunk.as_chunks_mut::<PAGE_SIZE>().0.iter_mut().enumerate() {
@@ -318,6 +315,7 @@ impl Target {
         }
 
         let mut mapping: Option<(u64, Option<VirtAddr>)> = None;
+        let mapped_va = self.va_mapped_by_pte();
         for hit in &mut result.hits {
             let pfn = hit.physical / page;
             let pte = match mapping {
@@ -336,7 +334,8 @@ impl Target {
             };
             hit.pte = pte;
             hit.va = pte
-                .and_then(|pte| self.va_mapped_by_pte(pte))
+                .zip(mapped_va.as_ref())
+                .and_then(|(pte, mapped_va)| mapped_va(pte))
                 .map(|va| va + (hit.physical % page));
         }
         Ok(result)

@@ -102,10 +102,11 @@ fn pte_to_va(pte: VirtAddr, pte_base: VirtAddr) -> VirtAddr {
 }
 
 impl Target {
-    /// The virtual address the AMD64 PTE at `pte` maps, when `pte` lies in
-    /// NT's PTE self-map (one PML4 slot: 512 GiB of PTEs); `None` for a PTE
-    /// elsewhere, such as a prototype PTE, or without `MmPteBase`.
-    pub fn va_mapped_by_pte(&self, pte: VirtAddr) -> Option<VirtAddr> {
+    /// Maps an AMD64 PTE address to the virtual address it maps, when the PTE
+    /// lies in NT's PTE self-map (one PML4 slot: 512 GiB of PTEs), and to
+    /// `None` for a PTE elsewhere, such as a prototype PTE. `None` on other
+    /// architectures or without `MmPteBase`, which is read once, here.
+    pub fn va_mapped_by_pte(&self) -> Option<impl Fn(VirtAddr) -> Option<VirtAddr>> {
         if self.arch() != Arch::Amd64 {
             return None;
         }
@@ -117,7 +118,9 @@ impl Target {
             .ok()?
             .read()
             .ok()?;
-        (pte.0.wrapping_sub(pte_base.0) < 1 << 39).then(|| pte_to_va(pte, pte_base))
+        Some(move |pte: VirtAddr| {
+            (pte.0.wrapping_sub(pte_base.0) < 1 << 39).then(|| pte_to_va(pte, pte_base))
+        })
     }
 
     /// Report each system-PTE bitmap allocator: its counters, the VA range
