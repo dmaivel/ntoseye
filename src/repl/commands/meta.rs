@@ -457,6 +457,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!analyze", "analysis"),
     ("!apc", "execution and stack"),
     ("!stacks", "execution and stack"),
+    ("!findstack", "execution and stack"),
     ("!process", "processes and modules"),
     (".vtl", "processes and modules"),
     ("!trustlets", "processes and modules"),

@@ -3,7 +3,7 @@
 
 use super::Args;
 use crate::error::{Error, Result};
-use crate::target::sched::ApcSelector;
+use crate::target::sched::{ApcSelector, findstack_level};
 use crate::view::{self, View};
 
 pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
@@ -53,6 +53,15 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .inspect_stacks(level, filter.as_deref())
                 .map(|detail| view::sched::stacks(&detail))
         }
+        "!findstack" | "findstack" => match argv {
+            [pattern] | [pattern, _] => findstack_level(argv.get(1).copied()).and_then(|level| {
+                let detail = args.state.ctx.inspect_findstack(pattern, level)?;
+                Ok(view::sched::findstack(&detail))
+            }),
+            _ => Err(Error::InvalidArgument(
+                "usage: !findstack <symbol|module> [0|1|2]".into(),
+            )),
+        },
         _ => return None,
     })
 }

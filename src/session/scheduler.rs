@@ -2,19 +2,21 @@
 //! processors with their short stacks, per-thread APC queues, and the
 //! all-threads stack listing.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::target::sched::{
-    ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, MAX_LIST_ENTRIES, RunningDetail,
-    StackThreadDetail, StacksDetail, available, frame_details, select_threads, thread_summary,
-    unavailable, walk_list_nodes,
+    ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
+    MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UnwalkedThread, available,
+    frame_details, frame_symbol_matches, select_threads, thread_summary, unavailable,
+    walk_list_nodes,
 };
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
 use crate::types::VirtAddr;
-use crate::unwind::{ThreadTraceContext, resolve_thread_trace_context};
+use crate::unwind::{ThreadStackTrace, ThreadTraceContext, resolve_thread_trace_context};
 
 const MAX_RUNNING_STACK_FRAMES: usize = 8;
 const MAX_STACK_FRAMES_LEVEL_1: usize = 32;
@@ -196,6 +198,30 @@ impl Session {
         })
     }
 
+    /// Walk each thread's stack in turn, bounded to `frame_limit` frames,
+    /// until the host interrupts (see [`Session::backtrace_thread`]). Returns
+    /// whether it was interrupted.
+    fn walk_thread_stacks(
+        &mut self,
+        threads: Vec<ThreadInfo>,
+        active_vcpus: &HashMap<u64, String>,
+        frame_limit: usize,
+        mut visit: impl FnMut(ThreadInfo, Result<ThreadStackTrace>),
+    ) -> bool {
+        for thread in threads {
+            if self.target.interrupt.swap(false, Ordering::SeqCst) {
+                return true;
+            }
+            let stack = self.backtrace_thread(
+                &thread,
+                active_vcpus.get(&thread.ethread.0).map(String::as_str),
+                frame_limit,
+            );
+            visit(thread, stack);
+        }
+        false
+    }
+
     /// Enumerate every Windows thread (including active vCPU threads absent
     /// from the process walk), resolve its bounded stack, and apply the optional
     /// case-insensitive process/symbol filter before returning structured rows.
@@ -211,55 +237,46 @@ impl Session {
             2 => MAX_STACK_FRAMES_LEVEL_2,
             _ => 1,
         };
-        let mut interrupted = false;
         let mut details = Vec::new();
-        for thread in threads {
-            if interrupted || self.target.interrupt.swap(false, Ordering::SeqCst) {
-                interrupted = true;
-                break;
-            }
-            let stack = self.backtrace_thread(
-                &thread,
-                active_vcpus.get(&thread.ethread.0).map(String::as_str),
-                frame_limit,
-            );
-            let (frames, truncated, error, top_symbol) = match stack {
-                Ok(trace) => {
-                    let frames = frame_details(trace.stacktrace.frames);
-                    let top = frames.first().map(|frame| frame.symbol.clone());
-                    (frames, trace.stacktrace.truncated, None, available(top))
+        let interrupted =
+            self.walk_thread_stacks(threads, &active_vcpus, frame_limit, |thread, stack| {
+                let (frames, truncated, error, top_symbol) = match stack {
+                    Ok(trace) => {
+                        let frames = frame_details(trace.stacktrace.frames);
+                        let top = frames.first().map(|frame| frame.symbol.clone());
+                        (frames, trace.stacktrace.truncated, None, available(top))
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        (Vec::new(), 0, Some(message.clone()), unavailable(message))
+                    }
+                };
+                let process = thread
+                    .process_name
+                    .as_deref()
+                    .unwrap_or("<unknown>")
+                    .to_ascii_lowercase();
+                let symbol_match = filter.as_deref().is_none_or(|needle| {
+                    top_symbol_contains(&top_symbol, needle)
+                        || frames
+                            .iter()
+                            .any(|frame| frame.symbol.to_ascii_lowercase().contains(needle))
+                });
+                let process_match = filter
+                    .as_deref()
+                    .is_none_or(|needle| process.contains(needle));
+                if !symbol_match && !process_match {
+                    return;
                 }
-                Err(error) => {
-                    let message = error.to_string();
-                    (Vec::new(), 0, Some(message.clone()), unavailable(message))
-                }
-            };
-            let process = thread
-                .process_name
-                .as_deref()
-                .unwrap_or("<unknown>")
-                .to_ascii_lowercase();
-            let symbol_match = filter.as_deref().is_none_or(|needle| {
-                top_symbol_contains(&top_symbol, needle)
-                    || frames
-                        .iter()
-                        .any(|frame| frame.symbol.to_ascii_lowercase().contains(needle))
+                details.push(StackThreadDetail {
+                    thread: thread_summary(&thread),
+                    active_vcpu: active_vcpus.get(&thread.ethread.0).cloned(),
+                    top_symbol,
+                    frames,
+                    truncated,
+                    error,
+                });
             });
-            let process_match = filter
-                .as_deref()
-                .is_none_or(|needle| process.contains(needle));
-            if !symbol_match && !process_match {
-                continue;
-            }
-            details.push(StackThreadDetail {
-                thread: thread_summary(&thread),
-                active_vcpu: active_vcpus.get(&thread.ethread.0).cloned(),
-                top_symbol,
-                frames,
-                truncated,
-                error,
-            });
-        }
         Ok(StacksDetail {
             level,
             filter,
@@ -267,6 +284,59 @@ impl Session {
             displayed_threads: details.len(),
             interrupted,
             threads: details,
+        })
+    }
+
+    /// `!findstack`: every thread whose walked stack (up to
+    /// [`MAX_STACK_FRAMES_LEVEL_2`] frames) has a frame matching `pattern`
+    /// (see [`frame_symbol_matches`]). Threads whose stacks do not walk are
+    /// listed apart: whether they match is unknown.
+    pub fn inspect_findstack(&mut self, pattern: &str, level: u8) -> Result<FindStackDetail> {
+        if pattern.is_empty() {
+            return Err(Error::InvalidArgument(
+                "!findstack needs a symbol or module".into(),
+            ));
+        }
+        let (threads, active_vcpus) = self.windows_threads()?;
+        let scanned_threads = threads.len();
+        let mut matched = Vec::new();
+        let mut unwalked = Vec::new();
+        let interrupted = self.walk_thread_stacks(
+            threads,
+            &active_vcpus,
+            MAX_STACK_FRAMES_LEVEL_2,
+            |thread, stack| match stack {
+                Ok(trace) => {
+                    let frames = frame_details(trace.stacktrace.frames);
+                    let matches: Vec<usize> = frames
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, frame)| frame_symbol_matches(pattern, &frame.symbol))
+                        .map(|(index, _)| index)
+                        .collect();
+                    if !matches.is_empty() {
+                        matched.push(FindStackThread {
+                            thread: thread_summary(&thread),
+                            active_vcpu: active_vcpus.get(&thread.ethread.0).cloned(),
+                            frames,
+                            matches,
+                            truncated: trace.stacktrace.truncated,
+                        });
+                    }
+                }
+                Err(error) => unwalked.push(UnwalkedThread {
+                    thread: thread_summary(&thread),
+                    error: error.to_string(),
+                }),
+            },
+        );
+        Ok(FindStackDetail {
+            pattern: pattern.to_string(),
+            level: level.min(2),
+            scanned_threads,
+            interrupted,
+            threads: matched,
+            unwalked,
         })
     }
 }

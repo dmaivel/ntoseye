@@ -60,7 +60,7 @@ ntoseye --backend memory
 
 Execution control, registers, execution-context selection, breakpoints, debug output, bugcheck stops, and reload detection are unavailable in this mode. Run {command}`capabilities` in the REPL for the exact backend feature matrix.
 
-Threads are still readable: {command}`!thread`, {command}`!stacks`, and {command}`!process` with flag 4 walk each thread's stack from what it saved on its kernel stack when it last stopped running. {command}`.thread` selects a thread the same way, and then {command}`k`, {command}`.frame`, and {command}`r` of a selected frame work on its stack, which each walk reads again as it is at that moment. A thread running on a processor at that moment has no stack to show, because its processor's registers are unavailable. The same holds on any backend while the target runs.
+Threads are still readable: {command}`!thread`, {command}`!stacks`, {command}`!findstack`, and {command}`!process` with flag 4 walk each thread's stack from what it saved on its kernel stack when it last stopped running. {command}`.thread` selects a thread the same way, and then {command}`k`, {command}`.frame`, and {command}`r` of a selected frame work on its stack, which each walk reads again as it is at that moment. A thread running on a processor at that moment has no stack to show, because its processor's registers are unavailable. The same holds on any backend while the target runs.
 
 ## Secure kernel (VTL1)
 

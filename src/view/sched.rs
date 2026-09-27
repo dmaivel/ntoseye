@@ -3,9 +3,10 @@
 use super::{View, diagnostic, list_termination};
 use crate::target::sched::{
     ApcDetail, ApcListDetail, ApcSelector, ApcThread, DpcDetail, DpcQueue, DpcQueuesDetail,
-    ReadyQueue, ReadyQueueEntry, ReadyQueuesDetail, RunningDetail, RunningProcessor,
-    SchedulerError, StackFrameDetail, StackThreadDetail, StacksDetail, ThreadSummary,
-    TimerBucketTermination, TimerDetail, TimerListDetail, TimerListEntry,
+    FindStackDetail, FindStackThread, ReadyQueue, ReadyQueueEntry, ReadyQueuesDetail,
+    RunningDetail, RunningProcessor, SchedulerError, StackFrameDetail, StackThreadDetail,
+    StacksDetail, ThreadSummary, TimerBucketTermination, TimerDetail, TimerListDetail,
+    TimerListEntry, UnwalkedThread,
 };
 use crate::target::{DiagnosticValue, kthread_state_name, wait_reason_name};
 
@@ -416,6 +417,85 @@ pub fn stacks(detail: &StacksDetail) -> View {
         (
             "threads",
             View::List(detail.threads.iter().map(stack_thread).collect()),
+        ),
+    ])
+}
+
+fn indexed_frame(index: usize, frame: &StackFrameDetail) -> View {
+    View::Object(vec![
+        ("index", View::Num(index as u64)),
+        ("sp", View::Hex(frame.sp.0)),
+        ("ip", View::Hex(frame.ip.0)),
+        ("symbol", View::Str(frame.symbol.clone())),
+        ("source", View::Str(frame.source.as_str().into())),
+    ])
+}
+
+fn unwalked_thread(thread: &UnwalkedThread) -> View {
+    View::Object(vec![
+        ("thread", thread_summary(&thread.thread)),
+        ("error", View::Str(thread.error.clone())),
+    ])
+}
+
+fn findstack_thread(thread: &FindStackThread, level: u8) -> View {
+    let mut fields = vec![
+        ("thread", thread_summary(&thread.thread)),
+        ("active", View::OptStr(thread.active_vcpu.clone())),
+        ("match_count", View::Num(thread.matches.len() as u64)),
+    ];
+    if level >= 1 {
+        fields.push((
+            "matching_frames",
+            View::List(
+                thread
+                    .matches
+                    .iter()
+                    .map(|&index| indexed_frame(index, &thread.frames[index]))
+                    .collect(),
+            ),
+        ));
+    }
+    if level >= 2 {
+        fields.push((
+            "frames",
+            View::List(
+                thread
+                    .frames
+                    .iter()
+                    .enumerate()
+                    .map(|(index, frame)| indexed_frame(index, frame))
+                    .collect(),
+            ),
+        ));
+        fields.push(("truncated", View::Num(thread.truncated as u64)));
+    }
+    View::Object(fields)
+}
+
+/// `!findstack`; top-level keys: `pattern`, `level`, `scanned_threads`,
+/// `interrupted`, `threads` (each with `match_count`, plus
+/// `matching_frames` from level 1 and the whole `frames` at level 2), and
+/// `unwalked`.
+pub fn findstack(detail: &FindStackDetail) -> View {
+    View::Object(vec![
+        ("pattern", View::Str(detail.pattern.clone())),
+        ("level", View::Num(detail.level.into())),
+        ("scanned_threads", View::Num(detail.scanned_threads as u64)),
+        ("interrupted", View::Bool(detail.interrupted)),
+        (
+            "threads",
+            View::List(
+                detail
+                    .threads
+                    .iter()
+                    .map(|thread| findstack_thread(thread, detail.level))
+                    .collect(),
+            ),
+        ),
+        (
+            "unwalked",
+            View::List(detail.unwalked.iter().map(unwalked_thread).collect()),
         ),
     ])
 }

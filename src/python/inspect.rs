@@ -1,3 +1,4 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::args::{ApcTarget, DeviceArg, ObjectArg};
@@ -256,6 +257,28 @@ impl Inspect {
         self.record(py, |session| {
             let detail = session.inspect_stacks(level, filter).map_err(err)?;
             Ok(view::sched::stacks(&detail))
+        })
+    }
+
+    /// List the threads whose stack has a frame matching a symbol or module
+    /// (`!findstack`): `module!prefix`, a bare module or function prefix, or
+    /// globs with `*`/`?`. `level` 0 counts the matching frames, 1 lists
+    /// them, 2 adds the whole stack.
+    #[pyo3(signature = (symbol, level=1))]
+    fn findstack<'py>(
+        &self,
+        py: Python<'py>,
+        symbol: &str,
+        level: u8,
+    ) -> PyResult<Bound<'py, Record>> {
+        if level > 2 {
+            return Err(PyValueError::new_err(format!(
+                "level must be 0, 1, or 2, not {level}"
+            )));
+        }
+        self.record(py, |session| {
+            let detail = session.inspect_findstack(symbol, level).map_err(err)?;
+            Ok(view::sched::findstack(&detail))
         })
     }
 

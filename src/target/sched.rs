@@ -9,11 +9,14 @@ use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{ParsedType, StructRef, TypeInfo};
+use crate::symbols::glob_matches;
 use crate::target::{
     DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
 };
 use crate::types::VirtAddr;
-use crate::unwind::{StackFrame, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
+use crate::unwind::{
+    FrameSource, StackFrame, ThreadTraceContext, format_symbol, resolve_thread_trace_context,
+};
 
 pub const MAX_LIST_ENTRIES: usize = 4096;
 const READY_PRIORITY_COUNT: usize = 32;
@@ -37,6 +40,8 @@ pub struct StackFrameDetail {
     pub sp: VirtAddr,
     pub ip: VirtAddr,
     pub symbol: String,
+    /// How the walk recovered the frame (`kv`'s provenance).
+    pub source: FrameSource,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +245,104 @@ pub struct StacksDetail {
     pub displayed_threads: usize,
     pub interrupted: bool,
     pub threads: Vec<StackThreadDetail>,
+}
+
+/// A thread whose stack could not be walked, so `!findstack` cannot say
+/// whether it matches.
+#[derive(Debug, Clone)]
+pub struct UnwalkedThread {
+    pub thread: ThreadSummary,
+    pub error: String,
+}
+
+/// A `!findstack` hit: the thread's walked stack and which frames matched.
+#[derive(Debug, Clone)]
+pub struct FindStackThread {
+    pub thread: ThreadSummary,
+    pub active_vcpu: Option<String>,
+    pub frames: Vec<StackFrameDetail>,
+    /// Indices into `frames` of the frames whose symbol matched.
+    pub matches: Vec<usize>,
+    /// Frames past the walk bound, not searched.
+    pub truncated: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct FindStackDetail {
+    pub pattern: String,
+    pub level: u8,
+    pub scanned_threads: usize,
+    pub interrupted: bool,
+    pub threads: Vec<FindStackThread>,
+    pub unwalked: Vec<UnwalkedThread>,
+}
+
+/// A frame symbol (`nt!KeWaitForSingleObject+0x846`, `tcpip+0x1a2b`,
+/// `0xfffff80412345678`) split into its module and function, the offset
+/// dropped.
+fn frame_symbol_parts(symbol: &str) -> (Option<&str>, Option<&str>) {
+    let base = match symbol.rsplit_once('+') {
+        Some((base, offset)) if offset.starts_with("0x") => base,
+        _ => symbol,
+    };
+    match base.split_once('!') {
+        Some((module, function)) => (Some(module), Some(function)),
+        None if base.starts_with("0x") => (None, None),
+        None => (Some(base), None),
+    }
+}
+
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+/// Whether a `!findstack` pattern matches a frame symbol, as WinDbg's does:
+/// `module!name` matches frames in that module whose function starts with
+/// `name` (`nt!KeWait` matches `KeWaitForSingleObject` and
+/// `KeWaitForMultipleObjects`; `nt!` any frame in nt); a bare word matches
+/// a module by name or a function by prefix. With `*` or `?` the module and
+/// function parts are globs matched whole. Case is ignored.
+pub fn frame_symbol_matches(pattern: &str, symbol: &str) -> bool {
+    let (module, function) = frame_symbol_parts(symbol);
+    let wildcard = pattern.contains(['*', '?']);
+    let module_matches = |wanted: &str| {
+        module.is_some_and(|module| {
+            if wildcard {
+                glob_matches(wanted, module, true)
+            } else {
+                module.eq_ignore_ascii_case(wanted)
+            }
+        })
+    };
+    let function_matches = |wanted: &str| {
+        function.is_some_and(|function| {
+            if wildcard {
+                glob_matches(wanted, function, true)
+            } else {
+                starts_with_ignore_case(function, wanted)
+            }
+        })
+    };
+    match pattern.split_once('!') {
+        Some((wanted_module, "")) => module_matches(wanted_module),
+        Some((wanted_module, wanted_function)) => {
+            module_matches(wanted_module) && function_matches(wanted_function)
+        }
+        None => module_matches(pattern) || function_matches(pattern),
+    }
+}
+
+/// `!findstack`'s display level: WinDbg's default is 1.
+pub fn findstack_level(text: Option<&str>) -> Result<u8> {
+    match text {
+        None | Some("1") => Ok(1),
+        Some("0") => Ok(0),
+        Some("2") => Ok(2),
+        Some(other) => Err(Error::InvalidArgument(format!(
+            "display level must be 0, 1, or 2, not '{other}'"
+        ))),
+    }
 }
 
 /// `!process` columns and details. Each field is `None` when this build's
@@ -475,6 +578,7 @@ pub fn frame_details(frames: impl IntoIterator<Item = StackFrame>) -> Vec<StackF
             sp: VirtAddr(frame.sp),
             ip: VirtAddr(frame.ip),
             symbol: frame.symbol,
+            source: frame.source,
         })
         .collect()
 }
@@ -1485,6 +1589,31 @@ impl Target {
 mod tests {
     use super::*;
     use crate::session::session_over_memory;
+
+    #[test]
+    fn findstack_patterns_match_like_windbg() {
+        let wait = "nt!KeWaitForSingleObject+0x846";
+        // module!prefix, as WinDbg's `wininet!CFsm` matches CFsm_*::RunSM.
+        assert!(frame_symbol_matches("nt!KeWaitForSingleObject", wait));
+        assert!(frame_symbol_matches("NT!kewait", wait));
+        assert!(!frame_symbol_matches("nt!WaitFor", wait));
+        assert!(!frame_symbol_matches("hal!KeWait", wait));
+        // A bare word is a module name or a function prefix, never a
+        // substring of either.
+        assert!(frame_symbol_matches("nt", wait));
+        assert!(frame_symbol_matches("KeWaitFor", wait));
+        assert!(!frame_symbol_matches("n", wait));
+        assert!(!frame_symbol_matches("Single", wait));
+        assert!(frame_symbol_matches("nt!", wait));
+        // Globs match the module and function whole, never the offset.
+        assert!(frame_symbol_matches("nt!*Single*", wait));
+        assert!(!frame_symbol_matches("nt!*0x846", wait));
+        assert!(frame_symbol_matches("*!Ke*", wait));
+        // Frames without a function: module+offset, or a bare address.
+        assert!(frame_symbol_matches("tcpip", "tcpip+0x1a2b"));
+        assert!(!frame_symbol_matches("tcpip!Tcp", "tcpip+0x1a2b"));
+        assert!(!frame_symbol_matches("0xfffff804", "0xfffff80412345678"));
+    }
 
     #[test]
     fn idle_detection_uses_pid_zero_or_idle_name() {

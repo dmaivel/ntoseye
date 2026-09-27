@@ -873,6 +873,13 @@ class Inspect:
         """
         Decode a `_FILE_OBJECT` (`!fileobj`).
         """
+    def findstack(self, /, symbol: str, level: int = 1) -> Record:
+        """
+        List the threads whose stack has a frame matching a symbol or module
+        (`!findstack`): `module!prefix`, a bare module or function prefix, or
+        globs with `*`/`?`. `level` 0 counts the matching frames, 1 lists
+        them, 2 adds the whole stack.
+        """
     def irp(self, /, address: int) -> Record:
         """
         Decode an in-flight `_IRP` and its current I/O stack location (`!irp`).

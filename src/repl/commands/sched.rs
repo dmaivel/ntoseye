@@ -2,8 +2,8 @@ use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::sched::{
-    ApcDetail, ApcListDetail, ApcSelector, ReadyQueuesDetail, StackFrameDetail, StacksDetail,
-    ThreadSummary, TimerDetail, TimerListDetail,
+    ApcDetail, ApcListDetail, ApcSelector, FindStackDetail, ReadyQueuesDetail, StackFrameDetail,
+    StacksDetail, ThreadSummary, TimerDetail, TimerListDetail, UnwalkedThread, findstack_level,
 };
 use crate::target::{DiagnosticValue, ListTermination, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
@@ -61,6 +61,15 @@ repl_command! {
     summary: "Show every thread's state, wait reason, and top stack symbol.",
     details: "Level 0 shows one frame; levels 1 and 2 append bounded full stacks. The optional filter matches process or stack symbols.",
     completion: [None, Process],
+}
+
+repl_command! {
+    cmd_findstack;
+    names: ["!findstack", "findstack"],
+    usage: "!findstack <symbol|module> [0|1|2]",
+    summary: "List the threads whose stack has a frame matching a symbol or module.",
+    details: "Walks every Windows thread's stack, up to 64 frames, as !stacks 2 does. `module!name` matches frames in that module whose function starts with name, as WinDbg's does (`nt!KeWait` matches KeWaitForSingleObject and KeWaitForMultipleObjects; `nt!` any frame in nt); a bare word matches a module by name or a function by prefix; with * or ? the module and function are globs (`nt!*Wait*`). Case is ignored. Display level 0 lists the matching threads and how many frames matched; 1 (the default) adds the matching frames; 2 the whole stack, matching frames marked with *. A thread whose stack does not walk (one running on a processor while the target runs) cannot be searched and is listed after the matches.",
+    completion: [Symbol, None],
 }
 
 fn diagnostic_cell<T: std::fmt::Display>(value: &DiagnosticValue<T>) -> String {
@@ -437,6 +446,31 @@ impl ReplState<'_> {
         print_stacks(&detail);
         Ok(())
     }
+
+    fn cmd_findstack(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let (pattern, level) = match (invocation.arg(0), invocation.arg(1), invocation.arg(2)) {
+            (None | Some("-?"), _, _) => {
+                outln!("{}\n", command_help("!findstack"));
+                return Ok(());
+            }
+            (Some(pattern), level, None) => match findstack_level(level) {
+                Ok(level) => (pattern.to_string(), level),
+                Err(error) => {
+                    error!("!findstack: {error}");
+                    return Ok(());
+                }
+            },
+            (Some(_), _, Some(extra)) => {
+                error!("!findstack: unexpected argument '{extra}'");
+                return Ok(());
+            }
+        };
+        match self.ctx.inspect_findstack(&pattern, level) {
+            Ok(detail) => print_findstack(&detail),
+            Err(error) => error!("!findstack: {error}"),
+        }
+        Ok(())
+    }
 }
 
 fn print_ready_queues(detail: &ReadyQueuesDetail) {
@@ -726,4 +760,110 @@ fn print_stacks(detail: &StacksDetail) {
     } else {
         outln!();
     }
+}
+
+fn thread_label(thread: &ThreadSummary) -> String {
+    format!(
+        "{} {} ({})  {}  {}",
+        thread_tid(thread),
+        thread_process(thread),
+        thread_pid(thread),
+        thread_state(thread),
+        thread_wait_reason(thread)
+    )
+}
+
+fn print_unwalked(unwalked: &[UnwalkedThread]) {
+    if unwalked.is_empty() {
+        return;
+    }
+    outln!("{} thread stack(s) could not be walked:", unwalked.len());
+    let mut by_error: Vec<(&str, Vec<ThreadSummary>)> = Vec::new();
+    for thread in unwalked {
+        match by_error
+            .iter_mut()
+            .find(|(error, _)| *error == thread.error)
+        {
+            Some((_, threads)) => threads.push(thread.thread.clone()),
+            None => by_error.push((&thread.error, vec![thread.thread.clone()])),
+        }
+    }
+    for (error, threads) in by_error {
+        outln!("    {} thread(s): {error}", threads.len());
+        outln!("        {}", thread_ids_by_process(&threads));
+    }
+}
+
+fn print_findstack(detail: &FindStackDetail) {
+    for thread in &detail.threads {
+        outln!(
+            "Thread {}, {} frame(s) match",
+            thread_label(&thread.thread),
+            thread.matches.len()
+        );
+        match detail.level {
+            0 => {}
+            1 => {
+                for &index in &thread.matches {
+                    let frame = &thread.frames[index];
+                    outln!(
+                        "    * {index:02} {}  {}  {}",
+                        ui::addr(frame.sp.0),
+                        ui::addr(frame.ip.0),
+                        frame.symbol
+                    );
+                }
+            }
+            _ => {
+                for (index, frame) in thread.frames.iter().enumerate() {
+                    let mark = if thread.matches.contains(&index) {
+                        '*'
+                    } else {
+                        ' '
+                    };
+                    outln!(
+                        "    {mark} {index:02} {}  {}  {}",
+                        ui::addr(frame.sp.0),
+                        ui::addr(frame.ip.0),
+                        frame.symbol
+                    );
+                }
+                if thread.truncated != 0 {
+                    outln!("      <{} more frame(s) not walked>", thread.truncated);
+                }
+            }
+        }
+        if detail.level > 0 {
+            outln!();
+        }
+    }
+    outln!(
+        "{} of {} thread(s) have a frame matching '{}'{}",
+        detail.threads.len(),
+        detail.scanned_threads,
+        detail.pattern,
+        if detail.interrupted {
+            " (interrupted: not every thread was searched)"
+        } else {
+            ""
+        }
+    );
+    print_unwalked(&detail.unwalked);
+    outln!();
+}
+
+/// `System (4): 12 16 20; smss.exe (544): 548`, in the threads' order.
+fn thread_ids_by_process(threads: &[ThreadSummary]) -> String {
+    let mut runs: Vec<(String, Vec<String>)> = Vec::new();
+    for thread in threads {
+        let process = format!("{} ({})", thread_process(thread), thread_pid(thread));
+        match runs.last_mut() {
+            Some((last, tids)) if *last == process => tids.push(thread_tid(thread)),
+            _ => runs.push((process, vec![thread_tid(thread)])),
+        }
+    }
+    runs.into_iter()
+        .map(|(process, tids)| format!("{process}: {}", tids.join(" ")))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
