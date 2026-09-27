@@ -705,7 +705,10 @@ impl Driver {
     }
 
     /// Inspect the `_DRIVER_OBJECT`, its devices, and dispatch table.
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn inspect<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::object::py::DriverObject>> {
         let view = self.owner.with(py, |session| {
             let detail = session
                 .target
@@ -764,7 +767,10 @@ impl Device {
     }
 
     /// Inspect this `_DEVICE_OBJECT` and its attachment stack.
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn inspect<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::object::py::DeviceObject>> {
         let detail = self.owner.with(py, |session| {
             session
                 .target

@@ -293,7 +293,11 @@ impl Process {
     }
 
     /// Decode a handle in this process's handle table.
-    fn handle<'py>(&self, py: Python<'py>, value: u64) -> PyResult<Bound<'py, Record>> {
+    fn handle<'py>(
+        &self,
+        py: Python<'py>,
+        value: u64,
+    ) -> PyResult<Bound<'py, view::object::py::HandleEntry>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_handle(value).map_err(err)
         })?;
@@ -302,7 +306,11 @@ impl Process {
 
     /// Enumerate up to `limit` handles in this process's handle table.
     #[pyo3(signature = (limit=256))]
-    fn handles<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Bound<'py, Record>> {
+    fn handles<'py>(
+        &self,
+        py: Python<'py>,
+        limit: usize,
+    ) -> PyResult<Bound<'py, view::object::py::HandleTable>> {
         let summary = self.owner.with_in(py, &self.context(), |session| {
             session.target.enumerate_handles(limit).map_err(err)
         })?;
@@ -318,7 +326,7 @@ impl Process {
         py: Python<'py>,
         handle: Option<u64>,
         max_traces: Option<usize>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::object::py::HandleTraces>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
                 .target

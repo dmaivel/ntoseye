@@ -62,7 +62,11 @@ impl Inspect {
     }
 
     /// Decode an in-flight `_IRP` and its current I/O stack location (`!irp`).
-    fn irp<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn irp<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::object::py::Irp>> {
         self.record(py, |session| {
             let detail = session.target.inspect_irp(VirtAddr(address)).map_err(err)?;
             Ok(view::object::irp(&detail))
@@ -75,7 +79,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         filter: Option<&str>,
-    ) -> PyResult<Vec<Bound<'py, Record>>> {
+    ) -> PyResult<Vec<Bound<'py, view::object::py::InFlightIrp>>> {
         self.list(py, |session| {
             let hits = session.target.discover_irps(filter).map_err(err)?;
             Ok(View::List(hits.iter().map(view::object::irp_hit).collect()))
@@ -95,7 +99,7 @@ impl Inspect {
         restart: Option<u64>,
         criteria: Option<&str>,
         value: u64,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::object::py::IrpFindResult>> {
         let pool = match pool_type {
             "nonpaged" => IrpPool::NonPaged,
             "paged" => IrpPool::Paged,
@@ -121,7 +125,11 @@ impl Inspect {
     /// Decode an ALPC port (`!alpc /p`): its kind, owner, connection, state,
     /// queues, and a connection port's connections. `address` is the port
     /// object's body or header.
-    fn alpc_port<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn alpc_port<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::object::py::AlpcPort>> {
         self.record(py, |session| {
             let port = session.target.alpc_port(VirtAddr(address)).map_err(err)?;
             Ok(view::object::alpc_port(&port))
@@ -129,7 +137,11 @@ impl Inspect {
     }
 
     /// Decode an ALPC message, a `_KALPC_MESSAGE` (`!alpc /m`).
-    fn alpc_message<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn alpc_message<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::object::py::AlpcMessage>> {
         self.record(py, |session| {
             let message = session
                 .target
@@ -147,7 +159,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process: Option<PyRef<'py, Process>>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::object::py::AlpcProcessPorts>> {
         let process = match process {
             Some(process) => {
                 process
@@ -205,7 +217,11 @@ impl Inspect {
     /// Decode an executive object header and resolve its type and name, and
     /// list a directory's entries (`!object`). `object` is the object's
     /// address, or its path in the object namespace (`"\\Driver\\ACPI"`).
-    fn object<'py>(&self, py: Python<'py>, object: ObjectArg) -> PyResult<Bound<'py, Record>> {
+    fn object<'py>(
+        &self,
+        py: Python<'py>,
+        object: ObjectArg,
+    ) -> PyResult<Bound<'py, view::object::py::ExecutiveObject>> {
         self.record(py, |session| {
             let address = match object {
                 ObjectArg::Address(address) => VirtAddr(address),
@@ -217,7 +233,11 @@ impl Inspect {
     }
 
     /// Decode a `_FILE_OBJECT` (`!fileobj`).
-    fn file_object<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn file_object<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::object::py::FileObject>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -228,7 +248,11 @@ impl Inspect {
     }
 
     /// Decode an executive resource (`!locks address`).
-    fn resource<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn resource<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::object::py::ExecutiveResource>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -240,7 +264,11 @@ impl Inspect {
 
     /// Enumerate the symbol-backed executive-resource list (`!locks`).
     #[pyo3(signature = (limit=256))]
-    fn resources<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Bound<'py, Record>> {
+    fn resources<'py>(
+        &self,
+        py: Python<'py>,
+        limit: usize,
+    ) -> PyResult<Bound<'py, view::object::py::ResourceList>> {
         self.record(py, |session| {
             let detail = session.target.enumerate_resources(limit).map_err(err)?;
             Ok(view::object::resource_list(&detail))
@@ -260,7 +288,10 @@ impl Inspect {
     }
 
     /// Enumerate process, thread, and image notification callbacks.
-    fn callbacks<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, Record>>> {
+    fn callbacks<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, view::object::py::NotifyCallback>>> {
         self.list(py, |session| {
             let callbacks = session.target.enumerate_notify_callbacks().map_err(err)?;
             let dtb = session.target.guest().map_err(err)?.ntoskrnl.dtb();
@@ -280,7 +311,7 @@ impl Inspect {
     }
 
     /// Dump the kernel SSDT and initialized win32k shadow table (`!ssdt`).
-    fn ssdt<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, Record>>> {
+    fn ssdt<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, view::object::py::SsdtTable>>> {
         self.list(py, |session| {
             let tables = session.target.dump_ssdt().map_err(err)?;
             Ok(View::List(

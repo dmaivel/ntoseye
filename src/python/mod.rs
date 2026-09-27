@@ -321,6 +321,15 @@ pub mod _ntoseye {
         PciTree, PciTreeDevice,
     };
     #[pymodule_export]
+    use crate::view::object::py::{
+        AlpcClientPort, AlpcConnection, AlpcMessage, AlpcOwnedPort, AlpcPort, AlpcProcessPorts,
+        AlpcQueue, AttachedDevice, DeviceObject, DriverDeviceLink, DriverObject,
+        DriverObjectSummary, ExecutiveObject, ExecutiveResource, FileObject, HandleEntry,
+        HandleTable, HandleTrace, HandleTraceFrame, HandleTraces, InFlightIrp, IoStackLocation,
+        Irp, IrpDispatchRoutine, IrpFindCriteria, IrpFindResult, NotifyCallback,
+        ObjectDirectoryEntry, PoolIrp, ResourceList, ResourceOwner, SsdtEntry, SsdtTable,
+    };
+    #[pymodule_export]
     use crate::view::py::ListEnd;
     #[pymodule_export]
     use crate::view::sched::py::{
