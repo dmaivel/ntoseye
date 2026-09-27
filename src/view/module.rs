@@ -4,12 +4,13 @@
 use super::{View, diagnostic};
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::pe::headers::{
-    CodeView, DebugDirectoryEntry, ExportDirectory, FileHeader, ImportDescriptor, ImportName,
-    OptionalHeader, SectionHeader, debug_type_name, dll_characteristics, file_characteristics,
-    machine_name, section_characteristics, subsystem_name,
+    CodeView, DebugDirectoryEntry, FileHeader, ImportDescriptor, ImportName, OptionalHeader,
+    SectionHeader, debug_type_name, dll_characteristics, file_characteristics, machine_name,
+    section_characteristics, subsystem_name,
 };
+use crate::pe::{ExportDirectory, ImageExports};
 use crate::symbols::ModuleSymbolStatus;
-use crate::target::image::{ImageExports, ImageHeadersDetail};
+use crate::target::image::ImageHeadersDetail;
 use crate::target::{DiagnosticValue, Target};
 use crate::types::Dtb;
 
@@ -406,7 +407,11 @@ fn image_exports(exports: &ImageExports, base: u64) -> View {
 
 fn import_descriptor(descriptor: &ImportDescriptor) -> View {
     View::Object(vec![
-        ("name", View::Str(descriptor.name.clone())),
+        ("name", View::OptStr(descriptor.name.as_ref().ok().cloned())),
+        (
+            "name_error",
+            View::OptStr(descriptor.name.as_ref().err().cloned()),
+        ),
         (
             "import_address_table",
             View::Hex(descriptor.first_thunk.into()),
@@ -430,22 +435,30 @@ fn import_descriptor(descriptor: &ImportDescriptor) -> View {
                     .entries
                     .iter()
                     .map(|entry| {
-                        let (name, hint, ordinal) = match &entry.name {
+                        let (name, hint, ordinal, error) = match &entry.name {
                             ImportName::Name { hint, name } => {
-                                (Some(name.clone()), Some(u64::from(*hint)), None)
+                                (Some(name.clone()), Some(u64::from(*hint)), None, None)
                             }
-                            ImportName::Ordinal(ordinal) => (None, None, Some(u64::from(*ordinal))),
+                            ImportName::Ordinal(ordinal) => {
+                                (None, None, Some(u64::from(*ordinal)), None)
+                            }
+                            ImportName::Unnamed => (None, None, None, None),
+                            ImportName::Unreadable(error) => {
+                                (None, None, None, Some(error.clone()))
+                            }
                         };
                         View::Object(vec![
                             ("name", View::OptStr(name)),
                             ("hint", View::OptNum(hint)),
                             ("ordinal", View::OptNum(ordinal)),
                             ("bound", View::OptHex(entry.bound)),
+                            ("error", View::OptStr(error)),
                         ])
                     })
                     .collect(),
             ),
         ),
+        ("incomplete", View::OptStr(descriptor.incomplete.clone())),
     ])
 }
 

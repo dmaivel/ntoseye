@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::expr::Expr;
+use crate::pe::ImageExports;
 use crate::pe::headers::{
     CodeView, DebugDirectoryEntry, ImageHeaders, ImportDescriptor, ImportName, SectionHeader,
     debug_type_name, dll_characteristics, file_characteristics, machine_name,
@@ -7,7 +8,7 @@ use crate::pe::headers::{
 };
 use crate::repl::*;
 use crate::target::DiagnosticValue;
-use crate::target::image::{ImageExports, ImageHeadersDetail};
+use crate::target::image::ImageHeadersDetail;
 use crate::ui;
 
 repl_command! {
@@ -15,7 +16,7 @@ repl_command! {
     names: ["!dh", "dh"],
     usage: "!dh [-f] [-s] [-e] [-i] [-a] <module|address>",
     summary: "Display a mapped PE image's headers.",
-    details: "The image is a module name (`nt`, `hal`, `ntdll`, or its image name) in the `.process` module list and then the kernel's, or any address inside a loaded module, or the base of an image no loader list names (it must start with MZ). Without options it shows the file and section headers, as WinDbg does. -f: the file header, optional header (entry point, image base, subsystem, DLL characteristics, stack and heap sizes), and data directories (RVA and size; the security directory's is a file offset). -s: the section table with decoded flags, and the debug directory with its CodeView PDB name, GUID, and age. -e: the export directory and every export (ordinal, RVA, name or forwarder). -i: each import descriptor and its imports (hint and name or ordinal) with the address the loader bound in the IAT. -a: all of these. Options combine (`-fs`, `-f -i`). A directory that does not read (a driver's import table lives in its INIT section, which is discarded after load) is reported as unavailable, and the rest is still shown. The headers are read from memory as mapped, so the values are what the loader left there.",
+    details: "The image is a module name (`nt`, `hal`, `ntdll`, or its image name) in the `.process` module list and then the kernel's, or any address inside a loaded module, or the base of an image no loader list names (it must start with MZ). Without options it shows the file and section headers, as WinDbg does. -f: the file header, optional header (entry point, image base, subsystem, DLL characteristics, stack and heap sizes), and data directories (RVA and size; the security directory's is a file offset). -s: the section table with decoded flags, and the debug directory with its CodeView PDB name, GUID, and age. -e: the export directory and every export (ordinal, RVA, name or forwarder). -i: each import descriptor and its imports (hint and name or ordinal) with the address the loader bound in the IAT; a descriptor without an import name table shows the bound addresses alone, since its IAT no longer holds names. -a: all of these. Options combine (`-fs`, `-f -i`). A directory that does not read (a driver's import table lives in its INIT section, which is discarded after load) is reported as unavailable, and the rest is still shown; so is an import or module name that does not read. The headers are read from memory as mapped, so the values are what the loader left there.",
     completion: [Symbol],
 }
 
@@ -319,7 +320,13 @@ fn print_imports(imports: &DiagnosticValue<Vec<ImportDescriptor>>) {
     }
     outln!("IMPORTS");
     for descriptor in descriptors {
-        outln!("  _IMAGE_IMPORT_DESCRIPTOR {}", descriptor.name);
+        match &descriptor.name {
+            Ok(name) => outln!("  _IMAGE_IMPORT_DESCRIPTOR {name}"),
+            Err(error) => outln!(
+                "  _IMAGE_IMPORT_DESCRIPTOR {}",
+                ui::muted(&format!("<name unreadable: {error}>"))
+            ),
+        }
         outln!("{:>10X} Import Address Table", descriptor.first_thunk);
         outln!("{:>10X} Import Name Table", descriptor.original_first_thunk);
         outln!("{:>10X} time date stamp", descriptor.time_date_stamp);
@@ -328,6 +335,12 @@ fn print_imports(imports: &DiagnosticValue<Vec<ImportDescriptor>>) {
             descriptor.forwarder_chain
         );
         outln!();
+        if descriptor.original_first_thunk == 0 {
+            outln!(
+                "    {}",
+                ui::muted("no import name table: the bound IAT holds addresses, not names")
+            );
+        }
         for entry in &descriptor.entries {
             let bound = entry
                 .bound
@@ -338,7 +351,18 @@ fn print_imports(imports: &DiagnosticValue<Vec<ImportDescriptor>>) {
                 ImportName::Ordinal(ordinal) => {
                     outln!("    {bound}       Ordinal {ordinal}")
                 }
+                ImportName::Unnamed => outln!("    {bound}"),
+                ImportName::Unreadable(error) => outln!(
+                    "    {bound}       {}",
+                    ui::muted(&format!("<name unreadable: {error}>"))
+                ),
             }
+        }
+        if let Some(error) = &descriptor.incomplete {
+            outln!(
+                "    {}",
+                ui::muted(&format!("<imports stop here: {error}>"))
+            );
         }
         outln!();
     }

@@ -7,10 +7,9 @@ use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::pe::headers::{
-    DebugDirectoryEntry, ExportDirectory, ImageHeaders, ImportDescriptor, debug_directory,
-    decode_headers, export_directory, imports,
+    DebugDirectoryEntry, ImageHeaders, ImportDescriptor, debug_directory, decode_headers, imports,
 };
-use crate::pe::{ModuleExportInfo, read_pe_exports};
+use crate::pe::{ImageExports, read_pe_exports};
 use crate::types::{Dtb, VirtAddr};
 
 /// Which parts of the image `!dh` shows (`-f`, `-s`, `-e`, `-i`).
@@ -80,13 +79,6 @@ impl DhParts {
         }
         Ok((parts, rest))
     }
-}
-
-/// The export directory and its entries.
-#[derive(Debug, Clone)]
-pub struct ImageExports {
-    pub directory: Option<ExportDirectory>,
-    pub exports: Vec<ModuleExportInfo>,
 }
 
 /// What `!dh` shows for one image. Each directory is read on its own: a
@@ -216,14 +208,9 @@ impl Target {
             ))
         })?;
         let debug = DiagnosticValue::from_result(debug_directory(&image, &headers));
-        let exports = parts.exports.then(|| {
-            DiagnosticValue::from_result(export_directory(&image, &headers).and_then(|directory| {
-                Ok(ImageExports {
-                    exports: read_pe_exports(&image, base)?,
-                    directory,
-                })
-            }))
-        });
+        let exports = parts
+            .exports
+            .then(|| DiagnosticValue::from_result(read_pe_exports(&image, base)));
         let imports = parts
             .imports
             .then(|| DiagnosticValue::from_result(imports(&image, &headers)));

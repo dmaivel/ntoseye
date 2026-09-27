@@ -63,6 +63,29 @@ pub struct ModuleExportInfo {
     pub forwarder: Option<String>,
 }
 
+/// `IMAGE_EXPORT_DIRECTORY` and the DLL name it points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportDirectory {
+    pub characteristics: u32,
+    pub time_date_stamp: u32,
+    pub version: (u16, u16),
+    pub name: String,
+    pub ordinal_base: u32,
+    pub number_of_functions: u32,
+    pub number_of_names: u32,
+    pub address_of_functions: u32,
+    pub address_of_names: u32,
+    pub address_of_name_ordinals: u32,
+}
+
+/// A mapped image's export directory and the exports it lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageExports {
+    /// `None` when the image exports nothing.
+    pub directory: Option<ExportDirectory>,
+    pub exports: Vec<ModuleExportInfo>,
+}
+
 /// A module image addressed by RVA. An on-disk image is complete; an image
 /// read from guest memory is demand-read in `IMAGE_BLOCK`-sized blocks and
 /// keeps every block it has read, so a stack walk costs the blocks its
@@ -438,85 +461,126 @@ pub fn read_pe_image(
     })
 }
 
-fn read_export_bytes<'a>(
+/// `len` bytes at `rva` of `image`, or an error naming `what` was being read
+/// there.
+fn read_image_bytes<'a>(
     image: &'a PeImage,
-    base: VirtAddr,
     rva: u32,
-    length: usize,
+    len: usize,
+    what: &str,
 ) -> Result<Cow<'a, [u8]>> {
     let start = rva as usize;
-    let end = start
-        .checked_add(length)
-        .filter(|&end| end <= image.size)
-        .ok_or_else(|| Error::DebugInfo("PE export data lies outside SizeOfImage".into()))?;
-    image
-        .read(start, end - start)
-        .ok_or(Error::BadVirtualAddress(base + u64::from(rva)))
+    if start.checked_add(len).is_none_or(|end| end > image.size) {
+        return Err(Error::DebugInfo(format!(
+            "{what} at RVA {rva:#x} ({len:#x} bytes) lies outside SizeOfImage"
+        )));
+    }
+    image.read(start, len).ok_or_else(|| {
+        Error::DebugInfo(format!(
+            "{what} at RVA {rva:#x} ({len:#x} bytes) is not resident"
+        ))
+    })
 }
 
-fn read_export_string(image: &PeImage, base: VirtAddr, rva: u32) -> Result<String> {
+/// The NUL-terminated string at `rva` of `image`, up to 4096 bytes, shown
+/// lossily when not UTF-8. It is read in pieces that stop at each block end,
+/// so a string that ends just before a paged-out block still reads.
+fn read_image_c_string(image: &PeImage, rva: u32, what: &str) -> Result<String> {
     const CHUNK: usize = 128;
     const MAX_LENGTH: usize = 4096;
     let mut bytes = Vec::new();
-    let mut offset = rva as usize;
+    let mut at = rva as usize;
     while bytes.len() < MAX_LENGTH {
-        let length = CHUNK
+        let len = CHUNK
+            .min(IMAGE_BLOCK - at % IMAGE_BLOCK)
             .min(MAX_LENGTH - bytes.len())
-            .min(image.size.saturating_sub(offset));
-        if length == 0 {
+            .min(image.size.saturating_sub(at));
+        if len == 0 {
             break;
         }
-        let chunk = read_export_bytes(image, base, offset as u32, length)?;
+        let chunk = image
+            .read(at, len)
+            .ok_or_else(|| Error::DebugInfo(format!("{what} at RVA {rva:#x} is not resident")))?;
         if let Some(end) = chunk.iter().position(|byte| *byte == 0) {
             bytes.extend_from_slice(&chunk[..end]);
             return Ok(String::from_utf8_lossy(&bytes).into_owned());
         }
         bytes.extend_from_slice(&chunk);
-        offset = offset.saturating_add(length);
+        at += len;
     }
     Err(Error::DebugInfo(format!(
-        "unterminated or overlong PE export string at {:#x}",
-        base.0.saturating_add(u64::from(rva))
+        "{what} at RVA {rva:#x} is unterminated or longer than {MAX_LENGTH} bytes"
     )))
 }
 
-/// Read named and ordinal-only exports from a mapped module image. The image
-/// remains lazy: only the export directory, address tables, and strings are
-/// fetched, and an unreadable mapped page remains a memory-access error.
-pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExportInfo>> {
+/// Read the export directory and its named and ordinal-only exports from a
+/// mapped module image. The image remains lazy: only the export directory,
+/// address tables, and strings are fetched. A directory entry with a zero
+/// RVA or size (most drivers') means the image exports nothing.
+pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<ImageExports> {
     const DIRECTORY_SIZE: usize = 40;
     const MAX_EXPORTS: usize = 1_000_000;
 
     let headers = PeView::from_bytes(image.headers())?;
-    let Some(directory) = headers.data_directory().get(IMAGE_DIRECTORY_ENTRY_EXPORT) else {
-        return Ok(Vec::new());
+    let Some(entry) = headers
+        .data_directory()
+        .get(IMAGE_DIRECTORY_ENTRY_EXPORT)
+        .filter(|entry| entry.VirtualAddress != 0 && entry.Size != 0)
+    else {
+        return Ok(ImageExports {
+            directory: None,
+            exports: Vec::new(),
+        });
     };
-    let directory_rva = directory.VirtualAddress;
-    let directory_size = directory.Size;
-    // Most drivers export nothing: the directory entry is present but zero.
-    if directory_rva == 0 && directory_size == 0 {
-        return Ok(Vec::new());
-    }
+    let directory_rva = entry.VirtualAddress;
+    let directory_size = entry.Size;
     if directory_size < DIRECTORY_SIZE as u32 {
-        return Err(Error::DebugInfo("truncated PE export directory".into()));
+        return Err(Error::DebugInfo(format!(
+            "export directory size {directory_size:#x} is shorter than \
+             IMAGE_EXPORT_DIRECTORY ({DIRECTORY_SIZE:#x})"
+        )));
     }
-    let data = read_export_bytes(image, base, directory_rva, DIRECTORY_SIZE)?;
+    let data = read_image_bytes(image, directory_rva, DIRECTORY_SIZE, "export directory")?;
     let u32_at = |offset| read_u32(&data, offset);
-    let ordinal_base = u32_at(16);
-    let function_count = u32_at(20) as usize;
-    let name_count = u32_at(24) as usize;
-    let functions_rva = u32_at(28);
-    let names_rva = u32_at(32);
-    let ordinals_rva = u32_at(36);
+    let directory = ExportDirectory {
+        characteristics: u32_at(0),
+        time_date_stamp: u32_at(4),
+        version: (read_u16(&data, 8), read_u16(&data, 10)),
+        name: read_image_c_string(image, u32_at(12), "export DLL name")?,
+        ordinal_base: u32_at(16),
+        number_of_functions: u32_at(20),
+        number_of_names: u32_at(24),
+        address_of_functions: u32_at(28),
+        address_of_names: u32_at(32),
+        address_of_name_ordinals: u32_at(36),
+    };
+    let ordinal_base = directory.ordinal_base;
+    let function_count = directory.number_of_functions as usize;
+    let name_count = directory.number_of_names as usize;
     if function_count > MAX_EXPORTS || name_count > MAX_EXPORTS {
         return Err(Error::DebugInfo(
             "PE export count exceeds the safety bound".into(),
         ));
     }
 
-    let functions = read_export_bytes(image, base, functions_rva, function_count * 4)?;
-    let names = read_export_bytes(image, base, names_rva, name_count * 4)?;
-    let ordinals = read_export_bytes(image, base, ordinals_rva, name_count * 2)?;
+    let functions = read_image_bytes(
+        image,
+        directory.address_of_functions,
+        function_count * 4,
+        "export address table",
+    )?;
+    let names = read_image_bytes(
+        image,
+        directory.address_of_names,
+        name_count * 4,
+        "export name table",
+    )?;
+    let ordinals = read_image_bytes(
+        image,
+        directory.address_of_name_ordinals,
+        name_count * 2,
+        "export ordinal table",
+    )?;
     let mut names_by_function: HashMap<usize, Vec<String>> = HashMap::new();
     for index in 0..name_count {
         let name_rva = read_u32(&names, index * 4);
@@ -529,7 +593,7 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExpo
         names_by_function
             .entry(function_index)
             .or_default()
-            .push(read_export_string(image, base, name_rva)?);
+            .push(read_image_c_string(image, name_rva, "export name")?);
     }
 
     let mut exports = Vec::new();
@@ -543,7 +607,7 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExpo
             .checked_add(index as u32)
             .ok_or_else(|| Error::DebugInfo("PE export ordinal overflow".into()))?;
         let forwarder = (function_rva >= directory_rva && function_rva < forwarder_end)
-            .then(|| read_export_string(image, base, function_rva))
+            .then(|| read_image_c_string(image, function_rva, "export forwarder"))
             .transpose()?;
         let address = forwarder
             .is_none()
@@ -565,7 +629,10 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<Vec<ModuleExpo
             }));
         }
     }
-    Ok(exports)
+    Ok(ImageExports {
+        directory: Some(directory),
+        exports,
+    })
 }
 
 /// Name of the PE section containing `address` within the image loaded at
@@ -767,8 +834,8 @@ pub fn read_pe_image_from_file(path: &Path) -> Result<PeImage> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, read_code_layout, read_pe_exports,
-        read_pe_header_page, read_pe_image,
+        IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, read_code_layout,
+        read_image_c_string, read_pe_exports, read_pe_header_page, read_pe_image,
     };
     use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
@@ -1045,6 +1112,23 @@ mod tests {
         assert_eq!(&image.read(0x2000, 4).unwrap()[..], &[0xdd; 4][..]);
     }
 
+    /// A string that ends just before a paged-out block reads, though a
+    /// fixed-size read from its start would run into that block.
+    #[test]
+    fn an_image_string_ending_before_an_unreadable_block_reads() {
+        let mut bytes = synthetic_image();
+        bytes[0x1ff0..0x1ff6].copy_from_slice(b"Alpha\0");
+        let memory = Arc::new(ImageMemory::new(0x10_0000, bytes));
+        memory.readable.store(0x2000, Ordering::Relaxed);
+        let image = open_image(&memory);
+        assert_eq!(
+            read_image_c_string(&image, 0x1ff0, "name").unwrap(),
+            "Alpha"
+        );
+        // One that runs on into the unreadable block does not.
+        assert!(read_image_c_string(&image, 0x1ff8, "name").is_err());
+    }
+
     /// The header probe alone covers a normally linked image; a section table
     /// that runs past the probe is completed by a second read instead of
     /// being parsed from zeros.
@@ -1108,10 +1192,9 @@ mod tests {
         let mut image = image_with_exports(1);
         let opt = 0x80 + 24;
         image[opt + 112..opt + 120].fill(0);
-        assert_eq!(
-            read_pe_exports(&PeImage::complete(image), VirtAddr(0x10_0000)).unwrap(),
-            []
-        );
+        let exports = read_pe_exports(&PeImage::complete(image), VirtAddr(0x10_0000)).unwrap();
+        assert_eq!(exports.directory, None);
+        assert_eq!(exports.exports, []);
     }
 
     #[test]
@@ -1119,7 +1202,7 @@ mod tests {
         let base = VirtAddr(0x10_0000);
         let exports = read_pe_exports(&PeImage::complete(image_with_exports(1)), base).unwrap();
         assert_eq!(
-            exports,
+            exports.exports,
             [
                 ModuleExportInfo {
                     name: Some("Alpha".into()),

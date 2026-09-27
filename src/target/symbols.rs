@@ -155,7 +155,7 @@ impl Target {
     /// read from its in-memory export directory ([`read_pe_exports`]).
     pub fn module_exports(&self, dtb: Dtb, base: VirtAddr) -> Result<Vec<ModuleExportInfo>> {
         let image = self.mapped_pe_image(dtb, base)?;
-        read_pe_exports(&image, base)
+        Ok(read_pe_exports(&image, base)?.exports)
     }
 
     /// Load symbols for one module (by short name, e.g. `user32`) or, with

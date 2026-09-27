@@ -1,12 +1,17 @@
 //! A mapped PE image's headers decoded for `!dh`: the file and optional
 //! headers, data directories, section table, debug directory (with its
-//! CodeView record), export directory, and import descriptors. Only what the
-//! headers point at is read, through a [`PeImage`], so a paged-out or
-//! discarded directory is reported on its own instead of failing the dump.
+//! CodeView record), and import descriptors; the export directory is read by
+//! [`read_pe_exports`](super::read_pe_exports). Only what the headers point
+//! at is read, through a [`PeImage`], so a paged-out or discarded directory is
+//! reported on its own instead of failing the dump.
 
-use super::PeImage;
-use crate::bytes::{get_u16, get_u32, get_u64};
+use super::{PeImage, read_image_bytes, read_image_c_string};
+use crate::bytes::{get_u16, get_u32, get_u64, read_u16, read_u32};
 use crate::error::{Error, Result};
+use pelite::image::{
+    IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG, IMAGE_DIRECTORY_ENTRY_IMPORT,
+    IMAGE_NT_OPTIONAL_HDR64_MAGIC,
+};
 use pelite::{PeView, Wrap};
 
 /// `IMAGE_FILE_HEADER`.
@@ -129,26 +134,19 @@ pub struct DebugDirectoryEntry {
     pub codeview: Option<std::result::Result<CodeView, String>>,
 }
 
-/// `IMAGE_EXPORT_DIRECTORY` and the DLL name it points at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExportDirectory {
-    pub characteristics: u32,
-    pub time_date_stamp: u32,
-    pub version: (u16, u16),
-    pub name: String,
-    pub ordinal_base: u32,
-    pub number_of_functions: u32,
-    pub number_of_names: u32,
-    pub address_of_functions: u32,
-    pub address_of_names: u32,
-    pub address_of_name_ordinals: u32,
-}
-
 /// How an import names what it imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportName {
     Ordinal(u16),
-    Name { hint: u16, name: String },
+    Name {
+        hint: u16,
+        name: String,
+    },
+    /// The descriptor has no import name table, and the IAT the loader bound
+    /// holds addresses rather than names: only the bound address is known.
+    Unnamed,
+    /// The hint/name entry does not read; says why.
+    Unreadable(String),
 }
 
 /// One import-name-table entry and the import address table slot beside
@@ -162,22 +160,20 @@ pub struct ImportEntry {
 /// One `IMAGE_IMPORT_DESCRIPTOR` and its entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDescriptor {
-    pub name: String,
+    /// The module imported from, or why its name does not read.
+    pub name: std::result::Result<String, String>,
     pub original_first_thunk: u32,
     pub time_date_stamp: u32,
     pub forwarder_chain: u32,
     pub first_thunk: u32,
     pub entries: Vec<ImportEntry>,
+    /// Why `entries` stops short of the table's end: a thunk that does not
+    /// read, or no terminator within the bound. `None` when the table was
+    /// read to its terminator.
+    pub incomplete: Option<String>,
 }
 
-pub const IMAGE_NT_OPTIONAL_HDR64_MAGIC: u16 = 0x20b;
-pub const IMAGE_DIRECTORY_ENTRY_EXPORT: usize = 0;
-pub const IMAGE_DIRECTORY_ENTRY_IMPORT: usize = 1;
-pub const IMAGE_DIRECTORY_ENTRY_DEBUG: usize = 6;
-const IMAGE_DEBUG_TYPE_CODEVIEW: u32 = 2;
-
 const DEBUG_DIRECTORY_ENTRY_SIZE: usize = 28;
-const EXPORT_DIRECTORY_SIZE: usize = 40;
 const IMPORT_DESCRIPTOR_SIZE: usize = 20;
 /// Real images carry a handful of debug entries; the size is guest data.
 const MAX_DEBUG_DIRECTORY_BYTES: usize = 0x1000;
@@ -186,7 +182,6 @@ const MAX_CODEVIEW_BYTES: usize = 0x1000;
 /// dozen modules, a few hundred functions each.
 const MAX_IMPORT_DESCRIPTORS: usize = 4096;
 const MAX_IMPORTS_PER_DESCRIPTOR: usize = 65_536;
-const MAX_NAME_LENGTH: usize = 4096;
 
 const DIRECTORY_NAMES: [&str; 16] = [
     "Export",
@@ -300,7 +295,7 @@ pub fn decode_headers(headers: &[u8]) -> Result<ImageHeaders> {
         .section_headers()
         .iter()
         .map(|section| SectionHeader {
-            name: section_name(&section.Name),
+            name: String::from_utf8_lossy(section.name_bytes()).into_owned(),
             virtual_size: section.VirtualSize,
             virtual_address: section.VirtualAddress,
             size_of_raw_data: section.SizeOfRawData,
@@ -318,54 +313,6 @@ pub fn decode_headers(headers: &[u8]) -> Result<ImageHeaders> {
         directories,
         sections,
     })
-}
-
-/// A section's 8-byte name, NUL-padded, shown lossily when not UTF-8.
-fn section_name(name: &[u8; 8]) -> String {
-    let end = name
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(name.len());
-    String::from_utf8_lossy(&name[..end]).into_owned()
-}
-
-/// `len` bytes at `rva`, or an error naming what was being read there.
-fn read_at<'a>(
-    image: &'a PeImage,
-    rva: u32,
-    len: usize,
-    what: &str,
-) -> Result<std::borrow::Cow<'a, [u8]>> {
-    image.read(rva as usize, len).ok_or_else(|| {
-        Error::DebugInfo(format!(
-            "{what} at RVA {rva:#x} ({len:#x} bytes) is outside the image or not resident"
-        ))
-    })
-}
-
-/// A NUL-terminated string at `rva`, bounded to [`MAX_NAME_LENGTH`].
-fn read_c_string(image: &PeImage, rva: u32, what: &str) -> Result<String> {
-    const CHUNK: usize = 64;
-    let mut bytes = Vec::new();
-    while bytes.len() < MAX_NAME_LENGTH {
-        let at = rva as usize + bytes.len();
-        // A string may end within a chunk that crosses the image end.
-        let len = CHUNK.min(image.size.saturating_sub(at));
-        if len == 0 {
-            break;
-        }
-        let chunk = image
-            .read(at, len)
-            .ok_or_else(|| Error::DebugInfo(format!("{what} at RVA {rva:#x} is not resident")))?;
-        if let Some(end) = chunk.iter().position(|byte| *byte == 0) {
-            bytes.extend_from_slice(&chunk[..end]);
-            return Ok(String::from_utf8_lossy(&bytes).into_owned());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Err(Error::DebugInfo(format!(
-        "{what} at RVA {rva:#x} is unterminated or longer than {MAX_NAME_LENGTH} bytes"
-    )))
 }
 
 /// The debug directory's entries, each CodeView record decoded. An image
@@ -387,7 +334,7 @@ pub fn debug_directory(
              bytes up to {MAX_DEBUG_DIRECTORY_BYTES:#x}"
         )));
     }
-    let bytes = read_at(image, directory.rva, size, "debug directory")?;
+    let bytes = read_image_bytes(image, directory.rva, size, "debug directory")?;
     Ok(bytes
         .as_chunks::<DEBUG_DIRECTORY_ENTRY_SIZE>()
         .0
@@ -427,7 +374,7 @@ fn read_codeview(image: &PeImage, rva: u32, size: u32) -> Result<CodeView> {
             "CodeView record size {size:#x} is outside 0x10..={MAX_CODEVIEW_BYTES:#x}"
         )));
     }
-    let bytes = read_at(image, rva, size, "CodeView record")?;
+    let bytes = read_image_bytes(image, rva, size, "CodeView record")?;
     decode_codeview(&bytes)
 }
 
@@ -471,43 +418,9 @@ pub fn decode_codeview(bytes: &[u8]) -> Result<CodeView> {
     }
 }
 
-/// The export directory, or `None` when the image exports nothing.
-pub fn export_directory(
-    image: &PeImage,
-    headers: &ImageHeaders,
-) -> Result<Option<ExportDirectory>> {
-    let Some(directory) = headers
-        .directory(IMAGE_DIRECTORY_ENTRY_EXPORT)
-        .filter(|directory| directory.rva != 0 && directory.size != 0)
-    else {
-        return Ok(None);
-    };
-    let bytes = read_at(
-        image,
-        directory.rva,
-        EXPORT_DIRECTORY_SIZE,
-        "export directory",
-    )?;
-    let u32_at = |offset| get_u32(&bytes, offset).unwrap_or_default();
-    let u16_at = |offset| get_u16(&bytes, offset).unwrap_or_default();
-    Ok(Some(ExportDirectory {
-        characteristics: u32_at(0),
-        time_date_stamp: u32_at(4),
-        version: (u16_at(8), u16_at(10)),
-        name: read_c_string(image, u32_at(12), "export DLL name")?,
-        ordinal_base: u32_at(16),
-        number_of_functions: u32_at(20),
-        number_of_names: u32_at(24),
-        address_of_functions: u32_at(28),
-        address_of_names: u32_at(32),
-        address_of_name_ordinals: u32_at(36),
-    }))
-}
-
-/// The import descriptors and their entries. Names come from the import
-/// name table (`OriginalFirstThunk`), which the loader leaves alone; an
-/// image linked without one names them through the IAT, which then still
-/// holds names only if it was never bound.
+/// The import descriptors and their entries. Only a descriptor that does not
+/// read fails the directory; a module name, an import name, or a thunk that
+/// does not read is reported in its descriptor beside the rest.
 pub fn imports(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<ImportDescriptor>> {
     let Some(directory) = headers
         .directory(IMAGE_DIRECTORY_ENTRY_IMPORT)
@@ -522,19 +435,22 @@ pub fn imports(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<ImportDesc
             .rva
             .checked_add((index * IMPORT_DESCRIPTOR_SIZE) as u32)
             .ok_or_else(|| Error::DebugInfo("import directory overflows the image".into()))?;
-        let bytes = read_at(image, rva, IMPORT_DESCRIPTOR_SIZE, "import descriptor")?;
-        let u32_at = |offset| get_u32(&bytes, offset).unwrap_or_default();
-        let (original_first_thunk, first_thunk, name) = (u32_at(0), u32_at(16), u32_at(12));
+        let bytes = read_image_bytes(image, rva, IMPORT_DESCRIPTOR_SIZE, "import descriptor")?;
+        let u32_at = |offset| read_u32(&bytes, offset);
+        let (original_first_thunk, name, first_thunk) = (u32_at(0), u32_at(12), u32_at(16));
         if first_thunk == 0 && original_first_thunk == 0 && name == 0 {
             return Ok(descriptors);
         }
+        let (entries, incomplete) = import_entries(image, original_first_thunk, first_thunk, wide);
         descriptors.push(ImportDescriptor {
-            name: read_c_string(image, name, "import module name")?,
+            name: read_image_c_string(image, name, "import module name")
+                .map_err(|error| error.to_string()),
             original_first_thunk,
             time_date_stamp: u32_at(4),
             forwarder_chain: u32_at(8),
             first_thunk,
-            entries: import_entries(image, original_first_thunk, first_thunk, wide)?,
+            entries,
+            incomplete,
         });
     }
     Err(Error::DebugInfo(format!(
@@ -542,19 +458,18 @@ pub fn imports(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<ImportDesc
     )))
 }
 
+/// A descriptor's entries, and why they stop short of the table's end if they
+/// do. Names come from the import name table (`OriginalFirstThunk`), which the
+/// loader leaves alone. Without one only the IAT is left, and in a loaded
+/// image it holds the addresses the loader bound, not names: its entries are
+/// [`ImportName::Unnamed`].
 fn import_entries(
     image: &PeImage,
     name_table: u32,
     address_table: u32,
     wide: bool,
-) -> Result<Vec<ImportEntry>> {
+) -> (Vec<ImportEntry>, Option<String>) {
     let width = if wide { 8 } else { 4 };
-    let ordinal_flag = if wide { 1u64 << 63 } else { 1u64 << 31 };
-    let names = if name_table != 0 {
-        name_table
-    } else {
-        address_table
-    };
     let thunk = |table: u32, index: usize| -> Option<u64> {
         let rva = table.checked_add(u32::try_from(index * width).ok()?)?;
         let bytes = image.read(rva as usize, width)?;
@@ -564,39 +479,65 @@ fn import_entries(
             get_u32(&bytes, 0).map(u64::from)
         }
     };
+    let (table, what) = if name_table != 0 {
+        (name_table, "import name table")
+    } else {
+        (address_table, "import address table")
+    };
     let mut entries = Vec::new();
+    if table == 0 {
+        return (entries, None);
+    }
     for index in 0..MAX_IMPORTS_PER_DESCRIPTOR {
-        let value = thunk(names, index).ok_or_else(|| {
-            Error::DebugInfo(format!(
-                "import name table entry {index} at RVA {names:#x} is not resident"
-            ))
-        })?;
-        if value == 0 {
-            return Ok(entries);
-        }
-        let name = if value & ordinal_flag != 0 {
-            ImportName::Ordinal(value as u16)
-        } else {
-            let hint_rva = u32::try_from(value & 0x7fff_ffff).map_err(|_| {
-                Error::DebugInfo(format!("import name RVA {value:#x} is out of range"))
-            })?;
-            let hint = read_at(image, hint_rva, 2, "import hint")?;
-            ImportName::Name {
-                hint: get_u16(&hint, 0).unwrap_or_default(),
-                name: read_c_string(image, hint_rva + 2, "import name")?,
-            }
+        let Some(value) = thunk(table, index) else {
+            return (
+                entries,
+                Some(format!(
+                    "{what} entry {index} (table at RVA {table:#x}) is not resident"
+                )),
+            );
         };
-        entries.push(ImportEntry {
-            name,
-            bound: (address_table != 0)
-                .then(|| thunk(address_table, index))
-                .flatten(),
+        if value == 0 {
+            return (entries, None);
+        }
+        entries.push(if name_table == 0 {
+            ImportEntry {
+                name: ImportName::Unnamed,
+                bound: Some(value),
+            }
+        } else {
+            ImportEntry {
+                name: import_name(image, value, wide),
+                bound: (address_table != 0)
+                    .then(|| thunk(address_table, index))
+                    .flatten(),
+            }
         });
     }
-    Err(Error::DebugInfo(format!(
-        "import name table at RVA {names:#x} has no terminator within \
-         {MAX_IMPORTS_PER_DESCRIPTOR} entries"
-    )))
+    (
+        entries,
+        Some(format!(
+            "{what} at RVA {table:#x} has no terminator within {MAX_IMPORTS_PER_DESCRIPTOR} entries"
+        )),
+    )
+}
+
+/// What an import name table entry names: an ordinal when its top bit is
+/// set, otherwise the RVA of a hint and a name.
+fn import_name(image: &PeImage, thunk: u64, wide: bool) -> ImportName {
+    let ordinal_flag = if wide { 1u64 << 63 } else { 1u64 << 31 };
+    if thunk & ordinal_flag != 0 {
+        return ImportName::Ordinal(thunk as u16);
+    }
+    let rva = (thunk & 0x7fff_ffff) as u32;
+    let hint_and_name = || -> Result<ImportName> {
+        let hint = read_image_bytes(image, rva, 2, "import hint")?;
+        Ok(ImportName::Name {
+            hint: read_u16(&hint, 0),
+            name: read_image_c_string(image, rva + 2, "import name")?,
+        })
+    };
+    hint_and_name().unwrap_or_else(|error| ImportName::Unreadable(error.to_string()))
 }
 
 pub fn machine_name(machine: u16) -> &'static str {
@@ -660,7 +601,7 @@ pub fn debug_type_name(kind: u32) -> &'static str {
     }
 }
 
-const FILE_CHARACTERISTICS: [(u16, &str); 15] = [
+const FILE_CHARACTERISTICS: [(u32, &str); 15] = [
     (0x0001, "Relocations stripped"),
     (0x0002, "Executable"),
     (0x0004, "Line numbers stripped"),
@@ -678,7 +619,7 @@ const FILE_CHARACTERISTICS: [(u16, &str); 15] = [
     (0x8000, "Bytes reversed (high)"),
 ];
 
-const DLL_CHARACTERISTICS: [(u16, &str); 11] = [
+const DLL_CHARACTERISTICS: [(u32, &str); 11] = [
     (0x0020, "High entropy VA supported"),
     (0x0040, "Dynamic base"),
     (0x0080, "Force integrity"),
@@ -709,32 +650,28 @@ const SECTION_CHARACTERISTICS: [(u32, &str); 13] = [
 ];
 
 /// The named flags set in `value`, then any unnamed bits as one hex value.
-fn flag_names<T>(value: T, table: &[(T, &'static str)]) -> Vec<String>
-where
-    T: Copy + std::ops::BitAnd<Output = T> + std::ops::Not<Output = T> + PartialEq + Default,
-    T: std::ops::BitOr<Output = T> + std::fmt::LowerHex,
-{
+fn flag_names(value: u32, table: &[(u32, &str)]) -> Vec<String> {
     let mut names = Vec::new();
-    let mut known = T::default();
+    let mut known = 0;
     for &(bit, name) in table {
-        known = known | bit;
-        if value & bit != T::default() {
+        known |= bit;
+        if value & bit != 0 {
             names.push(name.to_string());
         }
     }
     let rest = value & !known;
-    if rest != T::default() {
+    if rest != 0 {
         names.push(format!("unknown bits {rest:#x}"));
     }
     names
 }
 
 pub fn file_characteristics(value: u16) -> Vec<String> {
-    flag_names(value, &FILE_CHARACTERISTICS)
+    flag_names(value.into(), &FILE_CHARACTERISTICS)
 }
 
 pub fn dll_characteristics(value: u16) -> Vec<String> {
-    flag_names(value, &DLL_CHARACTERISTICS)
+    flag_names(value.into(), &DLL_CHARACTERISTICS)
 }
 
 /// A section's flags as WinDbg lists them: content and memory flags, the
@@ -770,6 +707,7 @@ pub fn section_characteristics(value: u32) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::VirtAddr;
 
     #[test]
     fn section_flags_decode_alignment_and_access_like_windbg() {
@@ -821,9 +759,13 @@ mod tests {
         assert!(decode_codeview(b"RSDS\0\0").is_err());
     }
 
-    /// A PE32 or PE32+ image importing one name and one ordinal from
+    /// Bytes past this RVA of [`image_with_imports`] do not read.
+    const SECOND_NAME: usize = 0x1800;
+
+    /// A PE32 or PE32+ image importing two names and one ordinal from
     /// `hal.dll`, whose IAT holds bound addresses as a loaded image's does.
-    fn image_with_imports(wide: bool) -> PeImage {
+    /// The second name sits in the last block, at [`SECOND_NAME`].
+    fn image_with_imports(wide: bool) -> Vec<u8> {
         let mut image = vec![0u8; 0x2000];
         let mut put = |at: usize, bytes: &[u8]| image[at..at + bytes.len()].copy_from_slice(bytes);
         let pe = 0x80;
@@ -859,30 +801,63 @@ mod tests {
         put(0x1300, b"hal.dll\0");
         put(0x1400, &7u16.to_le_bytes());
         put(0x1402, b"HalGetBusData\0");
+        put(SECOND_NAME, &9u16.to_le_bytes());
+        put(SECOND_NAME + 2, b"HalSetBusData\0");
         let width = if wide { 8 } else { 4 };
         let ordinal = if wide {
             (1u64 << 63) | 12
         } else {
             (1u64 << 31) | 12
         };
-        for (index, (name, bound)) in [(0x1400u64, 0xfff0_1000u64), (ordinal, 0xfff0_2000)]
+        for (index, name) in [0x1400u64, SECOND_NAME as u64, ordinal]
             .into_iter()
             .enumerate()
         {
             put(0x1100 + index * width, &name.to_le_bytes()[..width]);
-            put(0x1200 + index * width, &bound.to_le_bytes()[..width]);
+            put(
+                0x1200 + index * width,
+                &bound(wide, index).to_le_bytes()[..width],
+            );
         }
-        PeImage::complete(image)
+        image
+    }
+
+    /// What the loader bound in IAT slot `index` of [`image_with_imports`]:
+    /// a kernel address, whose top bit is the name table's ordinal flag.
+    fn bound(wide: bool, index: usize) -> u64 {
+        let base = if wide {
+            0xffff_f801_0000_1000
+        } else {
+            0x8001_1000
+        };
+        base + 0x100 * index as u64
+    }
+
+    /// `bytes` as a lazily read image whose bytes from `readable` on do not
+    /// read, like a paged-out page.
+    fn lazy_image(bytes: Vec<u8>, readable: usize) -> PeImage {
+        super::super::read_pe_image(VirtAddr(0), move |address, buf| {
+            let start = address.0 as usize;
+            if start + buf.len() > readable {
+                return Err(Error::BadVirtualAddress(address));
+            }
+            buf.copy_from_slice(&bytes[start..start + buf.len()]);
+            Ok(())
+        })
+        .unwrap()
+    }
+
+    fn imports_of(image: &PeImage) -> Vec<ImportDescriptor> {
+        imports(image, &decode_headers(image.headers()).unwrap()).unwrap()
     }
 
     #[test]
     fn imports_read_names_and_ordinals_from_the_name_table_of_either_width() {
         for wide in [true, false] {
-            let image = image_with_imports(wide);
-            let headers = decode_headers(image.headers()).unwrap();
-            let descriptors = imports(&image, &headers).unwrap();
+            let descriptors = imports_of(&PeImage::complete(image_with_imports(wide)));
             assert_eq!(descriptors.len(), 1, "wide={wide}");
-            assert_eq!(descriptors[0].name, "hal.dll");
+            assert_eq!(descriptors[0].name.as_deref(), Ok("hal.dll"));
+            assert_eq!(descriptors[0].incomplete, None);
             assert_eq!(
                 descriptors[0].entries,
                 [
@@ -891,13 +866,56 @@ mod tests {
                             hint: 7,
                             name: "HalGetBusData".into()
                         },
-                        bound: Some(0xfff0_1000),
+                        bound: Some(bound(wide, 0)),
+                    },
+                    ImportEntry {
+                        name: ImportName::Name {
+                            hint: 9,
+                            name: "HalSetBusData".into()
+                        },
+                        bound: Some(bound(wide, 1)),
                     },
                     ImportEntry {
                         name: ImportName::Ordinal(12),
-                        bound: Some(0xfff0_2000),
+                        bound: Some(bound(wide, 2)),
                     },
                 ],
+                "wide={wide}"
+            );
+        }
+    }
+
+    /// A name on a page that does not read costs that entry its name, not
+    /// the descriptor or the directory.
+    #[test]
+    fn an_unreadable_import_name_is_reported_on_its_entry_alone() {
+        let descriptors = imports_of(&lazy_image(image_with_imports(true), SECOND_NAME));
+        let entries = &descriptors[0].entries;
+        assert_eq!(descriptors[0].name.as_deref(), Ok("hal.dll"));
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(entries[0].name, ImportName::Name { hint: 7, .. }));
+        assert!(matches!(entries[1].name, ImportName::Unreadable(_)));
+        assert_eq!(entries[1].bound, Some(bound(true, 1)));
+        assert_eq!(entries[2].name, ImportName::Ordinal(12));
+    }
+
+    /// Without an import name table the IAT holds bound addresses, which are
+    /// not decoded as names or ordinals even with the ordinal bit set.
+    #[test]
+    fn a_bound_iat_without_a_name_table_yields_addresses_only() {
+        for wide in [true, false] {
+            let mut bytes = image_with_imports(wide);
+            bytes[0x1000..0x1004].fill(0);
+            let descriptors = imports_of(&PeImage::complete(bytes));
+            assert_eq!(descriptors[0].incomplete, None, "wide={wide}");
+            assert_eq!(
+                descriptors[0].entries,
+                (0..3)
+                    .map(|index| ImportEntry {
+                        name: ImportName::Unnamed,
+                        bound: Some(bound(wide, index)),
+                    })
+                    .collect::<Vec<_>>(),
                 "wide={wide}"
             );
         }
