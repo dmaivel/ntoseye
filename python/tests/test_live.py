@@ -21,6 +21,9 @@ HOT = "nt!KiSwapContext"
 # How a step under VBS reports that its vCPU, run alone, entered the Windows
 # hypervisor to wait on the held ones; a scenario it hits is run again.
 HYPERVISOR_WAIT = "entered the Windows hypervisor before finishing the step"
+# How a step reports that its vCPU, run alone, took an interrupt and waits
+# in the handler on a held vCPU; from VTL1 that handler is NT's.
+DIVERTED = "did not reach the next instruction"
 ATTEMPTS = 3
 
 
@@ -191,14 +194,17 @@ def test_secure_steps_use_hardware_sites_and_leave_code_unchanged(halted: Debugg
     address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
     for attempt in range(ATTEMPTS):
         try:
-            secure_step_scenario(halted, address)
-            return
+            if secure_step_scenario(halted, address):
+                return
         except ntoseye.NtoseyeError as error:
             if HYPERVISOR_WAIT not in str(error) or attempt == ATTEMPTS - 1:
                 raise
+    pytest.fail(f"all {ATTEMPTS} steps were diverted into an interrupt handler")
 
 
-def secure_step_scenario(halted: Debugger, address: int) -> None:
+def secure_step_scenario(halted: Debugger, address: int) -> bool:
+    """Step in the secure kernel and step out; `False` when the step was
+    diverted into an interrupt handler, which leaves nothing to check."""
     bp = halted.breakpoints.add(address, hardware=True)
     try:
         assert isinstance(halted.run(timeout=10.0), Stop.Breakpoint)
@@ -206,17 +212,19 @@ def secure_step_scenario(halted: Debugger, address: int) -> None:
         # Which sites a step plants is pinned by the Rust unit tests; this is
         # the live path. step_out's run-to site goes through the breakpoint
         # manager, which refuses a software site in the secure kernel.
+        halted.notices()
         step = halted.step()
         assert isinstance(step, Stop.Step)
-        # Usually the next instruction; an interrupt taken on resume can
-        # instead leave the step in a secure-kernel handler.
         assert step.rip != address
+        if any(DIVERTED in notice for notice in halted.notices()):
+            return False
         assert (step.symbol or "").startswith("securekernel!")
         out = halted.step_out()
         assert isinstance(out, Stop.Step)
         assert (out.symbol or "").startswith("securekernel!")
         assert out.thread is None
         assert not list(halted.breakpoints), "a temporary site was left behind"
+        return True
     finally:
         halted.interrupt()
         if bp.valid:

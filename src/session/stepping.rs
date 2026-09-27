@@ -42,22 +42,31 @@ impl Session {
         self.parked_stop = None;
         self.current_stop = None;
         self.backend.set_current_thread(&self.current_thread)?;
-        if !step_over_current_breakpoint(
+        let stepped = match step_over_current_breakpoint(
             self.backend.as_mut(),
             &self.register_map,
             &self.target,
             &mut self.breakpoints,
         )? {
-            if self.backend.single_step_unsafe() {
-                step_without_trap(
-                    self.backend.as_mut(),
-                    &self.register_map,
-                    &self.target,
-                    &self.breakpoints,
-                )?;
-            } else {
+            Some(stepped) => stepped,
+            None if self.backend.single_step_unsafe() => step_without_trap(
+                self.backend.as_mut(),
+                &self.register_map,
+                &self.target,
+                &self.breakpoints,
+            )?,
+            None => {
                 step_one_and_clear_tf(self.backend.as_mut(), &self.register_map)?;
+                RunPast::Reached
             }
+        };
+        if stepped == RunPast::Diverted {
+            self.notices.push(format!(
+                "{} did not reach the next instruction within {RUN_PAST_TIMEOUT:?} of running \
+                 alone: it took an interrupt first, and the handler waits on a vCPU the step \
+                 holds. It stopped in the handler; resume with g to let it finish",
+                self.current_thread
+            ));
         }
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints
@@ -485,8 +494,8 @@ pub fn step_one_and_clear_tf(
 }
 
 /// If RIP sits on one of our enabled breakpoints, disable it, step the
-/// underlying instruction, then re-enable; returns whether a step was
-/// performed. A stale breakpoint (its address space gone) is silently
+/// underlying instruction, then re-enable; returns how, or `None` when there
+/// was no breakpoint to step over. A stale breakpoint (its address space gone) is silently
 /// discarded. A target that owns its sites (KD) has already dropped the one
 /// at the PC while reporting the stop, so the disable is a no-op there and
 /// the re-enable is what writes it back. Callers must have selected the
@@ -496,7 +505,7 @@ pub fn step_over_current_breakpoint(
     register_map: &RegisterMap,
     debugger: &Target,
     breakpoints: &mut BreakpointManager,
-) -> Result<bool> {
+) -> Result<Option<RunPast>> {
     let regs = backend.read_registers()?;
     let rip = register_map.read_u64("rip", &regs)?;
     // Only the shared-page fallback below needs the address space; a stub
@@ -508,7 +517,7 @@ pub fn step_over_current_breakpoint(
     // Scope-agnostic: a wrong-process hit on a shared-page BP still needs the
     // disable/step/enable dance so the wrong process can make forward progress.
     let Some(bp_id) = breakpoints.breakpoint_id_at_address(rip) else {
-        return Ok(false);
+        return Ok(None);
     };
 
     match (breakpoints.disable(backend, debugger, bp_id), cr3) {
@@ -523,7 +532,7 @@ pub fn step_over_current_breakpoint(
     let stepped = if backend.single_step_unsafe() {
         run_past_site(backend, register_map, debugger, &regs, rip, cr3)
     } else {
-        step_one_and_clear_tf(backend, register_map)
+        step_one_and_clear_tf(backend, register_map).map(|()| RunPast::Reached)
     };
 
     // Re-arm whether or not the step worked: a failed step must not leave the
@@ -536,7 +545,18 @@ pub fn step_over_current_breakpoint(
         }
         Err(err) => return stepped.and(Err(err)),
     }
-    stepped.map(|()| true)
+    stepped.map(Some)
+}
+
+/// Where a vCPU executing one instruction ended up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunPast {
+    /// Past the instruction, or at a stop the target reported.
+    Reached,
+    /// Resumed alone past the instruction, it reached none of its successors
+    /// within [`RUN_PAST_TIMEOUT`] and was broken in on elsewhere: it took
+    /// an interrupt first, and the handler waits on a held vCPU.
+    Diverted,
 }
 
 /// How long a vCPU resumed alone gets to execute one instruction before the
@@ -558,7 +578,7 @@ fn run_past_site(
     regs: &[u8],
     rip: u64,
     cr3: Option<u64>,
-) -> Result<()> {
+) -> Result<RunPast> {
     let successors = site_successors(debugger, register_map, regs, rip, cr3)?;
     run_past(
         backend,
@@ -578,7 +598,7 @@ fn step_without_trap(
     register_map: &RegisterMap,
     debugger: &Target,
     breakpoints: &BreakpointManager,
-) -> Result<()> {
+) -> Result<RunPast> {
     let regs = backend.read_registers()?;
     let rip = register_map.read_u64("rip", &regs)?;
     let cr3 = register_map
@@ -623,7 +643,7 @@ fn run_past(
     rip: u64,
     successors: &[u64],
     sites: &TemporarySites,
-) -> Result<()> {
+) -> Result<RunPast> {
     let mut planted = Vec::with_capacity(successors.len());
     let result = run_to_successors(backend, register_map, rip, successors, sites, &mut planted);
     for (address, slot) in planted {
@@ -645,7 +665,7 @@ fn run_to_successors(
     successors: &[u64],
     sites: &TemporarySites,
     planted: &mut Vec<(u64, Option<u8>)>,
-) -> Result<()> {
+) -> Result<RunPast> {
     for (index, &address) in successors.iter().enumerate() {
         let slot = match sites {
             TemporarySites::Software => {
@@ -661,9 +681,9 @@ fn run_to_successors(
         planted.push((address, slot));
     }
     backend.continue_current_thread()?;
-    let event = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
-        Some(event) => event,
-        None => backend.interrupt()?,
+    let (event, timed_out) = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
+        Some(event) => (event, false),
+        None => (backend.interrupt()?, true),
     };
     if event.is_bugcheck {
         return Err(Error::DebugInfo(format!(
@@ -682,7 +702,11 @@ fn run_to_successors(
     // instruction, whose handler waits on a held vCPU. The site is armed
     // again, so when the handler returns to it that same execution hits a
     // second time.
-    Ok(())
+    Ok(if timed_out && !successors.contains(&now) {
+        RunPast::Diverted
+    } else {
+        RunPast::Reached
+    })
 }
 
 /// Every address execution can continue at after the instruction at `rip`,

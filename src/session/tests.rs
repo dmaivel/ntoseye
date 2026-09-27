@@ -3,7 +3,7 @@ use super::hits::{
 };
 use super::inspection::DBG_STATUS_WORKER;
 use super::lifecycle::prepare_backend_after_cleanup;
-use super::stepping::{site_successors, step_over_current_breakpoint};
+use super::stepping::{RunPast, site_successors, step_over_current_breakpoint};
 use super::*;
 use crate::breakpoints::{Breakpoint, BreakpointConfig, HardwareBreakpoint};
 use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
@@ -939,7 +939,7 @@ fn a_target_owned_breakpoint_is_stepped_over_and_written_back() {
         step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
             .unwrap();
 
-    assert!(stepped);
+    assert_eq!(stepped, Some(RunPast::Reached));
     assert_eq!(backend.get("rip"), 0x1001);
     assert!(manager.list()[0].enabled);
     // The target dropped the entry when it reported the hit; the step
@@ -974,7 +974,7 @@ fn a_site_under_the_windows_hypervisor_is_run_past_without_a_step() {
         step_over_current_breakpoint(&mut backend, &register_map, &session.target, &mut manager)
             .unwrap();
 
-    assert!(passed);
+    assert_eq!(passed, Some(RunPast::Reached));
     assert_eq!(backend.get("rip"), 0x1003);
     assert!(manager.list()[0].enabled);
     assert_eq!(
@@ -1079,6 +1079,31 @@ fn a_step_under_the_windows_hypervisor_runs_the_vcpu_alone_to_every_successor() 
         ]
     );
     assert!(hardware.lock().is_empty());
+}
+
+/// A vCPU run alone that reaches none of its successors before the timeout
+/// took an interrupt, and the handler waits on a held vCPU: the step stops
+/// in the handler and says why. One that reached a successor says nothing.
+#[test]
+fn a_step_diverted_into_an_interrupt_handler_says_so() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    for (lands_at, diverted) in [(0x1030, true), (0x1012, false)] {
+        let mut backend = MockBackend {
+            allow_breakpoints: true,
+            single_step_unsafe: true,
+            halts_only_on_interrupt: true,
+            lands_at: Some(lands_at),
+            one_vcpu: true,
+            ..MockBackend::default()
+        };
+        backend.set("rip", 0x1000);
+        let mut session = stepping_session(&code, backend);
+
+        assert_eq!(session.step().unwrap(), lands_at);
+        let notices = session.take_notices();
+        assert_eq!(!notices.is_empty(), diverted, "{notices:?}");
+    }
 }
 
 /// Secure-kernel code is never patched: a step there marks its successors
