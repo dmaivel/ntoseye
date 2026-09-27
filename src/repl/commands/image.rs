@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::expr::Expr;
 use crate::pe::ImageExports;
 use crate::pe::headers::{
-    CodeView, DebugDirectoryEntry, ImageHeaders, ImportDescriptor, ImportName, SectionHeader,
+    CodeView, DebugRecord, ImageHeaders, ImportDescriptor, ImportName, SectionHeader,
     debug_type_name, dll_characteristics, file_characteristics, machine_name,
     section_characteristics, subsystem_name,
 };
@@ -52,8 +52,10 @@ fn print_image_headers(detail: &ImageHeadersDetail) {
     if detail.parts.file {
         print_file_headers(detail);
     }
+    if let Some(debug) = &detail.debug {
+        print_debug_directory(debug);
+    }
     if detail.parts.sections {
-        print_debug_directory(&detail.debug);
         for (index, section) in headers.sections.iter().enumerate() {
             print_section(index + 1, section);
         }
@@ -193,21 +195,21 @@ fn print_file_headers(detail: &ImageHeadersDetail) {
     outln!();
 }
 
-fn print_debug_directory(debug: &DiagnosticValue<Vec<DebugDirectoryEntry>>) {
-    let entries = match debug {
-        DiagnosticValue::Available(entries) => entries,
+fn print_debug_directory(debug: &DiagnosticValue<Vec<DebugRecord>>) {
+    let records = match debug {
+        DiagnosticValue::Available(records) => records,
         DiagnosticValue::Unavailable(error) => {
             outln!("Debug Directories: <unavailable: {error}>\n");
             return;
         }
     };
-    if entries.is_empty() {
+    if records.is_empty() {
         return;
     }
-    outln!("Debug Directories({})", entries.len());
+    outln!("Debug Directories({})", records.len());
     outln!("    Type                         Size  Address   Pointer");
-    for entry in entries {
-        let format = match &entry.codeview {
+    for DebugRecord { entry, codeview } in records {
+        let format = match codeview {
             None => String::new(),
             Some(Ok(CodeView::Rsds { guid, age, path })) => {
                 format!("  Format: RSDS, guid {guid}, age {age}, {path}")

@@ -4,8 +4,8 @@
 use super::{View, diagnostic};
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::pe::headers::{
-    CodeView, DebugDirectoryEntry, FileHeader, ImportDescriptor, ImportName, OptionalHeader,
-    SectionHeader, debug_type_name, dll_characteristics, file_characteristics, machine_name,
+    CodeView, DebugRecord, FileHeader, ImportDescriptor, ImportName, OptionalHeader, SectionHeader,
+    debug_type_name, dll_characteristics, file_characteristics, machine_name,
     section_characteristics, subsystem_name,
 };
 use crate::pe::{ExportDirectory, ImageExports};
@@ -280,7 +280,7 @@ fn codeview(record: &CodeView) -> View {
     match record {
         CodeView::Rsds { guid, age, path } => View::Object(vec![
             ("format", View::Str("RSDS".into())),
-            ("guid", View::Str(guid.clone())),
+            ("guid", View::Str(guid.to_string())),
             ("signature", View::Null),
             ("age", View::Num((*age).into())),
             ("pdb", View::Str(path.clone())),
@@ -299,7 +299,8 @@ fn codeview(record: &CodeView) -> View {
     }
 }
 
-fn debug_entry(entry: &DebugDirectoryEntry) -> View {
+fn debug_entry(record: &DebugRecord) -> View {
+    let entry = &record.entry;
     View::Object(vec![
         ("type", View::Num(entry.kind.into())),
         ("type_name", View::Str(debug_type_name(entry.kind).into())),
@@ -317,16 +318,15 @@ fn debug_entry(entry: &DebugDirectoryEntry) -> View {
         ),
         (
             "codeview",
-            match &entry.codeview {
-                None => View::Null,
-                Some(record) => diagnostic(
-                    &match record {
-                        Ok(record) => DiagnosticValue::Available(record.clone()),
-                        Err(error) => DiagnosticValue::Unavailable(error.clone()),
-                    },
-                    codeview,
-                ),
-            },
+            record.codeview.as_ref().map_or(View::Null, |record| {
+                diagnostic(
+                    &record.as_ref().map_or_else(
+                        |error| DiagnosticValue::Unavailable(error.clone()),
+                        DiagnosticValue::Available,
+                    ),
+                    |record| codeview(record),
+                )
+            }),
         ),
     ])
 }
@@ -463,8 +463,9 @@ fn import_descriptor(descriptor: &ImportDescriptor) -> View {
 }
 
 /// `!dh`: a mapped image's headers; top-level keys: `base`, `module`,
-/// `file_header`, `optional_header`, `data_directories`, `sections`,
-/// `debug_directory`, and, when asked for, `exports` and `imports`.
+/// `file_header`, `optional_header`, `data_directories`, `sections`, and,
+/// when asked for, `debug_directory` (with the sections), `exports`, and
+/// `imports`.
 pub fn image_headers(detail: &ImageHeadersDetail) -> View {
     let headers = &detail.headers;
     let mut fields = vec![
@@ -507,13 +508,15 @@ pub fn image_headers(detail: &ImageHeadersDetail) -> View {
             "sections",
             View::List(headers.sections.iter().map(section_header).collect()),
         ),
-        (
-            "debug_directory",
-            diagnostic(&detail.debug, |entries| {
-                View::List(entries.iter().map(debug_entry).collect())
-            }),
-        ),
     ];
+    if let Some(debug) = &detail.debug {
+        fields.push((
+            "debug_directory",
+            diagnostic(debug, |records| {
+                View::List(records.iter().map(debug_entry).collect())
+            }),
+        ));
+    }
     if let Some(exports) = &detail.exports {
         fields.push((
             "exports",

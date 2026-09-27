@@ -12,7 +12,10 @@ use crate::{
     error::{Error, Result},
     guest::{Image, ModuleInfo},
     memory,
-    pe::{read_pe_header_page, size_of_image},
+    pe::{
+        headers::{self, DebugDirectoryEntry, read_debug_directory},
+        read_pe_header_page, size_of_image,
+    },
     types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
 use dashmap::mapref::entry::Entry;
@@ -21,18 +24,14 @@ use memmap2::Mmap;
 use pdb2::{FallibleIterator, TypeData};
 use pelite::{
     PeFile, PeView, Wrap,
-    image::{
-        GUID, IMAGE_DEBUG_CV_INFO_PDB70, IMAGE_DEBUG_DIRECTORY, IMAGE_DEBUG_TYPE_CODEVIEW,
-        IMAGE_DIRECTORY_ENTRY_DEBUG,
-    },
+    image::{GUID, IMAGE_DIRECTORY_ENTRY_DEBUG},
     pe64::debug::CodeView,
 };
 use std::{
+    borrow::Cow,
     fs::File,
     io::Cursor,
-    mem::size_of,
     path::Path,
-    ptr,
     sync::{Arc, atomic::Ordering},
 };
 
@@ -44,14 +43,6 @@ fn guid_to_u128(guid: GUID) -> u128 {
     bytes[8..16].copy_from_slice(&guid.Data4);
     u128::from_be_bytes(bytes)
 }
-
-/// Largest `IMAGE_DEBUG_DIRECTORY` array read from a guest image; real images
-/// carry a few entries.
-const MAX_DEBUG_DIRECTORY_BYTES: usize = 0x1000;
-
-/// Largest CodeView record read from a guest image (a GUID, an age, and a
-/// PDB path).
-const MAX_CODEVIEW_BYTES: usize = 0x1000;
 
 /// The pointer width a PDB's own pointer records state, for one whose DBI
 /// header names no machine: the x86 ntdll WOW64 runs on ARM64 Windows is
@@ -85,65 +76,30 @@ impl SymbolStore {
             .map(|entry| (entry.VirtualAddress, entry.Size)))
     }
 
-    fn read_debug_directory_entries<B: MemoryOps<PhysAddr>>(
-        memory: &memory::AddressSpace<'_, B>,
+    /// Reads `len` bytes at an RVA of the image mapped at `base_address`, for
+    /// [`read_debug_directory`].
+    fn image_reader<'m, B: MemoryOps<PhysAddr>>(
+        memory: &'m memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
-        debug_rva: u32,
-        debug_size: u32,
-    ) -> Result<Vec<IMAGE_DEBUG_DIRECTORY>> {
-        if debug_size == 0 {
-            return Ok(Vec::new());
+    ) -> impl Fn(u32, usize, &str) -> Result<Cow<'static, [u8]>> + 'm {
+        move |rva, len, _| {
+            let mut bytes = vec![0u8; len];
+            memory.read_bytes(base_address + u64::from(rva), &mut bytes)?;
+            Ok(Cow::Owned(bytes))
         }
-
-        let entry_size = size_of::<IMAGE_DEBUG_DIRECTORY>();
-        if !(debug_size as usize).is_multiple_of(entry_size) {
-            return Err(Error::DebugInfo(format!(
-                "debug directory size {:#x} is not a multiple of {}",
-                debug_size, entry_size
-            )));
-        }
-
-        // A handful of entries at most in any real image; the field is guest
-        // memory, so bound the allocation before trusting it.
-        if debug_size as usize > MAX_DEBUG_DIRECTORY_BYTES {
-            return Err(Error::DebugInfo(format!(
-                "debug directory size {debug_size:#x} exceeds {MAX_DEBUG_DIRECTORY_BYTES:#x}"
-            )));
-        }
-        let mut bytes = vec![0u8; debug_size as usize];
-        memory.read_bytes(base_address + debug_rva as u64, &mut bytes)?;
-
-        let mut entries = Vec::new();
-        for chunk in bytes.chunks_exact(entry_size) {
-            let entry =
-                unsafe { ptr::read_unaligned(chunk.as_ptr() as *const IMAGE_DEBUG_DIRECTORY) };
-            entries.push(entry);
-        }
-
-        Ok(entries)
     }
 
-    /// The raw CodeView record `entry` points at, bounded before the read.
-    fn read_codeview_bytes<B: MemoryOps<PhysAddr>>(
+    /// The debug directory entries of the image mapped at `base_address`.
+    fn read_debug_entries<B: MemoryOps<PhysAddr>>(
         memory: &memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
-        entry: &IMAGE_DEBUG_DIRECTORY,
-    ) -> Result<Vec<u8>> {
-        if entry.AddressOfRawData == 0 || entry.SizeOfData < 4 {
-            return Err(Error::DebugInfo(
-                "codeview entry is missing raw data".to_string(),
-            ));
+    ) -> Result<Vec<DebugDirectoryEntry>> {
+        match Self::read_debug_directory_location(memory, base_address)? {
+            Some((rva, size)) => {
+                read_debug_directory(rva, size, Self::image_reader(memory, base_address))
+            }
+            None => Ok(Vec::new()),
         }
-        if entry.SizeOfData as usize > MAX_CODEVIEW_BYTES {
-            return Err(Error::DebugInfo(format!(
-                "codeview entry size {:#x} exceeds {MAX_CODEVIEW_BYTES:#x}",
-                entry.SizeOfData
-            )));
-        }
-
-        let mut bytes = vec![0u8; entry.SizeOfData as usize];
-        memory.read_bytes(base_address + entry.AddressOfRawData as u64, &mut bytes)?;
-        Ok(bytes)
     }
 
     /// The PDB path in the RSDS CodeView record of the image mapped at
@@ -153,64 +109,14 @@ impl SymbolStore {
         memory: &memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
     ) -> Result<Option<String>> {
-        let Some((debug_rva, debug_size)) =
-            Self::read_debug_directory_location(memory, base_address)?
-        else {
-            return Ok(None);
-        };
-        for entry in
-            Self::read_debug_directory_entries(memory, base_address, debug_rva, debug_size)?
-        {
-            if entry.Type != IMAGE_DEBUG_TYPE_CODEVIEW {
-                continue;
-            }
-            let bytes = Self::read_codeview_bytes(memory, base_address, &entry)?;
-            if bytes.starts_with(b"RSDS") && bytes.len() >= size_of::<IMAGE_DEBUG_CV_INFO_PDB70>() {
-                return Ok(Some(Self::read_c_string_lossy(
-                    &bytes[size_of::<IMAGE_DEBUG_CV_INFO_PDB70>()..],
-                )));
-            }
-        }
-        Ok(None)
-    }
-
-    fn read_codeview_from_memory<B: MemoryOps<PhysAddr>>(
-        &self,
-        memory: &memory::AddressSpace<'_, B>,
-        base_address: VirtAddr,
-        entry: &IMAGE_DEBUG_DIRECTORY,
-    ) -> Result<(String, Option<(DownloadJob, u128)>)> {
-        let bytes = Self::read_codeview_bytes(memory, base_address, entry)?;
-        let signature = bytes
-            .get(..4)
-            .ok_or_else(|| Error::DebugInfo("codeview entry truncated".to_string()))?;
-
-        match signature {
-            b"RSDS" => {
-                if bytes.len() < size_of::<IMAGE_DEBUG_CV_INFO_PDB70>() {
-                    return Err(Error::DebugInfo("RSDS entry truncated".to_string()));
-                }
-
-                let image = unsafe {
-                    ptr::read_unaligned(bytes.as_ptr() as *const IMAGE_DEBUG_CV_INFO_PDB70)
-                };
-                let path =
-                    Self::read_c_string_lossy(&bytes[size_of::<IMAGE_DEBUG_CV_INFO_PDB70>()..]);
-                let summary = format!("CodeView RSDS age={} path={}", image.Age, path);
-                let job =
-                    self.build_download_job(&path, guid_to_u128(image.Signature), image.Age)?;
-                Ok((summary, Some(job)))
-            }
-            b"NB10" => {
-                if bytes.len() < 16 {
-                    return Err(Error::DebugInfo("NB10 entry truncated".to_string()));
-                }
-                let age = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-                let path = Self::read_c_string_lossy(&bytes[16..]);
-                Ok((format!("CodeView NB10 age={} path={}", age, path), None))
-            }
-            _ => Err(Error::DebugInfo("unknown magic number".to_string())),
-        }
+        let read = Self::image_reader(memory, base_address);
+        let entries = Self::read_debug_entries(memory, base_address)?;
+        Ok(entries
+            .iter()
+            .find_map(|entry| match entry.read_codeview(&read) {
+                Some(Ok(headers::CodeView::Rsds { path, .. })) => Some(path),
+                _ => None,
+            }))
     }
 
     pub fn read_c_string_lossy(bytes: &[u8]) -> String {
@@ -421,25 +327,17 @@ impl SymbolStore {
         memory: &memory::AddressSpace<'_, B>,
         base_address: VirtAddr,
     ) -> Result<Option<(DownloadJob, u128)>> {
-        let Some((debug_rva, debug_size)) =
-            Self::read_debug_directory_location(memory, base_address)?
-        else {
-            return Ok(None);
-        };
-
-        for entry in
-            Self::read_debug_directory_entries(memory, base_address, debug_rva, debug_size)?
-        {
-            if entry.Type != IMAGE_DEBUG_TYPE_CODEVIEW {
-                continue;
-            }
-
-            let (_, job) = self.read_codeview_from_memory(memory, base_address, &entry)?;
-            if let Some(job) = job {
-                return Ok(Some(job));
+        let read = Self::image_reader(memory, base_address);
+        for entry in Self::read_debug_entries(memory, base_address)? {
+            // An NB10 (PDB 2.0) record names no GUID to fetch the PDB by.
+            if let Some(headers::CodeView::Rsds { guid, age, path }) =
+                entry.read_codeview(&read).transpose()?
+            {
+                return self
+                    .build_download_job(&path, guid_to_u128(guid), age)
+                    .map(Some);
             }
         }
-
         Ok(None)
     }
 

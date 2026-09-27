@@ -7,7 +7,7 @@ use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::pe::headers::{
-    DebugDirectoryEntry, ImageHeaders, ImportDescriptor, debug_directory, decode_headers, imports,
+    DebugRecord, ImageHeaders, ImportDescriptor, debug_directory, decode_headers, imports,
 };
 use crate::pe::{ImageExports, read_pe_exports};
 use crate::types::{Dtb, VirtAddr};
@@ -91,7 +91,8 @@ pub struct ImageHeadersDetail {
     pub module: Option<String>,
     pub parts: DhParts,
     pub headers: ImageHeaders,
-    pub debug: DiagnosticValue<Vec<DebugDirectoryEntry>>,
+    /// Present when [`DhParts::sections`] was asked for.
+    pub debug: Option<DiagnosticValue<Vec<DebugRecord>>>,
     /// Present when [`DhParts::exports`] was asked for.
     pub exports: Option<DiagnosticValue<ImageExports>>,
     /// Present when [`DhParts::imports`] was asked for.
@@ -207,7 +208,9 @@ impl Target {
                 base.0
             ))
         })?;
-        let debug = DiagnosticValue::from_result(debug_directory(&image, &headers));
+        let debug = parts
+            .sections
+            .then(|| DiagnosticValue::from_result(debug_directory(&image, &headers)));
         let exports = parts
             .exports
             .then(|| DiagnosticValue::from_result(read_pe_exports(&image, base)));

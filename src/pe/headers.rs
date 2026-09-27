@@ -6,13 +6,15 @@
 //! reported on its own instead of failing the dump.
 
 use super::{PeImage, read_image_bytes, read_image_c_string};
-use crate::bytes::{get_u16, get_u32, get_u64, read_u16, read_u32};
+use crate::bytes::{get_u32, get_u64, read_u16, read_u32};
 use crate::error::{Error, Result};
+use crate::symbols::SymbolStore;
 use pelite::image::{
-    IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG, IMAGE_DIRECTORY_ENTRY_IMPORT,
+    GUID, IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG, IMAGE_DIRECTORY_ENTRY_IMPORT,
     IMAGE_NT_OPTIONAL_HDR64_MAGIC,
 };
 use pelite::{PeView, Wrap};
+use std::borrow::Cow;
 
 /// `IMAGE_FILE_HEADER`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,11 +109,7 @@ impl ImageHeaders {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeView {
     /// PDB 7.0: a GUID, an age, and the PDB path.
-    Rsds {
-        guid: String,
-        age: u32,
-        path: String,
-    },
+    Rsds { guid: GUID, age: u32, path: String },
     /// PDB 2.0: a timestamp signature, an age, and the PDB path.
     Nb10 {
         signature: u32,
@@ -120,8 +118,7 @@ pub enum CodeView {
     },
 }
 
-/// One `IMAGE_DEBUG_DIRECTORY` entry, with its CodeView record decoded when
-/// it is one: `Err` says why the record could not be read.
+/// One `IMAGE_DEBUG_DIRECTORY` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugDirectoryEntry {
     pub characteristics: u32,
@@ -131,6 +128,13 @@ pub struct DebugDirectoryEntry {
     pub size_of_data: u32,
     pub address_of_raw_data: u32,
     pub pointer_to_raw_data: u32,
+}
+
+/// A debug directory entry as `!dh` shows it, with its CodeView record
+/// decoded when it is one: `Err` says why the record could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugRecord {
+    pub entry: DebugDirectoryEntry,
     pub codeview: Option<std::result::Result<CodeView, String>>,
 }
 
@@ -177,6 +181,7 @@ const DEBUG_DIRECTORY_ENTRY_SIZE: usize = 28;
 const IMPORT_DESCRIPTOR_SIZE: usize = 20;
 /// Real images carry a handful of debug entries; the size is guest data.
 const MAX_DEBUG_DIRECTORY_BYTES: usize = 0x1000;
+/// A CodeView record is a GUID, an age, and a PDB path.
 const MAX_CODEVIEW_BYTES: usize = 0x1000;
 /// Bounds on guest-controlled import tables: ntoskrnl imports from about a
 /// dozen modules, a few hundred functions each.
@@ -315,98 +320,100 @@ pub fn decode_headers(headers: &[u8]) -> Result<ImageHeaders> {
     })
 }
 
-/// The debug directory's entries, each CodeView record decoded. An image
-/// without a debug directory has none.
-pub fn debug_directory(
-    image: &PeImage,
-    headers: &ImageHeaders,
+/// The entries of the debug directory at `rva` (`size` bytes), read through
+/// `read`, which reads `len` bytes at an RVA of the image and names what it
+/// reads for its errors. An image without a debug directory has none.
+pub fn read_debug_directory<'a>(
+    rva: u32,
+    size: u32,
+    read: impl Fn(u32, usize, &str) -> Result<Cow<'a, [u8]>>,
 ) -> Result<Vec<DebugDirectoryEntry>> {
-    let Some(directory) = headers
-        .directory(IMAGE_DIRECTORY_ENTRY_DEBUG)
-        .filter(|directory| directory.rva != 0 && directory.size != 0)
-    else {
+    if rva == 0 || size == 0 {
         return Ok(Vec::new());
-    };
-    let size = directory.size as usize;
+    }
+    let size = size as usize;
     if !size.is_multiple_of(DEBUG_DIRECTORY_ENTRY_SIZE) || size > MAX_DEBUG_DIRECTORY_BYTES {
         return Err(Error::DebugInfo(format!(
             "debug directory size {size:#x} is not a multiple of {DEBUG_DIRECTORY_ENTRY_SIZE} \
              bytes up to {MAX_DEBUG_DIRECTORY_BYTES:#x}"
         )));
     }
-    let bytes = read_image_bytes(image, directory.rva, size, "debug directory")?;
+    let bytes = read(rva, size, "debug directory")?;
     Ok(bytes
         .as_chunks::<DEBUG_DIRECTORY_ENTRY_SIZE>()
         .0
         .iter()
-        .map(|entry| {
-            let u32_at = |offset| get_u32(entry, offset).unwrap_or_default();
-            let u16_at = |offset| get_u16(entry, offset).unwrap_or_default();
-            let kind = u32_at(12);
-            let size_of_data = u32_at(16);
-            let address_of_raw_data = u32_at(20);
-            DebugDirectoryEntry {
-                characteristics: u32_at(0),
-                time_date_stamp: u32_at(4),
-                version: (u16_at(8), u16_at(10)),
-                kind,
-                size_of_data,
-                address_of_raw_data,
-                pointer_to_raw_data: u32_at(24),
-                codeview: (kind == IMAGE_DEBUG_TYPE_CODEVIEW).then(|| {
-                    read_codeview(image, address_of_raw_data, size_of_data)
-                        .map_err(|error| error.to_string())
-                }),
-            }
+        .map(|entry| DebugDirectoryEntry {
+            characteristics: read_u32(entry, 0),
+            time_date_stamp: read_u32(entry, 4),
+            version: (read_u16(entry, 8), read_u16(entry, 10)),
+            kind: read_u32(entry, 12),
+            size_of_data: read_u32(entry, 16),
+            address_of_raw_data: read_u32(entry, 20),
+            pointer_to_raw_data: read_u32(entry, 24),
         })
         .collect())
 }
 
-fn read_codeview(image: &PeImage, rva: u32, size: u32) -> Result<CodeView> {
-    if rva == 0 {
-        return Err(Error::DebugInfo(
-            "the CodeView record is not mapped (AddressOfRawData is 0)".into(),
-        ));
+impl DebugDirectoryEntry {
+    /// The CodeView record this entry points at, read through `read` (see
+    /// [`read_debug_directory`]); `None` when the entry is not a CodeView one.
+    pub fn read_codeview<'a>(
+        &self,
+        read: impl Fn(u32, usize, &str) -> Result<Cow<'a, [u8]>>,
+    ) -> Option<Result<CodeView>> {
+        (self.kind == IMAGE_DEBUG_TYPE_CODEVIEW).then(|| {
+            if self.address_of_raw_data == 0 {
+                return Err(Error::DebugInfo(
+                    "the CodeView record is not mapped (AddressOfRawData is 0)".into(),
+                ));
+            }
+            let size = self.size_of_data as usize;
+            if size > MAX_CODEVIEW_BYTES {
+                return Err(Error::DebugInfo(format!(
+                    "CodeView record size {size:#x} exceeds {MAX_CODEVIEW_BYTES:#x}"
+                )));
+            }
+            decode_codeview(&read(self.address_of_raw_data, size, "CodeView record")?)
+        })
     }
-    let size = size as usize;
-    if !(16..=MAX_CODEVIEW_BYTES).contains(&size) {
-        return Err(Error::DebugInfo(format!(
-            "CodeView record size {size:#x} is outside 0x10..={MAX_CODEVIEW_BYTES:#x}"
-        )));
-    }
-    let bytes = read_image_bytes(image, rva, size, "CodeView record")?;
-    decode_codeview(&bytes)
+}
+
+/// The debug directory of `image`, each CodeView record decoded.
+pub fn debug_directory(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<DebugRecord>> {
+    let Some(directory) = headers.directory(IMAGE_DIRECTORY_ENTRY_DEBUG) else {
+        return Ok(Vec::new());
+    };
+    let read = |rva: u32, len: usize, what: &str| read_image_bytes(image, rva, len, what);
+    Ok(read_debug_directory(directory.rva, directory.size, read)?
+        .into_iter()
+        .map(|entry| DebugRecord {
+            codeview: entry
+                .read_codeview(read)
+                .map(|record| record.map_err(|error| error.to_string())),
+            entry,
+        })
+        .collect())
 }
 
 /// Decode an RSDS (PDB 7.0) or NB10 (PDB 2.0) CodeView record.
 pub fn decode_codeview(bytes: &[u8]) -> Result<CodeView> {
-    let path = |start: usize| {
-        let tail = bytes.get(start..).unwrap_or_default();
-        let end = tail
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(tail.len());
-        String::from_utf8_lossy(&tail[..end]).into_owned()
-    };
+    let path =
+        |start: usize| SymbolStore::read_c_string_lossy(bytes.get(start..).unwrap_or_default());
     match bytes.get(..4) {
-        Some(b"RSDS") if bytes.len() >= 24 => {
-            let data1 = get_u32(bytes, 4).unwrap_or_default();
-            let data2 = get_u16(bytes, 8).unwrap_or_default();
-            let data3 = get_u16(bytes, 10).unwrap_or_default();
-            let data4 = &bytes[12..20];
-            let guid = format!(
-                "{data1:08X}-{data2:04X}-{data3:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-                data4[0], data4[1], data4[2], data4[3], data4[4], data4[5], data4[6], data4[7]
-            );
-            Ok(CodeView::Rsds {
-                guid,
-                age: get_u32(bytes, 20).unwrap_or_default(),
-                path: path(24),
-            })
-        }
+        Some(b"RSDS") if bytes.len() >= 24 => Ok(CodeView::Rsds {
+            guid: GUID {
+                Data1: read_u32(bytes, 4),
+                Data2: read_u16(bytes, 8),
+                Data3: read_u16(bytes, 10),
+                Data4: bytes[12..20].try_into().unwrap_or_default(),
+            },
+            age: read_u32(bytes, 20),
+            path: path(24),
+        }),
         Some(b"NB10") if bytes.len() >= 16 => Ok(CodeView::Nb10 {
-            signature: get_u32(bytes, 8).unwrap_or_default(),
-            age: get_u32(bytes, 12).unwrap_or_default(),
+            signature: read_u32(bytes, 8),
+            age: read_u32(bytes, 12),
             path: path(16),
         }),
         Some(magic) => Err(Error::DebugInfo(format!(
@@ -740,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn codeview_rsds_guid_is_formatted_from_its_mixed_endian_fields() {
+    fn codeview_rsds_guid_is_decoded_from_its_mixed_endian_fields() {
         let mut record = b"RSDS".to_vec();
         record.extend_from_slice(&[
             0x78, 0x56, 0x34, 0x12, 0xbc, 0x9a, 0xf0, 0xde, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
@@ -751,7 +758,12 @@ mod tests {
         assert_eq!(
             decode_codeview(&record).unwrap(),
             CodeView::Rsds {
-                guid: "12345678-9ABC-DEF0-0102-030405060708".into(),
+                guid: GUID {
+                    Data1: 0x1234_5678,
+                    Data2: 0x9abc,
+                    Data3: 0xdef0,
+                    Data4: [1, 2, 3, 4, 5, 6, 7, 8],
+                },
                 age: 3,
                 path: "ntkrnlmp.pdb".into(),
             }
