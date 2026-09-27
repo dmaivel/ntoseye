@@ -124,18 +124,8 @@ impl Target {
     /// running, or the loader entry's copy when the header page is not
     /// resident. Reads guest memory only.
     fn module_image_key(&self, name: &str) -> Result<(ModuleInfo, u32, u32)> {
-        let named = |module: &ModuleInfo| {
-            module.short_name.eq_ignore_ascii_case(name) || module.name.eq_ignore_ascii_case(name)
-        };
         let module = self
-            .modules()
-            .ok()
-            .and_then(|modules| modules.into_iter().find(named))
-            .or_else(|| {
-                self.kernel_modules()
-                    .ok()
-                    .and_then(|modules| modules.into_iter().find(named))
-            })
+            .module_named(name)
             .ok_or_else(|| Error::InvalidArgument(format!("no loaded module named '{name}'")))?;
         let (time_date_stamp, size_of_image) = SymbolStore::read_image_lookup_info(
             &self.process_memory(),

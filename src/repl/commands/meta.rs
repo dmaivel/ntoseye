@@ -471,6 +471,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("drivers", "processes and modules"),
     ("ld", "processes and modules"),
     ("lm", "processes and modules"),
+    ("!dh", "processes and modules"),
     ("lmv", "processes and modules"),
     ("ps", "processes and modules"),
     ("!for_each_process", "processes and modules"),

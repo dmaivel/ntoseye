@@ -16,6 +16,7 @@ mod exec;
 mod foreach;
 mod frames;
 mod heap;
+mod image;
 mod memory;
 mod meta;
 mod mm;

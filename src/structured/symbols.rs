@@ -26,6 +26,10 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 )),
             }
         }
+        "!dh" | "dh" => args
+            .target()
+            .inspect_image_headers(argv, |text| args.eval(text))
+            .map(|detail| view::module::image_headers(&detail)),
         "ln" => args.addr(0).map(|address| {
             view::symbols::nearest_symbol(
                 address,

@@ -19,6 +19,8 @@ use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
+pub mod headers;
+
 /// A module's header page. `PeView` rejects bytes that are not 4-byte
 /// aligned, and a bare byte array has no alignment of its own, so a header
 /// page returned by value parsed or failed depending on where the compiler

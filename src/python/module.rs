@@ -14,6 +14,7 @@ use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
 use crate::pe;
+use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::{self, View};
@@ -331,6 +332,32 @@ impl Module {
                 .map_err(err)
         })?;
         view_record(py, &view::module::module_symbol_report(&report))
+    }
+
+    /// The mapped image's PE headers (`!dh`): file and optional headers,
+    /// data directories, sections, and the debug directory with its PDB
+    /// identity; `exports` and `imports` add those directories.
+    #[pyo3(signature = (exports=false, imports=false))]
+    fn headers<'py>(
+        &self,
+        py: Python<'py>,
+        exports: bool,
+        imports: bool,
+    ) -> PyResult<Bound<'py, Record>> {
+        let info = self.info.clone();
+        let parts = DhParts {
+            exports,
+            imports,
+            ..DhParts::HEADERS
+        };
+        let view = self.owner.with_in(py, &self.context(), |session| {
+            session
+                .target
+                .image_headers(info.base_address, Some(&info), parts)
+                .map(|detail| view::module::image_headers(&detail))
+                .map_err(err)
+        })?;
+        view_record(py, &view)
     }
 
     /// Fetch the matching image from the symbol server cache (`.fetchimage`).

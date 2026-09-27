@@ -1255,6 +1255,12 @@ class Module:
         """
         File version from the image's version resource.
         """
+    def headers(self, /, exports: bool = False, imports: bool = False) -> Record:
+        """
+        The mapped image's PE headers (`!dh`): file and optional headers,
+        data directories, sections, and the debug directory with its PDB
+        identity; `exports` and `imports` add those directories.
+        """
     def image(self, /, zero_fill: bool = False) -> bytes:
         """
         The mapped image in memory layout, for pefile/LIEF. Raises
