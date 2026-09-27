@@ -351,10 +351,14 @@ fn print_event(event: &EtwEvent) {
         (Some(pid), Some(tid)) => format!("{pid:04x}.{tid:04x}"),
         _ => "----.----".to_string(),
     };
-    let time = event
-        .system_time
-        .and_then(format_filetime_precise)
-        .unwrap_or_else(|| format!("{:#x}", record.timestamp));
+    let time = match (
+        event.system_time.and_then(format_filetime_precise),
+        record.timestamp,
+    ) {
+        (Some(time), _) => time,
+        (None, Some(raw)) => format!("{raw:#x}"),
+        (None, None) => "(no timestamp)".to_string(),
+    };
     let guid = record.guid.as_ref().map(format_guid);
     let what = match record.kind {
         EtwHeaderKind::EventHeader => {

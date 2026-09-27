@@ -151,7 +151,7 @@ fn event(e: &EtwEvent) -> View {
         ("header", View::Str(r.kind.name().to_string())),
         ("header_type", View::Num(r.header_type.into())),
         ("size", View::Num(r.size.into())),
-        ("timestamp", View::Num(r.timestamp)),
+        ("timestamp", View::OptNum(r.timestamp)),
         ("system_time", View::OptNum(e.system_time)),
         ("system_time_utc", filetime(e.system_time)),
         ("process_id", View::OptNum(r.process_id.map(u64::from))),

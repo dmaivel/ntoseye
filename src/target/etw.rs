@@ -364,8 +364,9 @@ pub struct EtwRecord {
     pub header_type: u8,
     /// Record size, header included (unaligned).
     pub size: u16,
-    /// Raw timestamp in the logger's clock.
-    pub timestamp: u64,
+    /// Raw timestamp in the logger's clock; a WPP message without
+    /// `TRACE_MESSAGE_TIMESTAMP` has none.
+    pub timestamp: Option<u64>,
     pub thread_id: Option<u32>,
     pub process_id: Option<u32>,
     /// Provider (`EVENT_HEADER`), event class (`EVENT_TRACE_HEADER`) or
@@ -594,7 +595,7 @@ fn decode_record(
         kind,
         header_type,
         size,
-        timestamp: 0,
+        timestamp: None,
         thread_id: None,
         process_id: None,
         guid: None,
@@ -614,19 +615,19 @@ fn decode_record(
             record.hook_id = get_u16(bytes, 6);
             record.thread_id = get_u32(bytes, 8);
             record.process_id = get_u32(bytes, 12);
-            record.timestamp = get_u64(bytes, 16).ok_or_else(truncated)?;
+            record.timestamp = Some(get_u64(bytes, 16).ok_or_else(truncated)?);
             header_len
         }
         EtwHeaderKind::PerfInfo => {
             record.hook_id = get_u16(bytes, 6);
-            record.timestamp = get_u64(bytes, 8).ok_or_else(truncated)?;
+            record.timestamp = Some(get_u64(bytes, 8).ok_or_else(truncated)?);
             header_len
         }
         EtwHeaderKind::FullHeader | EtwHeaderKind::Instance => {
             record.class = Some((bytes[4], bytes[5], get_u16(bytes, 6).ok_or_else(truncated)?));
             record.thread_id = get_u32(bytes, 8);
             record.process_id = get_u32(bytes, 12);
-            record.timestamp = get_u64(bytes, 16).ok_or_else(truncated)?;
+            record.timestamp = Some(get_u64(bytes, 16).ok_or_else(truncated)?);
             record.guid = guid_at(bytes, 24);
             header_len
         }
@@ -635,7 +636,7 @@ fn decode_record(
             record.event_flags = Some(flags);
             record.thread_id = get_u32(bytes, layout.thread_id);
             record.process_id = get_u32(bytes, layout.process_id);
-            record.timestamp = get_u64(bytes, layout.time_stamp).ok_or_else(truncated)?;
+            record.timestamp = Some(get_u64(bytes, layout.time_stamp).ok_or_else(truncated)?);
             record.guid = guid_at(bytes, layout.provider_id);
             record.activity_id = guid_at(bytes, layout.activity_id);
             let d = layout.descriptor;
@@ -708,7 +709,7 @@ fn decode_record(
                 (None, None)
             };
             if option_flags & TRACE_MESSAGE_TIMESTAMP != 0 {
-                record.timestamp = get_u64(bytes, take(8)?).unwrap_or(0);
+                record.timestamp = Some(get_u64(bytes, take(8)?).ok_or_else(truncated)?);
             }
             if option_flags & TRACE_MESSAGE_SYSTEMINFO != 0 {
                 let info = take(8)?;
@@ -1180,6 +1181,7 @@ impl Target {
         let header_size = types.buffer.size;
         let compressed = types.buffer_state("EtwBufferStateCompressed");
         let memory = self.kernel_address_space();
+        // Each event with the time it sorts by.
         let mut events = Vec::new();
         let mut issues = Vec::new();
         let mut walked = 0;
@@ -1219,18 +1221,28 @@ impl Target {
                     reason: stop.reason,
                 });
             }
-            events.extend(records.into_iter().map(|record| EtwEvent {
-                buffer: buffer.address,
-                processor: buffer.processor,
-                system_time: time.system_time(record.timestamp),
-                record,
+            // A WPP message without a timestamp sorts after the record
+            // before it in its buffer.
+            let mut previous = 0;
+            events.extend(records.into_iter().map(|record| {
+                let order = record.timestamp.unwrap_or(previous);
+                previous = order;
+                let event = EtwEvent {
+                    buffer: buffer.address,
+                    processor: buffer.processor,
+                    system_time: record.timestamp.and_then(|t| time.system_time(t)),
+                    record,
+                };
+                (order, event)
             }));
         }
-        events.sort_by_key(|event| (event.record.timestamp, event.buffer.0, event.record.offset));
+        events.sort_by_key(|(order, event)| (*order, event.buffer.0, event.record.offset));
         let total_events = events.len();
-        if let Some(count) = most_recent {
-            events.drain(..total_events.saturating_sub(count));
-        }
+        let events: Vec<EtwEvent> = events
+            .into_iter()
+            .skip(most_recent.map_or(0, |count| total_events.saturating_sub(count)))
+            .map(|(_, event)| event)
+            .collect();
         let message_format_note = events
             .iter()
             .any(|event| event.record.kind == EtwHeaderKind::Message)
@@ -1598,7 +1610,7 @@ mod tests {
             format_guid(&message.guid.unwrap()),
             "{26465a38-b775-37bf-c9af-1810e91887cd}"
         );
-        assert_eq!(first.timestamp, 0x01dd_4e5b_2835_48f3);
+        assert_eq!(first.timestamp, Some(0x01dd_4e5b_2835_48f3));
         assert_eq!(
             (first.thread_id, first.process_id),
             (Some(0xc0), Some(0xb8c))
@@ -1636,7 +1648,7 @@ mod tests {
             (event.thread_id, event.process_id),
             (Some(0xac8), Some(0x138c))
         );
-        assert_eq!(event.timestamp, 0x1e_7906_a86c);
+        assert_eq!(event.timestamp, Some(0x1e_7906_a86c));
         let descriptor = event.descriptor.unwrap();
         assert_eq!(
             (
@@ -1652,7 +1664,7 @@ mod tests {
         assert_eq!(perfinfo.offset, 0xb0);
         assert_eq!(perfinfo.kind, EtwHeaderKind::PerfInfo);
         assert_eq!(perfinfo.hook_id, Some(0x0f45));
-        assert_eq!(perfinfo.timestamp, 0x17e6_2b41_d02e);
+        assert_eq!(perfinfo.timestamp, Some(0x17e6_2b41_d02e));
         assert_eq!(perfinfo.payload, (1..=8).collect::<Vec<u8>>());
     }
 
@@ -1702,6 +1714,79 @@ mod tests {
         let (records, stop) = decode_buffer_records(&oversized, 0, oversized.len(), &layout());
         assert!(records.is_empty());
         assert_eq!(stop.unwrap().offset, 0);
+    }
+
+    #[test]
+    fn decodes_classic_instance_and_compact_headers() {
+        let mut classic = hex("38 00 0a c0 02 04 01 00 11 00 00 00 22 00 00 00 \
+             08 07 06 05 04 03 02 01");
+        classic.extend(1..=16u8);
+        classic.extend([0; 8]);
+        classic.extend(hex("aa bb cc dd ee ff 00 11"));
+        let mut instance = classic[..0x30].to_vec();
+        instance[..4].copy_from_slice(&hex("48 00 0b c0"));
+        instance.resize(0x48, 0);
+        let compact = hex("02 00 03 c0 18 00 10 05 33 00 00 00 44 00 00 00 \
+             ff ee dd cc bb aa 99 88");
+        let data = [classic, instance, compact].concat();
+        let (records, stop) = decode_buffer_records(&data, 0, data.len(), &layout());
+        assert_eq!(stop, None);
+        let kinds: Vec<(EtwHeaderKind, u32)> = records.iter().map(|r| (r.kind, r.offset)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (EtwHeaderKind::FullHeader, 0),
+                (EtwHeaderKind::Instance, 0x38),
+                (EtwHeaderKind::Compact, 0x80)
+            ]
+        );
+        let classic = &records[0];
+        assert_eq!(classic.class, Some((2, 4, 1)));
+        assert_eq!(
+            (classic.thread_id, classic.process_id),
+            (Some(0x11), Some(0x22))
+        );
+        assert_eq!(classic.timestamp, Some(0x0102_0304_0506_0708));
+        assert_eq!(classic.guid, Some(std::array::from_fn(|i| i as u8 + 1)));
+        assert_eq!(classic.payload, hex("aa bb cc dd ee ff 00 11"));
+        assert!(records[1].payload.is_empty());
+        let compact = &records[2];
+        assert_eq!(compact.hook_id, Some(0x0510));
+        assert_eq!(
+            (compact.thread_id, compact.process_id),
+            (Some(0x33), Some(0x44))
+        );
+        assert_eq!(compact.timestamp, Some(0x8899_aabb_ccdd_eeff));
+    }
+
+    #[test]
+    fn a_wpp_message_without_timestamp_option_has_no_timestamp() {
+        // TRACE_MESSAGE_SEQUENCE | TRACE_MESSAGE_COMPONENTID.
+        let data = hex("14 00 00 90 07 00 05 00 01 00 00 00 33 00 00 00 de ad be ef");
+        let (records, stop) = decode_buffer_records(&data, 0, data.len(), &layout());
+        assert_eq!(stop, None);
+        let record = &records[0];
+        assert_eq!(record.timestamp, None);
+        assert_eq!(record.guid, None);
+        let message = record.message.unwrap();
+        assert_eq!(
+            (message.number, message.sequence, message.component_id),
+            (7, Some(1), Some(0x33))
+        );
+        assert_eq!(record.payload, hex("de ad be ef"));
+    }
+
+    #[test]
+    fn stops_at_an_extended_item_that_runs_past_its_event() {
+        let mut data = hex("58 00 13 c0 01 00");
+        data.resize(0x50, 0);
+        // A 0x10-byte item (8 data bytes) in an event with only 8 bytes left.
+        data.extend(hex("10 00 01 00 00 00 08 00"));
+        let (records, stop) = decode_buffer_records(&data, 0, data.len(), &layout());
+        assert!(records.is_empty());
+        let stop = stop.unwrap();
+        assert_eq!(stop.offset, 0);
+        assert!(stop.reason.contains("extended data item at +0x50"));
     }
 
     #[test]
