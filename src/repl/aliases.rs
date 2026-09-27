@@ -219,9 +219,14 @@ fn expand_alias_template(
                     .join(" "),
             );
         } else {
-            let index = key
-                .parse::<usize>()
-                .map_err(|_| format!("invalid alias parameter `${{{key}}}`"))?;
+            // Anything but a parameter number is someone else's name: loop
+            // variables and `!for_each_*` aliases (`${@#ModuleName}`) are
+            // replaced when the loop runs.
+            let Ok(index) = key.parse::<usize>() else {
+                out.push_str(&rest[start..start + 2 + end + 1]);
+                rest = &after_start[end + 1..];
+                continue;
+            };
             let Some(arg) = index.checked_sub(1).and_then(|idx| args.get(idx)) else {
                 return Err(format!("missing alias argument `${{{key}}}`"));
             };
@@ -389,6 +394,15 @@ mod tests {
     fn missing_positional_parameter_is_error() {
         let err = expand_alias_template("bp ${2}", &[]).unwrap_err();
         assert_eq!(err, "missing alias argument `${2}`");
+    }
+
+    #[test]
+    fn loop_names_pass_through_for_the_loop_to_replace() {
+        let args = [Cow::Borrowed("Sym")];
+        assert_eq!(
+            expand_alias_template("!for_each_module \"x ${@#ModuleName}!${1}\"", &args).unwrap(),
+            "!for_each_module \"x ${@#ModuleName}!Sym\""
+        );
     }
 
     #[test]

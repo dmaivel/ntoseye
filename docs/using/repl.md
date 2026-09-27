@@ -8,7 +8,7 @@ Every command is listed in the [command reference](../reference/commands/index.m
 
 ## Aliases
 
-Aliases use `alias <name> <expansion>`. `${1}` is the first argument passed to the alias, `${2}` is the second, and `${*}` expands to all alias arguments separated by spaces. Alias expansions can contain command lists separated by semicolons.
+Aliases use `alias <name> <expansion>`. `${1}` is the first argument passed to the alias, `${2}` is the second, and `${*}` expands to all alias arguments separated by spaces. Any other `${...}`, such as a `.foreach` variable or `${@#ModuleName}` in `!for_each_module`, is left in place for that command to replace. Alias expansions can contain command lists separated by semicolons.
 
 ```text
 alias ubp bp ${1}; g
