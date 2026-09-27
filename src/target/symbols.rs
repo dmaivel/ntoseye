@@ -11,7 +11,7 @@ use crate::{
     error::{Error, Result},
     guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, SessionSpace},
     memory::AddressSpace,
-    pe::{ModuleExportInfo, read_pe_exports, read_pe_image, read_pe_version_info},
+    pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
         LocalVariableLocation, ProcedureLocal, SourceLineExtent, SourceLocation, SymbolCandidate,
         SymbolIndex, SymbolStore, format_symbol_with_offset,
@@ -142,13 +142,19 @@ impl Target {
         Ok((module, time_date_stamp, size_of_image))
     }
 
+    /// The image mapped at `base` in `dtb`'s address space, its headers read
+    /// now and the rest on demand ([`read_pe_image`]).
+    pub fn mapped_pe_image(&self, dtb: Dtb, base: VirtAddr) -> Result<PeImage> {
+        let (phys, kernel_dtb, arch) = (Arc::clone(&self.phys), self.kernel_dtb(), self.arch());
+        read_pe_image(base, move |address, buf| {
+            AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
+        })
+    }
+
     /// The exports of the module mapped at `base` in `dtb`'s address space,
     /// read from its in-memory export directory ([`read_pe_exports`]).
     pub fn module_exports(&self, dtb: Dtb, base: VirtAddr) -> Result<Vec<ModuleExportInfo>> {
-        let (phys, kernel_dtb, arch) = (Arc::clone(&self.phys), self.kernel_dtb(), self.arch());
-        let image = read_pe_image(base, move |address, buf| {
-            AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
-        })?;
+        let image = self.mapped_pe_image(dtb, base)?;
         read_pe_exports(&image, base)
     }
 

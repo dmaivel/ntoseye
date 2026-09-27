@@ -2,19 +2,16 @@
 //! address inside a module (or an image base no loader list names), in the
 //! module-list scope (`.process`) and then the kernel's.
 
-use std::sync::Arc;
-
 use super::{DiagnosticValue, Target};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
-use crate::memory::AddressSpace;
 use crate::pe::headers::{
     DebugDirectoryEntry, ExportDirectory, ImageHeaders, ImportDescriptor, debug_directory,
     decode_headers, export_directory, imports,
 };
-use crate::pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image};
-use crate::types::VirtAddr;
+use crate::pe::{ModuleExportInfo, read_pe_exports};
+use crate::types::{Dtb, VirtAddr};
 
 /// Which parts of the image `!dh` shows (`-f`, `-s`, `-e`, `-i`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +130,7 @@ impl Target {
             }
         };
         let (base, module) = self.resolve_image(text, eval)?;
-        self.image_headers(base, module.as_ref(), parts)
+        self.image_headers(self.process_dtb(), base, module.as_ref(), parts)
     }
 
     /// The loaded module named `name` (its short name, `nt` for the kernel,
@@ -200,15 +197,18 @@ impl Target {
         }
     }
 
-    /// Decode the headers of the image mapped at `base` in the module-list
-    /// scope's address space, plus the directories `parts` asks for.
+    /// Decode the headers of the image mapped at `base` in `dtb`'s address
+    /// space, plus the directories `parts` asks for.
     pub fn image_headers(
         &self,
+        dtb: Dtb,
         base: VirtAddr,
         module: Option<&ModuleInfo>,
         parts: DhParts,
     ) -> Result<ImageHeadersDetail> {
-        let image = self.mapped_image(base)?;
+        let image = self.mapped_pe_image(dtb, base).map_err(|error| {
+            Error::DebugInfo(format!("cannot read PE headers at {:#x}: {error}", base.0))
+        })?;
         let headers = decode_headers(image.headers()).map_err(|error| {
             Error::DebugInfo(format!(
                 "{:#x} does not hold valid PE headers: {error}",
@@ -235,22 +235,6 @@ impl Target {
             debug,
             exports,
             imports,
-        })
-    }
-
-    /// The image at `base`, demand-read through the module-list scope.
-    fn mapped_image(&self, base: VirtAddr) -> Result<PeImage> {
-        let (phys, dtb, kernel_dtb, arch) = (
-            Arc::clone(&self.phys),
-            self.process_dtb(),
-            self.kernel_dtb(),
-            self.arch(),
-        );
-        read_pe_image(base, move |address, buf| {
-            AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
-        })
-        .map_err(|error| {
-            Error::DebugInfo(format!("cannot read PE headers at {:#x}: {error}", base.0))
         })
     }
 }

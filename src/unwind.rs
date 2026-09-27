@@ -261,7 +261,6 @@ struct OwnedModule {
 struct StackTracer<'a> {
     target: &'a Target,
     trace: &'a ThreadTraceContext,
-    phys: &'a Arc<PhysMem>,
     symbols: &'a SymbolStore,
     memory: AddressSpace<'a, PhysMem>,
     modules: HashMap<(Dtb, u64), CachedModule>,

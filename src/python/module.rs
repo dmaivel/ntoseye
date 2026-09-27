@@ -351,9 +351,10 @@ impl Module {
             ..DhParts::HEADERS
         };
         let view = self.owner.with_in(py, &self.context(), |session| {
+            let dtb = self.space.dtb(&session.target)?;
             session
                 .target
-                .image_headers(info.base_address, Some(&info), parts)
+                .image_headers(dtb, info.base_address, Some(&info), parts)
                 .map(|detail| view::module::image_headers(&detail))
                 .map_err(err)
         })?;

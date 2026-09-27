@@ -12,8 +12,8 @@ use crate::{
     backend::MemoryOps,
     error::{Error, Result},
     guest::{Image, ModuleInfo},
-    memory::{AddressSpace, PAGE_SIZE},
-    pe::{CodeLayout, PeImage, pe_headers_end, read_pe_image},
+    memory::PAGE_SIZE,
+    pe::{CodeLayout, PeImage, pe_headers_end},
     symbols::ImageFetch,
     target::Target,
     types::{Arch, CodeMachine, VirtAddr},
@@ -26,7 +26,6 @@ impl<'a> StackTracer<'a> {
         Self {
             target: debugger,
             trace,
-            phys: &debugger.phys,
             symbols: &debugger.symbols,
             memory: debugger.address_space(trace.active_dtb),
             modules: HashMap::new(),
@@ -204,11 +203,10 @@ impl<'a> StackTracer<'a> {
         let image = match kernel_image {
             Some(image) => image,
             None => {
-                let (phys, dtb) = (Arc::clone(self.phys), module.dtb);
-                let (kernel_dtb, arch) = (self.target.kernel_dtb(), self.target.arch());
-                match read_pe_image(module.info.base_address, move |address, buf| {
-                    AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch).read_bytes(address, buf)
-                }) {
+                match self
+                    .target
+                    .mapped_pe_image(module.dtb, module.info.base_address)
+                {
                     Ok(img) => Arc::new(img),
                     Err(_) => {
                         // Triage dumps don't contain PE headers; download the PE from
