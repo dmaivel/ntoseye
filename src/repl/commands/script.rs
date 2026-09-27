@@ -112,7 +112,7 @@ repl_command! {
     names: ["$<", "$><", "$$<", "$$><", "$$>a<"],
     usage: "$<Filename | $><Filename | $$<Filename | $$><Filename | $$>a<Filename [arg1 arg2 ...]",
     summary: "Run the commands in a script file on the machine ntoseye runs on.",
-    details: "`$<` and `$$<` run the file one line at a time. `$><`, `$$><`, and `$$>a<` join its lines with `;` into one command block, which a program whose .if or .while blocks span lines needs. `$<` and `$><` take the rest of the line as the file name, `;` included; the `$$` forms end at `;`, so other commands may follow. `$$>a<` takes a quoted file name when it has spaces, replaces `${$arg1}`...`${$argN}` in the file with its arguments (quoted when they hold spaces), leaves an argument not given as written, and replaces `${/d:$argN}` with 1 when argument N was given, else 0. `$$>a<` shows only the commands' output; the others echo each command first. Scripts may run scripts, 16 deep. Ctrl+C stops a script between commands.",
+    details: "`$<` and `$$<` run the file one line at a time. `$><`, `$$><`, and `$$>a<` join its lines with `;` into one command block, which a program whose .if or .while blocks span lines needs. `$<` and `$><` take the rest of the line as the file name, `;` included; the `$$` forms end at `;`, so other commands may follow. `$$>a<` takes a quoted file name when it has spaces, replaces `${$arg1}`...`${$argN}` in the file with its arguments as written, leaves an argument not given as written, and replaces `${/d:$argN}` with 1 when argument N was given, else 0. `$$>a<` shows only the commands' output; the others echo each command first. Scripts may run scripts, 16 deep. Ctrl+C stops a script between commands.",
     flow: Continue,
 }
 
