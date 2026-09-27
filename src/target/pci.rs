@@ -42,6 +42,9 @@ pub struct PciTree {
     pub segments: Vec<PciTreeSegment>,
     /// The walk stopped at [`MAX_TREE_NODES`] or a nesting/link limit.
     pub truncated: bool,
+    /// Each bus or function that could not be read, and why; the walk
+    /// skipped the rest of the list it was on.
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -911,6 +914,7 @@ impl Target {
             target: self,
             seen: HashSet::new(),
             truncated: false,
+            errors: Vec::new(),
         };
         let mut segments = Vec::new();
         let mut next: VirtAddr = self.kernel_address_space().read(list)?;
@@ -923,7 +927,7 @@ impl Target {
             let mut root_buses = Vec::new();
             let mut bus = segment.read_pointer("PciRootBusList")?;
             while !bus.is_zero() && !walk.exhausted() {
-                let (node, sibling) = walk.bus(bus, 0)?;
+                let (node, sibling) = walk.bus(bus, 0);
                 root_buses.extend(node);
                 bus = sibling;
             }
@@ -937,6 +941,7 @@ impl Target {
         Ok(PciTree {
             segments,
             truncated: walk.truncated,
+            errors: walk.errors,
         })
     }
 }
@@ -945,6 +950,7 @@ struct TreeWalk<'a> {
     target: &'a Target,
     seen: HashSet<u64>,
     truncated: bool,
+    errors: Vec<String>,
 }
 
 impl TreeWalk<'_> {
@@ -967,41 +973,57 @@ impl TreeWalk<'_> {
         true
     }
 
+    /// `result`'s value, or `None` after recording why the node at `address`
+    /// could not be read.
+    fn readable<T>(&mut self, address: VirtAddr, result: Result<T>) -> Option<T> {
+        result
+            .map_err(|error| self.errors.push(format!("{:#x}: {error}", address.0)))
+            .ok()
+    }
+
     /// The bus at `address` with its functions and child buses, and its
-    /// `SiblingBus` link.
-    fn bus(&mut self, address: VirtAddr, depth: usize) -> Result<(Option<PciTreeBus>, VirtAddr)> {
-        let types = self.target.types_in(self.target.kernel_dtb());
-        let bus = types.struct_at("pci!_PCI_BUS", address)?;
-        let sibling = bus.read_pointer("SiblingBus")?;
+    /// `SiblingBus` link. An unreadable bus ends its sibling list, an
+    /// unreadable function its bus's function list.
+    fn bus(&mut self, address: VirtAddr, depth: usize) -> (Option<PciTreeBus>, VirtAddr) {
         if depth >= MAX_BUS_DEPTH || !self.visit(address) {
             self.truncated = true;
-            return Ok((None, VirtAddr(0)));
+            return (None, VirtAddr(0));
         }
-        let mut devices = Vec::new();
-        let mut device = bus.read_pointer("ChildDevices")?;
-        while !device.is_zero() && self.visit(device) {
-            let (node, next) = self.device(device)?;
-            devices.push(node);
-            device = next;
-        }
-        let mut child_buses = Vec::new();
-        let mut child = bus.read_pointer("ChildBuses")?;
-        while !child.is_zero() && !self.exhausted() {
-            let (node, next) = self.bus(child, depth + 1)?;
-            child_buses.extend(node);
-            child = next;
-        }
-        Ok((
-            Some(PciTreeBus {
+        let types = self.target.types_in(self.target.kernel_dtb());
+        let header = types.struct_at("pci!_PCI_BUS", address).and_then(|bus| {
+            let node = PciTreeBus {
                 extension: address,
                 number: bus.read_field("SecondaryBusNumber")?,
                 subordinate: bus.read_field("SubordinateBusNumber")?,
                 bridge_pdo: bus.read_pointer("PhysicalDeviceObject")?,
-                devices,
-                child_buses,
-            }),
-            sibling,
-        ))
+                devices: Vec::new(),
+                child_buses: Vec::new(),
+            };
+            Ok((
+                node,
+                bus.read_pointer("SiblingBus")?,
+                bus.read_pointer("ChildDevices")?,
+                bus.read_pointer("ChildBuses")?,
+            ))
+        });
+        let Some((mut node, sibling, mut device, mut child)) = self.readable(address, header)
+        else {
+            return (None, VirtAddr(0));
+        };
+        while !device.is_zero() && self.visit(device) {
+            let result = self.device(device);
+            let Some((function, next)) = self.readable(device, result) else {
+                break;
+            };
+            node.devices.push(function);
+            device = next;
+        }
+        while !child.is_zero() && !self.exhausted() {
+            let (bus, next) = self.bus(child, depth + 1);
+            node.child_buses.extend(bus);
+            child = next;
+        }
+        (Some(node), sibling)
     }
 
     /// The function whose `_PCI_DEVICE` is at `address`, and its `Sibling`.

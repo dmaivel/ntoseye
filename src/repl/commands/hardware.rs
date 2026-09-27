@@ -428,6 +428,9 @@ fn print_pci_tree(tree: &PciTree) {
     if tree.truncated {
         outln!("(walk stopped at a repeated link or its size limit)");
     }
+    for error in &tree.errors {
+        outln!("(skipped the rest of a list at an unreadable node, {error})");
+    }
 }
 
 fn print_pci_tree_bus(bus: &PciTreeBus, depth: usize) {

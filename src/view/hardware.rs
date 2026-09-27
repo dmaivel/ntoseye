@@ -205,7 +205,8 @@ fn pci_tree_bus(bus: &PciTreeBus) -> View {
 }
 
 /// pci.sys's hierarchy; top-level keys: `segments` (each with `root_buses`,
-/// which nest `child_buses`), `truncated`.
+/// which nest `child_buses`), `truncated`, `errors` (each unreadable bus or
+/// function, whose list the walk left).
 pub fn pci_tree(tree: &PciTree) -> View {
     let segments = tree
         .segments
@@ -224,6 +225,10 @@ pub fn pci_tree(tree: &PciTree) -> View {
     View::Object(vec![
         ("segments", View::List(segments)),
         ("truncated", View::Bool(tree.truncated)),
+        (
+            "errors",
+            View::List(tree.errors.iter().map(|e| View::Str(e.clone())).collect()),
+        ),
     ])
 }
 
