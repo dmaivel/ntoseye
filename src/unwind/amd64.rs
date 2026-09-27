@@ -35,13 +35,16 @@ struct UnwindCodeSlot {
 
 #[derive(Debug, Clone)]
 struct ParsedUnwindInfo {
+    version_flags: u8,
     size_of_prolog: u8,
     frame_register: u8,
     frame_offset: u8,
     codes: Vec<UnwindCodeSlot>,
+    /// Image offset past the code array, where a handler or parent entry is
+    tail_offset: usize,
     /// Present when this is a chained entry (`UNW_FLAG_CHAININFO`): the parent
-    /// RUNTIME_FUNCTION's unwind-data RVA, so the walk can follow the chain
-    chained_unwind_data: Option<u32>,
+    /// RUNTIME_FUNCTION, whose unwind data the walk follows
+    parent: Option<RUNTIME_FUNCTION>,
 }
 
 /// Outcome of applying one frame's unwind codes
@@ -239,7 +242,7 @@ impl StackTracer<'_> {
                 begin,
                 unwind_info.size_of_prolog,
                 unwind_info.codes.len(),
-                unwind_info.chained_unwind_data.is_some(),
+                unwind_info.parent.is_some(),
                 primary && rip_offset < unwind_info.size_of_prolog as u32,
             );
 
@@ -269,7 +272,7 @@ impl StackTracer<'_> {
                 }
             }
 
-            match unwind_info.chained_unwind_data {
+            match unwind_info.parent.map(|parent| parent.UnwindData) {
                 Some(next) => {
                     unwind_data = next;
                     primary = false;
@@ -620,12 +623,9 @@ fn parse_unwind_info(image: &PeImage, unwind_rva: u32) -> Option<ParsedUnwindInf
 
     let aligned_code_count = (count_of_codes + 1) & !1;
     let tail_offset = offset + 4 + aligned_code_count * 2;
-    let chained_unwind_data = if (version_flags >> 3) & UNW_FLAG_CHAININFO != 0 {
+    let parent = if (version_flags >> 3) & UNW_FLAG_CHAININFO != 0 {
         // a chained entry is followed by the parent RUNTIME_FUNCTION
-        // (BeginAddress, EndAddress, UnwindInfoAddress); only the parent's
-        // unwind-data RVA is needed to keep walking the chain
-        let tail = image.read(tail_offset, 12)?;
-        Some(u32::from_le_bytes([tail[8], tail[9], tail[10], tail[11]]))
+        Some(runtime_function_at(image, tail_offset, 0)?)
     } else {
         None
     };
@@ -641,11 +641,13 @@ fn parse_unwind_info(image: &PeImage, unwind_rva: u32) -> Option<ParsedUnwindInf
     }
 
     Some(ParsedUnwindInfo {
+        version_flags,
         size_of_prolog: header[1],
         frame_register: frame_register_offset & 0x0f,
         frame_offset: frame_register_offset >> 4,
         codes,
-        chained_unwind_data,
+        tail_offset,
+        parent,
     })
 }
 
@@ -822,21 +824,11 @@ fn describe_unwind_info(
     symbol: impl Fn(u32) -> String,
 ) -> Option<(UnwindInfoDetail, Option<RUNTIME_FUNCTION>)> {
     let parsed = parse_unwind_info(image, rva)?;
-    let offset = rva as usize;
-    let header = image.read(offset, 1)?;
-    let version = header[0] & 0x7;
-    let flags = header[0] >> 3;
-    let tail_offset = offset + 4 + ((parsed.codes.len() + 1) & !1) * 2;
-    let mut size = tail_offset - offset;
-    let mut parent = None;
+    let flags = parsed.version_flags >> 3;
+    let tail_offset = parsed.tail_offset;
+    let mut size = tail_offset - rva as usize;
     let mut handler = None;
-    if flags & UNW_FLAG_CHAININFO != 0 {
-        let tail = image.read(tail_offset, RUNTIME_FUNCTION_SIZE)?;
-        parent = Some(RUNTIME_FUNCTION {
-            BeginAddress: image_u32(&tail, 0)?,
-            EndAddress: image_u32(&tail, 4)?,
-            UnwindData: image_u32(&tail, 8)?,
-        });
+    if parsed.parent.is_some() {
         size += RUNTIME_FUNCTION_SIZE;
     } else if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
         let handler_rva = image_u32(&image.read(tail_offset, 4)?, 0)?;
@@ -848,7 +840,7 @@ fn describe_unwind_info(
         size += 4;
     }
     let info = UnwindInfoDetail {
-        version,
+        version: parsed.version_flags & 0x7,
         flags,
         prolog_size: parsed.size_of_prolog,
         code_count: u8::try_from(parsed.codes.len()).ok()?,
@@ -859,7 +851,7 @@ fn describe_unwind_info(
         handler,
         size,
     };
-    Some((info, parent))
+    Some((info, parsed.parent))
 }
 
 /// Each unwind code with its operands, as the unwinder reads them. A code
@@ -1066,7 +1058,11 @@ mod tests {
         ];
         let info =
             parse_unwind_info(&PeImage::complete(blob.to_vec()), 0).expect("unwind info parses");
-        assert_eq!(info.chained_unwind_data, Some(0x2000));
+        let parent = info.parent.expect("chained parent");
+        assert_eq!(
+            (parent.BeginAddress, parent.EndAddress, parent.UnwindData),
+            (0x1000, 0x1100, 0x2000)
+        );
     }
 
     #[test]
@@ -1075,7 +1071,7 @@ mod tests {
         let blob = [0x01, 0x00, 0x00, 0x00];
         let info =
             parse_unwind_info(&PeImage::complete(blob.to_vec()), 0).expect("unwind info parses");
-        assert_eq!(info.chained_unwind_data, None);
+        assert!(info.parent.is_none());
     }
 
     #[test]
@@ -1094,11 +1090,13 @@ mod tests {
         let mut context = RegisterContext::new(0, 0x1800);
         context.regs[5] = Some(0x2000);
         let unwind = ParsedUnwindInfo {
+            version_flags: 1,
             size_of_prolog: 0,
             frame_register: 5,
             frame_offset: 2,
             codes: Vec::new(),
-            chained_unwind_data: None,
+            tail_offset: 4,
+            parent: None,
         };
 
         assert_eq!(frame_base(&context, &unwind), Some(0x1fe0));
