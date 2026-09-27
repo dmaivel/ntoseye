@@ -7,10 +7,11 @@ use super::context::Space;
 use super::handle::{Owner, require_halted};
 use super::record::{PlainDict, Record};
 use super::symbols::load_scope_symbols;
-use super::{MAX_READ_LEN, MAX_SEARCH_LEN, err, raise, view_dict, view_record, view_records};
+use super::{MAX_READ_LEN, err, raise, view_dict, view_record, view_records};
 use crate::backend::MemoryOps;
 use crate::layout::utf16le_lossy;
 use crate::memory::pattern_offsets;
+use crate::target::MAX_SEARCH_BYTES;
 use crate::target::MemorySearchMatch as CoreMemorySearchMatch;
 use crate::target::mm::{
     AddressModule as CoreAddressModule, MemoryRegionInfo, VadProtection, VadType,
@@ -111,9 +112,9 @@ fn check_read_len(n: usize) -> PyResult<()> {
 }
 
 fn check_search_len(length: usize) -> PyResult<()> {
-    if length > MAX_SEARCH_LEN {
+    if length > MAX_SEARCH_BYTES {
         return Err(raise(format!(
-            "search length {length} exceeds cap {MAX_SEARCH_LEN} (0x{MAX_SEARCH_LEN:x})"
+            "search length {length} exceeds cap {MAX_SEARCH_BYTES} (0x{MAX_SEARCH_BYTES:x})"
         )));
     }
     Ok(())

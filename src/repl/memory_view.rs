@@ -101,6 +101,80 @@ impl AddressRange {
     }
 }
 
+/// What `s` searches for, by its WinDbg flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchKind {
+    Bytes,
+    Words,
+    Dwords,
+    Qwords,
+    Ascii,
+    Unicode,
+}
+
+impl SearchKind {
+    pub fn from_flag(flag: &str) -> Option<Self> {
+        Some(match flag {
+            "-b" => Self::Bytes,
+            "-w" => Self::Words,
+            "-d" => Self::Dwords,
+            "-q" => Self::Qwords,
+            "-a" => Self::Ascii,
+            "-u" => Self::Unicode,
+            _ => return None,
+        })
+    }
+
+    /// Bytes per element, the unit of an `L<count>` range.
+    pub fn element_size(self) -> u64 {
+        match self {
+            Self::Bytes | Self::Ascii => 1,
+            Self::Words | Self::Unicode => 2,
+            Self::Dwords => 4,
+            Self::Qwords => 8,
+        }
+    }
+
+    /// The bytes to search for. Bytes are hex strings (`4d5a`, `\x4d\x5a`)
+    /// or values; values are evaluated with `eval` and stored little-endian
+    /// in the element's width; a string's arguments are one string joined
+    /// by spaces.
+    pub fn pattern(self, args: &[&str], eval: impl Fn(&str) -> Result<u64>) -> Result<Vec<u8>> {
+        let width = self.element_size() as usize;
+        let mut pattern = Vec::new();
+        match self {
+            Self::Ascii => pattern.extend(args.join(" ").bytes()),
+            Self::Unicode => {
+                for unit in args.join(" ").encode_utf16() {
+                    pattern.extend(unit.to_le_bytes());
+                }
+            }
+            Self::Bytes | Self::Words | Self::Dwords | Self::Qwords => {
+                for arg in args {
+                    if self == Self::Bytes
+                        && let Some(bytes) = parse_byte_pattern(arg)
+                    {
+                        pattern.extend(bytes);
+                        continue;
+                    }
+                    let value = eval(arg)?;
+                    if width < 8 && value >> (width * 8) != 0 {
+                        return Err(Error::InvalidArgument(format!(
+                            "{arg} ({value:#x}) does not fit in {width} byte{}",
+                            if width == 1 { "" } else { "s" }
+                        )));
+                    }
+                    pattern.extend(&value.to_le_bytes()[..width]);
+                }
+            }
+        }
+        if pattern.is_empty() {
+            return Err(Error::InvalidArgument("empty search pattern".into()));
+        }
+        Ok(pattern)
+    }
+}
+
 pub fn parse_byte_pattern(pattern: &str) -> Option<Vec<u8>> {
     if pattern.is_empty() {
         return None;
@@ -354,7 +428,39 @@ pub fn display_memory_with_validity(
 mod tests {
     use crate::types::VirtAddr;
 
-    use super::{range_length_from_value, windbg_count_expression};
+    use super::{SearchKind, range_length_from_value, windbg_count_expression};
+
+    /// A value searched as a word or dword is stored little-endian in that
+    /// width, and one that does not fit is refused rather than truncated;
+    /// bytes take hex strings and values alike, and a string's words are
+    /// one string.
+    #[test]
+    fn search_patterns_encode_each_kind_in_its_width() {
+        let eval = |text: &str| {
+            u64::from_str_radix(text.trim_start_matches("0x"), 16)
+                .map_err(|_| crate::error::Error::InvalidArgument(text.into()))
+        };
+        let pattern = |kind: SearchKind, args: &[&str]| kind.pattern(args, eval);
+
+        assert_eq!(
+            pattern(SearchKind::Bytes, &["4d", "5a90", "\\x00"]).unwrap(),
+            [0x4d, 0x5a, 0x90, 0]
+        );
+        assert_eq!(
+            pattern(SearchKind::Words, &["5a4d", "1"]).unwrap(),
+            [0x4d, 0x5a, 1, 0]
+        );
+        assert_eq!(
+            pattern(SearchKind::Dwords, &["c0000005"]).unwrap(),
+            [5, 0, 0, 0xc0]
+        );
+        assert!(pattern(SearchKind::Words, &["10000"]).is_err());
+        assert!(pattern(SearchKind::Bytes, &["100"]).is_err());
+        assert_eq!(
+            pattern(SearchKind::Unicode, &["a", "b"]).unwrap(),
+            [b'a', 0, b' ', 0, b'b', 0]
+        );
+    }
 
     #[test]
     fn windbg_count_prefix_accepts_numeric_counts_case_insensitively() {

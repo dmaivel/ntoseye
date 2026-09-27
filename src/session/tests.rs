@@ -525,7 +525,7 @@ fn memory_reads_follow_the_halted_context_root() {
 
     let mut bytes = [0u8; 4];
     session.read_masked(va, &mut bytes).unwrap();
-    let hits = session.target.search(va, b"SE", 4).unwrap();
+    let hits = session.target.search(va, b"SE", 4).unwrap().matches;
 
     assert_eq!(&bytes, b"USER");
     assert_eq!(hits, [USER_VA + 1]);

@@ -21,6 +21,7 @@ mod variables;
 mod vtl;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
+pub use memory::{MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, SearchResult, SearchStop};
 pub use vtl::{ForeignCode, ForeignModules, HYPERVISOR_CONTEXT, SavedVtlContext};
 
 use self::mm::AddressDescription;

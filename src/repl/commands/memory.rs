@@ -9,7 +9,7 @@ use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
 use crate::layout::utf16le_lossy;
 use crate::memory::{PAGE_SIZE, for_each_page_chunk, read_page_chunks};
-use crate::target::{CODE_BITNESS_X86, StringDescriptor};
+use crate::target::{CODE_BITNESS_X86, MAX_SEARCH_MATCHES, SearchStop, StringDescriptor};
 use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
 use crate::unwind::{
@@ -280,10 +280,10 @@ repl_command! {
 repl_command! {
     cmd_s;
     names: ["s"],
-    usage: "s <address> <hex bytes> [length]",
-    summary: "Search memory for a byte pattern.",
-    details: "hex bytes: 4883792000740a or \\x48\\x83\\x79\\x20\\x00\\x74\\x0a",
-    completion: [Expression, None, Expression],
+    usage: "s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>",
+    summary: "Search memory for bytes, values, or a string.",
+    details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` counts elements of the searched type; `L?` is accepted for WinDbg's large-range form. Unreadable pages are skipped, at most 1 GiB is scanned, and the search stops after 4096 matches or at Ctrl+C.",
+    completion: [None, Expression, Expression],
 }
 
 pub fn parse_write_values(
@@ -1356,46 +1356,64 @@ impl ReplState<'_> {
     }
 
     fn cmd_s(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() < 2 {
+        let mut args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
+        let kind = match args.first().and_then(|flag| SearchKind::from_flag(flag)) {
+            Some(kind) => {
+                args.remove(0);
+                kind
+            }
+            None => SearchKind::Bytes,
+        };
+        let [start_arg, range_arg, pattern_args @ ..] = args.as_slice() else {
+            outln!("{}\n", command_help("s"));
+            return Ok(());
+        };
+        if pattern_args.is_empty() {
             outln!("{}\n", command_help("s"));
             return Ok(());
         }
-
-        let pattern_str = invocation.arg(1).unwrap();
-
-        let Some(start_addr) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+        let Some(start_addr) = self.eval_or_report(start_arg) else {
             return Ok(());
         };
-
-        let pattern = match parse_byte_pattern(pattern_str) {
-            Some(pattern) => pattern,
-            None => {
-                error!("invalid pattern: {}", pattern_str);
+        // WinDbg's `L?` lifts its own range limit; the one here is fixed.
+        let range_arg = match range_arg
+            .strip_prefix("L?")
+            .or(range_arg.strip_prefix("l?"))
+        {
+            Some(count) => format!("L{count}"),
+            None => range_arg.to_string(),
+        };
+        let length = match eval_range_length(
+            &range_arg,
+            &self.ctx.target,
+            self.radix,
+            start_addr,
+            kind.element_size(),
+        ) {
+            Ok(length) => length,
+            Err(error) => {
+                error!("invalid range '{range_arg}': {error}");
+                return Ok(());
+            }
+        };
+        let pattern = match kind.pattern(pattern_args, |value| {
+            Expr::eval_with_radix(value, &self.ctx.target, self.radix).map(|value| value.0)
+        }) {
+            Ok(pattern) => pattern,
+            Err(error) => {
+                error!("{error}");
                 return Ok(());
             }
         };
 
-        let length = match invocation.arg(2) {
-            Some(length_arg) => match self.eval_or_report(length_arg) {
-                Some(value) => match usize::try_from(value.0) {
-                    Ok(length) => length,
-                    Err(_) => {
-                        error!("invalid length: {}", length_arg);
-                        return Ok(());
-                    }
-                },
-                None => return Ok(()),
-            },
-            None => 0x100,
-        };
-
-        let hits = match self.ctx.target.search(start_addr, &pattern, length) {
-            Ok(hits) => hits,
+        let result = match self.ctx.target.search(start_addr, &pattern, length) {
+            Ok(result) => result,
             Err(e) => {
-                error!("failed to read memory: {}", e);
+                error!("failed to search memory: {}", e);
                 return Ok(());
             }
         };
+        let hits = result.matches;
         for &addr in &hits {
             let sym = self
                 .ctx
@@ -1420,6 +1438,20 @@ impl ReplState<'_> {
                 if hits.len() == 1 { "match" } else { "matches" },
                 hits.len() - 1
             );
+        }
+        if result.unreadable > 0 {
+            outln!(
+                "{}",
+                format!("{:#x} unreadable bytes skipped", result.unreadable).bright_black()
+            );
+        }
+        match result.stopped {
+            Some(SearchStop::MatchLimit) => outln!(
+                "{}",
+                format!("stopped after {MAX_SEARCH_MATCHES} matches").bright_black()
+            ),
+            Some(SearchStop::Interrupted) => outln!("{}", "interrupted".bright_black()),
+            None => {}
         }
         self.ctx.target.set_results(hits, self.line.clone());
         outln!();

@@ -55,7 +55,6 @@ use record::{PlainDict, Record};
 /// accidental huge length (`read(addr, 10**12)`) would allocate before the
 /// read and OOM the interpreter; reject it as a clean error instead.
 pub const MAX_READ_LEN: usize = 1 << 28; // 256 MiB
-pub const MAX_SEARCH_LEN: usize = 1 << 30; // 1 GiB scanned per call
 
 /// The SDK's exception classes. They are declared in the package's own
 /// Python (`ntoseye/__init__.py`), which is their one definition for both the

@@ -2,14 +2,42 @@
 //! views over them, byte-pattern search, fields, and counted and C strings.
 
 use super::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, MemorySearchMatch, StringDescriptor, Target};
+use std::sync::atomic::Ordering;
+
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
     layout::{StructRef, TypeInfo, Types},
-    memory::{AddressSpace, PAGE_SIZE, pattern_offsets},
+    memory::{AddressSpace, PAGE_SIZE, pattern_offsets, read_page_chunks},
     phys::PhysMem,
     types::{Dtb, VirtAddr},
 };
+
+/// The most bytes one search scans.
+pub const MAX_SEARCH_BYTES: usize = 1 << 30;
+/// The most matches one search records. A pattern common in the range (a
+/// zero byte) would otherwise fill memory with them.
+pub const MAX_SEARCH_MATCHES: usize = 4096;
+/// Bytes read per step of a search.
+const SEARCH_CHUNK: usize = 1 << 20;
+
+/// What [`Target::search`] found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SearchResult {
+    /// Where the pattern matched, overlapping matches included, in order.
+    pub matches: Vec<u64>,
+    /// Bytes of the range that could not be read and were skipped.
+    pub unreadable: usize,
+    /// The search stopped early: [`MAX_SEARCH_MATCHES`] was reached, or the
+    /// host interrupted it.
+    pub stopped: Option<SearchStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchStop {
+    MatchLimit,
+    Interrupted,
+}
 
 impl Target {
     /// An address space rooted at `dtb` in the resolved guest architecture. On
@@ -58,16 +86,48 @@ impl Target {
     }
 
     /// Search `length` bytes from `start` in the current address space for the
-    /// byte `pattern`, returning the addresses of all (overlapping) matches.
-    pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<Vec<u64>> {
-        if pattern.is_empty() || pattern.len() > length {
-            return Ok(Vec::new());
+    /// byte `pattern`. Unreadable pages are skipped, and a match must lie in
+    /// readable bytes. The range is read a chunk at a time, so it may be
+    /// large; see [`SearchResult`] for where it stops.
+    pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<SearchResult> {
+        if length > MAX_SEARCH_BYTES {
+            return Err(Error::InvalidArgument(format!(
+                "search length {length:#x} exceeds the maximum of {MAX_SEARCH_BYTES:#x} bytes"
+            )));
         }
-        let mut buf = vec![0u8; length];
-        self.context_memory().read_bytes(start, &mut buf)?;
-        Ok(pattern_offsets(&buf, pattern)
-            .map(|offset| start.0.wrapping_add(offset as u64))
-            .collect())
+        let mut result = SearchResult::default();
+        if pattern.is_empty() || pattern.len() > length {
+            return Ok(result);
+        }
+        let memory = self.context_memory();
+        let mut offset = 0usize;
+        while offset + pattern.len() <= length {
+            if self.interrupt.load(Ordering::Relaxed) {
+                result.stopped = Some(SearchStop::Interrupted);
+                break;
+            }
+            // Each chunk reads on past its end by a pattern less one byte,
+            // so a match straddling two chunks is found in the first.
+            let starts = SEARCH_CHUNK.min(length - offset - pattern.len() + 1);
+            let read = starts + pattern.len() - 1;
+            let chunk_start = VirtAddr(start.0.wrapping_add(offset as u64));
+            let (data, valid) = read_page_chunks(chunk_start, read, |address, buf| {
+                memory.read_bytes(address, buf)
+            })?;
+            result.unreadable += valid[..starts].iter().filter(|valid| !**valid).count();
+            for at in pattern_offsets(&data, pattern).filter(|&at| at < starts) {
+                if !valid[at..at + pattern.len()].iter().all(|valid| *valid) {
+                    continue;
+                }
+                if result.matches.len() == MAX_SEARCH_MATCHES {
+                    result.stopped = Some(SearchStop::MatchLimit);
+                    return Ok(result);
+                }
+                result.matches.push(chunk_start.0.wrapping_add(at as u64));
+            }
+            offset += starts;
+        }
+        Ok(result)
     }
 
     /// Add symbol/module/region context to already-computed search hits. Keeping
