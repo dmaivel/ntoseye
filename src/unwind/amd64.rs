@@ -4,12 +4,14 @@
 use std::ops::Range;
 
 use pelite::pe64::image::{
-    RUNTIME_FUNCTION, UNW_FLAG_CHAININFO, UWOP_ALLOC_LARGE, UWOP_ALLOC_SMALL, UWOP_PUSH_MACHFRAME,
-    UWOP_PUSH_NONVOL, UWOP_SAVE_NONVOL, UWOP_SAVE_NONVOL_FAR, UWOP_SAVE_XMM128,
-    UWOP_SAVE_XMM128_FAR, UWOP_SET_FPREG,
+    RUNTIME_FUNCTION, UNW_FLAG_CHAININFO, UNW_FLAG_EHANDLER, UNW_FLAG_UHANDLER, UWOP_ALLOC_LARGE,
+    UWOP_ALLOC_SMALL, UWOP_PUSH_MACHFRAME, UWOP_PUSH_NONVOL, UWOP_SAVE_NONVOL,
+    UWOP_SAVE_NONVOL_FAR, UWOP_SAVE_XMM128, UWOP_SAVE_XMM128_FAR, UWOP_SET_FPREG,
 };
 
-use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
+use super::{
+    AMD64_REGISTER_NAMES, RegisterContext, StackTracer, Unwound, image_u32, runtime_functions,
+};
 use crate::pe::{CodeLayout, PeImage};
 use crate::types::CodeMachine;
 
@@ -678,10 +680,276 @@ fn slot_u16(codes: &[UnwindCodeSlot], index: usize) -> Option<u16> {
     Some(u16::from_le_bytes([slot.code_offset, slot.raw_op_info]))
 }
 
+/// A runtime function and its unwind data, as `.fnent` shows them.
+#[derive(Debug, Clone)]
+pub struct FunctionEntryDetail {
+    pub module: String,
+    pub image_base: u64,
+    /// The entry covering the address, then each parent its chained unwind
+    /// info names, in order.
+    pub entries: Vec<RuntimeFunctionDetail>,
+    /// Why the chain ends before its last parent, when it does.
+    pub incomplete: Option<String>,
+}
+
+/// One `RUNTIME_FUNCTION` (RVAs) and the `UNWIND_INFO` it points at.
+#[derive(Debug, Clone)]
+pub struct RuntimeFunctionDetail {
+    pub begin: u32,
+    pub end: u32,
+    pub unwind_rva: u32,
+    /// The symbol at `begin`.
+    pub symbol: String,
+    /// `None` when the unwind info is unreadable.
+    pub unwind: Option<UnwindInfoDetail>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnwindInfoDetail {
+    pub version: u8,
+    pub flags: u8,
+    pub prolog_size: u8,
+    pub code_count: u8,
+    /// The frame pointer register, when the function establishes one.
+    pub frame_register: Option<&'static str>,
+    /// The frame pointer's offset from the stack pointer, in bytes.
+    pub frame_offset: u32,
+    pub codes: Vec<UnwindCodeDetail>,
+    /// The exception or termination handler, for `UNW_FLAG_EHANDLER` or
+    /// `UNW_FLAG_UHANDLER`.
+    pub handler: Option<HandlerDetail>,
+    /// Bytes of the structure: header, codes, and the handler RVA or the
+    /// chained entry, without the handler's own data.
+    pub size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct HandlerDetail {
+    pub rva: u32,
+    pub symbol: String,
+    /// Where the handler's language-specific data starts.
+    pub data_rva: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnwindCodeDetail {
+    /// Index of the code's first slot.
+    pub slot: usize,
+    /// Offset in the prolog of the end of the instruction it undoes.
+    pub code_offset: u8,
+    pub op: u8,
+    pub op_info: u8,
+    /// The operation and its operands, e.g. `UWOP_SAVE_NONVOL rbx at +0x30`.
+    pub description: String,
+}
+
+/// What [`describe_function_entry`] found.
+pub enum EntryLookup {
+    /// The entry and its chained parents, and why the chain ends early when
+    /// it does.
+    Found {
+        entries: Vec<RuntimeFunctionDetail>,
+        incomplete: Option<String>,
+    },
+    /// No entry covers the address: a leaf function, or not code.
+    Leaf,
+    /// The lookup hit a paged-out hole an on-disk image could fill.
+    Holed,
+}
+
+/// The function-table entry covering `address` and its unwind data, chained
+/// parents included. `symbol` names an image address.
+pub fn describe_function_entry(
+    image: &PeImage,
+    layout: Option<&CodeLayout>,
+    base_address: u64,
+    address: u64,
+    symbol: impl Fn(u64) -> String,
+) -> EntryLookup {
+    let (unwind_data, begin, end) = match resolve_function(image, layout, base_address, address) {
+        Resolve::Function {
+            unwind_data,
+            begin,
+            end,
+        } => (unwind_data, begin, end),
+        Resolve::Leaf => return EntryLookup::Leaf,
+        Resolve::Holed => return EntryLookup::Holed,
+    };
+    let mut entries = Vec::new();
+    let mut incomplete = None;
+    let mut next = Some(RUNTIME_FUNCTION {
+        BeginAddress: begin,
+        EndAddress: end,
+        UnwindData: unwind_data,
+    });
+    while let Some(function) = next.take() {
+        if entries.len() > MAX_CHAIN_DEPTH {
+            incomplete = Some(format!("chain not followed past {MAX_CHAIN_DEPTH} parents"));
+            break;
+        }
+        let described = describe_unwind_info(image, function.UnwindData, |rva| {
+            symbol(base_address + u64::from(rva))
+        });
+        if described.is_none() {
+            incomplete = Some(format!(
+                "unwind info at RVA {:#x} is unreadable",
+                function.UnwindData
+            ));
+        }
+        let unwind = described.map(|(info, parent)| {
+            next = parent;
+            info
+        });
+        entries.push(RuntimeFunctionDetail {
+            begin: function.BeginAddress,
+            end: function.EndAddress,
+            unwind_rva: function.UnwindData,
+            symbol: symbol(base_address + u64::from(function.BeginAddress)),
+            unwind,
+        });
+    }
+    EntryLookup::Found {
+        entries,
+        incomplete,
+    }
+}
+
+/// The `UNWIND_INFO` at `rva`, and the parent entry it chains to; `None`
+/// when any of it is unreadable.
+fn describe_unwind_info(
+    image: &PeImage,
+    rva: u32,
+    symbol: impl Fn(u32) -> String,
+) -> Option<(UnwindInfoDetail, Option<RUNTIME_FUNCTION>)> {
+    let parsed = parse_unwind_info(image, rva)?;
+    let offset = rva as usize;
+    let header = image.read(offset, 1)?;
+    let version = header[0] & 0x7;
+    let flags = header[0] >> 3;
+    let tail_offset = offset + 4 + ((parsed.codes.len() + 1) & !1) * 2;
+    let mut size = tail_offset - offset;
+    let mut parent = None;
+    let mut handler = None;
+    if flags & UNW_FLAG_CHAININFO != 0 {
+        let tail = image.read(tail_offset, RUNTIME_FUNCTION_SIZE)?;
+        parent = Some(RUNTIME_FUNCTION {
+            BeginAddress: image_u32(&tail, 0)?,
+            EndAddress: image_u32(&tail, 4)?,
+            UnwindData: image_u32(&tail, 8)?,
+        });
+        size += RUNTIME_FUNCTION_SIZE;
+    } else if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+        let handler_rva = image_u32(&image.read(tail_offset, 4)?, 0)?;
+        handler = Some(HandlerDetail {
+            rva: handler_rva,
+            symbol: symbol(handler_rva),
+            data_rva: u32::try_from(tail_offset + 4).ok()?,
+        });
+        size += 4;
+    }
+    let info = UnwindInfoDetail {
+        version,
+        flags,
+        prolog_size: parsed.size_of_prolog,
+        code_count: u8::try_from(parsed.codes.len()).ok()?,
+        frame_register: (parsed.frame_register != 0)
+            .then(|| AMD64_REGISTER_NAMES[usize::from(parsed.frame_register)]),
+        frame_offset: u32::from(parsed.frame_offset) * 16,
+        codes: describe_unwind_codes(&parsed.codes),
+        handler,
+        size,
+    };
+    Some((info, parent))
+}
+
+/// Each unwind code with its operands, as the unwinder reads them. A code
+/// whose operation is unknown or whose operand slots run past the array
+/// ends the list with a note, since the slots after it cannot be framed.
+fn describe_unwind_codes(codes: &[UnwindCodeSlot]) -> Vec<UnwindCodeDetail> {
+    let register = |number: u8| AMD64_REGISTER_NAMES[usize::from(number & 0xf)];
+    let u32_at = |index: usize| {
+        Some(u32::from(slot_u16(codes, index)?) | u32::from(slot_u16(codes, index + 1)?) << 16)
+    };
+    let mut described = Vec::new();
+    let mut first_epilog = true;
+    let mut index = 0;
+    while let Some(code) = codes.get(index) {
+        let slots = unwind_slot_count(code.unwind_op, code.op_info);
+        let info = code.op_info;
+        let description = match code.unwind_op {
+            _ if slots == 0 => None,
+            UWOP_PUSH_NONVOL => Some(format!("UWOP_PUSH_NONVOL {}", register(info))),
+            UWOP_ALLOC_LARGE if info == 0 => slot_u16(codes, index + 1)
+                .map(|size| format!("UWOP_ALLOC_LARGE {:#x}", u32::from(size) * 8)),
+            UWOP_ALLOC_LARGE => u32_at(index + 1).map(|size| format!("UWOP_ALLOC_LARGE {size:#x}")),
+            UWOP_ALLOC_SMALL => Some(format!("UWOP_ALLOC_SMALL {:#x}", u32::from(info) * 8 + 8)),
+            UWOP_SET_FPREG => Some("UWOP_SET_FPREG".to_string()),
+            UWOP_SAVE_NONVOL => slot_u16(codes, index + 1).map(|offset| {
+                format!(
+                    "UWOP_SAVE_NONVOL {} at +{:#x}",
+                    register(info),
+                    u32::from(offset) * 8
+                )
+            }),
+            UWOP_SAVE_NONVOL_FAR => u32_at(index + 1)
+                .map(|offset| format!("UWOP_SAVE_NONVOL_FAR {} at +{offset:#x}", register(info))),
+            // The first epilog code gives the epilog size, and whether one
+            // ends the function; each later one an epilog's distance from the
+            // function's end (zero is padding).
+            UWOP_EPILOG if std::mem::take(&mut first_epilog) => Some(format!(
+                "UWOP_EPILOG size {:#x}{}",
+                code.code_offset,
+                if info & 1 != 0 {
+                    ", one at the end"
+                } else {
+                    ""
+                }
+            )),
+            UWOP_EPILOG => Some(format!(
+                "UWOP_EPILOG at end-{:#x}",
+                u16::from(code.code_offset) | u16::from(info) << 8
+            )),
+            UWOP_SPARE_CODE => Some("UWOP_SPARE_CODE".to_string()),
+            UWOP_SAVE_XMM128 => slot_u16(codes, index + 1).map(|offset| {
+                format!(
+                    "UWOP_SAVE_XMM128 xmm{info} at +{:#x}",
+                    u32::from(offset) * 16
+                )
+            }),
+            UWOP_SAVE_XMM128_FAR => u32_at(index + 1)
+                .map(|offset| format!("UWOP_SAVE_XMM128_FAR xmm{info} at +{offset:#x}")),
+            UWOP_PUSH_MACHFRAME if info == 1 => {
+                Some("UWOP_PUSH_MACHFRAME with error code".to_string())
+            }
+            UWOP_PUSH_MACHFRAME => Some("UWOP_PUSH_MACHFRAME".to_string()),
+            _ => None,
+        };
+        let complete = description.is_some();
+        described.push(UnwindCodeDetail {
+            slot: index,
+            code_offset: code.code_offset,
+            op: code.unwind_op,
+            op_info: info,
+            description: description.unwrap_or_else(|| {
+                format!(
+                    "unknown or truncated code (op {}); later codes not decoded",
+                    code.unwind_op
+                )
+            }),
+        });
+        if !complete {
+            break;
+        }
+        index += slots;
+    }
+    described
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Epilog, EpilogRelease, Lookup, ParsedUnwindInfo, RUNTIME_FUNCTION, decode_epilog,
+        Epilog, EpilogRelease, Lookup, ParsedUnwindInfo, RUNTIME_FUNCTION, UWOP_ALLOC_LARGE,
+        UWOP_EPILOG, UWOP_SAVE_NONVOL, UnwindCodeSlot, decode_epilog, describe_unwind_codes,
         frame_base, lookup_runtime_function, parse_unwind_info, unwind_slot_count,
     };
     use crate::pe::PeImage;
@@ -834,5 +1102,38 @@ mod tests {
         };
 
         assert_eq!(frame_base(&context, &unwind), Some(0x1fe0));
+    }
+
+    #[test]
+    fn unwind_codes_frame_multi_slot_operands_and_stop_at_a_truncated_one() {
+        let slot = |code_offset: u8, unwind_op: u8, op_info: u8| UnwindCodeSlot {
+            code_offset,
+            unwind_op,
+            op_info,
+            raw_op_info: op_info << 4 | unwind_op,
+        };
+        let operand = |value: u16| {
+            let [low, high] = value.to_le_bytes();
+            slot(low, high & 0xf, high >> 4)
+        };
+        let codes = [
+            // The first epilog code is a size; later ones count back from the
+            // function's end, with op_info as the high byte.
+            slot(0x02, UWOP_EPILOG, 1),
+            slot(0x10, UWOP_EPILOG, 1),
+            // A 32-bit allocation in the next two slots, low half first.
+            slot(0x08, UWOP_ALLOC_LARGE, 1),
+            operand(0x0000),
+            operand(0x0002),
+            // Its operand slot is missing.
+            slot(0x04, UWOP_SAVE_NONVOL, 3),
+        ];
+        let described = describe_unwind_codes(&codes);
+        let slots: Vec<usize> = described.iter().map(|code| code.slot).collect();
+        assert_eq!(slots, [0, 1, 2, 5]);
+        assert!(described[0].description.contains("size 0x2"));
+        assert!(described[1].description.contains("end-0x110"));
+        assert!(described[2].description.contains("0x20000"));
+        assert!(described[3].description.contains("truncated"));
     }
 }

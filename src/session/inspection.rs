@@ -17,10 +17,10 @@ use crate::target::usermode::ImageCheckDetail;
 use crate::target::{CompareResult, SearchResult, ThreadInfo};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
-    RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
+    FunctionEntryDetail, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
     build_parked_thread_recovered_stack, build_parked_thread_stack,
-    build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_range,
-    resolve_thread_trace_context,
+    build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
+    function_range, resolve_thread_trace_context,
 };
 
 /// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
@@ -298,6 +298,13 @@ impl Session {
         let machine = self.target.code_machine(VirtAddr(start));
         let rows = decode_code(&bytes, start, None, machine, resolve);
         Ok((format_symbol(&self.target, &trace, start), len, rows))
+    }
+
+    /// The function-table entry and unwind data for the function containing
+    /// `addr` in the current address space (`.fnent`).
+    pub fn function_entry(&self, addr: VirtAddr) -> Result<FunctionEntryDetail> {
+        let trace = resolve_thread_trace_context(&self.target, self.target.current_dtb());
+        function_entry(&self.target, &trace, addr.0)
     }
 
     /// Disassemble the instructions ending at `addr`. Missing pages before

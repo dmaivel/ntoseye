@@ -9,7 +9,7 @@ use crate::breakpoints::Breakpoint;
 use crate::disasm::DisasmRow;
 use crate::exception_policy::{ExceptionPolicy, ExceptionPolicyFinalAction, exception_alias};
 use crate::session::{CallTrace, CallTraceEnd, CallTraceFrame, RunStatus, VcpuInfo};
-use crate::unwind::StackFrame;
+use crate::unwind::{FunctionEntryDetail, StackFrame};
 
 pub fn vcpu(v: &VcpuInfo) -> View {
     View::Object(vec![
@@ -133,6 +133,77 @@ pub fn disasm_row(row: &DisasmRow) -> View {
         ("hex", View::Str(row.hex.clone())),
         ("asm", View::Str(row.asm())),
         ("comment", View::OptStr(row.comment.clone())),
+    ])
+}
+
+/// `.fnent`: the function-table entry covering an address and its unwind
+/// info, then each chained parent's. Addresses are absolute; `*_rva` fields
+/// are the raw image-relative values.
+pub fn function_entry(detail: &FunctionEntryDetail) -> View {
+    let base = detail.image_base;
+    let va = |rva: u32| View::Hex(base.wrapping_add(u64::from(rva)));
+    let entries = detail
+        .entries
+        .iter()
+        .map(|entry| {
+            let unwind = entry.unwind.as_ref().map_or(View::Null, |info| {
+                View::Object(vec![
+                    ("version", View::Num(info.version.into())),
+                    ("flags", View::Num(info.flags.into())),
+                    ("prolog_size", View::Num(info.prolog_size.into())),
+                    ("code_count", View::Num(info.code_count.into())),
+                    (
+                        "frame_register",
+                        View::OptStr(info.frame_register.map(str::to_string)),
+                    ),
+                    ("frame_offset", View::Num(info.frame_offset.into())),
+                    ("size", View::Num(info.size as u64)),
+                    (
+                        "codes",
+                        View::List(
+                            info.codes
+                                .iter()
+                                .map(|code| {
+                                    View::Object(vec![
+                                        ("slot", View::Num(code.slot as u64)),
+                                        ("code_offset", View::Num(code.code_offset.into())),
+                                        ("op", View::Num(code.op.into())),
+                                        ("op_info", View::Num(code.op_info.into())),
+                                        ("description", View::Str(code.description.clone())),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "handler",
+                        info.handler.as_ref().map_or(View::Null, |handler| {
+                            View::Object(vec![
+                                ("address", va(handler.rva)),
+                                ("symbol", View::Str(handler.symbol.clone())),
+                                ("data", va(handler.data_rva)),
+                            ])
+                        }),
+                    ),
+                ])
+            });
+            View::Object(vec![
+                ("begin", va(entry.begin)),
+                ("end", va(entry.end)),
+                ("begin_rva", View::Hex(entry.begin.into())),
+                ("end_rva", View::Hex(entry.end.into())),
+                ("unwind_info", va(entry.unwind_rva)),
+                ("unwind_info_rva", View::Hex(entry.unwind_rva.into())),
+                ("symbol", View::Str(entry.symbol.clone())),
+                ("unwind", unwind),
+            ])
+        })
+        .collect();
+    View::Object(vec![
+        ("module", View::Str(detail.module.clone())),
+        ("image_base", View::Hex(base)),
+        ("entries", View::List(entries)),
+        ("incomplete", View::OptStr(detail.incomplete.clone())),
     ])
 }
 

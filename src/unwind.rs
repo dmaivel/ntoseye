@@ -46,6 +46,9 @@ mod tracer;
 mod walk;
 mod wow64;
 
+pub use amd64::{
+    FunctionEntryDetail, HandlerDetail, RuntimeFunctionDetail, UnwindCodeDetail, UnwindInfoDetail,
+};
 use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
 use arm64::{Arm64Lookup, call_return_address, lookup_arm64_runtime_function};
 use walk::{build_recovered_stacktrace_seeded, ensure_module_symbols};
@@ -596,6 +599,60 @@ pub fn function_range(
     }
 
     None
+}
+
+/// The AMD64 function-table entry covering `address` and its unwind data
+/// (`.fnent`), chained parents included. Paged-out `.pdata` or `.xdata` is
+/// read from the matched on-disk image, as the unwinder does.
+pub fn function_entry(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    address: u64,
+) -> Result<FunctionEntryDetail> {
+    let mut tracer = StackTracer::new(debugger, trace);
+    let Some(module) = tracer.module_containing(address) else {
+        return Err(Error::DebugInfo(format!(
+            "{address:#x} is not in a loaded module"
+        )));
+    };
+    let (base, module) = (module.info.base_address.0, module.info.short_name.clone());
+    if tracer.code_machine_at(address) != CodeMachine::Amd64 {
+        return Err(Error::DebugInfo(format!(
+            "{address:#x} is ARM64 code; .fnent decodes AMD64 function tables"
+        )));
+    }
+    let symbol = |address| format_symbol(debugger, trace, address);
+    let lookup = |tracer: &StackTracer<'_>| {
+        let (image, layout) = tracer.module_code(address)?;
+        let found =
+            amd64::describe_function_entry(&image, layout.as_deref(), base, address, symbol);
+        Some((found, image.is_complete()))
+    };
+    let unreadable = || Error::DebugInfo(format!("the image of {module} is unreadable"));
+    let (mut found, complete) = lookup(&tracer).ok_or_else(unreadable)?;
+    if matches!(found, amd64::EntryLookup::Holed)
+        && !complete
+        && tracer.upgrade_module_image(address)
+    {
+        found = lookup(&tracer).ok_or_else(unreadable)?.0;
+    }
+    match found {
+        amd64::EntryLookup::Found {
+            entries,
+            incomplete,
+        } => Ok(FunctionEntryDetail {
+            module,
+            image_base: base,
+            entries,
+            incomplete,
+        }),
+        amd64::EntryLookup::Leaf => Err(Error::DebugInfo(format!(
+            "no function table entry in {module} covers {address:#x}; a leaf function has none"
+        ))),
+        amd64::EntryLookup::Holed => Err(Error::DebugInfo(format!(
+            "the function table of {module} is paged out at {address:#x}, and no on-disk image was found"
+        ))),
+    }
 }
 
 pub fn build_stacktrace(

@@ -413,6 +413,17 @@ impl Memory {
         )
     }
 
+    /// The function-table entry and unwind info of the function containing
+    /// `addr`, chained parents included (`.fnent`).
+    fn function_entry<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
+        self.space.require_virtual()?;
+        let context = self.space.context();
+        let detail = self.owner.with_in(py, &context, |session| {
+            session.function_entry(VirtAddr(addr)).map_err(err)
+        })?;
+        view_record(py, &view::execution::function_entry(&detail))
+    }
+
     /// Disassemble the `count` instructions ending at `addr` (`ub`).
     fn disassemble_back<'py>(
         &self,

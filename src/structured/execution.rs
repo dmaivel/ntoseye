@@ -51,6 +51,10 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 ("value", View::Hex(value.0)),
             ])
         }),
+        ".fnent" => args.addr(0).and_then(|address| {
+            let detail = args.state.ctx.function_entry(address)?;
+            Ok(view::execution::function_entry(&detail))
+        }),
         "r" | "registers" if argv.is_empty() => args.state.ctx.read_registers().map(|regs| {
             let register_map = &args.state.ctx.register_map;
             let mut entries: Vec<(String, View)> = register_map

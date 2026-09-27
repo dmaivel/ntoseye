@@ -579,6 +579,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("x", "symbols, types, and expressions"),
     (".frame", "execution and stack"),
     ("!for_each_frame", "execution and stack"),
+    (".fnent", "execution and stack"),
     (".cxr", "execution and stack"),
     (".ecxr", "execution and stack"),
     (".exr", "execution and stack"),

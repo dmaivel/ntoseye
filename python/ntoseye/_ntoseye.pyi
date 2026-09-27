@@ -1083,6 +1083,11 @@ class Memory:
         """
         The directory-table base used by this space.
         """
+    def function_entry(self, /, addr: int) -> Record:
+        """
+        The function-table entry and unwind info of the function containing
+        `addr`, chained parents included (`.fnent`).
+        """
     def page_in(self, /, addr: int) -> bool:
         """
         Make `addr` resident with the guest debugger worker (`.pagein`). The

@@ -12,9 +12,9 @@ use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_ri
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
-    RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_register_values,
-    build_thread_stacktrace, describe_saved_vtl, halted_in_windows_hypervisor,
-    resolve_thread_trace_context, try_format_symbol,
+    FunctionEntryDetail, RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT,
+    build_stacktrace_with_register_values, build_thread_stacktrace, describe_saved_vtl,
+    halted_in_windows_hypervisor, resolve_thread_trace_context, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -33,6 +33,15 @@ repl_command! {
     details: "N is a zero-based frame number; /r also displays its recovered registers.",
     completion: Expression,
     run_state: HaltedOrParkedThread,
+}
+
+repl_command! {
+    cmd_fnent;
+    names: [".fnent"],
+    usage: ".fnent <address>",
+    summary: "Display the function table entry and unwind info of the function containing an address.",
+    details: "Shows the AMD64 RUNTIME_FUNCTION covering the address (begin, end, and unwind info RVAs), then its UNWIND_INFO: version, flags, prolog size, frame register and offset, each unwind code with its operands, and the exception or termination handler; a chained entry is followed by each parent's. Paged-out function tables are read from the on-disk image. ARM64 code is not decoded.",
+    completion: Expression,
 }
 
 repl_command! {
@@ -826,6 +835,18 @@ impl ReplState<'_> {
         self.display_symbol_range(&range, 8)
     }
 
+    fn cmd_fnent(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let address_arg = require_arg!(invocation, 0, ".fnent");
+        let Some(address) = self.eval_or_report(address_arg) else {
+            return Ok(());
+        };
+        match self.ctx.function_entry(address) {
+            Ok(detail) => print_function_entry(&detail),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
     fn cmd_trap(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let address = match invocation.arg(0) {
             Some(expr) => match self.eval_or_report(expr) {
@@ -993,5 +1014,91 @@ pub fn print_indexed_stacktrace(
     let hidden = trace.frames.len().saturating_sub(display_limit) + trace.truncated;
     if hidden > 0 {
         outln!("{}", format!("... {} more frames", hidden).bright_black());
+    }
+}
+
+/// `.fnent` in WinDbg's order: the entry, its unwind info, then each chained
+/// parent's.
+fn print_function_entry(detail: &FunctionEntryDetail) {
+    let base = detail.image_base;
+    let va = |rva: u32| ui::addr(base.wrapping_add(u64::from(rva)));
+    for (index, entry) in detail.entries.iter().enumerate() {
+        if index == 0 {
+            outln!(
+                "{} in {} (image base {})",
+                ui::symbol(&entry.symbol),
+                detail.module,
+                ui::addr(base)
+            );
+        } else {
+            outln!("{} {}", ui::label("chained to"), ui::symbol(&entry.symbol));
+        }
+        outln!();
+        outln!(
+            "  BeginAddress      = {:08x}  {}",
+            entry.begin,
+            va(entry.begin)
+        );
+        outln!("  EndAddress        = {:08x}  {}", entry.end, va(entry.end));
+        outln!(
+            "  UnwindInfoAddress = {:08x}  {}",
+            entry.unwind_rva,
+            va(entry.unwind_rva)
+        );
+        outln!();
+        let Some(info) = &entry.unwind else {
+            outln!("  unwind info unreadable\n");
+            continue;
+        };
+        outln!(
+            "  Unwind info at {}, {} bytes",
+            va(entry.unwind_rva),
+            info.size
+        );
+        let flag_names: Vec<&str> = [(1, "EHANDLER"), (2, "UHANDLER"), (4, "CHAININFO")]
+            .into_iter()
+            .filter(|(bit, _)| info.flags & bit != 0)
+            .map(|(_, name)| name)
+            .collect();
+        outln!(
+            "    version {}, flags {:#x}{}, prolog {:#x}, codes {}",
+            info.version,
+            info.flags,
+            if flag_names.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", flag_names.join(" "))
+            },
+            info.prolog_size,
+            info.code_count
+        );
+        if let Some(register) = info.frame_register {
+            outln!(
+                "    frame register {register}, frame offset {:#x}",
+                info.frame_offset
+            );
+        }
+        for code in &info.codes {
+            outln!(
+                "    {:02}: offs {:#x}, unwind op {}, op info {}  {}",
+                code.slot,
+                code.code_offset,
+                code.op,
+                code.op_info,
+                code.description
+            );
+        }
+        if let Some(handler) = &info.handler {
+            outln!(
+                "    handler {} {}, data at {}",
+                va(handler.rva),
+                ui::symbol(&handler.symbol),
+                va(handler.data_rva)
+            );
+        }
+        outln!();
+    }
+    if let Some(reason) = &detail.incomplete {
+        outln!("{}\n", ui::muted(reason));
     }
 }
