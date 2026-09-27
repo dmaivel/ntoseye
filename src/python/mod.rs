@@ -296,11 +296,11 @@ pub mod _ntoseye {
     #[pymodule_export]
     use super::stop::{Stop, StopContext};
     #[pymodule_export]
-    use super::symbols::{Symbol, Symbols};
+    use super::symbols::Symbols;
     #[pymodule_export]
     use super::thread::{Cpu, Cpus, Frame, Msrs, Registers, Thread, Threads};
     #[pymodule_export]
-    use super::types::{Field, Struct, Type, Types};
+    use super::types::{Struct, Type, Types};
     #[pymodule_export]
     use super::{attach, decode_error};
     #[pymodule_export]
@@ -360,6 +360,11 @@ pub mod _ntoseye {
         ThreadSummary, TimerBucketEnd, TimerTable, TimerTableEntry, UniqStackGroup, UniqStackScope,
         UniqStacks, UnwalkedThread, WorkItem, WorkQueue, WorkQueuePriority, WorkQueues,
         WorkerThread,
+    };
+    #[pymodule_export]
+    use crate::view::symbols::py::{
+        Field, LocalVariableLocation, NearestSymbol, ProcedureLocal, SourceLocation, Symbol,
+        SymbolCandidate, SymbolSearchMatch, TypeLayout,
     };
     #[pymodule_export]
     use crate::view::usermode::py::{

@@ -15,7 +15,7 @@ use super::context::Space;
 use super::handle::Owner;
 use super::record::PlainDict;
 use super::symbols::load_scope_symbols;
-use super::{err, raise};
+use super::{err, raise, view_dict, view_record};
 use crate::backend::MemoryOps;
 use crate::error::Result as CoreResult;
 use crate::layout::{
@@ -25,6 +25,9 @@ use crate::layout::{
 use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
+use crate::view::View;
+use crate::view::shape::ViewValue;
+use crate::view::symbols;
 
 fn lookup_field<'a>(
     info: &'a TypeInfo,
@@ -121,50 +124,6 @@ impl Types {
     }
 }
 
-/// A PDB field layout: name, byte offset, byte size, and type spelling.
-#[pyclass(frozen, get_all, module = "ntoseye")]
-pub struct Field {
-    /// The field name.
-    name: String,
-    /// Byte offset within the containing type.
-    offset: u64,
-    /// Size in bytes.
-    size: u64,
-    #[pyo3(name = "type")]
-    /// The PDB type spelling.
-    type_name: String,
-}
-
-impl Field {
-    fn new(name: String, info: &FieldInfo) -> Field {
-        Field {
-            name,
-            offset: u64::from(info.offset),
-            size: info.size,
-            type_name: info.type_data.to_string(),
-        }
-    }
-}
-
-#[pymethods]
-impl Field {
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let dict = PyDict::new(py);
-        dict.set_item("name", &self.name)?;
-        dict.set_item("offset", self.offset)?;
-        dict.set_item("size", self.size)?;
-        dict.set_item("type", &self.type_name)?;
-        Ok(PlainDict(dict))
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "<Field {} offset={:#x} size={:#x} type={:?}>",
-            self.name, self.offset, self.size, self.type_name
-        )
-    }
-}
-
 /// A named PDB struct/union layout or enum definition.
 #[pyclass(module = "ntoseye")]
 pub struct Type {
@@ -194,14 +153,14 @@ impl Type {
         }
     }
 
-    /// The fields by name, in offset order.
-    fn field_map(&self) -> IndexMap<String, Field> {
+    /// The fields' views by name, in offset order.
+    fn field_views(&self) -> Vec<(String, View)> {
         let Definition::Layout(info) = &self.definition else {
-            return IndexMap::new();
+            return Vec::new();
         };
         info.fields_in_order()
             .into_iter()
-            .map(|(name, field)| (name.clone(), Field::new(name.clone(), field)))
+            .map(|(name, field)| (name.clone(), symbols::type_field(name, field).into_view()))
             .collect()
     }
 }
@@ -225,8 +184,14 @@ impl Type {
 
     /// Field layouts by name, in offset order. Enums have no fields.
     #[getter]
-    fn fields(&self) -> IndexMap<String, Field> {
-        self.field_map()
+    fn fields<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<IndexMap<String, Bound<'py, symbols::py::Field>>> {
+        self.field_views()
+            .into_iter()
+            .map(|(name, field)| Ok((name, view_record(py, &field)?)))
+            .collect()
     }
 
     /// Enum members by name, in declaration order; raises for structs and
@@ -261,8 +226,8 @@ impl Type {
         dict.set_item("name", &self.name)?;
         dict.set_item("size", self.size())?;
         let fields = PyDict::new(py);
-        for (name, field) in self.field_map() {
-            fields.set_item(name, field.to_dict(py)?)?;
+        for (name, field) in self.field_views() {
+            fields.set_item(name, view_dict(py, &field)?)?;
         }
         dict.set_item("fields", fields)?;
         if let Definition::Enum(def) = &self.definition {

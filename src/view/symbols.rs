@@ -2,145 +2,273 @@
 //! builders.
 
 use super::View;
-use crate::layout::TypeInfo;
-use crate::symbols::{
-    LocalVariableLocation, ProcedureLocal, SourceLocation, SymbolCandidate, SymbolVisibility,
-    format_symbol_with_offset,
-};
-use crate::target::{SymbolSearchMatch, Target};
+use super::shape::{Hex, Omit, ViewValue, shapes};
+use crate::layout::{FieldInfo, TypeInfo};
+use crate::symbols::{self, SymbolVisibility, format_symbol_with_offset};
+use crate::target::{self, Target};
 use crate::types::VirtAddr;
+
+shapes! {
+    /// A struct or union's field layout (`dt`).
+    TypeLayout {
+        /// The PDB type name.
+        name: String,
+        /// Size in bytes.
+        size: usize,
+        /// The fields, sorted by offset.
+        fields: Vec<Field>,
+    }
+
+    /// A PDB field layout: name, byte offset, byte size, and type spelling.
+    Field {
+        name: String,
+        /// Byte offset within the containing type.
+        offset: u32,
+        /// Size in bytes.
+        size: u64,
+        /// The PDB type spelling.
+        r#type: String,
+    }
+
+    /// One definition a symbol name resolves to.
+    SymbolCandidate {
+        module: String,
+        address: Hex,
+        /// `public` or `private`.
+        visibility: &'static str,
+        /// The defining compiland, for a private symbol.
+        compiland: Option<String>,
+    }
+
+    /// A symbol a name search matched.
+    SymbolSearchMatch {
+        name: String,
+        /// `None` when the match does not resolve to a unique address.
+        address: Option<Hex>,
+        module: Option<String>,
+    }
+
+    /// The symbol nearest below an address (`ln`); the symbol fields are
+    /// `None` when no symbol covers it.
+    NearestSymbol {
+        /// The queried address.
+        address: Hex,
+        /// `module!name+0xoffset`.
+        symbol: Option<String>,
+        module: Option<String>,
+        name: Option<String>,
+        /// Bytes from the symbol to `address`.
+        offset: Option<u32>,
+    }
+
+    /// A symbol identity nearest to an address.
+    Symbol {
+        /// The module the symbol belongs to.
+        module: String,
+        /// The symbol name.
+        name: String,
+        /// The symbol's address.
+        address: Hex,
+        /// How far past the symbol the queried address is.
+        offset: u32;
+
+        /// `module!name+0xoffset`.
+        fn __str__(slf: &pyo3::Bound<'_, Self>) -> pyo3::PyResult<String> {
+            use pyo3::types::PyAnyMethods;
+            let record = slf.as_super().get();
+            let py = slf.py();
+            Ok(format_symbol_with_offset(
+                &record.field(py, "module")?.extract::<String>()?,
+                &record.field(py, "name")?.extract::<String>()?,
+                record.field(py, "offset")?.extract()?,
+            ))
+        }
+    }
+
+    /// PDB source metadata for an address.
+    SourceLocation {
+        /// The source file as the PDB records it.
+        file: String,
+        line: u32,
+        /// `None` when the PDB records no column.
+        column: Option<u32>,
+        /// The file after source-path remapping, when one applies.
+        local_path: Option<String>,
+        /// Whether `local_path` exists on this machine.
+        local_exists: bool,
+    }
+
+    /// Where a local variable lives.
+    LocalVariableLocation {
+        /// `register`, `register_relative`, `frame_relative`, or
+        /// `unavailable`.
+        kind: &'static str,
+        /// The register, for `register` and `register_relative`.
+        register: Option<String>,
+        /// The signed displacement, for `register_relative` and
+        /// `frame_relative`.
+        offset: Option<i64>,
+        /// Why the location is unknown, for `unavailable`.
+        reason: Option<String>,
+    }
+
+    /// A PDB local or parameter.
+    ProcedureLocal {
+        name: String,
+        /// The PDB type spelling.
+        type_name: String,
+        /// `None` when the type's size is unknown.
+        byte_size: Option<u64>,
+        /// Whether it is a parameter rather than a local.
+        parameter: bool,
+        location: LocalVariableLocation,
+        /// Its value, absent from a layout-only listing (`locals_at`);
+        /// `None` when it did not evaluate.
+        value: Omit<Option<Hex>>,
+    }
+}
+
+/// One field's layout.
+pub fn type_field(name: &str, field: &FieldInfo) -> Field {
+    Field {
+        name: name.to_string(),
+        offset: field.offset,
+        size: field.size,
+        r#type: field.type_data.to_string(),
+    }
+}
 
 /// A struct's field layout, sorted by offset.
 pub fn type_layout(name: &str, info: &TypeInfo) -> View {
-    let fields = info
-        .fields_in_order()
-        .into_iter()
-        .map(|(field_name, field)| {
-            View::Object(vec![
-                ("name", View::Str(field_name.clone())),
-                ("offset", View::Num(field.offset.into())),
-                ("size", View::Num(field.size)),
-                ("type", View::Str(field.type_data.to_string())),
-            ])
-        })
-        .collect();
-    View::Object(vec![
-        ("name", View::Str(name.to_string())),
-        ("size", View::Num(info.size as u64)),
-        ("fields", View::List(fields)),
-    ])
+    TypeLayout {
+        name: name.to_string(),
+        size: info.size,
+        fields: info
+            .fields_in_order()
+            .into_iter()
+            .map(|(name, field)| type_field(name, field))
+            .collect(),
+    }
+    .into_view()
 }
 
-pub fn symbol_candidate(candidate: &SymbolCandidate) -> View {
-    View::Object(vec![
-        ("module", View::Str(candidate.module.clone())),
-        ("address", View::Hex(candidate.address.0)),
-        (
-            "visibility",
-            View::Str(
-                match candidate.visibility {
-                    SymbolVisibility::Public => "public",
-                    SymbolVisibility::Private => "private",
-                }
-                .to_string(),
-            ),
-        ),
-        ("compiland", View::OptStr(candidate.compiland.clone())),
-    ])
+pub fn symbol_candidate(candidate: &symbols::SymbolCandidate) -> View {
+    SymbolCandidate {
+        module: candidate.module.clone(),
+        address: Hex(candidate.address.0),
+        visibility: match candidate.visibility {
+            SymbolVisibility::Public => "public",
+            SymbolVisibility::Private => "private",
+        },
+        compiland: candidate.compiland.clone(),
+    }
+    .into_view()
 }
 
-pub fn symbol_search_match(symbol: &SymbolSearchMatch) -> View {
-    View::Object(vec![
-        ("name", View::Str(symbol.name.clone())),
-        (
-            "address",
-            View::OptHex(symbol.address.map(|address| address.0)),
-        ),
-        ("module", View::OptStr(symbol.module.clone())),
-    ])
+pub fn symbol_search_match(symbol: &target::SymbolSearchMatch) -> View {
+    SymbolSearchMatch {
+        name: symbol.name.clone(),
+        address: symbol.address.map(|address| Hex(address.0)),
+        module: symbol.module.clone(),
+    }
+    .into_view()
 }
 
 pub fn nearest_symbol(address: VirtAddr, symbol: Option<(String, String, u32)>) -> View {
     let (formatted, module, name, offset) = match symbol {
         Some((module, name, offset)) => (
-            View::Str(format_symbol_with_offset(&module, &name, offset)),
-            View::Str(module),
-            View::Str(name),
-            View::Num(offset.into()),
+            Some(format_symbol_with_offset(&module, &name, offset)),
+            Some(module),
+            Some(name),
+            Some(offset),
         ),
-        None => (View::Null, View::Null, View::Null, View::Null),
+        None => (None, None, None, None),
     };
-    View::Object(vec![
-        ("address", View::Hex(address.0)),
-        ("symbol", formatted),
-        ("module", module),
-        ("name", name),
-        ("offset", offset),
-    ])
+    NearestSymbol {
+        address: Hex(address.0),
+        symbol: formatted,
+        module,
+        name,
+        offset,
+    }
+    .into_view()
 }
 
-pub fn source_location(location: &SourceLocation) -> View {
-    View::Object(vec![
-        ("file", View::Str(location.file.clone())),
-        ("line", View::Num(location.line.into())),
-        ("column", View::OptNum(location.column.map(u64::from))),
-        (
-            "local_path",
-            View::OptStr(
-                location
-                    .local_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-            ),
-        ),
-        ("local_exists", View::Bool(location.local_exists)),
-    ])
+/// The symbol `offset` bytes below `address`.
+pub fn symbol(address: u64, module: String, name: String, offset: u32) -> View {
+    Symbol {
+        module,
+        name,
+        address: Hex(address.saturating_sub(u64::from(offset))),
+        offset,
+    }
+    .into_view()
 }
 
-fn local_location(location: &LocalVariableLocation) -> View {
+pub fn source_location(location: &symbols::SourceLocation) -> View {
+    SourceLocation {
+        file: location.file.clone(),
+        line: location.line,
+        column: location.column,
+        local_path: location
+            .local_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        local_exists: location.local_exists,
+    }
+    .into_view()
+}
+
+fn local_location(location: &symbols::LocalVariableLocation) -> LocalVariableLocation {
     let (kind, register, offset, reason) = match location {
-        LocalVariableLocation::Register { register } => {
+        symbols::LocalVariableLocation::Register { register } => {
             ("register", Some(register.clone()), None, None)
         }
-        LocalVariableLocation::RegisterRelative { register, offset } => (
+        symbols::LocalVariableLocation::RegisterRelative { register, offset } => (
             "register_relative",
             Some(register.clone()),
             Some(i64::from(*offset)),
             None,
         ),
-        LocalVariableLocation::FrameRelative { offset } => {
+        symbols::LocalVariableLocation::FrameRelative { offset } => {
             ("frame_relative", None, Some(i64::from(*offset)), None)
         }
-        LocalVariableLocation::Unavailable { reason } => {
+        symbols::LocalVariableLocation::Unavailable { reason } => {
             ("unavailable", None, None, Some(reason.clone()))
         }
     };
-    View::Object(vec![
-        ("kind", View::Str(kind.to_string())),
-        ("register", View::OptStr(register)),
-        ("offset", offset.map(View::Int).unwrap_or(View::Null)),
-        ("reason", View::OptStr(reason)),
-    ])
+    LocalVariableLocation {
+        kind,
+        register,
+        offset,
+        reason,
+    }
 }
 
-pub fn procedure_local(target: &Target, address: VirtAddr, local: &ProcedureLocal) -> View {
-    let View::Object(mut fields) = procedure_local_layout(local) else {
-        unreachable!("a local's layout is an object");
-    };
-    fields.push((
-        "value",
-        View::OptHex(target.resolve_procedure_local_value(address, local)),
-    ));
-    View::Object(fields)
+fn local(local: &symbols::ProcedureLocal, value: Omit<Option<Hex>>) -> ProcedureLocal {
+    ProcedureLocal {
+        name: local.name.clone(),
+        type_name: local.type_name.clone(),
+        byte_size: local.byte_size,
+        parameter: local.is_parameter,
+        location: local_location(&local.location),
+        value,
+    }
+}
+
+/// A PDB local or parameter with its value at `address`.
+pub fn procedure_local(
+    target: &Target,
+    address: VirtAddr,
+    local: &symbols::ProcedureLocal,
+) -> View {
+    let value = target
+        .resolve_procedure_local_value(address, local)
+        .map(Hex);
+    self::local(local, Omit(Some(value))).into_view()
 }
 
 /// A PDB local or parameter's layout, without evaluating it.
-pub fn procedure_local_layout(local: &ProcedureLocal) -> View {
-    View::Object(vec![
-        ("name", View::Str(local.name.clone())),
-        ("type_name", View::Str(local.type_name.clone())),
-        ("byte_size", View::OptNum(local.byte_size)),
-        ("parameter", View::Bool(local.is_parameter)),
-        ("location", local_location(&local.location)),
-    ])
+pub fn procedure_local_layout(local: &symbols::ProcedureLocal) -> View {
+    self::local(local, Omit(None)).into_view()
 }

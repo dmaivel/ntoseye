@@ -1,16 +1,14 @@
 //! Address-space-bound symbol lookup for the Python SDK.
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 
 use super::context::Space;
 use super::handle::Owner;
-use super::record::{PlainDict, Record};
 use super::{err, raise, symbol_not_found, view_record, view_records};
 use crate::breakpoints::BreakpointSpec;
 use crate::expr::Expr;
 use crate::session::Session;
-use crate::symbols::{format_symbol_with_offset, parse_source_paths, parse_symbol_sources};
+use crate::symbols::{parse_source_paths, parse_symbol_sources};
 use crate::types::{Dtb, VirtAddr};
 use crate::view::{self, View};
 
@@ -24,44 +22,6 @@ pub struct Symbols {
 impl Symbols {
     pub fn new(owner: Owner, space: Space) -> Symbols {
         Symbols { owner, space }
-    }
-}
-
-/// A symbol identity nearest to an address.
-#[pyclass(frozen, get_all, module = "ntoseye", skip_from_py_object)]
-#[derive(Clone)]
-pub struct Symbol {
-    /// The module the symbol belongs to.
-    module: String,
-    /// The symbol name.
-    name: String,
-    /// The symbol's address.
-    address: u64,
-    /// How far past the symbol the queried address is.
-    offset: u32,
-}
-
-#[pymethods]
-impl Symbol {
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let dict = PyDict::new(py);
-        dict.set_item("module", &self.module)?;
-        dict.set_item("name", &self.name)?;
-        dict.set_item("address", self.address)?;
-        dict.set_item("offset", self.offset)?;
-        Ok(PlainDict(dict))
-    }
-
-    fn __str__(&self) -> String {
-        format_symbol_with_offset(&self.module, &self.name, self.offset)
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "<Symbol {} address={:#x}>",
-            format_symbol_with_offset(&self.module, &self.name, self.offset),
-            self.address
-        )
     }
 }
 
@@ -116,7 +76,11 @@ impl Symbols {
     }
 
     /// Return every exact candidate, including module and private-compiland provenance.
-    fn candidates<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Vec<Bound<'py, Record>>> {
+    fn candidates<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+    ) -> PyResult<Vec<Bound<'py, view::symbols::py::SymbolCandidate>>> {
         let space = &self.space;
         let candidates = scoped(py, &self.owner, space, |session| {
             let dtb = space.dtb(&session.target)?;
@@ -134,18 +98,21 @@ impl Symbols {
     }
 
     /// Return the nearest symbol identity, or `None` if no symbol covers `addr`.
-    fn nearest(&self, py: Python<'_>, addr: u64) -> PyResult<Option<Symbol>> {
+    fn nearest<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Option<Bound<'py, view::symbols::py::Symbol>>> {
         let nearest = scoped(py, &self.owner, &self.space, |session| {
             Ok(session
                 .target
                 .nearest_symbol_current_context(VirtAddr(addr)))
         })?;
-        Ok(nearest.map(|(module, name, offset)| Symbol {
-            module,
-            name,
-            address: addr.saturating_sub(u64::from(offset)),
-            offset,
-        }))
+        nearest
+            .map(|(module, name, offset)| {
+                view_record(py, &view::symbols::symbol(addr, module, name, offset))
+            })
+            .transpose()
     }
 
     /// Fuzzy-search symbol names; `module!query` scopes the search to a module.
@@ -155,7 +122,7 @@ impl Symbols {
         py: Python<'py>,
         query: &str,
         limit: usize,
-    ) -> PyResult<Vec<Bound<'py, Record>>> {
+    ) -> PyResult<Vec<Bound<'py, view::symbols::py::SymbolSearchMatch>>> {
         if !(1..=500).contains(&limit) {
             return Err(raise("limit must be in range 1-500"));
         }
@@ -178,7 +145,7 @@ impl Symbols {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Option<Bound<'py, Record>>> {
+    ) -> PyResult<Option<Bound<'py, view::symbols::py::SourceLocation>>> {
         let location = scoped(py, &self.owner, &self.space, |session| {
             Ok(session.target.source_location(VirtAddr(addr)))
         })?;
@@ -201,7 +168,11 @@ impl Symbols {
     }
 
     /// List PDB local/parameter layouts covering `addr`, without evaluating values.
-    fn locals_at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Vec<Bound<'py, Record>>> {
+    fn locals_at<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Vec<Bound<'py, view::symbols::py::ProcedureLocal>>> {
         let rows = scoped(py, &self.owner, &self.space, |session| {
             let locals = session
                 .target
