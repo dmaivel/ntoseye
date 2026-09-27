@@ -233,45 +233,26 @@ pub fn split_command_list(line: &str) -> std::result::Result<Vec<&str>, CommandP
         }
 
         let mut depth = 0usize;
-        let mut quote = None;
-        let mut quote_start = 0;
-        let mut escaped = false;
-        let mut split = None;
-
-        for (offset, ch) in line[start..].char_indices() {
-            let idx = start + offset;
-            if let Some(active_quote) = quote {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == active_quote {
-                    quote = None;
-                }
-                continue;
-            }
-
+        let scan = scan_unquoted(&line[start..], |_, ch| {
             match ch {
-                '"' | '\'' => {
-                    quote = Some(ch);
-                    quote_start = idx;
-                }
                 '(' | '[' | '{' => depth += 1,
                 ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                ';' if depth == 0 => {
-                    split = Some(idx);
-                    break;
-                }
+                ';' if depth == 0 => return true,
                 _ => {}
             }
-        }
-
-        if quote.is_some() {
-            return Err(CommandParseError::new(
-                quote_start..quote_start + 1,
-                "unterminated quoted argument",
-            ));
-        }
+            false
+        });
+        let split = match scan {
+            Unquoted::Stopped(offset) => Some(start + offset),
+            Unquoted::End => None,
+            Unquoted::OpenQuote(offset) => {
+                let quote_start = start + offset;
+                return Err(CommandParseError::new(
+                    quote_start..quote_start + 1,
+                    "unterminated quoted argument",
+                ));
+            }
+        };
 
         let end = split.unwrap_or(line.len());
         let command = line[start..end].trim();
@@ -300,6 +281,79 @@ fn command_style_at(line: &str) -> Option<CommandStyle> {
         .map(|spec| spec.style)
 }
 
+/// Where [`scan_unquoted`] stopped.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unquoted {
+    /// The visitor stopped at this byte offset.
+    Stopped(usize),
+    /// The text ended with every quote closed.
+    End,
+    /// The quote opened at this byte offset is never closed.
+    OpenQuote(usize),
+}
+
+/// Call `visit` with each character of `text` outside quoted strings and its
+/// byte offset, until it returns `true`. Quote characters are not visited.
+/// Inside quotes a backslash escapes the next character, so `"a\"b"` is one
+/// string. The command-list splitter and `.foreach`'s block scanner share
+/// this, so they agree on where a quoted string ends.
+pub fn scan_unquoted(text: &str, mut visit: impl FnMut(usize, char) -> bool) -> Unquoted {
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, ch) in text.char_indices() {
+        if let Some((active, _)) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some((ch, offset));
+        } else if visit(offset, ch) {
+            return Unquoted::Stopped(offset);
+        }
+    }
+    match quote {
+        Some((_, offset)) => Unquoted::OpenQuote(offset),
+        None => Unquoted::End,
+    }
+}
+
+/// The quoted string that opens `text`, unescaped, and the text after its
+/// closing quote; `None` when `text` does not open with a quote or the quote
+/// is never closed. A backslash only escapes the quote or another backslash.
+/// Every other sequence is passed through intact, because the command that
+/// receives it owns its own escapes: `.printf` needs to see `\n`, and a
+/// Windows path keeps its separators.
+pub fn take_quoted(text: &str) -> Option<(String, &str)> {
+    let mut chars = text.char_indices();
+    let (_, quote @ ('"' | '\'')) = chars.next()? else {
+        return None;
+    };
+    let mut value = String::new();
+    let mut escaped = false;
+    for (offset, ch) in chars {
+        if escaped {
+            if ch != quote && ch != '\\' {
+                value.push('\\');
+            }
+            value.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return Some((value, &text[offset + ch.len_utf8()..]));
+        } else {
+            value.push(ch);
+        }
+    }
+    None
+}
+
 fn parse_args(
     line: &str,
     base: usize,
@@ -313,11 +367,7 @@ fn parse_args(
         }
 
         let start = pos;
-        let Some(quote) = line[pos..]
-            .chars()
-            .next()
-            .filter(|ch| *ch == '"' || *ch == '\'')
-        else {
+        if !line[pos..].starts_with(['"', '\'']) {
             let end = line[pos..]
                 .find(char::is_whitespace)
                 .map(|offset| pos + offset)
@@ -325,40 +375,14 @@ fn parse_args(
             args.push(Cow::Borrowed(&line[start..end]));
             pos = end;
             continue;
-        };
-
-        pos += quote.len_utf8();
-        let mut text = String::new();
-        let mut escaped = false;
-        let mut closed = false;
-        while let Some(ch) = line[pos..].chars().next() {
-            pos += ch.len_utf8();
-            if escaped {
-                // A backslash only escapes a quote or another backslash.
-                // Every other sequence is passed through intact, because the
-                // command that receives it owns its own escapes: `.printf`
-                // needs to see `\n`, and a Windows path keeps its
-                // separators.
-                if ch != quote && ch != '\\' {
-                    text.push('\\');
-                }
-                text.push(ch);
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote {
-                closed = true;
-                break;
-            } else {
-                text.push(ch);
-            }
         }
-        if !closed {
+        let Some((text, rest)) = take_quoted(&line[pos..]) else {
             return Err(CommandParseError::new(
-                base + start..base + start + quote.len_utf8(),
+                base + start..base + start + 1,
                 "unterminated quoted argument",
             ));
-        }
+        };
+        pos = line.len() - rest.len();
         args.push(Cow::Owned(text));
     }
     Ok(args)

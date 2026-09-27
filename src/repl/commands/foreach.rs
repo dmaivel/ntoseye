@@ -93,36 +93,13 @@ struct ForeachSpec<'a> {
 /// A value an alias names that the current item does not have.
 struct MissingValue(String);
 
-fn skip_ws(text: &str) -> &str {
-    text.trim_start()
-}
-
-/// The quoted string at the start of `text` and what follows it. A backslash
-/// escapes only a quote or another backslash, as in command arguments, so
-/// Windows paths and `.printf` escapes pass through intact.
-fn take_quoted(text: &str) -> std::result::Result<(String, &str), String> {
-    let mut chars = text.char_indices();
-    let Some((_, quote @ ('"' | '\''))) = chars.next() else {
+/// The quoted string at the start of `text` and what follows it, unescaped
+/// as command arguments are.
+fn quoted_arg(text: &str) -> std::result::Result<(String, &str), String> {
+    if !text.starts_with(['"', '\'']) {
         return Err("expected a quoted string".to_string());
-    };
-    let mut value = String::new();
-    let mut escaped = false;
-    for (index, ch) in chars {
-        if escaped {
-            if ch != quote && ch != '\\' {
-                value.push('\\');
-            }
-            value.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == quote {
-            return Ok((value, &text[index + ch.len_utf8()..]));
-        } else {
-            value.push(ch);
-        }
     }
-    Err("unterminated quoted string".to_string())
+    take_quoted(text).ok_or_else(|| "unterminated quoted string".to_string())
 }
 
 /// The contents of the `{ ... }` block at the start of `text` and what
@@ -133,41 +110,27 @@ fn take_block(text: &str) -> std::result::Result<(&str, &str), String> {
         return Err("expected '{'".to_string());
     }
     let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in text.char_indices() {
-        if let Some(active) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active {
-                quote = None;
-            }
-            continue;
-        }
+    let scan = scan_unquoted(text, |_, ch| {
         match ch {
-            '"' | '\'' => quote = Some(ch),
             '{' => depth += 1,
             '}' => {
+                // The opening brace counted first, so this never underflows.
                 depth -= 1;
-                if depth == 0 {
-                    return Ok((&text[1..index], &text[index + 1..]));
-                }
+                return depth == 0;
             }
             _ => {}
         }
+        false
+    });
+    match scan {
+        Unquoted::Stopped(close) => Ok((&text[1..close], &text[close + 1..])),
+        Unquoted::End | Unquoted::OpenQuote(_) => Err("unbalanced '{'".to_string()),
     }
-    Err("unbalanced '{'".to_string())
 }
 
 /// A `/pS` or `/ps` count: glued on (`/pS2`) or the next word (`/pS 2`).
 fn take_count(text: &str) -> std::result::Result<(&str, &str), String> {
-    let text = if text.starts_with(char::is_whitespace) {
-        skip_ws(text)
-    } else {
-        text
-    };
+    let text = text.trim_start();
     let end = text
         .find(|ch: char| ch.is_whitespace() || ch == '(' || ch == '/')
         .unwrap_or(text.len());
@@ -182,7 +145,7 @@ fn parse_foreach(tail: &str) -> std::result::Result<ForeachSpec<'_>, String> {
     let mut skip = None;
     let mut from_string = false;
     let mut from_file = false;
-    let mut rest = skip_ws(tail);
+    let mut rest = tail.trim_start();
     while let Some(option) = rest.strip_prefix('/') {
         // `/pS` and `/ps` differ only in case, so options match exactly.
         if let Some(after) = option.strip_prefix("pS") {
@@ -212,16 +175,16 @@ fn parse_foreach(tail: &str) -> std::result::Result<ForeachSpec<'_>, String> {
                 .unwrap_or_default();
             return Err(format!("unknown option '/{name}'"));
         }
-        rest = skip_ws(rest);
+        rest = rest.trim_start();
     }
     if from_string && from_file {
         return Err("/s and /f cannot be combined".to_string());
     }
 
-    let mut rest = skip_ws(
-        rest.strip_prefix('(')
-            .ok_or("expected '(' before the variable")?,
-    );
+    let mut rest = rest
+        .strip_prefix('(')
+        .ok_or("expected '(' before the variable")?
+        .trim_start();
     let variable_end = rest
         .find(|ch: char| ch.is_whitespace() || matches!(ch, '{' | '"' | '\'' | ')'))
         .unwrap_or(rest.len());
@@ -229,10 +192,10 @@ fn parse_foreach(tail: &str) -> std::result::Result<ForeachSpec<'_>, String> {
     if variable.is_empty() {
         return Err("expected a variable name after '('".to_string());
     }
-    rest = skip_ws(&rest[variable_end..]);
+    rest = rest[variable_end..].trim_start();
 
     let source = if from_string || from_file {
-        let (text, after) = take_quoted(rest).map_err(|error| {
+        let (text, after) = quoted_arg(rest).map_err(|error| {
             let what = if from_file {
                 "/f file name"
             } else {
@@ -252,11 +215,11 @@ fn parse_foreach(tail: &str) -> std::result::Result<ForeachSpec<'_>, String> {
         ForeachSource::Commands(commands.trim())
     };
 
-    rest = skip_ws(rest);
-    rest = skip_ws(
-        rest.strip_prefix(')')
-            .ok_or("expected ')' after the input")?,
-    );
+    rest = rest
+        .trim_start()
+        .strip_prefix(')')
+        .ok_or("expected ')' after the input")?
+        .trim_start();
     let (body, after) = take_block(rest).map_err(|error| format!("OutCommands: {error}"))?;
     if !after.trim().is_empty() {
         return Err(format!(
@@ -332,7 +295,7 @@ fn command_string(tail: &str) -> std::result::Result<Option<String>, String> {
     if !tail.starts_with('"') {
         return Ok(Some(tail.to_string()));
     }
-    let (command, rest) = take_quoted(tail)?;
+    let (command, rest) = quoted_arg(tail)?;
     if !rest.trim().is_empty() {
         return Err(format!(
             "unexpected text after the quoted command: '{}'",
