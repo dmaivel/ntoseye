@@ -290,7 +290,7 @@ impl Process {
     }
 
     /// The process token and its security information.
-    fn token<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn token<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::security::py::Token>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_process_token().map_err(err)
         })?;

@@ -965,7 +965,7 @@ impl Inspect {
         py: Python<'py>,
         address: u64,
         annotate_well_known: bool,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::security::py::SecurityDescriptor>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -976,7 +976,11 @@ impl Inspect {
     }
 
     /// Decode an ACL and its ACEs (`!acl`).
-    fn acl<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn acl<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::security::py::Acl>> {
         self.record(py, |session| {
             let detail = session.target.inspect_acl(VirtAddr(address)).map_err(err)?;
             Ok(view::security::acl(&detail))
@@ -984,7 +988,11 @@ impl Inspect {
     }
 
     /// Decode a SID to its string form, authority, and well-known name (`!sid`).
-    fn sid<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    fn sid<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Bound<'py, view::security::py::Sid>> {
         self.record(py, |session| {
             let detail = session.target.inspect_sid(VirtAddr(address)).map_err(err)?;
             Ok(view::security::sid(&detail))
@@ -992,7 +1000,11 @@ impl Inspect {
     }
 
     /// Decode the security descriptor referenced by an object's header (`!objsd`).
-    fn object_security<'py>(&self, py: Python<'py>, object: u64) -> PyResult<Bound<'py, Record>> {
+    fn object_security<'py>(
+        &self,
+        py: Python<'py>,
+        object: u64,
+    ) -> PyResult<Bound<'py, view::security::py::ObjectSecurity>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -1004,7 +1016,11 @@ impl Inspect {
 
     /// List sessions and their processes, optionally selecting one (`!session`).
     #[pyo3(signature = (session=None))]
-    fn sessions<'py>(&self, py: Python<'py>, session: Option<i64>) -> PyResult<Bound<'py, Record>> {
+    fn sessions<'py>(
+        &self,
+        py: Python<'py>,
+        session: Option<i64>,
+    ) -> PyResult<Bound<'py, view::security::py::Sessions>> {
         self.record(py, |session_state| {
             let detail = session_state.target.sessions(session).map_err(err)?;
             Ok(view::security::sessions(&detail))

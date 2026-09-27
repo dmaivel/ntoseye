@@ -384,6 +384,11 @@ pub mod _ntoseye {
         WorkerThread,
     };
     #[pymodule_export]
+    use crate::view::security::py::{
+        Ace, Acl, ObjectSecurity, SecurityDescriptor, Session, SessionProcess, SessionProcesses,
+        Sessions, Sid, SidAndAttributes, Token, TokenPrivilege,
+    };
+    #[pymodule_export]
     use crate::view::symbols::py::{
         Field, LocalVariableLocation, NearestSymbol, ProcedureLocal, SourceLocation, Symbol,
         SymbolCandidate, SymbolSearchMatch, TypeLayout,
