@@ -28,6 +28,7 @@ use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::view;
 use crate::view::execution::py::CallTrace;
+use crate::view::shape::ViewValue;
 
 fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
     Owner::unstamped(slf.py(), slf.as_unbound())
@@ -142,14 +143,21 @@ impl Debugger {
         self.generation()
     }
 
-    /// The backend's capability matrix as `{capability, label, supported}`
-    /// records: which operations the transport supports.
+    /// The backend's capability matrix: which operations the transport
+    /// supports.
     #[getter]
-    fn capabilities<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, Record>>> {
+    fn capabilities<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, view::backend::py::BackendCapability>>> {
         let rows = self.with_session(|session| Ok(session.capabilities()))?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::backend::capability).collect()),
+            &rows
+                .iter()
+                .map(view::backend::capability)
+                .collect::<Vec<_>>()
+                .into_view(),
         )
     }
 
@@ -277,11 +285,14 @@ impl Debugger {
         })
     }
 
-    /// Captured guest debug output (DbgPrint) since sequence `since`:
-    /// `{lines: [{seq, timestamp_ms, text}], next_seq, dropped}`. Pass the
-    /// previous `next_seq` to poll only new lines.
+    /// Captured guest debug output (DbgPrint) since sequence `since`. Pass
+    /// the previous `next_seq` to poll only new lines.
     #[pyo3(signature = (since=0))]
-    fn debug_log<'py>(&self, py: Python<'py>, since: u64) -> PyResult<Bound<'py, Record>> {
+    fn debug_log<'py>(
+        &self,
+        py: Python<'py>,
+        since: u64,
+    ) -> PyResult<Bound<'py, view::backend::py::DebugLog>> {
         let page = self.with_session(|session| Ok(session.read_debug_output(since)))?;
         view_record(py, &view::backend::debug_log(&page))
     }

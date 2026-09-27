@@ -304,6 +304,8 @@ pub mod _ntoseye {
     #[pymodule_export]
     use super::{attach, decode_error};
     #[pymodule_export]
+    use crate::view::backend::py::{BackendCapability, DebugLog, DebugLogLine};
+    #[pymodule_export]
     use crate::view::cpu::py::{
         CpuFeatureBits, CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt,
         IdtGate, Irql, Pcr, Prcb, ProcessorStateArea, SpecialRegistersArea,

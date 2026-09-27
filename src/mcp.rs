@@ -479,7 +479,7 @@ fn run_command(
     let debug_output = page
         .lines
         .iter()
-        .map(|line| view::to_json(&view::backend::debug_log_line(line)))
+        .map(|line| view::to_json(&view::backend::debug_log_line(line).into_view()))
         .collect();
     CommandOutput {
         ok: remote.ok,
