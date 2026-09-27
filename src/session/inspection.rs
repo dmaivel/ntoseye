@@ -14,7 +14,7 @@ use crate::memory::{PAGE_SIZE, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead};
 use crate::target::usermode::ImageCheckDetail;
-use crate::target::{SearchResult, ThreadInfo};
+use crate::target::{CompareResult, SearchResult, ThreadInfo};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
@@ -123,6 +123,21 @@ impl Session {
     /// neither hides the original bytes nor matches as an `int3`.
     pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<SearchResult> {
         self.target.search(start, pattern, length, |address, buf| {
+            self.read_masked(address, buf)
+        })
+    }
+
+    /// Compare two ranges of the inspection address space
+    /// ([`Target::compare`](crate::target::Target::compare)) as
+    /// [`Self::read_masked`] reads them, so a breakpoint this session planted
+    /// is compared as the byte it displaced.
+    pub fn compare(
+        &self,
+        first: VirtAddr,
+        second: VirtAddr,
+        length: usize,
+    ) -> Result<CompareResult> {
+        self.target.compare(first, second, length, |address, buf| {
             self.read_masked(address, buf)
         })
     }

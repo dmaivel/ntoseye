@@ -286,6 +286,24 @@ repl_command! {
     completion: [None, Expression, Expression],
 }
 
+repl_command! {
+    cmd_c;
+    names: ["c"],
+    usage: "c <address> <L<count>|end> <address2>",
+    summary: "Compare two memory ranges byte by byte.",
+    details: "Compares the range with as many bytes at <address2> and lists every byte that differs, as `<address> <byte> - <address2> <byte>` (`c nt L1000 poi(@$t0)`). Offsets unreadable in either range are skipped and counted, at most 1 GiB is compared, and the comparison stops after 4096 differences or at Ctrl+C.",
+    completion: [Expression, Expression, Expression],
+}
+
+repl_command! {
+    cmd_m;
+    names: ["m"],
+    usage: "m <address> <L<count>|end> <destination>",
+    summary: "Copy a memory range to another address.",
+    details: "The whole range is read before anything is written, so overlapping ranges copy as if through a buffer (`m @rsp L20 @rsp+8`). A breakpoint this session planted in the range is copied as the byte it displaced. At most 16 MiB is copied, and nothing is written when any byte of the range is unreadable.",
+    completion: [Expression, Expression, Expression],
+}
+
 pub fn parse_write_values(
     state: &ReplState<'_>,
     invocation: &CommandInvocation<'_>,
@@ -1365,6 +1383,127 @@ impl ReplState<'_> {
             );
         }
 
+        Ok(())
+    }
+
+    /// The range `<address> <L<count>|end>` and the address after it, the
+    /// shape `c` and `m` share; `None` after printing why not.
+    fn range_and_address(
+        &self,
+        invocation: &CommandInvocation<'_>,
+    ) -> Option<(AddressRange, VirtAddr)> {
+        let [start_arg, range_arg, other_arg] = invocation.argv.as_slice() else {
+            outln!("{}\n", command_help(invocation.name));
+            return None;
+        };
+        let start = self.eval_or_report(start_arg)?;
+        let range = match eval_range(range_arg, &self.ctx.target, self.radix, start, 1) {
+            Ok(range) => range,
+            Err(error) => {
+                error!("invalid range '{range_arg}': {error}");
+                return None;
+            }
+        };
+        let other = self.eval_or_report(other_arg)?;
+        Some((range, other))
+    }
+
+    fn cmd_c(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let Some((range, other)) = self.range_and_address(&invocation) else {
+            return Ok(());
+        };
+        let result = match self.ctx.compare(range.start, other, range.len()) {
+            Ok(result) => result,
+            Err(error) => {
+                error!("failed to compare memory: {error}");
+                return Ok(());
+            }
+        };
+        for &(offset, left, right) in &result.differences {
+            outln!(
+                "{}  {:02x} - {}  {:02x}",
+                ui::addr(range.start.0.wrapping_add(offset as u64)),
+                left,
+                ui::addr(other.0.wrapping_add(offset as u64)),
+                right
+            );
+        }
+        let compared = range.len() - result.unreadable;
+        match result.differences.len() {
+            0 => outln!(
+                "{} ({:#x} bytes compared)",
+                "no differences".bright_black(),
+                compared
+            ),
+            count => outln!(
+                "\n{count} {} ({:#x} bytes compared)",
+                if count == 1 {
+                    "difference"
+                } else {
+                    "differences"
+                },
+                compared
+            ),
+        }
+        if result.unreadable > 0 {
+            outln!(
+                "{}",
+                format!("{:#x} unreadable bytes skipped", result.unreadable).bright_black()
+            );
+        }
+        match result.stopped {
+            Some(SearchStop::MatchLimit) => outln!(
+                "{}",
+                format!("stopped after {MAX_SEARCH_MATCHES} differences").bright_black()
+            ),
+            Some(SearchStop::Interrupted) => outln!("{}", "interrupted".bright_black()),
+            None => {}
+        }
+        outln!();
+        Ok(())
+    }
+
+    fn cmd_m(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        /// A copy is buffered whole, so it is bounded.
+        const MAX_MOVE_BYTES: usize = 16 << 20;
+        let Some((range, destination)) = self.range_and_address(&invocation) else {
+            return Ok(());
+        };
+        if range.len() > MAX_MOVE_BYTES {
+            error!(
+                "cannot copy {:#x} bytes: at most {MAX_MOVE_BYTES:#x} are copied at once",
+                range.len()
+            );
+            return Ok(());
+        }
+        let (data, valid) = match self.read_virtual_best_effort(&range) {
+            Ok(read) => read,
+            Err(error) => {
+                error!("failed to read {}: {error}", ui::addr(range.start.0));
+                return Ok(());
+            }
+        };
+        if let Some(offset) = valid.iter().position(|valid| !valid) {
+            error!(
+                "nothing copied: {} is unreadable",
+                ui::addr(range.start.0.wrapping_add(offset as u64))
+            );
+            return Ok(());
+        }
+        match self
+            .ctx
+            .target
+            .context_memory()
+            .write_bytes(destination, &data)
+        {
+            Ok(()) => outln!(
+                "copied {:#x} bytes from {} to {}\n",
+                data.len(),
+                ui::addr(range.start.0),
+                ui::addr(destination.0)
+            ),
+            Err(error) => error!("failed to write {}: {error}", ui::addr(destination.0)),
+        }
         Ok(())
     }
 

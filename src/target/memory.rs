@@ -39,6 +39,19 @@ pub enum SearchStop {
     Interrupted,
 }
 
+/// What [`Target::compare`] found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CompareResult {
+    /// Offsets into both ranges whose bytes differ, with the first range's
+    /// byte and the second's, in order.
+    pub differences: Vec<(usize, u8, u8)>,
+    /// Offsets at which either range could not be read, and were skipped.
+    pub unreadable: usize,
+    /// The comparison stopped early: [`MAX_SEARCH_MATCHES`] differences
+    /// were found, or the host interrupted it.
+    pub stopped: Option<SearchStop>,
+}
+
 impl Target {
     /// An address space rooted at `dtb` in the resolved guest architecture. On
     /// ARM64 the kernel root (TTBR1) is threaded in so kernel-VA reads work
@@ -130,6 +143,54 @@ impl Target {
                 result.matches.push(chunk_start.0.wrapping_add(at as u64));
             }
             offset += starts;
+        }
+        Ok(result)
+    }
+
+    /// Compare `length` bytes at `first` with as many at `second`, reading
+    /// with `read` as [`Self::search`] does. Offsets unreadable in either
+    /// range are skipped and counted; see [`CompareResult`] for where it
+    /// stops.
+    pub fn compare(
+        &self,
+        first: VirtAddr,
+        second: VirtAddr,
+        length: usize,
+        read: impl Fn(VirtAddr, &mut [u8]) -> Result<()>,
+    ) -> Result<CompareResult> {
+        if length > MAX_SEARCH_BYTES {
+            return Err(Error::InvalidArgument(format!(
+                "compare length {length:#x} exceeds the maximum of {MAX_SEARCH_BYTES:#x} bytes"
+            )));
+        }
+        let mut result = CompareResult::default();
+        let mut offset = 0usize;
+        while offset < length {
+            if self.interrupt.load(Ordering::Relaxed) {
+                result.stopped = Some(SearchStop::Interrupted);
+                break;
+            }
+            let chunk_len = SEARCH_CHUNK.min(length - offset);
+            let at = |start: VirtAddr| VirtAddr(start.0.wrapping_add(offset as u64));
+            let (left, left_valid) = read_page_chunks(at(first), chunk_len, &read)?;
+            let (right, right_valid) = read_page_chunks(at(second), chunk_len, &read)?;
+            for index in 0..chunk_len {
+                if !(left_valid[index] && right_valid[index]) {
+                    result.unreadable += 1;
+                    continue;
+                }
+                if left[index] == right[index] {
+                    continue;
+                }
+                if result.differences.len() == MAX_SEARCH_MATCHES {
+                    result.stopped = Some(SearchStop::MatchLimit);
+                    return Ok(result);
+                }
+                result
+                    .differences
+                    .push((offset + index, left[index], right[index]));
+            }
+            offset += chunk_len;
         }
         Ok(result)
     }
