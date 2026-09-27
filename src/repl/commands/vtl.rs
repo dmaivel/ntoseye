@@ -77,6 +77,8 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | ".effmach"
             | ".echo"
             | ".printf"
+            // Each command it runs passes this gate itself.
+            | ".foreach"
             | ".cls"
             | ".logopen"
             | ".logappend"

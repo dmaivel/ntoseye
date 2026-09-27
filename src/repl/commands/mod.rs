@@ -13,6 +13,7 @@ mod cpu;
 mod diagnostics;
 mod exceptions;
 mod exec;
+mod foreach;
 mod frames;
 mod heap;
 mod memory;

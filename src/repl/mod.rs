@@ -241,6 +241,9 @@ pub struct ReplState<'a> {
     /// Nested automatic exception-command executions. Bounded so an event
     /// command that resumes into the same exception cannot recurse forever.
     pub event_command_depth: usize,
+    /// Nested command loops (`.foreach`, `!for_each_*`). Bounded so an alias
+    /// that loops over itself ends with an error instead of the stack.
+    pub command_loop_depth: usize,
     pub radix: NumberRadix,
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
@@ -435,6 +438,7 @@ impl<'a> ReplState<'a> {
             caches: store.caches,
             aliases: store.aliases,
             event_command_depth: 0,
+            command_loop_depth: 0,
             radix: store.radix,
             line: String::new(),
             context: store.context,
@@ -799,6 +803,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         caches,
         aliases,
         event_command_depth: 0,
+        command_loop_depth: 0,
         radix: NumberRadix::Hexadecimal,
         line: String::new(),
         context: DispatchContext::Interactive,

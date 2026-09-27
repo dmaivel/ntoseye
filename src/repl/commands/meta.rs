@@ -588,6 +588,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     (".cls", "session"),
     (".echo", "session"),
     (".printf", "session"),
+    (".foreach", "session"),
     (".hh", "session"),
     (".logopen", "session"),
     (".logappend", "session"),
