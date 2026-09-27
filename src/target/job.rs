@@ -103,6 +103,7 @@ pub struct JobDetail {
     pub parent_job: Option<VirtAddr>,
     pub root_job: Option<VirtAddr>,
     pub child_jobs: Vec<VirtAddr>,
+    pub child_job_termination: ListTermination,
     /// The job is a silo (`JobFlags.Silo`).
     pub silo: bool,
     pub server_silo_globals: Option<VirtAddr>,
@@ -201,7 +202,7 @@ impl Target {
             "JobLinks",
             MAX_JOB_PROCESSES,
         );
-        let (child_jobs, _) = list(
+        let (child_jobs, child_job_termination) = list(
             "ChildJobListHead",
             "_EJOB",
             "SiblingJobLinks",
@@ -228,6 +229,7 @@ impl Target {
             parent_job: pointer("ParentJob").filter(|job| !job.is_zero()),
             root_job: pointer("RootJob").filter(|job| !job.is_zero()),
             child_jobs,
+            child_job_termination,
             server_silo_globals: pointer("ServerSiloGlobals").filter(|globals| !globals.is_zero()),
             processes,
             process_termination,

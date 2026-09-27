@@ -54,8 +54,8 @@ fn job_fields(fields: &[JobField]) -> View {
 /// `!job`; top-level keys: `address`, `job_id`, `session_id`, `accounting`
 /// (times in 100 ns, memory in pages), `limits`, `limit_flag_names`,
 /// `job_flags`, `job_flag_names`, `nesting_depth`, `parent_job`, `root_job`,
-/// `child_jobs`, `silo`, `server_silo_globals`, `processes`,
-/// `unreadable_processes`, `process_list_termination`.
+/// `child_jobs`, `child_job_list_termination`, `silo`, `server_silo_globals`,
+/// `processes`, `unreadable_processes`, `process_list_termination`.
 pub fn job(job: &JobDetail) -> View {
     let limit_flags = job
         .limits
@@ -88,6 +88,10 @@ pub fn job(job: &JobDetail) -> View {
         ("parent_job", View::OptHex(job.parent_job.map(|job| job.0))),
         ("root_job", View::OptHex(job.root_job.map(|job| job.0))),
         ("child_jobs", addresses(&job.child_jobs)),
+        (
+            "child_job_list_termination",
+            list_termination(&job.child_job_termination),
+        ),
         ("silo", View::Bool(job.silo)),
         (
             "server_silo_globals",

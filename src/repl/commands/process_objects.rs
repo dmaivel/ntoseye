@@ -244,6 +244,9 @@ fn print_job(job: &JobDetail, flags: u64) {
         for child in &job.child_jobs {
             outln!("    child job {}", ui::addr(child.0));
         }
+        if let Some(why) = job.child_job_termination.diagnostic() {
+            outln!("    child job list ended early: {why}");
+        }
         if job.silo {
             outln!(
                 "  Silo: ServerSiloGlobals {}",
