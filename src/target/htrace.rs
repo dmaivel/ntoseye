@@ -109,12 +109,15 @@ impl Target {
             let entry = types
                 .struct_with_layout(entry_layout.clone(), db + slot * entry_size)
                 .prefetch();
-            let read = || -> Result<HandleTrace> {
-                let handle = entry.read_uint("Handle")?;
+            let read = || -> Result<Option<HandleTrace>> {
+                let traced = entry.read_uint("Handle")?;
+                if handle.is_some_and(|handle| handle != traced) {
+                    return Ok(None);
+                }
                 let client = entry.embedded("ClientId")?;
                 let stack = entry.read_field_bytes("StackTrace", 8 * 64)?;
-                Ok(HandleTrace {
-                    handle,
+                Ok(Some(HandleTrace {
+                    handle: traced,
                     kind: entry.read_field("Type")?,
                     process_id: client.read_uint("UniqueProcess")?,
                     thread_id: client.read_uint("UniqueThread")?,
@@ -130,13 +133,11 @@ impl Target {
                             (address, symbol)
                         })
                         .collect(),
-                })
+                }))
             };
             match read() {
-                Ok(trace) if handle.is_none_or(|handle| handle == trace.handle) => {
-                    detail.traces.push(trace);
-                }
-                Ok(_) => {}
+                Ok(Some(trace)) => detail.traces.push(trace),
+                Ok(None) => {}
                 Err(_) => detail.unreadable += 1,
             }
         }
