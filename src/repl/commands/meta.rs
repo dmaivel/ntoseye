@@ -388,8 +388,8 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        outln!(
-            "unknown command: '{}' (try pressing tab to see available commands)\n",
+        error!(
+            "unknown command '{}' (try pressing tab to see available commands)",
             invocation.name
         );
 
