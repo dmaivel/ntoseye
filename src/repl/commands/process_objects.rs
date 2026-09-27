@@ -179,20 +179,20 @@ impl ReplState<'_> {
     }
 
     fn cmd_job(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut values = [None, Some(1)];
+        let mut values = [0, 1];
         for (slot, arg) in values.iter_mut().zip(&invocation.argv) {
             match self.eval_or_report(arg.as_ref()) {
-                Some(VirtAddr(value)) => *slot = Some(value),
+                Some(VirtAddr(value)) => *slot = value,
                 None => return Ok(()),
             }
         }
         let [address, flags] = values;
         let target = &self.ctx.target;
         match target
-            .job_address(address.map(VirtAddr))
+            .job_address(Some(VirtAddr(address)))
             .and_then(|job| target.inspect_job(job))
         {
-            Ok(job) => print_job(&job, flags.unwrap_or(1)),
+            Ok(job) => print_job(&job, flags),
             Err(error) => error!("{error}"),
         }
         Ok(())
@@ -212,11 +212,7 @@ fn print_job(job: &JobDetail, flags: u64) {
         for field in &job.accounting {
             outln!("    {:<28} {:#x}", format!("{}:", field.field), field.value);
         }
-        outln!(
-            "  Job Flags ({})",
-            job.job_flags
-                .map_or("-".to_string(), |flags| format!("{flags:#x}"))
-        );
+        outln!("  Job Flags ({})", optional_hex(job.job_flags));
         for name in &job.job_flag_names {
             outln!("    [{name}]");
         }
@@ -233,13 +229,11 @@ fn print_job(job: &JobDetail, flags: u64) {
                 field.value
             );
         }
-        let job_link =
-            |link: Option<VirtAddr>| link.map_or("-".to_string(), |link| ui::addr(link.0));
         outln!(
             "  Nesting: depth {}  parent {}  root {}",
             optional(job.nesting_depth),
-            job_link(job.parent_job),
-            job_link(job.root_job)
+            optional_addr(job.parent_job),
+            optional_addr(job.root_job)
         );
         for child in &job.child_jobs {
             outln!("    child job {}", ui::addr(child.0));
@@ -250,7 +244,7 @@ fn print_job(job: &JobDetail, flags: u64) {
         if job.silo {
             outln!(
                 "  Silo: ServerSiloGlobals {}",
-                job_link(job.server_silo_globals)
+                optional_addr(job.server_silo_globals)
             );
         }
     }
@@ -367,6 +361,15 @@ fn optional_hex(value: Option<u64>) -> String {
     value.map_or("-".to_string(), |value| format!("{value:#x}"))
 }
 
+/// `[a] [b] ...`.
+fn bracketed(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| format!("[{name}]"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn optional_count(value: Option<u64>) -> String {
     value.map_or("?".to_string(), |value| value.to_string())
 }
@@ -424,11 +427,7 @@ fn print_alpc_port(port: &AlpcPortDetail) {
         format!(
             "{} {}",
             optional_hex(port.state),
-            port.state_flags
-                .iter()
-                .map(|flag| format!("[{flag}]"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            bracketed(&port.state_flags)
         ),
     );
     outln!();
@@ -504,12 +503,7 @@ fn print_alpc_message(message: &AlpcMessageDetail) {
             optional_hex(message.state),
             optional_count(message.queue_type),
             optional_count(message.queue_port_type),
-            message
-                .state_flags
-                .iter()
-                .map(|flag| format!("[{flag}]"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            bracketed(&message.state_flags)
         ),
     );
     row(
