@@ -45,6 +45,9 @@ pub struct CompareResult {
     /// Offsets into both ranges whose bytes differ, with the first range's
     /// byte and the second's, in order.
     pub differences: Vec<(usize, u8, u8)>,
+    /// Offsets readable in both ranges whose bytes were compared: fewer than
+    /// the length less `unreadable` when the comparison stopped early.
+    pub compared: usize,
     /// Offsets at which either range could not be read, and were skipped.
     pub unreadable: usize,
     /// The comparison stopped early: [`MAX_SEARCH_MATCHES`] differences
@@ -179,16 +182,16 @@ impl Target {
                     result.unreadable += 1;
                     continue;
                 }
-                if left[index] == right[index] {
-                    continue;
+                if left[index] != right[index] {
+                    if result.differences.len() == MAX_SEARCH_MATCHES {
+                        result.stopped = Some(SearchStop::MatchLimit);
+                        return Ok(result);
+                    }
+                    result
+                        .differences
+                        .push((offset + index, left[index], right[index]));
                 }
-                if result.differences.len() == MAX_SEARCH_MATCHES {
-                    result.stopped = Some(SearchStop::MatchLimit);
-                    return Ok(result);
-                }
-                result
-                    .differences
-                    .push((offset + index, left[index], right[index]));
+                result.compared += 1;
             }
             offset += chunk_len;
         }
@@ -346,5 +349,67 @@ impl Target {
             .kernel_address_space()
             .read(base + field.offset as u64)?;
         Ok(field.decode(raw))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::session_over_memory;
+
+    /// `c` reads a chunk at a time: a difference past the first chunk is
+    /// reported at its offset in the range, bytes unreadable in one range are
+    /// skipped and counted, and stopping at the difference limit counts only
+    /// the bytes it compared.
+    #[test]
+    fn compare_reports_offsets_across_chunks_and_counts_what_it_compared() {
+        const BASE: u64 = 0x10_0000;
+        let target = session_over_memory(0x1000, &[0; 0x10]).target;
+        // Memory from BASE, with one page of the second range unmapped.
+        let compare = |memory: &[u8], hole: u64, second: u64, length| {
+            let read = |address: VirtAddr, buf: &mut [u8]| {
+                let offset = (address.0 - BASE) as usize;
+                match memory.get(offset..offset + buf.len()) {
+                    Some(bytes) if address.0 - address.page_offset() != hole => {
+                        buf.copy_from_slice(bytes);
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidArgument("unmapped".into())),
+                }
+            };
+            target
+                .compare(VirtAddr(BASE), VirtAddr(BASE + second), length, read)
+                .unwrap()
+        };
+
+        const LENGTH: usize = SEARCH_CHUNK + 0x40000;
+        const SECOND: usize = LENGTH + 0x1000;
+        let mut memory = vec![0u8; SECOND + LENGTH];
+        memory[0x10] = 0xaa;
+        memory[SECOND + 3] = 1;
+        memory[SECOND + SEARCH_CHUNK + 5] = 2;
+        let hole = BASE + (SECOND + 0x2000) as u64;
+        memory[SECOND + 0x2000] = 3;
+        let result = compare(&memory, hole, SECOND as u64, LENGTH);
+        assert_eq!(
+            result.differences,
+            [(3, 0, 1), (0x10, 0xaa, 0), (SEARCH_CHUNK + 5, 0, 2)]
+        );
+        assert_eq!(result.unreadable, PAGE_SIZE);
+        assert_eq!(result.compared, LENGTH - PAGE_SIZE);
+        assert_eq!(result.stopped, None);
+
+        // 16 equal bytes, then nothing but differences: the comparison stops
+        // at the difference past the limit.
+        let mut memory = vec![0u8; 0x4000];
+        memory[0x2010..].fill(0xff);
+        let result = compare(&memory, 0, 0x2000, 0x2000);
+        assert_eq!(result.differences.len(), MAX_SEARCH_MATCHES);
+        assert_eq!(
+            result.differences.last(),
+            Some(&(16 + MAX_SEARCH_MATCHES - 1, 0, 0xff))
+        );
+        assert_eq!(result.compared, 16 + MAX_SEARCH_MATCHES);
+        assert_eq!(result.stopped, Some(SearchStop::MatchLimit));
     }
 }

@@ -1428,12 +1428,11 @@ impl ReplState<'_> {
                 right
             );
         }
-        let compared = range.len() - result.unreadable;
         match result.differences.len() {
             0 => outln!(
                 "{} ({:#x} bytes compared)",
                 "no differences".bright_black(),
-                compared
+                result.compared
             ),
             count => outln!(
                 "\n{count} {} ({:#x} bytes compared)",
@@ -1442,7 +1441,7 @@ impl ReplState<'_> {
                 } else {
                     "differences"
                 },
-                compared
+                result.compared
             ),
         }
         if result.unreadable > 0 {
