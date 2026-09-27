@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, HwBreakpointAccess,
-    StopEvent, TrapState,
+    StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::Result;
@@ -114,6 +114,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn set_kernel_dtb(&mut self, dtb: u64) {
         self.lock().set_kernel_dtb(dtb);
+    }
+
+    fn set_teb_path(&mut self, path: Option<TebPath>) {
+        self.lock().set_teb_path(path);
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {

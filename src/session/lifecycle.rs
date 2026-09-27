@@ -290,6 +290,7 @@ impl Session {
         // ARM64 register snapshots expose TTBR1 via the synthetic `cr3` slot;
         // hand the resolved kernel root to the backend so it can fill it.
         backend.set_kernel_dtb(target.kernel_dtb());
+        backend.set_teb_path(crate::cpu_state::teb_path(&target));
         backend.set_windows_hypervisor(target.windows_hypervisor_running());
         let register_map = backend.register_map().clone();
 

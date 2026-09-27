@@ -6,16 +6,17 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
+use crate::dbg_backend::TebPath;
 use crate::kd::framing::{INITIAL_PACKET_ID, PACKET_TYPE_KD_STATE_MANIPULATE, data_packet};
 use crate::kd::registers::{
     ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET, ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET,
     ARM64_KSPECIAL_REGISTERS_MIN_SIZE, ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET,
-    ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET, KSPECIAL_REGISTERS_CR0_OFFSET,
+    ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET, Arm64X18Source, KSPECIAL_REGISTERS_CR0_OFFSET,
     KSPECIAL_REGISTERS_CR2_OFFSET, KSPECIAL_REGISTERS_CR3_OFFSET, KSPECIAL_REGISTERS_CR4_OFFSET,
     KSPECIAL_REGISTERS_CR8_OFFSET, KSPECIAL_REGISTERS_DR0_OFFSET, KSPECIAL_REGISTERS_DR6_OFFSET,
     KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_GDTR_OFFSET, KSPECIAL_REGISTERS_IDTR_OFFSET,
     KSPECIAL_REGISTERS_LDTR_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE, KSPECIAL_REGISTERS_TR_OFFSET,
-    append_control_registers_from_special, arm64_kernel_x18, context_payload,
+    append_control_registers_from_special, arm64_x18, context_payload,
     update_arm64_debug_registers_from_context, update_special_debug_registers_from_context,
 };
 
@@ -221,14 +222,34 @@ fn arm64_registers_survive_refused_control_space() {
     worker.join().unwrap();
 }
 
-/// In a kernel-mode ARM64 context Windows' KD returns whatever the frame's
-/// unsaved `x18` slot held (seen: 0, and the KPRCB); the real value is the
-/// KPCR, `TPIDR_EL1` with the flag bits in its low 12 cleared, as the
-/// exception entry loads it. A user-mode `x18` (the TEB) is kept as read.
+/// Windows' KD does not return an ARM64 thread's `x18`. In kernel mode it is
+/// the KPCR, whatever KD reported (seen: 0, and the KPRCB); in user mode it
+/// is the TEB, read through the KPCR's current thread, and KD reports 0. A
+/// user-mode `x18` KD did report is kept.
 #[test]
-fn a_kernel_mode_arm64_context_gets_its_kpcr_in_x18() {
+fn an_arm64_context_gets_its_real_x18() {
     const EL1H: u32 = 0b0101;
     const EL0T: u32 = 0b0000;
+    const KPCR: u64 = 0xffff_f800_a1b7_0000;
+    const THREAD: u64 = 0xffff_ba87_e0ab_3080;
+    const TEB: u64 = 0x0000_00c8_4ac8_e000;
+    const PATH: TebPath = TebPath {
+        current_thread: 0x988,
+        teb: 0xf0,
+    };
+    struct Guest(Option<u64>);
+    impl Arm64X18Source for Guest {
+        fn kpcr(&mut self) -> Option<u64> {
+            self.0
+        }
+        fn read_pointer(&mut self, address: u64) -> Option<u64> {
+            match address {
+                a if a == KPCR + 0x988 => Some(THREAD),
+                a if a == THREAD + 0xf0 => Some(TEB),
+                _ => None,
+            }
+        }
+    }
     let context = |cpsr: u32, x18: u64| {
         let mut bytes = vec![0u8; context_arm64::CONTEXT_SIZE];
         bytes[context_arm64::OFFSET_CPSR..context_arm64::OFFSET_CPSR + 4]
@@ -237,15 +258,15 @@ fn a_kernel_mode_arm64_context_gets_its_kpcr_in_x18() {
         bytes[at..at + 8].copy_from_slice(&x18.to_le_bytes());
         bytes
     };
-    let tpidr = || Some(0xffff_f800_a1b7_0002);
+    let x18 = |cpsr, x18, path| arm64_x18(&context(cpsr, x18), path, &mut Guest(Some(KPCR)));
+
+    assert_eq!(x18(EL1H, 0, Some(PATH)), Some(KPCR));
+    assert_eq!(x18(EL1H, KPCR + 0x980, None), Some(KPCR));
+    assert_eq!(x18(EL0T, 0, Some(PATH)), Some(TEB));
+    assert_eq!(x18(EL0T, TEB, Some(PATH)), None);
+    assert_eq!(x18(EL0T, 0, None), None);
     assert_eq!(
-        arm64_kernel_x18(&context(EL1H, 0), tpidr),
-        Some(0xffff_f800_a1b7_0000)
+        arm64_x18(&context(EL1H, 0), Some(PATH), &mut Guest(None)),
+        None
     );
-    assert_eq!(
-        arm64_kernel_x18(&context(EL1H, 0xffff_f800_a1b7_0980), tpidr),
-        Some(0xffff_f800_a1b7_0000)
-    );
-    assert_eq!(arm64_kernel_x18(&context(EL0T, 0), tpidr), None);
-    assert_eq!(arm64_kernel_x18(&context(EL1H, 0), || None), None);
 }

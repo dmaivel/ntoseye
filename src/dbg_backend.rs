@@ -523,6 +523,15 @@ pub const STEP_UNDER_WINDOWS_HYPERVISOR: &str = "single-stepping is unsafe over 
      Windows runs its own hypervisor (VBS, Hyper-V): a step can complete inside the hypervisor and \
      leave its trap to Windows. Use the kd or kdnet backend to step";
 
+/// Where the current thread's TEB is: the pointer to the current thread at
+/// `kpcr + current_thread` (`_KPCR.Prcb.CurrentThread`), and the TEB pointer
+/// at `thread + teb` (`_KTHREAD.Teb`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TebPath {
+    pub current_thread: u64,
+    pub teb: u64,
+}
+
 /// Debug transport abstraction; guest memory access is provided separately by
 /// [`crate::phys::PhysMem`].
 pub trait DebugBackend {
@@ -537,6 +546,11 @@ pub trait DebugBackend {
     /// once guest discovery resolves it, so register snapshots can expose the
     /// DTB. No-op on backends whose register file carries the DTB natively.
     fn set_kernel_dtb(&mut self, _dtb: u64) {}
+
+    /// Provide where the current thread's TEB is, from the kernel's PDB, so
+    /// a register snapshot whose transport drops the TEB (KD on ARM64 in
+    /// user mode, where `x18` holds it) can fill it. No-op elsewhere.
+    fn set_teb_path(&mut self, _path: Option<TebPath>) {}
 
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;

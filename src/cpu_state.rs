@@ -2,6 +2,7 @@
 //! count, shared by the CPU and scheduler commands.
 
 use crate::backend::MemoryOps;
+use crate::dbg_backend::TebPath;
 use crate::error::{Error, Result};
 use crate::guest::Image;
 use crate::target::Target;
@@ -31,6 +32,23 @@ fn prcb_offset(target: &Target) -> Result<u64> {
         .types()
         .layout("_KPCR")?
         .field_offset("Prcb")
+}
+
+/// Where the current thread's TEB is, from the kernel's PDB; `None` when a
+/// layout lacks one of the fields.
+pub fn teb_path(target: &Target) -> Option<TebPath> {
+    let types = kernel(target).ok()?.types();
+    let current_thread = prcb_offset(target).ok()?
+        + types
+            .layout("_KPRCB")
+            .ok()?
+            .field_offset("CurrentThread")
+            .ok()?;
+    let teb = types.layout("_KTHREAD").ok()?.field_offset("Teb").ok()?;
+    Some(TebPath {
+        current_thread,
+        teb,
+    })
 }
 
 fn validate_pointer(kind: &str, index: u16, value: VirtAddr) -> Result<VirtAddr> {

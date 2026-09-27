@@ -193,6 +193,7 @@ impl KdBackend {
             register_map,
             arch,
             kernel_dtb_override: 0,
+            teb_path: None,
             processor_count: initial_stop.number_processors.max(1),
             current_processor: initial_stop.processor,
             last_stop_processor: initial_stop.processor,

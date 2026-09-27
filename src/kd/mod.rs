@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent, TrapState,
+    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::{Error, Result};
@@ -300,6 +300,9 @@ pub struct KdBackend {
     /// later confirmed by the session; on ARM64 it fills the synthetic `cr3`
     /// register slot.
     kernel_dtb_override: u64,
+    /// Where the current thread's TEB is, from the session; see
+    /// [`DebugBackend::set_teb_path`].
+    teb_path: Option<TebPath>,
     processor_count: u16,
     current_processor: u16,
     last_stop_processor: u16,
@@ -437,6 +440,10 @@ impl DebugBackend for KdBackend {
     fn set_kernel_dtb(&mut self, dtb: u64) {
         self.kernel_dtb_override = dtb;
         kd_trace!("kd: kernel page-table root = {dtb:#x}");
+    }
+
+    fn set_teb_path(&mut self, path: Option<TebPath>) {
+        self.teb_path = path;
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {

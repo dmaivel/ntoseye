@@ -2,8 +2,9 @@
 //! `KSPECIAL_REGISTERS` control space and MSRs, cached per halt.
 
 use crate::bytes;
+use crate::dbg_backend::TebPath;
 use crate::error::{Error, Result};
-use crate::types::Arch;
+use crate::types::{Arch, VirtAddr};
 
 use super::{
     KD_REQUEST_TIMEOUT, KdBackend, STATUS_SINGLE_STEP, api, context, context_arm64, hwbp,
@@ -50,24 +51,44 @@ const ARM64_WINDBG_FAR_EL1: u32 = 0x0003_0600;
 /// processor's KPCR there, with flags in the low bits.
 const ARM64_WINDBG_TPIDR_EL1: u32 = 0x0003_0d04;
 
-/// `x18` of a kernel-mode ARM64 `context`: the processor's KPCR, which
-/// every exception entry loads as `TPIDR_EL1` with the low 12 bits cleared.
-/// An exception taken in kernel mode reloads `x18` without saving it, so
-/// the `x18` KD returns there is whatever the frame's slot held (0, or
-/// another pointer). `None` for user mode, where `x18` is the TEB and is
-/// saved.
-pub(super) fn arm64_kernel_x18(
+/// Where Windows keeps an ARM64 thread's `x18`, which the `CONTEXT` KD
+/// returns does not carry.
+pub(super) trait Arm64X18Source {
+    /// The processor's KPCR: `TPIDR_EL1` with its flag bits (the low 12)
+    /// cleared, as every exception entry loads `x18`.
+    fn kpcr(&mut self) -> Option<u64>;
+    /// The pointer at `address` in kernel memory.
+    fn read_pointer(&mut self, address: u64) -> Option<u64>;
+}
+
+/// The `x18` of an ARM64 `context`, when it has to be recovered: in kernel
+/// mode the processor's KPCR, which an exception taken there reloads
+/// without saving, so KD returns whatever the frame's slot held (0, or
+/// another pointer); in user mode the current thread's TEB, which KD
+/// returns as 0 (the trap frame saves it, the `CONTEXT` leaves it out).
+/// `None` for a user-mode `x18` KD did return, or when `source` cannot
+/// answer.
+pub(super) fn arm64_x18(
     context: &[u8],
-    tpidr_el1: impl FnOnce() -> Option<u64>,
+    teb_path: Option<TebPath>,
+    source: &mut impl Arm64X18Source,
 ) -> Option<u64> {
     let cpsr = bytes::read_u32(context, context_arm64::OFFSET_CPSR);
+    let x18_at = context_arm64::OFFSET_X0 + 18 * 8;
+    let x18 = u64::from_le_bytes(context.get(x18_at..x18_at + 8)?.try_into().ok()?);
     // CPSR.M[3:2] is the exception level the context was taken at.
-    if (cpsr >> 2) & 3 != 1 {
-        return None;
+    match (cpsr >> 2) & 3 {
+        1 => source.kpcr().filter(|kpcr| *kpcr != 0),
+        0 if x18 == 0 => {
+            let path = teb_path?;
+            let kpcr = source.kpcr().filter(|kpcr| *kpcr != 0)?;
+            let thread = source.read_pointer(kpcr.wrapping_add(path.current_thread))?;
+            source
+                .read_pointer(thread.wrapping_add(path.teb))
+                .filter(|teb| *teb != 0)
+        }
+        _ => None,
     }
-    tpidr_el1()
-        .map(|value| value & !0xfff)
-        .filter(|kpcr| *kpcr != 0)
 }
 
 const ARM64_DEBUG_REGISTER_OFFSETS: &[(usize, usize, usize, usize)] = &[
@@ -242,6 +263,23 @@ pub(super) fn context_payload(data: &[u8]) -> Result<&[u8]> {
     Ok(&data[..context::CONTEXT_SIZE])
 }
 
+impl Arm64X18Source for KdBackend {
+    fn kpcr(&mut self) -> Option<u64> {
+        self.read_msr_value(self.current_processor, ARM64_WINDBG_TPIDR_EL1)
+            .inspect_err(|error| kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}"))
+            .ok()
+            .map(|value| value & !0xfff)
+    }
+
+    fn read_pointer(&mut self, address: u64) -> Option<u64> {
+        let mut bytes = [0u8; 8];
+        self.read_virtual_bytes(VirtAddr(address), &mut bytes)
+            .inspect_err(|error| kd_trace!("kd: ARM64 TEB lookup read failed: {error}"))
+            .ok()?;
+        Some(u64::from_le_bytes(bytes))
+    }
+}
+
 impl KdBackend {
     fn context_flags(&self) -> u32 {
         match self.arch {
@@ -363,17 +401,9 @@ impl KdBackend {
                     (0, 0)
                 };
                 let kernel_dtb = self.kernel_dtb_override;
-                let processor = self.current_processor;
-                let kpcr = arm64_kernel_x18(ctx, || {
-                    self.read_msr_value(processor, ARM64_WINDBG_TPIDR_EL1)
-                        .inspect_err(|error| {
-                            kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}")
-                        })
-                        .ok()
-                });
-                if let Some(kpcr) = kpcr {
+                if let Some(x18) = arm64_x18(ctx, self.teb_path, self) {
                     let at = context_arm64::OFFSET_X0 + 18 * 8;
-                    ctx[at..at + 8].copy_from_slice(&kpcr.to_le_bytes());
+                    ctx[at..at + 8].copy_from_slice(&x18.to_le_bytes());
                 }
                 ctx.resize(context_arm64::REGISTER_BUFFER_SIZE, 0);
                 ctx[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
