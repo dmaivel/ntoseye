@@ -1000,6 +1000,11 @@ class Inspect:
         """
         Aggregate pool tracker usage by tag (`!poolused`).
         """
+    def pool_validate(self, /, address: int) -> Record:
+        """
+        Check the block headers of the pool page containing `address` and
+        report the first inconsistency (`!poolval`).
+        """
     def ready(self, /, processor: int |None = None) -> Record:
         """
         Read bounded dispatcher-ready queues for every processor or one (`!ready`).

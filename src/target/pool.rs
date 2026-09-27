@@ -895,11 +895,30 @@ pub fn scan_pool_page_lax(
     pool_page_blocks(layout, base, &page)
 }
 
-/// [`scan_pool_page_lax`] of the page at `base` already read into `page`.
-pub fn pool_page_blocks(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec<PoolHeader> {
+/// Every 16-byte-aligned slot of the pool page `page` (at `base`) that reads
+/// as a plausible `_POOL_HEADER` whose block ends inside the page, in address
+/// order. Overlapping candidates are all kept: data inside a block can look
+/// like a header.
+pub fn pool_header_candidates(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec<PoolHeader> {
     let Some(page_end) = base.0.checked_add(page.len() as u64) else {
         return Vec::new();
     };
+    (0..page.len() as u64)
+        .step_by(POOL_ALIGN as usize)
+        .filter_map(|offset| {
+            pool_header_in(layout, base + offset, &page[offset as usize..]).filter(|h| {
+                pool_header_plausible(layout, h)
+                    && h.header
+                        .0
+                        .checked_add(h.size)
+                        .is_some_and(|end| end <= page_end)
+            })
+        })
+        .collect()
+}
+
+/// [`scan_pool_page_lax`] of the page at `base` already read into `page`.
+pub fn pool_page_blocks(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec<PoolHeader> {
     let tag_at = |header: VirtAddr| {
         page.get((header.0 - base.0) as usize..)
             .and_then(|bytes| pool_tag_in(layout, bytes))
@@ -914,18 +933,7 @@ pub fn pool_page_blocks(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec
         tag: tag_at(header),
         synthetic_free: true,
     };
-    let candidates: Vec<PoolHeader> = (0..page.len() as u64)
-        .step_by(POOL_ALIGN as usize)
-        .filter_map(|offset| {
-            pool_header_in(layout, base + offset, &page[offset as usize..]).filter(|h| {
-                pool_header_plausible(layout, h)
-                    && h.header
-                        .0
-                        .checked_add(h.size)
-                        .is_some_and(|end| end <= page_end)
-            })
-        })
-        .collect();
+    let candidates = pool_header_candidates(layout, base, page);
     let mut blocks = Vec::new();
     let mut cursor = base;
     for (i, h) in candidates.iter().copied().enumerate() {

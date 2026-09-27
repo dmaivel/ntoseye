@@ -564,6 +564,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!pool", "memory manager"),
     ("!poolfind", "memory manager"),
     ("!poolused", "memory manager"),
+    ("!poolval", "memory manager"),
     ("!pte", "memory manager"),
     ("!ptov", "memory manager"),
     ("!sysptes", "memory manager"),

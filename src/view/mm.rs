@@ -8,9 +8,9 @@ use crate::target::mm::{
     AddressDescription, AddressModule, BigPoolDetail, LookasideDetail, LookasideListsDetail,
     MdlDetail, MemoryRegionInfo, PfnDetail, PfnSelector, PoolBlockDetail, PoolFindDetail,
     PoolFindMatch, PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail,
-    ProcessMemoryUsage, PteLevel, PteWalk, PtovDetail, PtovMapping, SystemMemorySummary,
-    SystemPteTypeDetail, SystemPtesDetail, VadProtection, VadType, VmCounter, VmDetail,
-    VmPoolDetail, VmPteDetail, VprotDetail, VtopDetail, VtopLevel, memory_state_name,
+    PoolValidationDetail, ProcessMemoryUsage, PteLevel, PteWalk, PtovDetail, PtovMapping,
+    SystemMemorySummary, SystemPteTypeDetail, SystemPtesDetail, VadProtection, VadType, VmCounter,
+    VmDetail, VmPoolDetail, VmPteDetail, VprotDetail, VtopDetail, VtopLevel, memory_state_name,
     memory_type_name, page_protection_name,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
@@ -321,6 +321,34 @@ pub fn pool_page(detail: &PoolPageDetail) -> View {
         ),
         ("near_symbol", View::OptStr(detail.near_symbol.clone())),
         ("message", View::OptStr(detail.message.clone())),
+    ])
+}
+
+/// Render `!poolval`; top-level keys: `address`, `page`, `region`, `layout`,
+/// `valid`, `problem` (`header`, `message`), `blocks`.
+pub fn pool_validation(detail: &PoolValidationDetail) -> View {
+    View::Object(vec![
+        ("address", View::Hex(detail.address.0)),
+        ("page", View::Hex(detail.page.0)),
+        (
+            "region",
+            detail.region.as_ref().map_or(View::Null, pool_region),
+        ),
+        ("layout", View::Str(detail.layout.clone())),
+        ("valid", View::Bool(detail.problem.is_none())),
+        (
+            "problem",
+            detail.problem.as_ref().map_or(View::Null, |problem| {
+                View::Object(vec![
+                    ("header", View::Hex(problem.header.0)),
+                    ("message", View::Str(problem.message.clone())),
+                ])
+            }),
+        ),
+        (
+            "blocks",
+            View::List(detail.blocks.iter().map(pool_block).collect()),
+        ),
     ])
 }
 

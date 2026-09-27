@@ -8,9 +8,9 @@ use crate::expr::Expr;
 use crate::memory::{DTB_IDENTITY, PAGE_SIZE};
 use crate::repl::*;
 use crate::target::mm::{
-    LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolFindDetail,
-    PoolType, PoolUsageDetail, PoolUsageSort, PteLevel, PtovDetail, SystemPtesDetail, VmDetail,
-    VtopDetail, VtopLevel,
+    LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolBlockDetail,
+    PoolFindDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail, PteLevel,
+    PtovDetail, SystemPtesDetail, VmDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::tag_string;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
@@ -99,6 +99,15 @@ repl_command! {
 }
 
 repl_command! {
+    cmd_poolval;
+    names: ["!poolval", "poolval"],
+    usage: "!poolval <address> [level]",
+    summary: "Validate the block headers of the pool page containing an address.",
+    details: "Reports the page VALID or INVALID with the first inconsistency. A classic pool page must chain from its start to its end, each PreviousSize matching the BlockSize before it. Segment-heap pages (Windows 10 1903 and later) keep no PreviousSize chain, so there a block whose BlockSize runs over another block's header is the inconsistency. A classic block's PoolType must also name the pool (paged or nonpaged) the page lies in. A level of 1 or more also lists every block header. WinDbg's single-bit-error scan is not done.",
+    completion: Expression,
+}
+
+repl_command! {
     cmd_mdl;
     names: ["!mdl", "mdl"],
     usage: "!mdl <address> [pfn-count]",
@@ -114,6 +123,67 @@ repl_command! {
     summary: "Show system PTE usage from the memory manager's bitmap allocators.",
     details: "Windows 10 and later hand out system PTEs from _MI_SYSTEM_PTE_TYPE bitmap allocators in MiState: Vs.SystemPteInfo (the SystemPtes region) and SystemPtes' system-view, non-cached-mapping, and kernel-stack allocators. For each: the VA range it serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, PteFailures, and from its bitmap the number of free blocks and the largest; the bitmap is read whole (up to 2^27 bits, a bound only a corrupt SizeOfBitMap exceeds), and a free count that differs from the counter means the target allocated between the reads. Counts are in PTEs; the system-view bitmap covers 16 PTEs per bit. Flags follow WinDbg: 0x1 lists each free block (its first PTE, the address it maps, and its length; 256 per allocator). 0x4 (PTEs mapping locked pages) needs the kernel's TrackPtes tracking: it reports which allocators track, but the tracked mappings themselves are not listed. 0x2, 0x8, and 0x10 select Windows 2000/XP/Vista lists these allocators replaced and are ignored. A build without these allocators is refused.",
     completion: Expression,
+}
+
+fn print_pool_validation(detail: &PoolValidationDetail, level: u64) {
+    match &detail.region {
+        Some(region) => outln!(
+            "Pool page {} region is {}",
+            ui::addr(detail.page.0),
+            region.name
+        ),
+        None => outln!(
+            "Pool page {} is in no pool range this build locates",
+            ui::addr(detail.page.0)
+        ),
+    }
+    outln!(
+        "Validating {} pool headers for pool page: {}",
+        detail.layout,
+        ui::addr(detail.page.0)
+    );
+    match &detail.problem {
+        None => outln!("Pool page [ {} ] is VALID.", ui::addr(detail.page.0)),
+        Some(problem) => {
+            outln!("Pool page [ {} ] is INVALID.", ui::addr(detail.page.0));
+            outln!("  {}: {}", ui::addr(problem.header.0), problem.message);
+        }
+    }
+    if level >= 1 {
+        outln!();
+        outln!(
+            "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
+            "header",
+            "size",
+            "prev",
+            "state",
+            "type"
+        );
+        for block in &detail.blocks {
+            print_pool_block_row(block, detail.problem.as_ref().map(|problem| problem.header));
+        }
+    }
+    outln!();
+}
+
+fn print_pool_block_row(block: &PoolBlockDetail, problem: Option<VirtAddr>) {
+    let marker = if problem == Some(block.header) {
+        "!"
+    } else if block.marked {
+        ">"
+    } else {
+        " "
+    };
+    outln!(
+        "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} '{}'",
+        marker,
+        ui::addr(block.header.0),
+        block.size,
+        block.previous_size,
+        block.state,
+        block.pool_type,
+        block.tag_name
+    );
 }
 
 fn print_mdl(detail: &MdlDetail) {
@@ -954,6 +1024,25 @@ impl ReplState<'_> {
         Ok(())
     }
 
+    fn cmd_poolval(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let expr = require_arg!(invocation, 0, "!poolval");
+        let Some(address) = self.eval_or_report(expr) else {
+            return Ok(());
+        };
+        let level = match invocation.arg(1) {
+            Some(arg) => match self.eval_or_report(arg) {
+                Some(VirtAddr(level)) => level,
+                None => return Ok(()),
+            },
+            None => 0,
+        };
+        match self.ctx.target.validate_pool(address) {
+            Ok(detail) => print_pool_validation(&detail, level),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
     fn cmd_pool(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let Some(expr) = invocation.arg(0) else {
             outln!("{}\n", command_help("pool"));
@@ -1023,17 +1112,7 @@ impl ReplState<'_> {
                 "type"
             );
             for block in &detail.blocks {
-                let marker = if block.marked { ">" } else { " " };
-                outln!(
-                    "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} '{}'",
-                    marker,
-                    ui::addr(block.header.0),
-                    block.size,
-                    block.previous_size,
-                    block.state,
-                    block.pool_type,
-                    block.tag_name
-                );
+                print_pool_block_row(block, None);
             }
             if let Some(idx) = detail.target_index {
                 let block = &detail.blocks[idx];

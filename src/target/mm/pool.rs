@@ -5,17 +5,19 @@ use std::ops::ControlFlow;
 
 use super::{
     BigPoolDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange, PoolPageDetail,
-    PoolRegionDetail, PoolType, PoolUsageDetail, PoolUsageSort,
+    PoolProblem, PoolRegionDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail,
 };
-use crate::error::Result;
+use crate::backend::MemoryOps;
+use crate::error::{Error, Result};
 use crate::memory::PAGE_SIZE;
 use crate::symbols::glob_matches;
 use crate::target::Target;
 use crate::target::pool::{
-    BigPoolEntry, NONPAGED_POOL, PAGED_POOL, POOL_PAGE_SIZE, PoolHeader, annotate_near_symbol,
-    big_pool_layout, classify_pool_region, collect_pool_usage, find_big_pool,
-    locate_pool_block_in_page, pool_block_state, pool_layout, pool_page_blocks, pool_range,
-    scan_big_pool_entries, scan_present_pool_pages, segment_heap_hint, tag_string,
+    BigPoolEntry, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE, PoolHeader,
+    annotate_near_symbol, big_pool_layout, classify_pool_region, collect_pool_usage, find_big_pool,
+    locate_pool_block_in_page, pool_block_state, pool_header_candidates, pool_layout,
+    pool_page_blocks, pool_range, scan_big_pool_entries, scan_present_pool_pages,
+    segment_heap_hint, tag_looks_printable, tag_string,
 };
 use crate::types::VirtAddr;
 
@@ -94,6 +96,61 @@ impl Target {
                 None
             },
             message,
+        })
+    }
+
+    /// `!poolval`: check the block headers of the pool page holding
+    /// `address` and report the first inconsistency. A classic pool page
+    /// must chain from its start to its end, each `PreviousSize` matching
+    /// the `BlockSize` before it; a segment-heap page keeps no such chain,
+    /// so there a block whose `BlockSize` runs over another block's header is
+    /// the inconsistency. A classic block's `PoolType` must also name the
+    /// pool the page lies in.
+    pub fn validate_pool(&self, address: VirtAddr) -> Result<PoolValidationDetail> {
+        let layout = pool_layout(self)?;
+        let page = VirtAddr(address.0 & !(POOL_PAGE_SIZE - 1));
+        if let Some(big) = find_big_pool(self, &layout, page) {
+            return Err(Error::DebugInfo(format!(
+                "{:#x} is in a big-pool allocation ('{}', {:#x} bytes at {:#x}), which has no block headers",
+                address.0,
+                tag_string(big.tag),
+                big.size,
+                big.va.0
+            )));
+        }
+        let mut bytes = vec![0u8; POOL_PAGE_SIZE as usize];
+        self.kernel_address_space().read_bytes(page, &mut bytes)?;
+        let region =
+            classify_pool_region(self, address).map(|(name, start, end)| PoolRegionDetail {
+                name: name.to_string(),
+                start,
+                end,
+            });
+        let paged = region.as_ref().and_then(|region| {
+            if region.name == PAGED_POOL.name {
+                Some(true)
+            } else if region.name == NONPAGED_POOL.name {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        let blocks = pool_page_blocks(&layout, page, &bytes);
+        let candidates = pool_header_candidates(&layout, page, &bytes);
+        let (page_layout, problem) = first_pool_problem(&blocks, &candidates, page, paged);
+        Ok(PoolValidationDetail {
+            address,
+            page,
+            region,
+            layout: page_layout.name().to_string(),
+            blocks: blocks
+                .iter()
+                .map(|block| {
+                    let marked = (block.header.0..block.header.0 + block.size).contains(&address.0);
+                    pool_block_detail(block, marked, address)
+                })
+                .collect(),
+            problem,
         })
     }
 
@@ -303,6 +360,169 @@ impl Target {
     }
 }
 
+/// How a pool page lays its blocks out, which decides what a consistent page
+/// looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolPageLayout {
+    /// The classic pool: headers chain from the page start to its end, each
+    /// `PreviousSize` the `BlockSize` before it, `PoolType` the POOL_TYPE + 1.
+    Chained,
+    /// Segment heap (Windows 10 1903 and later): `PreviousSize` is unused,
+    /// variable-size blocks sit behind a 16-byte chunk header, and free
+    /// chunks have no `_POOL_HEADER`.
+    SegmentHeap,
+}
+
+impl PoolPageLayout {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Chained => "chained",
+            Self::SegmentHeap => "segment heap",
+        }
+    }
+}
+
+/// The first inconsistency among the blocks of the pool page at `page`:
+/// `blocks` is [`pool_page_blocks`]'s reading of it and `candidates`
+/// [`pool_header_candidates`]'s; `paged` says which pool the page's range
+/// belongs to, when known.
+fn first_pool_problem(
+    blocks: &[PoolHeader],
+    candidates: &[PoolHeader],
+    page: VirtAddr,
+    paged: Option<bool>,
+) -> (PoolPageLayout, Option<PoolProblem>) {
+    let page_end = page.0 + POOL_PAGE_SIZE;
+    let real = || blocks.iter().filter(|block| !block.synthetic_free);
+    let chained = blocks.windows(2).any(|pair| {
+        !pair[0].synthetic_free
+            && !pair[1].synthetic_free
+            && pair[1].header.0 == pair[0].header.0 + pair[0].size
+            && pair[1].previous_size == pair[0].size
+    });
+    let layout = if chained {
+        PoolPageLayout::Chained
+    } else {
+        PoolPageLayout::SegmentHeap
+    };
+    let problem =
+        |header: VirtAddr, message: String| (layout, Some(PoolProblem { header, message }));
+    let Some(first) = real().next() else {
+        return problem(page, "no _POOL_HEADER in the page".into());
+    };
+    if layout == PoolPageLayout::Chained && first.header != page {
+        return problem(
+            page,
+            format!(
+                "the first block header is at {:#x}, not the page start",
+                first.header.0
+            ),
+        );
+    }
+    for (index, block) in blocks.iter().enumerate() {
+        let end = block.header.0 + block.size;
+        // The classic header's PoolType is the POOL_TYPE + 1, whose bit 0 is
+        // the paged bit. The segment heap's encoding is not documented, so
+        // its pool type goes unchecked.
+        if layout == PoolPageLayout::Chained
+            && !block.synthetic_free
+            && block.pool_type != 0
+            && let Some(paged) = paged
+        {
+            let type_paged = (block.pool_type - 1) & 1 != 0;
+            if type_paged != paged {
+                return problem(
+                    block.header,
+                    format!(
+                        "PoolType {:#x} says {} pool, but the page is in {} pool",
+                        block.pool_type,
+                        if type_paged { "paged" } else { "nonpaged" },
+                        if paged { "paged" } else { "nonpaged" }
+                    ),
+                );
+            }
+        }
+        match layout {
+            PoolPageLayout::Chained => match blocks.get(index + 1) {
+                Some(next) if block.synthetic_free || next.synthetic_free => {
+                    return problem(
+                        block.header,
+                        format!(
+                            "no _POOL_HEADER where this block (BlockSize {:#x}) ends, at {end:#x}",
+                            block.size
+                        ),
+                    );
+                }
+                Some(next) if next.previous_size != block.size => {
+                    return problem(
+                        next.header,
+                        format!(
+                            "PreviousSize {:#x} does not match BlockSize {:#x} of the block at {:#x}",
+                            next.previous_size, block.size, block.header.0
+                        ),
+                    );
+                }
+                None if end != page_end => {
+                    return problem(
+                        block.header,
+                        format!(
+                            "the last block (BlockSize {:#x}) ends at {end:#x}, not the page end",
+                            block.size
+                        ),
+                    );
+                }
+                _ => {}
+            },
+            PoolPageLayout::SegmentHeap if segment_heap_header(block) => {
+                // A block header inside this block that chains to where a
+                // block begins is a real one this block's BlockSize runs
+                // over.
+                let boundary = |address: u64| {
+                    address == page_end
+                        || blocks.iter().any(|other| {
+                            !other.synthetic_free
+                                && (other.header.0 == address
+                                    || other.header.0 == address + POOL_ALIGN)
+                        })
+                };
+                if let Some(overrun) = candidates.iter().find(|candidate| {
+                    candidate.header.0 > block.header.0
+                        && candidate.header.0 < end
+                        && segment_heap_header(candidate)
+                        && boundary(candidate.header.0 + candidate.size)
+                }) {
+                    return problem(
+                        block.header,
+                        format!(
+                            "BlockSize {:#x} runs over the block header at {:#x} ('{}')",
+                            block.size,
+                            overrun.header.0,
+                            tag_string(overrun.tag)
+                        ),
+                    );
+                }
+            }
+            PoolPageLayout::SegmentHeap => {}
+        }
+    }
+    (layout, None)
+}
+
+/// Whether `header` reads as an allocated segment-heap block's: a tag, a
+/// pool type made of POOL_TYPE bits a header carries (paged, must-succeed,
+/// cache-aligned, quota, session), and no `PreviousSize` (only a
+/// cache-aligned allocation's second header has one, pointing back at the
+/// first). Anything else in the scan is a subsegment header or data it
+/// tolerated.
+fn segment_heap_header(header: &PoolHeader) -> bool {
+    const HEADER_POOL_TYPE_BITS: u8 = 0x2f;
+    !header.synthetic_free
+        && header.pool_type != 0
+        && header.pool_type & !HEADER_POOL_TYPE_BITS == 0
+        && header.previous_size == 0
+        && tag_looks_printable(header.tag)
+}
+
 fn pool_block_detail(block: &PoolHeader, marked: bool, target: VirtAddr) -> PoolBlockDetail {
     let state = pool_block_state(block).to_string();
     PoolBlockDetail {
@@ -334,5 +554,82 @@ fn big_pool_detail(target: VirtAddr, entry: &BigPoolEntry) -> BigPoolDetail {
         pattern: entry.pattern,
         pool_flags: entry.pool_flags,
         slush_size: entry.slush_size,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PAGE: VirtAddr = VirtAddr(0xffff_8000_0000_0000);
+    const TAG: u32 = u32::from_le_bytes(*b"Test");
+
+    fn header(offset: u64, size: u64, previous_size: u64, pool_type: u8) -> PoolHeader {
+        PoolHeader {
+            header: VirtAddr(PAGE.0 + offset),
+            body: VirtAddr(PAGE.0 + offset + 0x10),
+            size,
+            previous_size,
+            pool_type,
+            tag: TAG,
+            synthetic_free: false,
+        }
+    }
+
+    fn problem_at(
+        blocks: &[PoolHeader],
+        candidates: &[PoolHeader],
+        paged: Option<bool>,
+    ) -> Option<u64> {
+        first_pool_problem(blocks, candidates, PAGE, paged)
+            .1
+            .map(|problem| problem.header.0 - PAGE.0)
+    }
+
+    #[test]
+    fn chained_page_flags_a_previous_size_that_breaks_the_chain() {
+        let blocks = [
+            header(0, 0x100, 0, 1),
+            header(0x100, 0x200, 0x100, 1),
+            header(0x300, 0xd00, 0x180, 1),
+        ];
+        assert_eq!(problem_at(&blocks, &blocks, Some(false)), Some(0x300));
+    }
+
+    #[test]
+    fn chained_page_must_end_at_the_page_end() {
+        let blocks = [header(0, 0x100, 0, 1), header(0x100, 0x200, 0x100, 1)];
+        assert_eq!(problem_at(&blocks, &blocks, Some(false)), Some(0x100));
+        let whole = [header(0, 0x100, 0, 1), header(0x100, 0xf00, 0x100, 1)];
+        assert_eq!(problem_at(&whole, &whole, Some(false)), None);
+    }
+
+    #[test]
+    fn chained_pool_type_must_match_the_page_region() {
+        // PoolType 2 is PagedPool + 1.
+        let blocks = [header(0, 0x100, 0, 2), header(0x100, 0xf00, 0x100, 2)];
+        assert_eq!(problem_at(&blocks, &blocks, Some(false)), Some(0));
+        assert_eq!(problem_at(&blocks, &blocks, Some(true)), None);
+        assert_eq!(problem_at(&blocks, &blocks, None), None);
+    }
+
+    #[test]
+    fn segment_heap_block_running_over_a_chained_header_is_flagged() {
+        let outer = header(0x40, 0x300, 0, 2);
+        // A real header at 0x150 whose block ends where the next begins.
+        let overrun = header(0x150, 0x200, 0, 2);
+        let next = header(0x360, 0x100, 0, 2);
+        let blocks = [outer, next];
+        assert_eq!(
+            problem_at(&blocks, &[outer, overrun, next], Some(false)),
+            Some(0x40)
+        );
+        // The second header of a cache-aligned allocation points back at the
+        // first with its PreviousSize.
+        let aligned = header(0x60, 0x2f0, 0x20, 6);
+        assert_eq!(
+            problem_at(&blocks, &[outer, aligned, next], Some(false)),
+            None
+        );
     }
 }

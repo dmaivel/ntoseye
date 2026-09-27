@@ -227,6 +227,26 @@ pub struct PoolPageDetail {
 }
 
 /// Virtual pool range metadata attached to a pool-page result.
+/// `!poolval`: the blocks of one pool page and the first inconsistency
+/// among their headers, `None` when the page is consistent.
+#[derive(Debug, Clone)]
+pub struct PoolValidationDetail {
+    pub address: VirtAddr,
+    pub page: VirtAddr,
+    pub region: Option<PoolRegionDetail>,
+    /// `chained` (the classic pool) or `segment heap`.
+    pub layout: String,
+    pub blocks: Vec<PoolBlockDetail>,
+    pub problem: Option<PoolProblem>,
+}
+
+/// A pool header inconsistency: the header it is found at and what is wrong.
+#[derive(Debug, Clone)]
+pub struct PoolProblem {
+    pub header: VirtAddr,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PoolRegionDetail {
     pub name: String,

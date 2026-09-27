@@ -627,6 +627,18 @@ impl Inspect {
         })
     }
 
+    /// Check the block headers of the pool page containing `address` and
+    /// report the first inconsistency (`!poolval`).
+    fn pool_validate<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+        self.record(py, |session| {
+            let detail = session
+                .target
+                .validate_pool(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::mm::pool_validation(&detail))
+        })
+    }
+
     /// Aggregate pool tracker usage by tag (`!poolused`).
     #[pyo3(signature = (tag=None, *, sort="tag", include_counts=false))]
     fn pool_usage<'py>(

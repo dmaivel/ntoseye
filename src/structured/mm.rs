@@ -69,6 +69,10 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let detail = args.target().inspect_pool(address)?;
             Ok(view::mm::pool_page(&detail))
         }),
+        "!poolval" | "poolval" => args.addr(0).and_then(|address| {
+            let detail = args.target().validate_pool(address)?;
+            Ok(view::mm::pool_validation(&detail))
+        }),
         "!poolused" | "poolused" => {
             let (flags, tag) = match argv.first() {
                 Some(first) => match args.eval(first) {
