@@ -73,7 +73,7 @@ impl HaltClock {
     }
 
     /// The current halt's epoch; `None` while the target runs.
-    fn epoch(&self) -> Option<u64> {
+    pub fn epoch(&self) -> Option<u64> {
         (!self.is_running()).then(|| self.epoch.load(Ordering::Acquire))
     }
 }

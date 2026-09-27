@@ -259,6 +259,20 @@ pub struct GdbClient {
     /// Windows runs nested under its own hypervisor, so single steps are
     /// refused; see [`STEP_UNDER_WINDOWS_HYPERVISOR`].
     windows_hypervisor: bool,
+    halt_cache: HaltCache,
+}
+
+/// What the stub has answered during one halt, so asking again costs no
+/// round trip. Every resume starts a new halt epoch and drops it: the stub
+/// then picks its own thread, and the vCPUs have moved.
+#[derive(Default)]
+struct HaltCache {
+    epoch: Option<u64>,
+    /// The thread `Hg` and `Hc` both select, when this client selected it.
+    thread: Option<String>,
+    /// The register file [`GdbClient::read_registers`] returned for
+    /// `thread`; dropped by any register write.
+    registers: Option<Vec<u8>>,
 }
 
 /// What a wait on an already halted target reports: a stop with no fields,
@@ -316,6 +330,7 @@ impl GdbClient {
             control_thread: None,
             kernel_dtb: None,
             windows_hypervisor: false,
+            halt_cache: HaltCache::default(),
         };
 
         client.force_stop_and_resync()?;
@@ -617,6 +632,7 @@ impl GdbClient {
     /// page tables serve it, then make the selected vCPU the control vCPU
     /// again (a plain `s` steps the control vCPU). `None` when none did.
     fn through_another_vcpu(&mut self, packet: &str) -> Result<Option<String>> {
+        self.forget_halt_cache();
         let Some(selected) = self
             .control_thread
             .clone()
@@ -696,6 +712,24 @@ impl GdbClient {
             .map(|register| register.regnum)
     }
 
+    /// This halt's [`HaltCache`]; `None` while the target runs.
+    fn halt_cache(&mut self) -> Option<&mut HaltCache> {
+        let epoch = self.halts.epoch()?;
+        if self.halt_cache.epoch != Some(epoch) {
+            self.halt_cache = HaltCache {
+                epoch: Some(epoch),
+                ..HaltCache::default()
+            };
+        }
+        Some(&mut self.halt_cache)
+    }
+
+    /// Drop the [`HaltCache`] before a request that changes what it holds
+    /// in a way the halt epoch does not see.
+    fn forget_halt_cache(&mut self) {
+        self.halt_cache = HaltCache::default();
+    }
+
     /// The slot's record, or an error naming the slot a caller invented.
     /// Indexing would panic, and a debugger has no business dying over one.
     fn hardware_slot(&mut self, slot: u8) -> Result<&mut Option<HardwareSite>> {
@@ -747,6 +781,9 @@ impl GdbClient {
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
+        if let Some(registers) = self.halt_cache().and_then(|cache| cache.registers.clone()) {
+            return Ok(registers);
+        }
         let response = self.send_packet("g")?;
 
         if response.starts_with('E') {
@@ -762,10 +799,16 @@ impl GdbClient {
             let value = self.read_one_register(regnum)?;
             bytes.extend_from_slice(&value);
         }
+        if let Some(cache) = self.halt_cache() {
+            cache.registers = Some(bytes.clone());
+        }
         Ok(bytes)
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(cache) = self.halt_cache() {
+            cache.registers = None;
+        }
         // `G` takes back exactly what `g` gave. The system registers appended
         // behind it are not part of that reply, and the stub serves them
         // read-only anyway.
@@ -787,6 +830,7 @@ impl GdbClient {
     }
 
     fn continue_execution(&mut self) -> Result<()> {
+        self.forget_halt_cache();
         let _ = self.send_packet("Hc-1")?;
         self.control_thread = None;
         self.send_command_no_reply("c")?;
@@ -801,6 +845,7 @@ impl GdbClient {
         if self.windows_hypervisor {
             return Err(Error::DebugInfo(STEP_UNDER_WINDOWS_HYPERVISOR.to_string()));
         }
+        self.forget_halt_cache();
         match &self.control_thread {
             Some(thread) if self.features.thread_step => {
                 let packet = format!("vCont;s:{thread}");
@@ -823,6 +868,7 @@ impl GdbClient {
         if !self.features.thread_continue {
             return Err(Error::NotSupported);
         }
+        self.forget_halt_cache();
         self.send_command_no_reply(&format!("vCont;c:{thread}"))?;
         self.halts.set_running(true);
         Ok(())
@@ -937,6 +983,16 @@ impl GdbClient {
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
+        if self
+            .halt_cache()
+            .is_some_and(|cache| cache.thread.as_deref() == Some(thread_id))
+        {
+            return Ok(());
+        }
+        if let Some(cache) = self.halt_cache() {
+            cache.thread = None;
+            cache.registers = None;
+        }
         let resp_g = self.send_packet(&format!("Hg{}", thread_id))?;
         if resp_g != "OK" {
             return Err(Error::Rsp(format!(
@@ -953,6 +1009,9 @@ impl GdbClient {
             )));
         }
         self.control_thread = Some(thread_id.to_string());
+        if let Some(cache) = self.halt_cache() {
+            cache.thread = Some(thread_id.to_string());
+        }
 
         Ok(())
     }
@@ -1081,6 +1140,9 @@ impl GdbClient {
     }
 
     fn write_register_bytes(&mut self, regnum: usize, bytes: &[u8]) -> Result<()> {
+        if let Some(cache) = self.halt_cache() {
+            cache.registers = None;
+        }
         let response = self.send_packet(&format!("P{regnum:x}={}", hex::encode(bytes)))?;
         if response == "OK" {
             Ok(())
@@ -1283,8 +1345,8 @@ mod tests {
     use parking_lot::Mutex;
 
     use super::{
-        GdbClient, HW_BREAKPOINT_SLOTS, PacketReadState, RegisterMap, StopReply, StubFeatures,
-        append_packet, description_arch,
+        GdbClient, HW_BREAKPOINT_SLOTS, HaltCache, PacketReadState, RegisterMap, StopReply,
+        StubFeatures, append_packet, description_arch,
     };
     use crate::dbg_backend::DebugBackend;
     use crate::gdb::registers::RegisterInfo;
@@ -1344,6 +1406,7 @@ mod tests {
             control_thread: None,
             kernel_dtb: None,
             windows_hypervisor: false,
+            halt_cache: HaltCache::default(),
         };
         (client, received)
     }
@@ -1375,6 +1438,43 @@ mod tests {
             regnum: 0x43,
         }]);
         (client, received)
+    }
+
+    /// Within one halt a thread is selected and its registers read once; a
+    /// register write reads them again, and after a resume the stub has
+    /// picked its own thread and the vCPU has moved.
+    #[test]
+    fn a_halt_selects_its_thread_and_reads_its_registers_once() {
+        let (mut client, received) = halted_client_over_stub(|packet, _| {
+            match packet {
+                "g" => "0100000000000000",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        for _ in 0..2 {
+            client.set_current_thread("p01.02").unwrap();
+            client.read_registers().unwrap();
+        }
+        client.write_register_bytes(0x43, &[0; 8]).unwrap();
+        client.read_registers().unwrap();
+        client.halts.set_running(true);
+        client.halts.set_running(false);
+        client.set_current_thread("p01.02").unwrap();
+        client.read_registers().unwrap();
+        assert_eq!(
+            *received.lock(),
+            [
+                "Hgp01.02",
+                "Hcp01.02",
+                "g",
+                "P43=0000000000000000",
+                "g",
+                "Hgp01.02",
+                "Hcp01.02",
+                "g",
+            ]
+        );
     }
 
     /// Under VBS a vCPU can halt in the Windows hypervisor, whose page tables
