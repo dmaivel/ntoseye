@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use super::args::{ApcTarget, DeviceArg};
+use super::args::{ApcTarget, DeviceArg, ObjectArg};
 use super::context::{Context, in_context};
 use super::handle::Owner;
 use super::module::Device;
@@ -75,13 +75,15 @@ impl Inspect {
     }
 
     /// Decode an executive object header and resolve its type and name, and
-    /// list a directory's entries (`!object`).
-    fn object<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, Record>> {
+    /// list a directory's entries (`!object`). `object` is the object's
+    /// address, or its path in the object namespace (`"\\Driver\\ACPI"`).
+    fn object<'py>(&self, py: Python<'py>, object: ObjectArg) -> PyResult<Bound<'py, Record>> {
         self.record(py, |session| {
-            let detail = session
-                .target
-                .inspect_object(VirtAddr(address))
-                .map_err(err)?;
+            let address = match object {
+                ObjectArg::Address(address) => VirtAddr(address),
+                ObjectArg::Path(path) => session.target.object_at_path(&path).map_err(err)?,
+            };
+            let detail = session.target.inspect_object(address).map_err(err)?;
             Ok(view::object::object(&detail))
         })
     }

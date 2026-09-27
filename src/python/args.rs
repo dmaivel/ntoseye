@@ -191,3 +191,11 @@ pub enum ExceptionCode {
     Code(u64),
     Alias(String),
 }
+
+/// An executive object by body or header address, or by object namespace
+/// path (`\\Driver\\ACPI`).
+#[derive(FromPyObject)]
+pub enum ObjectArg {
+    Address(u64),
+    Path(String),
+}

@@ -893,10 +893,11 @@ class Inspect:
         """
         Return bounded system and per-process memory-use counters (`!memusage`).
         """
-    def object(self, /, address: int) -> Record:
+    def object(self, /, object: int |str) -> Record:
         """
         Decode an executive object header and resolve its type and name, and
-        list a directory's entries (`!object`).
+        list a directory's entries (`!object`). `object` is the object's
+        address, or its path in the object namespace (`"\\Driver\\ACPI"`).
         """
     def object_security(self, /, object: int) -> Record:
         """
@@ -1085,7 +1086,10 @@ class Memory:
         """
     def search(self, /, pattern: bytes, start: int, length: int) -> list[MemorySearchMatch]:
         """
-        Find overlapping matches and include symbol/module/VAD context.
+        Find overlapping matches and include symbol/module/VAD context. In a
+        virtual space unreadable pages are skipped, this session's own
+        breakpoints read as the code they replaced, and at most 4096 matches
+        are returned.
         """
     def translate(self, /, addr: int) -> int |None:
         """
