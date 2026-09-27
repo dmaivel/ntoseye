@@ -197,6 +197,12 @@ impl Guest {
         ntoskrnl
             .phys
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
+        if let Ok(pte_base) = ntoskrnl
+            .symbol("MmPteBase")
+            .and_then(|symbol| symbol.read::<u64>())
+        {
+            ntoskrnl.phys.set_pte_self_map(pte_base);
+        }
         Self {
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),

@@ -18,6 +18,9 @@ pub struct PhysMem {
     /// The guest kernel's `InvalidPteMask`, set when a kernel is found (see
     /// [`Self::set_invalid_pte_mask`]).
     invalid_pte_mask: AtomicU64,
+    /// The guest kernel's `MmPteBase`, 0 until a kernel is found (see
+    /// [`Self::set_pte_self_map`]).
+    pte_self_map: AtomicU64,
     /// The guest kernel's mapped-view lookup, set when a kernel is found (see
     /// [`Self::set_section_views`]).
     section_views: Mutex<Option<Arc<SectionViews>>>,
@@ -83,6 +86,7 @@ impl PhysMem {
         Self {
             source,
             invalid_pte_mask: AtomicU64::new(0),
+            pte_self_map: AtomicU64::new(0),
             section_views: Mutex::new(None),
         }
     }
@@ -146,6 +150,19 @@ impl PhysMem {
     /// [`MemoryOps::invalid_pte_mask`].
     pub fn set_invalid_pte_mask(&self, mask: u64) {
         self.invalid_pte_mask.store(mask, Ordering::Release);
+    }
+
+    /// Record the guest kernel's `MmPteBase`. The 512 GiB self-map it heads
+    /// is kernel space that maps whichever root it is read through, so a
+    /// target's virtual-memory API, which reads kernel space through its own
+    /// current root, cannot serve it for another root.
+    pub fn set_pte_self_map(&self, pte_base: u64) {
+        self.pte_self_map.store(pte_base, Ordering::Release);
+    }
+
+    fn in_pte_self_map(&self, addr: VirtAddr) -> bool {
+        let base = self.pte_self_map.load(Ordering::Acquire);
+        base != 0 && addr.0.wrapping_sub(base) < 1 << 39
     }
 
     /// Record the guest kernel's mapped-view lookup for this boot, or `None`
@@ -252,6 +269,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
 
     fn read_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &mut [u8]) -> Option<Result<()>> {
         match &self.source {
+            Source::Remote(_) if self.in_pte_self_map(addr) => None,
             Source::Remote(kd) => kd.read_virtual_direct(addr, root, buf),
             // A host mapping is there to be read directly; that is the whole
             // point of selecting it.
@@ -261,6 +279,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
 
     fn write_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &[u8]) -> Option<Result<()>> {
         match &self.source {
+            _ if self.in_pte_self_map(addr) => None,
             Source::Live {
                 mediated: Some(kd), ..
             } if kd.can_mediate_writes() => kd.write_virtual_direct(addr, root, buf),
