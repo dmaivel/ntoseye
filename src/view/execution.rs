@@ -2,309 +2,572 @@
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 
+#[cfg(feature = "python-stubs")]
+use pyo3::type_hint_union;
+
 use super::View;
 use super::process::{process, thread};
+use super::shape::{Hex, Omit, ViewValue, shapes};
 use super::symbols::source_location;
 use crate::breakpoints::Breakpoint;
 use crate::disasm::DisasmRow;
-use crate::exception_policy::{ExceptionPolicy, ExceptionPolicyFinalAction, exception_alias};
-use crate::session::{CallTrace, CallTraceEnd, CallTraceFrame, RunStatus, VcpuInfo};
+use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
+use crate::session::{self, CallTraceEnd, VcpuInfo};
 use crate::unwind::{
-    Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, StackFrame,
-    UnwindDetail,
+    self, Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, UnwindDetail,
 };
 
+shapes! {
+    /// A vCPU (backend execution context) and the guest code it runs.
+    VcpuStatus {
+        /// The backend thread/vCPU id (`p1.1`).
+        id: String,
+        /// None when the register context was unreadable.
+        rip: Option<Hex>,
+        /// The address space the vCPU executes in: `kernel`, a process name,
+        /// or `unknown`; empty when it could not be determined.
+        context: String,
+        /// The nearest symbol to `rip`, when one resolved.
+        symbol: Option<String>,
+        /// For a vCPU halted in the Windows hypervisor, where each VTL left
+        /// off (`VTL0 nt!HalProcessorIdle+0xf`).
+        saved_vtl: Vec<String>,
+        /// Why the register context was unavailable, when it was.
+        error: Option<String>,
+    }
+
+    /// A code breakpoint or data watchpoint (`bl`).
+    BreakpointStatus {
+        id: u32,
+        /// None while a symbolic or source breakpoint is deferred.
+        address: Option<Hex>,
+        enabled: bool,
+        /// Whether the breakpoint resolved to an address; tells a deferred
+        /// breakpoint from a disabled one.
+        resolved: bool,
+        /// Whether a symbolic or source specification awaits resolution.
+        deferred: bool,
+        /// The symbolic or source specification (`bu`/`bm`), kept across
+        /// re-resolution.
+        specification: Option<String>,
+        /// The display name of the current resolution.
+        symbol: Option<String>,
+        /// `global`, or the process it is limited to (`name (pid)`).
+        scope: String,
+        /// The thread that may surface a hit (`/t`: `tid N` or `ethread
+        /// 0x...`), if restricted.
+        thread: Option<String>,
+        /// The processor that may surface a hit (`/c`), if restricted.
+        processor: Option<u16>,
+        /// The condition expression a hit must satisfy.
+        condition: Option<String>,
+        /// The requested hit number; 0 and 1 both break on the first hit.
+        pass_count: u64,
+        hit_count: u64,
+        /// Hits left before the breakpoint breaks.
+        remaining_pass_count: u64,
+        /// Whether the breakpoint is removed after its first break.
+        one_shot: bool,
+        /// Commands run when it breaks.
+        action: Option<String>,
+        temporary: bool,
+        /// `write` or `read_write` for a data watchpoint, None for a code
+        /// breakpoint.
+        watch_access: Option<&'static str>,
+        /// The watched width in bytes, None for a code breakpoint.
+        watch_length: Option<u8>,
+    }
+
+    /// Whether the target runs and where it stopped.
+    RunStatus {
+        running: bool,
+        /// The backend thread/vCPU selected.
+        current_thread: String,
+        /// The instruction pointer when halted, None while running.
+        rip: Option<Hex>,
+        /// The nearest symbol to `rip` when halted; code outside NT is named
+        /// for what it is (`hvix64+0x3a6bde`).
+        symbol: Option<String>,
+        /// For a vCPU halted in the Windows hypervisor, where each VTL left
+        /// off (`VTL0 nt!HalProcessorIdle+0xf`).
+        saved_vtl: Vec<String>,
+        /// The process chosen with `.process` whose memory `dt`, `dq`, ...
+        /// read; it survives resumes.
+        attached_process: Option<View>,
+        /// The process whose page tables the stopped vCPU has loaded.
+        stopped_process: Option<View>,
+        /// The Windows thread the stopped vCPU runs; its owner can differ
+        /// from `stopped_process` (`KeStackAttachProcess`).
+        stopped_thread: Option<View>,
+        /// False after a reboot until the kernel's loaded-module list exists:
+        /// process and module enumeration is not yet meaningful.
+        coherent: bool,
+        /// The rediscovered `nt` base; it changes across a reboot.
+        kernel_base: Hex,
+    }
+
+    /// One frame of a walked stack.
+    StackFrame {
+        /// The frame's position in the walked stack, present in a selection
+        /// of a stack's frames.
+        index: Omit<usize>,
+        /// The instruction pointer.
+        ip: Hex,
+        /// The stack pointer.
+        sp: Hex,
+        /// The symbol at `ip`; empty when none resolved.
+        symbol: String,
+        /// How the frame was recovered: `current`, `seed`, `unwind`, or `scan`.
+        source: &'static str,
+        /// The source line at `ip`, when line information resolves it.
+        source_location: Option<View>,
+    }
+
+    /// One decoded instruction.
+    DisassembledInstruction {
+        ip: Hex,
+        /// The instruction's bytes, in hex.
+        hex: String,
+        /// The instruction text.
+        asm: String,
+        /// The resolved branch or rip-relative target, when there is one.
+        comment: Option<String>,
+    }
+
+    /// The function-table entry covering an address and each chained parent's
+    /// (`.fnent`).
+    FunctionEntry {
+        /// The module containing the function.
+        module: String,
+        image_base: Hex,
+        /// The entry covering the address, then each parent its chained unwind
+        /// info names, in order.
+        entries: Vec<RuntimeFunction>,
+        /// Why the chain ends before its last parent, when it does.
+        incomplete: Option<String>,
+    }
+
+    /// One function-table entry and its unwind data. Addresses are absolute;
+    /// `*_rva` fields are the raw image-relative values.
+    RuntimeFunction {
+        begin: Hex,
+        end: Hex,
+        begin_rva: Hex,
+        end_rva: Hex,
+        /// The unwind info's address; None for ARM64 packed unwind data.
+        unwind_info: Option<Hex>,
+        /// The entry's raw unwind word: the unwind info's RVA, or ARM64's
+        /// packed unwind data.
+        unwind_data: Hex,
+        /// The symbol at `begin`.
+        symbol: String,
+        /// The decoded unwind data, None when it is unreadable.
+        unwind: Option<Unwind>,
+    }
+
+    /// AMD64 `UNWIND_INFO`.
+    Amd64UnwindInfo {
+        /// `amd64`.
+        form: &'static str,
+        version: u8,
+        /// `UNW_FLAG_*` bits.
+        flags: u8,
+        /// Bytes of the prolog.
+        prolog_size: u8,
+        /// Unwind-code slots.
+        code_count: u8,
+        /// The frame pointer register, when the function establishes one.
+        frame_register: Option<&'static str>,
+        /// The frame pointer's offset from the stack pointer, in bytes.
+        frame_offset: u32,
+        /// Bytes of the structure: header, codes, and the handler RVA or the
+        /// chained entry, without the handler's own data.
+        size: usize,
+        codes: Vec<Amd64UnwindCode>,
+        /// The exception or termination handler, for `UNW_FLAG_EHANDLER` or
+        /// `UNW_FLAG_UHANDLER`.
+        handler: Option<UnwindHandler>,
+    }
+
+    /// One AMD64 unwind code.
+    Amd64UnwindCode {
+        /// Index of the code's first slot.
+        slot: usize,
+        /// Offset in the prolog of the end of the instruction it undoes.
+        code_offset: u8,
+        /// The `UWOP_*` operation.
+        op: u8,
+        /// The operation's info nibble.
+        op_info: u8,
+        /// The operation and its operands, e.g. `UWOP_SAVE_NONVOL rbx at +0x30`.
+        description: String,
+    }
+
+    /// An unwind info's exception or termination handler.
+    UnwindHandler {
+        address: Hex,
+        symbol: String,
+        /// Where the handler's language-specific data starts.
+        data: Hex,
+    }
+
+    /// ARM64 unwind data packed into the `.pdata` entry (flag 1 or 2): a
+    /// canonical prolog, listed as the codes it stands for.
+    Arm64PackedUnwind {
+        /// `packed`.
+        form: &'static str,
+        /// 1, or 2 for a function fragment without a prolog.
+        flag: u32,
+        /// The `RegF` field: saved non-volatile floating-point registers.
+        reg_f: u32,
+        /// The `RegI` field: saved non-volatile integer registers.
+        reg_i: u32,
+        /// Whether the prolog homes the argument registers.
+        homes_arguments: bool,
+        /// The `CR` field: whether and how the frame chain and link register
+        /// are saved.
+        cr: u32,
+        /// The frame's size, in bytes.
+        frame_size: u32,
+        codes: Vec<Arm64UnwindCode>,
+    }
+
+    /// An ARM64 `.xdata` unwind record.
+    Arm64XdataUnwind {
+        /// `xdata`.
+        form: &'static str,
+        version: u32,
+        /// The `X` bit: exception data (a handler) follows.
+        exception_data: bool,
+        /// The `E` bit: a single epilog described in the header.
+        epilog_in_header: bool,
+        epilog_count: u32,
+        /// 32-bit words of unwind codes.
+        code_words: u32,
+        epilog_scopes: Vec<Arm64EpilogScope>,
+        /// Bytes of the record, the handler's RVA included.
+        size: usize,
+        codes: Vec<Arm64UnwindCode>,
+        handler: Option<UnwindHandler>,
+    }
+
+    /// One ARM64 unwind code.
+    Arm64UnwindCode {
+        /// Its first byte's index in the code bytes.
+        index: usize,
+        bytes: Vec<Hex>,
+        /// Its name and the prolog instruction it stands for.
+        description: String,
+    }
+
+    /// One ARM64 epilog scope.
+    Arm64EpilogScope {
+        /// The epilog's start, in bytes from the function's.
+        start_offset: Hex,
+        /// The index of the epilog's first unwind code.
+        first_code: u32,
+    }
+
+    /// A `wt` call trace: why it stopped, the instructions it stepped, and
+    /// the call tree.
+    CallTrace {
+        /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
+        /// `failed`; anything but `returned` leaves a partial tree.
+        end: &'static str,
+        /// What failed, for `failed`.
+        error: Option<String>,
+        /// Instructions single-stepped.
+        instructions: usize,
+        root: CallTraceFrame,
+    }
+
+    /// One call-tree node of a `wt` trace.
+    CallTraceFrame {
+        /// The called function.
+        name: String,
+        /// Instructions stepped in the function itself.
+        instructions: usize,
+        /// The calls it made.
+        children: Vec<CallTraceFrame>,
+    }
+
+    /// One exception stop policy (`sx`).
+    ExceptionPolicy {
+        /// The exception code.
+        code: Hex,
+        /// The code's WinDbg alias (`av`, `bp`, ...), when it has one.
+        alias: Option<&'static str>,
+        /// `break`, `second_chance`, `notify`, or `ignore`.
+        mode: &'static str,
+        /// An explicit final action: `break`, or continue as `handled` or
+        /// `not_handled`; None for the mode's default.
+        disposition: Option<&'static str>,
+        /// Commands run when the exception arrives.
+        command: Option<String>,
+    }
+
+    /// An evaluated debugger expression (`?`).
+    ExpressionValue {
+        expression: String,
+        value: Hex,
+    }
+
+    /// One register of the current context (`r`).
+    RegisterValue {
+        name: String,
+        /// An int, or for a vector register a `0x`-prefixed 32-digit hex
+        /// string.
+        value: RegisterContent,
+    }
+}
+
+/// An entry's decoded unwind data, by form.
+pub enum Unwind {
+    Amd64(Amd64UnwindInfo),
+    Packed(Arm64PackedUnwind),
+    Xdata(Arm64XdataUnwind),
+}
+
+impl ViewValue for Unwind {
+    fn into_view(self) -> View {
+        match self {
+            Self::Amd64(info) => info.into_view(),
+            Self::Packed(packed) => packed.into_view(),
+            Self::Xdata(xdata) => xdata.into_view(),
+        }
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: pyo3::inspect::PyStaticExpr = type_hint_union!(
+        <Amd64UnwindInfo as ViewValue>::HINT,
+        <Arm64PackedUnwind as ViewValue>::HINT,
+        <Arm64XdataUnwind as ViewValue>::HINT
+    );
+}
+
+/// A register's value: an address-width value, or a vector register too
+/// wide for an int's hex rendering.
+pub enum RegisterContent {
+    Scalar(Hex),
+    /// A 128-bit value, as `0x` and 32 hex digits.
+    Wide(String),
+}
+
+impl ViewValue for RegisterContent {
+    fn into_view(self) -> View {
+        match self {
+            Self::Scalar(value) => value.into_view(),
+            Self::Wide(value) => value.into_view(),
+        }
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: pyo3::inspect::PyStaticExpr =
+        type_hint_union!(<Hex as ViewValue>::HINT, <String as ViewValue>::HINT);
+}
+
 pub fn vcpu(v: &VcpuInfo) -> View {
-    View::Object(vec![
-        ("id", View::Str(v.id.clone())),
-        ("rip", View::OptHex(v.rip)),
-        ("context", View::Str(v.context.clone())),
-        ("symbol", View::OptStr(v.symbol.clone())),
-        (
-            "saved_vtl",
-            View::List(v.saved_vtl.iter().cloned().map(View::Str).collect()),
-        ),
-        ("error", View::OptStr(v.error.clone())),
-    ])
+    VcpuStatus {
+        id: v.id.clone(),
+        rip: v.rip.map(Hex),
+        context: v.context.clone(),
+        symbol: v.symbol.clone(),
+        saved_vtl: v.saved_vtl.clone(),
+        error: v.error.clone(),
+    }
+    .into_view()
 }
 
-/// One code-breakpoint/data-watchpoint row. `address` is null while a symbolic
-/// or source breakpoint is deferred; `resolved` distinguishes that state from a
-/// deliberately disabled breakpoint.
+/// One code-breakpoint/data-watchpoint row.
 pub fn breakpoint(bp: &Breakpoint) -> View {
-    View::Object(vec![
-        ("id", View::Num(bp.id.into())),
-        (
-            "address",
-            View::OptHex(bp.resolved_address().map(|address| address.0)),
-        ),
-        ("enabled", View::Bool(bp.enabled)),
-        ("resolved", View::Bool(bp.resolved)),
-        ("deferred", View::Bool(bp.deferred())),
-        (
-            "specification",
-            View::OptStr(bp.specification().map(str::to_string)),
-        ),
-        ("symbol", View::OptStr(bp.symbol.clone())),
-        ("scope", View::Str(bp.scope.label())),
-        (
-            "thread",
-            View::OptStr(bp.thread.as_ref().map(|thread| thread.label())),
-        ),
-        ("processor", View::OptNum(bp.processor.map(u64::from))),
-        ("condition", View::OptStr(bp.condition.clone())),
-        ("pass_count", View::Num(bp.pass_count)),
-        ("hit_count", View::Num(bp.hit_count)),
-        ("remaining_pass_count", View::Num(bp.remaining_pass_count)),
-        ("one_shot", View::Bool(bp.one_shot)),
-        ("action", View::OptStr(bp.action.clone())),
-        ("temporary", View::Bool(bp.temporary)),
-        (
-            "watch_access",
-            View::OptStr(bp.watch_access_name().map(str::to_string)),
-        ),
-        (
-            "watch_length",
-            View::OptNum(bp.watch_length().map(u64::from)),
-        ),
-    ])
+    BreakpointStatus {
+        id: bp.id,
+        address: bp.resolved_address().map(|address| Hex(address.0)),
+        enabled: bp.enabled,
+        resolved: bp.resolved,
+        deferred: bp.deferred(),
+        specification: bp.specification().map(str::to_string),
+        symbol: bp.symbol.clone(),
+        scope: bp.scope.label(),
+        thread: bp.thread.as_ref().map(|thread| thread.label()),
+        processor: bp.processor,
+        condition: bp.condition.clone(),
+        pass_count: bp.pass_count,
+        hit_count: bp.hit_count,
+        remaining_pass_count: bp.remaining_pass_count,
+        one_shot: bp.one_shot,
+        action: bp.action.clone(),
+        temporary: bp.temporary,
+        watch_access: bp.watch_access_name(),
+        watch_length: bp.watch_length(),
+    }
+    .into_view()
 }
 
-pub fn run_status(status: &RunStatus) -> View {
-    View::Object(vec![
-        ("running", View::Bool(status.running)),
-        ("current_thread", View::Str(status.current_thread.clone())),
-        ("rip", View::OptHex(status.rip)),
-        ("symbol", View::OptStr(status.symbol.clone())),
-        (
-            "saved_vtl",
-            View::List(status.saved_vtl.iter().cloned().map(View::Str).collect()),
-        ),
-        (
-            "attached_process",
-            status.attached_process.as_ref().map_or(View::Null, process),
-        ),
-        (
-            "stopped_process",
-            status.stopped_process.as_ref().map_or(View::Null, process),
-        ),
-        (
-            "stopped_thread",
-            status
-                .stopped_thread
-                .as_ref()
-                .map_or(View::Null, |t| thread(t, None)),
-        ),
-        ("coherent", View::Bool(status.coherent)),
-        ("kernel_base", View::Hex(status.kernel_base)),
-    ])
+pub fn run_status(status: &session::RunStatus) -> RunStatus {
+    RunStatus {
+        running: status.running,
+        current_thread: status.current_thread.clone(),
+        rip: status.rip.map(Hex),
+        symbol: status.symbol.clone(),
+        saved_vtl: status.saved_vtl.clone(),
+        attached_process: status.attached_process.as_ref().map(process),
+        stopped_process: status.stopped_process.as_ref().map(process),
+        stopped_thread: status.stopped_thread.as_ref().map(|t| thread(t, None)),
+        coherent: status.coherent,
+        kernel_base: Hex(status.kernel_base),
+    }
 }
 
-pub fn stack_frame(frame: &StackFrame) -> View {
-    View::Object(stack_frame_fields(frame))
+pub fn stack_frame(frame: &unwind::StackFrame) -> StackFrame {
+    StackFrame {
+        index: Omit(None),
+        ip: Hex(frame.ip),
+        sp: Hex(frame.sp),
+        symbol: frame.symbol.clone(),
+        source: frame.source.as_str(),
+        source_location: frame.source_location.as_ref().map(source_location),
+    }
 }
 
-/// [`stack_frame`] with its position in the walked stack first, for a
-/// selection of a stack's frames.
-pub fn numbered_stack_frame(index: usize, frame: &StackFrame) -> View {
-    let mut fields = vec![("index", View::Num(index as u64))];
-    fields.extend(stack_frame_fields(frame));
-    View::Object(fields)
+/// [`stack_frame`] with its position in the walked stack, for a selection of
+/// a stack's frames.
+pub fn numbered_stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFrame {
+    StackFrame {
+        index: Omit(Some(index)),
+        ..stack_frame(frame)
+    }
 }
 
-fn stack_frame_fields(frame: &StackFrame) -> Vec<(&'static str, View)> {
-    vec![
-        ("ip", View::Hex(frame.ip)),
-        ("sp", View::Hex(frame.sp)),
-        ("symbol", View::Str(frame.symbol.clone())),
-        ("source", View::Str(frame.source.as_str().to_string())),
-        (
-            "source_location",
-            frame
-                .source_location
-                .as_ref()
-                .map_or(View::Null, source_location),
-        ),
-    ]
+/// One decoded instruction.
+pub fn disasm_row(row: &DisasmRow) -> DisassembledInstruction {
+    DisassembledInstruction {
+        ip: Hex(row.ip),
+        hex: row.hex.clone(),
+        asm: row.asm(),
+        comment: row.comment.clone(),
+    }
 }
 
-/// One decoded instruction: bytes, text, and the resolved branch/rip-relative
-/// target comment when there is one.
-pub fn disasm_row(row: &DisasmRow) -> View {
-    View::Object(vec![
-        ("ip", View::Hex(row.ip)),
-        ("hex", View::Str(row.hex.clone())),
-        ("asm", View::Str(row.asm())),
-        ("comment", View::OptStr(row.comment.clone())),
-    ])
+fn arm64_codes(codes: &[Arm64CodeDetail]) -> Vec<Arm64UnwindCode> {
+    codes
+        .iter()
+        .map(|code| Arm64UnwindCode {
+            index: code.index,
+            bytes: code.bytes.iter().map(|&byte| Hex(byte.into())).collect(),
+            description: code.description.clone(),
+        })
+        .collect()
 }
 
 /// `.fnent`: the function-table entry covering an address and its unwind
-/// info, then each chained parent's. Addresses are absolute; `*_rva` fields
-/// are the raw image-relative values, and `unwind_data` is the entry's raw
-/// word: the unwind info's RVA, or ARM64's packed unwind data, for which
-/// `unwind_info` is null. `unwind.form` is `amd64`, `packed`, or `xdata`.
+/// info, then each chained parent's.
 pub fn function_entry(detail: &FunctionEntryDetail) -> View {
     let base = detail.image_base;
-    let va = |rva: u32| View::Hex(base.wrapping_add(u64::from(rva)));
+    let va = |rva: u32| Hex(base.wrapping_add(u64::from(rva)));
     let handler = |handler: &Option<HandlerDetail>| {
-        handler.as_ref().map_or(View::Null, |handler| {
-            View::Object(vec![
-                ("address", va(handler.rva)),
-                ("symbol", View::Str(handler.symbol.clone())),
-                ("data", va(handler.data_rva)),
-            ])
+        handler.as_ref().map(|handler| UnwindHandler {
+            address: va(handler.rva),
+            symbol: handler.symbol.clone(),
+            data: va(handler.data_rva),
         })
-    };
-    let arm64_codes = |codes: &[Arm64CodeDetail]| {
-        View::List(
-            codes
-                .iter()
-                .map(|code| {
-                    View::Object(vec![
-                        ("index", View::Num(code.index as u64)),
-                        (
-                            "bytes",
-                            View::List(
-                                code.bytes
-                                    .iter()
-                                    .map(|&byte| View::Hex(byte.into()))
-                                    .collect(),
-                            ),
-                        ),
-                        ("description", View::Str(code.description.clone())),
-                    ])
-                })
-                .collect(),
-        )
     };
     let entries = detail
         .entries
         .iter()
         .map(|entry| {
-            let unwind = entry
-                .unwind
-                .as_ref()
-                .map_or(View::Null, |unwind| match unwind {
-                    UnwindDetail::Amd64(info) => View::Object(vec![
-                        ("form", View::Str("amd64".into())),
-                        ("version", View::Num(info.version.into())),
-                        ("flags", View::Num(info.flags.into())),
-                        ("prolog_size", View::Num(info.prolog_size.into())),
-                        ("code_count", View::Num(info.code_count.into())),
-                        (
-                            "frame_register",
-                            View::OptStr(info.frame_register.map(str::to_string)),
-                        ),
-                        ("frame_offset", View::Num(info.frame_offset.into())),
-                        ("size", View::Num(info.size as u64)),
-                        (
-                            "codes",
-                            View::List(
-                                info.codes
-                                    .iter()
-                                    .map(|code| {
-                                        View::Object(vec![
-                                            ("slot", View::Num(code.slot as u64)),
-                                            ("code_offset", View::Num(code.code_offset.into())),
-                                            ("op", View::Num(code.op.into())),
-                                            ("op_info", View::Num(code.op_info.into())),
-                                            ("description", View::Str(code.description.clone())),
-                                        ])
-                                    })
-                                    .collect(),
-                            ),
-                        ),
-                        ("handler", handler(&info.handler)),
-                    ]),
-                    UnwindDetail::Arm64(Arm64UnwindDetail::Packed {
-                        flag,
-                        reg_f,
-                        reg_i,
-                        homes_arguments,
-                        cr,
-                        frame_size,
-                        codes,
-                    }) => View::Object(vec![
-                        ("form", View::Str("packed".into())),
-                        ("flag", View::Num((*flag).into())),
-                        ("reg_f", View::Num((*reg_f).into())),
-                        ("reg_i", View::Num((*reg_i).into())),
-                        ("homes_arguments", View::Bool(*homes_arguments)),
-                        ("cr", View::Num((*cr).into())),
-                        ("frame_size", View::Num((*frame_size).into())),
-                        ("codes", arm64_codes(codes)),
-                    ]),
-                    UnwindDetail::Arm64(Arm64UnwindDetail::Xdata {
-                        version,
-                        exception_data,
-                        epilog_in_header,
-                        epilog_count,
-                        code_words,
-                        scopes,
-                        codes,
-                        handler: xdata_handler,
-                        size,
-                    }) => View::Object(vec![
-                        ("form", View::Str("xdata".into())),
-                        ("version", View::Num((*version).into())),
-                        ("exception_data", View::Bool(*exception_data)),
-                        ("epilog_in_header", View::Bool(*epilog_in_header)),
-                        ("epilog_count", View::Num((*epilog_count).into())),
-                        ("code_words", View::Num((*code_words).into())),
-                        (
-                            "epilog_scopes",
-                            View::List(
-                                scopes
-                                    .iter()
-                                    .map(|(start, first_code)| {
-                                        View::Object(vec![
-                                            ("start_offset", View::Hex((*start).into())),
-                                            ("first_code", View::Num((*first_code).into())),
-                                        ])
-                                    })
-                                    .collect(),
-                            ),
-                        ),
-                        ("size", View::Num(*size as u64)),
-                        ("codes", arm64_codes(codes)),
-                        ("handler", handler(xdata_handler)),
-                    ]),
-                });
-            let packed = matches!(
-                entry.unwind,
-                Some(UnwindDetail::Arm64(Arm64UnwindDetail::Packed { .. }))
-            );
-            View::Object(vec![
-                ("begin", va(entry.begin)),
-                ("end", va(entry.end)),
-                ("begin_rva", View::Hex(entry.begin.into())),
-                ("end_rva", View::Hex(entry.end.into())),
-                (
-                    "unwind_info",
-                    if packed {
-                        View::Null
-                    } else {
-                        va(entry.unwind_data)
-                    },
-                ),
-                ("unwind_data", View::Hex(entry.unwind_data.into())),
-                ("symbol", View::Str(entry.symbol.clone())),
-                ("unwind", unwind),
-            ])
+            let unwind = entry.unwind.as_ref().map(|unwind| match unwind {
+                UnwindDetail::Amd64(info) => Unwind::Amd64(Amd64UnwindInfo {
+                    form: "amd64",
+                    version: info.version,
+                    flags: info.flags,
+                    prolog_size: info.prolog_size,
+                    code_count: info.code_count,
+                    frame_register: info.frame_register,
+                    frame_offset: info.frame_offset,
+                    size: info.size,
+                    codes: info
+                        .codes
+                        .iter()
+                        .map(|code| Amd64UnwindCode {
+                            slot: code.slot,
+                            code_offset: code.code_offset,
+                            op: code.op,
+                            op_info: code.op_info,
+                            description: code.description.clone(),
+                        })
+                        .collect(),
+                    handler: handler(&info.handler),
+                }),
+                UnwindDetail::Arm64(Arm64UnwindDetail::Packed {
+                    flag,
+                    reg_f,
+                    reg_i,
+                    homes_arguments,
+                    cr,
+                    frame_size,
+                    codes,
+                }) => Unwind::Packed(Arm64PackedUnwind {
+                    form: "packed",
+                    flag: *flag,
+                    reg_f: *reg_f,
+                    reg_i: *reg_i,
+                    homes_arguments: *homes_arguments,
+                    cr: *cr,
+                    frame_size: *frame_size,
+                    codes: arm64_codes(codes),
+                }),
+                UnwindDetail::Arm64(Arm64UnwindDetail::Xdata {
+                    version,
+                    exception_data,
+                    epilog_in_header,
+                    epilog_count,
+                    code_words,
+                    scopes,
+                    codes,
+                    handler: xdata_handler,
+                    size,
+                }) => Unwind::Xdata(Arm64XdataUnwind {
+                    form: "xdata",
+                    version: *version,
+                    exception_data: *exception_data,
+                    epilog_in_header: *epilog_in_header,
+                    epilog_count: *epilog_count,
+                    code_words: *code_words,
+                    epilog_scopes: scopes
+                        .iter()
+                        .map(|&(start, first_code)| Arm64EpilogScope {
+                            start_offset: Hex(start.into()),
+                            first_code,
+                        })
+                        .collect(),
+                    size: *size,
+                    codes: arm64_codes(codes),
+                    handler: handler(xdata_handler),
+                }),
+            });
+            let packed = matches!(unwind, Some(Unwind::Packed(_)));
+            RuntimeFunction {
+                begin: va(entry.begin),
+                end: va(entry.end),
+                begin_rva: Hex(entry.begin.into()),
+                end_rva: Hex(entry.end.into()),
+                unwind_info: (!packed).then(|| va(entry.unwind_data)),
+                unwind_data: Hex(entry.unwind_data.into()),
+                symbol: entry.symbol.clone(),
+                unwind,
+            }
         })
         .collect();
-    View::Object(vec![
-        ("module", View::Str(detail.module.clone())),
-        ("image_base", View::Hex(base)),
-        ("entries", View::List(entries)),
-        ("incomplete", View::OptStr(detail.incomplete.clone())),
-    ])
+    FunctionEntry {
+        module: detail.module.clone(),
+        image_base: Hex(base),
+        entries,
+        incomplete: detail.incomplete.clone(),
+    }
+    .into_view()
 }
 
-/// A `wt` call trace: why it stopped, the instructions it stepped, and the
-/// call tree.
-pub fn call_trace(trace: &CallTrace) -> View {
+/// A `wt` call trace.
+pub fn call_trace(trace: &session::CallTrace) -> View {
     let (end, error) = match &trace.end {
         CallTraceEnd::Returned => ("returned", None),
         CallTraceEnd::Limit => ("limit", None),
@@ -313,40 +576,35 @@ pub fn call_trace(trace: &CallTrace) -> View {
         CallTraceEnd::Diverted => ("diverted", None),
         CallTraceEnd::Failed(error) => ("failed", Some(error.clone())),
     };
-    View::Object(vec![
-        ("end", View::Str(end.to_string())),
-        ("error", View::OptStr(error)),
-        ("instructions", View::Num(trace.instructions as u64)),
-        ("root", call_trace_frame(&trace.root)),
-    ])
+    CallTrace {
+        end,
+        error,
+        instructions: trace.instructions,
+        root: call_trace_frame(&trace.root),
+    }
+    .into_view()
 }
 
-fn call_trace_frame(frame: &CallTraceFrame) -> View {
-    View::Object(vec![
-        ("name", View::Str(frame.name.clone())),
-        ("instructions", View::Num(frame.instructions as u64)),
-        (
-            "children",
-            View::List(frame.children.iter().map(call_trace_frame).collect()),
-        ),
-    ])
+fn call_trace_frame(frame: &session::CallTraceFrame) -> CallTraceFrame {
+    CallTraceFrame {
+        name: frame.name.clone(),
+        instructions: frame.instructions,
+        children: frame.children.iter().map(call_trace_frame).collect(),
+    }
 }
 
 /// One exception stop policy (`sx`).
-pub fn exception_policy(code: u32, policy: &ExceptionPolicy) -> View {
+pub fn exception_policy(code: u32, policy: &exception_policy::ExceptionPolicy) -> ExceptionPolicy {
     let disposition = match policy.final_action {
         Some(ExceptionPolicyFinalAction::Continue(disposition)) => Some(disposition.name()),
         Some(ExceptionPolicyFinalAction::Break) => Some("break"),
         None => None,
     };
-    View::Object(vec![
-        ("code", View::Hex(u64::from(code))),
-        (
-            "alias",
-            View::OptStr(exception_alias(code).map(str::to_string)),
-        ),
-        ("mode", View::Str(policy.mode.name().to_string())),
-        ("disposition", View::OptStr(disposition.map(str::to_string))),
-        ("command", View::OptStr(policy.command.clone())),
-    ])
+    ExceptionPolicy {
+        code: Hex(u64::from(code)),
+        alias: exception_alias(code),
+        mode: policy.mode.name(),
+        disposition,
+        command: policy.command.clone(),
+    }
 }

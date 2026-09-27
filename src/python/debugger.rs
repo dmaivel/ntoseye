@@ -27,6 +27,7 @@ use super::{err, raise, runcontrol, runner, view_record, view_records};
 use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::view;
+use crate::view::execution::py::CallTrace;
 
 fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
     Owner::unstamped(slf.py(), slf.as_unbound())
@@ -230,7 +231,7 @@ impl Debugger {
     /// at most `limit` instructions: `{end, error, instructions, root}`, where
     /// `root` is the call tree and `end` says why tracing stopped.
     #[pyo3(signature = (limit=10_000))]
-    fn trace_calls<'py>(slf: &Bound<'py, Self>, limit: usize) -> PyResult<Bound<'py, Record>> {
+    fn trace_calls<'py>(slf: &Bound<'py, Self>, limit: usize) -> PyResult<Bound<'py, CallTrace>> {
         runcontrol::trace_calls(slf, limit)
     }
 

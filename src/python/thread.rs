@@ -24,6 +24,7 @@ use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::types::VirtAddr;
 use crate::unwind::{RecoveredFrame, StackFrame};
 use crate::view;
+use crate::view::cpu::py::{CpuInfo, Gdt, Idt, Irql, Pcr, Prcb};
 
 /// A thread collection: `dbg.threads` (all) or `proc.threads`.
 #[pyclass(module = "ntoseye")]
@@ -884,7 +885,7 @@ impl Cpu {
     }
 
     /// Decode this processor's KPCR and KPRCB essentials (`!pcr`).
-    fn pcr<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn pcr<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Pcr>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
@@ -894,7 +895,7 @@ impl Cpu {
     }
 
     /// Decode this processor's `_KPRCB` (`!prcb`).
-    fn prcb<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn prcb<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Prcb>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
@@ -904,7 +905,7 @@ impl Cpu {
     }
 
     /// Read this processor's current IRQL (`!irql`).
-    fn irql<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn irql<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Irql>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
@@ -915,7 +916,7 @@ impl Cpu {
 
     /// Decode one IDT vector, or the bounded full table (`!idt`).
     #[pyo3(signature = (vector=None))]
-    fn idt<'py>(&self, py: Python<'py>, vector: Option<u16>) -> PyResult<Bound<'py, Record>> {
+    fn idt<'py>(&self, py: Python<'py>, vector: Option<u16>) -> PyResult<Bound<'py, Idt>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
@@ -925,7 +926,7 @@ impl Cpu {
     }
 
     /// Decode this processor's GDT (`!gdt`).
-    fn gdt<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn gdt<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Gdt>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
@@ -935,7 +936,7 @@ impl Cpu {
     }
 
     /// Read processor vendor, family, model, speed, and feature bits (`!cpuinfo`).
-    fn info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, CpuInfo>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {

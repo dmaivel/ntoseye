@@ -10,8 +10,8 @@ use super::breakpoints::Breakpoint;
 use super::memory::MemoryRegion;
 use super::module::{Driver, Module};
 use super::process::{Heap, Process};
-use super::record::Record;
 use super::thread::{Cpu, Thread};
+use crate::view::execution::py::ExceptionPolicy;
 
 macro_rules! typed_iterator {
     ($(#[$doc:meta])* $name:ident($item:ty)) => {
@@ -73,8 +73,8 @@ typed_iterator! {
     HeapIterator(Heap)
 }
 typed_iterator! {
-    /// Iterator over records, such as `dbg.exceptions`.
-    RecordIterator(Py<Record>)
+    /// Iterator over `dbg.exceptions`.
+    ExceptionPolicyIterator(Py<ExceptionPolicy>)
 }
 typed_iterator! {
     /// Iterator over names: a record's fields, a register file's registers.

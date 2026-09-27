@@ -280,8 +280,8 @@ pub mod _ntoseye {
     use super::inspect::Inspect;
     #[pymodule_export]
     use super::iter::{
-        BreakpointIterator, CpuIterator, DriverIterator, HeapIterator, MemoryRegionIterator,
-        ModuleIterator, NameIterator, ProcessIterator, RecordIterator, ThreadIterator,
+        BreakpointIterator, CpuIterator, DriverIterator, ExceptionPolicyIterator, HeapIterator,
+        MemoryRegionIterator, ModuleIterator, NameIterator, ProcessIterator, ThreadIterator,
     };
     #[pymodule_export]
     use super::memory::{AddressModule, Memory, MemoryRegion, MemorySearchMatch};
@@ -303,6 +303,18 @@ pub mod _ntoseye {
     use super::types::{Field, Struct, Type, Types};
     #[pymodule_export]
     use super::{attach, decode_error};
+    #[pymodule_export]
+    use crate::view::cpu::py::{
+        CpuFeatureBits, CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt,
+        IdtGate, Irql, Pcr, Prcb, ProcessorStateArea, SpecialRegistersArea,
+    };
+    #[pymodule_export]
+    use crate::view::execution::py::{
+        Amd64UnwindCode, Amd64UnwindInfo, Arm64EpilogScope, Arm64PackedUnwind, Arm64UnwindCode,
+        Arm64XdataUnwind, BreakpointStatus, CallTrace, CallTraceFrame, DisassembledInstruction,
+        ExceptionPolicy, ExpressionValue, FunctionEntry, RegisterValue, RunStatus, RuntimeFunction,
+        StackFrame, UnwindHandler, VcpuStatus,
+    };
     #[pymodule_export]
     use crate::view::hardware::py::{
         PciBar, PciBus, PciBuses, PciCapability, PciConfigBytes, PciFunction, PciScan, PciSegment,

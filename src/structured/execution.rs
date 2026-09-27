@@ -3,6 +3,8 @@
 
 use super::Args;
 use crate::error::Result;
+use crate::view::execution::{ExpressionValue, RegisterContent, RegisterValue};
+use crate::view::shape::{Hex, ViewValue};
 use crate::view::{self, View};
 
 pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
@@ -26,13 +28,12 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .state
                 .ctx
                 .backtrace(count.map_or(64, |count| count as usize))?;
-            Ok(View::List(
-                trace
-                    .frames
-                    .iter()
-                    .map(view::execution::stack_frame)
-                    .collect(),
-            ))
+            Ok(trace
+                .frames
+                .iter()
+                .map(view::execution::stack_frame)
+                .collect::<Vec<_>>()
+                .into_view())
         }),
         "u" | "disasm" => args.addr(0).and_then(|address| {
             let count = argv
@@ -41,15 +42,18 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .and_then(|count| usize::from_str_radix(count, 16).ok())
                 .unwrap_or(8);
             let rows = args.state.ctx.disassemble(address, count)?;
-            Ok(View::List(
-                rows.iter().map(view::execution::disasm_row).collect(),
-            ))
+            Ok(rows
+                .iter()
+                .map(view::execution::disasm_row)
+                .collect::<Vec<_>>()
+                .into_view())
         }),
         "?" | "ev" if !args.raw_tail.is_empty() => args.eval(args.raw_tail).map(|value| {
-            View::Object(vec![
-                ("expression", View::Str(args.raw_tail.to_string())),
-                ("value", View::Hex(value.0)),
-            ])
+            ExpressionValue {
+                expression: args.raw_tail.to_string(),
+                value: Hex(value.0),
+            }
+            .into_view()
         }),
         ".fnent" => args.addr(0).and_then(|address| {
             let detail = args.state.ctx.function_entry(address)?;
@@ -57,29 +61,28 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         }),
         "r" | "registers" if argv.is_empty() => args.state.ctx.read_registers().map(|regs| {
             let register_map = &args.state.ctx.register_map;
-            let mut entries: Vec<(String, View)> = register_map
+            let mut registers: Vec<RegisterValue> = register_map
                 .to_hashmap(&regs)
                 .into_iter()
-                .map(|(name, value)| (name, View::Hex(value)))
+                .map(|(name, value)| RegisterValue {
+                    name,
+                    value: RegisterContent::Scalar(Hex(value)),
+                })
                 .chain(
                     register_map
                         .wide_values(&regs)
                         .into_iter()
-                        .map(|(name, value)| (name, View::Str(format!("{value:#034x}")))),
+                        .map(|(name, value)| RegisterValue {
+                            name,
+                            value: RegisterContent::Wide(format!("{value:#034x}")),
+                        }),
                 )
                 .collect();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            View::List(
-                entries
-                    .into_iter()
-                    .map(|(name, value)| {
-                        View::Object(vec![("name", View::Str(name)), ("value", value)])
-                    })
-                    .collect(),
-            )
+            registers.sort_by(|left, right| left.name.cmp(&right.name));
+            registers.into_view()
         }),
         ".process" if argv.is_empty() => {
-            Ok(view::execution::run_status(&args.state.ctx.run_status()))
+            Ok(view::execution::run_status(&args.state.ctx.run_status()).into_view())
         }
         _ => return None,
     })

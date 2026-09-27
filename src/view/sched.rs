@@ -3,7 +3,7 @@
 #[cfg(feature = "python-stubs")]
 use pyo3::type_hint_union;
 
-use super::execution::{numbered_stack_frame, stack_frame};
+use super::execution::{self, numbered_stack_frame, stack_frame};
 use super::shape::{Diag, Hex, Omit, ViewValue, shapes};
 use super::{ListEnd, View, list_termination};
 use crate::target::sched::{self as detail, ApcSelector};
@@ -49,7 +49,7 @@ shapes! {
         idle_thread: Diag<Option<ThreadSummary>>,
         /// The running thread's first frames; absent unless stacks were
         /// requested.
-        short_stack: Omit<Diag<Vec<View>>>,
+        short_stack: Omit<Diag<Vec<execution::StackFrame>>>,
     }
 
     /// Every processor's running threads (`!running`).
@@ -234,7 +234,7 @@ shapes! {
         top_symbol: Diag<Option<String>>,
         /// Frames, innermost first: the top one at level 0, up to 32 at
         /// level 1, up to 64 at level 2.
-        frames: Vec<View>,
+        frames: Vec<execution::StackFrame>,
         /// Frames past the walk bound, not listed.
         truncated: usize,
         /// Why the stack could not be walked, if it could not.
@@ -271,9 +271,9 @@ shapes! {
         match_count: usize,
         /// The frames that matched, each with its `index` in the stack;
         /// absent at level 0.
-        matching_frames: Omit<Vec<View>>,
+        matching_frames: Omit<Vec<execution::StackFrame>>,
         /// The whole walked stack, innermost first; present at level 2.
-        frames: Omit<Vec<View>>,
+        frames: Omit<Vec<execution::StackFrame>>,
         /// Frames past the walk bound, not searched; present at level 2.
         truncated: Omit<usize>,
     }
@@ -335,7 +335,7 @@ shapes! {
         thread: Diag<ThreadSummary>,
         /// The thread's stack; `None` unless stacks were requested and the
         /// thread decoded.
-        stack: Option<Diag<Vec<View>>>,
+        stack: Option<Diag<Vec<execution::StackFrame>>>,
     }
 
     /// An `_EX_WORK_QUEUE`.
@@ -382,7 +382,7 @@ shapes! {
         threads: Vec<ThreadSummary>,
         /// The first thread's frames, innermost first; the others share its
         /// instruction pointers, not its stack pointers.
-        frames: Vec<View>,
+        frames: Vec<execution::StackFrame>,
         /// Frames past the walk bound, not compared.
         truncated: usize,
     }
@@ -465,11 +465,8 @@ fn scheduler_errors(errors: &[detail::SchedulerError]) -> Vec<SchedulerError> {
     errors.iter().map(scheduler_error).collect()
 }
 
-fn frames(frames: &[StackFrame]) -> Vec<View> {
-    frames
-        .iter()
-        .map(|frame| stack_frame(frame).into_view())
-        .collect()
+fn frames(frames: &[StackFrame]) -> Vec<execution::StackFrame> {
+    frames.iter().map(stack_frame).collect()
 }
 
 fn opt_hex(address: &Option<VirtAddr>) -> Option<Hex> {
@@ -690,7 +687,7 @@ fn findstack_thread(thread: &detail::FindStackThread, level: u8) -> FindStackThr
             thread
                 .matches
                 .iter()
-                .map(|&index| numbered_stack_frame(index, &thread.stack.frames[index]).into_view())
+                .map(|&index| numbered_stack_frame(index, &thread.stack.frames[index]))
                 .collect()
         })),
         frames: Omit(whole.then(|| frames(&thread.stack.frames))),

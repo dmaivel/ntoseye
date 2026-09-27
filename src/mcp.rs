@@ -37,6 +37,7 @@ use crate::repl::{
 use crate::session::{RunStatus, Session};
 use crate::structured;
 use crate::view;
+use crate::view::shape::ViewValue;
 use crate::{Backend, TargetSpec};
 
 /// The session actor's state: the (`!Send`) session plus the REPL state the
@@ -415,7 +416,7 @@ impl CommandOutput {
             "ok": self.ok,
             "output": self.text,
             "result": self.result,
-            "target": view::to_json(&view::execution::run_status(&self.status)),
+            "target": view::to_json(&view::execution::run_status(&self.status).into_view()),
             "debug_output": self.debug_output,
         });
         let mut result = CallToolResult::structured(value);

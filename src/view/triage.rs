@@ -5,6 +5,7 @@ use super::View;
 use super::bugcheck::bugcheck;
 use super::execution::{run_status, stack_frame};
 use super::module::module;
+use super::shape::ViewValue;
 use crate::dmp::{DmpException, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
 use crate::triage::TriagePrcbInfo;
 use crate::triage_report::{
@@ -316,7 +317,7 @@ fn unloaded_driver(driver: &UnloadedDriver) -> View {
 /// presentation-free report builder.
 pub fn triage_report(report: &TriageReport, module_limit: usize) -> View {
     View::Object(vec![
-        ("status", run_status(&report.status)),
+        ("status", run_status(&report.status).into_view()),
         (
             "bugcheck",
             report.bugcheck.as_ref().map(bugcheck).unwrap_or(View::Null),
@@ -342,7 +343,15 @@ pub fn triage_report(report: &TriageReport, module_limit: usize) -> View {
             report
                 .backtrace
                 .as_ref()
-                .map(|trace| View::List(trace.frames.iter().map(stack_frame).collect()))
+                .map(|trace| {
+                    View::List(
+                        trace
+                            .frames
+                            .iter()
+                            .map(|frame| stack_frame(frame).into_view())
+                            .collect(),
+                    )
+                })
                 .unwrap_or(View::Null),
         ),
         (

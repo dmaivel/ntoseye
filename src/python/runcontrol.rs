@@ -10,7 +10,6 @@ use pyo3::prelude::*;
 
 use super::args::UntilFlow;
 use super::handle::{Debugger, require_halted};
-use super::record::Record;
 use super::stop::{Stop, from_outcome};
 use super::symbols::Location;
 use super::{err, raise, timeout_arg, view_record};
@@ -20,6 +19,7 @@ use crate::error::Result as CoreResult;
 use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode};
 use crate::types::VirtAddr;
 use crate::view;
+use crate::view::execution::py::CallTrace;
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };
@@ -309,7 +309,10 @@ impl UntilFlow {
     }
 }
 
-pub fn trace_calls<'py>(dbg: &Bound<'py, Debugger>, limit: usize) -> PyResult<Bound<'py, Record>> {
+pub fn trace_calls<'py>(
+    dbg: &Bound<'py, Debugger>,
+    limit: usize,
+) -> PyResult<Bound<'py, CallTrace>> {
     reject_condition_mutation()?;
     let trace = dbg.get().with_session(|session| {
         require_halted(session, "trace_calls")?;

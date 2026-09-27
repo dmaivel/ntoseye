@@ -10,7 +10,7 @@ use super::args::{
     WhenCallback,
 };
 use super::handle::{Debugger, Owner, require_halted};
-use super::iter::{BreakpointIterator, RecordIterator};
+use super::iter::{BreakpointIterator, ExceptionPolicyIterator};
 use super::process::Process;
 use super::record::PlainDict;
 use super::runcontrol::reject_condition_mutation;
@@ -24,6 +24,7 @@ use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
 use crate::view;
+use crate::view::shape::ViewValue;
 
 /// Code breakpoints and data watchpoints, keyed by id (`dbg.breakpoints`).
 #[pyclass(module = "ntoseye")]
@@ -651,7 +652,7 @@ impl Exceptions {
     }
 
     /// Iterate configured exception-policy records.
-    fn __iter__(&self, py: Python<'_>) -> PyResult<RecordIterator> {
+    fn __iter__(&self, py: Python<'_>) -> PyResult<ExceptionPolicyIterator> {
         let rows = self.owner.with(py, |session| {
             Ok(session
                 .exception_policies
@@ -660,10 +661,10 @@ impl Exceptions {
                 .collect::<Vec<_>>())
         })?;
         let records = rows
-            .iter()
-            .map(|row| view_record(py, row).map(Bound::unbind))
+            .into_iter()
+            .map(|row| view_record(py, &row.into_view()).map(Bound::unbind))
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(RecordIterator::new(records))
+        Ok(ExceptionPolicyIterator::new(records))
     }
 
     /// Number of configured policies.

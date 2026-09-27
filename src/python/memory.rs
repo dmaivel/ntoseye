@@ -19,6 +19,8 @@ use crate::target::mm::{
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
 use crate::view;
+use crate::view::execution::py::{DisassembledInstruction, FunctionEntry};
+use crate::view::shape::ViewValue;
 
 /// A guest address space: `dbg.memory` (kernel), `proc.memory`, `dbg.physical`.
 #[pyclass(module = "ntoseye")]
@@ -383,7 +385,7 @@ impl Memory {
         py: Python<'py>,
         addr: u64,
         count: usize,
-    ) -> PyResult<Vec<Bound<'py, Record>>> {
+    ) -> PyResult<Vec<Bound<'py, DisassembledInstruction>>> {
         self.space.require_virtual()?;
         check_disassembly_count(count)?;
         let context = self.space.context();
@@ -392,7 +394,11 @@ impl Memory {
         })?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::execution::disasm_row).collect()),
+            &rows
+                .iter()
+                .map(view::execution::disasm_row)
+                .collect::<Vec<_>>()
+                .into_view(),
         )
     }
 
@@ -401,7 +407,7 @@ impl Memory {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Vec<Bound<'py, Record>>> {
+    ) -> PyResult<Vec<Bound<'py, DisassembledInstruction>>> {
         self.space.require_virtual()?;
         let context = self.space.context();
         let (_, _, rows) = self.owner.with_in(py, &context, |session| {
@@ -409,13 +415,21 @@ impl Memory {
         })?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::execution::disasm_row).collect()),
+            &rows
+                .iter()
+                .map(view::execution::disasm_row)
+                .collect::<Vec<_>>()
+                .into_view(),
         )
     }
 
     /// The function-table entry and unwind info (AMD64 or ARM64) of the
     /// function containing `addr`, chained parents included (`.fnent`).
-    fn function_entry<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, Record>> {
+    fn function_entry<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Bound<'py, FunctionEntry>> {
         self.space.require_virtual()?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
@@ -430,7 +444,7 @@ impl Memory {
         py: Python<'py>,
         addr: u64,
         count: usize,
-    ) -> PyResult<Vec<Bound<'py, Record>>> {
+    ) -> PyResult<Vec<Bound<'py, DisassembledInstruction>>> {
         self.space.require_virtual()?;
         check_disassembly_count(count)?;
         let context = self.space.context();
@@ -439,7 +453,11 @@ impl Memory {
         })?;
         view_records(
             py,
-            &view::View::List(rows.iter().map(view::execution::disasm_row).collect()),
+            &rows
+                .iter()
+                .map(view::execution::disasm_row)
+                .collect::<Vec<_>>()
+                .into_view(),
         )
     }
 }
