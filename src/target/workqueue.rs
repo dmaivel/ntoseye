@@ -9,9 +9,10 @@
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo};
-use crate::target::sched::{StackFrameDetail, ThreadSummary, thread_summary, walk_list_nodes};
+use crate::target::sched::{ThreadSummary, thread_summary, walk_list_nodes};
 use crate::target::{DiagnosticValue, ListTermination, Target};
 use crate::types::VirtAddr;
+use crate::unwind::StackFrame;
 
 /// `WORK_QUEUE_TYPE` names from wdm.h, in value order; `nt!ExpBuiltinPriorities`
 /// holds the queue priority of each.
@@ -69,7 +70,7 @@ pub struct WorkerThread {
     pub kthread: VirtAddr,
     pub thread: DiagnosticValue<ThreadSummary>,
     /// Filled when stacks were requested.
-    pub stack: Option<DiagnosticValue<Vec<StackFrameDetail>>>,
+    pub stack: Option<DiagnosticValue<Vec<StackFrame>>>,
 }
 
 /// One `_EX_WORK_QUEUE`.

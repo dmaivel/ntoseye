@@ -12,8 +12,8 @@ use crate::target::Target;
 use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
 use crate::unwind::{
-    FrameSource, StackTrace, ThreadTraceContext, build_thread_stacktrace, format_symbol,
-    preferred_code_dtb,
+    FrameSource, StackFrame, StackTrace, ThreadTraceContext, build_thread_stacktrace,
+    format_symbol, preferred_code_dtb,
 };
 
 pub fn print_section(title: &str) {
@@ -460,52 +460,66 @@ fn print_stacktrace_data_impl(
     let shown = stacktrace.frames.len().min(display_limit);
 
     for (num, frame) in stacktrace.frames.iter().take(shown).enumerate() {
-        let mut annotations = Vec::new();
-        if !frame.symbol.starts_with("0x") {
-            annotations.push(ui::symbol(&frame.symbol));
-        }
-        if show_provenance {
-            annotations.push(
-                format!("[{}]", frame.source.as_str())
-                    .bright_black()
-                    .to_string(),
-            );
-        } else if frame.source == FrameSource::Scan {
-            annotations.push("[scan]".bright_black().to_string());
-        }
-        if let Some(location) = frame.source_location.as_ref() {
-            annotations.push(format_source_location(location).bright_black().to_string());
-        }
-        let annotation = if annotations.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", annotations.join(" "))
-        };
-        if embedded {
-            outln!(
-                "{indent}{} {}{}",
-                ui::muted(&format!("#{num:<2}")),
-                ui::addr(frame.ip),
-                annotation
-            );
-        } else {
-            outln!(
-                "{indent}{} {}  {}{}",
-                ui::muted(&format!("#{num:<2}")),
-                ui::addr(frame.sp),
-                ui::addr(frame.ip),
-                annotation
-            );
-        }
+        outln!(
+            "{indent}{}",
+            format_stack_frame(Some(num), frame, !embedded, show_provenance)
+        );
     }
 
     let hidden = stacktrace.frames.len().saturating_sub(display_limit) + stacktrace.truncated;
     if hidden > 0 {
-        outln!(
-            "{indent}{}",
-            format!("... {} more frames", hidden).bright_black()
-        );
+        outln!("{indent}{}", more_frames(hidden));
     }
+}
+
+/// One frame line in `k`'s layout: the frame `number` when given, the child
+/// SP when `with_sp`, the return address, then the symbol, how the frame
+/// was recovered (always with `show_provenance`, as `kv` shows it, else only
+/// a stack scan's guess), and its source line.
+pub fn format_stack_frame(
+    number: Option<usize>,
+    frame: &StackFrame,
+    with_sp: bool,
+    show_provenance: bool,
+) -> String {
+    let mut line = String::new();
+    if let Some(number) = number {
+        line.push_str(&ui::muted(&format!("#{number:<2}")));
+        line.push(' ');
+    }
+    if with_sp {
+        line.push_str(&ui::addr(frame.sp));
+        line.push_str("  ");
+    }
+    line.push_str(&ui::addr(frame.ip));
+    let mut annotations = Vec::new();
+    if !frame.symbol.starts_with("0x") {
+        annotations.push(ui::symbol(&frame.symbol));
+    }
+    if show_provenance {
+        annotations.push(
+            format!("[{}]", frame.source.as_str())
+                .bright_black()
+                .to_string(),
+        );
+    } else if frame.source == FrameSource::Scan {
+        annotations.push("[scan]".bright_black().to_string());
+    }
+    if let Some(location) = frame.source_location.as_ref() {
+        annotations.push(format_source_location(location).bright_black().to_string());
+    }
+    if !annotations.is_empty() {
+        line.push_str("  ");
+        line.push_str(&annotations.join(" "));
+    }
+    line
+}
+
+/// The note under a stack for the frames not shown or not walked.
+pub fn more_frames(hidden: usize) -> String {
+    format!("... {hidden} more frames")
+        .bright_black()
+        .to_string()
 }
 
 #[cfg(test)]

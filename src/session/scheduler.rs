@@ -11,9 +11,8 @@ use crate::session::Session;
 use crate::target::sched::{
     ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
     MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UniqStackDetail,
-    UniqStackScope, UnwalkedThread, available, findstack_level_error, frame_details,
-    frame_symbol_matches, group_stacks, select_threads, thread_summary, unavailable,
-    walk_list_nodes,
+    UniqStackScope, UnwalkedThread, available, findstack_level_error, frame_symbol_matches,
+    group_stacks, select_threads, thread_summary, unavailable, walk_list_nodes,
 };
 use crate::target::workqueue::ExQueueDetail;
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
@@ -59,7 +58,7 @@ impl Session {
                         )
                     });
                 worker.stack = Some(match stack {
-                    Ok(trace) => available(frame_details(trace.stacktrace.frames)),
+                    Ok(trace) => available(trace.stacktrace.frames),
                     Err(error) => unavailable(error.to_string()),
                 });
             }
@@ -91,7 +90,7 @@ impl Session {
                                 vcpu,
                                 MAX_RUNNING_STACK_FRAMES,
                             ) {
-                                Ok(trace) => available(frame_details(trace.stacktrace.frames)),
+                                Ok(trace) => available(trace.stacktrace.frames),
                                 Err(error) => unavailable(error.to_string()),
                             },
                             Err(error) => unavailable(error.to_string()),
@@ -285,7 +284,7 @@ impl Session {
             self.walk_thread_stacks(threads, &active_vcpus, frame_limit, |thread, stack| {
                 let (frames, truncated, error, top_symbol) = match stack {
                     Ok(trace) => {
-                        let frames = frame_details(trace.stacktrace.frames);
+                        let frames = trace.stacktrace.frames;
                         let top = frames.first().map(|frame| frame.symbol.clone());
                         (frames, trace.stacktrace.truncated, None, available(top))
                     }
@@ -353,8 +352,9 @@ impl Session {
             MAX_STACK_FRAMES_LEVEL_2,
             |thread, stack| match stack {
                 Ok(trace) => {
-                    let frames = frame_details(trace.stacktrace.frames);
-                    let matches: Vec<usize> = frames
+                    let stack = trace.stacktrace;
+                    let matches: Vec<usize> = stack
+                        .frames
                         .iter()
                         .enumerate()
                         .filter(|(_, frame)| frame_symbol_matches(pattern, &frame.symbol))
@@ -364,9 +364,8 @@ impl Session {
                         matched.push(FindStackThread {
                             thread: thread_summary(&thread),
                             active_vcpu: active_vcpus.get(&thread.ethread.0).cloned(),
-                            frames,
+                            stack,
                             matches,
-                            truncated: trace.stacktrace.truncated,
                         });
                     }
                 }
@@ -402,11 +401,7 @@ impl Session {
             &active_vcpus,
             MAX_STACK_FRAMES_LEVEL_2,
             |thread, stack| match stack {
-                Ok(trace) => stacks.push((
-                    thread_summary(&thread),
-                    frame_details(trace.stacktrace.frames),
-                    trace.stacktrace.truncated,
-                )),
+                Ok(trace) => stacks.push((thread_summary(&thread), trace.stacktrace)),
                 Err(error) => unwalked.push(UnwalkedThread {
                     thread: thread_summary(&thread),
                     error: error.to_string(),

@@ -1,15 +1,17 @@
 use crate::error::{Error, Result};
 use crate::expr::Expr;
+use crate::repl::disasm::{format_stack_frame, more_frames};
 use crate::repl::*;
 use crate::target::sched::{
-    ApcDetail, ApcListDetail, ApcSelector, FindStackDetail, ReadyQueuesDetail, StackFrameDetail,
-    StacksDetail, ThreadSummary, TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions,
-    UniqStackScope, UnwalkedThread, findstack_level,
+    ApcDetail, ApcListDetail, ApcSelector, FindStackDetail, ReadyQueuesDetail, StacksDetail,
+    ThreadSummary, TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions, UniqStackScope,
+    UnwalkedThread, findstack_level,
 };
 use crate::target::workqueue::{ExQueueDetail, WorkItemDetail};
 use crate::target::{DiagnosticValue, ListTermination, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
 use crate::ui;
+use crate::unwind::StackFrame;
 
 repl_command! {
     cmd_running;
@@ -177,7 +179,7 @@ fn running_thread_detail(value: &DiagnosticValue<Option<ThreadSummary>>) -> Stri
     )
 }
 
-fn short_stack_cell(value: Option<&DiagnosticValue<Vec<StackFrameDetail>>>) -> String {
+fn short_stack_cell(value: Option<&DiagnosticValue<Vec<StackFrame>>>) -> String {
     let Some(value) = value else {
         return "-".to_string();
     };
@@ -960,35 +962,31 @@ fn print_findstack(detail: &FindStackDetail) {
             thread_label(&thread.thread),
             thread.matches.len()
         );
+        let frames = &thread.stack.frames;
         match detail.level {
             0 => {}
             1 => {
                 for &index in &thread.matches {
-                    let frame = &thread.frames[index];
                     outln!(
-                        "    * {index:02} {}  {}  {}",
-                        ui::addr(frame.sp.0),
-                        ui::addr(frame.ip.0),
-                        frame.symbol
+                        "    * {}",
+                        format_stack_frame(Some(index), &frames[index], true, false)
                     );
                 }
             }
             _ => {
-                for (index, frame) in thread.frames.iter().enumerate() {
+                for (index, frame) in frames.iter().enumerate() {
                     let mark = if thread.matches.contains(&index) {
                         '*'
                     } else {
                         ' '
                     };
                     outln!(
-                        "    {mark} {index:02} {}  {}  {}",
-                        ui::addr(frame.sp.0),
-                        ui::addr(frame.ip.0),
-                        frame.symbol
+                        "    {mark} {}",
+                        format_stack_frame(Some(index), frame, true, false)
                     );
                 }
-                if thread.truncated != 0 {
-                    outln!("      <{} more frame(s) not walked>", thread.truncated);
+                if thread.stack.truncated != 0 {
+                    outln!("      {}", more_frames(thread.stack.truncated));
                 }
             }
         }
@@ -1029,26 +1027,19 @@ fn print_uniqstack(detail: &UniqStackDetail, options: UniqStackOptions) {
             group.threads.len()
         );
         sharing += group.threads.len() - 1;
-        for (index, frame) in group.frames.iter().enumerate() {
-            let number = if options.frame_numbers {
-                format!("{index:02} ")
-            } else {
-                String::new()
-            };
-            let source = if options.provenance {
-                format!("  [{}]", frame.source.as_str())
-            } else {
-                String::new()
-            };
+        for (index, frame) in group.stack.frames.iter().enumerate() {
             outln!(
-                "    {number}{}  {}  {}{source}",
-                ui::addr(frame.sp.0),
-                ui::addr(frame.ip.0),
-                frame.symbol
+                "    {}",
+                format_stack_frame(
+                    options.frame_numbers.then_some(index),
+                    frame,
+                    true,
+                    options.provenance
+                )
             );
         }
-        if group.truncated != 0 {
-            outln!("    <{} more frame(s) not walked>", group.truncated);
+        if group.stack.truncated != 0 {
+            outln!("    {}", more_frames(group.stack.truncated));
         }
         if group.threads.len() > 1 {
             outln!("    Threads: {}", thread_ids_by_process(&group.threads));

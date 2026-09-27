@@ -15,7 +15,7 @@ use crate::target::{
 };
 use crate::types::VirtAddr;
 use crate::unwind::{
-    FrameSource, StackFrame, ThreadTraceContext, format_symbol, resolve_thread_trace_context,
+    StackFrame, StackTrace, ThreadTraceContext, format_symbol, resolve_thread_trace_context,
 };
 
 pub const MAX_LIST_ENTRIES: usize = 4096;
@@ -36,15 +36,6 @@ pub struct ThreadSummary {
 }
 
 #[derive(Debug, Clone)]
-pub struct StackFrameDetail {
-    pub sp: VirtAddr,
-    pub ip: VirtAddr,
-    pub symbol: String,
-    /// How the walk recovered the frame (`kv`'s provenance).
-    pub source: FrameSource,
-}
-
-#[derive(Debug, Clone)]
 pub struct RunningProcessor {
     pub index: u16,
     pub kpcr: DiagnosticValue<VirtAddr>,
@@ -54,7 +45,7 @@ pub struct RunningProcessor {
     pub idle_thread: DiagnosticValue<Option<ThreadSummary>>,
     /// Present only when `include_stacks` was requested. The vector is bounded
     /// to the short running-thread stack limit.
-    pub short_stack: Option<DiagnosticValue<Vec<StackFrameDetail>>>,
+    pub short_stack: Option<DiagnosticValue<Vec<StackFrame>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -232,7 +223,7 @@ pub struct StackThreadDetail {
     pub thread: ThreadSummary,
     pub active_vcpu: Option<String>,
     pub top_symbol: DiagnosticValue<Option<String>>,
-    pub frames: Vec<StackFrameDetail>,
+    pub frames: Vec<StackFrame>,
     pub truncated: usize,
     pub error: Option<String>,
 }
@@ -255,16 +246,16 @@ pub struct UnwalkedThread {
     pub error: String,
 }
 
-/// A `!findstack` hit: the thread's walked stack and which frames matched.
+/// A `!findstack` hit: the thread's walked stack (frames past the walk
+/// bound, counted in its `truncated`, are not searched) and which frames
+/// matched.
 #[derive(Debug, Clone)]
 pub struct FindStackThread {
     pub thread: ThreadSummary,
     pub active_vcpu: Option<String>,
-    pub frames: Vec<StackFrameDetail>,
-    /// Indices into `frames` of the frames whose symbol matched.
+    pub stack: StackTrace,
+    /// Indices into `stack.frames` of the frames whose symbol matched.
     pub matches: Vec<usize>,
-    /// Frames past the walk bound, not searched.
-    pub truncated: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -278,13 +269,12 @@ pub struct FindStackDetail {
 }
 
 /// Threads whose walked stacks have the same frames (instruction pointers)
-/// and the same truncation. `frames` are the first thread's, whose stack
+/// and the same truncation. `stack` is the first thread's, whose stack
 /// pointers the others do not share.
 #[derive(Debug, Clone)]
 pub struct UniqStackGroup {
     pub threads: Vec<ThreadSummary>,
-    pub frames: Vec<StackFrameDetail>,
-    pub truncated: usize,
+    pub stack: StackTrace,
 }
 
 /// Which threads `!uniqstack` groups.
@@ -491,20 +481,22 @@ pub fn findstack_level_error(level: impl std::fmt::Display) -> Error {
 /// Group walked stacks by their frames' instruction pointers and truncation,
 /// keeping the order in which each group's first thread came.
 pub fn group_stacks(
-    stacks: impl IntoIterator<Item = (ThreadSummary, Vec<StackFrameDetail>, usize)>,
+    stacks: impl IntoIterator<Item = (ThreadSummary, StackTrace)>,
 ) -> Vec<UniqStackGroup> {
     let mut groups: Vec<UniqStackGroup> = Vec::new();
     let mut index: HashMap<(Vec<u64>, usize), usize> = HashMap::new();
-    for (thread, frames, truncated) in stacks {
-        let key = (frames.iter().map(|frame| frame.ip.0).collect(), truncated);
+    for (thread, stack) in stacks {
+        let key = (
+            stack.frames.iter().map(|frame| frame.ip).collect(),
+            stack.truncated,
+        );
         match index.get(&key) {
             Some(&group) => groups[group].threads.push(thread),
             None => {
                 index.insert(key, groups.len());
                 groups.push(UniqStackGroup {
                     threads: vec![thread],
-                    frames,
-                    truncated,
+                    stack,
                 });
             }
         }
@@ -736,18 +728,6 @@ fn decode_running_thread(
         Ok(thread) => available(Some(thread_summary(&thread))),
         Err(error) => unavailable(error.to_string()),
     }
-}
-
-pub fn frame_details(frames: impl IntoIterator<Item = StackFrame>) -> Vec<StackFrameDetail> {
-    frames
-        .into_iter()
-        .map(|frame| StackFrameDetail {
-            sp: VirtAddr(frame.sp),
-            ip: VirtAddr(frame.ip),
-            symbol: frame.symbol,
-            source: frame.source,
-        })
-        .collect()
 }
 
 impl Target {
@@ -1756,6 +1736,7 @@ impl Target {
 mod tests {
     use super::*;
     use crate::session::session_over_memory;
+    use crate::unwind::FrameSource;
 
     #[test]
     fn findstack_patterns_match_like_windbg() {
@@ -1794,24 +1775,28 @@ mod tests {
             wait_reason: optional(None),
             priority: optional(None),
         };
-        let frames = |sp: u64, ips: &[u64]| {
-            ips.iter()
+        let stack = |sp: u64, ips: &[u64], truncated| StackTrace {
+            frames: ips
+                .iter()
                 .enumerate()
-                .map(|(index, ip)| StackFrameDetail {
-                    sp: VirtAddr(sp + index as u64 * 0x10),
-                    ip: VirtAddr(*ip),
+                .map(|(index, ip)| StackFrame {
+                    sp: sp + index as u64 * 0x10,
+                    ip: *ip,
                     symbol: format!("nt!f{ip:x}"),
                     source: FrameSource::Unwind,
+                    source_location: None,
+                    machine_frame: None,
                 })
-                .collect::<Vec<_>>()
+                .collect(),
+            truncated,
         };
         let groups = group_stacks([
-            (thread(12), frames(0x1000, &[1, 2, 3]), 0),
-            (thread(16), frames(0x9000, &[1, 2, 4]), 0),
-            (thread(20), frames(0x5000, &[1, 2, 3]), 0),
+            (thread(12), stack(0x1000, &[1, 2, 3], 0)),
+            (thread(16), stack(0x9000, &[1, 2, 4], 0)),
+            (thread(20), stack(0x5000, &[1, 2, 3], 0)),
             // Same frames, but the walk stopped at its bound.
-            (thread(24), frames(0x7000, &[1, 2, 3]), 5),
-            (thread(28), frames(0x3000, &[1, 2, 4]), 0),
+            (thread(24), stack(0x7000, &[1, 2, 3], 5)),
+            (thread(28), stack(0x3000, &[1, 2, 4], 0)),
         ]);
         let tids: Vec<Vec<u64>> = groups
             .iter()
@@ -1828,8 +1813,8 @@ mod tests {
             .collect();
         assert_eq!(tids, [vec![12, 20], vec![16, 28], vec![24]]);
         // A group shows its first thread's stack.
-        assert_eq!(groups[0].frames[0].sp, VirtAddr(0x1000));
-        assert_eq!(groups[2].truncated, 5);
+        assert_eq!(groups[0].stack.frames[0].sp, 0x1000);
+        assert_eq!(groups[2].stack.truncated, 5);
     }
 
     #[test]

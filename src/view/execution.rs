@@ -98,7 +98,19 @@ pub fn run_status(status: &RunStatus) -> View {
 }
 
 pub fn stack_frame(frame: &StackFrame) -> View {
-    View::Object(vec![
+    View::Object(stack_frame_fields(frame))
+}
+
+/// [`stack_frame`] with its position in the walked stack first, for a
+/// selection of a stack's frames.
+pub fn numbered_stack_frame(index: usize, frame: &StackFrame) -> View {
+    let mut fields = vec![("index", View::Num(index as u64))];
+    fields.extend(stack_frame_fields(frame));
+    View::Object(fields)
+}
+
+fn stack_frame_fields(frame: &StackFrame) -> Vec<(&'static str, View)> {
+    vec![
         ("ip", View::Hex(frame.ip)),
         ("sp", View::Hex(frame.sp)),
         ("symbol", View::Str(frame.symbol.clone())),
@@ -110,7 +122,7 @@ pub fn stack_frame(frame: &StackFrame) -> View {
                 .as_ref()
                 .map_or(View::Null, source_location),
         ),
-    ])
+    ]
 }
 
 /// One decoded instruction: bytes, text, and the resolved branch/rip-relative

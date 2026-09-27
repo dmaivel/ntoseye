@@ -1,12 +1,13 @@
 //! sched: [`View`] builders for the structured inspectors.
 
+use super::execution::{numbered_stack_frame, stack_frame};
 use super::{View, diagnostic, list_termination};
 use crate::target::sched::{
     ApcDetail, ApcListDetail, ApcSelector, ApcThread, DpcDetail, DpcQueue, DpcQueuesDetail,
     FindStackDetail, FindStackThread, ReadyQueue, ReadyQueueEntry, ReadyQueuesDetail,
-    RunningDetail, RunningProcessor, SchedulerError, StackFrameDetail, StackThreadDetail,
-    StacksDetail, ThreadSummary, TimerBucketTermination, TimerDetail, TimerListDetail,
-    TimerListEntry, UniqStackDetail, UniqStackGroup, UniqStackScope, UnwalkedThread,
+    RunningDetail, RunningProcessor, SchedulerError, StackThreadDetail, StacksDetail,
+    ThreadSummary, TimerBucketTermination, TimerDetail, TimerListDetail, TimerListEntry,
+    UniqStackDetail, UniqStackGroup, UniqStackScope, UnwalkedThread,
 };
 use crate::target::workqueue::{
     ExQueueDetail, WorkItemDetail, WorkQueueDetail, WorkQueuePriority, WorkerThread,
@@ -52,14 +53,6 @@ fn thread_summary(thread: &ThreadSummary) -> View {
     ])
 }
 
-fn frame(frame: &StackFrameDetail) -> View {
-    View::Object(vec![
-        ("sp", View::Hex(frame.sp.0)),
-        ("ip", View::Hex(frame.ip.0)),
-        ("symbol", View::Str(frame.symbol.clone())),
-    ])
-}
-
 fn running_thread(value: &DiagnosticValue<Option<ThreadSummary>>) -> View {
     diagnostic(value, |thread| {
         thread.as_ref().map_or(View::Null, thread_summary)
@@ -85,7 +78,7 @@ fn running_processor(processor: &RunningProcessor) -> View {
         fields.push((
             "short_stack",
             diagnostic(stack, |frames| {
-                View::List(frames.iter().map(frame).collect())
+                View::List(frames.iter().map(stack_frame).collect())
             }),
         ));
     }
@@ -399,7 +392,7 @@ fn stack_thread(thread: &StackThreadDetail) -> View {
         ),
         (
             "frames",
-            View::List(thread.frames.iter().map(frame).collect()),
+            View::List(thread.frames.iter().map(stack_frame).collect()),
         ),
         ("truncated", View::Num(thread.truncated as u64)),
         ("error", View::OptStr(thread.error.clone())),
@@ -424,16 +417,6 @@ pub fn stacks(detail: &StacksDetail) -> View {
     ])
 }
 
-fn indexed_frame(index: usize, frame: &StackFrameDetail) -> View {
-    View::Object(vec![
-        ("index", View::Num(index as u64)),
-        ("sp", View::Hex(frame.sp.0)),
-        ("ip", View::Hex(frame.ip.0)),
-        ("symbol", View::Str(frame.symbol.clone())),
-        ("source", View::Str(frame.source.as_str().into())),
-    ])
-}
-
 fn unwalked_thread(thread: &UnwalkedThread) -> View {
     View::Object(vec![
         ("thread", thread_summary(&thread.thread)),
@@ -454,7 +437,7 @@ fn findstack_thread(thread: &FindStackThread, level: u8) -> View {
                 thread
                     .matches
                     .iter()
-                    .map(|&index| indexed_frame(index, &thread.frames[index]))
+                    .map(|&index| numbered_stack_frame(index, &thread.stack.frames[index]))
                     .collect(),
             ),
         ));
@@ -462,16 +445,9 @@ fn findstack_thread(thread: &FindStackThread, level: u8) -> View {
     if level >= 2 {
         fields.push((
             "frames",
-            View::List(
-                thread
-                    .frames
-                    .iter()
-                    .enumerate()
-                    .map(|(index, frame)| indexed_frame(index, frame))
-                    .collect(),
-            ),
+            View::List(thread.stack.frames.iter().map(stack_frame).collect()),
         ));
-        fields.push(("truncated", View::Num(thread.truncated as u64)));
+        fields.push(("truncated", View::Num(thread.stack.truncated as u64)));
     }
     View::Object(fields)
 }
@@ -553,7 +529,7 @@ fn worker_thread(worker: &WorkerThread) -> View {
             "stack",
             worker.stack.as_ref().map_or(View::Null, |stack| {
                 diagnostic(stack, |frames| {
-                    View::List(frames.iter().map(frame).collect())
+                    View::List(frames.iter().map(stack_frame).collect())
                 })
             }),
         ),
@@ -604,16 +580,9 @@ fn uniqstack_group(group: &UniqStackGroup) -> View {
         ),
         (
             "frames",
-            View::List(
-                group
-                    .frames
-                    .iter()
-                    .enumerate()
-                    .map(|(index, frame)| indexed_frame(index, frame))
-                    .collect(),
-            ),
+            View::List(group.stack.frames.iter().map(stack_frame).collect()),
         ),
-        ("truncated", View::Num(group.truncated as u64)),
+        ("truncated", View::Num(group.stack.truncated as u64)),
     ])
 }
 
