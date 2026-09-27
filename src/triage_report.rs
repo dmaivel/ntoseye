@@ -7,10 +7,7 @@ pub mod time;
 mod verifier;
 mod whea;
 
-use crate::bugchecks::{
-    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, bugcheck_trap_frame_on_stack,
-    current_bugcheck, module_filename,
-};
+use crate::bugchecks::{BugcheckAnalysis, bugcheck_trap_frame_on_stack, module_filename};
 use crate::dmp::{DmpException, DmpInfo, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
 use crate::guest::ModuleInfo;
 use crate::ntstatus::ntstatus_name;
@@ -212,18 +209,7 @@ impl TriageReport {
     /// still produces the directly available crash/status data.
     pub fn build(session: &mut Session) -> Self {
         let status = session.run_status();
-        // The stop's own bugcheck comes first. A target that reports the
-        // crash itself (KD) and one trapped at `nt!KeBugCheckEx` both carry
-        // it on the event, and in the trapped case nothing has written
-        // `nt!KiBugCheckData` yet: the call that fills it has not run.
-        let reported = session
-            .last_event
-            .as_ref()
-            .and_then(|event| event.stop.bugcheck.clone());
-        let mut bugcheck = reported
-            .map(|info| analyze_bugcheck(&session.target, &info))
-            .or_else(|| current_bugcheck(&session.target))
-            .or_else(|| bugcheck_from_dump_info(&session.target));
+        let mut bugcheck = session.bugcheck();
         let mut warnings = Vec::new();
         let backtrace = if status.running {
             None

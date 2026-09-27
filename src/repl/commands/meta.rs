@@ -490,6 +490,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("tt", "execution and stack"),
     ("wt", "execution and stack"),
     ("!analyze", "analysis"),
+    (".bugcheck", "analysis"),
     ("!apc", "execution and stack"),
     ("!stacks", "execution and stack"),
     ("!findstack", "execution and stack"),

@@ -21,6 +21,14 @@ repl_command! {
     completion: Expression,
 }
 
+repl_command! {
+    cmd_bugcheck();
+    names: [".bugcheck"],
+    usage: ".bugcheck",
+    summary: "Display the bugcheck code and its four parameters.",
+    details: "Takes the bugcheck the stop reported, else nt!KiBugCheckData's (as $bug_code and $bug_param1-4 do), else a crash dump header's, as !analyze does.",
+}
+
 const ANALYZE_STACK_LIMIT: usize = 16;
 const ANALYZE_MODULE_LIMIT: usize = 16;
 const ANALYZE_UNLOADED_LIMIT: usize = 12;
@@ -657,6 +665,28 @@ fn print_dump_metadata(report: &TriageReport) {
 }
 
 impl ReplState<'_> {
+    fn cmd_bugcheck(&mut self) -> Result<()> {
+        let Some(analysis) = self.ctx.bugcheck() else {
+            outln!(
+                "{}\n",
+                ui::muted("no bugcheck: the target has not bugchecked")
+            );
+            return Ok(());
+        };
+        outln!("Bugcheck code {:08x} ({})", analysis.code, analysis.name);
+        let arguments: Vec<String> = analysis
+            .args
+            .iter()
+            .map(|arg| ui::addr(arg.value))
+            .collect();
+        outln!("Arguments {}", arguments.join(" "));
+        if let Some(source) = &analysis.source {
+            outln!("{}", ui::muted(&format!("from {source}")));
+        }
+        outln!();
+        Ok(())
+    }
+
     fn cmd_analyze(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let options = match parse_analyze_options(&invocation, &self.ctx.target, self.radix) {
             Ok(options) => options,

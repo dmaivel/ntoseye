@@ -6,6 +6,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::backend::MemoryOps;
+use crate::bugchecks::{
+    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
+};
 use crate::bytes;
 use crate::disasm::{DisasmRow, decode_code, decode_preceding};
 use crate::error::{Error, Result};
@@ -298,6 +301,19 @@ impl Session {
         let machine = self.target.code_machine(VirtAddr(start));
         let rows = decode_code(&bytes, start, None, machine, resolve);
         Ok((format_symbol(&self.target, &trace, start), len, rows))
+    }
+
+    /// The bugcheck the target is in: the one its stop reported (a target
+    /// that reports the crash itself, like KD, or a stop trapped at
+    /// `nt!KeBugCheckEx`, before the call that fills `nt!KiBugCheckData`
+    /// has run), else `nt!KiBugCheckData`'s, else a dump header's.
+    pub fn bugcheck(&self) -> Option<BugcheckAnalysis> {
+        self.last_event
+            .as_ref()
+            .and_then(|event| event.stop.bugcheck.as_ref())
+            .map(|info| analyze_bugcheck(&self.target, info))
+            .or_else(|| current_bugcheck(&self.target))
+            .or_else(|| bugcheck_from_dump_info(&self.target))
     }
 
     /// The function-table entry and unwind data for the function containing
