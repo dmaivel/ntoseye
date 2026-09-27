@@ -638,8 +638,9 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(Flow::Continue);
         }
+        // `*` in an expression multiplies; a comment is never Command1.
         let is_command = |word: &str| {
-            command_registry().get(word).is_some()
+            (command_registry().get(word).is_some() && !is_comment(word))
                 || self
                     .aliases
                     .entries()
@@ -647,7 +648,6 @@ impl ReplState<'_> {
                     .any(|(alias, _)| alias == word)
                 || word.starts_with('~')
                 || script_file_token(word).is_some()
-                || is_comment(word)
         };
         let command = match parse_j(invocation.raw_tail, self.radix, is_command) {
             Ok(command) => command,
@@ -903,6 +903,9 @@ mod tests {
         assert_eq!(text, "only-else\n");
         let (_, text) = interactive("j (0) '.echo a'");
         assert_eq!(text, "");
+        // `*` multiplies; it does not start a comment as Command1.
+        let (_, text) = interactive("j 1 * 0 '.echo yes' ; '.echo no'");
+        assert_eq!(text, "no\n");
     }
 
     #[test]
