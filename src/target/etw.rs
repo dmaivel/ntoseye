@@ -1030,6 +1030,14 @@ impl Target {
     }
 
     fn read_etw_buffers(&self, types: &EtwTypes, logger: &EtwLogger) -> Result<Vec<EtwBuffer>> {
+        if logger.buffer_size as usize <= types.buffer.size || logger.buffer_size > MAX_BUFFER_SIZE
+        {
+            return Err(Error::DebugInfo(format!(
+                "logger {:#x}'s BufferSize {:#x} is not a trace buffer size (above the {:#x}-byte \
+                 buffer header, at most ETW's 16 MB)",
+                logger.logger_id, logger.buffer_size, types.buffer.size
+            )));
+        }
         let memory = self.kernel_address_space();
         let head = logger.address + types.logger.field_offset("GlobalList")?;
         let global_entry = types.buffer.field_offset("GlobalEntry")?;
@@ -1152,7 +1160,8 @@ impl Target {
         let mut events = Vec::new();
         let mut issues = Vec::new();
         let mut walked = 0;
-        let mut data = vec![0u8; logger.buffer_size.min(MAX_BUFFER_SIZE) as usize];
+        // read_etw_buffers bounded BufferSize, and every data_end by it.
+        let mut data = vec![0u8; logger.buffer_size as usize];
         for buffer in &buffers {
             if self.interrupted() {
                 return Err(Error::DebugInfo("interrupted".into()));
@@ -1339,19 +1348,19 @@ fn logfile_header_buffer(
 ) -> Result<Vec<u8>> {
     let size = logger.buffer_size as usize;
     let mut buffer = vec![0u8; size];
-    write_u32(&mut buffer, offsets.buffer_size, logger.buffer_size);
-    write_u16(&mut buffer, offsets.logger_id, logger.logger_id as u16);
-
     let logger_name = utf16z(&logger.name);
     let file_name = utf16z(&logger.log_file_name);
     let event_size = 0x20 + TRACE_LOGFILE_HEADER64_SIZE + logger_name.len() + file_name.len();
     let event = offsets.size;
     let used = align8(event + event_size);
+    // The buffer header fields lie below `event`, so this bounds every write.
     if event_size > usize::from(u16::MAX) || used > size {
         return Err(Error::DebugInfo(format!(
             "the logfile header event ({event_size:#x} bytes) does not fit a {size:#x}-byte buffer"
         )));
     }
+    write_u32(&mut buffer, offsets.buffer_size, logger.buffer_size);
+    write_u16(&mut buffer, offsets.logger_id, logger.logger_id as u16);
     // SYSTEM_TRACE_HEADER: version 2, TRACE_HEADER_TYPE_SYSTEM64, flags
     // 0xc0; the thread, process and CPU times stay 0.
     write_u32(&mut buffer, event, 0xc002_0002);
@@ -1419,12 +1428,6 @@ impl Target {
     pub fn etw_log_file(&self, text: &str, radix: NumberRadix) -> Result<EtwLogFile> {
         let logger = self.etw_logger(text, radix)?;
         let types = self.etw_types()?;
-        if logger.buffer_size > MAX_BUFFER_SIZE {
-            return Err(Error::DebugInfo(format!(
-                "logger {:#x}'s BufferSize {:#x} is beyond ETW's 16 MB limit",
-                logger.logger_id, logger.buffer_size
-            )));
-        }
         let buffers = self.read_etw_buffers(&types, &logger)?;
         let guest = self.guest()?;
         let kernel = guest.ntoskrnl.types();
