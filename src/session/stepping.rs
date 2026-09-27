@@ -25,7 +25,7 @@ use crate::session::{
 use crate::target::Target;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
-    build_stacktrace, format_symbol, preferred_code_dtb, resolve_thread_trace_context,
+    build_stacktrace, format_symbol, preferred_code_dtb, resolve_thread_trace_context, thread_root,
 };
 
 impl Session {
@@ -695,10 +695,13 @@ pub fn site_successors(
     rip: u64,
     cr3: Option<u64>,
 ) -> Result<Vec<u64>> {
-    // As `current_instruction` reads it: CR3 carries PCID and flush bits,
-    // and a module's own root serves its code.
-    let trace = resolve_thread_trace_context(debugger, cr3.unwrap_or(0));
-    let memory = debugger.address_space(preferred_code_dtb(&trace, rip));
+    // The vCPU fetches the instruction and follows its pointers through its
+    // own root. Without one, a module's own root serves its code.
+    let dtb = match cr3 {
+        Some(cr3) => thread_root(debugger, cr3),
+        None => preferred_code_dtb(&resolve_thread_trace_context(debugger, 0), rip),
+    };
+    let memory = debugger.address_space(dtb);
     let mut bytes = [0u8; 16];
     memory.read_bytes(VirtAddr(rip), &mut bytes)?;
     let bitness = debugger.code_bitness(VirtAddr(rip));

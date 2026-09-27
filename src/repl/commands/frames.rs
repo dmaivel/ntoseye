@@ -7,14 +7,14 @@ use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::session::ExceptionRecord;
-use crate::target::{HYPERVISOR_CONTEXT, SavedThreadRegisters, SelectedFrame, lookup_register};
+use crate::target::{SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, build_stacktrace_with_register_values,
-    build_thread_stacktrace, describe_saved_vtl, resolve_thread_trace_context,
-    resolve_thread_trace_context_at, try_format_symbol,
+    build_thread_stacktrace, describe_saved_vtl, halted_in_windows_hypervisor,
+    resolve_thread_trace_context, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -261,7 +261,7 @@ impl ReplState<'_> {
             error!("the vCPU's CR3 and RIP are unavailable");
             return Ok(());
         };
-        if resolve_thread_trace_context_at(target, cr3, rip).description != HYPERVISOR_CONTEXT {
+        if !halted_in_windows_hypervisor(target, cr3, rip) {
             error!(
                 "{} is not halted in the Windows hypervisor",
                 ui::thread_id(&self.ctx.current_thread)

@@ -2,9 +2,8 @@ use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
 use crate::repl::*;
-use crate::target::HYPERVISOR_CONTEXT;
 use crate::ui;
-use crate::unwind::resolve_thread_trace_context_at;
+use crate::unwind::halted_in_windows_hypervisor;
 
 repl_command! {
     cmd_vtl;
@@ -234,8 +233,7 @@ impl ReplState<'_> {
             }
             outln!();
         } else if let Some(rip) = target.register_value("rip")
-            && resolve_thread_trace_context_at(target, target.current_dtb(), rip).description
-                == HYPERVISOR_CONTEXT
+            && halted_in_windows_hypervisor(target, target.current_dtb(), rip)
         {
             // Not VTL0: the vCPU halted in the Windows hypervisor, whose root
             // maps no NT memory.

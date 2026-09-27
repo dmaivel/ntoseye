@@ -10,14 +10,14 @@ use crate::{
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
-    guest::{Image, ModuleInfo},
+    guest::{Image, ModuleInfo, ProcessInfo, SecureKernel},
     memory::{AddressSpace, DTB_IDENTITY},
     pe::{CodeLayout, PeImage},
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
     target::{
-        ForeignModules, KTHREAD_STATE_RUNNING, KTHREAD_STATE_TERMINATED, SavedThreadRegisters,
-        SavedVtlContext, Target, ThreadInfo, lookup_register,
+        ForeignModules, HYPERVISOR_CONTEXT, KTHREAD_STATE_RUNNING, KTHREAD_STATE_TERMINATED,
+        SavedThreadRegisters, SavedVtlContext, Target, ThreadInfo, lookup_register,
     },
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
     types::{Arch, CodeMachine, Dtb, VirtAddr},
@@ -273,16 +273,62 @@ struct StackTracer<'a> {
     kernel: Option<&'a Image>,
 }
 
-pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceContext {
-    let dtb_mask = debugger.arch().dtb_page_mask();
-    let cr3_masked = cr3 & dtb_mask;
-    let kernel_dtb = debugger.kernel_dtb();
-    let kernel_dtb_masked = kernel_dtb & dtb_mask;
+/// Whose page-table root a thread runs on.
+enum RootOwner {
+    Kernel,
+    SecureKernel(Arc<SecureKernel>),
+    Process(ProcessInfo),
+    /// None of NT's: the Windows hypervisor, VTL1 code not yet recognized,
+    /// or a root this session cannot place.
+    Unknown,
+}
 
+/// Whether a thread on root `cr3_masked` runs in the kernel's view.
+fn in_kernel_root(debugger: &Target, cr3_masked: u64) -> bool {
+    let kernel_dtb = debugger.kernel_dtb();
     // Triage dumps use DTB_IDENTITY because page-table walks are impossible,
     // so force the kernel context regardless of the thread's real CR3.
-    if kernel_dtb == DTB_IDENTITY || cr3_masked == kernel_dtb_masked {
-        return ThreadTraceContext {
+    kernel_dtb == DTB_IDENTITY || cr3_masked == kernel_dtb & debugger.arch().dtb_page_mask()
+}
+
+fn root_owner(debugger: &Target, cr3_masked: u64) -> RootOwner {
+    if in_kernel_root(debugger, cr3_masked) {
+        return RootOwner::Kernel;
+    }
+    // A root mapping the secure kernel: its modules and system root, so code
+    // reads, symbols and unwinding use the secure kernel, never NT's.
+    if debugger.recognize_secure_root(cr3_masked)
+        && let Some(secure) = debugger
+            .guest
+            .as_ref()
+            .and_then(|guest| guest.cached_secure_kernel())
+    {
+        return RootOwner::SecureKernel(secure);
+    }
+    match debugger.process_for_cr3(cr3_masked) {
+        Some(process) => RootOwner::Process(process),
+        None => RootOwner::Unknown,
+    }
+}
+
+/// The root a thread on `cr3` runs in, as [`resolve_thread_trace_context`]
+/// reports it (`active_dtb`) without walking any module list: `cr3` without
+/// its PCID and flush bits, or the kernel's view on a target that cannot
+/// walk page tables.
+pub fn thread_root(debugger: &Target, cr3: u64) -> Dtb {
+    let cr3_masked = cr3 & debugger.arch().dtb_page_mask();
+    if in_kernel_root(debugger, cr3_masked) {
+        debugger.kernel_dtb()
+    } else {
+        cr3_masked
+    }
+}
+
+pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceContext {
+    let cr3_masked = cr3 & debugger.arch().dtb_page_mask();
+    let kernel_dtb = debugger.kernel_dtb();
+    match root_owner(debugger, cr3_masked) {
+        RootOwner::Kernel => ThreadTraceContext {
             description: "kernel".to_string(),
             active_dtb: kernel_dtb,
             kernel_dtb,
@@ -290,51 +336,42 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
             kernel_modules: debugger.kernel_modules().unwrap_or_default(),
             process_modules: Vec::new(),
             foreign_image: None,
-        };
-    }
-
-    // A root mapping the secure kernel: its modules and system root, so code
-    // reads, symbols and unwinding use the secure kernel, never NT's.
-    if debugger.recognize_secure_root(cr3_masked)
-        && let Some(guest) = debugger.guest.as_ref()
-        && let Some(secure) = guest.cached_secure_kernel()
-    {
-        return ThreadTraceContext {
+        },
+        RootOwner::SecureKernel(secure) => ThreadTraceContext {
             description: "VTL1".to_string(),
             active_dtb: cr3_masked,
             kernel_dtb: secure.image.dtb(),
             process_dtb: None,
-            kernel_modules: secure.modules(guest).unwrap_or_default(),
+            kernel_modules: debugger
+                .guest
+                .as_ref()
+                .and_then(|guest| secure.modules(guest).ok())
+                .unwrap_or_default(),
             process_modules: Vec::new(),
             foreign_image: None,
-        };
-    }
-
-    if let Some(proc_info) = debugger.process_for_cr3(cr3_masked) {
-        let process_modules = debugger
-            .guest
-            .as_ref()
-            .map(|g| g.process_modules(&proc_info).unwrap_or_default())
-            .unwrap_or_default();
-        return ThreadTraceContext {
+        },
+        RootOwner::Process(proc_info) => ThreadTraceContext {
             description: format!("{} ({})", proc_info.name, proc_info.pid),
             active_dtb: cr3_masked,
             kernel_dtb,
             process_dtb: Some(proc_info.dtb),
             kernel_modules: debugger.kernel_modules().unwrap_or_default(),
-            process_modules,
+            process_modules: debugger
+                .guest
+                .as_ref()
+                .and_then(|guest| guest.process_modules(&proc_info).ok())
+                .unwrap_or_default(),
             foreign_image: None,
-        };
-    }
-
-    ThreadTraceContext {
-        description: UNKNOWN_CONTEXT.to_string(),
-        active_dtb: cr3_masked,
-        kernel_dtb,
-        process_dtb: None,
-        kernel_modules: debugger.kernel_modules().unwrap_or_default(),
-        process_modules: Vec::new(),
-        foreign_image: None,
+        },
+        RootOwner::Unknown => ThreadTraceContext {
+            description: UNKNOWN_CONTEXT.to_string(),
+            active_dtb: cr3_masked,
+            kernel_dtb,
+            process_dtb: None,
+            kernel_modules: debugger.kernel_modules().unwrap_or_default(),
+            process_modules: Vec::new(),
+            foreign_image: None,
+        },
     }
 }
 
@@ -400,6 +437,16 @@ pub fn resolve_thread_trace_context_at(
         ForeignModules::None => {}
     }
     trace
+}
+
+/// Whether a vCPU at `rip` on root `cr3` is halted in the Windows
+/// hypervisor, as [`resolve_thread_trace_context_at`] names it. A root that
+/// is NT's never is, so its module lists are not walked to find out.
+pub fn halted_in_windows_hypervisor(debugger: &Target, cr3: u64, rip: u64) -> bool {
+    matches!(
+        root_owner(debugger, cr3 & debugger.arch().dtb_page_mask()),
+        RootOwner::Unknown
+    ) && resolve_thread_trace_context_at(debugger, cr3, rip).description == HYPERVISOR_CONTEXT
 }
 
 /// [`try_format_symbol`] for code a vCPU runs at `rip` with root `cr3`,

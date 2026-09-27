@@ -10,7 +10,10 @@ use crate::memory::DTB_IDENTITY;
 use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
-use crate::unwind::{resolve_thread_trace_context_at, saved_vtl_summary, try_format_symbol};
+use crate::unwind::{
+    halted_in_windows_hypervisor, resolve_thread_trace_context_at, saved_vtl_summary,
+    try_format_symbol,
+};
 
 pub(super) fn update_target_context_from_registers(
     target: &mut Target,
@@ -303,10 +306,7 @@ impl Session {
         else {
             return Ok(false);
         };
-        Ok(
-            resolve_thread_trace_context_at(&self.target, cr3, rip).description
-                == HYPERVISOR_CONTEXT,
-        )
+        Ok(halted_in_windows_hypervisor(&self.target, cr3, rip))
     }
 
     /// Refuse to step a vCPU halted in the Windows hypervisor: the step would

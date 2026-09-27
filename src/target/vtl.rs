@@ -21,7 +21,7 @@ use crate::{
     pe::{read_pe_header_page, size_of_image},
     symbols::SymbolStore,
     types::{Arch, Dtb, PhysAddr, VirtAddr},
-    unwind::resolve_thread_trace_context_at,
+    unwind::halted_in_windows_hypervisor,
 };
 
 /// How far below an instruction pointer to look for the header of the image
@@ -245,7 +245,7 @@ impl Target {
     ) -> Option<HashMap<String, u64>> {
         let cr3 = *registers.get(self.arch().dtb_register())?;
         let rip = *registers.get("rip")?;
-        if resolve_thread_trace_context_at(self, cr3, rip).description != HYPERVISOR_CONTEXT {
+        if !halted_in_windows_hypervisor(self, cr3, rip) {
             return None;
         }
         let processor = processor_index_from_backend_thread_id(vcpu);
