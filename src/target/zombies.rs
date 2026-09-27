@@ -10,7 +10,7 @@
 use std::ops::ControlFlow;
 
 use crate::backend::MemoryOps;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::StructRef;
 use crate::target::Target;
 use crate::target::pool::{
@@ -91,7 +91,7 @@ pub struct ZombiesDetail {
     pub scanned_pages: u64,
     pub processes: Vec<ZombieProcess>,
     pub threads: Vec<ZombieThread>,
-    /// Live objects of each kind seen, to put the zombies in proportion.
+    /// Live objects of each kind decoded, to put the zombies in proportion.
     pub live_processes: usize,
     pub live_threads: usize,
     /// The scan stopped early: interrupted, or at the result bound.
@@ -156,15 +156,10 @@ impl Target {
         let nt = &guest.ntoskrnl;
         let memory = nt.memory();
         let header = nt.types().layout("_OBJECT_HEADER")?;
-        let type_index = |type_symbol: &str| -> Option<u8> {
-            let object = nt.symbol(type_symbol).ok()?.read::<VirtAddr>().ok()?;
-            let offset = nt
-                .types()
-                .layout("_OBJECT_TYPE")
-                .ok()?
-                .field_offset("Index")
-                .ok()?;
-            memory.read::<u8>(object + offset).ok()
+        let index_offset = nt.types().layout("_OBJECT_TYPE")?.field_offset("Index")?;
+        let type_index = |type_symbol: &str| -> Result<u8> {
+            let object = nt.symbol(type_symbol)?.read::<VirtAddr>()?;
+            memory.read::<u8>(object + index_offset)
         };
         let query = ObjectQuery {
             header_size: header.size as u64,
@@ -172,15 +167,19 @@ impl Target {
             type_index_offset: header.field_offset("TypeIndex")?,
             pointer_count_offset: header.field_offset("PointerCount")?,
             handle_count_offset: header.field_offset("HandleCount")?,
-            cookie: nt
-                .symbol("ObHeaderCookie")
-                .and_then(|symbol| symbol.read::<u8>())
-                .unwrap_or(0),
+            cookie: match nt.symbol("ObHeaderCookie") {
+                Ok(symbol) => symbol.read::<u8>()?,
+                Err(Error::SymbolNotFound(_)) => 0,
+                Err(error) => return Err(error),
+            },
             process_index: kinds
                 .processes
                 .then(|| type_index("PsProcessType"))
-                .flatten(),
-            thread_index: kinds.threads.then(|| type_index("PsThreadType")).flatten(),
+                .transpose()?,
+            thread_index: kinds
+                .threads
+                .then(|| type_index("PsThreadType"))
+                .transpose()?,
         };
         let layout = pool_layout(self)?;
         let (region_start, region_end) = pool_range(self, &NONPAGED_POOL)?;
@@ -208,8 +207,9 @@ impl Target {
                             continue;
                         };
                         match self.zombie_process(header + query.body_offset, counts) {
-                            Some(zombie) => detail.processes.push(zombie),
-                            None => detail.live_processes += 1,
+                            Ok(Some(zombie)) => detail.processes.push(zombie),
+                            Ok(None) => detail.live_processes += 1,
+                            Err(_) => {}
                         }
                     }
                     (THREAD_TAG, _, Some(index)) => {
@@ -219,8 +219,9 @@ impl Target {
                             continue;
                         };
                         match self.zombie_thread(header + query.body_offset, counts) {
-                            Some(zombie) => detail.threads.push(zombie),
-                            None => detail.live_threads += 1,
+                            Ok(Some(zombie)) => detail.threads.push(zombie),
+                            Ok(None) => detail.live_threads += 1,
+                            Err(_) => {}
                         }
                     }
                     _ => {}
@@ -239,47 +240,55 @@ impl Target {
     }
 
     /// The process at `eprocess` when it has exited (`ExitTime` set).
-    fn zombie_process(&self, eprocess: VirtAddr, counts: ObjectCounts) -> Option<ZombieProcess> {
-        let types = self.guest().ok()?.ntoskrnl.types();
-        let process = types.struct_at("_EPROCESS", eprocess).ok()?.prefetch();
-        let exit_time: u64 = process.read_field("ExitTime").ok()?;
+    fn zombie_process(
+        &self,
+        eprocess: VirtAddr,
+        counts: ObjectCounts,
+    ) -> Result<Option<ZombieProcess>> {
+        let types = self.guest()?.ntoskrnl.types();
+        let process = types.struct_at("_EPROCESS", eprocess)?.prefetch();
+        let exit_time: u64 = process.read_field("ExitTime")?;
         if exit_time == 0 {
-            return None;
+            return Ok(None);
         }
-        Some(ZombieProcess {
+        Ok(Some(ZombieProcess {
             eprocess,
-            pid: process.read_uint("UniqueProcessId").ok()?,
+            pid: process.read_uint("UniqueProcessId")?,
             image: image_file_name(&process).unwrap_or_default(),
             exit_time,
             exit_status: process.read_field("ExitStatus").unwrap_or(0),
             counts,
-        })
+        }))
     }
 
     /// The thread at `ethread` when it has terminated.
-    fn zombie_thread(&self, ethread: VirtAddr, counts: ObjectCounts) -> Option<ZombieThread> {
-        let types = self.guest().ok()?.ntoskrnl.types();
-        let thread = types.struct_at("_ETHREAD", ethread).ok()?.prefetch();
-        let tcb = thread.embedded("Tcb").ok()?;
-        if tcb.read_uint("State").ok()? != THREAD_TERMINATED {
-            return None;
+    fn zombie_thread(
+        &self,
+        ethread: VirtAddr,
+        counts: ObjectCounts,
+    ) -> Result<Option<ZombieThread>> {
+        let types = self.guest()?.ntoskrnl.types();
+        let thread = types.struct_at("_ETHREAD", ethread)?.prefetch();
+        let tcb = thread.embedded("Tcb")?;
+        if tcb.read_uint("State")? != THREAD_TERMINATED {
+            return Ok(None);
         }
-        let process = tcb.read_pointer("Process").ok()?;
+        let process = tcb.read_pointer("Process")?;
         let image = types
             .struct_at("_EPROCESS", process)
             .ok()
             .and_then(|process| image_file_name(&process))
             .filter(|image| !image.is_empty());
-        let cid = thread.embedded("Cid").ok()?;
-        Some(ZombieThread {
+        let cid = thread.embedded("Cid")?;
+        Ok(Some(ZombieThread {
             ethread,
-            pid: cid.read_uint("UniqueProcess").ok()?,
-            tid: cid.read_uint("UniqueThread").ok()?,
+            pid: cid.read_uint("UniqueProcess")?,
+            tid: cid.read_uint("UniqueThread")?,
             process,
             image,
             exit_status: thread.read_field("ExitStatus").unwrap_or(0),
             counts,
-        })
+        }))
     }
 }
 
