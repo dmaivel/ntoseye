@@ -17,16 +17,17 @@
 | --- | --- |
 | `dx`, `??`, `@@c++( )` | Typed MASM expressions: `ev ((nt!_EPROCESS*)@$proc)->UniqueProcessId`, or {command}`dt`. Member access yields the field's value, not its address. There is no C++ evaluator, so pointer arithmetic is never scaled. |
 | `!name` for a symbol in any module | `module!name`. A leading `!` negates here, and `!name` alone reports the ambiguity. |
-| `.foreach`, `!for_each_process` | The [Python SDK](../scripting/sdk.md) or a [custom command](../scripting/commands.md). |
 | `x` exact wildcard match | {command}`x` is a fuzzy search: `*` and `?` still glob, and `^`, `$`, `'`, `!`, and spaces refine it. |
 | `as Name Text` with `${Name}` substituted in later commands | {command}`as` defines a command alias: `as ubp bp ${1}; g`, then `ubp nt!NtCreateFile`. `${1}`, `${2}`, ... and `${*}` are the alias's arguments. |
 | `.process /i` (invasive switch, then `g`) | {command}`.process` switches immediately, with or without `/i`: `ntoseye` reads any process's memory through its page tables. `attach <pid>` is the same. |
-| `bsc`, `c`, `m`, `.detach`, `qd` | Not available. Change a condition with {command}`bpc`; {command}`q` exits. |
+| `!wmitrace.searchpath`, `!wmitrace.tmffile` (WPP message formatting) | {command}`!wmitrace.logdump` shows each event's provider or WPP message GUID and its raw payload; WPP messages are not formatted. |
+| `.detach` | Not available. {command}`q` (also spelled `qd`) removes the session's breakpoints and exits with the guest running. |
 | `~` lists threads of a user-mode process | {command}`~` lists processors (vCPUs), `~Ns` selects one. Windows threads are {command}`threads` and {command}`!thread`. |
 
 ## Behaves differently
 
 - **Breakpoint scoping is a filter.** `bp /p <pid>` and `/t` are checked by `ntoseye` when a breakpoint hits; the breakpoint itself is global, so a breakpoint in a shared DLL traps every process that runs it, and hits outside the scope are resumed silently. [Breakpoints in shared pages](../using/breakpoints.md#user-mode-breakpoints-in-shared-pages) explains the cost. `/c <processor>` scopes to one processor and has no WinDbg equivalent.
+- **{command}`!uniqstack` groups kernel threads.** WinDbg's user-mode {command}`!uniqstack` groups one process's threads; here it groups the `.process` process's threads or every thread in the system, and a stack includes the user frames below a system call.
 - **Some backends need no debugger in Windows.** Over the `gdb` and `memory` backends Windows boots normally, without `bcdedit /debug`, so it does not know it is being debugged and behaves as it does in production. See [Choosing a backend](../setup/backends.md).
 
 ## Only in ntoseye
