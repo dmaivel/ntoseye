@@ -192,7 +192,11 @@ impl Target {
                 .struct_with_layout(subsection_layout.clone(), next)
                 .prefetch();
             let read = || -> Result<(VirtAddr, SubsectionDetail, VirtAddr)> {
-                let flags_offset = subsection_layout.field_offset("SubsectionFlags")?;
+                // Older builds (22631 among them) keep the flags as the
+                // first member of the union `u`.
+                let flags_offset = subsection_layout
+                    .field_offset("SubsectionFlags")
+                    .or_else(|_| subsection_layout.field_offset("u"))?;
                 let flags = u64::from(
                     self.kernel_address_space()
                         .read::<u32>(next + flags_offset)?,
