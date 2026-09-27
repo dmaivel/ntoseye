@@ -3,7 +3,8 @@ use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::sched::{
     ApcDetail, ApcListDetail, ApcSelector, FindStackDetail, ReadyQueuesDetail, StackFrameDetail,
-    StacksDetail, ThreadSummary, TimerDetail, TimerListDetail, UnwalkedThread, findstack_level,
+    StacksDetail, ThreadSummary, TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions,
+    UniqStackScope, UnwalkedThread, findstack_level,
 };
 use crate::target::{DiagnosticValue, ListTermination, kthread_state_name, wait_reason_name};
 use crate::types::VirtAddr;
@@ -70,6 +71,15 @@ repl_command! {
     summary: "List the threads whose stack has a frame matching a symbol or module.",
     details: "Walks every Windows thread's stack, up to 64 frames, as !stacks 2 does. `module!name` matches frames in that module whose function starts with name, as WinDbg's does (`nt!KeWait` matches KeWaitForSingleObject and KeWaitForMultipleObjects; `nt!` any frame in nt); a bare word matches a module by name or a function by prefix; with * or ? the module and function are globs (`nt!*Wait*`). Case is ignored. Display level 0 lists the matching threads and how many frames matched; 1 (the default) adds the matching frames; 2 the whole stack, matching frames marked with *. A thread whose stack does not walk (one running on a processor while the target runs) cannot be searched and is listed after the matches.",
     completion: [Symbol, None],
+}
+
+repl_command! {
+    cmd_uniqstack;
+    names: ["!uniqstack", "uniqstack"],
+    usage: "!uniqstack [-v] [-n] [*|process]",
+    summary: "Group threads by identical call stacks, showing each distinct stack once.",
+    details: "WinDbg's !uniqstack groups the user-mode stacks of the current process's threads; this one groups the threads the kernel schedules, by their stacks as !stacks 2 walks them (up to 64 frames: the kernel frames, then the user-mode frames below a system call): the threads of the .process selection, or of every process when none is selected (the default in a kernel session), * for every thread, or a PID or process name for one process. Threads whose frames have the same instruction pointers (and the same truncation) share a group. Each distinct stack is shown once, from its first thread, with the number of threads sharing it and their thread IDs by process; totals follow. -n numbers the frames; -v shows how each frame was recovered (current, seed, unwind, or scan), as kv does, in place of WinDbg's x86 FPO data. WinDbg's -b and -p are refused: x64 passes the first arguments in registers, which a saved stack does not keep, and -p needs private-symbol parameters per frame (use .thread and kp on one thread). A thread whose stack does not walk (one running on a processor while the target runs) is listed apart.",
+    completion: [None, Process],
 }
 
 fn diagnostic_cell<T: std::fmt::Display>(value: &DiagnosticValue<T>) -> String {
@@ -471,6 +481,19 @@ impl ReplState<'_> {
         }
         Ok(())
     }
+
+    fn cmd_uniqstack(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
+        let result = UniqStackOptions::parse(&args).and_then(|(options, scope)| {
+            let scope = self.ctx.target.uniqstack_scope(scope)?;
+            Ok((options, self.ctx.inspect_uniqstack(scope)?))
+        });
+        match result {
+            Ok((options, detail)) => print_uniqstack(&detail, options),
+            Err(error) => error!("!uniqstack: {error}"),
+        }
+        Ok(())
+    }
 }
 
 fn print_ready_queues(detail: &ReadyQueuesDetail) {
@@ -844,6 +867,65 @@ fn print_findstack(detail: &FindStackDetail) {
         detail.pattern,
         if detail.interrupted {
             " (interrupted: not every thread was searched)"
+        } else {
+            ""
+        }
+    );
+    print_unwalked(&detail.unwalked);
+    outln!();
+}
+
+fn print_uniqstack(detail: &UniqStackDetail, options: UniqStackOptions) {
+    match &detail.scope {
+        UniqStackScope::AllThreads => {
+            outln!("{} thread(s) of every process\n", detail.scanned_threads)
+        }
+        UniqStackScope::Process { pid, name } => {
+            outln!("{} thread(s) of {name} ({pid})\n", detail.scanned_threads)
+        }
+    }
+    let mut sharing = 0;
+    for group in &detail.groups {
+        let first = &group.threads[0];
+        outln!(
+            ". {}  -- {} thread(s) with this stack",
+            thread_label(first),
+            group.threads.len()
+        );
+        sharing += group.threads.len() - 1;
+        for (index, frame) in group.frames.iter().enumerate() {
+            let number = if options.frame_numbers {
+                format!("{index:02} ")
+            } else {
+                String::new()
+            };
+            let source = if options.provenance {
+                format!("  [{}]", frame.source.as_str())
+            } else {
+                String::new()
+            };
+            outln!(
+                "    {number}{}  {}  {}{source}",
+                ui::addr(frame.sp.0),
+                ui::addr(frame.ip.0),
+                frame.symbol
+            );
+        }
+        if group.truncated != 0 {
+            outln!("    <{} more frame(s) not walked>", group.truncated);
+        }
+        if group.threads.len() > 1 {
+            outln!("    Threads: {}", thread_ids_by_process(&group.threads));
+        }
+        outln!();
+    }
+    outln!(
+        "Total threads: {}, walked: {}, unique stacks: {}, threads sharing an earlier stack: {sharing}{}",
+        detail.scanned_threads,
+        detail.scanned_threads - detail.unwalked.len(),
+        detail.groups.len(),
+        if detail.interrupted {
+            " (interrupted: not every thread was walked)"
         } else {
             ""
         }

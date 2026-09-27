@@ -12,7 +12,7 @@ use super::{err, raise, view_record, view_records};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::session::Session;
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
-use crate::target::sched::ApcSelector;
+use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::{self, View};
@@ -279,6 +279,32 @@ impl Inspect {
         self.record(py, |session| {
             let detail = session.inspect_findstack(symbol, level).map_err(err)?;
             Ok(view::sched::findstack(&detail))
+        })
+    }
+
+    /// Group threads by identical call stacks, one process's or, by
+    /// default, every thread's (`!uniqstack`).
+    #[pyo3(signature = (process=None))]
+    fn uniqstack<'py>(
+        &self,
+        py: Python<'py>,
+        process: Option<PyRef<'_, Process>>,
+    ) -> PyResult<Bound<'py, Record>> {
+        let scope = match process {
+            None => UniqStackScope::AllThreads,
+            Some(process) => {
+                process
+                    .owner
+                    .require_argument_of(py, &self.owner, "process")?;
+                UniqStackScope::Process {
+                    pid: process.info.pid,
+                    name: process.info.name.clone(),
+                }
+            }
+        };
+        self.record(py, |session| {
+            let detail = session.inspect_uniqstack(scope).map_err(err)?;
+            Ok(view::sched::uniqstack(&detail))
         })
     }
 

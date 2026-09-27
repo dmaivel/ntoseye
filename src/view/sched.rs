@@ -6,7 +6,7 @@ use crate::target::sched::{
     FindStackDetail, FindStackThread, ReadyQueue, ReadyQueueEntry, ReadyQueuesDetail,
     RunningDetail, RunningProcessor, SchedulerError, StackFrameDetail, StackThreadDetail,
     StacksDetail, ThreadSummary, TimerBucketTermination, TimerDetail, TimerListDetail,
-    TimerListEntry, UnwalkedThread,
+    TimerListEntry, UniqStackDetail, UniqStackGroup, UniqStackScope, UnwalkedThread,
 };
 use crate::target::{DiagnosticValue, kthread_state_name, wait_reason_name};
 
@@ -492,6 +492,59 @@ pub fn findstack(detail: &FindStackDetail) -> View {
                     .map(|thread| findstack_thread(thread, detail.level))
                     .collect(),
             ),
+        ),
+        (
+            "unwalked",
+            View::List(detail.unwalked.iter().map(unwalked_thread).collect()),
+        ),
+    ])
+}
+
+fn uniqstack_group(group: &UniqStackGroup) -> View {
+    View::Object(vec![
+        ("thread_count", View::Num(group.threads.len() as u64)),
+        (
+            "threads",
+            View::List(group.threads.iter().map(thread_summary).collect()),
+        ),
+        (
+            "frames",
+            View::List(
+                group
+                    .frames
+                    .iter()
+                    .enumerate()
+                    .map(|(index, frame)| indexed_frame(index, frame))
+                    .collect(),
+            ),
+        ),
+        ("truncated", View::Num(group.truncated as u64)),
+    ])
+}
+
+/// `!uniqstack`; top-level keys: `scope` (`all` or a process's `pid` and
+/// `name`), `scanned_threads`, `interrupted`, `groups` (each with its
+/// `threads`, the first one's `frames`, and `thread_count`), and `unwalked`.
+pub fn uniqstack(detail: &UniqStackDetail) -> View {
+    let scope = match &detail.scope {
+        UniqStackScope::AllThreads => View::Object(vec![
+            ("kind", View::Str("all".into())),
+            ("pid", View::Null),
+            ("name", View::Null),
+        ]),
+        UniqStackScope::Process { pid, name } => View::Object(vec![
+            ("kind", View::Str("process".into())),
+            ("pid", View::Num(*pid)),
+            ("name", View::Str(name.clone())),
+        ]),
+    };
+    View::Object(vec![
+        ("scope", scope),
+        ("scanned_threads", View::Num(detail.scanned_threads as u64)),
+        ("interrupted", View::Bool(detail.interrupted)),
+        (
+            "groups",
+            View::List(detail.groups.iter().map(uniqstack_group).collect()),
         ),
         (
             "unwalked",

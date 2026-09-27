@@ -10,9 +10,9 @@ use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::target::sched::{
     ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
-    MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UnwalkedThread, available,
-    frame_details, frame_symbol_matches, select_threads, thread_summary, unavailable,
-    walk_list_nodes,
+    MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UniqStackDetail,
+    UniqStackScope, UnwalkedThread, available, frame_details, frame_symbol_matches, group_stacks,
+    select_threads, thread_summary, unavailable, walk_list_nodes,
 };
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
 use crate::types::VirtAddr;
@@ -336,6 +336,42 @@ impl Session {
             scanned_threads,
             interrupted,
             threads: matched,
+            unwalked,
+        })
+    }
+
+    /// `!uniqstack`: the threads of `scope`, grouped by identical walked
+    /// stacks (up to [`MAX_STACK_FRAMES_LEVEL_2`] frames; see
+    /// [`group_stacks`]).
+    pub fn inspect_uniqstack(&mut self, scope: UniqStackScope) -> Result<UniqStackDetail> {
+        let (mut threads, active_vcpus) = self.windows_threads()?;
+        if let UniqStackScope::Process { pid, .. } = &scope {
+            threads.retain(|thread| thread.pid == Some(*pid));
+        }
+        let scanned_threads = threads.len();
+        let mut stacks = Vec::new();
+        let mut unwalked = Vec::new();
+        let interrupted = self.walk_thread_stacks(
+            threads,
+            &active_vcpus,
+            MAX_STACK_FRAMES_LEVEL_2,
+            |thread, stack| match stack {
+                Ok(trace) => stacks.push((
+                    thread_summary(&thread),
+                    frame_details(trace.stacktrace.frames),
+                    trace.stacktrace.truncated,
+                )),
+                Err(error) => unwalked.push(UnwalkedThread {
+                    thread: thread_summary(&thread),
+                    error: error.to_string(),
+                }),
+            },
+        );
+        Ok(UniqStackDetail {
+            scope,
+            scanned_threads,
+            interrupted,
+            groups: group_stacks(stacks),
             unwalked,
         })
     }

@@ -994,6 +994,11 @@ class Inspect:
         """
         Build the structured one-shot crash/debug report (`!analyze`).
         """
+    def uniqstack(self, /, process: Process |None = None) -> Record:
+        """
+        Group threads by identical call stacks, one process's or, by
+        default, every thread's (`!uniqstack`).
+        """
     def verifier(self, /) -> Record:
         """
         Report Driver Verifier configuration and statistics (`!verifier`).

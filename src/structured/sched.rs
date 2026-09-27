@@ -3,7 +3,7 @@
 
 use super::Args;
 use crate::error::{Error, Result};
-use crate::target::sched::{ApcSelector, findstack_level};
+use crate::target::sched::{ApcSelector, UniqStackOptions, findstack_level};
 use crate::view::{self, View};
 
 pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
@@ -62,6 +62,11 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 "usage: !findstack <symbol|module> [0|1|2]".into(),
             )),
         },
+        "!uniqstack" | "uniqstack" => UniqStackOptions::parse(argv).and_then(|(_, scope)| {
+            let scope = args.target().uniqstack_scope(scope)?;
+            let detail = args.state.ctx.inspect_uniqstack(scope)?;
+            Ok(view::sched::uniqstack(&detail))
+        }),
         _ => return None,
     })
 }

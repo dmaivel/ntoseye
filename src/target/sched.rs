@@ -1,6 +1,6 @@
 //! sched: structured inspector data (shared by the REPL, Python SDK, and MCP).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
@@ -248,7 +248,7 @@ pub struct StacksDetail {
 }
 
 /// A thread whose stack could not be walked, so `!findstack` cannot say
-/// whether it matches.
+/// whether it matches and `!uniqstack` cannot group it.
 #[derive(Debug, Clone)]
 pub struct UnwalkedThread {
     pub thread: ThreadSummary,
@@ -274,6 +274,140 @@ pub struct FindStackDetail {
     pub scanned_threads: usize,
     pub interrupted: bool,
     pub threads: Vec<FindStackThread>,
+    pub unwalked: Vec<UnwalkedThread>,
+}
+
+/// Threads whose walked stacks have the same frames (instruction pointers)
+/// and the same truncation. `frames` are the first thread's, whose stack
+/// pointers the others do not share.
+#[derive(Debug, Clone)]
+pub struct UniqStackGroup {
+    pub threads: Vec<ThreadSummary>,
+    pub frames: Vec<StackFrameDetail>,
+    pub truncated: usize,
+}
+
+/// Which threads `!uniqstack` groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UniqStackScope {
+    AllThreads,
+    Process { pid: u64, name: String },
+}
+
+/// `!uniqstack` display options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UniqStackOptions {
+    /// `-n`: number the frames.
+    pub frame_numbers: bool,
+    /// `-v`: how each frame was recovered, as `kv` shows it.
+    pub provenance: bool,
+}
+
+impl UniqStackOptions {
+    /// Parse `!uniqstack [-v] [-n] [*|process]`, refusing WinDbg's `-b` and
+    /// `-p`, which need what a kernel thread's saved stack does not keep.
+    /// Returns the options and the scope argument, if any.
+    pub fn parse<'a>(args: &[&'a str]) -> Result<(Self, Option<&'a str>)> {
+        let mut options = Self::default();
+        let mut scope = None;
+        for &arg in args {
+            match arg.strip_prefix('-') {
+                Some(flags) if !flags.is_empty() => {
+                    for flag in flags.chars() {
+                        match flag.to_ascii_lowercase() {
+                            'n' => options.frame_numbers = true,
+                            'v' => options.provenance = true,
+                            'b' => {
+                                return Err(Error::InvalidArgument(
+                                    "!uniqstack -b is not supported: x64 passes the first four \
+                                     arguments in registers, which a thread's saved stack does \
+                                     not keep (WinDbg shows the callee's home slots, which hold \
+                                     them only if it spilled them)"
+                                        .into(),
+                                ));
+                            }
+                            'p' => {
+                                return Err(Error::InvalidArgument(
+                                    "!uniqstack -p is not supported: it needs each frame's \
+                                     parameters from private symbols and per-frame registers; \
+                                     select one thread with .thread and use kp"
+                                        .into(),
+                                ));
+                            }
+                            other => {
+                                return Err(Error::InvalidArgument(format!(
+                                    "unknown !uniqstack option -{other}: expected -v or -n"
+                                )));
+                            }
+                        }
+                    }
+                }
+                _ if scope.is_none() => scope = Some(arg),
+                _ => {
+                    return Err(Error::InvalidArgument(format!(
+                        "!uniqstack takes one process or *, got '{}' and '{arg}'",
+                        scope.unwrap_or_default()
+                    )));
+                }
+            }
+        }
+        Ok((options, scope))
+    }
+}
+
+impl Target {
+    /// The threads `!uniqstack` groups: `*` for every thread, a PID or a
+    /// process-name substring naming one process, and by default the
+    /// `.process` selection, or every thread when none is selected.
+    pub fn uniqstack_scope(&self, argument: Option<&str>) -> Result<UniqStackScope> {
+        let process = match argument {
+            Some("*") => return Ok(UniqStackScope::AllThreads),
+            None => match self.attached_process() {
+                Some(process) => process.clone(),
+                None => return Ok(UniqStackScope::AllThreads),
+            },
+            Some(text) => {
+                let mut processes = self.matching_processes(Some(text))?;
+                // `System` is also a substring of `Secure System`.
+                let exact: Vec<usize> = processes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, process)| process.name.eq_ignore_ascii_case(text))
+                    .map(|(index, _)| index)
+                    .collect();
+                if let [index] = exact.as_slice() {
+                    processes.swap(0, *index);
+                    processes.truncate(1);
+                }
+                match processes.len() {
+                    1 => processes.remove(0),
+                    0 => {
+                        return Err(Error::InvalidArgument(format!(
+                            "no process matches '{text}'"
+                        )));
+                    }
+                    many => {
+                        return Err(Error::InvalidArgument(format!(
+                            "ambiguous process '{text}': {many} matches; give a PID"
+                        )));
+                    }
+                }
+            }
+        };
+        Ok(UniqStackScope::Process {
+            pid: process.pid,
+            name: process.name,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UniqStackDetail {
+    pub scope: UniqStackScope,
+    pub scanned_threads: usize,
+    pub interrupted: bool,
+    /// In the order their first thread was walked.
+    pub groups: Vec<UniqStackGroup>,
     pub unwalked: Vec<UnwalkedThread>,
 }
 
@@ -343,6 +477,30 @@ pub fn findstack_level(text: Option<&str>) -> Result<u8> {
             "display level must be 0, 1, or 2, not '{other}'"
         ))),
     }
+}
+
+/// Group walked stacks by their frames' instruction pointers and truncation,
+/// keeping the order in which each group's first thread came.
+pub fn group_stacks(
+    stacks: impl IntoIterator<Item = (ThreadSummary, Vec<StackFrameDetail>, usize)>,
+) -> Vec<UniqStackGroup> {
+    let mut groups: Vec<UniqStackGroup> = Vec::new();
+    let mut index: HashMap<(Vec<u64>, usize), usize> = HashMap::new();
+    for (thread, frames, truncated) in stacks {
+        let key = (frames.iter().map(|frame| frame.ip.0).collect(), truncated);
+        match index.get(&key) {
+            Some(&group) => groups[group].threads.push(thread),
+            None => {
+                index.insert(key, groups.len());
+                groups.push(UniqStackGroup {
+                    threads: vec![thread],
+                    frames,
+                    truncated,
+                });
+            }
+        }
+    }
+    groups
 }
 
 /// `!process` columns and details. Each field is `None` when this build's
@@ -1613,6 +1771,56 @@ mod tests {
         assert!(frame_symbol_matches("tcpip", "tcpip+0x1a2b"));
         assert!(!frame_symbol_matches("tcpip!Tcp", "tcpip+0x1a2b"));
         assert!(!frame_symbol_matches("0xfffff804", "0xfffff80412345678"));
+    }
+
+    #[test]
+    fn stacks_group_by_instruction_pointers_not_stack_pointers() {
+        let thread = |tid| ThreadSummary {
+            ethread: VirtAddr(tid),
+            kthread: VirtAddr(tid),
+            tid: optional(Some(tid)),
+            pid: optional(Some(4)),
+            process_name: optional(Some("System".to_string())),
+            state: optional(None),
+            wait_reason: optional(None),
+            priority: optional(None),
+        };
+        let frames = |sp: u64, ips: &[u64]| {
+            ips.iter()
+                .enumerate()
+                .map(|(index, ip)| StackFrameDetail {
+                    sp: VirtAddr(sp + index as u64 * 0x10),
+                    ip: VirtAddr(*ip),
+                    symbol: format!("nt!f{ip:x}"),
+                    source: FrameSource::Unwind,
+                })
+                .collect::<Vec<_>>()
+        };
+        let groups = group_stacks([
+            (thread(12), frames(0x1000, &[1, 2, 3]), 0),
+            (thread(16), frames(0x9000, &[1, 2, 4]), 0),
+            (thread(20), frames(0x5000, &[1, 2, 3]), 0),
+            // Same frames, but the walk stopped at its bound.
+            (thread(24), frames(0x7000, &[1, 2, 3]), 5),
+            (thread(28), frames(0x3000, &[1, 2, 4]), 0),
+        ]);
+        let tids: Vec<Vec<u64>> = groups
+            .iter()
+            .map(|group| {
+                group
+                    .threads
+                    .iter()
+                    .map(|thread| match thread.tid {
+                        DiagnosticValue::Available(Some(tid)) => tid,
+                        _ => unreachable!(),
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(tids, [vec![12, 20], vec![16, 28], vec![24]]);
+        // A group shows its first thread's stack.
+        assert_eq!(groups[0].frames[0].sp, VirtAddr(0x1000));
+        assert_eq!(groups[2].truncated, 5);
     }
 
     #[test]
