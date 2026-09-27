@@ -87,6 +87,15 @@ repl_command! {
 }
 
 repl_command! {
+    cmd_dg;
+    names: ["dg"],
+    usage: "dg <first-selector> [last-selector]",
+    summary: "Decode segment selectors from the current processor's GDT.",
+    details: "Shows each selector from first through last, in steps of 8 as WinDbg does, with its descriptor's base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. A selector naming an LDT (bit 2 set) is reported rather than decoded: 64-bit Windows has none.",
+    completion: [Expression, Expression],
+}
+
+repl_command! {
     cmd_cpuinfo;
     names: ["!cpuinfo", "cpuinfo"],
     usage: "!cpuinfo",
@@ -431,6 +440,100 @@ fn print_gdt(detail: &GdtDetail) {
     }
 }
 
+/// WinDbg's name for a descriptor type: code and data segments by their
+/// access bits, system descriptors by their 64-bit-mode meaning.
+fn segment_type_name(system: bool, type_code: u8) -> String {
+    if system {
+        return match type_code {
+            0x2 => "LDT",
+            0x9 => "TSS64 Avl",
+            0xb => "TSS64 Busy",
+            0xc => "CallGate64",
+            0xe => "IntGate64",
+            0xf => "TrapGate64",
+            _ => "<Reserved>",
+        }
+        .to_string();
+    }
+    let mut name = if type_code & 0x8 != 0 {
+        let access = if type_code & 0x2 != 0 { "RE" } else { "EO" };
+        let conforming = if type_code & 0x4 != 0 { " Co" } else { "" };
+        format!("Code {access}{conforming}")
+    } else {
+        let access = if type_code & 0x2 != 0 { "RW" } else { "RO" };
+        let expand_down = if type_code & 0x4 != 0 { " Ed" } else { "" };
+        format!("Data {access}{expand_down}")
+    };
+    if type_code & 0x1 != 0 {
+        name.push_str(" Ac");
+    }
+    name
+}
+
+/// `dg`'s table, in WinDbg's columns.
+fn print_selectors(detail: &GdtDetail, selectors: impl Iterator<Item = u16>) {
+    fn got<T: Clone>(value: &DiagnosticValue<T>) -> Option<T> {
+        match value {
+            DiagnosticValue::Available(value) => Some(value.clone()),
+            DiagnosticValue::Unavailable(_) => None,
+        }
+    }
+    outln!("{:50}P Si Gr Pr Lo", "");
+    outln!(
+        "Sel  {:<16} {:<16} {:<10} l ze an es ng Flags",
+        "Base",
+        "Limit",
+        "Type"
+    );
+    outln!(
+        "---- {} {} {} - -- -- -- -- --------",
+        "-".repeat(16),
+        "-".repeat(16),
+        "-".repeat(10)
+    );
+    for selector in selectors {
+        let index = u64::from(selector >> 3);
+        let row = if selector & 0x4 != 0 {
+            "LDT selector; 64-bit Windows has no LDT".to_string()
+        } else if let Some(entry) = detail.entries.iter().find(|entry| entry.index == index) {
+            match (got(&entry.raw), got(&entry.type_code), got(&entry.limit)) {
+                (Some(raw), Some(type_code), Some(limit)) => {
+                    let system = got(&entry.descriptor_kind).as_deref() == Some("system");
+                    let flag = |value: &DiagnosticValue<bool>, set: &'static str, clear| {
+                        if got(value) == Some(true) { set } else { clear }
+                    };
+                    format!(
+                        "{} {limit:016x} {:<10} {} {} {} {} {} {:08x}",
+                        got(&entry.base)
+                            .map_or_else(|| "?".repeat(16), |base| format!("{:016x}", base.0)),
+                        segment_type_name(system, type_code),
+                        got(&entry.dpl).unwrap_or(0),
+                        flag(&entry.default_size, "Bg", "Nb"),
+                        flag(&entry.granularity, "Pg", "By"),
+                        flag(&entry.present, "P ", "NP"),
+                        flag(&entry.long_mode, "Lo", "Nl"),
+                        (raw >> 40) & 0xf0ff
+                    )
+                }
+                _ => match &entry.raw {
+                    DiagnosticValue::Unavailable(error) => format!("<unreadable: {error}>"),
+                    DiagnosticValue::Available(_) => "<undecodable>".to_string(),
+                },
+            }
+        } else if index >= detail.entry_count {
+            "beyond the GDT limit".to_string()
+        } else if detail.entries.iter().any(|entry| {
+            entry.index + 1 == index && got(&entry.descriptor_kind).as_deref() == Some("system")
+        }) {
+            "upper half of the system descriptor before it".to_string()
+        } else {
+            "past the entries read".to_string()
+        };
+        outln!("{selector:04x} {row}");
+    }
+    outln!();
+}
+
 fn print_cpuinfo(detail: &CpuInfoDetail) {
     if detail.source == "triage-dump PRCB metadata" {
         outln!("CPU information from triage-dump PRCB metadata");
@@ -712,6 +815,47 @@ impl ReplState<'_> {
             Ok(detail) => print_gdt(&detail),
             Err(error) => error!("GDTR unavailable: {error}"),
         }
+        Ok(())
+    }
+
+    fn cmd_dg(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let first_arg = require_arg!(invocation, 0, "dg");
+        let selector = |arg: &str| match self.eval_or_report(arg)? {
+            VirtAddr(value) if value <= 0xffff => Some(value as u16),
+            _ => {
+                error!("'{arg}' is not a 16-bit selector");
+                None
+            }
+        };
+        let Some(first) = selector(first_arg) else {
+            return Ok(());
+        };
+        let Some(last) = invocation.arg(1).map_or(Some(first), selector) else {
+            return Ok(());
+        };
+        if last < first {
+            error!("the last selector {last:#x} is below the first {first:#x}");
+            return Ok(());
+        }
+        if self.ctx.target.arch() == Arch::Arm64 {
+            error!("dg is not defined on ARM64 targets");
+            return Ok(());
+        }
+        let processor = match parse_processor(self, None) {
+            Ok(processor) => processor,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let detail = match self.ctx.inspect_gdt(processor) {
+            Ok(detail) => detail,
+            Err(error) => {
+                error!("GDTR unavailable: {error}");
+                return Ok(());
+            }
+        };
+        print_selectors(&detail, (first..=last).step_by(8));
         Ok(())
     }
 

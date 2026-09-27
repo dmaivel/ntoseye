@@ -522,6 +522,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("wrmsr", "cpu"),
     ("!cpuinfo", "cpu"),
     ("!gdt", "cpu"),
+    ("dg", "cpu"),
     ("!idt", "cpu"),
     ("!irql", "cpu"),
     ("!pcr", "cpu"),
