@@ -117,9 +117,10 @@ repl_command! {
 }
 
 repl_command! {
-    names: ["q", "quit"],
+    names: ["q", "quit", "qd"],
     usage: "q",
-    summary: "Exit the application.",
+    summary: "Exit, removing this session's breakpoints and leaving the guest running.",
+    details: "This is WinDbg's qd (quit and detach), which is accepted too. A guest the session halted is resumed; one it cannot remove a breakpoint from is left halted instead, since resuming would leave the breakpoint to trap with no debugger.",
     flow: Quit,
 }
 
