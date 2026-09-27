@@ -136,14 +136,16 @@ impl Args<'_, '_> {
     }
 
     /// `!htrace [handle [process [max-traces]]]`, 0 standing for an omitted
-    /// handle or process as in the REPL.
+    /// argument as in the REPL.
     fn handle_traces(&self) -> Result<View> {
         let handle = self.opt_value(0)?.filter(|handle| *handle != 0);
-        let max_traces = self.opt_value(2)?.map(|max| max as usize);
+        let max_traces = self.opt_value(2)?.filter(|max| *max != 0);
         let process = self
             .state
             .process_or_current(self.argv.get(1).copied().filter(|text| *text != "0"))?;
-        let detail = self.target().handle_traces(&process, handle, max_traces)?;
+        let detail =
+            self.target()
+                .handle_traces(&process, handle, max_traces.map(|max| max as usize))?;
         Ok(view::object::handle_traces(&detail))
     }
 

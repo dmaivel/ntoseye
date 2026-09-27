@@ -49,7 +49,7 @@ repl_command! {
     names: ["!htrace", "htrace"],
     usage: "!htrace [handle [process [max-traces]]]",
     summary: "Show the stacks handle tracing recorded for a process's handles.",
-    details: "Reads the ring of traces (open, close, bad reference) in the process handle table's DebugInfo, newest first. Handle 0 or omitted shows every handle's traces; the process (an EPROCESS address, PID, or name) defaults to the current one. Tracing must already be on for the process (Application Verifier's Handles check, or NtSetInformationProcess(ProcessHandleTracing)); !htrace says when it is not. User-mode frames resolve once the process's modules are loaded (.process /p). The user-mode forms that change tracing (-enable, -disable, -snapshot, -diff) are not provided.",
+    details: "Reads the ring of traces (open, close, bad reference) in the process handle table's DebugInfo, newest first. Handle 0 or omitted shows every handle's traces, and max-traces 0 or omitted every trace; the process (an EPROCESS address, PID, or name) defaults to the current one. Tracing must already be on for the process (Application Verifier's Handles check, or NtSetInformationProcess(ProcessHandleTracing)); !htrace says when it is not. User-mode frames resolve once the process's modules are loaded (.process /p). The user-mode forms that change tracing (-enable, -disable, -snapshot, -diff) are not provided.",
     completion: Expression,
 }
 
@@ -106,22 +106,23 @@ impl ReplState<'_> {
     }
 
     fn cmd_htrace(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let arg = |index: usize| invocation.arg(index).filter(|text| *text != "0");
-        let handle = match arg(0).map(|text| self.eval_or_report(text)) {
-            Some(Some(VirtAddr(handle))) => Some(handle),
-            Some(None) => return Ok(()),
-            None => None,
-        };
-        let max_traces = match arg(2).map(|text| self.eval_or_report(text)) {
-            Some(Some(VirtAddr(max))) => Some(max as usize),
-            Some(None) => return Ok(()),
-            None => None,
-        };
+        // A handle or max-traces of 0, like an omitted one, means all.
+        let mut values = [None; 2];
+        for (slot, index) in values.iter_mut().zip([0, 2]) {
+            if let Some(text) = invocation.arg(index) {
+                let Some(VirtAddr(value)) = self.eval_or_report(text) else {
+                    return Ok(());
+                };
+                *slot = (value != 0).then_some(value);
+            }
+        }
+        let [handle, max_traces] = values;
         let target = &self.ctx.target;
         match self
-            .process_or_current(arg(1))
-            .and_then(|process| target.handle_traces(&process, handle, max_traces))
-        {
+            .process_or_current(invocation.arg(1).filter(|text| *text != "0"))
+            .and_then(|process| {
+                target.handle_traces(&process, handle, max_traces.map(|max| max as usize))
+            }) {
             Ok(detail) => print_handle_traces(&detail),
             Err(error) => error!("{error}"),
         }
