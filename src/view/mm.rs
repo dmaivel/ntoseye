@@ -556,6 +556,10 @@ fn system_pte_type(detail: &SystemPteTypeDetail) -> View {
             "unreadable_bitmap_bytes",
             View::Num(detail.unreadable_bitmap_bytes),
         ),
+        (
+            "unscanned_bitmap_bits",
+            View::Num(detail.unscanned_bitmap_bits),
+        ),
         ("free_run_count", View::Num(detail.free_run_count)),
         ("largest_free_run", View::Num(detail.largest_free_run)),
         ("free_runs", View::List(runs)),

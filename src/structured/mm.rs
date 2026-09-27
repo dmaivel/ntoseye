@@ -24,8 +24,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             Ok(view::mm::mdl(&detail))
         }),
         "!sysptes" | "sysptes" => args.opt_value(0).and_then(|flags| {
-            let flags = flags.unwrap_or(0);
-            let detail = args.target().system_ptes(flags, flags & 1 != 0)?;
+            let detail = args.target().system_ptes(flags.unwrap_or(0))?;
             Ok(view::mm::system_ptes(&detail))
         }),
         "address" => args.addr(0).and_then(|address| {

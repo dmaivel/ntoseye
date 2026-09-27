@@ -22,6 +22,10 @@ const MAX_LISTED_RUNS: usize = 256;
 /// `BasePte + bit`; the system-view allocator is the one that sets it.
 const FLAG_16_PTES_PER_BIT: u32 = 1;
 const PTE_SIZE: u64 = 8;
+/// Most bitmap bits read per allocator: one per PTE of a 512 GiB system-VA
+/// region, a 16 MiB bitmap. A larger `SizeOfBitMap` is not an allocator
+/// Windows builds; only the bits within this bound are read.
+const MAX_BITMAP_BITS: u64 = 1 << 27;
 
 /// Clear-bit runs of an allocation bitmap.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -99,10 +103,11 @@ fn pte_to_va(pte: VirtAddr, pte_base: VirtAddr) -> VirtAddr {
 
 impl Target {
     /// Report each system-PTE bitmap allocator: its counters, the VA range
-    /// it hands out, and the free runs its bitmap holds (listed when
-    /// `list_free_runs`). A build without `_MI_SYSTEM_PTE_TYPE` allocators
+    /// it hands out, and the free runs its bitmap holds (listed when flag
+    /// 0x1 is set). A build without `_MI_SYSTEM_PTE_TYPE` allocators
     /// in `MiState` (before Windows 10) is refused.
-    pub fn system_ptes(&self, flags: u64, list_free_runs: bool) -> Result<SystemPtesDetail> {
+    pub fn system_ptes(&self, flags: u64) -> Result<SystemPtesDetail> {
+        let list_free_runs = flags & 1 != 0;
         let guest = self.guest()?;
         let ntos = &guest.ntoskrnl;
         let types = ntos.types();
@@ -191,7 +196,8 @@ impl Target {
                 .and_then(|tracking| tracking.read_pointer("Buffer"))
                 .is_ok_and(|buffer| !buffer.is_zero());
 
-            let length = bitmap_bits.div_ceil(8);
+            let scanned_bits = bitmap_bits.min(MAX_BITMAP_BITS);
+            let length = scanned_bits.div_ceil(8);
             let mut bytes = vec![0u8; length as usize];
             let mut unreadable = 0u64;
             let mut offset = 0usize;
@@ -207,7 +213,7 @@ impl Target {
             }
             let runs = clear_runs(
                 &bytes,
-                bitmap_bits,
+                scanned_bits,
                 if list_free_runs { MAX_LISTED_RUNS } else { 0 },
             );
             let free_runs = runs
@@ -244,6 +250,7 @@ impl Target {
                 failures: pte_type.read_field("PteFailures")?,
                 bitmap_free: runs.clear_bits * ptes_per_bit,
                 unreadable_bitmap_bytes: unreadable,
+                unscanned_bitmap_bits: bitmap_bits - scanned_bits,
                 free_run_count: runs.run_count,
                 largest_free_run: runs.largest * ptes_per_bit,
                 free_runs,

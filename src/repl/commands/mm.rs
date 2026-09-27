@@ -112,7 +112,7 @@ repl_command! {
     names: ["!sysptes", "sysptes"],
     usage: "!sysptes [flags]",
     summary: "Show system PTE usage from the memory manager's bitmap allocators.",
-    details: "Windows 10 and later hand out system PTEs from _MI_SYSTEM_PTE_TYPE bitmap allocators in MiState: Vs.SystemPteInfo (the SystemPtes region) and SystemPtes' system-view, non-cached-mapping, and kernel-stack allocators. For each: the VA range it serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, PteFailures, and from its bitmap the number of free blocks and the largest; the bitmap is read whole, and a free count that differs from the counter means the target allocated between the reads. Counts are in PTEs; the system-view bitmap covers 16 PTEs per bit. Flags follow WinDbg: 0x1 lists each free block (its first PTE, the address it maps, and its length; 256 per allocator). 0x4 (PTEs mapping locked pages) needs the kernel's TrackPtes tracking: it reports which allocators track, but the tracked mappings themselves are not listed. 0x2, 0x8, and 0x10 select Windows 2000/XP/Vista lists these allocators replaced and are ignored. A build without these allocators is refused.",
+    details: "Windows 10 and later hand out system PTEs from _MI_SYSTEM_PTE_TYPE bitmap allocators in MiState: Vs.SystemPteInfo (the SystemPtes region) and SystemPtes' system-view, non-cached-mapping, and kernel-stack allocators. For each: the VA range it serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, PteFailures, and from its bitmap the number of free blocks and the largest; the bitmap is read whole (up to 2^27 bits, a bound only a corrupt SizeOfBitMap exceeds), and a free count that differs from the counter means the target allocated between the reads. Counts are in PTEs; the system-view bitmap covers 16 PTEs per bit. Flags follow WinDbg: 0x1 lists each free block (its first PTE, the address it maps, and its length; 256 per allocator). 0x4 (PTEs mapping locked pages) needs the kernel's TrackPtes tracking: it reports which allocators track, but the tracked mappings themselves are not listed. 0x2, 0x8, and 0x10 select Windows 2000/XP/Vista lists these allocators replaced and are ignored. A build without these allocators is refused.",
     completion: Expression,
 }
 
@@ -174,12 +174,12 @@ fn print_system_ptes(detail: &SystemPtesDetail) {
             outln!("    unused (empty bitmap)");
             continue;
         }
-        let span = pte_type.bitmap_bits * pte_type.ptes_per_bit;
+        let span = pte_type.bitmap_bits.saturating_mul(pte_type.ptes_per_bit);
         match pte_type.base_va {
             Some(base) => outln!(
                 "    VA range      {} - {}   first PTE {}",
                 ui::addr(base.0),
-                ui::addr(base.0.wrapping_add(span * PAGE_SIZE as u64)),
+                ui::addr(base.0.wrapping_add(span.saturating_mul(PAGE_SIZE as u64))),
                 ui::addr(pte_type.base_pte.0)
             ),
             None => outln!("    first PTE     {}", ui::addr(pte_type.base_pte.0)),
@@ -203,6 +203,13 @@ fn print_system_ptes(detail: &SystemPtesDetail) {
             outln!(
                 "    {} bitmap bytes unreadable (counted as allocated)",
                 pte_type.unreadable_bitmap_bytes
+            );
+        }
+        if pte_type.unscanned_bitmap_bits != 0 {
+            outln!(
+                "    {:#x} bitmap bits past the {:#x}-bit bound not read (left out of the counts)",
+                pte_type.unscanned_bitmap_bits,
+                pte_type.bitmap_bits - pte_type.unscanned_bitmap_bits
             );
         }
         for run in &pte_type.free_runs {
@@ -939,7 +946,7 @@ impl ReplState<'_> {
             },
             None => 0,
         };
-        match self.ctx.target.system_ptes(flags, flags & 1 != 0) {
+        match self.ctx.target.system_ptes(flags) {
             Ok(detail) => print_system_ptes(&detail),
             Err(error) => error!("{error}"),
         }

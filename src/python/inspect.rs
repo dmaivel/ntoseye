@@ -631,8 +631,10 @@ impl Inspect {
     #[pyo3(signature = (free_runs=false))]
     fn system_ptes<'py>(&self, py: Python<'py>, free_runs: bool) -> PyResult<Bound<'py, Record>> {
         self.record(py, |session| {
-            let flags = u64::from(free_runs);
-            let detail = session.target.system_ptes(flags, free_runs).map_err(err)?;
+            let detail = session
+                .target
+                .system_ptes(u64::from(free_runs))
+                .map_err(err)?;
             Ok(view::mm::system_ptes(&detail))
         })
     }

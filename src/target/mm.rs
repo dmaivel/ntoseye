@@ -398,6 +398,9 @@ pub struct SystemPteTypeDetail {
     pub bitmap_free: u64,
     /// Bitmap bytes that could not be read (counted as allocated).
     pub unreadable_bitmap_bytes: u64,
+    /// Bits past the bound on how much of one bitmap is read (a corrupt
+    /// `SizeOfBitMap`); they are left out of every count.
+    pub unscanned_bitmap_bits: u64,
     pub free_run_count: u64,
     pub largest_free_run: u64,
     /// The free runs in address order, when listing was requested; bounded.
