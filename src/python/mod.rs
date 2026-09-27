@@ -309,6 +309,11 @@ pub mod _ntoseye {
         IdtGate, Irql, Pcr, Prcb, ProcessorStateArea, SpecialRegistersArea,
     };
     #[pymodule_export]
+    use crate::view::etw::py::{
+        EtwBuffer, EtwEvent, EtwEventClass, EtwEventDescriptor, EtwEventDump, EtwEventIssue,
+        EtwEventMessage, EtwExtendedData, EtwLogger, EtwLoggerBuffers, EtwLoggerTable,
+    };
+    #[pymodule_export]
     use crate::view::execution::py::{
         Amd64UnwindCode, Amd64UnwindInfo, Arm64EpilogScope, Arm64PackedUnwind, Arm64UnwindCode,
         Arm64XdataUnwind, BreakpointStatus, CallTrace, CallTraceFrame, DisassembledInstruction,

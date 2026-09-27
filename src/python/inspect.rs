@@ -1012,7 +1012,10 @@ impl Inspect {
     }
 
     /// List the active ETW trace sessions (`!wmitrace.strdump`).
-    fn etw_loggers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
+    fn etw_loggers<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, view::etw::py::EtwLoggerTable>> {
         self.record(py, |session| {
             let table = session.target.etw_loggers().map_err(err)?;
             Ok(view::etw::logger_table(&table))
@@ -1022,7 +1025,11 @@ impl Inspect {
     /// Decode one ETW trace session's `_WMI_LOGGER_CONTEXT`
     /// (`!wmitrace.logger`). `logger` is its logger id or context address,
     /// or its session name.
-    fn etw_logger<'py>(&self, py: Python<'py>, logger: LoggerArg) -> PyResult<Bound<'py, Record>> {
+    fn etw_logger<'py>(
+        &self,
+        py: Python<'py>,
+        logger: LoggerArg,
+    ) -> PyResult<Bound<'py, view::etw::py::EtwLogger>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -1034,7 +1041,11 @@ impl Inspect {
 
     /// List the trace buffers on an ETW trace session's GlobalList
     /// (`!wmitrace.strdump logger`).
-    fn etw_buffers<'py>(&self, py: Python<'py>, logger: LoggerArg) -> PyResult<Bound<'py, Record>> {
+    fn etw_buffers<'py>(
+        &self,
+        py: Python<'py>,
+        logger: LoggerArg,
+    ) -> PyResult<Bound<'py, view::etw::py::EtwLoggerBuffers>> {
         self.record(py, |session| {
             let detail = session
                 .target
@@ -1052,7 +1063,7 @@ impl Inspect {
         py: Python<'py>,
         logger: LoggerArg,
         count: Option<usize>,
-    ) -> PyResult<Bound<'py, Record>> {
+    ) -> PyResult<Bound<'py, view::etw::py::EtwEventDump>> {
         self.record(py, |session| {
             let dump = session
                 .target
