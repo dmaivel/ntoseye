@@ -49,7 +49,9 @@ impl ParsedType {
 /// `.?AT<unnamed-tag>@@` just as shared), `_IRP.Tail` among hundreds, so
 /// one of those is keyed by its field list's type index as well
 /// (`<unnamed-tag>#1124`); its members reference its definition, which
-/// carries that index. A named type keeps its name.
+/// carries that index. A named type keeps its name. The index means
+/// nothing in another PDB, so a member's type qualifies such a key with its
+/// module (`nt!<unnamed-tag>#1124`).
 pub fn aggregate_key(name: &str, field_list: Option<u32>) -> String {
     match field_list {
         Some(index) if name.starts_with("<unnamed-") => format!("{name}#{index:x}"),
@@ -58,9 +60,10 @@ pub fn aggregate_key(name: &str, field_list: Option<u32>) -> String {
 }
 
 /// How an aggregate key (see [`aggregate_key`]) is shown: an unnamed type
-/// as the `<unnamed-tag>` the PDB names it.
+/// as the `<unnamed-tag>` the PDB names it, without the index or the module
+/// that scope its lookup.
 pub fn aggregate_display_name(key: &str) -> &str {
-    match key.split_once('#') {
+    match unqualified_type_name(key).split_once('#') {
         Some((name, _)) if name.starts_with("<unnamed-") => name,
         _ => key,
     }

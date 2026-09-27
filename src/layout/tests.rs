@@ -60,3 +60,28 @@ fn wide_text_pairs_surrogates_and_stops_at_nul_only_when_terminated() {
     assert_eq!(utf16le_nul_terminated(&bytes), "a\u{1f600}");
     assert_eq!(utf16le_lossy(&bytes), "a\u{1f600}\0b");
 }
+
+#[test]
+fn unnamed_aggregates_are_keyed_by_field_list_and_shown_by_pdb_name() {
+    // A named type keeps its name, `#` and all; only an unnamed one with
+    // its own field list (not a forward reference) gets the index.
+    assert_eq!(aggregate_key("_IRP", Some(0x1124)), "_IRP");
+    assert_eq!(aggregate_key("_A#B", Some(0x1124)), "_A#B");
+    assert_eq!(
+        aggregate_key("<unnamed-tag>", Some(0x1124)),
+        "<unnamed-tag>#1124"
+    );
+    assert_eq!(aggregate_key("<unnamed-tag>", None), "<unnamed-tag>");
+
+    // Shown without the index or the module that scopes the lookup, for
+    // the kernel's keys and a 32-bit module's alike.
+    for key in [
+        "<unnamed-tag>#1124",
+        "nt!<unnamed-tag>#1124",
+        "ntdll32!<unnamed-tag>#1a2",
+    ] {
+        assert_eq!(aggregate_display_name(key), "<unnamed-tag>");
+    }
+    assert_eq!(aggregate_display_name("_A#B"), "_A#B");
+    assert_eq!(aggregate_display_name("ntdll32!_PEB"), "ntdll32!_PEB");
+}

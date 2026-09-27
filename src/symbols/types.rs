@@ -115,19 +115,26 @@ impl SymbolStore {
         self.pdb_pointer_sizes.get(&guid).map_or(8, |size| *size)
     }
 
-    /// The `module!` prefix nested type names of PDB `guid` carry so that
-    /// expanding them stays in the same PDB. Only a 32-bit module's layouts
-    /// need it: its `_LIST_ENTRY` or `_UNICODE_STRING` differs from the
-    /// kernel's, which an unqualified lookup would otherwise prefer.
-    pub(super) fn nested_type_prefix(&self, guid: u128) -> String {
-        if self.pointer_size(guid) == 8 {
-            return String::new();
+    /// The `module!` prefixes nested type names of PDB `guid` carry so that
+    /// expanding them stays in the same PDB (see [`NestedTypePrefix`]).
+    pub(super) fn nested_type_prefix(&self, guid: u128) -> NestedTypePrefix {
+        let module = if self.kernel_guid() == Some(guid) {
+            "nt!".to_string()
+        } else {
+            self.modules
+                .iter()
+                .find(|module| module.guid == guid)
+                .map(|module| format!("{}!", module.short_name))
+                .unwrap_or_default()
+        };
+        NestedTypePrefix {
+            named: if self.pointer_size(guid) == 8 {
+                String::new()
+            } else {
+                module.clone()
+            },
+            unnamed: module,
         }
-        self.modules
-            .iter()
-            .find(|module| module.guid == guid)
-            .map(|module| format!("{}!", module.short_name))
-            .unwrap_or_default()
     }
 
     pub(super) fn type_size<'p>(
@@ -211,7 +218,7 @@ impl SymbolStore {
         guid: u128,
         finder: &TypeFinder<'p>,
         index: TypeIndex,
-        prefix: &str,
+        prefix: &NestedTypePrefix,
     ) -> pdb2::Result<ParsedType> {
         let item = finder.find(index)?;
         let parsed = item.parse()?;
@@ -247,15 +254,15 @@ impl SymbolStore {
                 }
             }
 
-            TypeData::Class(data) => Ok(ParsedType::Struct(format!(
-                "{prefix}{}",
-                aggregate_key(&data.name.to_string(), class_field_list(&data))
-            ))),
-            TypeData::Union(data) => Ok(ParsedType::Union(format!(
-                "{prefix}{}",
-                aggregate_key(&data.name.to_string(), union_field_list(&data))
-            ))),
-            TypeData::Enumeration(data) => Ok(ParsedType::Enum(format!("{prefix}{}", data.name))),
+            TypeData::Class(data) => Ok(ParsedType::Struct(
+                prefix.aggregate(&data.name.to_string(), class_field_list(&data)),
+            )),
+            TypeData::Union(data) => Ok(ParsedType::Union(
+                prefix.aggregate(&data.name.to_string(), union_field_list(&data)),
+            )),
+            TypeData::Enumeration(data) => {
+                Ok(ParsedType::Enum(format!("{}{}", prefix.named, data.name)))
+            }
 
             TypeData::Pointer(data) => {
                 let inner = self.resolve_type(guid, finder, data.underlying_type, prefix)?;
@@ -313,7 +320,7 @@ impl SymbolStore {
         guid: u128,
         type_finder: &pdb2::TypeFinder<'p>,
         field_index: pdb2::TypeIndex,
-        prefix: &str,
+        prefix: &NestedTypePrefix,
         fields_map: &mut HashMap<String, FieldInfo>,
     ) -> pdb2::Result<()> {
         let field_item = type_finder.find(field_index)?;
@@ -470,6 +477,31 @@ impl SymbolStore {
             }
         }
         Ok(())
+    }
+}
+
+/// The `module!` qualifiers a PDB's nested type names carry, so that
+/// expanding one looks it up in the PDB that defines it rather than the
+/// kernel's, which a bare name prefers.
+pub(super) struct NestedTypePrefix {
+    /// For named types and enums: only a 32-bit module's, whose
+    /// `_LIST_ENTRY` or `_UNICODE_STRING` differs from the kernel's.
+    named: String,
+    /// For every module's unnamed aggregates: their key's field-list index
+    /// (see [`aggregate_key`]) names an unrelated type in any other PDB.
+    unnamed: String,
+}
+
+impl NestedTypePrefix {
+    /// The qualified key of an aggregate called `name`.
+    fn aggregate(&self, name: &str, field_list: Option<u32>) -> String {
+        let key = aggregate_key(name, field_list);
+        let prefix = if key.len() == name.len() {
+            &self.named
+        } else {
+            &self.unnamed
+        };
+        format!("{prefix}{key}")
     }
 }
 

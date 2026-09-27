@@ -505,7 +505,9 @@ fn parse_public_symbols(
 }
 
 /// Named structs, unions, and enums from the type stream, keeping each
-/// struct's largest complete definition in `struct_defs`.
+/// struct's largest complete definition in `struct_defs`. Unnamed structs
+/// and unions are defined there under their [`aggregate_key`] but not
+/// listed: nobody types `<unnamed-tag>#1124`.
 fn parse_type_stream(
     pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
     type_strings: &mut Vec<String>,
@@ -535,18 +537,23 @@ fn parse_type_stream(
                     if !class.properties.forward_reference()
                         && class.name.to_string() != "<anonymous-tag>" =>
                 {
-                    let name =
-                        aggregate_key(&class.name.to_string(), class.fields.map(|fields| fields.0));
-                    record_struct(name.clone(), class.size, class.fields);
-                    type_strings.push(name);
+                    let name = class.name.to_string();
+                    let key = aggregate_key(&name, class.fields.map(|fields| fields.0));
+                    if key == name {
+                        type_strings.push(name.into_owned());
+                    }
+                    record_struct(key, class.size, class.fields);
                 }
                 TypeData::Union(union)
                     if !union.properties.forward_reference()
                         && union.name.to_string() != "<anonymous-tag>" =>
                 {
-                    let name = aggregate_key(&union.name.to_string(), Some(union.fields.0));
-                    record_struct(name.clone(), union.size, Some(union.fields));
-                    type_strings.push(name);
+                    let name = union.name.to_string();
+                    let key = aggregate_key(&name, Some(union.fields.0));
+                    if key == name {
+                        type_strings.push(name.into_owned());
+                    }
+                    record_struct(key, union.size, Some(union.fields));
                 }
                 TypeData::Enumeration(en)
                     if !en.properties.forward_reference()
