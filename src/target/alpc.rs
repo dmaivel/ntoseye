@@ -354,15 +354,24 @@ impl Target {
                 ])
             })
             .flatten();
-        let kind = ends.and_then(|[connection, server, client]| {
-            [
-                (connection, AlpcPortKind::Connection),
-                (server, AlpcPortKind::ServerCommunication),
-                (client, AlpcPortKind::ClientCommunication),
-            ]
-            .into_iter()
-            .find_map(|(end, kind)| (end == address).then_some(kind))
-        });
+        let kind = ends
+            .and_then(|[connection, server, client]| {
+                [
+                    (connection, AlpcPortKind::Connection),
+                    (server, AlpcPortKind::ServerCommunication),
+                    (client, AlpcPortKind::ClientCommunication),
+                ]
+                .into_iter()
+                .find_map(|(end, kind)| (end == address).then_some(kind))
+            })
+            // The communication info can be paged out; the state word's Type
+            // bits say the same.
+            .or_else(|| match state_bits(&port, ["Type"]).1 {
+                [Some(1)] => Some(AlpcPortKind::Connection),
+                [Some(2)] => Some(AlpcPortKind::ClientCommunication),
+                [Some(3)] => Some(AlpcPortKind::ServerCommunication),
+                _ => None,
+            });
         Ok(PortCore {
             port,
             kind,
@@ -381,7 +390,18 @@ impl Target {
                 address.0
             ))
         })?;
-        if header.type_name.as_deref() != Some(ALPC_PORT_TYPE) {
+        // The type's name lives in paged pool, which a KD memory source may
+        // not reach; the type object itself is `nt!AlpcPortObjectType`.
+        let is_port = match header.type_name.as_deref() {
+            Some(name) => name == ALPC_PORT_TYPE,
+            None => header.type_object.is_some_and(|object| {
+                self.guest()
+                    .and_then(|guest| guest.ntoskrnl.symbol("AlpcPortObjectType"))
+                    .and_then(|symbol| symbol.read::<VirtAddr>())
+                    .is_ok_and(|port_type| port_type == object)
+            }),
+        };
+        if !is_port {
             return Err(Error::InvalidArgument(format!(
                 "{:#x} is not an ALPC port (its object type is {})",
                 address.0,
