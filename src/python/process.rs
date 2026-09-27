@@ -295,6 +295,25 @@ impl Process {
         view_record(py, &view::object::handle_table(&summary))
     }
 
+    /// The stacks handle tracing recorded for this process's handles, newest
+    /// first (`!htrace`): those of `handle` when given, at most `max_traces`.
+    /// `debug_info` is `None` when tracing is off for the process.
+    #[pyo3(signature = (handle=None, max_traces=None))]
+    fn handle_traces<'py>(
+        &self,
+        py: Python<'py>,
+        handle: Option<u64>,
+        max_traces: Option<usize>,
+    ) -> PyResult<Bound<'py, Record>> {
+        let detail = self.owner.with_in(py, &self.context(), |session| {
+            session
+                .target
+                .handle_traces(&self.info, handle, max_traces)
+                .map_err(err)
+        })?;
+        view_record(py, &view::object::handle_traces(&detail))
+    }
+
     /// Decode kernel and user APC queues for this process (`!apc`).
     fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Record>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {

@@ -4,6 +4,7 @@
 
 use super::process::process;
 use super::{View, diagnostic, list_termination};
+use crate::target::htrace::{HandleTraceDetail, handle_trace_kind_name};
 use crate::target::irpfind::{IrpFindDetail, IrpFindEntry, IrpPool};
 use crate::target::object::{
     DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, FileObjectDetail, HandleEntryDetail,
@@ -501,5 +502,56 @@ pub fn irp_find(detail: &IrpFindDetail) -> View {
             "restart",
             View::OptHex(detail.restart.map(|restart| restart.0)),
         ),
+    ])
+}
+
+/// `!htrace`; top-level keys: `process`, `object_table`, `debug_info` (null
+/// when tracing is off), `table_size`, `recorded`, `parsed`, `unreadable`,
+/// and `traces` (newest first), each `{handle, kind, kind_name, process_id,
+/// thread_id, stack: [{address, symbol}]}`.
+pub fn handle_traces(detail: &HandleTraceDetail) -> View {
+    let traces = detail
+        .traces
+        .iter()
+        .map(|trace| {
+            View::Object(vec![
+                ("handle", View::Hex(trace.handle)),
+                ("kind", View::Num(u64::from(trace.kind))),
+                (
+                    "kind_name",
+                    View::Str(handle_trace_kind_name(trace.kind).to_string()),
+                ),
+                ("process_id", View::Num(trace.process_id)),
+                ("thread_id", View::Num(trace.thread_id)),
+                (
+                    "stack",
+                    View::List(
+                        trace
+                            .stack
+                            .iter()
+                            .map(|(address, symbol)| {
+                                View::Object(vec![
+                                    ("address", View::Hex(address.0)),
+                                    ("symbol", View::OptStr(symbol.clone())),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ])
+        })
+        .collect();
+    View::Object(vec![
+        ("process", process(&detail.process)),
+        ("object_table", View::Hex(detail.object_table.0)),
+        (
+            "debug_info",
+            View::OptHex(detail.debug_info.map(|info| info.0)),
+        ),
+        ("table_size", View::Num(detail.table_size)),
+        ("recorded", View::Num(detail.recorded)),
+        ("parsed", View::Num(detail.parsed)),
+        ("unreadable", View::Num(detail.unreadable)),
+        ("traces", View::List(traces)),
     ])
 }

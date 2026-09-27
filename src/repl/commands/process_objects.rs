@@ -1,10 +1,11 @@
-//! Process-state inspectors: job objects and global flags.
+//! Process-state inspectors: job objects, global flags, and handle traces.
 
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::repl::*;
 use crate::target::DiagnosticValue;
 use crate::target::gflag::{GLOBAL_FLAGS, GlobalFlagChange, GlobalFlagsDetail, global_flags_set};
+use crate::target::htrace::{HandleTraceDetail, handle_trace_kind_name};
 use crate::target::job::{JobDetail, job_limit_flag_names};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -27,7 +28,42 @@ repl_command! {
     completion: Expression,
 }
 
+repl_command! {
+    cmd_htrace;
+    names: ["!htrace", "htrace"],
+    usage: "!htrace [handle [process [max-traces]]]",
+    summary: "Show the stacks handle tracing recorded for a process's handles.",
+    details: "Reads the ring of traces (open, close, bad reference) in the process handle table's DebugInfo, newest first. Handle 0 or omitted shows every handle's traces; the process (an EPROCESS address, PID, or name) defaults to the current one. Tracing must already be on for the process (Application Verifier's Handles check, or NtSetInformationProcess(ProcessHandleTracing)); !htrace says when it is not. User-mode frames resolve once the process's modules are loaded (.process /p). The user-mode forms that change tracing (-enable, -disable, -snapshot, -diff) are not provided.",
+    completion: Expression,
+}
+
 impl ReplState<'_> {
+    fn cmd_htrace(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let arg = |index: usize| invocation.arg(index).filter(|text| *text != "0");
+        let handle = match arg(0).map(|text| self.eval_or_report(text)) {
+            Some(Some(VirtAddr(handle))) => Some(handle),
+            Some(None) => return Ok(()),
+            None => None,
+        };
+        let max_traces = match arg(2).map(|text| self.eval_or_report(text)) {
+            Some(Some(VirtAddr(max))) => Some(max as usize),
+            Some(None) => return Ok(()),
+            None => None,
+        };
+        let target = &self.ctx.target;
+        let process = match arg(1) {
+            Some(selector) => target
+                .matching_processes(None)
+                .and_then(|processes| self.process_for_selector_or_name(selector, &processes)),
+            None => target.selected_process_info(),
+        };
+        match process.and_then(|process| target.handle_traces(&process, handle, max_traces)) {
+            Ok(detail) => print_handle_traces(&detail),
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
+    }
+
     fn cmd_gflag(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let target = &self.ctx.target;
         match invocation.arg(0) {
@@ -190,6 +226,54 @@ fn print_global_flags(detail: &GlobalFlagsDetail) {
                 process.pid
             ),
         }
+    }
+    outln!();
+}
+
+fn print_handle_traces(detail: &HandleTraceDetail) {
+    let process = &detail.process;
+    outln!(
+        "Process {} ({}, PID {})",
+        ui::addr(process.eprocess_va.0),
+        process.name,
+        process.pid
+    );
+    outln!("ObjectTable {}", ui::addr(detail.object_table.0));
+    let Some(debug_info) = detail.debug_info else {
+        outln!("Handle tracing is not enabled for this process.\n");
+        return;
+    };
+    outln!(
+        "DebugInfo {}  TableSize {:#x}  {:#x} trace(s) recorded",
+        ui::addr(debug_info.0),
+        detail.table_size,
+        detail.recorded
+    );
+    let separator = "-".repeat(38);
+    outln!("{separator}");
+    for trace in &detail.traces {
+        outln!(
+            "Handle {:#x} - {}:",
+            trace.handle,
+            handle_trace_kind_name(trace.kind)
+        );
+        outln!(
+            "Thread ID = {:#x}, Process ID = {:#x}",
+            trace.thread_id,
+            trace.process_id
+        );
+        for (address, symbol) in &trace.stack {
+            match symbol {
+                Some(symbol) => outln!("{}: {}", ui::addr(address.0), ui::symbol(symbol)),
+                None => outln!("{}", ui::addr(address.0)),
+            }
+        }
+        outln!("{separator}");
+    }
+    outln!("Parsed {:#x} stack trace(s).", detail.parsed);
+    outln!("Dumped {:#x} stack trace(s).", detail.traces.len());
+    if detail.unreadable != 0 {
+        outln!("{:#x} trace slot(s) unreadable.", detail.unreadable);
     }
     outln!();
 }

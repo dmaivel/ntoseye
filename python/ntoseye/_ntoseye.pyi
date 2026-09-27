@@ -1473,6 +1473,12 @@ class Process:
         """
         Decode a handle in this process's handle table.
         """
+    def handle_traces(self, /, handle: int |None = None, max_traces: int |None = None) -> Record:
+        """
+        The stacks handle tracing recorded for this process's handles, newest
+        first (`!htrace`): those of `handle` when given, at most `max_traces`.
+        `debug_info` is `None` when tracing is off for the process.
+        """
     def handles(self, /, limit: int = 256) -> Record:
         """
         Enumerate up to `limit` handles in this process's handle table.

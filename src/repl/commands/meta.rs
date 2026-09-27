@@ -576,6 +576,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!drvobj", "objects and I/O"),
     ("!fileobj", "objects and I/O"),
     ("!handle", "objects and I/O"),
+    ("!htrace", "objects and I/O"),
     ("!irp", "objects and I/O"),
     ("!irpfind", "objects and I/O"),
     ("!job", "processes and modules"),

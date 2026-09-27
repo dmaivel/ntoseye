@@ -7,6 +7,7 @@ pub mod cpu;
 pub mod etw;
 pub mod gflag;
 pub mod heap;
+pub mod htrace;
 pub mod image;
 pub mod irpfind;
 pub mod job;
