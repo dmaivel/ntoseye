@@ -271,10 +271,10 @@ repl_command! {
 repl_command! {
     cmd_f;
     names: ["f"],
-    usage: "f <address> <hex bytes> [L<count>|length|end]",
+    usage: "f <address> <L<count>|end> <pattern>",
     summary: "Fill memory with a repeated byte pattern.",
-    details: "hex bytes: 90, 4883792000740a, or \\x90\\x90",
-    completion: [Expression, None, Expression],
+    details: "The pattern is bytes, as `s` takes them: `90`, `48 89 5c`, `48895c`, or `\\x48\\x89`, repeated to fill the range (`f @rsp L20 cc`).",
+    completion: [Expression, Expression, None],
 }
 
 repl_command! {
@@ -1306,35 +1306,33 @@ impl ReplState<'_> {
     }
 
     fn cmd_f(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() < 2 {
+        let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
+        let [address_arg, range_arg, pattern_args @ ..] = args.as_slice() else {
+            outln!("{}\n", command_help("f"));
+            return Ok(());
+        };
+        if pattern_args.is_empty() {
             outln!("{}\n", command_help("f"));
             return Ok(());
         }
-
-        let Some(address) = self.eval_or_report(invocation.arg(0).unwrap()) else {
+        let Some(address) = self.eval_or_report(address_arg) else {
             return Ok(());
         };
-
-        let pattern_str = invocation.arg(1).unwrap();
-        let pattern = match parse_byte_pattern(pattern_str) {
-            Some(pattern) => pattern,
-            None => {
-                error!("invalid pattern: {}", pattern_str);
+        let length = match eval_range_length(range_arg, &self.ctx.target, self.radix, address, 1) {
+            Ok(length) => length,
+            Err(e) => {
+                error!("invalid length or end '{}': {}", range_arg, e);
                 return Ok(());
             }
         };
-
-        let length = match invocation.arg(2) {
-            Some(length_arg) => {
-                match eval_range_length(length_arg, &self.ctx.target, self.radix, address, 1) {
-                    Ok(length) => length,
-                    Err(e) => {
-                        error!("invalid length or end '{}': {}", length_arg, e);
-                        return Ok(());
-                    }
-                }
+        let pattern = match SearchKind::Bytes.pattern(pattern_args, |value| {
+            Expr::eval_with_radix(value, &self.ctx.target, self.radix).map(|value| value.0)
+        }) {
+            Ok(pattern) => pattern,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
             }
-            None => pattern.len(),
         };
 
         let data = repeat_pattern(&pattern, length);
@@ -1348,7 +1346,7 @@ impl ReplState<'_> {
                 "filled".green(),
                 length,
                 ui::addr(address.0),
-                format!("[{}]", pattern_str).green()
+                format!("[{}]", hex::encode(&pattern)).green()
             );
         }
 
