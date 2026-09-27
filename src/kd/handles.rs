@@ -186,6 +186,18 @@ impl DebugBackend for KdBackendHandle {
         self.lock().write_msr(processor, msr, value)
     }
 
+    fn supports_io_ports(&self) -> bool {
+        self.lock().supports_io_ports()
+    }
+
+    fn read_io_port(&mut self, port: u64, size: u8) -> Result<u32> {
+        self.lock().read_io_port(port, size)
+    }
+
+    fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {
+        self.lock().write_io_port(port, size, value)
+    }
+
     fn supports_target_control(&self) -> bool {
         self.lock().supports_target_control()
     }

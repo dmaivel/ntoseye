@@ -1,4 +1,5 @@
-//! Hang diagnosis from the processor blocks (`!qlocks`, `!ipi`).
+//! Hang diagnosis from the processor blocks (`!qlocks`, `!ipi`) and I/O-port
+//! access (`ib`/`iw`/`id`, `ob`/`ow`/`od`).
 
 use crate::error::Result;
 use crate::expr::Expr;
@@ -7,6 +8,7 @@ use crate::target::DiagnosticValue;
 use crate::target::hang::{
     IpiProcessor, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
 };
+use crate::types::VirtAddr;
 use crate::ui;
 
 repl_command! {
@@ -26,7 +28,127 @@ repl_command! {
     completion: Expression,
 }
 
+repl_command! {
+    cmd_ib;
+    names: ["ib"],
+    usage: "ib <port>",
+    summary: "Read a byte from an I/O port.",
+    details: "Reads 1 byte(s) from the I/O port on the current processor through the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target; the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. Reading a port can change device state (a FIFO or status latch), as it does on real hardware.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_ob;
+    names: ["ob"],
+    usage: "ob <port> <value>",
+    summary: "Write a byte to an I/O port.",
+    details: "Writes 1 byte(s) to the I/O port on the current processor through the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size and the value must fit in it.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_iw;
+    names: ["iw"],
+    usage: "iw <port>",
+    summary: "Read a word from an I/O port.",
+    details: "Reads 2 byte(s) from the I/O port on the current processor through the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target; the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. Reading a port can change device state (a FIFO or status latch), as it does on real hardware.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_ow;
+    names: ["ow"],
+    usage: "ow <port> <value>",
+    summary: "Write a word to an I/O port.",
+    details: "Writes 2 byte(s) to the I/O port on the current processor through the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size and the value must fit in it.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_id;
+    names: ["id"],
+    usage: "id <port>",
+    summary: "Read a dword from an I/O port.",
+    details: "Reads 4 byte(s) from the I/O port on the current processor through the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target; the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. Reading a port can change device state (a FIFO or status latch), as it does on real hardware.",
+    completion: Expression,
+}
+
+repl_command! {
+    cmd_od;
+    names: ["od"],
+    usage: "od <port> <value>",
+    summary: "Write a dword to an I/O port.",
+    details: "Writes 4 byte(s) to the I/O port on the current processor through the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size and the value must fit in it.",
+    completion: Expression,
+}
+
 impl ReplState<'_> {
+    fn cmd_ib(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.read_port(invocation, 1)
+    }
+
+    fn cmd_ob(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.write_port(invocation, 1)
+    }
+
+    fn cmd_iw(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.read_port(invocation, 2)
+    }
+
+    fn cmd_ow(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.write_port(invocation, 2)
+    }
+
+    fn cmd_id(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.read_port(invocation, 4)
+    }
+
+    fn cmd_od(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        self.write_port(invocation, 4)
+    }
+
+    /// `ib`/`iw`/`id`: WinDbg's `port: value` line.
+    fn read_port(&mut self, invocation: CommandInvocation<'_>, size: u8) -> Result<()> {
+        let [port] = invocation.argv.as_slice() else {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        };
+        let Some(VirtAddr(port)) = self.eval_or_report(port) else {
+            return Ok(());
+        };
+        match self.ctx.read_io_port(port, size) {
+            Ok(value) => outln!(
+                "{port:08x}: {value:0width$x}",
+                width = usize::from(size) * 2
+            ),
+            Err(error) => error!("{}: {error}", invocation.name),
+        }
+        Ok(())
+    }
+
+    fn write_port(&mut self, invocation: CommandInvocation<'_>, size: u8) -> Result<()> {
+        let [port, value] = invocation.argv.as_slice() else {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        };
+        let Some(VirtAddr(port)) = self.eval_or_report(port) else {
+            return Ok(());
+        };
+        let Some(VirtAddr(value)) = self.eval_or_report(value) else {
+            return Ok(());
+        };
+        let Ok(value) = u32::try_from(value) else {
+            error!(
+                "{}: {value:#x} does not fit in {size} byte(s)",
+                invocation.name
+            );
+            return Ok(());
+        };
+        if let Err(error) = self.ctx.write_io_port(port, size, value) {
+            error!("{}: {error}", invocation.name);
+        }
+        Ok(())
+    }
     fn cmd_qlocks(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if !invocation.argv.is_empty() {
             outln!("{}\n", command_help(invocation.name));

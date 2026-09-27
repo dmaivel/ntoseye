@@ -25,6 +25,8 @@ pub const DBGKD_RESTORE_BREAKPOINT: u32 = 0x0000_3135;
 pub const DBGKD_MAXSTREAM: u64 = 16;
 pub const DBGKD_READ_CONTROL_SPACE: u32 = 0x0000_3137;
 pub const DBGKD_WRITE_CONTROL_SPACE: u32 = 0x0000_3138;
+pub const DBGKD_READ_IO_SPACE: u32 = 0x0000_3139;
+pub const DBGKD_WRITE_IO_SPACE: u32 = 0x0000_313A;
 pub const DBGKD_CONTINUE_API2: u32 = 0x0000_313C;
 pub const DBGKD_READ_PHYSICAL_MEMORY: u32 = 0x0000_313D;
 pub const DBGKD_WRITE_PHYSICAL_MEMORY: u32 = 0x0000_313E;
@@ -296,6 +298,41 @@ pub fn write_machine_specific_register<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET + 8, (value >> 32) as u32);
     let (parsed, _, _) = send_manipulate(framing, &header, &[])?;
     check_status(&parsed, DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER)
+}
+
+/// `DbgKdReadIoSpaceApi` (`ib`/`iw`/`id` in WinDbg): `size` (1, 2, or 4)
+/// bytes from I/O port `port`, read on `processor`. The union is
+/// `DBGKD_READ_WRITE_IO64 { IoAddress: u64, DataSize: u32, DataValue: u32 }`;
+/// the reply carries the value in `DataValue`.
+pub fn read_io_space<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    port: u64,
+    size: u32,
+) -> Result<u32> {
+    let mut header = make_header(DBGKD_READ_IO_SPACE, processor);
+    write_u64(&mut header, UNION_OFFSET, port);
+    write_u32(&mut header, UNION_OFFSET + 8, size);
+    let (parsed, reply_header, _) = send_manipulate(framing, &header, &[])?;
+    check_status(&parsed, DBGKD_READ_IO_SPACE)?;
+    Ok(read_u32(&reply_header, UNION_OFFSET + 12))
+}
+
+/// `DbgKdWriteIoSpaceApi` (`ob`/`ow`/`od` in WinDbg): the same union as
+/// [`read_io_space`], with the value to write in `DataValue`.
+pub fn write_io_space<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    port: u64,
+    size: u32,
+    value: u32,
+) -> Result<()> {
+    let mut header = make_header(DBGKD_WRITE_IO_SPACE, processor);
+    write_u64(&mut header, UNION_OFFSET, port);
+    write_u32(&mut header, UNION_OFFSET + 8, size);
+    write_u32(&mut header, UNION_OFFSET + 12, value);
+    let (parsed, _, _) = send_manipulate(framing, &header, &[])?;
+    check_status(&parsed, DBGKD_WRITE_IO_SPACE)
 }
 
 /// Send a manipulate-state request whose API has no reply packet. The KD

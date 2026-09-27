@@ -1313,11 +1313,94 @@ impl Session {
         }
         self.backend.write_msr(processor, msr, value)
     }
+
+    /// Refuse an I/O-port access the backend cannot make, saying why, or one
+    /// the target cannot take while running.
+    fn check_io_ports(&self) -> Result<()> {
+        if self.target.arch() == Arch::Arm64 {
+            return Err(Error::DebugInfo(
+                "ARM64 has no I/O-port space; devices are memory-mapped".into(),
+            ));
+        }
+        if !self.backend.capabilities().iter().any(|capability| {
+            capability.capability == DebugCapability::IoPorts && capability.supported
+        }) {
+            return Err(Error::DebugInfo(format!(
+                "the {} backend has no I/O-port access; ports are read and written through \
+                 the Windows KD protocol (the kd and kdnet backends)",
+                self.backend.name()
+            )));
+        }
+        if self.backend.is_running() {
+            return Err(Error::TargetRunning(PORTS_NEED_HALT));
+        }
+        Ok(())
+    }
+
+    /// Read `size` (1, 2, or 4) bytes from I/O port `port` on the current
+    /// processor (`ib`/`iw`/`id`).
+    pub fn read_io_port(&mut self, port: u64, size: u8) -> Result<u32> {
+        validate_io_port(port, size)?;
+        self.check_io_ports()?;
+        self.backend.read_io_port(port, size)
+    }
+
+    /// Write `value` as `size` (1, 2, or 4) bytes to I/O port `port` on the
+    /// current processor (`ob`/`ow`/`od`).
+    pub fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {
+        validate_io_port(port, size)?;
+        if size < 4 && u64::from(value) >> (u32::from(size) * 8) != 0 {
+            return Err(Error::InvalidArgument(format!(
+                "{value:#x} does not fit in {size} byte(s)"
+            )));
+        }
+        self.check_io_ports()?;
+        self.backend.write_io_port(port, size, value)
+    }
+}
+
+/// [`Error::TargetRunning`] payload for I/O-port access.
+const PORTS_NEED_HALT: &str = "I/O ports are accessed on a halted target.";
+
+/// An x86 I/O-port access: 1, 2, or 4 bytes inside the 64 KiB port space,
+/// aligned to its size as the kernel's `KdpReadIoSpace` requires.
+fn validate_io_port(port: u64, size: u8) -> Result<()> {
+    if !matches!(size, 1 | 2 | 4) {
+        return Err(Error::InvalidArgument(format!(
+            "I/O access size must be 1, 2, or 4 bytes, not {size}"
+        )));
+    }
+    if port
+        .checked_add(u64::from(size))
+        .is_none_or(|end| end > 0x1_0000)
+    {
+        return Err(Error::InvalidArgument(format!(
+            "port {port:#x} is outside the 64 KiB I/O space"
+        )));
+    }
+    if !port.is_multiple_of(u64::from(size)) {
+        return Err(Error::InvalidArgument(format!(
+            "port {port:#x} is not aligned to a {size}-byte access"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{msr_name, parse_msr_name};
+    use super::{msr_name, parse_msr_name, validate_io_port};
+
+    #[test]
+    fn io_port_accesses_stay_aligned_inside_the_port_space() {
+        assert!(validate_io_port(0xfffc, 4).is_ok());
+        assert!(validate_io_port(0xffff, 1).is_ok());
+        assert!(validate_io_port(0xfffe, 4).is_err());
+        assert!(validate_io_port(0x1_0000, 1).is_err());
+        assert!(validate_io_port(0xcf9, 2).is_err());
+        assert!(validate_io_port(0xcfa, 2).is_ok());
+        assert!(validate_io_port(0x80, 3).is_err());
+        assert!(validate_io_port(u64::MAX, 1).is_err());
+    }
 
     #[test]
     fn msr_name_aliases_round_trip() {

@@ -369,6 +369,7 @@ pub enum DebugCapability {
     BugcheckDetails,
     DebugOutput,
     Msr,
+    IoPorts,
     TargetControl,
     TargetFileIo,
 }
@@ -394,6 +395,7 @@ impl DebugCapability {
             Self::BugcheckDetails => "bugcheck_details",
             Self::DebugOutput => "debug_output",
             Self::Msr => "msr",
+            Self::IoPorts => "io_ports",
             Self::TargetControl => "target_control",
             Self::TargetFileIo => "target_file_io",
         }
@@ -418,6 +420,7 @@ impl DebugCapability {
             Self::BugcheckDetails => "bugcheck details",
             Self::DebugOutput => "debug output",
             Self::Msr => "model-specific registers",
+            Self::IoPorts => "I/O ports",
             Self::TargetControl => "reboot / forced crash",
             Self::TargetFileIo => "host-served target files",
         }
@@ -663,6 +666,10 @@ pub trait DebugBackend {
                 supported: self.supports_msr(),
             },
             BackendCapability {
+                capability: DebugCapability::IoPorts,
+                supported: self.supports_io_ports(),
+            },
+            BackendCapability {
                 capability: DebugCapability::TargetControl,
                 supported: self.supports_target_control(),
             },
@@ -860,6 +867,25 @@ pub trait DebugBackend {
 
     /// Write model-specific register `msr` on `processor`.
     fn write_msr(&mut self, _processor: u16, _msr: u32, _value: u64) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Whether the transport can read and write I/O ports (`ib`/`ob`). KD
+    /// implements this with `DbgKdReadIoSpaceApi`/`DbgKdWriteIoSpaceApi`;
+    /// a GDB stub, host memory, and a dump have no I/O space.
+    fn supports_io_ports(&self) -> bool {
+        false
+    }
+
+    /// Read `size` (1, 2, or 4) bytes from I/O port `port` on the current
+    /// processor.
+    fn read_io_port(&mut self, _port: u64, _size: u8) -> Result<u32> {
+        Err(Error::NotSupported)
+    }
+
+    /// Write the low `size` (1, 2, or 4) bytes of `value` to I/O port `port`
+    /// on the current processor.
+    fn write_io_port(&mut self, _port: u64, _size: u8, _value: u32) -> Result<()> {
         Err(Error::NotSupported)
     }
 

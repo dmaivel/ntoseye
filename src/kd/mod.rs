@@ -534,6 +534,24 @@ impl DebugBackend for KdBackend {
         self.write_msr_value(processor, msr, value)
     }
 
+    fn supports_io_ports(&self) -> bool {
+        true
+    }
+
+    fn read_io_port(&mut self, port: u64, size: u8) -> Result<u32> {
+        let processor = self.current_processor;
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::read_io_space(framing, processor, port, u32::from(size))
+        })
+    }
+
+    fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {
+        let processor = self.current_processor;
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::write_io_space(framing, processor, port, u32::from(size), value)
+        })
+    }
+
     fn supports_target_control(&self) -> bool {
         true
     }
@@ -568,6 +586,10 @@ impl DebugBackend for KdBackend {
             BackendCapability {
                 capability: DebugCapability::Msr,
                 supported: self.supports_msr(),
+            },
+            BackendCapability {
+                capability: DebugCapability::IoPorts,
+                supported: self.supports_io_ports(),
             },
             BackendCapability {
                 capability: DebugCapability::TargetControl,
