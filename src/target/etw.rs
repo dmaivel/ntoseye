@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
+use crate::bytes::{get_u16, get_u32, get_u64, write_u16, write_u32, write_u64};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
@@ -485,20 +486,8 @@ const TRACE_MESSAGE_SYSTEMINFO: u16 = 0x0020;
 
 const EVENT_HEADER_FLAG_EXTENDED_INFO: u16 = 0x0001;
 
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-}
-
-fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
-}
-
 fn guid_at(bytes: &[u8], at: usize) -> Option<[u8; 16]> {
-    bytes.get(at..at + 16)?.try_into().ok()
+    bytes.get(at..at.checked_add(16)?)?.try_into().ok()
 }
 
 fn align8(value: usize) -> usize {
@@ -545,7 +534,7 @@ fn decode_record(
     bytes: &[u8],
     layout: &EventHeaderLayout,
 ) -> std::result::Result<EtwRecord, String> {
-    let marker = u32_at(bytes, 0).ok_or("truncated marker")?;
+    let marker = get_u32(bytes, 0).ok_or("truncated marker")?;
     let [b0, b1, header_type, flags] = marker.to_le_bytes();
     if marker == 0 {
         return Err("zero marker (unused space)".into());
@@ -574,9 +563,9 @@ fn decode_record(
     // SYSTEM/PERFINFO headers keep a version in the first word and the size
     // in the WMI_TRACE_PACKET that follows; the rest start with their size.
     let (size, header_len) = match kind {
-        EtwHeaderKind::System => (u16_at(bytes, 4), 0x20),
-        EtwHeaderKind::Compact => (u16_at(bytes, 4), 0x18),
-        EtwHeaderKind::PerfInfo => (u16_at(bytes, 4), 0x10),
+        EtwHeaderKind::System => (get_u16(bytes, 4), 0x20),
+        EtwHeaderKind::Compact => (get_u16(bytes, 4), 0x18),
+        EtwHeaderKind::PerfInfo => (get_u16(bytes, 4), 0x10),
         EtwHeaderKind::FullHeader => (Some(leading), 0x30),
         EtwHeaderKind::Instance => (Some(leading), 0x48),
         EtwHeaderKind::EventHeader => (Some(leading), layout.size),
@@ -619,42 +608,42 @@ fn decode_record(
 
     let payload_start = match kind {
         EtwHeaderKind::System | EtwHeaderKind::Compact => {
-            record.hook_id = u16_at(bytes, 6);
-            record.thread_id = u32_at(bytes, 8);
-            record.process_id = u32_at(bytes, 12);
-            record.timestamp = u64_at(bytes, 16).ok_or_else(truncated)?;
+            record.hook_id = get_u16(bytes, 6);
+            record.thread_id = get_u32(bytes, 8);
+            record.process_id = get_u32(bytes, 12);
+            record.timestamp = get_u64(bytes, 16).ok_or_else(truncated)?;
             header_len
         }
         EtwHeaderKind::PerfInfo => {
-            record.hook_id = u16_at(bytes, 6);
-            record.timestamp = u64_at(bytes, 8).ok_or_else(truncated)?;
+            record.hook_id = get_u16(bytes, 6);
+            record.timestamp = get_u64(bytes, 8).ok_or_else(truncated)?;
             header_len
         }
         EtwHeaderKind::FullHeader | EtwHeaderKind::Instance => {
-            record.class = Some((bytes[4], bytes[5], u16_at(bytes, 6).ok_or_else(truncated)?));
-            record.thread_id = u32_at(bytes, 8);
-            record.process_id = u32_at(bytes, 12);
-            record.timestamp = u64_at(bytes, 16).ok_or_else(truncated)?;
+            record.class = Some((bytes[4], bytes[5], get_u16(bytes, 6).ok_or_else(truncated)?));
+            record.thread_id = get_u32(bytes, 8);
+            record.process_id = get_u32(bytes, 12);
+            record.timestamp = get_u64(bytes, 16).ok_or_else(truncated)?;
             record.guid = guid_at(bytes, 24);
             header_len
         }
         EtwHeaderKind::EventHeader => {
-            let flags = u16_at(bytes, layout.flags).ok_or_else(truncated)?;
+            let flags = get_u16(bytes, layout.flags).ok_or_else(truncated)?;
             record.event_flags = Some(flags);
-            record.thread_id = u32_at(bytes, layout.thread_id);
-            record.process_id = u32_at(bytes, layout.process_id);
-            record.timestamp = u64_at(bytes, layout.time_stamp).ok_or_else(truncated)?;
+            record.thread_id = get_u32(bytes, layout.thread_id);
+            record.process_id = get_u32(bytes, layout.process_id);
+            record.timestamp = get_u64(bytes, layout.time_stamp).ok_or_else(truncated)?;
             record.guid = guid_at(bytes, layout.provider_id);
             record.activity_id = guid_at(bytes, layout.activity_id);
             let d = layout.descriptor;
             record.descriptor = Some(EtwEventDescriptor {
-                id: u16_at(bytes, d + layout.descriptor_id).ok_or_else(truncated)?,
+                id: get_u16(bytes, d + layout.descriptor_id).ok_or_else(truncated)?,
                 version: bytes[d + layout.descriptor_version],
                 channel: bytes[d + layout.descriptor_channel],
                 level: bytes[d + layout.descriptor_level],
                 opcode: bytes[d + layout.descriptor_opcode],
-                task: u16_at(bytes, d + layout.descriptor_task).ok_or_else(truncated)?,
-                keyword: u64_at(bytes, d + layout.descriptor_keyword).ok_or_else(truncated)?,
+                task: get_u16(bytes, d + layout.descriptor_task).ok_or_else(truncated)?,
+                keyword: get_u64(bytes, d + layout.descriptor_keyword).ok_or_else(truncated)?,
             });
             let mut at = header_len;
             if flags & EVENT_HEADER_FLAG_EXTENDED_INFO != 0 {
@@ -662,7 +651,7 @@ fn decode_record(
                 // USHORT ExtType, USHORT Linkage (bit 0: another item
                 // follows), USHORT DataSize, then the data.
                 loop {
-                    let item = |field| u16_at(bytes, at + field);
+                    let item = |field| get_u16(bytes, at + field);
                     let (Some(total), Some(ext_type), Some(linkage), Some(data_size)) =
                         (item(0), item(2), item(4), item(6))
                     else {
@@ -690,8 +679,8 @@ fn decode_record(
             at.min(len)
         }
         EtwHeaderKind::Message => {
-            let number = u16_at(bytes, 4).ok_or_else(truncated)?;
-            let option_flags = u16_at(bytes, 6).ok_or_else(truncated)?;
+            let number = get_u16(bytes, 4).ok_or_else(truncated)?;
+            let option_flags = get_u16(bytes, 6).ok_or_else(truncated)?;
             let mut at = 8;
             let mut take = |n: usize| -> std::result::Result<usize, String> {
                 let here = at;
@@ -704,24 +693,24 @@ fn decode_record(
                 Ok(here)
             };
             let sequence = if option_flags & TRACE_MESSAGE_SEQUENCE != 0 {
-                u32_at(bytes, take(4)?)
+                get_u32(bytes, take(4)?)
             } else {
                 None
             };
             let (component_id, guid) = if option_flags & TRACE_MESSAGE_COMPONENTID != 0 {
-                (u32_at(bytes, take(4)?), None)
+                (get_u32(bytes, take(4)?), None)
             } else if option_flags & TRACE_MESSAGE_GUID != 0 {
                 (None, guid_at(bytes, take(16)?))
             } else {
                 (None, None)
             };
             if option_flags & TRACE_MESSAGE_TIMESTAMP != 0 {
-                record.timestamp = u64_at(bytes, take(8)?).unwrap_or(0);
+                record.timestamp = get_u64(bytes, take(8)?).unwrap_or(0);
             }
             if option_flags & TRACE_MESSAGE_SYSTEMINFO != 0 {
                 let info = take(8)?;
-                record.thread_id = u32_at(bytes, info);
-                record.process_id = u32_at(bytes, info + 4);
+                record.thread_id = get_u32(bytes, info);
+                record.process_id = get_u32(bytes, info + 4);
             }
             record.guid = guid;
             record.message = Some(EtwMessage {
@@ -863,11 +852,24 @@ struct EtwTypes {
     logger: Arc<TypeInfo>,
     buffer: Arc<TypeInfo>,
     event_header: EventHeaderLayout,
+    /// `_ETW_BUFFER_STATE`'s variants; empty when the PDB lacks the enum.
+    buffer_states: Vec<(String, i64)>,
+}
+
+impl EtwTypes {
+    /// The value of the `_ETW_BUFFER_STATE` variant `name`.
+    fn buffer_state(&self, name: &str) -> Option<i64> {
+        self.buffer_states
+            .iter()
+            .find(|(variant, _)| variant == name)
+            .map(|(_, value)| *value)
+    }
 }
 
 impl Target {
     fn etw_types(&self) -> Result<EtwTypes> {
-        let types = self.guest()?.ntoskrnl.types();
+        let guest = self.guest()?;
+        let types = guest.ntoskrnl.types();
         Ok(EtwTypes {
             logger: types.layout("_WMI_LOGGER_CONTEXT")?,
             buffer: types.layout("_WMI_BUFFER_HEADER")?,
@@ -875,6 +877,11 @@ impl Target {
                 &*types.layout("_EVENT_HEADER")?,
                 &*types.layout("_EVENT_DESCRIPTOR")?,
             )?,
+            buffer_states: guest
+                .ntoskrnl
+                .guid
+                .and_then(|guid| self.symbols.enum_variants(guid, "_ETW_BUFFER_STATE"))
+                .unwrap_or_default(),
         })
     }
 
@@ -1026,12 +1033,6 @@ impl Target {
         let memory = self.kernel_address_space();
         let head = logger.address + types.logger.field_offset("GlobalList")?;
         let global_entry = types.buffer.field_offset("GlobalEntry")?;
-        let states = self
-            .guest()?
-            .ntoskrnl
-            .guid
-            .and_then(|guid| self.symbols.enum_variants(guid, "_ETW_BUFFER_STATE"))
-            .unwrap_or_default();
         let mut buffers = Vec::new();
         let mut seen = HashSet::new();
         let mut link: VirtAddr = memory.read(head)?;
@@ -1054,7 +1055,7 @@ impl Target {
             let node_buffer: VirtAddr = memory.read(link + 0x10u64)?;
             let buffer = [node_buffer, VirtAddr(link.0.wrapping_sub(global_entry))]
                 .into_iter()
-                .find_map(|candidate| self.read_etw_buffer(types, logger, &states, candidate).ok())
+                .find_map(|candidate| self.read_etw_buffer(types, logger, candidate).ok())
                 .ok_or_else(|| {
                     Error::DebugInfo(format!(
                         "logger {:#x}'s GlobalList entry {:#x} leads to no _WMI_BUFFER_HEADER \
@@ -1072,7 +1073,6 @@ impl Target {
         &self,
         types: &EtwTypes,
         logger: &EtwLogger,
-        states: &[(String, i64)],
         address: VirtAddr,
     ) -> Result<EtwBuffer> {
         if !looks_like_kernel_pointer(address.0) {
@@ -1107,7 +1107,8 @@ impl Target {
         Ok(EtwBuffer {
             address,
             state,
-            state_name: states
+            state_name: types
+                .buffer_states
                 .iter()
                 .find(|(_, value)| *value == i64::from(state))
                 .map(|(name, _)| name.trim_start_matches("EtwBufferState").to_string())
@@ -1146,16 +1147,7 @@ impl Target {
             cpu_mhz,
         };
         let header_size = types.buffer.size;
-        let states = self
-            .guest()?
-            .ntoskrnl
-            .guid
-            .and_then(|guid| self.symbols.enum_variants(guid, "_ETW_BUFFER_STATE"))
-            .unwrap_or_default();
-        let compressed = states
-            .iter()
-            .find(|(name, _)| name == "EtwBufferStateCompressed")
-            .map(|(_, value)| *value);
+        let compressed = types.buffer_state("EtwBufferStateCompressed");
         let memory = self.kernel_address_space();
         let mut events = Vec::new();
         let mut issues = Vec::new();
@@ -1230,7 +1222,7 @@ impl Target {
     /// Processor 0's rated speed (`_KPRCB.MHz`), which converts CpuCycle
     /// timestamps.
     fn processor_mhz(&self) -> Result<u64> {
-        let kprcb = self.inspect_prcb(0)?.kprcb;
+        let kprcb = crate::cpu_state::kprcb_for_processor(self, 0)?;
         let mhz = self
             .guest()?
             .ntoskrnl
@@ -1284,18 +1276,6 @@ const TRACE_LOGFILE_HEADER64_SIZE: usize = 0x118;
 /// LogFileMode.
 const LOGFILE_MODE_CLEARED: u32 = 0x0000_0100 | 0x0040_0000 | 0x0080_0000;
 
-fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
-    bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
-}
-
-fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
-    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn put_u64(bytes: &mut [u8], at: usize, value: u64) {
-    bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
-}
-
 fn utf16z(text: &str) -> Vec<u8> {
     text.encode_utf16()
         .chain(std::iter::once(0))
@@ -1336,12 +1316,12 @@ impl BufferHeaderOffsets {
     /// Mark `buffer` as flushed with `used` valid bytes, as the logger
     /// writes it to its file: the rest of the buffer is filled with 0xff.
     fn seal(&self, buffer: &mut [u8], used: usize, state: u32, flag: u16, kind: u16) {
-        put_u32(buffer, self.saved_offset, used as u32);
-        put_u32(buffer, self.current_offset, used as u32);
-        put_u32(buffer, self.offset, used as u32);
-        put_u32(buffer, self.state, state);
-        put_u16(buffer, self.buffer_flag, flag);
-        put_u16(buffer, self.buffer_type, kind);
+        write_u32(buffer, self.saved_offset, used as u32);
+        write_u32(buffer, self.current_offset, used as u32);
+        write_u32(buffer, self.offset, used as u32);
+        write_u32(buffer, self.state, state);
+        write_u16(buffer, self.buffer_flag, flag);
+        write_u16(buffer, self.buffer_type, kind);
         buffer[used..].fill(0xff);
     }
 }
@@ -1359,8 +1339,8 @@ fn logfile_header_buffer(
 ) -> Result<Vec<u8>> {
     let size = logger.buffer_size as usize;
     let mut buffer = vec![0u8; size];
-    put_u32(&mut buffer, offsets.buffer_size, logger.buffer_size);
-    put_u16(&mut buffer, offsets.logger_id, logger.logger_id as u16);
+    write_u32(&mut buffer, offsets.buffer_size, logger.buffer_size);
+    write_u16(&mut buffer, offsets.logger_id, logger.logger_id as u16);
 
     let logger_name = utf16z(&logger.name);
     let file_name = utf16z(&logger.log_file_name);
@@ -1374,10 +1354,10 @@ fn logfile_header_buffer(
     }
     // SYSTEM_TRACE_HEADER: version 2, TRACE_HEADER_TYPE_SYSTEM64, flags
     // 0xc0; the thread, process and CPU times stay 0.
-    put_u32(&mut buffer, event, 0xc002_0002);
-    put_u16(&mut buffer, event + 4, event_size as u16);
-    put_u16(&mut buffer, event + 6, WMI_LOG_TYPE_HEADER);
-    put_u64(&mut buffer, event + 0x10, logger.reference_clock);
+    write_u32(&mut buffer, event, 0xc002_0002);
+    write_u16(&mut buffer, event + 4, event_size as u16);
+    write_u16(&mut buffer, event + 6, WMI_LOG_TYPE_HEADER);
+    write_u64(&mut buffer, event + 0x10, logger.reference_clock);
 
     let h = event + 0x20;
     // Layout 1.5 (QPC and platform clock in the header), 2.0 for buffers
@@ -1390,33 +1370,33 @@ fn logfile_header_buffer(
     } else {
         0x0501
     };
-    put_u32(&mut buffer, h, logger.buffer_size);
+    write_u32(&mut buffer, h, logger.buffer_size);
     buffer[h + 4] = system.major_version;
     buffer[h + 5] = system.minor_version;
-    put_u16(&mut buffer, h + 6, sub_version);
-    put_u32(&mut buffer, h + 0x08, system.build_number);
-    put_u32(&mut buffer, h + 0x0c, system.processors);
-    put_u64(&mut buffer, h + 0x10, system.end_time);
-    put_u32(&mut buffer, h + 0x18, system.timer_resolution);
-    put_u32(&mut buffer, h + 0x1c, logger.maximum_file_size);
-    put_u32(
+    write_u16(&mut buffer, h + 6, sub_version);
+    write_u32(&mut buffer, h + 0x08, system.build_number);
+    write_u32(&mut buffer, h + 0x0c, system.processors);
+    write_u64(&mut buffer, h + 0x10, system.end_time);
+    write_u32(&mut buffer, h + 0x18, system.timer_resolution);
+    write_u32(&mut buffer, h + 0x1c, logger.maximum_file_size);
+    write_u32(
         &mut buffer,
         h + 0x20,
         logger.logger_mode & !LOGFILE_MODE_CLEARED,
     );
-    put_u32(&mut buffer, h + 0x24, buffers_written);
-    put_u32(&mut buffer, h + 0x28, 1); // StartBuffers
-    put_u32(&mut buffer, h + 0x2c, 8); // PointerSize
-    put_u32(&mut buffer, h + 0x30, logger.events_lost);
-    put_u32(&mut buffer, h + 0x34, system.cpu_mhz);
+    write_u32(&mut buffer, h + 0x24, buffers_written);
+    write_u32(&mut buffer, h + 0x28, 1); // StartBuffers
+    write_u32(&mut buffer, h + 0x2c, 8); // PointerSize
+    write_u32(&mut buffer, h + 0x30, logger.events_lost);
+    write_u32(&mut buffer, h + 0x34, system.cpu_mhz);
     // LoggerName/LogFileName (0x38/0x40) hold platform timer sources, not
     // known here; TimeZone (0x48) gets only the bias.
-    put_u32(&mut buffer, h + 0x48, system.time_zone_bias as u32);
-    put_u64(&mut buffer, h + 0xf8, system.boot_time);
-    put_u64(&mut buffer, h + 0x100, system.qpc_frequency);
-    put_u64(&mut buffer, h + 0x108, logger.reference_system_time);
-    put_u32(&mut buffer, h + 0x110, logger.clock.raw());
-    put_u32(&mut buffer, h + 0x114, logger.log_buffers_lost);
+    write_u32(&mut buffer, h + 0x48, system.time_zone_bias as u32);
+    write_u64(&mut buffer, h + 0xf8, system.boot_time);
+    write_u64(&mut buffer, h + 0x100, system.qpc_frequency);
+    write_u64(&mut buffer, h + 0x108, logger.reference_system_time);
+    write_u32(&mut buffer, h + 0x110, logger.clock.raw());
+    write_u32(&mut buffer, h + 0x114, logger.log_buffers_lost);
     let names = h + TRACE_LOGFILE_HEADER64_SIZE;
     buffer[names..names + logger_name.len()].copy_from_slice(&logger_name);
     let names = names + logger_name.len();
@@ -1450,22 +1430,10 @@ impl Target {
         let kernel = guest.ntoskrnl.types();
         let offsets =
             BufferHeaderOffsets::from_pdb(&types.buffer, &*kernel.layout("_ETW_BUFFER_CONTEXT")?)?;
-        let states = guest
-            .ntoskrnl
-            .guid
-            .and_then(|guid| self.symbols.enum_variants(guid, "_ETW_BUFFER_STATE"))
-            .unwrap_or_default();
-        let state = |name: &str| {
-            states
-                .iter()
-                .find(|(variant, _)| variant == name)
-                .map(|(_, value)| *value)
-                .ok_or_else(|| {
-                    Error::DebugInfo(format!("_ETW_BUFFER_STATE has no {name} in the PDB"))
-                })
-        };
-        let flush_state = state("EtwBufferStateFlush")? as u32;
-        let compressed = state("EtwBufferStateCompressed").ok();
+        let flush_state = types.buffer_state("EtwBufferStateFlush").ok_or_else(|| {
+            Error::DebugInfo("_ETW_BUFFER_STATE has no EtwBufferStateFlush in the PDB".into())
+        })? as u32;
+        let compressed = types.buffer_state("EtwBufferStateCompressed");
         if let Some(buffer) = buffers
             .iter()
             .find(|buffer| Some(i64::from(buffer.state)) == compressed)
