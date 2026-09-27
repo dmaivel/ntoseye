@@ -31,6 +31,7 @@ mod process_objects;
 mod sched;
 mod script;
 mod security;
+mod shell;
 mod symbols;
 mod target_control;
 mod thread;
@@ -238,10 +239,15 @@ impl ReplState<'_> {
     }
 
     /// The per-command policy every dispatch path shares: the context's
-    /// run-control denial, then a remote host's wait for the halt the command
-    /// needs (against the target's state right now, so a `break` earlier on
-    /// the line counts), then the run-state check. `None` means run it.
+    /// refusal of host commands and of run control, then a remote host's
+    /// wait for the halt the command needs (against the target's state right
+    /// now, so a `break` earlier on the line counts), then the run-state
+    /// check. `None` means run it.
     fn admit(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
+        if let Some(reason) = self.host_command_denial(spec) {
+            error!("{reason}");
+            return Ok(Some(Flow::Denied));
+        }
         if let Some(reason) = self.secure_denial(spec) {
             error!("{reason}");
             return Ok(Some(Flow::Denied));

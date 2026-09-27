@@ -686,6 +686,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     (".logopen", "session"),
     (".logappend", "session"),
     (".logclose", "session"),
+    (".shell", "session"),
     ("ad", "session"),
     ("al", "session"),
     ("as", "session"),
