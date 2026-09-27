@@ -397,8 +397,10 @@ impl BreakpointManager {
     }
 
     /// Disable a breakpoint to run the instruction under it, re-enabled
-    /// straight after: other executions stay held meanwhile, so an
-    /// interrupted one still returns to an armed site.
+    /// straight after. Other executions are held meanwhile, or, when they
+    /// are let run, stopped by the temporary site the run plants on the
+    /// instruction, so an interrupted one still returns to an armed site;
+    /// what it remembers of them is kept.
     pub fn lift(
         &mut self,
         client: &mut dyn DebugBackend,
@@ -513,6 +515,12 @@ impl BreakpointManager {
         };
         self.interrupted_hits.remove(index);
         true
+    }
+
+    /// Forget that the execution with stack pointer `rsp` was interrupted on
+    /// breakpoint `id`'s site: it is running past it now.
+    pub fn forget_interrupted_hit(&mut self, id: u32, rsp: u64) {
+        self.interrupted_hits.retain(|hit| *hit != (id, rsp));
     }
 
     fn forget_interrupted_hits(&mut self, id: u32) {

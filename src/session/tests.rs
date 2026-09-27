@@ -1299,6 +1299,56 @@ fn a_hit_interrupted_on_its_site_is_reported_once() {
     ));
 }
 
+/// An execution interrupted on a breakpoint's site that gets back onto it by
+/// stepping, not by hitting it, runs past it on the next resume; a later
+/// hit from the same stack is a new one, not that execution returning.
+#[test]
+fn an_interrupted_hit_stepped_back_onto_is_forgotten() {
+    let mut memory = [0x90u8; 0x100];
+    memory[..3].copy_from_slice(&[0x48, 0x89, 0xd8]);
+    let rsp = 0x1088;
+    for (index, value) in [0x1000, 0x10, 0x202, rsp, 0x18].into_iter().enumerate() {
+        let at = 0x80 - 40 + index * 8;
+        memory[at..at + 8].copy_from_slice(&u64::to_le_bytes(value));
+    }
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        halts_only_on_interrupt: true,
+        landings: VecDeque::from([0x1030]),
+        lands_at: Some(0x1003),
+        released_to: Some(0x1030),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    backend.set("rsp", rsp);
+    let mut session = stepping_session(&memory, backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session.current_thread = "p01.01".into();
+
+    session.resume().unwrap();
+    session.backend.interrupt().unwrap();
+    let on_site = |session: &mut Session| {
+        let backend = session.backend.as_mut();
+        let mut regs = backend.read_registers().unwrap();
+        let map = &session.register_map;
+        map.write_u64("rip", &mut regs, 0x1000).unwrap();
+        map.write_u64("rsp", &mut regs, rsp).unwrap();
+        backend.write_registers(&regs).unwrap();
+    };
+    // Stepped back onto the site, it is stepped past it.
+    on_site(&mut session);
+    assert_eq!(session.step().unwrap(), 0x1003);
+    on_site(&mut session);
+    assert!(matches!(
+        session.resolve_breakpoint_stop(0x1000, 0).unwrap(),
+        BreakpointStopAction::Hit { .. }
+    ));
+}
+
 /// Secure-kernel code is never patched: a step there marks its successors
 /// with debug-register sites in slots no breakpoint holds.
 #[test]

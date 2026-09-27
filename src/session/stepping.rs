@@ -552,6 +552,12 @@ pub fn step_over_current_breakpoint(
     let Some(bp_id) = breakpoints.breakpoint_id_at_address(rip) else {
         return Ok(None);
     };
+    // An execution interrupted on the site that got back onto it some other
+    // way than hitting it (stepped through its handler) runs past it now;
+    // its remembered hit must not absorb a later, real one.
+    if let Ok(rsp) = register_map.read_u64("rsp", &regs) {
+        breakpoints.forget_interrupted_hit(bp_id, rsp);
+    }
 
     match (breakpoints.lift(backend, debugger, bp_id), cr3) {
         (Ok(()), _) => {}
@@ -591,9 +597,9 @@ pub fn step_over_current_breakpoint(
 
 /// The stack pointer of the execution at `regs` when an interrupt it took on
 /// the instruction at `rip`, before executing it, is still pending return:
-/// the processor pushed a return frame (RIP, CS, RFLAGS, RSP, SS, behind an
-/// error code for some exceptions) below the 16-byte-aligned stack pointer,
-/// and NT builds its trap frame below that. `None` without such a frame:
+/// the processor pushed a return frame (RIP, CS, RFLAGS, RSP, SS) below the
+/// 16-byte-aligned stack pointer, and an error code, for the exceptions with
+/// one, below that; NT builds its trap frame below both. `None` without such a frame:
 /// the interrupt was taken past the instruction, came from user mode, or
 /// switched to an interrupt stack.
 fn interrupted_on(
@@ -605,18 +611,13 @@ fn interrupted_on(
 ) -> Option<u64> {
     let rsp = register_map.read_u64("rsp", regs).ok()?;
     let memory = debugger.address_space(code_root(debugger, cr3, rip));
-    let mut frame = [0u8; 48];
+    let mut frame = [0u8; 40];
     let base = (rsp & !0xf).wrapping_sub(frame.len() as u64);
     memory.read_bytes(VirtAddr(base), &mut frame).ok()?;
     let word = |index: usize| {
         u64::from_le_bytes(frame[index * 8..index * 8 + 8].try_into().expect("8 bytes"))
     };
-    // Without an error code the frame is the top five words, with one the
-    // bottom five.
-    [1, 0]
-        .into_iter()
-        .any(|first| word(first) == rip && word(first + 1) & 3 == 0 && word(first + 3) == rsp)
-        .then_some(rsp)
+    (word(0) == rip && word(1) & 3 == 0 && word(3) == rsp).then_some(rsp)
 }
 
 /// Where a vCPU on root `cr3` (or, without one, the module of `rip`) reads
