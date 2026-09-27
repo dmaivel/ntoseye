@@ -26,7 +26,6 @@ repl_command! {
     summary: "Display a process's VAD tree (defaults to the selected process context).",
     details: "Select a process by PID or EPROCESS expression; with no argument the current context is used (`.process /p <pid>` to select one). `vmmap [address|filter]` keeps the flat region view of the attached process, or the kernel modules when detached. VAD walks are bounded and skip unreadable entries rather than aborting the listing.",
     completion: [Process, None],
-    run_state: Halted,
 }
 
 repl_command! {

@@ -267,10 +267,6 @@ impl ReplState<'_> {
             }
             None => 0,
         };
-        if flags & 4 != 0 && self.ctx.backend.is_running() {
-            error!("VM is running; process stacks require a halted target");
-            return Ok(());
-        }
         let processes = match self.ctx.target.matching_processes(None) {
             Ok(processes) => processes,
             Err(error) => {

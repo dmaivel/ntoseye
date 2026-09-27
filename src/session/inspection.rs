@@ -358,8 +358,8 @@ impl Session {
     /// current vCPU. `running_on` is the vCPU running it, if any: the walk
     /// starts from that vCPU's registers, or, when it is halted in the Windows
     /// hypervisor, from the VTL0 state the hypervisor saved. A thread not
-    /// running, or whose vCPU's registers cannot be read, is walked from what
-    /// it saved on its kernel stack.
+    /// running is walked from what it saved on its kernel stack; one running
+    /// whose vCPU's registers cannot be read (the target runs) has no stack.
     pub fn backtrace_thread(
         &mut self,
         thread: &ThreadInfo,

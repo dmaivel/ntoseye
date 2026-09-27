@@ -60,6 +60,8 @@ ntoseye --backend memory
 
 Execution control, registers, execution-context selection, breakpoints, debug output, bugcheck stops, and reload detection are unavailable in this mode. Run {command}`capabilities` in the REPL for the exact backend feature matrix.
 
+Threads are still readable: {command}`!thread`, {command}`!stacks`, and {command}`!process` with flag 4 walk each thread's stack from what it saved on its kernel stack when it last stopped running. A thread running on a processor at that moment has no stack to show, because its processor's registers are unavailable. The same holds on any backend while the target runs.
+
 ## Secure kernel (VTL1)
 
 `.vtl 1` and {command}`!trustlets` need direct host memory: the `memory` and `gdb` backends, or `kd`/`kdnet` while reads come from host memory. Only `gdb` stops, steps, and breaks in VTL1. See the [VBS guide](../platforms/vbs.md) for what each backend supports there.

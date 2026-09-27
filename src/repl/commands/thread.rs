@@ -36,7 +36,6 @@ repl_command! {
     usage: "threads [filter]",
     summary: "List Windows threads, optionally filtered by process, PID, TID, or ETHREAD.",
     completion: Process,
-    run_state: Halted,
 }
 
 repl_command! {
@@ -44,9 +43,8 @@ repl_command! {
     names: ["!thread", "thread"],
     usage: "!thread [ethread|tid] [flags] [count]",
     summary: "Display a Windows thread and optionally its kernel stack.",
-    details: "The legacy `thread <tid> k|r [count]` forms remain available. A numeric flags value selects detail/stack output; unavailable fields are shown as `-`. A running thread whose vCPU is halted in the Windows hypervisor (VBS) is shown from the VTL0 state the hypervisor saved, as `.thread` selects it.",
+    details: "The legacy `thread <tid> k|r [count]` forms remain available. A numeric flags value selects detail/stack output; unavailable fields are shown as `-`. A running thread whose vCPU is halted in the Windows hypervisor (VBS) is shown from the VTL0 state the hypervisor saved, as `.thread` selects it. While the target runs, the thread is shown but not selected, and a thread running on a processor has no stack.",
     completion: [Thread, None, None],
-    run_state: Halted,
 }
 
 repl_command! {
@@ -331,6 +329,10 @@ impl ReplState<'_> {
         } else {
             None
         };
+        if target == "." && current_alias_address.is_none() {
+            error!("no current Windows thread; name one by ETHREAD or TID");
+            return Ok(());
+        }
         let target_value = current_alias_address
             .or_else(|| Expr::eval_with_radix(target, &self.ctx.target, self.radix).ok())
             .map(|address| address.0);
@@ -369,6 +371,27 @@ impl ReplState<'_> {
             .unwrap_or(DEFAULT_THREAD_FRAME_LIMIT)
             .max(1);
 
+        // Selecting a thread lasts until the target resumes, so a running
+        // target has nothing to select into: the thread is only shown.
+        if self.ctx.backend.is_running() {
+            print_thread_extended_detail(&self.ctx.target, thread);
+            match action {
+                Some("k" | "r" | "registers") => error!(
+                    "VM is running; `thread <tid> k|r` selects the thread, which needs a halted target"
+                ),
+                Some(other) if numeric_action.is_none() => {
+                    error!("unknown thread action '{}': expected k or r", other)
+                }
+                _ => {}
+            }
+            if default_stack {
+                let vcpu = active.get(&thread.ethread.0).map(|(vcpu, _)| vcpu.as_str());
+                self.print_thread_kstack(thread, vcpu);
+            }
+            outln!();
+            return Ok(());
+        }
+
         let Some((vcpu, _)) = active.get(&thread.ethread.0) else {
             print_thread_extended_detail(&self.ctx.target, thread);
             outln!(
@@ -379,17 +402,7 @@ impl ReplState<'_> {
             self.clear_selected_frame();
             self.caches.refresh_symbol_context(&self.ctx.target);
             if default_stack {
-                match self.ctx.backtrace_thread(thread, None, THREAD_STACK_LIMIT) {
-                    Ok(trace) => {
-                        outln!("k-stack ({}):", trace.source.as_str());
-                        print_stacktrace_data_with_provenance(
-                            &trace.stacktrace,
-                            THREAD_STACK_LIMIT,
-                            false,
-                        );
-                    }
-                    Err(error) => error!("failed to unwind thread stack: {}", error),
-                }
+                self.print_thread_kstack(thread, None);
             } else {
                 match action {
                     Some("k") => match self.ctx.backtrace(frame_limit) {
@@ -465,6 +478,21 @@ impl ReplState<'_> {
         }
         outln!();
         Ok(())
+    }
+
+    /// `thread`'s stack as [`crate::session::Session::backtrace_thread`] walks
+    /// it, without selecting it.
+    fn print_thread_kstack(&mut self, thread: &ThreadInfo, running_on: Option<&str>) {
+        match self
+            .ctx
+            .backtrace_thread(thread, running_on, THREAD_STACK_LIMIT)
+        {
+            Ok(trace) => {
+                outln!("k-stack ({}):", trace.source.as_str());
+                print_stacktrace_data_with_provenance(&trace.stacktrace, THREAD_STACK_LIMIT, false);
+            }
+            Err(error) => error!("failed to unwind thread stack: {}", error),
+        }
     }
 
     fn print_running_kstack(&mut self, source: &str) {

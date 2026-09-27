@@ -452,6 +452,9 @@ pub fn fast_ref_address(raw: u64) -> VirtAddr {
     VirtAddr(raw & !0xf)
 }
 
+/// `KTHREAD.State` of a thread executing on a processor.
+pub const KTHREAD_STATE_RUNNING: u8 = 2;
+
 /// `KTHREAD.State` of a thread whose kernel stack has been freed.
 pub const KTHREAD_STATE_TERMINATED: u8 = 4;
 
@@ -459,7 +462,7 @@ pub fn kthread_state_name(state: u8) -> &'static str {
     match state {
         0 => "Initialized",
         1 => "Ready",
-        2 => "Running",
+        KTHREAD_STATE_RUNNING => "Running",
         3 => "Standby",
         KTHREAD_STATE_TERMINATED => "Terminated",
         5 => "Waiting",

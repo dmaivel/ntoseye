@@ -16,8 +16,8 @@ use crate::{
     phys::PhysMem,
     symbols::{SourceLocation, SymbolStore},
     target::{
-        ForeignModules, KTHREAD_STATE_TERMINATED, SavedThreadRegisters, SavedVtlContext, Target,
-        ThreadInfo, lookup_register,
+        ForeignModules, KTHREAD_STATE_RUNNING, KTHREAD_STATE_TERMINATED, SavedThreadRegisters,
+        SavedVtlContext, Target, ThreadInfo, lookup_register,
     },
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
     types::{Arch, Dtb, VirtAddr},
@@ -762,6 +762,15 @@ pub fn build_parked_thread_recovered_stack(
         Error::DebugInfo("parked thread owning process DTB is unavailable".into())
     })?;
     let trace = resolve_thread_trace_context(debugger, process_dtb);
+    // A running thread's context-switch frame was consumed when it was
+    // switched in, and its stack has moved on since; only its processor's
+    // registers say where it is.
+    if thread.state == Some(KTHREAD_STATE_RUNNING) {
+        return Err(Error::DebugInfo(
+            "thread stack unavailable: the thread is running, and its processor's registers are unavailable"
+                .into(),
+        ));
+    }
     // The trap frame and the context-switch frame both live on the kernel
     // stack, which a terminated thread has freed. One a long wait swapped out
     // (`KernelStackResident` clear) usually still sits in RAM on the standby
