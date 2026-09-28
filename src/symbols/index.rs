@@ -42,6 +42,13 @@ impl SymbolIndex {
         }
     }
 
+    /// Whether `name` is one of the names, which must be sorted and deduped.
+    pub fn contains(&self, name: &str) -> bool {
+        self.names
+            .binary_search_by(|probe| probe.as_str().cmp(name))
+            .is_ok()
+    }
+
     /// Search names best-first with smart-case ranking (case-insensitive unless
     /// the query has uppercase). A plain ASCII query is first reduced to a
     /// bounded candidate set by one cheap pass that keeps the names whose bare

@@ -28,8 +28,9 @@ impl SymbolStore {
     /// `module!` qualifier names the module (`nt` is the kernel); a bare name
     /// tries the kernel first, then the modules of that address space, so a
     /// name both define (`_PEB`, `_LIST_ENTRY`) gets the kernel's layout. A
-    /// WOW64 process's 32-bit layouts are reached by qualifier (`ntdll32!_PEB`),
-    /// and their nested types carry it (see `nested_type_prefix`).
+    /// WOW64 process's 32-bit layouts are reached by qualifier (`ntdll32!_PEB`).
+    /// Nested type names carry the qualifier of the PDB that defines them (see
+    /// [`NestedTypePrefix`]).
     fn type_lookup_guids<'n>(&self, dtb: Dtb, type_name: &'n str) -> (Vec<u128>, &'n str) {
         let kernel_guid = self.kernel_guid();
         if let Some((module, name)) = type_name.rsplit_once('!') {
@@ -137,8 +138,9 @@ impl SymbolStore {
 
     /// The `module!` prefixes nested type names of PDB `guid` carry so that
     /// expanding them stays in the same PDB (see [`NestedTypePrefix`]).
-    pub(super) fn nested_type_prefix(&self, guid: u128) -> NestedTypePrefix {
-        let module = if self.kernel_guid() == Some(guid) {
+    pub fn nested_type_prefix(&self, guid: u128) -> NestedTypePrefix {
+        let kernel = self.kernel_guid() == Some(guid);
+        let module = if kernel {
             "nt!".to_string()
         } else {
             self.modules
@@ -148,12 +150,15 @@ impl SymbolStore {
                 .unwrap_or_default()
         };
         NestedTypePrefix {
-            named: if self.pointer_size(guid) == 8 {
-                String::new()
+            guid,
+            module,
+            named: if self.pointer_size(guid) != 8 {
+                NamedTypes::All
+            } else if kernel {
+                NamedTypes::None
             } else {
-                module.clone()
+                NamedTypes::Defined
             },
-            unnamed: module,
         }
     }
 
@@ -274,15 +279,19 @@ impl SymbolStore {
                 }
             }
 
-            TypeData::Class(data) => Ok(ParsedType::Struct(
-                prefix.aggregate(&data.name.to_string(), class_field_list(&data)),
+            TypeData::Class(data) => Ok(ParsedType::Struct(prefix.aggregate(
+                self,
+                &data.name.to_string(),
+                class_field_list(&data),
+            ))),
+            TypeData::Union(data) => Ok(ParsedType::Union(prefix.aggregate(
+                self,
+                &data.name.to_string(),
+                union_field_list(&data),
+            ))),
+            TypeData::Enumeration(data) => Ok(ParsedType::Enum(
+                prefix.enumeration(self, &data.name.to_string()),
             )),
-            TypeData::Union(data) => Ok(ParsedType::Union(
-                prefix.aggregate(&data.name.to_string(), union_field_list(&data)),
-            )),
-            TypeData::Enumeration(data) => {
-                Ok(ParsedType::Enum(format!("{}{}", prefix.named, data.name)))
-            }
 
             TypeData::Pointer(data) => {
                 let inner = self.resolve_type(guid, finder, data.underlying_type, prefix)?;
@@ -528,25 +537,69 @@ impl SymbolStore {
 /// The `module!` qualifiers a PDB's nested type names carry, so that
 /// expanding one looks it up in the PDB that defines it rather than the
 /// kernel's, which a bare name prefers.
-pub(super) struct NestedTypePrefix {
-    /// For named types and enums: only a 32-bit module's, whose
-    /// `_LIST_ENTRY` or `_UNICODE_STRING` differs from the kernel's.
-    named: String,
-    /// For every module's unnamed aggregates: their key's field-list index
-    /// (see [`aggregate_key`]) names an unrelated type in any other PDB.
-    unnamed: String,
+pub struct NestedTypePrefix {
+    guid: u128,
+    /// `module!` of PDB `guid` (`nt!` for the kernel's); empty when no loaded
+    /// module has it.
+    module: String,
+    /// Which named types and enums carry `module`. Unnamed aggregates always
+    /// do: their key's field-list index (see [`aggregate_key`]) names an
+    /// unrelated type in any other PDB.
+    named: NamedTypes,
+}
+
+/// Named nested types a PDB qualifies with its module.
+enum NamedTypes {
+    /// Every one: a 32-bit PDB, whose `_LIST_ENTRY` or `_UNICODE_STRING`
+    /// differs from the kernel's.
+    All,
+    /// Those the PDB defines completely: a 64-bit module other than the
+    /// kernel. A forward reference (a driver's opaque `_EPROCESS*`) stays
+    /// bare and resolves in the kernel's PDB.
+    Defined,
+    /// None: the 64-bit kernel's, where a bare name resolves first.
+    None,
 }
 
 impl NestedTypePrefix {
     /// The qualified key of an aggregate called `name`.
-    fn aggregate(&self, name: &str, field_list: Option<u32>) -> String {
+    pub fn aggregate(&self, store: &SymbolStore, name: &str, field_list: Option<u32>) -> String {
         let key = aggregate_key(name, field_list);
-        let prefix = if key.len() == name.len() {
-            &self.named
+        let qualify = key.len() != name.len()
+            || self.qualifies(|| {
+                store
+                    .struct_defs
+                    .get(&self.guid)
+                    .is_some_and(|defs| defs.contains_key(name))
+            });
+        self.qualified(qualify, key)
+    }
+
+    /// The qualified name of an enum called `name`.
+    pub fn enumeration(&self, store: &SymbolStore, name: &str) -> String {
+        let qualify = self.qualifies(|| {
+            store
+                .index_enums
+                .get(&self.guid)
+                .is_some_and(|index| index.contains(name))
+        });
+        self.qualified(qualify, name.to_string())
+    }
+
+    fn qualifies(&self, defined: impl FnOnce() -> bool) -> bool {
+        match self.named {
+            NamedTypes::All => true,
+            NamedTypes::Defined => defined(),
+            NamedTypes::None => false,
+        }
+    }
+
+    fn qualified(&self, qualify: bool, name: String) -> String {
+        if qualify {
+            format!("{}{name}", self.module)
         } else {
-            &self.unnamed
-        };
-        format!("{prefix}{key}")
+            name
+        }
     }
 }
 

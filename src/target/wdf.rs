@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::{ListCursor, ListTermination, Target, bounded_list_walk};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::layout::{ParsedType, StructRef, TypeInfo, Types};
+use crate::layout::{StructRef, TypeInfo, Types};
 use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
 use crate::wpp::{TmfMessage, format_message};
@@ -759,25 +759,6 @@ impl<'a> WdfTypes<'a> {
             .prefetch()
     }
 
-    /// The struct embedded as `field` in `outer`, its type resolved in
-    /// Wdf01000's PDB. (`StructRef::embedded` resolves a named nested type in
-    /// the kernel's, which lacks KMDF's.)
-    fn embedded(&self, outer: &StructRef<'a>, field: &str) -> Result<StructRef<'a>> {
-        let info = outer.layout().field(field)?;
-        let (ParsedType::Struct(name) | ParsedType::Union(name)) = &info.type_data else {
-            return Err(Error::FieldTypeMismatch(
-                field.to_string(),
-                "struct or union".into(),
-            ));
-        };
-        let layout = if name.contains('!') {
-            self.types.layout(name.as_str())?
-        } else {
-            self.layout(name)?
-        };
-        Ok(self.at(&layout, outer.addr() + u64::from(info.offset)))
-    }
-
     fn type_name(&self, value: u16) -> Option<&str> {
         self.object_types
             .iter()
@@ -882,7 +863,8 @@ impl Target {
         globals: VirtAddr,
     ) -> Result<std::result::Result<Option<String>, String>> {
         let bytes = wdf
-            .embedded(&wdf.at(&wdf.globals, globals), "Public")?
+            .at(&wdf.globals, globals)
+            .embedded("Public")?
             .read_field_bytes("DriverName", 256)?;
         Ok(driver_name(&bytes))
     }
@@ -1040,7 +1022,7 @@ impl Target {
     /// not check out is one of its `problems`; only unreadable globals fail.
     fn wdf_client(&self, wdf: &WdfTypes<'_>, address: VirtAddr) -> Result<WdfClient> {
         let globals = wdf.at(&wdf.globals, address);
-        let public = wdf.embedded(&globals, "Public")?;
+        let public = globals.embedded("Public")?;
         let mut problems = Vec::new();
         let name = self.wdf_driver_name(wdf, address)?.unwrap_or_else(|why| {
             problems.push(why);
@@ -1089,10 +1071,9 @@ impl Target {
             None
         } else {
             let read = || -> Result<WdfVersion> {
-                let version = wdf.embedded(
-                    &wdf.at(&wdf.layout("_WDF_BIND_INFO")?, bind_info),
-                    "Version",
-                )?;
+                let version = wdf
+                    .at(&wdf.layout("_WDF_BIND_INFO")?, bind_info)
+                    .embedded("Version")?;
                 Ok(WdfVersion {
                     major: version.read_uint("Major")? as u32,
                     minor: version.read_uint("Minor")? as u32,
@@ -1106,8 +1087,8 @@ impl Target {
                 .ok()
         };
         let log_header = globals.read_pointer("WdfLogHeader")?;
-        let driver_object = wdf
-            .embedded(&globals, "DriverObject")?
+        let driver_object = globals
+            .embedded("DriverObject")?
             .read_pointer("m_DriverObject")?;
         let driver_object_name = if driver_object.is_zero() {
             None
@@ -1286,8 +1267,8 @@ impl Target {
             ));
         }
         let device = wdf.at(&wdf.layout("FxDevice").map_err(|e| e.to_string())?, object);
-        let back = wdf
-            .embedded(&device, "m_DeviceObject")
+        let back = device
+            .embedded("m_DeviceObject")
             .and_then(|mx| mx.read_pointer("m_DeviceObject"))
             .map_err(|error| error.to_string())?;
         if back != device_object {
@@ -1550,7 +1531,7 @@ impl Target {
         let address = object.address;
         let device = wdf.at(&wdf.layout("FxDevice")?, address);
         let mx = |field: &str| -> Result<VirtAddr> {
-            wdf.embedded(&device, field)?.read_pointer("m_DeviceObject")
+            device.embedded(field)?.read_pointer("m_DeviceObject")
         };
         let kind = self.wdf_device_kind(&wdf, &device)?;
         let pkg_pnp = device.read_pointer("m_PkgPnp")?;
@@ -1640,7 +1621,8 @@ impl Target {
             return Err(format!("a {}, not a request", object.type_name));
         }
         let irp = wdf
-            .embedded(&wdf.at(request_layout, address), "m_Irp")
+            .at(request_layout, address)
+            .embedded("m_Irp")
             .and_then(|irp| irp.read_pointer("m_Irp"))
             .map_err(|error| error.to_string())?;
         Ok(WdfRequestRef {
@@ -1761,7 +1743,7 @@ impl Target {
         let queue = wdf.at(&queue_layout, address);
         let mut callbacks = Vec::new();
         for (name, field) in CALLBACKS {
-            let callback = wdf.embedded(&queue, field)?.read_pointer("Method")?;
+            let callback = queue.embedded(field)?.read_pointer("Method")?;
             if !callback.is_zero() {
                 callbacks.push(WdfCallback {
                     name,

@@ -660,6 +660,73 @@ fn type_lookup_prefers_the_kernel_unless_qualified() {
 }
 
 #[test]
+fn nested_types_name_the_module_that_defines_them() {
+    let store = SymbolStore::new();
+    let (kernel_dtb, user_dtb) = (0x2000, 0x1000);
+    let (kernel, balloon, viorng, ntdll32) = (0x22, 0x44, 0x45, 0x55);
+    let layout = |name: &str, size| TypeInfo {
+        name: name.to_string(),
+        size,
+        fields: HashMap::new(),
+        pointer_size: 8,
+    };
+    store.set_kernel(Some(kernel), kernel_dtb);
+    store.register_module_for_test(balloon, "balloon", kernel_dtb);
+    store.register_module_for_test(viorng, "viorng", kernel_dtb);
+    store.register_module_for_test(ntdll32, "ntdll32", user_dtb);
+    store.pdb_pointer_sizes.insert(ntdll32, 4);
+    store.inject_module_for_test(balloon, vec![layout("DEVICE_CONTEXT", 0x40)], &[]);
+    store.inject_module_for_test(viorng, vec![layout("DEVICE_CONTEXT", 0x20)], &[]);
+    store.struct_defs.insert(
+        balloon,
+        HashMap::from([(
+            "DEVICE_CONTEXT".to_string(),
+            (0x40, pdb2::TypeIndex(0x1000)),
+        )]),
+    );
+    store.index_enums.insert(
+        balloon,
+        SymbolIndex::from_names(vec!["BALLOON_STATE".to_string()]),
+    );
+
+    // A driver qualifies what its PDB defines; a forward reference resolves
+    // in the kernel's.
+    let driver = store.nested_type_prefix(balloon);
+    let context = driver.aggregate(&store, "DEVICE_CONTEXT", Some(0x1000));
+    assert_eq!(context, "balloon!DEVICE_CONTEXT");
+    assert_eq!(driver.aggregate(&store, "_EPROCESS", None), "_EPROCESS");
+    assert_eq!(
+        driver.enumeration(&store, "BALLOON_STATE"),
+        "balloon!BALLOON_STATE"
+    );
+    assert_eq!(driver.enumeration(&store, "_POOL_TYPE"), "_POOL_TYPE");
+    assert_eq!(
+        driver.aggregate(&store, "<unnamed-tag>", Some(0x1124)),
+        "balloon!<unnamed-tag>#1124"
+    );
+    // The name resolves to the defining driver's layout, not another's.
+    let size = |name: &str| {
+        store
+            .find_type_across_modules(kernel_dtb, name)
+            .map(|t| t.size)
+    };
+    assert_eq!(size(&context), Some(0x40));
+
+    let nt = store.nested_type_prefix(kernel);
+    assert_eq!(nt.aggregate(&store, "_KPRCB", Some(0x10)), "_KPRCB");
+    assert_eq!(
+        nt.aggregate(&store, "<unnamed-tag>", Some(0x10)),
+        "nt!<unnamed-tag>#10"
+    );
+    // A 32-bit module qualifies every named type, defined here or not.
+    let wow = store.nested_type_prefix(ntdll32);
+    assert_eq!(
+        wow.aggregate(&store, "_LIST_ENTRY", None),
+        "ntdll32!_LIST_ENTRY"
+    );
+}
+
+#[test]
 fn x86_public_names_lose_their_calling_convention_decoration() {
     assert_eq!(undecorate_x86("_RtlAllocateHeap@12"), "RtlAllocateHeap");
     assert_eq!(undecorate_x86("_RtlpLFHKey"), "RtlpLFHKey");

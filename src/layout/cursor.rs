@@ -56,8 +56,8 @@ impl<'a> Types<'a> {
 
     /// The parsed layout of struct `name` from the object's PDB (cached). A
     /// `module!`-qualified name resolves in this space's modules instead,
-    /// which is how a 32-bit layout (`ntdll32!_PEB`) and the nested types it
-    /// names are reached.
+    /// which is how another module's layout (`ntdll32!_PEB`,
+    /// `wdf01000!FxDevice`) and the nested types it names are reached.
     pub fn layout<S>(self, name: S) -> Result<Arc<TypeInfo>>
     where
         S: Into<String> + AsRef<str>,
