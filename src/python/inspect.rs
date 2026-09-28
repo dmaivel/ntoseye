@@ -37,11 +37,14 @@ impl Inspect {
     }
 
     /// Run `build` in the session and return its result as the SDK does.
-    fn typed<'py, T: ViewValue + Send>(
+    fn typed<'py, T: ViewValue>(
         &self,
         py: Python<'py>,
-        build: impl FnOnce(&mut Session) -> PyResult<T> + Send,
-    ) -> PyResult<Typed<'py, T>> {
+        build: impl FnOnce(&mut Session) -> PyResult<T::Source> + Send,
+    ) -> PyResult<Typed<'py, T>>
+    where
+        T::Source: Send,
+    {
         let value = self.owner.with_in(py, &Context::default(), build)?;
         Typed::new(py, value)
     }

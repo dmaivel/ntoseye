@@ -5,6 +5,7 @@
 use super::process::{process, thread};
 use super::shape::{Hex, Omit, shapes, unions};
 use super::symbols::source_location;
+use crate::types::VirtAddr;
 use crate::breakpoints::Breakpoint;
 use crate::disasm::DisasmRow;
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
@@ -36,7 +37,7 @@ shapes! {
     BreakpointStatus {
         id: u32,
         /// None while a symbolic or source breakpoint is deferred.
-        address: Option<Hex>,
+        address: Option<VirtAddr>,
         enabled: bool,
         /// Whether the breakpoint resolved to an address; tells a deferred
         /// breakpoint from a disabled one.
@@ -148,13 +149,13 @@ shapes! {
     RuntimeFunction {
         begin: Hex,
         end: Hex,
-        begin_rva: Hex,
-        end_rva: Hex,
+        begin_rva: Hex<u32>,
+        end_rva: Hex<u32>,
         /// The unwind info's address; None for ARM64 packed unwind data.
         unwind_info: Option<Hex>,
         /// The entry's raw unwind word: the unwind info's RVA, or ARM64's
         /// packed unwind data.
-        unwind_data: Hex,
+        unwind_data: Hex<u32>,
         /// The symbol at `begin`.
         symbol: String,
         /// The decoded unwind data, None when it is unreadable.
@@ -251,7 +252,7 @@ shapes! {
     Arm64UnwindCode {
         /// Its first byte's index in the code bytes.
         index: usize,
-        bytes: Vec<Hex>,
+        bytes: Vec<Hex<u8>>,
         /// Its name and the prolog instruction it stands for.
         description: String,
     }
@@ -259,7 +260,7 @@ shapes! {
     /// One ARM64 epilog scope.
     Arm64EpilogScope {
         /// The epilog's start, in bytes from the function's.
-        start_offset: Hex,
+        start_offset: Hex<u32>,
         /// The index of the epilog's first unwind code.
         first_code: u32,
     }
@@ -290,7 +291,7 @@ shapes! {
     /// One exception stop policy (`sx`).
     ExceptionPolicy {
         /// The exception code.
-        code: Hex,
+        code: Hex<u32>,
         /// The code's WinDbg alias (`av`, `bp`, ...), when it has one.
         alias: Option<&'static str>,
         /// `break`, `second_chance`, `notify`, or `ignore`.
@@ -305,7 +306,7 @@ shapes! {
     /// An evaluated debugger expression (`?`).
     ExpressionValue {
         expression: String,
-        value: Hex,
+        value: VirtAddr,
     }
 
     /// One register of the current context (`r`).
@@ -339,7 +340,7 @@ unions! {
 pub fn vcpu(v: &VcpuInfo) -> VcpuStatus {
     VcpuStatus {
         id: v.id.clone(),
-        rip: v.rip.map(Hex),
+        rip: v.rip,
         context: v.context.clone(),
         symbol: v.symbol.clone(),
         saved_vtl: v.saved_vtl.clone(),
@@ -351,7 +352,7 @@ pub fn vcpu(v: &VcpuInfo) -> VcpuStatus {
 pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
     BreakpointStatus {
         id: bp.id,
-        address: bp.resolved_address().map(|address| Hex(address.0)),
+        address: bp.resolved_address(),
         enabled: bp.enabled,
         resolved: bp.resolved,
         deferred: bp.deferred(),
@@ -376,22 +377,22 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
     RunStatus {
         running: status.running,
         current_thread: status.current_thread.clone(),
-        rip: status.rip.map(Hex),
+        rip: status.rip,
         symbol: status.symbol.clone(),
         saved_vtl: status.saved_vtl.clone(),
         attached_process: status.attached_process.as_ref().map(process),
         stopped_process: status.stopped_process.as_ref().map(process),
         stopped_thread: status.stopped_thread.as_ref().map(|t| thread(t, None)),
         coherent: status.coherent,
-        kernel_base: Hex(status.kernel_base),
+        kernel_base: status.kernel_base,
     }
 }
 
 pub fn stack_frame(frame: &unwind::StackFrame) -> StackFrame {
     StackFrame {
-        index: Omit(None),
-        ip: Hex(frame.ip),
-        sp: Hex(frame.sp),
+        index: None,
+        ip: frame.ip,
+        sp: frame.sp,
         symbol: frame.symbol.clone(),
         source: frame.source.as_str(),
         source_location: frame.source_location.as_ref().map(source_location),
@@ -402,7 +403,7 @@ pub fn stack_frame(frame: &unwind::StackFrame) -> StackFrame {
 /// a stack's frames.
 pub fn numbered_stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFrame {
     StackFrame {
-        index: Omit(Some(index)),
+        index: Some(index),
         ..stack_frame(frame)
     }
 }
@@ -410,7 +411,7 @@ pub fn numbered_stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFr
 /// One decoded instruction.
 pub fn disasm_row(row: &DisasmRow) -> DisassembledInstruction {
     DisassembledInstruction {
-        ip: Hex(row.ip),
+        ip: row.ip,
         hex: row.hex.clone(),
         asm: row.asm(),
         comment: row.comment.clone(),
@@ -422,7 +423,7 @@ fn arm64_codes(codes: &[Arm64CodeDetail]) -> Vec<Arm64UnwindCode> {
         .iter()
         .map(|code| Arm64UnwindCode {
             index: code.index,
-            bytes: code.bytes.iter().map(|&byte| Hex(byte.into())).collect(),
+            bytes: code.bytes.clone(),
             description: code.description.clone(),
         })
         .collect()
@@ -432,7 +433,7 @@ fn arm64_codes(codes: &[Arm64CodeDetail]) -> Vec<Arm64UnwindCode> {
 /// info, then each chained parent's.
 pub fn function_entry(detail: &FunctionEntryDetail) -> FunctionEntry {
     let base = detail.image_base;
-    let va = |rva: u32| Hex(base.wrapping_add(u64::from(rva)));
+    let va = |rva: u32| base.wrapping_add(u64::from(rva));
     let handler = |handler: &Option<HandlerDetail>| {
         handler.as_ref().map(|handler| UnwindHandler {
             address: va(handler.rva),
@@ -505,7 +506,7 @@ pub fn function_entry(detail: &FunctionEntryDetail) -> FunctionEntry {
                     epilog_scopes: scopes
                         .iter()
                         .map(|&(start, first_code)| Arm64EpilogScope {
-                            start_offset: Hex(start.into()),
+                            start_offset: start,
                             first_code,
                         })
                         .collect(),
@@ -518,10 +519,10 @@ pub fn function_entry(detail: &FunctionEntryDetail) -> FunctionEntry {
             RuntimeFunction {
                 begin: va(entry.begin),
                 end: va(entry.end),
-                begin_rva: Hex(entry.begin.into()),
-                end_rva: Hex(entry.end.into()),
+                begin_rva: entry.begin,
+                end_rva: entry.end,
                 unwind_info: (!packed).then(|| va(entry.unwind_data)),
-                unwind_data: Hex(entry.unwind_data.into()),
+                unwind_data: entry.unwind_data,
                 symbol: entry.symbol.clone(),
                 unwind,
             }
@@ -529,7 +530,7 @@ pub fn function_entry(detail: &FunctionEntryDetail) -> FunctionEntry {
         .collect();
     FunctionEntry {
         module: detail.module.clone(),
-        image_base: Hex(base),
+        image_base: base,
         entries,
         incomplete: detail.incomplete.clone(),
     }
@@ -569,7 +570,7 @@ pub fn exception_policy(code: u32, policy: &exception_policy::ExceptionPolicy) -
         None => None,
     };
     ExceptionPolicy {
-        code: Hex(u64::from(code)),
+        code,
         alias: exception_alias(code),
         mode: policy.mode.name(),
         disposition,

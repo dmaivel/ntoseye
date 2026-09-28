@@ -18,7 +18,6 @@ use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::module::{Export, Section};
-use crate::view::shape::Hex;
 use crate::view::shape::Typed;
 use crate::view::{self};
 use pelite::PeView;
@@ -171,8 +170,8 @@ impl Module {
                     });
                     Section {
                         name: header.name().map(str::to_owned).unwrap_or_default(),
-                        rva: Hex(header.VirtualAddress.into()),
-                        size: Hex(header.VirtualSize.max(header.SizeOfRawData).into()),
+                        rva: header.VirtualAddress,
+                        size: header.VirtualSize.max(header.SizeOfRawData),
                         permissions,
                     }
                 })
@@ -251,7 +250,7 @@ impl Module {
             .map(|export| Export {
                 name: export.name,
                 ordinal: export.ordinal,
-                address: export.address.map(|address| Hex(address.0)),
+                address: export.address,
                 forwarder: export.forwarder,
             })
             .collect::<Vec<_>>();

@@ -677,6 +677,14 @@ pub enum DiagnosticValue<T> {
 }
 
 impl<T> DiagnosticValue<T> {
+    /// The value mapped by `f`, or the same error.
+    pub fn map<U>(&self, f: impl FnOnce(&T) -> U) -> DiagnosticValue<U> {
+        match self {
+            Self::Available(value) => DiagnosticValue::Available(f(value)),
+            Self::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+        }
+    }
+
     fn from_result(result: Result<T>) -> Self {
         match result {
             Ok(value) => Self::Available(value),
@@ -692,6 +700,14 @@ pub struct DiagnosticMetric<T> {
 }
 
 impl<T> DiagnosticMetric<T> {
+    /// The value mapped by `f`, with the same source, or the same error.
+    pub fn map<U>(&self, f: impl FnOnce(&T) -> U) -> DiagnosticMetric<U> {
+        DiagnosticMetric {
+            value: self.value.map(f),
+            source: self.source,
+        }
+    }
+
     fn available(value: MetadataValue<T>) -> Self {
         Self {
             value: DiagnosticValue::Available(value.value),

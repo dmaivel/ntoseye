@@ -165,8 +165,11 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
 
 /// A value as a plain `dict`: an entity's `to_dict()` is the shape MCP renders
 /// for it.
-pub fn view_dict<'py>(py: Python<'py>, value: impl ViewValue) -> PyResult<PlainDict<'py>> {
-    view::to_py(py, &value.into_view(), PyShape::Plain)?
+pub fn view_dict<'py, T: ViewValue<Source = T>>(
+    py: Python<'py>,
+    value: T,
+) -> PyResult<PlainDict<'py>> {
+    view::to_py(py, &T::view(value), PyShape::Plain)?
         .cast_into::<PyDict>()
         .map(PlainDict)
         .map_err(|e| raise(e.to_string()))

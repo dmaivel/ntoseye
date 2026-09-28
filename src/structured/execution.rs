@@ -4,7 +4,6 @@
 use super::Args;
 use crate::error::Result;
 use crate::view::execution::{ExpressionValue, RegisterContent, RegisterValue};
-use crate::view::shape::{Hex, ViewValue};
 use crate::view::{self, View};
 
 pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
@@ -43,7 +42,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         "?" | "ev" if !args.raw_tail.is_empty() => args.eval(args.raw_tail).map(|value| {
             ExpressionValue {
                 expression: args.raw_tail.to_string(),
-                value: Hex(value.0),
+                value,
             }
             .into_view()
         }),
@@ -58,7 +57,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .into_iter()
                 .map(|(name, value)| RegisterValue {
                     name,
-                    value: RegisterContent::Scalar(Hex(value)),
+                    value: RegisterContent::Scalar(value),
                 })
                 .chain(
                     register_map
@@ -71,7 +70,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 )
                 .collect();
             registers.sort_by(|left, right| left.name.cmp(&right.name));
-            registers.into_view()
+            View::list(registers)
         }),
         ".process" if argv.is_empty() => {
             Ok(view::execution::run_status(&args.state.ctx.run_status()).into_view())

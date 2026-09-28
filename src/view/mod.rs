@@ -85,8 +85,8 @@ pub enum View {
 
 impl View {
     /// A list of rendered values: `View::list(frames.iter().map(stack_frame))`.
-    pub fn list<T: shape::ViewValue>(items: impl IntoIterator<Item = T>) -> View {
-        View::List(items.into_iter().map(T::into_view).collect())
+    pub fn list<T: shape::ViewValue<Source = T>>(items: impl IntoIterator<Item = T>) -> View {
+        View::List(items.into_iter().map(T::view).collect())
     }
 }
 

@@ -1,6 +1,7 @@
 //! ETW [`View`] builders: trace sessions, their buffers, and their events.
 
 use super::shape::{Hex, shapes};
+use crate::types::VirtAddr;
 use crate::target::etw::{
     self, EtwEventDump as EtwEventDumpDetail, EtwLoggerBuffers as EtwLoggerBuffersDetail,
     EtwLoggerTable as EtwLoggerTableDetail, event_trace_group_name, extended_type_name,
@@ -11,17 +12,17 @@ shapes! {
     /// An active ETW trace session, decoded from its `_WMI_LOGGER_CONTEXT`.
     EtwLogger {
         /// The `_WMI_LOGGER_CONTEXT`.
-        address: Hex,
+        address: VirtAddr,
         logger_id: u32,
         /// `LoggerName`; `None` when its buffer is unreadable (pool freed or
         /// paged out while a session stops).
         name: Option<String>,
         /// `LogFileName`; `None` when its buffer is unreadable.
         log_file_name: Option<String>,
-        logger_mode: Hex,
+        logger_mode: Hex<u32>,
         /// The `EVENT_TRACE_*_MODE` bits set in `logger_mode`.
         logger_mode_names: Vec<&'static str>,
-        flags: Hex,
+        flags: Hex<u32>,
         /// The `Flags` bitfields that are set, from the PDB.
         flag_names: Vec<String>,
         collection_on: bool,
@@ -30,13 +31,13 @@ shapes! {
         maximum_event_size: u32,
         minimum_buffers: u32,
         maximum_buffers: u32,
-        number_of_buffers: i64,
-        buffers_available: i64,
+        number_of_buffers: i32,
+        buffers_available: i32,
         /// Buffers taken from the free pool (`number_of_buffers -
         /// buffers_available`): current on a processor, full, or being
         /// flushed.
         buffers_in_use: i64,
-        peak_buffers: i64,
+        peak_buffers: i32,
         buffers_written: u32,
         events_lost: u32,
         log_buffers_lost: u32,
@@ -55,23 +56,23 @@ shapes! {
         flush_timer: u32,
         flush_threshold: u32,
         maximum_file_size: u32,
-        logger_thread: Hex,
-        logger_status: i64,
+        logger_thread: VirtAddr,
+        logger_status: i32,
         instance_guid: String,
     }
 
     /// Every active ETW logger of the host silo (`!wmitrace.strdump`).
     EtwLoggerTable {
-        silo_state: Hex,
+        silo_state: VirtAddr,
         /// `EtwpLoggerContext`: the array of `max_loggers` context pointers.
-        context_array: Hex,
+        context_array: VirtAddr,
         max_loggers: u32,
         loggers: Vec<EtwLogger>,
     }
 
     /// A logger's trace buffer (`_WMI_BUFFER_HEADER`).
     EtwBuffer {
-        address: Hex,
+        address: VirtAddr,
         state: u32,
         state_name: String,
         processor: u16,
@@ -82,7 +83,7 @@ shapes! {
         current_offset: u32,
         /// Bytes of the buffer holding the header and complete events.
         data_end: u32,
-        reference_count: i64,
+        reference_count: i32,
     }
 
     /// A logger and the buffers on its `GlobalList`
@@ -111,7 +112,7 @@ shapes! {
     EtwEventMessage {
         /// The message number.
         number: u16,
-        option_flags: Hex,
+        option_flags: Hex<u16>,
         sequence: Option<u32>,
         guid: Option<String>,
         component_id: Option<u32>,
@@ -138,7 +139,7 @@ shapes! {
     /// kind lacks are `None`.
     EtwEvent {
         /// The buffer it came from.
-        buffer: Hex,
+        buffer: VirtAddr,
         /// Offset of the record in its buffer.
         offset: u32,
         processor: u16,
@@ -161,10 +162,10 @@ shapes! {
         guid: Option<String>,
         descriptor: Option<EtwEventDescriptor>,
         /// `EVENT_HEADER.Flags`.
-        event_flags: Option<Hex>,
+        event_flags: Option<Hex<u16>>,
         activity_id: Option<String>,
         /// Kernel hook id (group << 8 | type) of system and perfinfo events.
-        hook_id: Option<Hex>,
+        hook_id: Option<Hex<u16>>,
         /// The hook id's `EVENT_TRACE_GROUP_*` name, when it is a known one.
         group: Option<&'static str>,
         /// A classic event's class; the JSON key is `class`.
@@ -177,7 +178,7 @@ shapes! {
 
     /// A buffer whose events could not all be decoded.
     EtwEventIssue {
-        buffer: Hex,
+        buffer: VirtAddr,
         /// Where in the buffer the walk stopped.
         offset: u32,
         reason: String,
@@ -219,23 +220,23 @@ fn filetime(value: Option<u64>) -> Option<String> {
 /// A `_WMI_LOGGER_CONTEXT`: configuration, counters, and clock.
 pub fn logger(l: &etw::EtwLogger) -> EtwLogger {
     EtwLogger {
-        address: Hex(l.address.0),
+        address: l.address,
         logger_id: l.logger_id,
         name: l.name.clone(),
         log_file_name: l.log_file_name.clone(),
-        logger_mode: Hex(l.logger_mode.into()),
+        logger_mode: l.logger_mode,
         logger_mode_names: logger_mode_names(l.logger_mode),
-        flags: Hex(l.flags.into()),
+        flags: l.flags,
         flag_names: l.flag_names.clone(),
         collection_on: l.collection_on,
         buffer_size: l.buffer_size,
         maximum_event_size: l.maximum_event_size,
         minimum_buffers: l.minimum_buffers,
         maximum_buffers: l.maximum_buffers,
-        number_of_buffers: l.number_of_buffers.into(),
-        buffers_available: l.buffers_available.into(),
+        number_of_buffers: l.number_of_buffers,
+        buffers_available: l.buffers_available,
         buffers_in_use: l.buffers_in_use(),
-        peak_buffers: l.peak_buffers.into(),
+        peak_buffers: l.peak_buffers,
         buffers_written: l.buffers_written,
         events_lost: l.events_lost,
         log_buffers_lost: l.log_buffers_lost,
@@ -249,8 +250,8 @@ pub fn logger(l: &etw::EtwLogger) -> EtwLogger {
         flush_timer: l.flush_timer,
         flush_threshold: l.flush_threshold,
         maximum_file_size: l.maximum_file_size,
-        logger_thread: Hex(l.logger_thread.0),
-        logger_status: l.logger_status.into(),
+        logger_thread: l.logger_thread,
+        logger_status: l.logger_status,
         instance_guid: format_guid(&l.instance_guid),
     }
 }
@@ -258,8 +259,8 @@ pub fn logger(l: &etw::EtwLogger) -> EtwLogger {
 /// `!wmitrace.strdump`: every active logger.
 pub fn logger_table(table: &EtwLoggerTableDetail) -> EtwLoggerTable {
     EtwLoggerTable {
-        silo_state: Hex(table.silo_state.0),
-        context_array: Hex(table.context_array.0),
+        silo_state: table.silo_state,
+        context_array: table.context_array,
         max_loggers: table.max_loggers,
         loggers: table.loggers.iter().map(logger).collect(),
     }
@@ -267,7 +268,7 @@ pub fn logger_table(table: &EtwLoggerTableDetail) -> EtwLoggerTable {
 
 fn buffer(b: &etw::EtwBuffer) -> EtwBuffer {
     EtwBuffer {
-        address: Hex(b.address.0),
+        address: b.address,
         state: b.state,
         state_name: b.state_name.clone(),
         processor: b.processor,
@@ -276,7 +277,7 @@ fn buffer(b: &etw::EtwBuffer) -> EtwBuffer {
         saved_offset: b.saved_offset,
         current_offset: b.current_offset,
         data_end: b.data_end,
-        reference_count: b.reference_count.into(),
+        reference_count: b.reference_count,
     }
 }
 
@@ -292,7 +293,7 @@ pub fn logger_buffers(detail: &EtwLoggerBuffersDetail) -> EtwLoggerBuffers {
 fn event(e: &etw::EtwEvent) -> EtwEvent {
     let r = &e.record;
     EtwEvent {
-        buffer: Hex(e.buffer.0),
+        buffer: e.buffer,
         offset: r.offset,
         processor: e.processor,
         header: r.kind.name(),
@@ -311,11 +312,11 @@ fn event(e: &etw::EtwEvent) -> EtwEvent {
             level: d.level,
             opcode: d.opcode,
             task: d.task,
-            keyword: Hex(d.keyword),
+            keyword: d.keyword,
         }),
-        event_flags: r.event_flags.map(|flags| Hex(flags.into())),
+        event_flags: r.event_flags,
         activity_id: guid(r.activity_id.as_ref()),
-        hook_id: r.hook_id.map(|hook| Hex(hook.into())),
+        hook_id: r.hook_id,
         group: r.hook_id.and_then(event_trace_group_name),
         event_class: r.class.map(|(kind, level, version)| EtwEventClass {
             r#type: kind,
@@ -324,7 +325,7 @@ fn event(e: &etw::EtwEvent) -> EtwEvent {
         }),
         message: r.message.map(|m| EtwEventMessage {
             number: m.number,
-            option_flags: Hex(m.option_flags.into()),
+            option_flags: m.option_flags,
             sequence: m.sequence,
             guid: guid(m.guid.as_ref()),
             component_id: m.component_id,
@@ -355,7 +356,7 @@ pub fn event_dump(dump: &EtwEventDumpDetail) -> EtwEventDump {
             .issues
             .iter()
             .map(|issue| EtwEventIssue {
-                buffer: Hex(issue.buffer.0),
+                buffer: issue.buffer,
                 offset: issue.offset,
                 reason: issue.reason.clone(),
             })

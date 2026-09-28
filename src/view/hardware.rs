@@ -1,6 +1,7 @@
 //! hardware: [`View`] builders for hang diagnosis (`!qlocks`, `!ipi`) and PCI.
 
 use super::shape::{Diag, Hex, Keyed, Omit, shapes};
+use crate::types::VirtAddr;
 use crate::target::hang::{
     self, IpiDetail, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
 };
@@ -38,7 +39,7 @@ fn queued_lock(lock: &hang::QueuedLock) -> QueuedLock {
     QueuedLock {
         number: lock.number,
         name: lock.name.clone(),
-        lock: lock.lock.map(|lock| Hex(lock.0)),
+        lock: lock.lock,
         holders,
     }
 }
@@ -54,16 +55,16 @@ pub fn queued_locks(detail: &QueuedLocksDetail) -> QueuedLocks {
 
 fn ipi_request(request: &hang::IpiRequest) -> IpiRequest {
     IpiRequest {
-        mailbox: Hex(request.mailbox.0),
+        mailbox: request.mailbox,
         sender: request.sender,
-        request_summary: Diag::of(&request.request_summary, |summary| Hex(*summary)),
-        request_type: Diag::of(&request.request_summary, |summary| {
+        request_summary: request.request_summary.clone(),
+        request_type: request.request_summary.map(|summary| {
             ipi_request_type_name(*summary)
         }),
-        worker_routine: Diag::of(&request.worker_routine, |routine| Hex(routine.0)),
+        worker_routine: request.worker_routine.clone(),
         worker_symbol: request.worker_symbol.clone(),
-        parameters: Diag::of(&request.parameters, |parameters| {
-            parameters.iter().copied().map(Hex).collect()
+        parameters: request.parameters.map(|parameters| {
+            parameters.to_vec()
         }),
     }
 }
@@ -73,19 +74,17 @@ fn ipi_processor(processor: &hang::IpiProcessor) -> IpiProcessor {
         .fields
         .iter()
         .find(|field| field.name == "IpiFrozen")
-        .map(|field| Diag::of(&field.value, |value| ipi_frozen_name(*value)));
+        .map(|field| field.value.map(|value| ipi_frozen_name(*value)));
     IpiProcessor {
         processor: processor.processor,
-        kprcb: Hex(processor.kprcb.0),
-        fields: Keyed(
-            processor
+        kprcb: processor.kprcb,
+        fields: processor
                 .fields
                 .iter()
-                .map(|field| (field.name, Diag::of(&field.value, |value| Hex(*value))))
+                .map(|field| (field.name, field.value.clone()))
                 .collect(),
-        ),
         frozen_state: frozen,
-        pending: Diag::of(&processor.pending, |requests| {
+        pending: processor.pending.map(|requests| {
             requests.iter().map(ipi_request).collect()
         }),
         pending_truncated: processor.pending_truncated,
@@ -129,7 +128,7 @@ shapes! {
         /// suffix (`IoCancel`), or `LockQueue[n]` when unknown.
         name: String,
         /// The spinlock, from the first processor entry that names it.
-        lock: Option<Hex>,
+        lock: Option<VirtAddr>,
         holders: Vec<QueuedLockHolder>,
     }
 
@@ -144,14 +143,14 @@ shapes! {
     /// A request a sender posted in a processor's IPI mailbox list.
     IpiRequest {
         /// The sender's `_REQUEST_MAILBOX` slot in the receiver's array.
-        mailbox: Hex,
+        mailbox: VirtAddr,
         /// The sending processor; `None` when the mailbox lies outside the
         /// receiver's array.
         sender: Option<u16>,
         request_summary: Diag<Hex>,
         /// The request summary's type, when it is a known one.
         request_type: Diag<Option<&'static str>>,
-        worker_routine: Diag<Hex>,
+        worker_routine: Diag<VirtAddr>,
         /// The worker routine's symbol, when it resolves.
         worker_symbol: Option<String>,
         /// `RequestPacket.CurrentPacket`: the worker's three parameters.
@@ -161,7 +160,7 @@ shapes! {
     /// One processor's IPI state.
     IpiProcessor {
         processor: u16,
-        kprcb: Hex,
+        kprcb: VirtAddr,
         /// The `_KPRCB` IPI fields this build has, by name, each a
         /// `Diagnostic` of its value.
         fields: Keyed<Diag<Hex>>,
@@ -188,23 +187,23 @@ shapes! {
     /// A device pci.sys enumerated (`!pcitree`).
     PciTreeDevice {
         /// pci.sys's device extension.
-        extension: Hex,
+        extension: VirtAddr,
         /// The device's physical device object.
-        pdo: Hex,
+        pdo: VirtAddr,
         bus: u32,
         device: u8,
         function: u8,
-        vendor_id: Hex,
-        device_id: Hex,
-        revision: Hex,
-        base_class: Hex,
-        sub_class: Hex,
-        prog_if: Hex,
+        vendor_id: Hex<u16>,
+        device_id: Hex<u16>,
+        revision: Hex<u8>,
+        base_class: Hex<u8>,
+        sub_class: Hex<u8>,
+        prog_if: Hex<u8>,
         /// The class code's name, when it is a known one.
         class_name: Option<String>,
-        subsystem_vendor_id: Hex,
-        subsystem_id: Hex,
-        header_type: Hex,
+        subsystem_vendor_id: Hex<u16>,
+        subsystem_id: Hex<u16>,
+        header_type: Hex<u8>,
         /// The device's PnP instance path, when pci.sys recorded one.
         instance_path: Option<String>,
     }
@@ -213,12 +212,12 @@ shapes! {
     /// its bridges.
     PciBus {
         /// pci.sys's bus extension.
-        extension: Hex,
+        extension: VirtAddr,
         number: u32,
         /// The highest bus number behind this one.
         subordinate: u32,
         /// The bridge's physical device object; 0 for a root bus.
-        bridge_pdo: Hex,
+        bridge_pdo: VirtAddr,
         devices: Vec<PciTreeDevice>,
         child_buses: Vec<PciBus>,
     }
@@ -226,7 +225,7 @@ shapes! {
     /// A PCI segment and its root buses.
     PciSegment {
         /// pci.sys's segment record.
-        address: Hex,
+        address: VirtAddr,
         segment: u16,
         root_buses: Vec<PciBus>,
     }
@@ -263,8 +262,8 @@ shapes! {
     /// A capability-list entry.
     PciCapability {
         /// Its offset in configuration space.
-        offset: Hex,
-        id: Hex,
+        offset: Hex<u16>,
+        id: Hex<u16>,
         /// The capability's name, when it is a known one.
         name: Option<&'static str>,
         /// The version of an extended capability; absent for a standard one.
@@ -285,32 +284,32 @@ shapes! {
         bus: u8,
         device: u8,
         function: u8,
-        vendor_id: Hex,
-        device_id: Hex,
-        revision: Hex,
-        base_class: Hex,
-        sub_class: Hex,
-        prog_if: Hex,
+        vendor_id: Hex<u16>,
+        device_id: Hex<u16>,
+        revision: Hex<u8>,
+        base_class: Hex<u8>,
+        sub_class: Hex<u8>,
+        prog_if: Hex<u8>,
         /// The class code's name, when it is a known one.
         class_name: Option<String>,
-        header_type: Hex,
+        header_type: Hex<u8>,
         multifunction: bool,
-        command: Hex,
+        command: Hex<u16>,
         /// The names of the command register's set bits.
         command_flags: Vec<&'static str>,
-        status: Hex,
+        status: Hex<u16>,
         /// The names of the status register's set bits.
         status_flags: Vec<&'static str>,
         /// Type 0 and 2 headers only.
-        subsystem_vendor_id: Option<Hex>,
+        subsystem_vendor_id: Option<Hex<u16>>,
         /// Type 0 and 2 headers only.
-        subsystem_id: Option<Hex>,
+        subsystem_id: Option<Hex<u16>>,
         bars: Vec<PciBar>,
         /// The expansion ROM base register (types 0 and 1).
-        expansion_rom: Option<Hex>,
+        expansion_rom: Option<Hex<u32>>,
         /// Type 1 and 2 headers only.
         buses: Option<PciBuses>,
-        interrupt_line: Hex,
+        interrupt_line: Hex<u8>,
         /// 0 for none, 1-4 for INTA#-INTD#.
         interrupt_pin: u8,
         capabilities: Vec<PciCapability>,
@@ -331,31 +330,31 @@ shapes! {
 
 fn pci_tree_device(device: &pci::PciTreeDevice) -> PciTreeDevice {
     PciTreeDevice {
-        extension: Hex(device.extension.0),
-        pdo: Hex(device.device_object.0),
+        extension: device.extension,
+        pdo: device.device_object,
         bus: device.bus,
         device: device.device,
         function: device.function,
-        vendor_id: Hex(device.vendor_id.into()),
-        device_id: Hex(device.device_id.into()),
-        revision: Hex(device.revision.into()),
-        base_class: Hex(device.base_class.into()),
-        sub_class: Hex(device.sub_class.into()),
-        prog_if: Hex(device.prog_if.into()),
+        vendor_id: device.vendor_id,
+        device_id: device.device_id,
+        revision: device.revision,
+        base_class: device.base_class,
+        sub_class: device.sub_class,
+        prog_if: device.prog_if,
         class_name: class_name(device.base_class, device.sub_class),
-        subsystem_vendor_id: Hex(device.subsystem_vendor_id.into()),
-        subsystem_id: Hex(device.subsystem_id.into()),
-        header_type: Hex(device.header_type.into()),
+        subsystem_vendor_id: device.subsystem_vendor_id,
+        subsystem_id: device.subsystem_id,
+        header_type: device.header_type,
         instance_path: device.instance_path.clone(),
     }
 }
 
 fn pci_bus(bus: &pci::PciTreeBus) -> PciBus {
     PciBus {
-        extension: Hex(bus.extension.0),
+        extension: bus.extension,
         number: bus.number,
         subordinate: bus.subordinate,
-        bridge_pdo: Hex(bus.bridge_pdo.0),
+        bridge_pdo: bus.bridge_pdo,
         devices: bus.devices.iter().map(pci_tree_device).collect(),
         child_buses: bus.child_buses.iter().map(pci_bus).collect(),
     }
@@ -368,7 +367,7 @@ pub fn pci_tree(tree: &pci::PciTree) -> PciTree {
             .segments
             .iter()
             .map(|segment| PciSegment {
-                address: Hex(segment.address.0),
+                address: segment.address,
                 segment: segment.number,
                 root_buses: segment.root_buses.iter().map(pci_bus).collect(),
             })
@@ -384,10 +383,10 @@ fn pci_capabilities(
 ) -> Vec<PciCapability> {
     list.iter()
         .map(|capability| PciCapability {
-            offset: Hex(capability.offset.into()),
-            id: Hex(capability.id.into()),
+            offset: capability.offset,
+            id: capability.id,
             name: name(capability.id),
-            version: Omit(capability.version),
+            version: capability.version,
         })
         .collect()
 }
@@ -410,33 +409,33 @@ fn pci_function(function: &PciFunctionConfig, raw: Option<PciRawRange>) -> PciFu
         bus: function.bus,
         device: function.device,
         function: function.function,
-        vendor_id: Hex(header.vendor_id.into()),
-        device_id: Hex(header.device_id.into()),
-        revision: Hex(header.revision.into()),
-        base_class: Hex(header.base_class.into()),
-        sub_class: Hex(header.sub_class.into()),
-        prog_if: Hex(header.prog_if.into()),
+        vendor_id: header.vendor_id,
+        device_id: header.device_id,
+        revision: header.revision,
+        base_class: header.base_class,
+        sub_class: header.sub_class,
+        prog_if: header.prog_if,
         class_name: class_name(header.base_class, header.sub_class),
-        header_type: Hex(header.header_type.into()),
+        header_type: header.header_type,
         multifunction: header.multifunction(),
-        command: Hex(header.command.into()),
+        command: header.command,
         command_flags: command_flags(header.command),
-        status: Hex(header.status.into()),
+        status: header.status,
         status_flags: status_flags(header.status),
-        subsystem_vendor_id: header.subsystem.map(|(vendor, _)| Hex(vendor.into())),
-        subsystem_id: header.subsystem.map(|(_, id)| Hex(id.into())),
+        subsystem_vendor_id: header.subsystem.map(|(vendor, _)| vendor),
+        subsystem_id: header.subsystem.map(|(_, id)| id),
         bars: header
             .bars
             .iter()
             .map(|bar| PciBar {
                 index: bar.index,
                 kind: bar.kind.name(),
-                address: Hex(bar.address),
+                address: bar.address,
                 prefetchable: bar.prefetchable,
-                raw: Hex(bar.raw),
+                raw: bar.raw,
             })
             .collect(),
-        expansion_rom: header.expansion_rom.map(|rom| Hex(rom.into())),
+        expansion_rom: header.expansion_rom,
         buses: header
             .buses
             .map(|(primary, secondary, subordinate)| PciBuses {
@@ -444,7 +443,7 @@ fn pci_function(function: &PciFunctionConfig, raw: Option<PciRawRange>) -> PciFu
                 secondary,
                 subordinate,
             }),
-        interrupt_line: Hex(header.interrupt_line.into()),
+        interrupt_line: header.interrupt_line,
         interrupt_pin: header.interrupt_pin,
         capabilities: pci_capabilities(&list, capability_name),
         extended_capabilities: pci_capabilities(&extended, extended_capability_name),
@@ -452,7 +451,7 @@ fn pci_function(function: &PciFunctionConfig, raw: Option<PciRawRange>) -> PciFu
             let end = raw.end.min(config.len());
             let start = raw.start.min(end);
             PciConfigBytes {
-                offset: Hex(start as u64),
+                offset: start as u64,
                 bytes: hex::encode(&config[start..end]),
             }
         }),

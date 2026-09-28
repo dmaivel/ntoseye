@@ -12,8 +12,8 @@ use crate::unwind::StackFrame;
 shapes! {
     /// A thread's identity and scheduling state, each read on its own.
     ThreadSummary {
-        ethread: Hex,
-        kthread: Hex,
+        ethread: VirtAddr,
+        kthread: VirtAddr,
         /// Thread id.
         tid: Diag<Option<u64>>,
         /// Owning process's id.
@@ -36,8 +36,8 @@ shapes! {
     RunningProcessor {
         /// Processor number.
         index: u16,
-        kpcr: Diag<Hex>,
-        prcb: Diag<Hex>,
+        kpcr: Diag<VirtAddr>,
+        prcb: Diag<VirtAddr>,
         /// The thread running on it; `None` inside when there is none.
         current_thread: Diag<Option<ThreadSummary>>,
         /// The thread selected to run next; `None` inside when there is none.
@@ -57,7 +57,7 @@ shapes! {
     /// A thread on a dispatcher ready queue.
     ReadyThread {
         /// The `_KTHREAD` linked on the queue.
-        kthread: Hex,
+        kthread: VirtAddr,
         /// The thread decoded; `None` inside when it could not be.
         thread: Diag<Option<ThreadSummary>>,
     }
@@ -93,13 +93,13 @@ shapes! {
 
     /// A queued `_KDPC`.
     Dpc {
-        address: Hex,
+        address: VirtAddr,
         /// `DeferredRoutine`.
-        deferred_routine: Diag<Option<Hex>>,
+        deferred_routine: Diag<Option<VirtAddr>>,
         /// `deferred_routine` as a symbol, when one resolves.
         deferred_routine_symbol: Diag<Option<String>>,
         /// `DeferredContext`.
-        context: Diag<Option<Hex>>,
+        context: Diag<Option<VirtAddr>>,
         /// `Importance`.
         importance: Diag<Option<u8>>,
     }
@@ -127,17 +127,17 @@ shapes! {
 
     /// A `_KTIMER` and its decoded DPC.
     KernelTimer {
-        address: Hex,
+        address: VirtAddr,
         /// `DueTime`: the interrupt time it expires at.
         due_time: Diag<Hex>,
         /// `Period` in milliseconds; 0 for a one-shot timer.
         period: Diag<u32>,
         /// `Dpc` as stored, encoded by the kernel.
-        dpc_encoded: Diag<Option<Hex>>,
+        dpc_encoded: Diag<Option<VirtAddr>>,
         /// The decoded `_KDPC` address; `None` inside when the timer has none.
-        dpc: Diag<Option<Hex>>,
+        dpc: Diag<Option<VirtAddr>>,
         /// The DPC's `DeferredRoutine`.
-        dpc_routine: Diag<Option<Hex>>,
+        dpc_routine: Diag<Option<VirtAddr>>,
         /// `dpc_routine` as a symbol, when one resolves.
         dpc_routine_symbol: Diag<Option<String>>,
         /// The current interrupt time, to compare `due_time` against.
@@ -185,13 +185,13 @@ shapes! {
 
     /// A queued `_KAPC`.
     Apc {
-        address: Hex,
+        address: VirtAddr,
         /// `KernelRoutine`.
-        kernel_routine: Diag<Option<Hex>>,
+        kernel_routine: Diag<Option<VirtAddr>>,
         /// `kernel_routine` as a symbol, when one resolves.
         kernel_routine_symbol: Diag<Option<String>>,
         /// `NormalRoutine`; `None` inside for a special kernel APC.
-        normal_routine: Diag<Option<Hex>>,
+        normal_routine: Diag<Option<VirtAddr>>,
         /// `normal_routine` as a symbol, when one resolves.
         normal_routine_symbol: Diag<Option<String>>,
     }
@@ -292,23 +292,23 @@ shapes! {
     /// runs `nt!IopProcessWorkItem` to call `routine`.
     IoWorkItem {
         /// The `_IO_WORKITEM` holding the queued `_WORK_QUEUE_ITEM`.
-        address: Hex,
-        routine: Hex,
+        address: VirtAddr,
+        routine: VirtAddr,
         /// `routine` as a symbol, when one resolves.
         routine_symbol: Option<String>,
         /// The device or driver object it was allocated for.
-        io_object: Hex,
-        context: Hex,
+        io_object: VirtAddr,
+        context: VirtAddr,
     }
 
     /// A pending `_WORK_QUEUE_ITEM`.
     WorkItem {
-        address: Hex,
+        address: VirtAddr,
         /// `WorkerRoutine`.
-        routine: Hex,
+        routine: VirtAddr,
         /// `routine` as a symbol, when one resolves.
         routine_symbol: Option<String>,
-        parameter: Hex,
+        parameter: VirtAddr,
         /// The I/O work item it belongs to, when queued by `IoQueueWorkItem`.
         io_work_item: Option<IoWorkItem>,
     }
@@ -319,7 +319,7 @@ shapes! {
         /// The `WORK_QUEUE_TYPE`s `ExQueueWorkItem` maps to this priority.
         queue_types: Vec<&'static str>,
         /// `CurrentCount[priority]`: threads running an item of this priority.
-        current_count: i64,
+        current_count: i32,
         /// The pending work items (key `items`).
         work_items: Vec<WorkItem> => "items",
         /// How the list walk ended.
@@ -328,7 +328,7 @@ shapes! {
 
     /// A thread serving a work queue.
     WorkerThread {
-        kthread: Hex,
+        kthread: VirtAddr,
         thread: Diag<ThreadSummary>,
         /// The thread's stack; `None` unless stacks were requested and the
         /// thread decoded.
@@ -337,9 +337,9 @@ shapes! {
 
     /// An `_EX_WORK_QUEUE`.
     WorkQueue {
-        address: Hex,
+        address: VirtAddr,
         /// The `_EPARTITION` it belongs to.
-        partition: Hex,
+        partition: VirtAddr,
         /// NUMA node.
         node: u16,
         queue_index: u32,
@@ -347,9 +347,9 @@ shapes! {
         queue_index_name: Option<String>,
         items_processed: u32,
         items_processed_last_pass: u32,
-        thread_count: i64,
+        thread_count: i32,
         min_threads: u64,
-        max_threads: i64,
+        max_threads: i32,
         /// `_KPRIQUEUE.MaximumCount`: how many threads may run items at once.
         concurrency: u32,
         /// Items on all 32 priority lists, listed or not.
@@ -419,23 +419,23 @@ unions! {
 
 fn thread_summary(thread: &detail::ThreadSummary) -> ThreadSummary {
     ThreadSummary {
-        ethread: Hex(thread.ethread.0),
-        kthread: Hex(thread.kthread.0),
-        tid: Diag::of(&thread.tid, |value| *value),
-        pid: Diag::of(&thread.pid, |value| *value),
-        process_name: Diag::of(&thread.process_name, Clone::clone),
-        state: Diag::of(&thread.state, |value| *value),
-        state_name: Diag::of(&thread.state, |value| value.map(kthread_state_name)),
-        wait_reason: Diag::of(&thread.wait_reason, |value| *value),
-        wait_reason_name: Diag::of(&thread.wait_reason, |value| value.map(wait_reason_name)),
-        priority: Diag::of(&thread.priority, |value| *value),
+        ethread: thread.ethread,
+        kthread: thread.kthread,
+        tid: thread.tid.clone(),
+        pid: thread.pid.clone(),
+        process_name: thread.process_name.clone(),
+        state: thread.state.clone(),
+        state_name: thread.state.map(|value| value.map(kthread_state_name)),
+        wait_reason: thread.wait_reason.clone(),
+        wait_reason_name: thread.wait_reason.map(|value| value.map(wait_reason_name)),
+        priority: thread.priority.clone(),
     }
 }
 
 fn optional_thread(
     value: &DiagnosticValue<Option<detail::ThreadSummary>>,
-) -> Diag<Option<ThreadSummary>> {
-    Diag::of(value, |thread| thread.as_ref().map(thread_summary))
+) -> DiagnosticValue<Option<ThreadSummary>> {
+    value.map(|thread| thread.as_ref().map(thread_summary))
 }
 
 fn scheduler_error(error: &detail::SchedulerError) -> SchedulerError {
@@ -454,10 +454,6 @@ fn frames(frames: &[StackFrame]) -> Vec<execution::StackFrame> {
     frames.iter().map(stack_frame).collect()
 }
 
-fn opt_hex(address: &Option<VirtAddr>) -> Option<Hex> {
-    address.map(|address| Hex(address.0))
-}
-
 pub fn running(detail: &detail::RunningDetail) -> RunningProcessors {
     RunningProcessors {
         processors: detail
@@ -465,17 +461,15 @@ pub fn running(detail: &detail::RunningDetail) -> RunningProcessors {
             .iter()
             .map(|processor| RunningProcessor {
                 index: processor.index,
-                kpcr: Diag::of(&processor.kpcr, |address| Hex(address.0)),
-                prcb: Diag::of(&processor.prcb, |address| Hex(address.0)),
+                kpcr: processor.kpcr.clone(),
+                prcb: processor.prcb.clone(),
                 current_thread: optional_thread(&processor.current_thread),
                 next_thread: optional_thread(&processor.next_thread),
                 idle_thread: optional_thread(&processor.idle_thread),
-                short_stack: Omit(
-                    processor
+                short_stack: processor
                         .short_stack
                         .as_ref()
-                        .map(|stack| Diag::of(stack, |stack| frames(stack))),
-                ),
+                        .map(|stack| stack.map(|stack| frames(stack))),
             })
             .collect(),
     }
@@ -493,7 +487,7 @@ pub fn ready_queues(detail: &detail::ReadyQueuesDetail) -> ReadyQueues {
                     .entries
                     .iter()
                     .map(|entry| ReadyThread {
-                        kthread: Hex(entry.kthread.0),
+                        kthread: entry.kthread,
                         thread: optional_thread(&entry.thread),
                     })
                     .collect(),
@@ -508,11 +502,11 @@ pub fn ready_queues(detail: &detail::ReadyQueuesDetail) -> ReadyQueues {
 
 fn dpc(dpc: &detail::DpcDetail) -> Dpc {
     Dpc {
-        address: Hex(dpc.address.0),
-        deferred_routine: Diag::of(&dpc.deferred_routine, opt_hex),
-        deferred_routine_symbol: Diag::of(&dpc.deferred_routine_symbol, Clone::clone),
-        context: Diag::of(&dpc.context, opt_hex),
-        importance: Diag::of(&dpc.importance, |importance| *importance),
+        address: dpc.address,
+        deferred_routine: dpc.deferred_routine.clone(),
+        deferred_routine_symbol: dpc.deferred_routine_symbol.clone(),
+        context: dpc.context.clone(),
+        importance: dpc.importance.clone(),
     }
 }
 
@@ -536,20 +530,20 @@ pub fn dpc_queues(detail: &detail::DpcQueuesDetail) -> DpcQueues {
 
 pub fn timer(timer: &detail::TimerDetail) -> KernelTimer {
     KernelTimer {
-        address: Hex(timer.address.0),
-        due_time: Diag::of(&timer.due_time, |value| Hex(*value)),
-        period: Diag::of(&timer.period, |value| *value),
-        dpc_encoded: Diag::of(&timer.dpc_encoded, opt_hex),
-        dpc: Diag::of(&timer.dpc, opt_hex),
-        dpc_routine: Diag::of(&timer.dpc_routine, opt_hex),
-        dpc_routine_symbol: Diag::of(&timer.dpc_routine_symbol, Clone::clone),
-        interrupt_time: Diag::of(&timer.interrupt_time, |value| value.map(Hex)),
+        address: timer.address,
+        due_time: timer.due_time.clone(),
+        period: timer.period.clone(),
+        dpc_encoded: timer.dpc_encoded.clone(),
+        dpc: timer.dpc.clone(),
+        dpc_routine: timer.dpc_routine.clone(),
+        dpc_routine_symbol: timer.dpc_routine_symbol.clone(),
+        interrupt_time: timer.interrupt_time.clone(),
     }
 }
 
 pub fn timer_list(detail: &detail::TimerListDetail) -> TimerTable {
     TimerTable {
-        interrupt_time: Diag::of(&detail.interrupt_time, |value| value.map(Hex)),
+        interrupt_time: detail.interrupt_time.clone(),
         interrupt_time_source: detail.interrupt_time_source.clone(),
         entries: detail
             .entries
@@ -585,17 +579,17 @@ fn apc_selector(selector: ApcSelector) -> ApcSelectorValue {
     };
     ApcSelectorValue::Selection(ApcSelection {
         kind,
-        value: Hex(value),
+        value,
     })
 }
 
 fn apc(apc: &detail::ApcDetail) -> Apc {
     Apc {
-        address: Hex(apc.address.0),
-        kernel_routine: Diag::of(&apc.kernel_routine, opt_hex),
-        kernel_routine_symbol: Diag::of(&apc.kernel_routine_symbol, Clone::clone),
-        normal_routine: Diag::of(&apc.normal_routine, opt_hex),
-        normal_routine_symbol: Diag::of(&apc.normal_routine_symbol, Clone::clone),
+        address: apc.address,
+        kernel_routine: apc.kernel_routine.clone(),
+        kernel_routine_symbol: apc.kernel_routine_symbol.clone(),
+        normal_routine: apc.normal_routine.clone(),
+        normal_routine_symbol: apc.normal_routine_symbol.clone(),
     }
 }
 
@@ -633,7 +627,7 @@ pub fn stacks(detail: &detail::StacksDetail) -> ThreadStacks {
             .map(|thread| ThreadStack {
                 thread: thread_summary(&thread.thread),
                 active: thread.active_vcpu.clone(),
-                top_symbol: Diag::of(&thread.top_symbol, Clone::clone),
+                top_symbol: thread.top_symbol.clone(),
                 frames: frames(&thread.frames),
                 truncated: thread.truncated,
                 error: thread.error.clone(),
@@ -658,15 +652,15 @@ fn findstack_thread(thread: &detail::FindStackThread, level: u8) -> FindStackThr
         thread: thread_summary(&thread.thread),
         active: thread.active_vcpu.clone(),
         match_count: thread.matches.len(),
-        matching_frames: Omit((level >= 1).then(|| {
+        matching_frames: (level >= 1).then(|| {
             thread
                 .matches
                 .iter()
                 .map(|&index| numbered_stack_frame(index, &thread.stack.frames[index]))
                 .collect()
-        })),
-        frames: Omit(whole.then(|| frames(&thread.stack.frames))),
-        truncated: Omit(whole.then_some(thread.stack.truncated)),
+        }),
+        frames: whole.then(|| frames(&thread.stack.frames)),
+        truncated: whole.then_some(thread.stack.truncated),
     }
 }
 
@@ -687,16 +681,16 @@ pub fn findstack(detail: &detail::FindStackDetail) -> FindStack {
 
 fn work_item(item: &workqueue::WorkItemDetail) -> WorkItem {
     WorkItem {
-        address: Hex(item.address.0),
-        routine: Hex(item.routine.0),
+        address: item.address,
+        routine: item.routine,
         routine_symbol: item.routine_symbol.clone(),
-        parameter: Hex(item.parameter.0),
+        parameter: item.parameter,
         io_work_item: item.io.as_ref().map(|io| IoWorkItem {
-            address: Hex(io.address.0),
-            routine: Hex(io.routine.0),
+            address: io.address,
+            routine: io.routine,
             routine_symbol: io.routine_symbol.clone(),
-            io_object: Hex(io.io_object.0),
-            context: Hex(io.context.0),
+            io_object: io.io_object,
+            context: io.context,
         }),
     }
 }
@@ -705,7 +699,7 @@ fn work_queue_priority(priority: &workqueue::WorkQueuePriority) -> WorkQueuePrio
     WorkQueuePriority {
         priority: priority.priority,
         queue_types: priority.queue_types.clone(),
-        current_count: priority.current_count.into(),
+        current_count: priority.current_count,
         work_items: priority.items.iter().map(work_item).collect(),
         termination: list_termination(&priority.termination),
     }
@@ -713,16 +707,16 @@ fn work_queue_priority(priority: &workqueue::WorkQueuePriority) -> WorkQueuePrio
 
 fn work_queue(queue: &workqueue::WorkQueueDetail) -> WorkQueue {
     WorkQueue {
-        address: Hex(queue.address.0),
-        partition: Hex(queue.partition.0),
+        address: queue.address,
+        partition: queue.partition,
         node: queue.node,
         queue_index: queue.queue_index,
         queue_index_name: queue.queue_index_name.clone(),
         items_processed: queue.items_processed,
         items_processed_last_pass: queue.items_processed_last_pass,
-        thread_count: queue.thread_count.into(),
+        thread_count: queue.thread_count,
         min_threads: queue.min_threads,
-        max_threads: queue.max_threads.into(),
+        max_threads: queue.max_threads,
         concurrency: queue.concurrency,
         pending: queue.pending,
         priorities: queue.priorities.iter().map(work_queue_priority).collect(),
@@ -730,14 +724,14 @@ fn work_queue(queue: &workqueue::WorkQueueDetail) -> WorkQueue {
             .threads
             .iter()
             .map(|worker| WorkerThread {
-                kthread: Hex(worker.kthread.0),
-                thread: Diag::of(&worker.thread, |info| {
+                kthread: worker.kthread,
+                thread: worker.thread.map(|info| {
                     thread_summary(&detail::thread_summary(info))
                 }),
                 stack: worker
                     .stack
                     .as_ref()
-                    .map(|stack| Diag::of(stack, |stack| frames(stack))),
+                    .map(|stack| stack.map(|stack| frames(stack))),
             })
             .collect(),
         threads_termination: list_termination(&queue.threads_termination),
@@ -746,7 +740,7 @@ fn work_queue(queue: &workqueue::WorkQueueDetail) -> WorkQueue {
 
 pub fn work_queues(detail: &ExQueueDetail) -> WorkQueues {
     WorkQueues {
-        flags: Hex(detail.flags),
+        flags: detail.flags,
         priority_filter: detail.priority_filter.clone(),
         queues: detail.queues.iter().map(work_queue).collect(),
         errors: detail.errors.clone(),

@@ -11,14 +11,14 @@ use crate::types::VirtAddr;
 shapes! {
     /// A descriptor-table register (IDTR/GDTR).
     DescriptorRegister {
-        base: Hex,
+        base: VirtAddr,
         /// The table's limit: its size in bytes, minus one.
         limit: u64,
     }
 
     /// Where `_KSPECIAL_REGISTERS` sits in a processor state.
     SpecialRegistersArea {
-        address: Hex,
+        address: VirtAddr,
         /// Bytes of the structure.
         size: u64,
         /// The type name.
@@ -27,13 +27,13 @@ shapes! {
 
     /// The `_KPROCESSOR_STATE` embedded in a `_KPRCB`.
     ProcessorStateArea {
-        address: Hex,
+        address: VirtAddr,
         /// Bytes of the structure.
         size: u64,
         /// The type name.
         name: String,
         /// Address of the `_CONTEXT` embedded in the processor state.
-        context_frame: Diag<Hex>,
+        context_frame: Diag<VirtAddr>,
         special_registers: Diag<SpecialRegistersArea>,
     }
 
@@ -43,29 +43,29 @@ shapes! {
         /// The processor number.
         processor: u16,
         /// The `_KPCR` address.
-        kpcr: Diag<Hex>,
+        kpcr: Diag<VirtAddr>,
         /// The `_KPRCB` address.
-        kprcb: Hex,
+        kprcb: VirtAddr,
         /// `_KPCR.KdVersionBlock`.
-        kd_version_block: Diag<Hex>,
+        kd_version_block: Diag<VirtAddr>,
         /// `_KPCR.CurrentPrcb`.
-        current_prcb: Diag<Hex>,
+        current_prcb: Diag<VirtAddr>,
         /// The current IRQL.
         irql: Diag<u64>,
         /// `_KPCR.Self`.
-        self_pcr: Diag<Hex>,
+        self_pcr: Diag<VirtAddr>,
         /// The running `_KTHREAD`.
-        current_thread: Diag<Hex>,
+        current_thread: Diag<VirtAddr>,
         /// The `_KTHREAD` selected to run next.
-        next_thread: Diag<Hex>,
+        next_thread: Diag<VirtAddr>,
         /// The processor's idle `_KTHREAD`.
-        idle_thread: Diag<Hex>,
+        idle_thread: Diag<VirtAddr>,
         /// The interrupt descriptor table register.
         idtr: Diag<DescriptorRegister>,
         /// The global descriptor table register.
         gdtr: Diag<DescriptorRegister>,
         /// The task state segment's address.
-        tss_base: Diag<Hex>,
+        tss_base: Diag<VirtAddr>,
     }
 
     /// Selected `_KPRCB` fields of a processor (`!prcb`).
@@ -73,15 +73,15 @@ shapes! {
         /// The processor number.
         processor: u16,
         /// The `_KPRCB` address.
-        kprcb: Hex,
+        kprcb: VirtAddr,
         /// `_KPRCB.Number`.
         number: Diag<u64>,
         /// The running `_KTHREAD`.
-        current_thread: Diag<Hex>,
+        current_thread: Diag<VirtAddr>,
         /// The `_KTHREAD` selected to run next.
-        next_thread: Diag<Hex>,
+        next_thread: Diag<VirtAddr>,
         /// The processor's idle `_KTHREAD`.
-        idle_thread: Diag<Hex>,
+        idle_thread: Diag<VirtAddr>,
         /// `_KPRCB.DpcRoutineActive`.
         dpc_routine_active: Diag<u64>,
         /// `_KPRCB.InterruptCount`.
@@ -106,9 +106,9 @@ shapes! {
     IdtGate {
         vector: u16,
         /// The gate's address in the table.
-        address: Hex,
+        address: VirtAddr,
         /// The interrupt handler the gate points at.
-        handler: Diag<Hex>,
+        handler: Diag<VirtAddr>,
         /// The handler's symbol; the diagnostic's value is None when none
         /// resolved.
         symbol: Diag<Option<String>>,
@@ -136,7 +136,7 @@ shapes! {
         /// The processor number.
         processor: u16,
         /// The table's address.
-        base: Hex,
+        base: VirtAddr,
         /// The table's limit: its size in bytes, minus one.
         limit: u64,
         /// The one vector asked for, or None for the full table.
@@ -156,7 +156,7 @@ shapes! {
         /// for other descriptors.
         high_raw: Diag<Option<Hex>>,
         /// The segment base.
-        base: Diag<Hex>,
+        base: Diag<VirtAddr>,
         /// The segment limit, in bytes.
         limit: Diag<u64>,
         /// The raw type field.
@@ -179,7 +179,7 @@ shapes! {
         /// The processor number.
         processor: u16,
         /// The table's address.
-        base: Hex,
+        base: VirtAddr,
         /// The table's limit: its size in bytes, minus one.
         limit: u64,
         /// Slots the limit describes, which can exceed the entries decoded.
@@ -211,7 +211,7 @@ shapes! {
         /// The processor number.
         processor: u16,
         /// The `_KPRCB` address.
-        kprcb: Diag<Hex>,
+        kprcb: Diag<VirtAddr>,
         /// Where the values came from: `_KPRCB` or `triage-dump PRCB metadata`.
         source: String,
         /// The vendor string (`GenuineIntel`, ...).
@@ -231,14 +231,14 @@ shapes! {
 
 fn descriptor(value: &DescriptorDetail) -> DescriptorRegister {
     DescriptorRegister {
-        base: Hex(value.base.0),
+        base: value.base,
         limit: value.limit,
     }
 }
 
 fn special_registers(value: &SpecialRegistersDetail) -> SpecialRegistersArea {
     SpecialRegistersArea {
-        address: Hex(value.address.0),
+        address: value.address,
         size: value.size,
         name: value.name.clone(),
     }
@@ -246,47 +246,45 @@ fn special_registers(value: &SpecialRegistersDetail) -> SpecialRegistersArea {
 
 fn processor_state(value: &ProcessorStateDetail) -> ProcessorStateArea {
     ProcessorStateArea {
-        address: Hex(value.address.0),
+        address: value.address,
         size: value.size,
         name: value.name.clone(),
-        context_frame: Diag::of(&value.context_frame, |address| Hex(address.0)),
-        special_registers: Diag::of(&value.special_registers, special_registers),
+        context_frame: value.context_frame.clone(),
+        special_registers: value.special_registers.map(special_registers),
     }
 }
 
 /// KPCR/KPRCB inspector.
 pub fn pcr(detail: &PcrDetail) -> Pcr {
-    let address = |address: &VirtAddr| Hex(address.0);
     Pcr {
         processor: detail.processor,
-        kpcr: Diag::of(&detail.kpcr, address),
-        kprcb: Hex(detail.kprcb.0),
-        kd_version_block: Diag::of(&detail.kd_version_block, address),
-        current_prcb: Diag::of(&detail.current_prcb, address),
-        irql: Diag::of(&detail.irql, |value| *value),
-        self_pcr: Diag::of(&detail.self_pcr, address),
-        current_thread: Diag::of(&detail.current_thread, address),
-        next_thread: Diag::of(&detail.next_thread, address),
-        idle_thread: Diag::of(&detail.idle_thread, address),
-        idtr: Diag::of(&detail.idtr, descriptor),
-        gdtr: Diag::of(&detail.gdtr, descriptor),
-        tss_base: Diag::of(&detail.tss_base, address),
+        kpcr: detail.kpcr.clone(),
+        kprcb: detail.kprcb,
+        kd_version_block: detail.kd_version_block.clone(),
+        current_prcb: detail.current_prcb.clone(),
+        irql: detail.irql.clone(),
+        self_pcr: detail.self_pcr.clone(),
+        current_thread: detail.current_thread.clone(),
+        next_thread: detail.next_thread.clone(),
+        idle_thread: detail.idle_thread.clone(),
+        idtr: detail.idtr.map(descriptor),
+        gdtr: detail.gdtr.map(descriptor),
+        tss_base: detail.tss_base.clone(),
     }
 }
 
 /// KPRCB inspector.
 pub fn prcb(detail: &PrcbDetail) -> Prcb {
-    let address = |address: &VirtAddr| Hex(address.0);
     Prcb {
         processor: detail.processor,
-        kprcb: Hex(detail.kprcb.0),
-        number: Diag::of(&detail.number, |value| *value),
-        current_thread: Diag::of(&detail.current_thread, address),
-        next_thread: Diag::of(&detail.next_thread, address),
-        idle_thread: Diag::of(&detail.idle_thread, address),
-        dpc_routine_active: Diag::of(&detail.dpc_routine_active, |value| *value),
-        interrupt_count: Diag::of(&detail.interrupt_count, |value| *value),
-        processor_state: Diag::of(&detail.processor_state, processor_state),
+        kprcb: detail.kprcb,
+        number: detail.number.clone(),
+        current_thread: detail.current_thread.clone(),
+        next_thread: detail.next_thread.clone(),
+        idle_thread: detail.idle_thread.clone(),
+        dpc_routine_active: detail.dpc_routine_active.clone(),
+        interrupt_count: detail.interrupt_count.clone(),
+        processor_state: detail.processor_state.map(processor_state),
     }
 }
 
@@ -294,8 +292,8 @@ pub fn prcb(detail: &PrcbDetail) -> Prcb {
 pub fn irql(detail: &IrqlDetail) -> Irql {
     Irql {
         processor: detail.processor,
-        value: Diag::of(&detail.value, |value| *value),
-        level_name: Diag::of(&detail.level_name, String::clone),
+        value: detail.value.clone(),
+        level_name: detail.level_name.map(String::clone),
         note: detail.note.clone(),
     }
 }
@@ -303,17 +301,17 @@ pub fn irql(detail: &IrqlDetail) -> Irql {
 fn idt_entry(detail: &IdtEntryDetail) -> IdtGate {
     IdtGate {
         vector: detail.vector,
-        address: Hex(detail.address.0),
-        handler: Diag::of(&detail.handler, |address| Hex(address.0)),
-        symbol: Diag::of(&detail.symbol, Option::clone),
-        selector: Diag::of(&detail.selector, |selector| *selector),
-        ist: Diag::of(&detail.ist, |ist| *ist),
-        gate_type: Diag::of(&detail.gate_type, |gate_type| *gate_type),
-        gate_name: Diag::of(&detail.gate_name, String::clone),
-        dpl: Diag::of(&detail.dpl, |dpl| *dpl),
-        present: Diag::of(&detail.present, |present| *present),
-        non_nt_hook: Diag::of(&detail.non_nt_hook, |hook| *hook),
-        ki_isr_thunk: Diag::of(&detail.ki_isr_thunk, Option::clone),
+        address: detail.address,
+        handler: detail.handler.clone(),
+        symbol: detail.symbol.map(Option::clone),
+        selector: detail.selector.clone(),
+        ist: detail.ist.clone(),
+        gate_type: detail.gate_type.clone(),
+        gate_name: detail.gate_name.map(String::clone),
+        dpl: detail.dpl.clone(),
+        present: detail.present.clone(),
+        non_nt_hook: detail.non_nt_hook.clone(),
+        ki_isr_thunk: detail.ki_isr_thunk.map(Option::clone),
     }
 }
 
@@ -321,7 +319,7 @@ fn idt_entry(detail: &IdtEntryDetail) -> IdtGate {
 pub fn idt(detail: &IdtDetail) -> Idt {
     Idt {
         processor: detail.processor,
-        base: Hex(detail.base.0),
+        base: detail.base,
         limit: detail.limit,
         vector: detail.vector,
         truncated: detail.truncated,
@@ -332,17 +330,17 @@ pub fn idt(detail: &IdtDetail) -> Idt {
 fn gdt_entry(detail: &GdtEntryDetail) -> GdtDescriptor {
     GdtDescriptor {
         index: detail.index,
-        raw: Diag::of(&detail.raw, |raw| Hex(*raw)),
-        high_raw: Diag::of(&detail.high_raw, |raw| raw.map(Hex)),
-        base: Diag::of(&detail.base, |address| Hex(address.0)),
-        limit: Diag::of(&detail.limit, |limit| *limit),
-        type_code: Diag::of(&detail.type_code, |type_code| *type_code),
-        descriptor_kind: Diag::of(&detail.descriptor_kind, String::clone),
-        dpl: Diag::of(&detail.dpl, |dpl| *dpl),
-        present: Diag::of(&detail.present, |present| *present),
-        long_mode: Diag::of(&detail.long_mode, |long_mode| *long_mode),
-        default_size: Diag::of(&detail.default_size, |default_size| *default_size),
-        granularity: Diag::of(&detail.granularity, |granularity| *granularity),
+        raw: detail.raw.clone(),
+        high_raw: detail.high_raw.clone(),
+        base: detail.base.clone(),
+        limit: detail.limit.clone(),
+        type_code: detail.type_code.clone(),
+        descriptor_kind: detail.descriptor_kind.map(String::clone),
+        dpl: detail.dpl.clone(),
+        present: detail.present.clone(),
+        long_mode: detail.long_mode.clone(),
+        default_size: detail.default_size.clone(),
+        granularity: detail.granularity.clone(),
     }
 }
 
@@ -350,7 +348,7 @@ fn gdt_entry(detail: &GdtEntryDetail) -> GdtDescriptor {
 pub fn gdt(detail: &GdtDetail) -> Gdt {
     Gdt {
         processor: detail.processor,
-        base: Hex(detail.base.0),
+        base: detail.base,
         limit: detail.limit,
         entry_count: detail.entry_count,
         truncated: detail.truncated,
@@ -361,7 +359,7 @@ pub fn gdt(detail: &GdtDetail) -> Gdt {
 fn feature_bits(detail: &FeatureBitsDetail) -> CpuFeatureBits {
     CpuFeatureBits {
         name: detail.name.clone(),
-        value: Diag::of(&detail.value, |value| Hex(*value)),
+        value: detail.value.clone(),
     }
 }
 
@@ -378,14 +376,14 @@ fn triage_fallback(detail: &CpuTriageInfo) -> CpuTriageFallback {
 pub fn cpuinfo(detail: &CpuInfoDetail) -> CpuInfo {
     CpuInfo {
         processor: detail.processor,
-        kprcb: Diag::of(&detail.kprcb, |address| Hex(address.0)),
+        kprcb: detail.kprcb.clone(),
         source: detail.source.clone(),
-        vendor: Diag::of(&detail.vendor, String::clone),
-        vendor_id: Diag::of(&detail.vendor_id, |value| *value),
-        family: Diag::of(&detail.family, |value| *value),
-        model: Diag::of(&detail.model, |value| *value),
-        stepping: Diag::of(&detail.stepping, |value| *value),
-        mhz: Diag::of(&detail.mhz, |value| *value),
+        vendor: detail.vendor.map(String::clone),
+        vendor_id: detail.vendor_id.clone(),
+        family: detail.family.clone(),
+        model: detail.model.clone(),
+        stepping: detail.stepping.clone(),
+        mhz: detail.mhz.clone(),
         feature_bits: detail.feature_bits.iter().map(feature_bits).collect(),
         triage_fallback: detail.triage_fallback.as_ref().map(triage_fallback),
     }

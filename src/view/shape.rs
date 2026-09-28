@@ -7,17 +7,26 @@
 //!
 //! [`BaseRecord`]: crate::python::record::BaseRecord
 
+use std::marker::PhantomData;
+
 use super::{DiagnosticView, View};
 use crate::target::{DiagnosticMetric, DiagnosticValue};
 use crate::types::VirtAddr;
 
-/// A value a declared shape's field can hold, and how each surface shows it.
-pub trait ViewValue: Sized {
-    fn into_view(self) -> View;
+/// A type a shape's field is declared with: how the field renders, and the
+/// value a builder supplies for it ([`Self::Source`]). The declaration is
+/// the one place a field's presentation is stated: a field declared
+/// `Hex<u16>` takes the `u16` itself, one declared `Diag<VirtAddr>` takes the
+/// `DiagnosticValue<VirtAddr>` the target read.
+pub trait ViewValue {
+    /// What a builder supplies for a field of this type.
+    type Source;
+
+    fn view(source: Self::Source) -> View;
 
     /// The field as its object holds it; `None` leaves the field out.
-    fn into_field(self) -> Option<View> {
-        Some(self.into_view())
+    fn field(source: Self::Source) -> Option<View> {
+        Some(Self::view(source))
     }
 
     /// The type the field's SDK property returns, for the stub.
@@ -25,61 +34,33 @@ pub trait ViewValue: Sized {
     const HINT: pyo3::inspect::PyStaticExpr;
 }
 
-/// An address, pointer, or register value: a `0x` hex string in JSON, an int
-/// shown as hex by the SDK's `repr`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hex(pub u64);
+/// A number shown in hex (a register, ID, or flags value): a `0x` string in
+/// JSON, an int the SDK's `repr` shows in hex. Addresses are declared
+/// [`VirtAddr`], which renders the same way.
+pub struct Hex<T = u64>(PhantomData<T>);
 
 /// A field left out of its object when `None`, rather than rendered `null`.
 /// Its SDK property returns `None` then.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Omit<T>(pub Option<T>);
+pub struct Omit<T>(PhantomData<T>);
 
 /// A field that reads on its own and can fail: `{available, value, error}`
-/// in JSON (plus `source` for a metric), a `Diagnostic` in the SDK.
-#[derive(Debug)]
-pub struct Diag<T> {
-    value: Option<T>,
-    error: Option<String>,
-    source: Option<Option<String>>,
-}
+/// in JSON, a `Diagnostic` in the SDK. Takes the [`DiagnosticValue`] read.
+pub struct Diag<T>(PhantomData<T>);
 
-impl<T: Clone> Diag<T> {
-    /// A field read as `value`, as it is.
-    pub fn new(value: &DiagnosticValue<T>) -> Self {
-        Self::of(value, T::clone)
-    }
-}
+/// A [`Diag`] that also names where the value came from (`source`, possibly
+/// unknown). Takes the [`DiagnosticMetric`] read.
+pub struct Metric<T>(PhantomData<T>);
 
-impl<T> Diag<T> {
-    /// A field read as `value`, encoded by `encode` when available.
-    pub fn of<U>(value: &DiagnosticValue<U>, encode: impl FnOnce(&U) -> T) -> Self {
-        let (value, error) = match value {
-            DiagnosticValue::Available(value) => (Some(encode(value)), None),
-            DiagnosticValue::Unavailable(error) => (None, Some(error.clone())),
-        };
-        Self {
-            value,
-            error,
-            source: None,
-        }
-    }
-
-    /// A metric, which also names where it came from (`source`, possibly
-    /// unknown).
-    pub fn metric<U>(metric: &DiagnosticMetric<U>, encode: impl FnOnce(&U) -> T) -> Self {
-        Self {
-            source: Some(metric.source.map(|source| source.to_string())),
-            ..Self::of(&metric.value, encode)
-        }
-    }
-}
+/// An object whose keys are data, not a schema (fields a Windows build may
+/// or may not have): a JSON object, and in the SDK a `Record`, whose
+/// attributes are its keys. Takes the `(key, value)` pairs.
+pub struct Keyed<T>(PhantomData<T>);
 
 macro_rules! scalars {
     ($($t:ty => |$v:ident| $view:expr, $hint:literal;)*) => {$(
         impl ViewValue for $t {
-            fn into_view(self) -> View {
-                let $v = self;
+            type Source = Self;
+            fn view($v: Self) -> View {
                 $view
             }
             #[cfg(feature = "python-stubs")]
@@ -93,25 +74,31 @@ scalars! {
     u32 => |v| View::Num(v.into()), "int";
     u64 => |v| View::Num(v), "int";
     usize => |v| View::Num(v as u64), "int";
+    i16 => |v| View::Int(v.into()), "int";
+    i32 => |v| View::Int(v.into()), "int";
     i64 => |v| View::Int(v), "int";
-    Hex => |v| View::Hex(v.0), "int";
     VirtAddr => |v| View::Hex(v.0), "int";
     bool => |v| View::Bool(v), "bool";
     String => |v| View::Str(v), "str";
     &'static str => |v| View::Str(v.to_string()), "str";
 }
 
-/// An object whose keys are data, not a schema (fields a Windows build may
-/// or may not have): a JSON object, and in the SDK a `Record`, whose
-/// attributes are its keys.
-pub struct Keyed<T>(pub Vec<(&'static str, T)>);
+impl<T: Into<u64>> ViewValue for Hex<T> {
+    type Source = T;
+    fn view(value: T) -> View {
+        View::Hex(value.into())
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: pyo3::inspect::PyStaticExpr = pyo3::type_hint_identifier!("builtins", "int");
+}
 
 impl<T: ViewValue> ViewValue for Keyed<T> {
-    fn into_view(self) -> View {
+    type Source = Vec<(&'static str, T::Source)>;
+    fn view(fields: Self::Source) -> View {
         View::Object(
-            self.0
+            fields
                 .into_iter()
-                .map(|(key, value)| (key, value.into_view()))
+                .map(|(key, value)| (key, T::view(value)))
                 .collect(),
         )
     }
@@ -121,8 +108,9 @@ impl<T: ViewValue> ViewValue for Keyed<T> {
 }
 
 impl<T: ViewValue> ViewValue for Option<T> {
-    fn into_view(self) -> View {
-        self.map_or(View::Null, T::into_view)
+    type Source = Option<T::Source>;
+    fn view(value: Self::Source) -> View {
+        value.map_or(View::Null, T::view)
     }
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr =
@@ -130,19 +118,21 @@ impl<T: ViewValue> ViewValue for Option<T> {
 }
 
 impl<T: ViewValue> ViewValue for Omit<T> {
-    fn into_view(self) -> View {
-        self.0.into_view()
+    type Source = Option<T::Source>;
+    fn view(value: Self::Source) -> View {
+        <Option<T>>::view(value)
     }
-    fn into_field(self) -> Option<View> {
-        self.0.map(T::into_view)
+    fn field(value: Self::Source) -> Option<View> {
+        value.map(T::view)
     }
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr = <Option<T>>::HINT;
 }
 
 impl<T: ViewValue> ViewValue for Vec<T> {
-    fn into_view(self) -> View {
-        View::List(self.into_iter().map(T::into_view).collect())
+    type Source = Vec<T::Source>;
+    fn view(items: Self::Source) -> View {
+        View::List(items.into_iter().map(T::view).collect())
     }
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr =
@@ -150,27 +140,50 @@ impl<T: ViewValue> ViewValue for Vec<T> {
 }
 
 impl<T: ViewValue> ViewValue for Box<T> {
-    fn into_view(self) -> View {
-        (*self).into_view()
+    type Source = Box<T::Source>;
+    fn view(value: Self::Source) -> View {
+        T::view(*value)
     }
-    fn into_field(self) -> Option<View> {
-        (*self).into_field()
+    fn field(value: Self::Source) -> Option<View> {
+        T::field(*value)
     }
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr = T::HINT;
 }
 
+fn diagnostic<T: ViewValue>(
+    value: DiagnosticValue<T::Source>,
+    source: Option<Option<String>>,
+) -> View {
+    let (value, error) = match value {
+        DiagnosticValue::Available(value) => (Some(T::view(value)), None),
+        DiagnosticValue::Unavailable(error) => (None, Some(error)),
+    };
+    View::Diagnostic(Box::new(DiagnosticView {
+        value,
+        error,
+        source,
+    }))
+}
+
 impl<T: ViewValue> ViewValue for Diag<T> {
-    fn into_view(self) -> View {
-        View::Diagnostic(Box::new(DiagnosticView {
-            value: self.value.map(T::into_view),
-            error: self.error,
-            source: self.source,
-        }))
+    type Source = DiagnosticValue<T::Source>;
+    fn view(value: Self::Source) -> View {
+        diagnostic::<T>(value, None)
     }
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr =
         <crate::python::record::Diagnostic as pyo3::PyTypeInfo>::TYPE_HINT;
+}
+
+impl<T: ViewValue> ViewValue for Metric<T> {
+    type Source = DiagnosticMetric<T::Source>;
+    fn view(metric: Self::Source) -> View {
+        let source = metric.source.map(|source| source.to_string());
+        diagnostic::<T>(metric.value, Some(source))
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: pyo3::inspect::PyStaticExpr = <Diag<T>>::HINT;
 }
 
 /// A declared object: its fields in order, and the SDK class it becomes.
@@ -193,8 +206,8 @@ pub struct Typed<'py, T>(pyo3::Bound<'py, pyo3::PyAny>, std::marker::PhantomData
 
 #[cfg(feature = "python")]
 impl<'py, T: ViewValue> Typed<'py, T> {
-    pub fn new(py: pyo3::Python<'py>, value: T) -> pyo3::PyResult<Self> {
-        let object = super::to_py(py, &value.into_view(), super::PyShape::Records)?;
+    pub fn new(py: pyo3::Python<'py>, value: T::Source) -> pyo3::PyResult<Self> {
+        let object = super::to_py(py, &T::view(value), super::PyShape::Records)?;
         Ok(Self(object, std::marker::PhantomData))
     }
 
@@ -262,9 +275,10 @@ pub const fn is_reserved_property(name: &str) -> bool {
 }
 
 /// Declare result shapes: each becomes a plain struct (build it, then
-/// [`ViewValue::into_view`] it) and, in the SDK, a same-named `BaseRecord`
-/// subclass in the invoking module's `py` submodule, with a property per
-/// field. Doc comments on the struct and its fields document the class and
+/// [`into_view`](ViewValue::view) it) and, in the SDK, a same-named
+/// `BaseRecord` subclass in the invoking module's `py` submodule, with a
+/// property per field. A field's declared type says how it renders; the
+/// struct holds what its builder supplies ([`ViewValue::Source`]). Doc comments on the struct and its fields document the class and
 /// properties. A field named like a `BaseRecord` method (`keys`, `values`,
 /// `items`, `get`, `to_dict`) or a Python keyword (`class`, `from`, ...) is a
 /// compile error: give it another name and keep its key with `=> "items"`
@@ -291,7 +305,7 @@ macro_rules! shapes {
             pub struct $name {
                 $(
                     $(#[doc = $field_doc])*
-                    pub $field: $ty,
+                    pub $field: <$ty as $crate::view::shape::ViewValue>::Source,
                 )*
             }
 
@@ -314,7 +328,7 @@ macro_rules! shapes {
                 ///
                 /// [`ViewValue`]: $crate::view::shape::ViewValue
                 pub fn into_view(self) -> $crate::view::View {
-                    $crate::view::shape::ViewValue::into_view(self)
+                    <Self as $crate::view::shape::ViewValue>::view(self)
                 }
 
                 /// This shape as its SDK class, for a handle Rust keeps.
@@ -324,15 +338,19 @@ macro_rules! shapes {
                     self,
                     py: pyo3::Python<'py>,
                 ) -> pyo3::PyResult<pyo3::Bound<'py, py::$name>> {
-                    Ok($crate::view::shape::Typed::new(py, self)?.into_bound().cast_into::<py::$name>()?)
+                    let typed = $crate::view::shape::Typed::<Self>::new(py, self)?;
+                    Ok(typed.into_bound().cast_into::<py::$name>()?)
                 }
             }
 
             impl $crate::view::shape::ViewValue for $name {
-                fn into_view(self) -> $crate::view::View {
+                type Source = Self;
+                fn view(shape: Self) -> $crate::view::View {
                     let mut fields = Vec::new();
                     $(
-                        if let Some(value) = $crate::view::shape::ViewValue::into_field(self.$field) {
+                        if let Some(value) =
+                            <$ty as $crate::view::shape::ViewValue>::field(shape.$field)
+                        {
                             fields.push(($crate::view::shape::key!($field $(, $key)?), value));
                         }
                     )*
@@ -424,14 +442,15 @@ macro_rules! unions {
         pub enum $name {
             $(
                 $(#[doc = $variant_doc])*
-                $variant($ty),
+                $variant(<$ty as $crate::view::shape::ViewValue>::Source),
             )+
         }
 
         impl $crate::view::shape::ViewValue for $name {
-            fn into_view(self) -> $crate::view::View {
-                match self {
-                    $(Self::$variant(value) => $crate::view::shape::ViewValue::into_view(value),)+
+            type Source = Self;
+            fn view(value: Self) -> $crate::view::View {
+                match value {
+                    $(Self::$variant(value) => <$ty as $crate::view::shape::ViewValue>::view(value),)+
                 }
             }
             #[cfg(feature = "python-stubs")]
@@ -479,12 +498,13 @@ mod tests {
     shapes! {
         Sample {
             r#type: &'static str,
-            address: Hex,
+            address: VirtAddr,
+            id: Hex<u16>,
             missing: Omit<u8>,
             present: Omit<u8>,
             null: Option<String>,
-            read: Diag<Hex>,
-            failed: Diag<Hex>,
+            read: Diag<VirtAddr>,
+            failed: Diag<VirtAddr>,
             work_items: u8 => "items";
             fn __str__(slf: &pyo3::Bound<'_, Self>) -> pyo3::PyResult<String> {
                 Ok(slf.as_super().get().field(slf.py(), "type")?.to_string())
@@ -496,15 +516,13 @@ mod tests {
     fn shape_renders_as_the_object_it_declares() {
         let sample = Sample {
             r#type: "port",
-            address: Hex(0x1000),
-            missing: Omit(None),
-            present: Omit(Some(3)),
+            address: VirtAddr(0x1000),
+            id: 0x1f,
+            missing: None,
+            present: Some(3),
             null: None,
-            read: Diag::of(&DiagnosticValue::Available(0x20u64), |v| Hex(*v)),
-            failed: Diag::of(
-                &DiagnosticValue::<u64>::Unavailable("paged out".into()),
-                |v| Hex(*v),
-            ),
+            read: DiagnosticValue::Available(VirtAddr(0x20)),
+            failed: DiagnosticValue::Unavailable("paged out".into()),
             work_items: 1,
         };
         let View::Shaped(shaped) = sample.into_view() else {
@@ -514,7 +532,7 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "type", "address", "present", "null", "read", "failed", "items"
+                "type", "address", "id", "present", "null", "read", "failed", "items"
             ]
         );
         assert_eq!(
@@ -522,6 +540,7 @@ mod tests {
             serde_json::json!({
                 "type": "port",
                 "address": "0x1000",
+                "id": "0x1f",
                 "present": 3,
                 "null": null,
                 "read": {"available": true, "value": "0x20", "error": null},

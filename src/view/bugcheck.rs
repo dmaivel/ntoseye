@@ -73,9 +73,9 @@ shapes! {
         r10: Option<Hex>,
         r11: Option<Hex>,
         rip: Hex,
-        cs: Hex,
+        cs: Hex<u16>,
         ss: Option<Hex>,
-        eflags: Hex,
+        eflags: Hex<u32>,
         /// The exception's error code; stale for a vector that carries none.
         error_code: Option<Hex>,
         /// The mode the trap came from: 0 kernel, 1 user.
@@ -146,10 +146,10 @@ shapes! {
         /// record, reconstructed from the stop rather than read from memory.
         record_address: Option<Hex>,
         /// The exception code (NTSTATUS).
-        code: Hex,
+        code: Hex<u32>,
         /// The code's symbolic name.
         code_name: String,
-        flags: Hex,
+        flags: Hex<u32>,
         /// The address of a nested `EXCEPTION_RECORD`, or 0.
         nested: Hex,
         /// Where the exception occurred.
@@ -206,12 +206,12 @@ pub fn bugcheck(a: &BugcheckAnalysis) -> Bugcheck {
             .enumerate()
             .map(|(i, arg)| BugcheckArgument {
                 index: i + 1,
-                value: Hex(arg.value),
+                value: arg.value,
                 description: arg.description.clone(),
             })
             .collect(),
         fault: a.fault.as_ref().map(|f| BugcheckFault {
-            ip: Hex(f.ip),
+            ip: f.ip,
             symbol: f.symbol.clone(),
             driver: f.driver.clone(),
         }),
@@ -220,39 +220,38 @@ pub fn bugcheck(a: &BugcheckAnalysis) -> Bugcheck {
 }
 
 fn ktrap_frame_registers(frame: &KtrapFrame) -> KtrapFrameRegisters {
-    let hex = |value: Option<u64>| value.map(Hex);
     match &frame.data {
         KtrapFrameData::Amd64(frame) => KtrapFrameRegisters::Amd64(Amd64TrapFrame {
             kind: frame.kind.map(|kind| kind.as_str()),
-            rax: hex(frame.rax),
-            rbx: hex(frame.rbx),
-            rcx: hex(frame.rcx),
-            rdx: hex(frame.rdx),
-            rsi: hex(frame.rsi),
-            rdi: hex(frame.rdi),
-            rbp: Hex(frame.rbp),
-            rsp: Hex(frame.rsp),
-            r8: hex(frame.r8),
-            r9: hex(frame.r9),
-            r10: hex(frame.r10),
-            r11: hex(frame.r11),
-            rip: Hex(frame.rip),
-            cs: Hex(frame.cs.into()),
-            ss: hex(frame.ss.map(u64::from)),
-            eflags: Hex(frame.eflags.into()),
-            error_code: hex(frame.error_code),
+            rax: frame.rax,
+            rbx: frame.rbx,
+            rcx: frame.rcx,
+            rdx: frame.rdx,
+            rsi: frame.rsi,
+            rdi: frame.rdi,
+            rbp: frame.rbp,
+            rsp: frame.rsp,
+            r8: frame.r8,
+            r9: frame.r9,
+            r10: frame.r10,
+            r11: frame.r11,
+            rip: frame.rip,
+            cs: frame.cs,
+            ss: frame.ss.map(u64::from),
+            eflags: frame.eflags,
+            error_code: frame.error_code,
             previous_mode: frame.previous_mode,
             previous_irql: frame.previous_irql,
         }),
         KtrapFrameData::Arm64(frame) => {
             let x = |index: usize| match index {
-                0..=18 => Some(Hex(frame.x[index])),
-                29 => Some(Hex(frame.fp)),
-                30 => Some(Hex(frame.lr)),
+                0..=18 => Some(frame.x[index]),
+                29 => Some(frame.fp),
+                30 => Some(frame.lr),
                 _ => None,
             };
             let registers =
-                |values: &[Option<u64>]| values.iter().copied().map(hex).collect::<Vec<_>>();
+                |values: &[Option<u64>]| values.to_vec();
             KtrapFrameRegisters::Arm64(Box::new(Arm64TrapFrame {
                 x0: x(0),
                 x1: x(1),
@@ -285,13 +284,13 @@ fn ktrap_frame_registers(frame: &KtrapFrame) -> KtrapFrameRegisters {
                 x28: x(28),
                 x29: x(29),
                 x30: x(30),
-                fp: Hex(frame.fp),
-                lr: Hex(frame.lr),
-                sp: Hex(frame.sp),
-                pc: Hex(frame.pc),
-                cpsr: hex(frame.cpsr),
-                esr: hex(frame.esr),
-                fault_address: hex(frame.fault_address),
+                fp: frame.fp,
+                lr: frame.lr,
+                sp: frame.sp,
+                pc: frame.pc,
+                cpsr: frame.cpsr,
+                esr: frame.esr,
+                fault_address: frame.fault_address,
                 previous_mode: frame.previous_mode,
                 previous_irql: frame.previous_irql,
                 bcr: registers(&frame.bcr),
@@ -308,20 +307,20 @@ fn ktrap_frame_registers(frame: &KtrapFrame) -> KtrapFrameRegisters {
 /// reconstructed from the stop rather than read from guest memory.
 pub fn exception_record(record_address: Option<u64>, record: &session::ExceptionRecord) -> ExceptionRecord {
     ExceptionRecord {
-        record_address: record_address.map(Hex),
-        code: Hex(record.code.into()),
+        record_address,
+        code: record.code,
         code_name: exception_code_name(record.code).to_string(),
-        flags: Hex(record.flags.into()),
-        nested: Hex(record.nested),
-        exception_address: Hex(record.address),
-        parameters: record.parameters.iter().copied().map(Hex).collect(),
+        flags: record.flags,
+        nested: record.nested,
+        exception_address: record.address,
+        parameters: record.parameters.to_vec(),
     }
 }
 
 /// A decoded `_KTRAP_FRAME` shared by structured host APIs.
 pub fn trap_frame(frame: &KtrapFrame, rip_symbol: Option<String>) -> TrapFrame {
     TrapFrame {
-        address: Hex(frame.address),
+        address: frame.address,
         rip_symbol,
         frame: ktrap_frame_registers(frame),
     }
@@ -332,7 +331,7 @@ pub fn trap_frame(frame: &KtrapFrame, rip_symbol: Option<String>) -> TrapFrame {
 /// the reason decoding failed.
 pub fn bugcheck_trap_frame(tf: &bugchecks::BugcheckTrapFrame) -> BugcheckTrapFrame {
     BugcheckTrapFrame {
-        address: Hex(tf.address),
+        address: tf.address,
         rip_symbol: tf.rip_symbol.clone(),
         frame: tf.frame.as_ref().map(ktrap_frame_registers),
         error: tf.error.clone(),

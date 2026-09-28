@@ -1,7 +1,7 @@
 //! Neutral value-tree views for memory-manager inspectors.
 
 use super::process::process;
-use super::shape::{Diag, Hex, Omit, shapes};
+use super::shape::{Diag, Hex, Metric, Omit, shapes};
 use crate::target::mm::{
     self as target_mm, BigPoolDetail, LookasideDetail, LookasideListsDetail, MdlDetail,
     MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange,
@@ -11,23 +11,23 @@ use crate::target::mm::{
     memory_type_name, page_protection_name,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
-use crate::target::{self, DiagnosticValue};
+use crate::target::{self};
 use crate::types::{PageTableLevel, PteAttributes, VirtAddr};
 
 shapes! {
     /// A named memory-manager counter (`!vm`).
     VmCounter {
         name: String,
-        value: Diag<u64>,
+        value: Metric<u64>,
         /// What `value` counts: `pages`, `bytes`, or empty for a plain count.
         unit: &'static str,
     }
 
     /// Pool counters and the pool fields of `MiState` (`!vm`).
     VmPool {
-        nonpaged_pool_bytes: Diag<u64>,
-        nonpaged_pool_maximum: Diag<u64>,
-        paged_pool_pages: Diag<u64>,
+        nonpaged_pool_bytes: Metric<u64>,
+        nonpaged_pool_maximum: Metric<u64>,
+        paged_pool_pages: Metric<u64>,
         /// The symbol-backed pool fields of `MiState`.
         fields: Vec<VmCounter>,
     }
@@ -78,10 +78,10 @@ shapes! {
         /// The page frame number.
         pfn: Hex,
         /// The `_MMPFN` record's address.
-        record: Hex,
+        record: VirtAddr,
         /// The requested physical address, for a physical-address selector.
         physical_address: Option<Hex>,
-        pte_address: Diag<Hex>,
+        pte_address: Diag<VirtAddr>,
         original_pte: Diag<Hex>,
         reference_count: Diag<u64>,
         flink: Option<Diag<Hex>>,
@@ -109,7 +109,7 @@ shapes! {
         /// `PXE`, `PPE`, `PDE`, or `PTE`.
         level: &'static str,
         /// The entry's virtual address.
-        address: Hex,
+        address: VirtAddr,
         /// The entry as read.
         value: Hex,
         /// The frame the entry points at.
@@ -126,7 +126,7 @@ shapes! {
 
     /// A virtual address translated through a DTB's page tables (`!vtop`).
     AddressTranslation {
-        address: Hex,
+        address: VirtAddr,
         dtb: Hex,
         /// The levels read, top down.
         levels: Vec<PageTableEntry>,
@@ -144,7 +144,7 @@ shapes! {
 
     /// A virtual address that maps a physical page.
     PhysicalMapping {
-        virtual_address: Hex,
+        virtual_address: VirtAddr,
         /// Mapped by a large page.
         large: bool,
     }
@@ -165,24 +165,24 @@ shapes! {
     /// A virtual pool range.
     PoolRegion {
         name: String,
-        start: Hex,
+        start: VirtAddr,
         /// End of the range (exclusive).
-        end: Hex,
+        end: VirtAddr,
     }
 
     /// A `_POOL_HEADER` block in a pool page.
     PoolBlock {
         /// The pool header's address.
-        header: Hex,
+        header: VirtAddr,
         /// The allocation's address, just past the header.
-        body: Hex,
+        body: VirtAddr,
         /// Block size in bytes, header included.
         size: u64,
         /// The previous block's size in bytes.
         previous_size: u64,
         /// The header's `PoolType` bits.
         pool_type: u8,
-        tag: Hex,
+        tag: Hex<u32>,
         /// The tag as its four characters.
         tag_name: String,
         allocated: bool,
@@ -197,32 +197,32 @@ shapes! {
     /// A large allocation from `PoolBigPageTable`.
     BigPoolAllocation {
         /// The allocation's address.
-        address: Hex,
+        address: VirtAddr,
         /// The requested address.
-        target: Hex,
+        target: VirtAddr,
         /// Allocation size in bytes.
         size: u64,
         /// The requested address's offset into the allocation.
         offset: Hex,
-        tag: Hex,
+        tag: Hex<u32>,
         /// The tag as its four characters.
         tag_name: String,
         /// The `PoolBigPageTable` entry's address.
-        entry: Hex,
+        entry: VirtAddr,
         /// The entry's index in `PoolBigPageTable`.
         index: u64,
         nonpaged: bool,
-        pattern: Hex,
-        pool_flags: Hex,
+        pattern: Hex<u8>,
+        pool_flags: Hex<u16>,
         slush_size: u16,
     }
 
     /// The pool page holding an address (`!pool`).
     PoolPage {
         /// The requested address.
-        target: Hex,
+        target: VirtAddr,
         /// The page's address.
-        page: Hex,
+        page: VirtAddr,
         /// How the page is laid out: its pool kind, or why it could not be
         /// decoded.
         page_kind: String,
@@ -245,7 +245,7 @@ shapes! {
     /// A pool header inconsistency.
     PoolProblem {
         /// The header it is found at.
-        header: Hex,
+        header: VirtAddr,
         /// What is wrong.
         message: String,
     }
@@ -253,9 +253,9 @@ shapes! {
     /// The blocks of the pool page holding an address, checked for header
     /// consistency (`!poolval`).
     PoolValidation {
-        address: Hex,
+        address: VirtAddr,
         /// The page's address.
-        page: Hex,
+        page: VirtAddr,
         /// The pool range holding the page, when known.
         region: Option<PoolRegion>,
         /// `chained` (the classic pool) or `segment heap`.
@@ -270,7 +270,7 @@ shapes! {
     /// One tag's pool usage (`!poolused`), in bytes. `None` when the tracker
     /// has no entry for that pool.
     PoolTagUsage {
-        tag: Hex,
+        tag: Hex<u32>,
         /// The tag as its four characters.
         tag_name: String,
         nonpaged_bytes: Option<u64>,
@@ -306,10 +306,10 @@ shapes! {
     PoolMatch {
         /// Where it was found: a pool range scan or the big-pool table.
         source: String,
-        address: Hex,
+        address: VirtAddr,
         /// Size in bytes.
         size: u64,
-        tag: Hex,
+        tag: Hex<u32>,
         /// The tag as its four characters.
         tag_name: String,
         allocated: bool,
@@ -317,7 +317,7 @@ shapes! {
         /// `NonPagedPool` or `PagedPool`, when known.
         pool_type: Option<&'static str>,
         /// The `PoolBigPageTable` entry, for a big-pool match.
-        table_entry: Option<Hex>,
+        table_entry: Option<VirtAddr>,
         /// The `PoolBigPageTable` index, for a big-pool match.
         index: Option<u64>,
     }
@@ -325,16 +325,16 @@ shapes! {
     /// How far `!poolfind` scanned one virtual pool range.
     PoolRangeScan {
         name: String,
-        start: Hex,
+        start: VirtAddr,
         /// End of the range (exclusive).
-        end: Hex,
+        end: VirtAddr,
         /// Pages the range spans, mapped or not.
         pages: u64,
         /// Mapped pages read.
         scanned_pages: u64,
         /// The mapped page the scan stopped at, unread, when the match bound
         /// or an interrupt ended it early.
-        stopped_at: Option<Hex>,
+        stopped_at: Option<VirtAddr>,
     }
 
     /// A pool-tag search (`!poolfind`).
@@ -357,14 +357,14 @@ shapes! {
 
     /// A pool tag.
     PoolTag {
-        value: Hex,
+        value: Hex<u32>,
         /// The tag as its four characters.
         name: String,
     }
 
     /// A decoded `_GENERAL_LOOKASIDE` list (`!lookaside`).
     LookasideList {
-        address: Hex,
+        address: VirtAddr,
         /// Position in the list walk.
         index: usize,
         tag: Diag<PoolTag>,
@@ -394,24 +394,24 @@ shapes! {
     /// A decoded `_MDL` header and the page-frame array that follows it
     /// (`!mdl`).
     Mdl {
-        address: Hex,
-        next: Hex,
+        address: VirtAddr,
+        next: VirtAddr,
         /// Bytes of header plus PFN array the allocation holds.
         size: u16,
-        flags: Hex,
+        flags: Hex<u16>,
         /// `MDL_*` names of the set `flags` bits, low bit first.
         flag_names: Vec<&'static str>,
-        process: Hex,
-        mapped_system_va: Hex,
-        start_va: Hex,
+        process: VirtAddr,
+        mapped_system_va: VirtAddr,
+        start_va: VirtAddr,
         byte_count: u32,
-        byte_offset: Hex,
+        byte_offset: Hex<u32>,
         /// Pages the described buffer spans.
         spanned_pages: u64,
         /// PFN slots `size` leaves after the header.
         capacity: u64,
         /// Where the PFN array starts (just past the header).
-        pfn_array: Hex,
+        pfn_array: VirtAddr,
         pfns: Vec<Hex>,
         /// Fewer PFNs are listed than the buffer spans: a smaller count was
         /// requested.
@@ -421,9 +421,9 @@ shapes! {
     /// A run of free system PTEs: clear bits in an allocation bitmap.
     SystemPteRun {
         /// Address of the run's first PTE.
-        pte: Hex,
+        pte: VirtAddr,
         /// Virtual address that PTE maps, when `MmPteBase` is known.
-        va: Option<Hex>,
+        va: Option<VirtAddr>,
         /// Length in PTEs.
         ptes: u64,
     }
@@ -433,16 +433,16 @@ shapes! {
     SystemPteType {
         /// The `MiState` path of the allocator, e.g. `Vs.SystemPteInfo`.
         name: String,
-        address: Hex,
+        address: VirtAddr,
         /// The `_MI_SYSTEM_VA_TYPE` name, without the `MiVa` prefix.
         va_type: Option<String>,
-        flags: Hex,
+        flags: Hex<u32>,
         /// PTEs each bitmap bit covers.
         ptes_per_bit: u64,
-        base_pte: Hex,
+        base_pte: VirtAddr,
         /// Virtual address `base_pte` maps; `None` without `MmPteBase`.
-        base_va: Option<Hex>,
-        bitmap: Hex,
+        base_va: Option<VirtAddr>,
+        bitmap: VirtAddr,
         bitmap_bits: u64,
         /// `TotalSystemPtes`: PTEs made available so far.
         total: u64,
@@ -483,7 +483,7 @@ shapes! {
         /// The module's image name.
         name: String,
         /// The module's base address.
-        base: Hex,
+        base: VirtAddr,
         /// The module's image size.
         size: u32,
         /// The address's offset from `base`.
@@ -493,9 +493,9 @@ shapes! {
     /// One VAD or kernel region (`proc.regions` items, address context).
     MemoryRegion {
         /// First address of the region.
-        start: Hex,
+        start: VirtAddr,
         /// End of the region (exclusive).
-        end: Hex,
+        end: VirtAddr,
         /// Size in bytes.
         size: u64,
         /// The VAD protection value (an index into the memory manager's
@@ -515,23 +515,23 @@ shapes! {
     /// `MEM_*`/`PAGE_*` value beside its name.
     MemoryBasicInformation {
         process: super::process::ProcessIdentity,
-        address: Hex,
-        base_address: Hex,
+        address: VirtAddr,
+        base_address: VirtAddr,
         /// The VAD's start; zero for free memory.
-        allocation_base: Hex,
-        allocation_protect: Hex,
+        allocation_base: VirtAddr,
+        allocation_protect: Hex<u32>,
         allocation_protect_name: String,
         /// Bytes from `base_address` to the first page whose state or
         /// protection differs, or the end of the VAD.
         region_size: Hex,
-        state: Hex,
+        state: Hex<u32>,
         state_name: &'static str,
-        protect: Hex,
+        protect: Hex<u32>,
         protect_name: String,
-        r#type: Hex,
+        r#type: Hex<u32>,
         type_name: &'static str,
         /// The VAD node; `None` for free memory.
-        vad: Option<Hex>,
+        vad: Option<VirtAddr>,
         /// The scan stopped at its bound or an unreadable page table before
         /// the region ended, so `region_size` is a lower bound.
         truncated: bool,
@@ -540,7 +540,7 @@ shapes! {
     /// What an address belongs to: a loaded module (and section), a process
     /// VAD region, a kernel region, or nothing recognized.
     AddressDescription {
-        address: Hex,
+        address: VirtAddr,
         /// The address space it was looked up in.
         dtb: Hex,
         /// `kernel-module`, `user-image`, `kernel-region`, `private`,
@@ -559,7 +559,7 @@ shapes! {
     /// A memory-search hit with symbol and location context.
     MemorySearchMatch {
         /// Where the pattern matched.
-        address: Hex,
+        address: VirtAddr,
         /// The match's offset from the search start.
         offset: Hex,
         /// The nearest symbol, if one resolved.
@@ -581,7 +581,7 @@ shapes! {
     /// A full page-table walk (`!pte`): the levels reached, top down (a
     /// large-page mapping short-circuits, so fewer levels).
     PteWalk {
-        address: Hex,
+        address: VirtAddr,
         /// The address space walked.
         dtb: Hex,
         levels: Vec<PageTableEntry>,
@@ -601,12 +601,12 @@ shapes! {
 
     /// System memory counters and per-process usage (`!memusage`).
     SystemMemoryUsage {
-        physical_pages: Diag<u64>,
-        available_pages: Diag<u64>,
-        committed_pages: Diag<u64>,
-        commit_limit_pages: Diag<u64>,
-        paged_pool_pages: Diag<u64>,
-        nonpaged_pool_bytes: Diag<u64>,
+        physical_pages: Metric<u64>,
+        available_pages: Metric<u64>,
+        committed_pages: Metric<u64>,
+        commit_limit_pages: Metric<u64>,
+        paged_pool_pages: Metric<u64>,
+        nonpaged_pool_bytes: Metric<u64>,
         processes: Vec<ProcessMemoryUsage>,
         /// Processes counted, including those past the listing bound.
         process_count: usize,
@@ -618,7 +618,7 @@ shapes! {
 fn vm_counter(counter: &target_mm::VmCounter) -> VmCounter {
     VmCounter {
         name: counter.name.clone(),
-        value: Diag::metric(&counter.value, |value| *value),
+        value: counter.value.clone(),
         unit: counter.unit,
     }
 }
@@ -628,9 +628,9 @@ pub fn vm(detail: &VmDetail) -> VmStatistics {
     VmStatistics {
         system: memory_usage(&detail.system),
         pool: VmPool {
-            nonpaged_pool_bytes: Diag::metric(&detail.pool.nonpaged_pool_bytes, |value| *value),
-            nonpaged_pool_maximum: Diag::metric(&detail.pool.nonpaged_pool_maximum, |value| *value),
-            paged_pool_pages: Diag::metric(&detail.pool.paged_pool_pages, |value| *value),
+            nonpaged_pool_bytes: detail.pool.nonpaged_pool_bytes.clone(),
+            nonpaged_pool_maximum: detail.pool.nonpaged_pool_maximum.clone(),
+            paged_pool_pages: detail.pool.paged_pool_pages.clone(),
             fields: detail.pool.fields.iter().map(vm_counter).collect(),
         },
         pte: VmPte {
@@ -639,13 +639,6 @@ pub fn vm(detail: &VmDetail) -> VmStatistics {
         page_files: detail.page_files.counters.iter().map(vm_counter).collect(),
         include_processes: detail.include_processes,
     }
-}
-
-fn diagnostic_opt<T, U>(
-    value: Option<&DiagnosticValue<U>>,
-    encode: impl FnOnce(&U) -> T,
-) -> Option<Diag<T>> {
-    value.map(|value| Diag::of(value, encode))
 }
 
 fn page_location_name(value: u8) -> &'static str {
@@ -675,41 +668,41 @@ pub fn pfn(detail: &PfnDetail) -> Pfn {
     let selector = match detail.selector {
         target_mm::PfnSelector::Pfn(value) => PfnSelector {
             kind: "pfn",
-            value: Hex(value),
+            value,
         },
         target_mm::PfnSelector::PhysicalAddress(value) => PfnSelector {
             kind: "physical_address",
-            value: Hex(value),
+            value,
         },
     };
     Pfn {
         selector,
-        pfn: Hex(detail.pfn),
-        record: Hex(detail.record.0),
-        physical_address: detail.physical_address.map(Hex),
-        pte_address: Diag::of(&detail.pte_address, |value| Hex(value.0)),
-        original_pte: Diag::of(&detail.original_pte, |value| Hex(*value)),
-        reference_count: Diag::of(&detail.reference_count, |value| *value),
-        flink: diagnostic_opt(detail.flink.as_ref(), |value| Hex(*value)),
-        blink: diagnostic_opt(detail.blink.as_ref(), |value| Hex(*value)),
-        node_flink_low: diagnostic_opt(detail.node_flink_low.as_ref(), |value| Hex(*value)),
-        node_blink_low: diagnostic_opt(detail.node_blink_low.as_ref(), |value| Hex(*value)),
-        share_count: diagnostic_opt(detail.share_count.as_ref(), |value| *value),
-        ws_index: diagnostic_opt(detail.ws_index.as_ref(), |value| Hex(*value)),
-        event: diagnostic_opt(detail.event.as_ref(), |value| Hex(*value)),
-        used_entry_count: Diag::of(&detail.used_entry_count, |value| *value),
-        page_color: Diag::of(&detail.page_color, |value| *value),
-        pte_frame: Diag::of(&detail.pte_frame, |value| Hex(*value)),
-        page_location: Diag::of(&detail.page_location, |value| PageLocation {
+        pfn: detail.pfn,
+        record: detail.record,
+        physical_address: detail.physical_address,
+        pte_address: detail.pte_address.clone(),
+        original_pte: detail.original_pte.clone(),
+        reference_count: detail.reference_count.clone(),
+        flink: detail.flink.clone(),
+        blink: detail.blink.clone(),
+        node_flink_low: detail.node_flink_low.clone(),
+        node_blink_low: detail.node_blink_low.clone(),
+        share_count: detail.share_count.clone(),
+        ws_index: detail.ws_index.clone(),
+        event: detail.event.clone(),
+        used_entry_count: detail.used_entry_count.clone(),
+        page_color: detail.page_color.clone(),
+        pte_frame: detail.pte_frame.clone(),
+        page_location: detail.page_location.map(|value| PageLocation {
             value: *value,
             name: page_location_name(*value),
         }),
-        modified: Diag::of(&detail.modified, |value| *value),
-        cache_attribute: Diag::of(&detail.cache_attribute, |value| CacheAttribute {
+        modified: detail.modified.clone(),
+        cache_attribute: detail.cache_attribute.map(|value| CacheAttribute {
             value: *value,
             name: cache_attribute_name(*value),
         }),
-        priority: Diag::of(&detail.priority, |value| *value),
+        priority: detail.priority.clone(),
     }
 }
 
@@ -730,9 +723,9 @@ fn table_level(
 ) -> PageTableEntry {
     PageTableEntry {
         level: level.name(),
-        address: Hex(address.0),
-        value: Hex(value),
-        pfn: Hex(attributes.pfn),
+        address,
+        value,
+        pfn: attributes.pfn,
         present: attributes.present,
         large_page: attributes.large_page,
         writable: attributes.writable,
@@ -745,10 +738,10 @@ fn table_level(
 /// `!vtop`'s translation.
 pub fn vtop(detail: &VtopDetail) -> AddressTranslation {
     AddressTranslation {
-        address: Hex(detail.address.0),
-        dtb: Hex(detail.dtb),
+        address: detail.address,
+        dtb: detail.dtb,
         levels: detail.levels.iter().map(vtop_level).collect(),
-        physical: detail.physical.map(Hex),
+        physical: detail.physical,
         large: detail.large,
         transition: detail.transition,
         section: detail.section,
@@ -757,7 +750,7 @@ pub fn vtop(detail: &VtopDetail) -> AddressTranslation {
 
 fn ptov_mapping(mapping: &PtovMapping) -> PhysicalMapping {
     PhysicalMapping {
-        virtual_address: Hex(mapping.virtual_address.0),
+        virtual_address: mapping.virtual_address,
         large: mapping.large,
     }
 }
@@ -765,8 +758,8 @@ fn ptov_mapping(mapping: &PtovMapping) -> PhysicalMapping {
 /// `!ptov`'s reverse mappings.
 pub fn ptov(detail: &PtovDetail) -> ReverseTranslation {
     ReverseTranslation {
-        physical: Hex(detail.physical),
-        dtb: Hex(detail.dtb),
+        physical: detail.physical,
+        dtb: detail.dtb,
         mappings: detail.mappings.iter().map(ptov_mapping).collect(),
         table_pages: detail.table_pages,
         bounded: detail.bounded,
@@ -777,40 +770,40 @@ pub fn ptov(detail: &PtovDetail) -> ReverseTranslation {
 fn pool_region(region: &PoolRegionDetail) -> PoolRegion {
     PoolRegion {
         name: region.name.clone(),
-        start: Hex(region.start.0),
-        end: Hex(region.end.0),
+        start: region.start,
+        end: region.end,
     }
 }
 
 fn pool_block(block: &PoolBlockDetail) -> PoolBlock {
     PoolBlock {
-        header: Hex(block.header.0),
-        body: Hex(block.body.0),
+        header: block.header,
+        body: block.body,
         size: block.size,
         previous_size: block.previous_size,
         pool_type: block.pool_type,
-        tag: Hex(block.tag.into()),
+        tag: block.tag,
         tag_name: block.tag_name.clone(),
         allocated: block.allocated,
         marked: block.marked,
         state: block.state.clone(),
-        target_offset: block.target_offset.map(Hex),
+        target_offset: block.target_offset,
     }
 }
 
 fn big_pool(big: &BigPoolDetail) -> BigPoolAllocation {
     BigPoolAllocation {
-        address: Hex(big.address.0),
-        target: Hex(big.target.0),
+        address: big.address,
+        target: big.target,
         size: big.size,
-        offset: Hex(big.offset),
-        tag: Hex(big.tag.into()),
+        offset: big.offset,
+        tag: big.tag,
         tag_name: big.tag_name.clone(),
-        entry: Hex(big.entry.0),
+        entry: big.entry,
         index: big.index,
         nonpaged: big.nonpaged,
-        pattern: Hex(big.pattern.into()),
-        pool_flags: Hex(big.pool_flags.into()),
+        pattern: big.pattern,
+        pool_flags: big.pool_flags,
         slush_size: big.slush_size,
     }
 }
@@ -818,8 +811,8 @@ fn big_pool(big: &BigPoolDetail) -> BigPoolAllocation {
 /// `!pool`'s page.
 pub fn pool_page(detail: &PoolPageDetail) -> PoolPage {
     PoolPage {
-        target: Hex(detail.target.0),
-        page: Hex(detail.page.0),
+        target: detail.target,
+        page: detail.page,
         page_kind: detail.page_kind.clone(),
         region: detail.region.as_ref().map(pool_region),
         blocks: detail.blocks.iter().map(pool_block).collect(),
@@ -834,13 +827,13 @@ pub fn pool_page(detail: &PoolPageDetail) -> PoolPage {
 /// `!poolval`'s check.
 pub fn pool_validation(detail: &PoolValidationDetail) -> PoolValidation {
     PoolValidation {
-        address: Hex(detail.address.0),
-        page: Hex(detail.page.0),
+        address: detail.address,
+        page: detail.page,
         region: detail.region.as_ref().map(pool_region),
         layout: detail.layout.clone(),
         valid: detail.problem.is_none(),
         problem: detail.problem.as_ref().map(|problem| PoolProblem {
-            header: Hex(problem.header.0),
+            header: problem.header,
             message: problem.message.clone(),
         }),
         blocks: detail.blocks.iter().map(pool_block).collect(),
@@ -849,9 +842,9 @@ pub fn pool_validation(detail: &PoolValidationDetail) -> PoolValidation {
 
 fn usage_row(row: &PoolUsageRow, include_counts: bool) -> PoolTagUsage {
     let bytes = |value: Option<i64>| value.map(|value| value.max(0) as u64);
-    let count = |value: Option<i64>| Omit(include_counts.then(|| bytes(value)));
+    let count = |value: Option<i64>| include_counts.then(|| bytes(value));
     PoolTagUsage {
-        tag: Hex(row.tag.into()),
+        tag: row.tag,
         tag_name: tag_string(row.tag),
         nonpaged_bytes: bytes(row.nonpaged_bytes),
         paged_bytes: bytes(row.paged_bytes),
@@ -882,14 +875,14 @@ pub fn pool_usage(detail: &PoolUsageDetail) -> PoolUsage {
 fn pool_match(m: &PoolFindMatch) -> PoolMatch {
     PoolMatch {
         source: m.source.clone(),
-        address: Hex(m.address.0),
+        address: m.address,
         size: m.size,
-        tag: Hex(m.tag.into()),
+        tag: m.tag,
         tag_name: m.tag_name.clone(),
         allocated: m.allocated,
         state: m.state.clone(),
         pool_type: m.pool_type.map(PoolType::name),
-        table_entry: m.table_entry.map(|value| Hex(value.0)),
+        table_entry: m.table_entry,
         index: m.index,
     }
 }
@@ -897,11 +890,11 @@ fn pool_match(m: &PoolFindMatch) -> PoolMatch {
 fn pool_range_scan(range: &PoolFindRange) -> PoolRangeScan {
     PoolRangeScan {
         name: range.name.clone(),
-        start: Hex(range.start.0),
-        end: Hex(range.end.0),
+        start: range.start,
+        end: range.end,
         pages: range.pages,
         scanned_pages: range.scanned_pages,
-        stopped_at: range.stopped_at.map(|at| Hex(at.0)),
+        stopped_at: range.stopped_at,
     }
 }
 
@@ -922,17 +915,17 @@ pub fn pool_find(detail: &PoolFindDetail) -> PoolSearch {
 /// One lookaside list (`!lookaside <address>`).
 pub fn lookaside(detail: &LookasideDetail) -> LookasideList {
     LookasideList {
-        address: Hex(detail.address.0),
+        address: detail.address,
         index: detail.index,
-        tag: Diag::of(&detail.tag, |value| PoolTag {
-            value: Hex((*value).into()),
+        tag: detail.tag.map(|value| PoolTag {
+            value: (*value),
             name: tag_string(*value),
         }),
-        size: Diag::of(&detail.size, |value| *value),
-        depth: Diag::of(&detail.depth, |value| *value),
-        total_allocates: Diag::of(&detail.total_allocates, |value| *value),
-        total_frees: Diag::of(&detail.total_frees, |value| *value),
-        allocate_misses: Diag::of(&detail.allocate_misses, |value| *value),
+        size: detail.size.clone(),
+        depth: detail.depth.clone(),
+        total_allocates: detail.total_allocates.clone(),
+        total_frees: detail.total_frees.clone(),
+        allocate_misses: detail.allocate_misses.clone(),
     }
 }
 
@@ -952,20 +945,20 @@ pub fn lookaside_lists(detail: &LookasideListsDetail) -> LookasideLists {
 /// `!mdl`'s header and PFNs.
 pub fn mdl(detail: &MdlDetail) -> Mdl {
     Mdl {
-        address: Hex(detail.address.0),
-        next: Hex(detail.next.0),
+        address: detail.address,
+        next: detail.next,
         size: detail.size,
-        flags: Hex(detail.flags.into()),
+        flags: detail.flags,
         flag_names: detail.flag_names.clone(),
-        process: Hex(detail.process.0),
-        mapped_system_va: Hex(detail.mapped_system_va.0),
-        start_va: Hex(detail.start_va.0),
+        process: detail.process,
+        mapped_system_va: detail.mapped_system_va,
+        start_va: detail.start_va,
         byte_count: detail.byte_count,
-        byte_offset: Hex(detail.byte_offset.into()),
+        byte_offset: detail.byte_offset,
         spanned_pages: detail.spanned_pages,
         capacity: detail.capacity,
-        pfn_array: Hex(detail.pfn_array.0),
-        pfns: detail.pfns.iter().copied().map(Hex).collect(),
+        pfn_array: detail.pfn_array,
+        pfns: detail.pfns.to_vec(),
         truncated: detail.truncated,
     }
 }
@@ -973,13 +966,13 @@ pub fn mdl(detail: &MdlDetail) -> Mdl {
 fn system_pte_type(detail: &SystemPteTypeDetail) -> SystemPteType {
     SystemPteType {
         name: detail.name.clone(),
-        address: Hex(detail.address.0),
+        address: detail.address,
         va_type: detail.va_type.clone(),
-        flags: Hex(detail.flags.into()),
+        flags: detail.flags,
         ptes_per_bit: detail.ptes_per_bit,
-        base_pte: Hex(detail.base_pte.0),
-        base_va: detail.base_va.map(|va| Hex(va.0)),
-        bitmap: Hex(detail.bitmap.0),
+        base_pte: detail.base_pte,
+        base_va: detail.base_va,
+        bitmap: detail.bitmap,
         bitmap_bits: detail.bitmap_bits,
         total: detail.total,
         free: detail.free,
@@ -994,8 +987,8 @@ fn system_pte_type(detail: &SystemPteTypeDetail) -> SystemPteType {
             .free_runs
             .iter()
             .map(|run| SystemPteRun {
-                pte: Hex(run.pte.0),
-                va: run.va.map(|va| Hex(va.0)),
+                pte: run.pte,
+                va: run.va,
                 ptes: run.ptes,
             })
             .collect(),
@@ -1007,7 +1000,7 @@ fn system_pte_type(detail: &SystemPteTypeDetail) -> SystemPteType {
 /// `!sysptes`'s allocators.
 pub fn system_ptes(detail: &SystemPtesDetail) -> SystemPtes {
     SystemPtes {
-        flags: Hex(detail.flags),
+        flags: detail.flags,
         types: detail.types.iter().map(system_pte_type).collect(),
         total: detail.total,
         free: detail.free,
@@ -1018,17 +1011,17 @@ pub fn system_ptes(detail: &SystemPtesDetail) -> SystemPtes {
 fn address_module(m: &target_mm::AddressModule) -> AddressModule {
     AddressModule {
         name: m.name.clone(),
-        base: Hex(m.base.0),
+        base: m.base,
         size: m.size,
-        offset: Hex(m.offset),
+        offset: m.offset,
     }
 }
 
 /// One VAD or kernel region.
 pub fn memory_region(r: &MemoryRegionInfo) -> MemoryRegion {
     MemoryRegion {
-        start: Hex(r.start.0),
-        end: Hex(r.end.0),
+        start: r.start,
+        end: r.end,
         size: r.size(),
         protection: r.protection.map(VadProtection::raw),
         vad_type: r.vad_type.map(VadType::raw),
@@ -1042,19 +1035,19 @@ pub fn memory_region(r: &MemoryRegionInfo) -> MemoryRegion {
 pub fn vprot(detail: &VprotDetail) -> MemoryBasicInformation {
     MemoryBasicInformation {
         process: process(&detail.process),
-        address: Hex(detail.address.0),
-        base_address: Hex(detail.base_address.0),
-        allocation_base: Hex(detail.allocation_base.0),
-        allocation_protect: Hex(detail.allocation_protect.into()),
+        address: detail.address,
+        base_address: detail.base_address,
+        allocation_base: detail.allocation_base,
+        allocation_protect: detail.allocation_protect,
         allocation_protect_name: page_protection_name(detail.allocation_protect),
-        region_size: Hex(detail.region_size),
-        state: Hex(detail.state.into()),
+        region_size: detail.region_size,
+        state: detail.state,
         state_name: memory_state_name(detail.state),
-        protect: Hex(detail.protect.into()),
+        protect: detail.protect,
         protect_name: page_protection_name(detail.protect),
-        r#type: Hex(detail.kind.into()),
+        r#type: detail.kind,
         type_name: memory_type_name(detail.kind),
-        vad: detail.vad.map(|vad| Hex(vad.0)),
+        vad: detail.vad,
         truncated: detail.truncated,
     }
 }
@@ -1062,8 +1055,8 @@ pub fn vprot(detail: &VprotDetail) -> MemoryBasicInformation {
 /// What an address belongs to (`!address`).
 pub fn address_description(d: &target_mm::AddressDescription) -> AddressDescription {
     AddressDescription {
-        address: Hex(d.address.0),
-        dtb: Hex(d.dtb),
+        address: d.address,
+        dtb: d.dtb,
         kind: d.kind,
         module: d.module.as_ref().map(address_module),
         section: d.section.clone(),
@@ -1076,8 +1069,8 @@ pub fn address_description(d: &target_mm::AddressDescription) -> AddressDescript
 pub fn memory_search_match(m: &target::MemorySearchMatch) -> MemorySearchMatch {
     let d = &m.description;
     MemorySearchMatch {
-        address: Hex(m.address.0),
-        offset: Hex(m.offset),
+        address: m.address,
+        offset: m.offset,
         symbol: m.symbol.clone(),
         kind: d.kind,
         module: d.module.as_ref().map(address_module),
@@ -1096,8 +1089,8 @@ pub fn undescribed_search_match(
     kind: &'static str,
 ) -> MemorySearchMatch {
     MemorySearchMatch {
-        address: Hex(address),
-        offset: Hex(offset),
+        address: VirtAddr(address),
+        offset,
         symbol,
         kind,
         module: None,
@@ -1110,8 +1103,8 @@ pub fn undescribed_search_match(
 /// `!pte`'s walk.
 pub fn pte_walk(walk: &target_mm::PteWalk) -> PteWalk {
     PteWalk {
-        address: Hex(walk.address.0),
-        dtb: Hex(walk.dtb),
+        address: walk.address,
+        dtb: walk.dtb,
         levels: walk.levels().map(pte_level).collect(),
     }
 }
@@ -1119,25 +1112,25 @@ pub fn pte_walk(walk: &target_mm::PteWalk) -> PteWalk {
 fn process_memory_usage(usage: &target_mm::ProcessMemoryUsage) -> ProcessMemoryUsage {
     ProcessMemoryUsage {
         process: process(&usage.process),
-        virtual_size: Diag::of(&usage.virtual_size, |value| *value),
-        peak_virtual_size: Diag::of(&usage.peak_virtual_size, |value| *value),
-        working_set_size: Diag::of(&usage.working_set_size, |value| *value),
-        peak_working_set_size: Diag::of(&usage.peak_working_set_size, |value| *value),
-        pagefile_usage: Diag::of(&usage.pagefile_usage, |value| *value),
-        peak_pagefile_usage: Diag::of(&usage.peak_pagefile_usage, |value| *value),
-        private_usage: Diag::of(&usage.private_usage, |value| *value),
+        virtual_size: usage.virtual_size.clone(),
+        peak_virtual_size: usage.peak_virtual_size.clone(),
+        working_set_size: usage.working_set_size.clone(),
+        peak_working_set_size: usage.peak_working_set_size.clone(),
+        pagefile_usage: usage.pagefile_usage.clone(),
+        peak_pagefile_usage: usage.peak_pagefile_usage.clone(),
+        private_usage: usage.private_usage.clone(),
     }
 }
 
 /// System memory counters and per-process usage.
 pub fn memory_usage(summary: &SystemMemorySummary) -> SystemMemoryUsage {
     SystemMemoryUsage {
-        physical_pages: Diag::metric(&summary.physical_pages, |value| *value),
-        available_pages: Diag::metric(&summary.available_pages, |value| *value),
-        committed_pages: Diag::metric(&summary.committed_pages, |value| *value),
-        commit_limit_pages: Diag::metric(&summary.commit_limit_pages, |value| *value),
-        paged_pool_pages: Diag::metric(&summary.paged_pool_pages, |value| *value),
-        nonpaged_pool_bytes: Diag::metric(&summary.nonpaged_pool_bytes, |value| *value),
+        physical_pages: summary.physical_pages.clone(),
+        available_pages: summary.available_pages.clone(),
+        committed_pages: summary.committed_pages.clone(),
+        commit_limit_pages: summary.commit_limit_pages.clone(),
+        paged_pool_pages: summary.paged_pool_pages.clone(),
+        nonpaged_pool_bytes: summary.nonpaged_pool_bytes.clone(),
         processes: summary.processes.iter().map(process_memory_usage).collect(),
         process_count: summary.process_count,
         truncated: summary.truncated,

@@ -8,7 +8,7 @@ shapes! {
     /// A process's PEB heap list (`!heap` / `!heap -s`).
     HeapSummary {
         /// The process environment block the list was read from.
-        peb: Hex,
+        peb: VirtAddr,
         /// The list was longer than the walk limit and was cut short.
         truncated: bool,
         heaps: Vec<HeapOverview>,
@@ -18,7 +18,7 @@ shapes! {
     HeapOverview {
         /// Position in the PEB heap list.
         index: usize,
-        address: Hex,
+        address: VirtAddr,
         /// `nt`, `segment`, or `unknown (<signature>)`.
         kind: String,
         /// Unavailable when the heap's signature, layout, memory, or symbols
@@ -29,7 +29,7 @@ shapes! {
     /// Usage totals of one heap.
     HeapStats {
         /// `_HEAP.Flags` (NT heap) or `GlobalFlags` (segment heap).
-        flags: Hex,
+        flags: Hex<u32>,
         /// Reserved bytes.
         reserved: u64,
         /// Committed bytes.
@@ -42,7 +42,7 @@ shapes! {
         virtual_blocks: u64,
         /// NT-heap front-end (LFH) address; None when there is none or for a
         /// segment heap.
-        front_end: Option<Hex>,
+        front_end: Option<VirtAddr>,
         /// NT-heap `FrontEndHeapType`; 0 for a segment heap.
         front_end_type: u8,
         /// Segment-heap VS page ranges; 0 for an NT heap.
@@ -59,7 +59,7 @@ shapes! {
     HeapDetail {
         /// Position in the PEB heap list.
         index: usize,
-        address: Hex,
+        address: VirtAddr,
         /// `nt`, `segment`, or `unknown (<signature>)`.
         kind: String,
         /// Whether entries, chunks, and blocks were walked and listed.
@@ -74,11 +74,11 @@ shapes! {
 
     /// An NT (`_HEAP`) heap.
     NtHeap {
-        address: Hex,
+        address: VirtAddr,
         /// `_HEAP.Flags`.
-        flags: Hex,
+        flags: Hex<u32>,
         /// `_HEAP.ForceFlags`.
-        force_flags: Hex,
+        force_flags: Hex<u32>,
         /// Size of `_HEAP_ENTRY` in bytes: 16 on x64, 8 on x86; every block
         /// starts with one.
         granule: u64,
@@ -90,7 +90,7 @@ shapes! {
         /// `_HEAP.VirtualMemoryThreshold`, in granules.
         virtual_threshold: u32,
         /// The front-end (LFH) heap; None when there is none.
-        front_end: Option<Hex>,
+        front_end: Option<VirtAddr>,
         /// `_HEAP.FrontEndHeapType`.
         front_end_type: u8,
         /// Blocks too large for a segment, allocated on their own.
@@ -101,13 +101,13 @@ shapes! {
     /// An NT-heap block allocated on its own (`_HEAP_VIRTUAL_ALLOC_ENTRY`).
     NtVirtualBlock {
         /// The block's header.
-        entry: Hex,
+        entry: VirtAddr,
         /// Committed bytes.
         commit_size: u64,
         /// Reserved bytes.
         reserve_size: u64,
         /// First user byte.
-        user: Hex,
+        user: VirtAddr,
         /// Always `virtual`.
         kind: &'static str,
     }
@@ -115,17 +115,17 @@ shapes! {
     /// One `_HEAP_SEGMENT` of an NT heap.
     NtHeapSegment {
         /// The segment header.
-        address: Hex,
+        address: VirtAddr,
         /// First byte the segment spans.
-        base: Hex,
+        base: VirtAddr,
         /// Byte past the segment's last page.
         end: Hex,
         pages: u32,
         uncommitted_pages: u32,
         /// Uncommitted ranges the entry chain skips over.
         uncommitted: Vec<NtUncommittedRange>,
-        first_entry: Hex,
-        last_valid_entry: Hex,
+        first_entry: VirtAddr,
+        last_valid_entry: VirtAddr,
         /// The segment's entry chain; empty unless entries were listed.
         entries: Vec<NtHeapEntry>,
         /// Where and why the chain walk ended before `last_valid_entry`; None
@@ -142,20 +142,20 @@ shapes! {
 
     /// Where a heap walk had to stop, and why.
     HeapWalkStop {
-        address: Hex,
+        address: VirtAddr,
         reason: String,
     }
 
     /// An NT-heap entry (`_HEAP_ENTRY`), decoded from its header.
     NtHeapEntry {
         /// The entry header.
-        address: Hex,
+        address: VirtAddr,
         /// Bytes, header included.
         size: u64,
         /// Bytes of the entry before it.
         previous_size: u64,
         /// The header's flags byte.
-        flags: Hex,
+        flags: Hex<u8>,
         /// `busy` or `free`.
         state: &'static str,
         /// Always `entry`.
@@ -185,14 +185,14 @@ shapes! {
     /// A legacy-LFH user block region living inside one busy NT-heap entry.
     NtLfhUserBlocks {
         /// The `_HEAP_USERDATA_HEADER`.
-        header: Hex,
+        header: VirtAddr,
         /// The owning `_HEAP_SUBSEGMENT`.
-        subsegment: Hex,
+        subsegment: VirtAddr,
         /// Bytes per block.
         block_size: u64,
         block_count: u32,
         busy_count: u32,
-        first_block: Hex,
+        first_block: VirtAddr,
         /// Bytes between consecutive blocks.
         stride: u64,
         /// One bit per block, set when busy: block `i` is byte `i / 8`, bit
@@ -205,13 +205,13 @@ shapes! {
     /// One block of a heap walk: an NT legacy-LFH block, a segment-heap VS
     /// chunk, or a segment-heap LFH block.
     HeapBlock {
-        address: Hex,
+        address: VirtAddr,
         /// Bytes, header included.
         size: u64,
         /// Bytes of the block before it; None where blocks do not record it.
         previous_size: Option<u64>,
         /// Header flags; None where blocks have no header of their own.
-        flags: Option<Hex>,
+        flags: Option<Hex<u32>>,
         /// `busy` or `free`.
         state: &'static str,
         /// `nt-lfh-block`, `vs-chunk`, or `lfh-block`.
@@ -221,7 +221,7 @@ shapes! {
         /// Whether the header checksum held; None where there is no checksum.
         checksum_ok: Option<bool>,
         /// First user byte.
-        user: Option<Hex>,
+        user: Option<VirtAddr>,
         /// Bytes available to the caller.
         user_size: Option<u64>,
         /// Position in its region or subsegment; None for VS chunks.
@@ -230,9 +230,9 @@ shapes! {
 
     /// A segment heap (`_SEGMENT_HEAP`).
     SegmentHeap {
-        address: Hex,
+        address: VirtAddr,
         /// `_SEGMENT_HEAP.GlobalFlags`.
-        global_flags: Hex,
+        global_flags: Hex<u32>,
         reserved_pages: u64,
         committed_pages: u64,
         free_committed_pages: u64,
@@ -276,13 +276,13 @@ shapes! {
 
     /// A page segment (`_HEAP_PAGE_SEGMENT`) of a segment context.
     SegmentHeapPageSegment {
-        address: Hex,
+        address: VirtAddr,
         ranges: Vec<HeapPageRange>,
     }
 
     /// A page range (`_HEAP_PAGE_RANGE_DESCRIPTOR`) of a page segment.
     HeapPageRange {
-        address: Hex,
+        address: VirtAddr,
         /// Bytes: `units * unit_size`.
         size: u64,
         /// Byte past the range.
@@ -291,7 +291,7 @@ shapes! {
         /// Bytes per unit.
         unit_size: u64,
         /// The descriptor's `RangeFlags`.
-        flags: Hex,
+        flags: Hex<u8>,
         committed_pages: u8,
         /// Slack at the end of the range, in bytes.
         unused_bytes: u32,
@@ -314,7 +314,7 @@ shapes! {
 
     /// A segment-heap variable-size subsegment (`_HEAP_VS_SUBSEGMENT`).
     VsSubsegment {
-        address: Hex,
+        address: VirtAddr,
         /// The subsegment's signature matched.
         signature_ok: bool,
         /// The subsegment's chunks; empty unless entries were listed.
@@ -325,7 +325,7 @@ shapes! {
 
     /// A segment-heap LFH subsegment (`_HEAP_LFH_SUBSEGMENT`).
     LfhSubsegment {
-        address: Hex,
+        address: VirtAddr,
         /// Bytes per block.
         block_size: u64,
         block_count: u32,
@@ -333,7 +333,7 @@ shapes! {
         busy_count: u32,
         /// The LFH bucket the subsegment serves.
         bucket: u16,
-        first_block: Hex,
+        first_block: VirtAddr,
         /// Blocks per `bitmap` word.
         blocks_per_word: u32,
         /// `BlockBitmap` words (a qword on x64, a dword on x86); a block's low
@@ -345,7 +345,7 @@ shapes! {
 
     /// A segment-heap VS chunk, decoded from its header.
     VsChunk {
-        address: Hex,
+        address: VirtAddr,
         /// Bytes, header included.
         size: u64,
         /// Bytes of the chunk before it.
@@ -370,8 +370,8 @@ shapes! {
     /// A segment-heap large allocation (`_HEAP_LARGE_ALLOC_DATA`).
     HeapLargeAllocation {
         /// The allocation's metadata record.
-        metadata: Hex,
-        address: Hex,
+        metadata: VirtAddr,
+        address: VirtAddr,
         /// Bytes: `pages` pages.
         size: u64,
         pages: u64,
@@ -386,7 +386,7 @@ shapes! {
     /// `Heaps.find_block()`).
     HeapBlockSearch {
         /// The address searched for.
-        address: Hex,
+        address: VirtAddr,
         /// A heap holds the address.
         found: bool,
         /// A heap list or walk was cut at its limit, so the search may have
@@ -404,7 +404,7 @@ shapes! {
     HeapIdentity {
         /// Position in the PEB heap list.
         index: usize,
-        address: Hex,
+        address: VirtAddr,
         /// `nt`, `segment`, or `unknown (<signature>)`.
         kind: String,
     }
@@ -414,7 +414,7 @@ shapes! {
         /// Always `nt-entry`.
         kind: &'static str,
         /// The `_HEAP_SEGMENT` holding the entry.
-        segment: Hex,
+        segment: VirtAddr,
         entry: NtHeapEntry,
     }
 
@@ -423,14 +423,14 @@ shapes! {
         /// Always `nt-lfh-block`.
         kind: &'static str,
         /// The `_HEAP_SEGMENT` holding the region.
-        segment: Hex,
+        segment: VirtAddr,
         /// The busy entry holding the region.
         entry: NtHeapEntry,
         /// The user block region (its `blocks` left empty).
         region: NtLfhUserBlocks,
         /// The block's position in the region.
         index: u32,
-        address: Hex,
+        address: VirtAddr,
         /// Bytes per block.
         size: u64,
         /// `busy` or `free`.
@@ -443,17 +443,17 @@ shapes! {
     HeapMatchNtVirtual {
         /// Always `nt-virtual`.
         kind: &'static str,
-        address: Hex,
+        address: VirtAddr,
         /// Bytes: the larger of the reserve and commit sizes.
         size: u64,
         /// Always `virtual`.
         state: &'static str,
         /// The block's header.
-        entry: Hex,
+        entry: VirtAddr,
         commit_size: u64,
         reserve_size: u64,
         /// First user byte.
-        user: Hex,
+        user: VirtAddr,
     }
 
     /// An address inside an NT-heap segment but on no entry: the heap header,
@@ -461,7 +461,7 @@ shapes! {
     HeapMatchNtSegment {
         /// Always `nt-segment`.
         kind: &'static str,
-        segment: Hex,
+        segment: VirtAddr,
         /// Where and why the entry walk stopped; None when it did not.
         stopped: Option<HeapWalkStop>,
     }
@@ -473,7 +473,7 @@ shapes! {
         kind: &'static str,
         range: HeapPageRange,
         /// First user byte.
-        user: Hex,
+        user: VirtAddr,
         /// Bytes in the range.
         size: u64,
     }
@@ -484,7 +484,7 @@ shapes! {
         kind: &'static str,
         range: HeapPageRange,
         /// The `_HEAP_VS_SUBSEGMENT` holding the chunk.
-        subsegment: Hex,
+        subsegment: VirtAddr,
         chunk: VsChunk,
     }
 
@@ -555,13 +555,13 @@ fn busy_state(busy: bool) -> &'static str {
 
 fn heap_summary_stats(stats: &target::HeapSummaryStats) -> HeapStats {
     HeapStats {
-        flags: Hex(stats.flags.into()),
+        flags: stats.flags,
         reserved: stats.reserved,
         committed: stats.committed,
         free: stats.free,
         segments: stats.segments,
         virtual_blocks: stats.virtual_blocks,
-        front_end: stats.front_end.map(|address| Hex(address.0)),
+        front_end: stats.front_end,
         front_end_type: stats.front_end_type,
         vs_subsegments: stats.vs_subsegments,
         lfh_subsegments: stats.lfh_subsegments,
@@ -572,16 +572,16 @@ fn heap_summary_stats(stats: &target::HeapSummaryStats) -> HeapStats {
 
 pub fn heap_summary(summary: &target::HeapSummaryDetail) -> HeapSummary {
     HeapSummary {
-        peb: Hex(summary.peb.0),
+        peb: summary.peb,
         truncated: summary.truncated,
         heaps: summary
             .heaps
             .iter()
             .map(|item| HeapOverview {
                 index: item.index,
-                address: Hex(item.address.0),
+                address: item.address,
                 kind: heap_kind(item.kind),
-                stats: Diag::of(&item.stats, heap_summary_stats),
+                stats: item.stats.map(heap_summary_stats),
             })
             .collect(),
     }
@@ -589,34 +589,34 @@ pub fn heap_summary(summary: &target::HeapSummaryDetail) -> HeapSummary {
 
 fn nt_entry(entry: &target::NtEntry) -> NtHeapEntry {
     NtHeapEntry {
-        address: Hex(entry.address.0),
+        address: entry.address,
         size: entry.size,
         previous_size: entry.previous_size,
-        flags: Hex(entry.flags.into()),
+        flags: entry.flags,
         state: busy_state(entry.busy()),
         kind: "entry",
         unused_bytes: entry.unused_bytes,
         checksum_ok: entry.checksum_ok,
         granule: entry.granule,
-        user: Hex(entry.user().0),
+        user: entry.user().0,
         user_size: entry.user_size(),
-        lfh: Omit(None),
-        lfh_error: Omit(None),
-        lfh_truncated: Omit(None),
+        lfh: None,
+        lfh_error: None,
+        lfh_truncated: None,
     }
 }
 
 fn heap_block(block: &target::HeapBlockDetail) -> HeapBlock {
     HeapBlock {
-        address: Hex(block.address.0),
+        address: block.address,
         size: block.size,
         previous_size: block.previous_size,
-        flags: block.flags.map(|flags| Hex(flags.into())),
+        flags: block.flags,
         state: block.state,
         kind: block.kind,
         unused_bytes: block.unused_bytes,
         checksum_ok: block.checksum_ok,
-        user: block.user.map(|address| Hex(address.0)),
+        user: block.user,
         user_size: block.user_size,
         index: block.index,
     }
@@ -630,12 +630,12 @@ fn heap_blocks(blocks: &[target::HeapBlockDetail]) -> Vec<HeapBlock> {
 
 fn nt_lfh(region: &target::NtUserBlocks, blocks: &[target::HeapBlockDetail]) -> NtLfhUserBlocks {
     NtLfhUserBlocks {
-        header: Hex(region.header.0),
-        subsegment: Hex(region.subsegment.0),
+        header: region.header,
+        subsegment: region.subsegment,
         block_size: region.block_size,
         block_count: region.block_count,
         busy_count: region.busy_count(),
-        first_block: Hex(region.first_block.0),
+        first_block: region.first_block,
         stride: region.stride,
         busy_bitmap: region.busy.clone(),
         blocks: heap_blocks(blocks),
@@ -644,21 +644,21 @@ fn nt_lfh(region: &target::NtUserBlocks, blocks: &[target::HeapBlockDetail]) -> 
 
 fn nt_entry_detail(entry: &target::NtEntryDetail) -> NtHeapEntry {
     NtHeapEntry {
-        lfh: Omit(Some(
+        lfh: Some(
             entry
                 .lfh
                 .as_ref()
                 .map(|region| nt_lfh(region, &entry.lfh_blocks)),
-        )),
-        lfh_error: Omit(Some(entry.lfh_error.clone())),
-        lfh_truncated: Omit(Some(entry.lfh_truncated)),
+        ),
+        lfh_error: Some(entry.lfh_error.clone()),
+        lfh_truncated: Some(entry.lfh_truncated),
         ..nt_entry(&entry.entry)
     }
 }
 
 fn walk_stop(address: VirtAddr, reason: &str) -> HeapWalkStop {
     HeapWalkStop {
-        address: Hex(address.0),
+        address,
         reason: reason.to_string(),
     }
 }
@@ -666,21 +666,21 @@ fn walk_stop(address: VirtAddr, reason: &str) -> HeapWalkStop {
 fn nt_segment(segment: &target::NtSegmentDetail) -> NtHeapSegment {
     let raw = &segment.segment;
     NtHeapSegment {
-        address: Hex(raw.address.0),
-        base: Hex(raw.base.0),
-        end: Hex(raw.end().0),
+        address: raw.address,
+        base: raw.base,
+        end: raw.end().0,
         pages: raw.pages,
         uncommitted_pages: raw.uncommitted_pages,
         uncommitted: raw
             .uncommitted
             .iter()
             .map(|range| NtUncommittedRange {
-                start: Hex(range.start),
-                end: Hex(range.end),
+                start: range.start,
+                end: range.end,
             })
             .collect(),
-        first_entry: Hex(raw.first_entry.0),
-        last_valid_entry: Hex(raw.last_valid_entry.0),
+        first_entry: raw.first_entry,
+        last_valid_entry: raw.last_valid_entry,
         entries: segment.entries.iter().map(nt_entry_detail).collect(),
         stopped: segment
             .stopped
@@ -692,23 +692,23 @@ fn nt_segment(segment: &target::NtSegmentDetail) -> NtHeapSegment {
 fn nt_heap(detail: &target::NtHeapDetail) -> NtHeap {
     let heap = &detail.heap;
     NtHeap {
-        address: Hex(heap.address.0),
-        flags: Hex(heap.flags.into()),
-        force_flags: Hex(heap.force_flags.into()),
+        address: heap.address,
+        flags: heap.flags,
+        force_flags: heap.force_flags,
         granule: heap.granule,
-        encoding: heap.encoding.map(Hex),
+        encoding: heap.encoding,
         total_free_units: heap.total_free_units,
         virtual_threshold: heap.virtual_threshold,
-        front_end: heap.front_end.map(|address| Hex(address.0)),
+        front_end: heap.front_end,
         front_end_type: heap.front_end_type,
         virtual_blocks: heap
             .virtual_blocks
             .iter()
             .map(|block| NtVirtualBlock {
-                entry: Hex(block.entry.0),
+                entry: block.entry,
                 commit_size: block.commit_size,
                 reserve_size: block.reserve_size,
-                user: Hex(block.user.0),
+                user: block.user,
                 kind: "virtual",
             })
             .collect(),
@@ -718,7 +718,7 @@ fn nt_heap(detail: &target::NtHeapDetail) -> NtHeap {
 
 fn vs_chunk(chunk: &target::VsChunk) -> VsChunk {
     VsChunk {
-        address: Hex(chunk.address.0),
+        address: chunk.address,
         size: chunk.size,
         previous_size: chunk.previous_size,
         flags: None,
@@ -726,7 +726,7 @@ fn vs_chunk(chunk: &target::VsChunk) -> VsChunk {
         kind: "vs-chunk",
         unused_bytes: chunk.unused_bytes,
         granule: chunk.granule,
-        user: Hex(chunk.user().0),
+        user: chunk.user().0,
         user_size: chunk.user_size(),
     }
 }
@@ -736,15 +736,15 @@ fn lfh_subsegment(
     blocks: &[target::HeapBlockDetail],
 ) -> LfhSubsegment {
     LfhSubsegment {
-        address: Hex(subsegment.address.0),
+        address: subsegment.address,
         block_size: subsegment.block_size,
         block_count: subsegment.block_count,
         free_count: subsegment.free_count,
         busy_count: subsegment.busy_count(),
         bucket: subsegment.bucket,
-        first_block: Hex(subsegment.first_block.0),
+        first_block: subsegment.first_block,
         blocks_per_word: subsegment.blocks_per_word,
-        bitmap: subsegment.bitmap.iter().copied().map(Hex).collect(),
+        bitmap: subsegment.bitmap.to_vec(),
         blocks: heap_blocks(blocks),
     }
 }
@@ -752,19 +752,19 @@ fn lfh_subsegment(
 /// A page range as a block search reports it, without its decoding.
 fn page_range(range: &target::PageRange) -> HeapPageRange {
     HeapPageRange {
-        address: Hex(range.address.0),
+        address: range.address,
         size: range.size(),
-        end: Hex(range.end().0),
+        end: range.end().0,
         units: range.units,
         unit_size: range.unit_size,
-        flags: Hex(range.flags.into()),
+        flags: range.flags,
         committed_pages: range.committed_pages,
         unused_bytes: range.unused_bytes,
         kind: range.kind.name(),
-        subsegment: Omit(None),
-        blocks: Omit(None),
-        error: Omit(None),
-        truncated: Omit(None),
+        subsegment: None,
+        blocks: None,
+        error: None,
+        truncated: None,
     }
 }
 
@@ -774,7 +774,7 @@ fn segment_range(range: &target::SegmentRangeDetail) -> HeapPageRange {
         .as_ref()
         .map(|subsegment| match subsegment {
             SegmentSubsegment::Vs(subsegment) => HeapSubsegment::Vs(VsSubsegment {
-                address: Hex(subsegment.address.0),
+                address: subsegment.address,
                 signature_ok: subsegment.signature_ok,
                 chunks: heap_blocks(&range.blocks),
                 chunk_count: subsegment.chunks.len(),
@@ -784,10 +784,10 @@ fn segment_range(range: &target::SegmentRangeDetail) -> HeapPageRange {
             }
         });
     HeapPageRange {
-        subsegment: Omit(Some(subsegment)),
-        blocks: Omit(Some(heap_blocks(&range.blocks))),
-        error: Omit(Some(range.error.clone())),
-        truncated: Omit(Some(range.truncated)),
+        subsegment: Some(subsegment),
+        blocks: Some(heap_blocks(&range.blocks)),
+        error: Some(range.error.clone()),
+        truncated: Some(range.truncated),
         ..page_range(&range.range)
     }
 }
@@ -798,14 +798,14 @@ fn segment_context(context: &target::SegmentContextDetail) -> SegmentHeapContext
         index: raw.index,
         unit_shift: raw.unit_shift,
         unit_size: raw.unit_size(),
-        segment_mask: Hex(raw.segment_mask),
+        segment_mask: raw.segment_mask,
         segment_size: raw.segment_size(),
         max_allocation_size: raw.max_allocation_size,
         segments: context
             .segments
             .iter()
             .map(|segment| SegmentHeapPageSegment {
-                address: Hex(segment.segment.address.0),
+                address: segment.segment.address,
                 ranges: segment.ranges.iter().map(segment_range).collect(),
             })
             .collect(),
@@ -814,8 +814,8 @@ fn segment_context(context: &target::SegmentContextDetail) -> SegmentHeapContext
 
 fn large_allocation(allocation: &target::LargeAllocation) -> HeapLargeAllocation {
     HeapLargeAllocation {
-        metadata: Hex(allocation.metadata.0),
-        address: Hex(allocation.address.0),
+        metadata: allocation.metadata,
+        address: allocation.address,
         size: allocation.size(),
         pages: allocation.pages,
         unused_bytes: allocation.unused_bytes,
@@ -827,8 +827,8 @@ fn large_allocation(allocation: &target::LargeAllocation) -> HeapLargeAllocation
 fn segment_heap(detail: &target::SegmentHeapDetail) -> SegmentHeap {
     let heap = &detail.heap;
     SegmentHeap {
-        address: Hex(heap.address.0),
-        global_flags: Hex(heap.global_flags.into()),
+        address: heap.address,
+        global_flags: heap.global_flags,
         reserved_pages: heap.reserved_pages,
         committed_pages: heap.committed_pages,
         free_committed_pages: heap.free_committed_pages,
@@ -837,8 +837,8 @@ fn segment_heap(detail: &target::SegmentHeapDetail) -> SegmentHeap {
         large_reserved_pages: heap.large_reserved_pages,
         large_committed_pages: heap.large_committed_pages,
         encoding_keys: SegmentHeapKeys {
-            heap: Hex(heap.keys.heap_key),
-            lfh: Hex(heap.keys.lfh_key),
+            heap: heap.keys.heap_key,
+            lfh: heap.keys.lfh_key,
         },
         granule: heap.granule,
         contexts: detail.contexts.iter().map(segment_context).collect(),
@@ -853,7 +853,7 @@ fn segment_heap(detail: &target::SegmentHeapDetail) -> SegmentHeap {
 pub fn heap(detail: &target::HeapDetail) -> HeapDetail {
     HeapDetail {
         index: detail.index,
-        address: Hex(detail.address.0),
+        address: detail.address,
         kind: heap_kind(detail.kind),
         list_entries: detail.list_entries,
         nt: detail.nt.as_ref().map(nt_heap),
@@ -866,7 +866,7 @@ fn block_match(block: &BlockMatch) -> HeapBlockMatch {
     match block {
         BlockMatch::NtEntry { segment, entry } => HeapBlockMatch::NtEntry(HeapMatchNtEntry {
             kind: "nt-entry",
-            segment: Hex(segment.0),
+            segment: *segment,
             entry: nt_entry(entry),
         }),
         BlockMatch::NtLfhBlock {
@@ -878,37 +878,37 @@ fn block_match(block: &BlockMatch) -> HeapBlockMatch {
             let address = region.block(*index);
             HeapBlockMatch::NtLfhBlock(HeapMatchNtLfhBlock {
                 kind: "nt-lfh-block",
-                segment: Hex(segment.0),
+                segment: *segment,
                 entry: nt_entry(entry),
                 region: nt_lfh(region, &[]),
                 index: *index,
-                address: Hex(address.0),
+                address,
                 size: region.block_size,
                 state: busy_state(region.is_busy(*index)),
-                user: Hex((address + entry.granule).0),
+                user: (address + entry.granule).0,
             })
         }
         BlockMatch::NtVirtual(block) => HeapBlockMatch::NtVirtual(HeapMatchNtVirtual {
             kind: "nt-virtual",
-            address: Hex(block.entry.0),
+            address: block.entry,
             size: block.reserve_size.max(block.commit_size),
             state: "virtual",
-            entry: Hex(block.entry.0),
+            entry: block.entry,
             commit_size: block.commit_size,
             reserve_size: block.reserve_size,
-            user: Hex(block.user.0),
+            user: block.user,
         }),
         BlockMatch::NtSegmentOnly { segment, stopped } => {
             HeapBlockMatch::NtSegment(HeapMatchNtSegment {
                 kind: "nt-segment",
-                segment: Hex(segment.0),
+                segment: *segment,
                 stopped: stopped.map(|(address, reason)| walk_stop(address, reason)),
             })
         }
         BlockMatch::Direct(range) => HeapBlockMatch::Page(HeapMatchPage {
             kind: "page",
             range: page_range(range),
-            user: Hex(range.address.0),
+            user: range.address,
             size: range.size(),
         }),
         BlockMatch::VsChunk {
@@ -918,7 +918,7 @@ fn block_match(block: &BlockMatch) -> HeapBlockMatch {
         } => HeapBlockMatch::VsChunk(HeapMatchVsChunk {
             kind: "vs-chunk",
             range: page_range(range),
-            subsegment: Hex(subsegment.0),
+            subsegment: *subsegment,
             chunk: vs_chunk(chunk),
         }),
         BlockMatch::LfhBlock {
@@ -930,7 +930,7 @@ fn block_match(block: &BlockMatch) -> HeapBlockMatch {
             range: page_range(range),
             subsegment: lfh_subsegment(subsegment, &[]),
             index: *index,
-            address: Hex(subsegment.block(*index).0),
+            address: subsegment.block(*index).0,
             state: busy_state(subsegment.is_busy(*index)),
         }),
         BlockMatch::RangeOnly(range) => HeapBlockMatch::Range(HeapMatchRange {
@@ -946,12 +946,12 @@ fn block_match(block: &BlockMatch) -> HeapBlockMatch {
 
 pub fn heap_block_search(detail: &target::HeapBlockSearchDetail) -> HeapBlockSearch {
     HeapBlockSearch {
-        address: Hex(detail.address.0),
+        address: detail.address,
         found: detail.found,
         truncated: detail.truncated,
         heap: detail.heap.as_ref().map(|heap| HeapIdentity {
             index: heap.index,
-            address: Hex(heap.address.0),
+            address: heap.address,
             kind: heap_kind(heap.kind),
         }),
         block: detail.block.as_ref().map(block_match),

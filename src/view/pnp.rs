@@ -5,27 +5,28 @@ use crate::target::pnp::{
 };
 
 use super::shape::{Hex, shapes};
+use crate::types::VirtAddr;
 
 shapes! {
     /// A device node's identity and state, as subtree and triage listings
     /// show it.
     DevNodeSummary {
         /// The `_DEVICE_NODE`.
-        address: Hex,
+        address: VirtAddr,
         /// Its physical device object.
-        pdo: Hex,
+        pdo: VirtAddr,
         instance_path: String,
         service_name: String,
         /// `PNP_DEVNODE_STATE`.
-        state: Hex,
+        state: Hex<u32>,
         state_name: String,
         /// The `CM_PROB_*` problem code; 0 for none.
-        problem: Hex,
+        problem: Hex<u32>,
         /// The problem code's name, when it is a known one.
         problem_name: Option<String>,
-        problem_status: Hex,
+        problem_status: Hex<u32>,
         /// The IRP PnP is waiting on; 0 for none.
-        pending_irp: Hex,
+        pending_irp: VirtAddr,
         /// `Level`: its depth in the device tree.
         depth: u32,
     }
@@ -34,16 +35,16 @@ shapes! {
     DevNodeHistoryState {
         /// Its slot in the ring.
         index: u32,
-        state: Hex,
+        state: Hex<u32>,
         state_name: String,
     }
 
     /// A device object in a device stack.
     DeviceStackLayer {
-        device_object: Hex,
-        driver_object: Hex,
+        device_object: VirtAddr,
+        driver_object: VirtAddr,
         driver_name: String,
-        device_extension: Hex,
+        device_extension: VirtAddr,
         object_name: String,
         /// Whether this is the device the stack was requested for.
         is_argument: bool,
@@ -52,32 +53,32 @@ shapes! {
     /// A decoded `_DEVICE_NODE`, optionally with its flat subtree
     /// (`!devnode`).
     DevNode {
-        address: Hex,
+        address: VirtAddr,
         /// Its physical device object.
-        pdo: Hex,
-        parent: Hex,
-        sibling: Hex,
-        child: Hex,
+        pdo: VirtAddr,
+        parent: VirtAddr,
+        sibling: VirtAddr,
+        child: VirtAddr,
         instance_path: String,
         service_name: String,
         /// `PNP_DEVNODE_STATE`.
-        state: Hex,
+        state: Hex<u32>,
         state_name: String,
-        previous_state: Hex,
+        previous_state: Hex<u32>,
         previous_state_name: String,
         state_history: Vec<DevNodeHistoryState>,
         /// `StateHistoryEntry`: the ring's next slot.
         state_history_entry: u32,
-        flags: Hex,
-        user_flags: Hex,
-        completion_status: Hex,
+        flags: Hex<u32>,
+        user_flags: Hex<u32>,
+        completion_status: Hex<u32>,
         /// The `CM_PROB_*` problem code; 0 for none.
-        problem: Hex,
+        problem: Hex<u32>,
         /// The problem code's name, when it is a known one.
         problem_name: Option<String>,
-        problem_status: Hex,
+        problem_status: Hex<u32>,
         /// The IRP PnP is waiting on; 0 for none.
-        pending_irp: Hex,
+        pending_irp: VirtAddr,
         /// The nodes below it, depth first; empty unless recursion was
         /// requested.
         subtree: Vec<DevNodeSummary>,
@@ -90,9 +91,9 @@ shapes! {
     DeviceStack {
         /// The address given: a device object (or a pointer to one) or a
         /// device node.
-        argument: Hex,
+        argument: VirtAddr,
         /// The device object the stack was walked from.
-        requested_device: Hex,
+        requested_device: VirtAddr,
         /// The stack, top filter first.
         entries: Vec<DeviceStackLayer>,
         /// `None` when the PDO has no device node or it could not be read
@@ -122,16 +123,16 @@ shapes! {
 
 fn devnode_summary(summary: &pnp::DevNodeSummary) -> DevNodeSummary {
     DevNodeSummary {
-        address: Hex(summary.address.0),
-        pdo: Hex(summary.pdo.0),
+        address: summary.address,
+        pdo: summary.pdo,
         instance_path: summary.instance_path.clone(),
         service_name: summary.service_name.clone(),
-        state: Hex(summary.state.into()),
+        state: summary.state,
         state_name: summary.state_name.clone(),
-        problem: Hex(summary.problem.into()),
+        problem: summary.problem,
         problem_name: summary.problem_name.clone(),
-        problem_status: Hex(summary.problem_status.into()),
-        pending_irp: Hex(summary.pending_irp.0),
+        problem_status: summary.problem_status,
+        pending_irp: summary.pending_irp,
         depth: summary.depth,
     }
 }
@@ -139,17 +140,17 @@ fn devnode_summary(summary: &pnp::DevNodeSummary) -> DevNodeSummary {
 fn state_history_entry(entry: &StateHistoryEntry) -> DevNodeHistoryState {
     DevNodeHistoryState {
         index: entry.index,
-        state: Hex(entry.state.into()),
+        state: entry.state,
         state_name: entry.state_name.clone(),
     }
 }
 
 fn device_stack_entry(entry: &DeviceStackEntry) -> DeviceStackLayer {
     DeviceStackLayer {
-        device_object: Hex(entry.device_object.0),
-        driver_object: Hex(entry.driver_object.0),
+        device_object: entry.device_object,
+        driver_object: entry.driver_object,
         driver_name: entry.driver_name.clone(),
-        device_extension: Hex(entry.device_extension.0),
+        device_extension: entry.device_extension,
         object_name: entry.object_name.clone(),
         is_argument: entry.is_argument,
     }
@@ -158,16 +159,16 @@ fn device_stack_entry(entry: &DeviceStackEntry) -> DeviceStackLayer {
 /// `_DEVICE_NODE` fields plus the optional bounded flat subtree.
 pub fn devnode(detail: &DevNodeDetail) -> DevNode {
     DevNode {
-        address: Hex(detail.address.0),
-        pdo: Hex(detail.pdo.0),
-        parent: Hex(detail.parent.0),
-        sibling: Hex(detail.sibling.0),
-        child: Hex(detail.child.0),
+        address: detail.address,
+        pdo: detail.pdo,
+        parent: detail.parent,
+        sibling: detail.sibling,
+        child: detail.child,
         instance_path: detail.instance_path.clone(),
         service_name: detail.service_name.clone(),
-        state: Hex(detail.state.into()),
+        state: detail.state,
         state_name: detail.state_name.clone(),
-        previous_state: Hex(detail.previous_state.into()),
+        previous_state: detail.previous_state,
         previous_state_name: detail.previous_state_name.clone(),
         state_history: detail
             .state_history
@@ -175,13 +176,13 @@ pub fn devnode(detail: &DevNodeDetail) -> DevNode {
             .map(state_history_entry)
             .collect(),
         state_history_entry: detail.state_history_entry,
-        flags: Hex(detail.flags.into()),
-        user_flags: Hex(detail.user_flags.into()),
-        completion_status: Hex(detail.completion_status.into()),
-        problem: Hex(detail.problem.into()),
+        flags: detail.flags,
+        user_flags: detail.user_flags,
+        completion_status: detail.completion_status,
+        problem: detail.problem,
         problem_name: detail.problem_name.clone(),
-        problem_status: Hex(detail.problem_status.into()),
-        pending_irp: Hex(detail.pending_irp.0),
+        problem_status: detail.problem_status,
+        pending_irp: detail.pending_irp,
         subtree: detail.subtree.iter().map(devnode_summary).collect(),
         subtree_truncated: detail.subtree_truncated,
     }
@@ -190,8 +191,8 @@ pub fn devnode(detail: &DevNodeDetail) -> DevNode {
 /// Ordered top-filter-to-PDO device stack and its PDO devnode summary.
 pub fn device_stack(detail: &DeviceStackDetail) -> DeviceStack {
     DeviceStack {
-        argument: Hex(detail.argument.0),
-        requested_device: Hex(detail.requested_device.0),
+        argument: detail.argument,
+        requested_device: detail.requested_device,
         entries: detail.entries.iter().map(device_stack_entry).collect(),
         pdo_devnode: detail.pdo_devnode.as_ref().map(devnode_summary),
         pdo_devnode_error: detail.pdo_devnode_error.clone(),

@@ -2,6 +2,7 @@
 
 use super::shape::{Diag, Hex, Omit, shapes};
 use super::list::{ListEnd, list_termination};
+use crate::types::VirtAddr;
 use crate::guest::ProcessInfo;
 use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
 use crate::target::job::{JobDetail, JobField, job_limit_flag_names};
@@ -16,10 +17,10 @@ shapes! {
         pid: Option<u64>,
         /// The owning process's image name.
         process_name: Option<String>,
-        ethread: Hex,
-        kthread: Hex,
+        ethread: VirtAddr,
+        kthread: VirtAddr,
         /// The owning `_EPROCESS`.
-        eprocess: Option<Hex>,
+        eprocess: Option<VirtAddr>,
         /// `_KTHREAD.State`.
         state: Option<u64>,
         /// The state's name (`Running`, `Waiting`, ...).
@@ -40,7 +41,7 @@ shapes! {
         name: String,
         /// The directory table base (page-table root).
         dtb: Hex,
-        eprocess: Hex,
+        eprocess: VirtAddr,
         /// A 32-bit process running under WOW64.
         wow64: bool,
     }
@@ -100,7 +101,7 @@ shapes! {
     /// the processes assigned to it. A field this build lacks is `None`.
     Job {
         /// The `_EJOB`.
-        address: Hex,
+        address: VirtAddr,
         job_id: Option<u64>,
         session_id: Option<u64>,
         accounting: JobAccounting,
@@ -114,25 +115,25 @@ shapes! {
         job_flag_names: Vec<String>,
         nesting_depth: Option<u64>,
         /// `None` for a top-level job.
-        parent_job: Option<Hex>,
+        parent_job: Option<VirtAddr>,
         /// `None` for a top-level job.
-        root_job: Option<Hex>,
-        child_jobs: Vec<Hex>,
+        root_job: Option<VirtAddr>,
+        child_jobs: Vec<VirtAddr>,
         child_job_list_termination: ListEnd,
         /// The job is a silo.
         silo: bool,
         /// `None` for a job that is not a server silo.
-        server_silo_globals: Option<Hex>,
+        server_silo_globals: Option<VirtAddr>,
         processes: Vec<ProcessIdentity>,
         /// `_EPROCESS` addresses on the job's list that could not be decoded.
-        unreadable_processes: Vec<Hex>,
+        unreadable_processes: Vec<VirtAddr>,
         process_list_termination: ListEnd,
     }
 
     /// One GFlags flag set.
     GlobalFlag {
         /// The flag's bit mask.
-        bit: Hex,
+        bit: Hex<u32>,
         /// The GFlags abbreviation (`hpa`, `ust`, ...).
         abbreviation: &'static str,
         description: &'static str,
@@ -140,7 +141,7 @@ shapes! {
 
     /// A process's `_PEB.NtGlobalFlag`.
     ProcessGlobalFlags {
-        value: Hex,
+        value: Hex<u32>,
         flags: Vec<GlobalFlag>,
     }
 
@@ -148,9 +149,9 @@ shapes! {
     /// (`!gflag`).
     GlobalFlags {
         /// `nt!NtGlobalFlag`'s address.
-        kernel_address: Hex,
+        kernel_address: VirtAddr,
         /// `nt!NtGlobalFlag`.
-        kernel: Hex,
+        kernel: Hex<u32>,
         kernel_flags: Vec<GlobalFlag>,
         /// The current process; `None` with no process selected.
         process: Option<ProcessIdentity>,
@@ -160,14 +161,14 @@ shapes! {
 
     /// An exited process whose object is still referenced.
     ZombieProcess {
-        eprocess: Hex,
+        eprocess: VirtAddr,
         pid: u64,
         /// The image name.
         image: String,
         /// `_EPROCESS.ExitTime`, a FILETIME.
         exit_time: Hex,
         /// The exit NTSTATUS.
-        exit_status: Hex,
+        exit_status: Hex<u32>,
         /// Open handles to the object.
         handle_count: u64,
         /// References to the object.
@@ -176,15 +177,15 @@ shapes! {
 
     /// A terminated thread whose object is still referenced.
     ZombieThread {
-        ethread: Hex,
+        ethread: VirtAddr,
         pid: u64,
         tid: u64,
         /// The owning `_EPROCESS`.
-        process: Hex,
+        process: VirtAddr,
         /// The owning process's image name; `None` when unreadable.
         image: Option<String>,
         /// The exit NTSTATUS.
-        exit_status: Hex,
+        exit_status: Hex<u32>,
         /// Open handles to the object.
         handle_count: u64,
         /// References to the object.
@@ -203,9 +204,9 @@ shapes! {
         /// Live threads seen by the scan.
         live_threads: u64,
         /// The scanned pool region's start.
-        region_start: Hex,
+        region_start: VirtAddr,
         /// The scanned pool region's end.
-        region_end: Hex,
+        region_end: VirtAddr,
         scanned_pages: u64,
         /// The scan was interrupted before it finished.
         interrupted: bool,
@@ -221,9 +222,9 @@ pub fn thread(t: &ThreadInfo, active: Option<&str>) -> ThreadOverview {
         tid: t.tid,
         pid: t.pid,
         process_name: t.process_name.clone(),
-        ethread: Hex(t.ethread.0),
-        kthread: Hex(t.kthread.0),
-        eprocess: t.eprocess.map(|a| Hex(a.0)),
+        ethread: t.ethread,
+        kthread: t.kthread,
+        eprocess: t.eprocess,
         state: t.state.map(u64::from),
         state_name: t.state.map(|s| kthread_state_name(s).to_string()),
         wait_reason: t.wait_reason.map(u64::from),
@@ -236,20 +237,18 @@ pub fn process(process: &ProcessInfo) -> ProcessIdentity {
     ProcessIdentity {
         pid: process.pid,
         name: process.name.clone(),
-        dtb: Hex(process.dtb),
-        eprocess: Hex(process.eprocess_va.0),
+        dtb: process.dtb,
+        eprocess: process.eprocess_va,
         wow64: process.is_wow64(),
     }
 }
 
 /// The value of the job field keyed `key`, if this build has it.
-fn job_field(fields: &[JobField], key: &str) -> Omit<u64> {
-    Omit(
-        fields
-            .iter()
-            .find(|field| field.key == key)
-            .map(|field| field.value),
-    )
+fn job_field(fields: &[JobField], key: &str) -> Option<u64> {
+    fields
+        .iter()
+        .find(|field| field.key == key)
+        .map(|field| field.value)
 }
 
 fn job_accounting(fields: &[JobField]) -> JobAccounting {
@@ -295,27 +294,23 @@ pub fn job(job: &JobDetail) -> Job {
         .find(|field| field.field == "LimitFlags")
         .map_or(0, |field| field.value);
     Job {
-        address: Hex(job.address.0),
+        address: job.address,
         job_id: job.job_id,
         session_id: job.session_id,
         accounting: job_accounting(&job.accounting),
         limits: job_limits(&job.limits),
         limit_flag_names: job_limit_flag_names(limit_flags),
-        job_flags: job.job_flags.map(Hex),
+        job_flags: job.job_flags,
         job_flag_names: job.job_flag_names.clone(),
         nesting_depth: job.nesting_depth,
-        parent_job: job.parent_job.map(|job| Hex(job.0)),
-        root_job: job.root_job.map(|job| Hex(job.0)),
-        child_jobs: job.child_jobs.iter().map(|job| Hex(job.0)).collect(),
+        parent_job: job.parent_job,
+        root_job: job.root_job,
+        child_jobs: job.child_jobs.clone(),
         child_job_list_termination: list_termination(&job.child_job_termination),
         silo: job.silo,
-        server_silo_globals: job.server_silo_globals.map(|globals| Hex(globals.0)),
+        server_silo_globals: job.server_silo_globals,
         processes: job.processes.iter().map(process).collect(),
-        unreadable_processes: job
-            .unreadable_processes
-            .iter()
-            .map(|process| Hex(process.0))
-            .collect(),
+        unreadable_processes: job.unreadable_processes.clone(),
         process_list_termination: list_termination(&job.process_termination),
     }
 }
@@ -323,7 +318,7 @@ pub fn job(job: &JobDetail) -> Job {
 fn global_flag_names(value: u32) -> Vec<GlobalFlag> {
     global_flags_set(value)
         .map(|flag| GlobalFlag {
-            bit: Hex(flag.bit.into()),
+            bit: flag.bit,
             abbreviation: flag.abbreviation,
             description: flag.description,
         })
@@ -332,12 +327,12 @@ fn global_flag_names(value: u32) -> Vec<GlobalFlag> {
 
 pub fn global_flags(detail: &GlobalFlagsDetail) -> GlobalFlags {
     GlobalFlags {
-        kernel_address: Hex(detail.kernel_address.0),
-        kernel: Hex(detail.kernel.into()),
+        kernel_address: detail.kernel_address,
+        kernel: detail.kernel,
         kernel_flags: global_flag_names(detail.kernel),
         process: detail.process.as_ref().map(process),
-        process_flags: Diag::of(&detail.process_flags, |&flags| ProcessGlobalFlags {
-            value: Hex(flags.into()),
+        process_flags: detail.process_flags.map(|&flags| ProcessGlobalFlags {
+            value: flags,
             flags: global_flag_names(flags),
         }),
     }
@@ -345,21 +340,21 @@ pub fn global_flags(detail: &GlobalFlagsDetail) -> GlobalFlags {
 
 pub fn zombies(detail: &ZombiesDetail) -> Zombies {
     let processes = detail.processes.iter().map(|process| ZombieProcess {
-        eprocess: Hex(process.eprocess.0),
+        eprocess: process.eprocess,
         pid: process.pid,
         image: process.image.clone(),
-        exit_time: Hex(process.exit_time),
-        exit_status: Hex(process.exit_status.into()),
+        exit_time: process.exit_time,
+        exit_status: process.exit_status,
         handle_count: process.counts.handle_count as u64,
         pointer_count: process.counts.pointer_count as u64,
     });
     let threads = detail.threads.iter().map(|thread| ZombieThread {
-        ethread: Hex(thread.ethread.0),
+        ethread: thread.ethread,
         pid: thread.pid,
         tid: thread.tid,
-        process: Hex(thread.process.0),
+        process: thread.process,
         image: thread.image.clone(),
-        exit_status: Hex(thread.exit_status.into()),
+        exit_status: thread.exit_status,
         handle_count: thread.counts.handle_count as u64,
         pointer_count: thread.counts.pointer_count as u64,
     });
@@ -368,8 +363,8 @@ pub fn zombies(detail: &ZombiesDetail) -> Zombies {
         threads: detail.kinds.threads.then(|| threads.collect()),
         live_processes: detail.live_processes as u64,
         live_threads: detail.live_threads as u64,
-        region_start: Hex(detail.region_start.0),
-        region_end: Hex(detail.region_end.0),
+        region_start: detail.region_start,
+        region_end: detail.region_end,
         scanned_pages: detail.scanned_pages,
         interrupted: detail.interrupted,
         truncated: detail.truncated,

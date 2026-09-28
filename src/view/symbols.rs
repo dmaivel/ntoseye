@@ -32,7 +32,7 @@ shapes! {
     /// One definition a symbol name resolves to.
     SymbolCandidate {
         module: String,
-        address: Hex,
+        address: VirtAddr,
         /// `public` or `private`.
         visibility: &'static str,
         /// The defining compiland, for a private symbol.
@@ -43,7 +43,7 @@ shapes! {
     SymbolSearchMatch {
         name: String,
         /// `None` when the match does not resolve to a unique address.
-        address: Option<Hex>,
+        address: Option<VirtAddr>,
         module: Option<String>,
     }
 
@@ -51,7 +51,7 @@ shapes! {
     /// `None` when no symbol covers it.
     NearestSymbol {
         /// The queried address.
-        address: Hex,
+        address: VirtAddr,
         /// `module!name+0xoffset`.
         symbol: Option<String>,
         module: Option<String>,
@@ -153,7 +153,7 @@ pub fn type_layout(name: &str, info: &TypeInfo) -> TypeLayout {
 pub fn symbol_candidate(candidate: &symbols::SymbolCandidate) -> SymbolCandidate {
     SymbolCandidate {
         module: candidate.module.clone(),
-        address: Hex(candidate.address.0),
+        address: candidate.address,
         visibility: match candidate.visibility {
             SymbolVisibility::Public => "public",
             SymbolVisibility::Private => "private",
@@ -165,7 +165,7 @@ pub fn symbol_candidate(candidate: &symbols::SymbolCandidate) -> SymbolCandidate
 pub fn symbol_search_match(symbol: &target::SymbolSearchMatch) -> SymbolSearchMatch {
     SymbolSearchMatch {
         name: symbol.name.clone(),
-        address: symbol.address.map(|address| Hex(address.0)),
+        address: symbol.address,
         module: symbol.module.clone(),
     }
 }
@@ -181,7 +181,7 @@ pub fn nearest_symbol(address: VirtAddr, symbol: Option<(String, String, u32)>) 
         None => (None, None, None, None),
     };
     NearestSymbol {
-        address: Hex(address.0),
+        address,
         symbol: formatted,
         module,
         name,
@@ -194,7 +194,7 @@ pub fn symbol(address: u64, module: String, name: String, offset: u32) -> Symbol
     Symbol {
         module,
         name,
-        address: Hex(address.saturating_sub(u64::from(offset))),
+        address: address.saturating_sub(u64::from(offset)),
         offset,
     }
 }
@@ -238,7 +238,7 @@ fn local_location(location: &symbols::LocalVariableLocation) -> LocalVariableLoc
     }
 }
 
-fn local(local: &symbols::ProcedureLocal, value: Omit<Option<Hex>>) -> ProcedureLocal {
+fn local(local: &symbols::ProcedureLocal, value: Option<Option<u64>>) -> ProcedureLocal {
     ProcedureLocal {
         name: local.name.clone(),
         type_name: local.type_name.clone(),
@@ -255,13 +255,11 @@ pub fn procedure_local(
     address: VirtAddr,
     local: &symbols::ProcedureLocal,
 ) -> ProcedureLocal {
-    let value = target
-        .resolve_procedure_local_value(address, local)
-        .map(Hex);
-    self::local(local, Omit(Some(value)))
+    let value = target.resolve_procedure_local_value(address, local);
+    self::local(local, Some(value))
 }
 
 /// A PDB local or parameter's layout, without evaluating it.
 pub fn procedure_local_layout(local: &symbols::ProcedureLocal) -> ProcedureLocal {
-    self::local(local, Omit(None))
+    self::local(local, None)
 }

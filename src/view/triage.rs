@@ -23,7 +23,7 @@ shapes! {
         /// The exception code (NTSTATUS).
         code: u32,
         /// The same code, as hex.
-        code_hex: Hex,
+        code_hex: Hex<u32>,
         /// The code's symbolic name.
         code_name: String,
         flags: u32,
@@ -40,7 +40,7 @@ shapes! {
         build: u32,
         service_pack_build: u32,
         /// The machine type (`IMAGE_FILE_MACHINE_*`).
-        machine_image_type: Hex,
+        machine_image_type: Hex<u32>,
         /// `I386`, `AMD64`, `ARM64`, or `Unknown`.
         machine: &'static str,
         /// When the dump was taken (ISO 8601 UTC); `None` when unrecorded.
@@ -50,7 +50,7 @@ shapes! {
         /// `Workstation`, `DomainController`, `Server`, or `Unknown`.
         product_type: &'static str,
         /// The product suite (`VER_SUITE_*`) bits.
-        suite_mask: Hex,
+        suite_mask: Hex<u32>,
     }
 
     /// The process and thread a triage dump recorded as crashing. The
@@ -87,7 +87,7 @@ shapes! {
         /// `bugcheck` or `exception`.
         code_kind: &'static str,
         /// The bugcheck or exception code.
-        code: Hex,
+        code: Hex<u32>,
         /// Where the failing location came from: `bugcheck_fault`,
         /// `exception_address`, `current_instruction`, `top_frame`, or
         /// `code_only`.
@@ -124,7 +124,7 @@ shapes! {
 
     /// A Driver Verifier bugcheck, decoded by its subcode.
     VerifierFinding {
-        bugcheck_code: Hex,
+        bugcheck_code: Hex<u32>,
         bugcheck_name: String,
         /// The verifier subcode (the first bugcheck parameter).
         subcode: Hex,
@@ -162,7 +162,7 @@ shapes! {
         available: bool,
         /// Why the record could not be decoded.
         reason: Omit<String>,
-        revision: Omit<Hex>,
+        revision: Omit<Hex<u16>>,
         /// The record's error severity (`WHEA_ERROR_SEVERITY`).
         severity: Omit<u32>,
         /// The record's length in bytes.
@@ -259,11 +259,11 @@ shapes! {
 pub fn dump_exception(exception: &DmpException) -> DumpException {
     DumpException {
         code: exception.code,
-        code_hex: Hex(exception.code.into()),
+        code_hex: exception.code,
         code_name: exception_code_name(exception.code).to_string(),
         flags: exception.flags,
-        address: Hex(exception.address),
-        parameters: exception.parameters.iter().copied().map(Hex).collect(),
+        address: exception.address,
+        parameters: exception.parameters.to_vec(),
     }
 }
 
@@ -284,7 +284,7 @@ pub fn system_info(info: &DmpSystemInfo) -> DumpSystemInfo {
         major_version: info.major_version,
         build: info.minor_version,
         service_pack_build: info.service_pack_build,
-        machine_image_type: Hex(info.machine_image_type.into()),
+        machine_image_type: info.machine_image_type,
         machine,
         system_time: (info.system_time != 0)
             .then(|| filetime_to_iso(info.system_time as u64))
@@ -293,7 +293,7 @@ pub fn system_info(info: &DmpSystemInfo) -> DumpSystemInfo {
             .then(|| u64::try_from(info.system_up_time / 10_000_000).ok())
             .flatten(),
         product_type: product,
-        suite_mask: Hex(info.suite_mask.into()),
+        suite_mask: info.suite_mask,
     }
 }
 
@@ -302,16 +302,16 @@ pub fn crash_context(context: &TriageCrashInfo) -> CrashContext {
         process_name: context.process_name.clone(),
         process_id: context.process_id,
         thread_id: context.thread_id,
-        parent_process_id: Omit(context.parent_process_id),
-        exit_status: Omit(context.exit_status.map(|status| Hex(status as u64))),
-        create_time: Omit(context.create_time.map(filetime_to_iso)),
-        thread_exit_status: Omit(context.thread_exit_status.map(|status| Hex(status as u64))),
+        parent_process_id: context.parent_process_id,
+        exit_status: context.exit_status.map(|status| status as u64),
+        create_time: context.create_time.map(filetime_to_iso),
+        thread_exit_status: context.thread_exit_status.map(|status| status as u64),
     }
 }
 
 pub fn prcb(prcb: &TriagePrcbInfo) -> TriagePrcb {
     TriagePrcb {
-        current_thread: Hex(prcb.current_thread),
+        current_thread: prcb.current_thread,
         processor_number: prcb.processor_number,
         mhz: prcb.mhz,
         cpu_type: prcb.cpu_type,
@@ -333,7 +333,7 @@ fn failure_signature(signature: &SignatureDetail) -> FailureSignature {
     };
     FailureSignature {
         code_kind,
-        code: Hex(signature.code.into()),
+        code: signature.code,
         source,
         module: signature.module.clone(),
         symbol: signature.symbol.clone(),
@@ -364,7 +364,7 @@ fn culprit(culprit: &CulpritAttribution) -> Culprit {
                     CulpritEvidenceKind::TopFrame => "top_frame",
                 },
                 detail: evidence.detail.clone(),
-                address: evidence.address.map(Hex),
+                address: evidence.address,
             })
             .collect(),
     }
@@ -372,9 +372,9 @@ fn culprit(culprit: &CulpritAttribution) -> Culprit {
 
 fn verifier(verifier: &VerifierFindingDetail) -> VerifierFinding {
     VerifierFinding {
-        bugcheck_code: Hex(verifier.bugcheck_code.into()),
+        bugcheck_code: verifier.bugcheck_code,
         bugcheck_name: verifier.bugcheck_name.clone(),
-        subcode: Hex(verifier.subcode),
+        subcode: verifier.subcode,
         known_subcode: verifier.known_subcode,
         subcode_description: verifier.subcode_description.clone(),
         associated_driver: verifier.associated_driver.clone(),
@@ -382,7 +382,7 @@ fn verifier(verifier: &VerifierFindingDetail) -> VerifierFinding {
             .arguments
             .iter()
             .map(|argument| VerifierFindingArgument {
-                value: Hex(argument.value),
+                value: argument.value,
                 description: argument.description.clone(),
             })
             .collect(),
@@ -391,7 +391,7 @@ fn verifier(verifier: &VerifierFindingDetail) -> VerifierFinding {
             .iter()
             .map(|address| VerifierFindingAddress {
                 role: address.role.clone(),
-                address: Hex(address.address),
+                address: address.address,
             })
             .collect(),
     }
@@ -399,27 +399,27 @@ fn verifier(verifier: &VerifierFindingDetail) -> VerifierFinding {
 
 fn whea(whea: &WheaFinding) -> WheaRecord {
     const SECTION_LIMIT: usize = 64;
-    let record_address = whea.record_address.map(Hex);
+    let record_address = whea.record_address;
     match &whea.state {
         WheaRecordState::Unavailable { reason } => WheaRecord {
             record_address,
             available: false,
-            reason: Omit(Some(reason.clone())),
-            revision: Omit(None),
-            severity: Omit(None),
-            length: Omit(None),
-            sections_total: Omit(None),
-            sections: Omit(None),
+            reason: Some(reason.clone()),
+            revision: None,
+            severity: None,
+            length: None,
+            sections_total: None,
+            sections: None,
         },
         WheaRecordState::Decoded(record) => WheaRecord {
             record_address,
             available: true,
-            reason: Omit(None),
-            revision: Omit(Some(Hex(record.revision.into()))),
-            severity: Omit(Some(record.severity)),
-            length: Omit(Some(record.length)),
-            sections_total: Omit(Some(record.sections.len())),
-            sections: Omit(Some(
+            reason: None,
+            revision: Some(record.revision),
+            severity: Some(record.severity),
+            length: Some(record.length),
+            sections_total: Some(record.sections.len()),
+            sections: Some(
                 record
                     .sections
                     .iter()
@@ -438,7 +438,7 @@ fn whea(whea: &WheaFinding) -> WheaRecord {
                         },
                     })
                     .collect(),
-            )),
+            ),
         },
     }
 }
@@ -471,8 +471,8 @@ fn blackbox(blackbox: &BlackboxFinding) -> BlackboxStream {
 fn unloaded_driver(driver: &dmp::UnloadedDriver) -> UnloadedDriver {
     UnloadedDriver {
         name: driver.name.clone(),
-        start_address: Hex(driver.start_address),
-        end_address: Hex(driver.end_address),
+        start_address: driver.start_address,
+        end_address: driver.end_address,
     }
 }
 

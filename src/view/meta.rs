@@ -2,6 +2,7 @@
 
 use super::shape::{Diag, Hex, shapes};
 use super::list::{ListEnd, list_termination};
+use crate::types::VirtAddr;
 use crate::target::ListTermination;
 use crate::target::meta::{
     ErrorCodeDetail, TargetDumpMetadata, TargetKernelDetail, TargetTimeDetail, TargetVersionDetail,
@@ -13,7 +14,7 @@ shapes! {
     /// A driver Driver Verifier is verifying, from `!verifier`'s list.
     VerifierDriverSummary {
         /// The driver's verifier entry.
-        entry: Hex,
+        entry: VirtAddr,
         /// The entry's state (`Loaded`).
         state: String,
         /// Nonpaged pool the driver holds, in bytes.
@@ -27,7 +28,7 @@ shapes! {
     /// A driver configured for verification, from the verifier's suspect list.
     VerifierSuspectDriver {
         /// The suspect-list entry.
-        address: Hex,
+        address: VirtAddr,
         full_name: String,
         base_name: String,
         /// How many times the driver has loaded.
@@ -86,11 +87,11 @@ shapes! {
     /// (`!verifier <module>`). Byte counts are in bytes.
     VerifierDriver {
         module: String,
-        image_base: Hex,
+        image_base: VirtAddr,
         /// The image size in bytes.
         image_size: u64,
         /// The driver's `_DRIVER_OBJECT`.
-        driver_object: Hex,
+        driver_object: VirtAddr,
         /// The image's signing level (`SE_SIGNING_LEVEL`).
         se_signing_level: Hex,
         raise_irqls: u64,
@@ -129,7 +130,7 @@ shapes! {
         name: String,
         /// The module name (`nt`).
         short_name: String,
-        base: Hex,
+        base: VirtAddr,
         /// The image size in bytes.
         size: Option<u64>,
         file_version: Option<String>,
@@ -145,8 +146,8 @@ shapes! {
         /// Whether the dump is a triage (minidump-style) dump.
         is_triage: bool,
         /// The kernel page-table root the dump records.
-        directory_table_base: Hex,
-        bugcheck_code: Hex,
+        directory_table_base: VirtAddr,
+        bugcheck_code: Hex<u32>,
         bugcheck_parameters: Vec<Hex>,
         number_processors: u32,
         major_version: u32,
@@ -160,10 +161,10 @@ shapes! {
         /// Seconds the system had been up.
         uptime_seconds: Option<u64>,
         /// The exception code the dump records.
-        exception_code: Option<Hex>,
+        exception_code: Option<Hex<u32>>,
         /// Whether the dump's triage data overflowed.
         triage_overflowed: bool,
-        kernel_base: Option<Hex>,
+        kernel_base: Option<VirtAddr>,
     }
 
     /// The target's build, architecture, kernel, symbols, debugger version,
@@ -229,7 +230,7 @@ shapes! {
         customer: Option<bool>,
         /// The Win32 error: the code itself, or the one a
         /// `HRESULT_FROM_WIN32` code wraps.
-        win32_code: Option<Hex>,
+        win32_code: Option<Hex<u32>>,
         /// That Win32 error's name.
         win32_name: Option<String>,
     }
@@ -237,7 +238,7 @@ shapes! {
 
 fn verifier_summary(driver: &DriverSummaryDetail) -> VerifierDriverSummary {
     VerifierDriverSummary {
-        entry: Hex(driver.entry.0),
+        entry: driver.entry,
         state: driver.state.clone(),
         nonpaged_bytes: driver.nonpaged_bytes,
         paged_bytes: driver.paged_bytes,
@@ -247,7 +248,7 @@ fn verifier_summary(driver: &DriverSummaryDetail) -> VerifierDriverSummary {
 
 fn suspect_driver(driver: &SuspectDriverDetail) -> VerifierSuspectDriver {
     VerifierSuspectDriver {
-        address: Hex(driver.address.0),
+        address: driver.address,
         full_name: driver.full_name.clone(),
         base_name: driver.base_name.clone(),
         loads: driver.loads,
@@ -256,27 +257,26 @@ fn suspect_driver(driver: &SuspectDriverDetail) -> VerifierSuspectDriver {
 }
 
 fn verifier_statistics(stats: &StatisticsDetail) -> VerifierStatistics {
-    let count = |value: &_| Diag::of(value, |value: &u64| *value);
     VerifierStatistics {
-        raise_irqls: count(&stats.raise_irqls),
-        acquire_spin_locks: count(&stats.acquire_spin_locks),
-        synchronize_executions: count(&stats.synchronize_executions),
-        trims: count(&stats.trims),
-        allocations_attempted: count(&stats.allocations_attempted),
-        allocations_succeeded: count(&stats.allocations_succeeded),
-        allocations_succeeded_special_pool: count(&stats.allocations_succeeded_special_pool),
-        allocations_with_no_tag: count(&stats.allocations_with_no_tag),
-        allocations_failed: count(&stats.allocations_failed),
-        current_paged_pool_allocations: count(&stats.current_paged_pool_allocations),
-        paged_bytes: count(&stats.paged_bytes),
-        peak_paged_pool_allocations: count(&stats.peak_paged_pool_allocations),
-        peak_paged_bytes: count(&stats.peak_paged_bytes),
-        current_nonpaged_pool_allocations: count(&stats.current_nonpaged_pool_allocations),
-        nonpaged_bytes: count(&stats.nonpaged_bytes),
-        peak_nonpaged_pool_allocations: count(&stats.peak_nonpaged_pool_allocations),
-        peak_nonpaged_bytes: count(&stats.peak_nonpaged_bytes),
-        loads: count(&stats.loads),
-        unloads: count(&stats.unloads),
+        raise_irqls: stats.raise_irqls.clone(),
+        acquire_spin_locks: stats.acquire_spin_locks.clone(),
+        synchronize_executions: stats.synchronize_executions.clone(),
+        trims: stats.trims.clone(),
+        allocations_attempted: stats.allocations_attempted.clone(),
+        allocations_succeeded: stats.allocations_succeeded.clone(),
+        allocations_succeeded_special_pool: stats.allocations_succeeded_special_pool.clone(),
+        allocations_with_no_tag: stats.allocations_with_no_tag.clone(),
+        allocations_failed: stats.allocations_failed.clone(),
+        current_paged_pool_allocations: stats.current_paged_pool_allocations.clone(),
+        paged_bytes: stats.paged_bytes.clone(),
+        peak_paged_pool_allocations: stats.peak_paged_pool_allocations.clone(),
+        peak_paged_bytes: stats.peak_paged_bytes.clone(),
+        current_nonpaged_pool_allocations: stats.current_nonpaged_pool_allocations.clone(),
+        nonpaged_bytes: stats.nonpaged_bytes.clone(),
+        peak_nonpaged_pool_allocations: stats.peak_nonpaged_pool_allocations.clone(),
+        peak_nonpaged_bytes: stats.peak_nonpaged_bytes.clone(),
+        loads: stats.loads.clone(),
+        unloads: stats.unloads.clone(),
     }
 }
 
@@ -300,16 +300,16 @@ fn suspect_list_end(termination: &ListTermination) -> ListEnd {
 /// and configured-but-unloaded suspect drivers.
 pub fn verifier(detail: &VerifierDetail) -> Verifier {
     Verifier {
-        level: Diag::of(&detail.level, |value| Hex(*value)),
-        option_flags: Diag::of(&detail.option_flags, |value| Hex(*value)),
-        verify_mode: Diag::of(&detail.verify_mode, |value| *value),
-        level_options: Diag::of(&detail.level_options, |options| options.clone()),
+        level: detail.level.clone(),
+        option_flags: detail.option_flags.clone(),
+        verify_mode: detail.verify_mode.clone(),
+        level_options: detail.level_options.clone(),
         statistics: verifier_statistics(&detail.statistics),
-        drivers: Diag::of(&detail.drivers, |drivers| {
+        drivers: detail.drivers.map(|drivers| {
             drivers.iter().map(verifier_summary).collect()
         }),
         drivers_truncated: detail.drivers_truncated,
-        configured_but_unloaded: Diag::of(&detail.configured_but_unloaded, |drivers| {
+        configured_but_unloaded: detail.configured_but_unloaded.map(|drivers| {
             drivers.iter().map(suspect_driver).collect()
         }),
         suspect_list_termination: suspect_list_end(&detail.suspect_list_termination),
@@ -320,10 +320,10 @@ pub fn verifier(detail: &VerifierDetail) -> Verifier {
 pub fn verifier_driver(detail: &VerifierDriverDetail) -> VerifierDriver {
     VerifierDriver {
         module: detail.module_name.clone(),
-        image_base: Hex(detail.image_base.0),
+        image_base: detail.image_base,
         image_size: detail.image_size,
-        driver_object: Hex(detail.driver_object.0),
-        se_signing_level: Hex(detail.se_signing_level),
+        driver_object: detail.driver_object,
+        se_signing_level: detail.se_signing_level,
         raise_irqls: detail.raise_irqls,
         acquire_spin_locks: detail.acquire_spin_locks,
         synchronize_executions: detail.synchronize_executions,
@@ -356,7 +356,7 @@ fn target_kernel(kernel: &TargetKernelDetail) -> TargetKernel {
     TargetKernel {
         name: kernel.name.clone(),
         short_name: kernel.short_name.clone(),
-        base: Hex(kernel.base.0),
+        base: kernel.base,
         size: kernel.size,
         file_version: kernel.file_version.clone(),
         product_version: kernel.product_version.clone(),
@@ -368,20 +368,20 @@ fn target_kernel(kernel: &TargetKernelDetail) -> TargetKernel {
 fn target_dump(dump: &TargetDumpMetadata) -> TargetDump {
     TargetDump {
         is_triage: dump.is_triage,
-        directory_table_base: Hex(dump.directory_table_base.0),
-        bugcheck_code: Hex(dump.bugcheck_code.into()),
-        bugcheck_parameters: dump.bugcheck_parameters.iter().copied().map(Hex).collect(),
+        directory_table_base: dump.directory_table_base,
+        bugcheck_code: dump.bugcheck_code,
+        bugcheck_parameters: dump.bugcheck_parameters.to_vec(),
         number_processors: dump.number_processors,
         major_version: dump.major_version,
         minor_version: dump.minor_version,
         product_type: dump.product_type,
         machine_image_type: dump.machine_image_type,
         service_pack_build: dump.service_pack_build,
-        system_time: dump.system_time.map(Hex),
+        system_time: dump.system_time,
         uptime_seconds: dump.uptime_seconds,
-        exception_code: dump.exception_code.map(|code| Hex(code.into())),
+        exception_code: dump.exception_code,
         triage_overflowed: dump.triage_overflowed,
-        kernel_base: dump.kernel_base.map(|base| Hex(base.0)),
+        kernel_base: dump.kernel_base,
     }
 }
 
@@ -400,7 +400,7 @@ pub fn target_version(detail: &TargetVersionDetail) -> TargetVersion {
         symbol_status: detail.symbol_status.clone(),
         debugger_version: detail.debugger_version.clone(),
         symbol_path: detail.symbol_path.clone(),
-        system_time: detail.system_time.map(Hex),
+        system_time: detail.system_time,
         system_time_iso: detail.system_time_iso.clone(),
         uptime_seconds: detail.uptime_seconds,
         uptime: detail.uptime.clone(),
@@ -412,7 +412,7 @@ pub fn target_version(detail: &TargetVersionDetail) -> TargetVersion {
 /// Target UTC FILETIME/ISO time and uptime in seconds/formatted form.
 pub fn target_time(detail: &TargetTimeDetail) -> TargetTime {
     TargetTime {
-        system_time: detail.system_time.map(Hex),
+        system_time: detail.system_time,
         system_time_iso: detail.system_time_iso.clone(),
         uptime_seconds: detail.uptime_seconds,
         uptime: detail.uptime.clone(),
@@ -422,14 +422,14 @@ pub fn target_time(detail: &TargetTimeDetail) -> TargetTime {
 /// Decoded NTSTATUS, Win32, or HRESULT metadata.
 pub fn error_code(detail: &ErrorCodeDetail) -> ErrorCode {
     ErrorCode {
-        code: Hex(detail.code),
+        code: detail.code,
         kind: detail.kind.clone(),
         name: detail.name.clone(),
         description: detail.description.clone(),
         severity: detail.severity.clone(),
         facility: detail.facility,
         customer: detail.customer,
-        win32_code: detail.win32_code.map(|code| Hex(code.into())),
+        win32_code: detail.win32_code,
         win32_name: detail.win32_name.clone(),
     }
 }

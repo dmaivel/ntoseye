@@ -13,7 +13,7 @@ shapes! {
     /// A process's `_RTL_USER_PROCESS_PARAMETERS`: its strings read on their
     /// own, each unavailable when paged out.
     ProcessParameters {
-        address: Hex,
+        address: VirtAddr,
         command_line: Diag<String>,
         /// The image's full path.
         image_path_name: Diag<String>,
@@ -25,7 +25,7 @@ shapes! {
         shell_info: Diag<String>,
         runtime_data: Diag<String>,
         /// The environment block's address.
-        environment: Diag<Hex>,
+        environment: Diag<VirtAddr>,
         /// The environment block's size in bytes.
         environment_size: Diag<u64>,
     }
@@ -33,11 +33,11 @@ shapes! {
     /// A `_PEB_LDR_DATA` list head.
     LoaderListHead {
         /// The `LIST_ENTRY` head itself.
-        address: Hex,
+        address: VirtAddr,
         /// The first entry.
-        flink: Diag<Hex>,
+        flink: Diag<VirtAddr>,
         /// The last entry.
-        blink: Diag<Hex>,
+        blink: Diag<VirtAddr>,
     }
 
     /// The three `_PEB_LDR_DATA` module lists' heads.
@@ -49,19 +49,19 @@ shapes! {
 
     /// A process's `_PEB` (`!peb`), each field read on its own.
     Peb {
-        address: Hex,
-        image_base_address: Diag<Hex>,
+        address: VirtAddr,
+        image_base_address: Diag<VirtAddr>,
         /// The `_PEB_LDR_DATA` address.
-        ldr: Diag<Hex>,
+        ldr: Diag<VirtAddr>,
         /// The `_RTL_USER_PROCESS_PARAMETERS` address.
-        process_parameters: Diag<Hex>,
+        process_parameters: Diag<VirtAddr>,
         /// The decoded process parameters.
         process_parameters_detail: Diag<ProcessParameters>,
         /// The default heap.
-        process_heap: Diag<Hex>,
+        process_heap: Diag<VirtAddr>,
         number_of_heaps: Diag<u64>,
         /// The heap pointer array.
-        process_heaps: Diag<Hex>,
+        process_heaps: Diag<VirtAddr>,
         /// `BeingDebugged`: nonzero while a user-mode debugger is attached.
         being_debugged: Diag<u8>,
         os_major_version: Diag<u64>,
@@ -70,7 +70,7 @@ shapes! {
         session_id: Diag<u64>,
         number_of_processors: Diag<u64>,
         /// The API set schema.
-        api_set_map: Diag<Hex>,
+        api_set_map: Diag<VirtAddr>,
         /// The loader's module list heads.
         loader_lists: Diag<LoaderLists>,
         /// The WOW64 `_PEB32`; `None` for a native process.
@@ -79,19 +79,19 @@ shapes! {
 
     /// A WOW64 process's 32-bit `_PEB32`, each field read on its own.
     Peb32 {
-        address: Hex,
-        image_base_address: Diag<Hex>,
+        address: VirtAddr,
+        image_base_address: Diag<VirtAddr>,
         /// The `_PEB_LDR_DATA32` address.
-        ldr: Diag<Hex>,
+        ldr: Diag<VirtAddr>,
         /// The 32-bit process parameters' address.
-        process_parameters: Diag<Hex>,
+        process_parameters: Diag<VirtAddr>,
         /// The decoded 32-bit process parameters.
         process_parameters_detail: Diag<ProcessParameters>,
         /// The default heap.
-        process_heap: Diag<Hex>,
+        process_heap: Diag<VirtAddr>,
         number_of_heaps: Diag<u64>,
         /// The heap pointer array.
-        process_heaps: Diag<Hex>,
+        process_heaps: Diag<VirtAddr>,
         /// `BeingDebugged`: nonzero while a user-mode debugger is attached.
         being_debugged: Diag<u8>,
         os_major_version: Diag<u64>,
@@ -105,46 +105,46 @@ shapes! {
 
     /// A thread's `_TEB` (`!teb`), each field read on its own.
     Teb {
-        address: Hex,
-        stack_base: Diag<Hex>,
-        stack_limit: Diag<Hex>,
+        address: VirtAddr,
+        stack_base: Diag<VirtAddr>,
+        stack_limit: Diag<VirtAddr>,
         /// The thread-local storage array.
-        tls_pointer: Diag<Hex>,
+        tls_pointer: Diag<VirtAddr>,
         /// The Win32 last error.
         last_error_value: Diag<u32>,
         /// The last NTSTATUS.
-        last_status_value: Diag<Hex>,
+        last_status_value: Diag<Hex<u32>>,
         count_of_owned_critical_sections: Diag<u32>,
         /// The process's `_PEB`.
-        peb: Diag<Hex>,
+        peb: Diag<VirtAddr>,
         /// `WowTebOffset`: the byte offset to the WOW64 `_TEB32` (0 for none).
-        wow_teb_offset: Diag<i64>,
+        wow_teb_offset: Diag<i32>,
         /// `WOW32Reserved`: the WOW64 transition thunk.
-        wow64_reserved: Diag<Hex>,
+        wow64_reserved: Diag<VirtAddr>,
         /// The active activation context; value `None` when there is none.
-        activation_context: Diag<Option<Hex>>,
-        client_id_unique_process: Diag<Hex>,
-        client_id_unique_thread: Diag<Hex>,
+        activation_context: Diag<Option<VirtAddr>>,
+        client_id_unique_process: Diag<VirtAddr>,
+        client_id_unique_thread: Diag<VirtAddr>,
         /// The WOW64 `_TEB32`; `None` for a native thread.
         teb32: Option<Teb32>,
     }
 
     /// A WOW64 thread's 32-bit `_TEB32`, each field read on its own.
     Teb32 {
-        address: Hex,
-        stack_base: Diag<Hex>,
-        stack_limit: Diag<Hex>,
+        address: VirtAddr,
+        stack_base: Diag<VirtAddr>,
+        stack_limit: Diag<VirtAddr>,
         /// The thread-local storage array.
-        tls_pointer: Diag<Hex>,
+        tls_pointer: Diag<VirtAddr>,
         /// The Win32 last error.
         last_error_value: Diag<u32>,
         /// The last NTSTATUS.
-        last_status_value: Diag<Hex>,
+        last_status_value: Diag<Hex<u32>>,
         count_of_owned_critical_sections: Diag<u32>,
         /// The process's `_PEB32`.
-        peb: Diag<Hex>,
-        client_id_unique_process: Diag<Hex>,
-        client_id_unique_thread: Diag<Hex>,
+        peb: Diag<VirtAddr>,
+        client_id_unique_process: Diag<VirtAddr>,
+        client_id_unique_thread: Diag<VirtAddr>,
     }
 
     /// One module on a process's loader list (`!dlls`).
@@ -153,18 +153,18 @@ shapes! {
         name: String,
         /// The file name.
         short_name: String,
-        base_address: Hex,
+        base_address: VirtAddr,
         /// The image size in bytes.
         size: u32,
         /// On the WOW64 (32-bit) loader list.
         is_32bit: bool,
         /// `None` when the loader entry has none (or it is unreadable).
-        entry_point: Option<Hex>,
+        entry_point: Option<VirtAddr>,
         /// The PE header's link timestamp; `None` when the header is
         /// unreadable.
-        time_date_stamp: Option<Hex>,
+        time_date_stamp: Option<Hex<u32>>,
         /// The PE header's checksum; `None` when the header is unreadable.
-        checksum: Option<Hex>,
+        checksum: Option<Hex<u32>>,
         /// The version resource's file version; `None` when unreadable.
         file_version: Option<String>,
         /// The version resource's product version; `None` when unreadable.
@@ -190,11 +190,11 @@ shapes! {
     /// A thread's Win32 last error and last NTSTATUS (`!gle`).
     LastError {
         /// The `_TEB` read.
-        teb: Hex,
+        teb: VirtAddr,
         last_error_value: Diag<u32>,
         /// The error's symbolic name; value `None` when unknown.
         last_error_name: Diag<Option<String>>,
-        last_status_value: Diag<Hex>,
+        last_status_value: Diag<Hex<u32>>,
         /// The status's symbolic name; value `None` when unknown.
         last_status_name: Diag<Option<String>>,
         /// The WOW64 `_TEB32`'s values; `None` for a native thread.
@@ -204,11 +204,11 @@ shapes! {
     /// A WOW64 thread's 32-bit last error and last NTSTATUS.
     LastError32 {
         /// The `_TEB32` read.
-        teb: Hex,
+        teb: VirtAddr,
         last_error_value: Diag<u32>,
         /// The error's symbolic name; value `None` when unknown.
         last_error_name: Diag<Option<String>>,
-        last_status_value: Diag<Hex>,
+        last_status_value: Diag<Hex<u32>>,
         /// The status's symbolic name; value `None` when unknown.
         last_status_name: Diag<Option<String>>,
     }
@@ -227,7 +227,7 @@ shapes! {
     /// One executable section's comparison against the cached image.
     ImageSectionCheck {
         name: String,
-        rva: Hex,
+        rva: Hex<u32>,
         /// Mismatched bytes, known self-patches excluded.
         genuine_mismatches: u64,
         /// Mismatched bytes, known self-patches included.
@@ -266,11 +266,11 @@ shapes! {
 
     /// One byte that differs from the cached image.
     ImageByteDiff {
-        rva: Hex,
+        rva: Hex<u32>,
         /// The cached image's byte.
-        expected: Hex,
+        expected: Hex<u8>,
         /// The byte in memory.
-        actual: Hex,
+        actual: Hex<u8>,
         /// The self-patch kind it belongs to; `None` for a genuine mismatch.
         kind: Option<&'static str>,
     }
@@ -282,7 +282,7 @@ shapes! {
         /// The full path.
         module: String,
         short_name: String,
-        base_address: Hex,
+        base_address: VirtAddr,
         sections: Vec<ImageSectionCheck>,
         /// Mismatched bytes, known self-patches excluded.
         genuine_mismatched_bytes: u64,
@@ -303,120 +303,110 @@ shapes! {
     }
 }
 
-fn hex(address: &VirtAddr) -> Hex {
-    Hex(address.0)
-}
-
 fn process_parameters(detail: &ProcessParametersDetail) -> ProcessParameters {
     ProcessParameters {
-        address: hex(&detail.address),
-        command_line: Diag::of(&detail.command_line, String::clone),
-        image_path_name: Diag::of(&detail.image_path_name, String::clone),
-        current_directory: Diag::of(&detail.current_directory, String::clone),
-        dll_path: Diag::of(&detail.dll_path, String::clone),
-        window_title: Diag::of(&detail.window_title, String::clone),
-        desktop_info: Diag::of(&detail.desktop_info, String::clone),
-        shell_info: Diag::of(&detail.shell_info, String::clone),
-        runtime_data: Diag::of(&detail.runtime_data, String::clone),
-        environment: Diag::of(&detail.environment, hex),
-        environment_size: Diag::of(&detail.environment_size, |value| *value),
+        address: detail.address,
+        command_line: detail.command_line.map(String::clone),
+        image_path_name: detail.image_path_name.map(String::clone),
+        current_directory: detail.current_directory.map(String::clone),
+        dll_path: detail.dll_path.map(String::clone),
+        window_title: detail.window_title.map(String::clone),
+        desktop_info: detail.desktop_info.map(String::clone),
+        shell_info: detail.shell_info.map(String::clone),
+        runtime_data: detail.runtime_data.map(String::clone),
+        environment: detail.environment.clone(),
+        environment_size: detail.environment_size.clone(),
     }
 }
 
 fn loader_list_head(detail: &target::LoaderListHead) -> LoaderListHead {
     LoaderListHead {
-        address: hex(&detail.address),
-        flink: Diag::of(&detail.flink, hex),
-        blink: Diag::of(&detail.blink, hex),
+        address: detail.address,
+        flink: detail.flink.clone(),
+        blink: detail.blink.clone(),
     }
 }
 
 fn loader_lists(detail: &LoaderListHeads) -> LoaderLists {
     LoaderLists {
-        in_load_order: Diag::of(&detail.in_load_order, loader_list_head),
-        in_memory_order: Diag::of(&detail.in_memory_order, loader_list_head),
-        in_initialization_order: Diag::of(&detail.in_initialization_order, loader_list_head),
+        in_load_order: detail.in_load_order.map(loader_list_head),
+        in_memory_order: detail.in_memory_order.map(loader_list_head),
+        in_initialization_order: detail.in_initialization_order.map(loader_list_head),
     }
 }
 
 fn peb32(detail: &Peb32Detail) -> Peb32 {
     Peb32 {
-        address: hex(&detail.address),
-        image_base_address: Diag::of(&detail.image_base_address, hex),
-        ldr: Diag::of(&detail.ldr, hex),
-        process_parameters: Diag::of(&detail.process_parameters, hex),
-        process_parameters_detail: Diag::of(&detail.process_parameters_detail, process_parameters),
-        process_heap: Diag::of(&detail.process_heap, hex),
-        number_of_heaps: Diag::of(&detail.number_of_heaps, |value| *value),
-        process_heaps: Diag::of(&detail.process_heaps, hex),
-        being_debugged: Diag::of(&detail.being_debugged, |value| *value),
-        os_major_version: Diag::of(&detail.os_major_version, |value| *value),
-        os_minor_version: Diag::of(&detail.os_minor_version, |value| *value),
-        os_build_number: Diag::of(&detail.os_build_number, |value| *value),
-        session_id: Diag::of(&detail.session_id, |value| *value),
-        number_of_processors: Diag::of(&detail.number_of_processors, |value| *value),
-        loader_lists: Diag::of(&detail.loader_lists, loader_lists),
+        address: detail.address,
+        image_base_address: detail.image_base_address.clone(),
+        ldr: detail.ldr.clone(),
+        process_parameters: detail.process_parameters.clone(),
+        process_parameters_detail: detail.process_parameters_detail.map(process_parameters),
+        process_heap: detail.process_heap.clone(),
+        number_of_heaps: detail.number_of_heaps.clone(),
+        process_heaps: detail.process_heaps.clone(),
+        being_debugged: detail.being_debugged.clone(),
+        os_major_version: detail.os_major_version.clone(),
+        os_minor_version: detail.os_minor_version.clone(),
+        os_build_number: detail.os_build_number.clone(),
+        session_id: detail.session_id.clone(),
+        number_of_processors: detail.number_of_processors.clone(),
+        loader_lists: detail.loader_lists.map(loader_lists),
     }
 }
 
 pub fn peb(detail: &PebDetail) -> Peb {
     Peb {
-        address: hex(&detail.address),
-        image_base_address: Diag::of(&detail.image_base_address, hex),
-        ldr: Diag::of(&detail.ldr, hex),
-        process_parameters: Diag::of(&detail.process_parameters, hex),
-        process_parameters_detail: Diag::of(&detail.process_parameters_detail, process_parameters),
-        process_heap: Diag::of(&detail.process_heap, hex),
-        number_of_heaps: Diag::of(&detail.number_of_heaps, |value| *value),
-        process_heaps: Diag::of(&detail.process_heaps, hex),
-        being_debugged: Diag::of(&detail.being_debugged, |value| *value),
-        os_major_version: Diag::of(&detail.os_major_version, |value| *value),
-        os_minor_version: Diag::of(&detail.os_minor_version, |value| *value),
-        os_build_number: Diag::of(&detail.os_build_number, |value| *value),
-        session_id: Diag::of(&detail.session_id, |value| *value),
-        number_of_processors: Diag::of(&detail.number_of_processors, |value| *value),
-        api_set_map: Diag::of(&detail.api_set_map, hex),
-        loader_lists: Diag::of(&detail.loader_lists, loader_lists),
+        address: detail.address,
+        image_base_address: detail.image_base_address.clone(),
+        ldr: detail.ldr.clone(),
+        process_parameters: detail.process_parameters.clone(),
+        process_parameters_detail: detail.process_parameters_detail.map(process_parameters),
+        process_heap: detail.process_heap.clone(),
+        number_of_heaps: detail.number_of_heaps.clone(),
+        process_heaps: detail.process_heaps.clone(),
+        being_debugged: detail.being_debugged.clone(),
+        os_major_version: detail.os_major_version.clone(),
+        os_minor_version: detail.os_minor_version.clone(),
+        os_build_number: detail.os_build_number.clone(),
+        session_id: detail.session_id.clone(),
+        number_of_processors: detail.number_of_processors.clone(),
+        api_set_map: detail.api_set_map.clone(),
+        loader_lists: detail.loader_lists.map(loader_lists),
         peb32: detail.peb32.as_ref().map(peb32),
     }
 }
 
 fn teb32(detail: &Teb32Detail) -> Teb32 {
     Teb32 {
-        address: hex(&detail.address),
-        stack_base: Diag::of(&detail.stack_base, hex),
-        stack_limit: Diag::of(&detail.stack_limit, hex),
-        tls_pointer: Diag::of(&detail.tls_pointer, hex),
-        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
-        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
-        count_of_owned_critical_sections: Diag::of(
-            &detail.count_of_owned_critical_sections,
-            |value| *value,
-        ),
-        peb: Diag::of(&detail.peb, hex),
-        client_id_unique_process: Diag::of(&detail.client_id_unique_process, hex),
-        client_id_unique_thread: Diag::of(&detail.client_id_unique_thread, hex),
+        address: detail.address,
+        stack_base: detail.stack_base.clone(),
+        stack_limit: detail.stack_limit.clone(),
+        tls_pointer: detail.tls_pointer.clone(),
+        last_error_value: detail.last_error_value.clone(),
+        last_status_value: detail.last_status_value.map(|value| *value),
+        count_of_owned_critical_sections: detail.count_of_owned_critical_sections.clone(),
+        peb: detail.peb.clone(),
+        client_id_unique_process: detail.client_id_unique_process.clone(),
+        client_id_unique_thread: detail.client_id_unique_thread.clone(),
     }
 }
 
 pub fn teb(detail: &TebDetail) -> Teb {
     Teb {
-        address: hex(&detail.address),
-        stack_base: Diag::of(&detail.stack_base, hex),
-        stack_limit: Diag::of(&detail.stack_limit, hex),
-        tls_pointer: Diag::of(&detail.tls_pointer, hex),
-        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
-        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
-        count_of_owned_critical_sections: Diag::of(
-            &detail.count_of_owned_critical_sections,
-            |value| *value,
-        ),
-        peb: Diag::of(&detail.peb, hex),
-        wow_teb_offset: Diag::of(&detail.wow_teb_offset, |value| (*value).into()),
-        wow64_reserved: Diag::of(&detail.wow64_reserved, hex),
-        activation_context: Diag::of(&detail.activation_context, |value| value.as_ref().map(hex)),
-        client_id_unique_process: Diag::of(&detail.client_id_unique_process, hex),
-        client_id_unique_thread: Diag::of(&detail.client_id_unique_thread, hex),
+        address: detail.address,
+        stack_base: detail.stack_base.clone(),
+        stack_limit: detail.stack_limit.clone(),
+        tls_pointer: detail.tls_pointer.clone(),
+        last_error_value: detail.last_error_value.clone(),
+        last_status_value: detail.last_status_value.map(|value| *value),
+        count_of_owned_critical_sections: detail.count_of_owned_critical_sections.clone(),
+        peb: detail.peb.clone(),
+        wow_teb_offset: detail.wow_teb_offset.clone(),
+        wow64_reserved: detail.wow64_reserved.clone(),
+        activation_context: detail.activation_context.map(|value| value.as_ref().copied()),
+        client_id_unique_process: detail.client_id_unique_process.clone(),
+        client_id_unique_thread: detail.client_id_unique_thread.clone(),
         teb32: detail.teb32.as_ref().map(teb32),
     }
 }
@@ -426,12 +416,12 @@ pub fn loader_module(detail: &LoaderModuleDetail) -> LoaderModule {
     LoaderModule {
         name: detail.name.clone(),
         short_name: detail.short_name.clone(),
-        base_address: hex(&detail.base_address),
+        base_address: detail.base_address,
         size: detail.size,
         is_32bit: detail.is_32bit,
-        entry_point: detail.entry_point.as_ref().map(hex),
-        time_date_stamp: detail.time_date_stamp.map(|stamp| Hex(stamp.into())),
-        checksum: detail.checksum.map(|checksum| Hex(checksum.into())),
+        entry_point: detail.entry_point.as_ref().copied(),
+        time_date_stamp: detail.time_date_stamp,
+        checksum: detail.checksum,
         file_version: detail.file_version.clone(),
         product_version: detail.product_version.clone(),
     }
@@ -455,21 +445,21 @@ pub fn loader_terminations(detail: &LoaderModulesDetail) -> LoaderTerminations {
 
 fn last_error32(detail: &LastError32Detail) -> LastError32 {
     LastError32 {
-        teb: hex(&detail.teb),
-        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
-        last_error_name: Diag::of(&detail.last_error_name, Option::clone),
-        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
-        last_status_name: Diag::of(&detail.last_status_name, Option::clone),
+        teb: detail.teb,
+        last_error_value: detail.last_error_value.clone(),
+        last_error_name: detail.last_error_name.map(Option::clone),
+        last_status_value: detail.last_status_value.map(|value| *value),
+        last_status_name: detail.last_status_name.map(Option::clone),
     }
 }
 
 pub fn last_error(detail: &LastErrorDetail) -> LastError {
     LastError {
-        teb: hex(&detail.teb),
-        last_error_value: Diag::of(&detail.last_error_value, |value| *value),
-        last_error_name: Diag::of(&detail.last_error_name, Option::clone),
-        last_status_value: Diag::of(&detail.last_status_value, |value| Hex((*value).into())),
-        last_status_name: Diag::of(&detail.last_status_name, Option::clone),
+        teb: detail.teb,
+        last_error_value: detail.last_error_value.clone(),
+        last_error_name: detail.last_error_name.map(Option::clone),
+        last_status_value: detail.last_status_value.map(|value| *value),
+        last_status_name: detail.last_status_name.map(Option::clone),
         teb32: detail.teb32.as_ref().map(last_error32),
     }
 }
@@ -487,7 +477,7 @@ fn self_patch_counts(detail: &target::SelfPatchCounts) -> ImageSelfPatchCounts {
 fn section_result(detail: &ImageSectionResult) -> ImageSectionCheck {
     ImageSectionCheck {
         name: detail.name.clone(),
-        rva: Hex(detail.rva.into()),
+        rva: detail.rva,
         genuine_mismatches: detail.genuine_mismatches,
         total_mismatches: detail.total_mismatches,
         self_patches: self_patch_counts(&detail.self_patches),
@@ -499,16 +489,16 @@ fn section_result(detail: &ImageSectionResult) -> ImageSectionCheck {
 
 fn mismatch_range(detail: &target::MismatchRange) -> ImageMismatchRange {
     ImageMismatchRange {
-        start: Hex(detail.start),
-        end: Hex(detail.end),
+        start: detail.start,
+        end: detail.end,
         size: detail.end.saturating_sub(detail.start),
     }
 }
 
 fn self_patch_range(detail: &target::SelfPatchRange) -> ImageSelfPatchRange {
     ImageSelfPatchRange {
-        start: Hex(detail.start),
-        end: Hex(detail.end),
+        start: detail.start,
+        end: detail.end,
         size: detail.end.saturating_sub(detail.start),
         kind: detail.kind.name(),
         function: detail.function.clone(),
@@ -517,9 +507,9 @@ fn self_patch_range(detail: &target::SelfPatchRange) -> ImageSelfPatchRange {
 
 fn byte_diff(detail: &target::ByteDiff) -> ImageByteDiff {
     ImageByteDiff {
-        rva: Hex(detail.rva.into()),
-        expected: Hex(detail.expected.into()),
-        actual: Hex(detail.actual.into()),
+        rva: detail.rva,
+        expected: detail.expected,
+        actual: detail.actual,
         kind: detail.kind.map(target::SelfPatchKind::name),
     }
 }
@@ -528,7 +518,7 @@ pub fn image_check(detail: &ImageCheckDetail) -> ImageCheck {
     ImageCheck {
         module: detail.module.clone(),
         short_name: detail.short_name.clone(),
-        base_address: hex(&detail.base_address),
+        base_address: detail.base_address,
         sections: detail.sections.iter().map(section_result).collect(),
         genuine_mismatched_bytes: detail.genuine_mismatched_bytes,
         total_mismatched_bytes: detail.total_mismatched_bytes,

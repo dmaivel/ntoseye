@@ -2,6 +2,7 @@
 //! load status.
 
 use super::shape::{Diag, Hex, Omit, shapes, unions};
+use crate::types::VirtAddr;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::pe::headers::{
     CodeView, DebugRecord, FileHeader, ImportDescriptor, ImportName, OptionalHeader, SectionHeader,
@@ -23,15 +24,15 @@ shapes! {
         short_name: String,
         /// Full image path, when the loader recorded one.
         path: Option<String>,
-        base: Hex,
+        base: VirtAddr,
         /// One past the image's last byte.
         end: Hex,
         /// Mapped image size in bytes.
         size: u32,
         /// PE timestamp, absent when the loader record lacks one.
-        time_date_stamp: Omit<Hex>,
+        time_date_stamp: Omit<Hex<u32>>,
         /// PE checksum, absent when the loader record lacks one.
-        checksum: Omit<Hex>,
+        checksum: Omit<Hex<u32>>,
         /// File version from the version resource, absent when unread.
         file_version: Omit<String>,
         /// Product version from the version resource, absent when unread.
@@ -81,58 +82,58 @@ shapes! {
 
     /// `IMAGE_FILE_HEADER`.
     ImageFileHeader {
-        machine: Hex,
+        machine: Hex<u16>,
         /// `AMD64`, `I386`, ...
         machine_name: &'static str,
         number_of_sections: u16,
-        time_date_stamp: Hex,
-        pointer_to_symbol_table: Hex,
+        time_date_stamp: Hex<u32>,
+        pointer_to_symbol_table: Hex<u32>,
         number_of_symbols: u32,
-        size_of_optional_header: Hex,
-        characteristics: Hex,
+        size_of_optional_header: Hex<u16>,
+        characteristics: Hex<u16>,
         /// The `IMAGE_FILE_*` flags set in `characteristics`.
         characteristics_names: Vec<String>,
     }
 
     /// `IMAGE_OPTIONAL_HEADER` (PE32 or PE32+).
     ImageOptionalHeader {
-        magic: Hex,
+        magic: Hex<u16>,
         /// `major.minor`.
         linker_version: String,
-        size_of_code: Hex,
-        size_of_initialized_data: Hex,
-        size_of_uninitialized_data: Hex,
-        entry_point_rva: Hex,
+        size_of_code: Hex<u32>,
+        size_of_initialized_data: Hex<u32>,
+        size_of_uninitialized_data: Hex<u32>,
+        entry_point_rva: Hex<u32>,
         /// The mapped entry point, `None` when the image has none.
         entry_point: Option<Hex>,
-        base_of_code: Hex,
+        base_of_code: Hex<u32>,
         /// PE32 only; `None` for PE32+.
-        base_of_data: Option<Hex>,
+        base_of_data: Option<Hex<u32>>,
         /// The preferred base the image was linked for.
         image_base: Hex,
-        section_alignment: Hex,
-        file_alignment: Hex,
+        section_alignment: Hex<u32>,
+        file_alignment: Hex<u32>,
         /// `major.minor`.
         operating_system_version: String,
         /// `major.minor`.
         image_version: String,
         /// `major.minor`.
         subsystem_version: String,
-        win32_version_value: Hex,
-        size_of_image: Hex,
-        size_of_headers: Hex,
-        checksum: Hex,
+        win32_version_value: Hex<u32>,
+        size_of_image: Hex<u32>,
+        size_of_headers: Hex<u32>,
+        checksum: Hex<u32>,
         subsystem: u16,
         /// `Native`, `Windows GUI`, ...
         subsystem_name: &'static str,
-        dll_characteristics: Hex,
+        dll_characteristics: Hex<u16>,
         /// The `IMAGE_DLLCHARACTERISTICS_*` flags set.
         dll_characteristics_names: Vec<String>,
         size_of_stack_reserve: Hex,
         size_of_stack_commit: Hex,
         size_of_heap_reserve: Hex,
         size_of_heap_commit: Hex,
-        loader_flags: Hex,
+        loader_flags: Hex<u32>,
         number_of_rva_and_sizes: u32,
     }
 
@@ -142,23 +143,23 @@ shapes! {
         index: usize,
         /// `Export`, `Import`, `Debug`, ...
         name: &'static str,
-        rva: Hex,
-        size: Hex,
+        rva: Hex<u32>,
+        size: Hex<u32>,
     }
 
     /// One `IMAGE_SECTION_HEADER`.
     ImageSectionHeader {
         name: String,
-        virtual_size: Hex,
+        virtual_size: Hex<u32>,
         /// The section's RVA.
-        virtual_address: Hex,
-        size_of_raw_data: Hex,
-        pointer_to_raw_data: Hex,
-        pointer_to_relocations: Hex,
-        pointer_to_linenumbers: Hex,
+        virtual_address: Hex<u32>,
+        size_of_raw_data: Hex<u32>,
+        pointer_to_raw_data: Hex<u32>,
+        pointer_to_relocations: Hex<u32>,
+        pointer_to_linenumbers: Hex<u32>,
         number_of_relocations: u16,
         number_of_linenumbers: u16,
-        characteristics: Hex,
+        characteristics: Hex<u32>,
         /// The `IMAGE_SCN_*` flags set.
         characteristics_names: Vec<String>,
     }
@@ -170,7 +171,7 @@ shapes! {
         /// The PDB GUID, for `RSDS`.
         guid: Option<String>,
         /// The PDB timestamp signature, for `NB10`.
-        signature: Option<Hex>,
+        signature: Option<Hex<u32>>,
         age: u32,
         /// The PDB path the linker recorded.
         pdb: String,
@@ -182,13 +183,13 @@ shapes! {
         r#type: u32,
         /// `CODEVIEW`, `POGO`, ...
         type_name: &'static str,
-        characteristics: Hex,
-        time_date_stamp: Hex,
+        characteristics: Hex<u32>,
+        time_date_stamp: Hex<u32>,
         /// `major.minor`.
         version: String,
-        size_of_data: Hex,
-        address_of_raw_data: Hex,
-        pointer_to_raw_data: Hex,
+        size_of_data: Hex<u32>,
+        address_of_raw_data: Hex<u32>,
+        pointer_to_raw_data: Hex<u32>,
         /// The decoded CodeView record, `None` for other entry types.
         codeview: Option<Diag<CodeViewRecord>>,
     }
@@ -197,16 +198,16 @@ shapes! {
     ImageExportDirectory {
         /// The DLL name the directory records.
         name: String,
-        characteristics: Hex,
-        time_date_stamp: Hex,
+        characteristics: Hex<u32>,
+        time_date_stamp: Hex<u32>,
         /// `major.minor`.
         version: String,
         ordinal_base: u32,
         number_of_functions: u32,
         number_of_names: u32,
-        address_of_functions: Hex,
-        address_of_names: Hex,
-        address_of_name_ordinals: Hex,
+        address_of_functions: Hex<u32>,
+        address_of_names: Hex<u32>,
+        address_of_name_ordinals: Hex<u32>,
     }
 
     /// An image's export directory and its exports (`!dh -e`).
@@ -224,7 +225,7 @@ shapes! {
         /// `None` for a forwarder.
         rva: Option<Hex>,
         /// The mapped address, `None` for a forwarder.
-        address: Option<Hex>,
+        address: Option<VirtAddr>,
         /// The forwarding target (`OTHER.Function`), for a forwarder.
         forwarder: Option<String>,
     }
@@ -235,10 +236,10 @@ shapes! {
         name: Option<String>,
         /// Why the DLL name did not read.
         name_error: Option<String>,
-        import_address_table: Hex,
-        import_name_table: Hex,
-        time_date_stamp: Hex,
-        forwarder_chain: Hex,
+        import_address_table: Hex<u32>,
+        import_name_table: Hex<u32>,
+        time_date_stamp: Hex<u32>,
+        forwarder_chain: Hex<u32>,
         imports: Vec<ImageImport>,
         /// Why the thunk walk stopped early, when it did.
         incomplete: Option<String>,
@@ -282,13 +283,13 @@ shapes! {
     /// state.
     ModuleImageInfo {
         module: LoadedModule,
-        machine: Hex,
+        machine: Hex<u16>,
         /// `AMD64`, `I386`, ...
         machine_name: &'static str,
-        time_date_stamp: Hex,
-        size_of_image: Hex,
-        checksum: Hex,
-        characteristics: Hex,
+        time_date_stamp: Hex<u32>,
+        size_of_image: Hex<u32>,
+        checksum: Hex<u32>,
+        characteristics: Hex<u16>,
         /// The `IMAGE_FILE_*` flags set in `characteristics`.
         characteristics_names: Vec<String>,
         debug_directory: Diag<Vec<ImageDebugEntry>>,
@@ -302,9 +303,9 @@ shapes! {
         /// The section name (`.text`).
         name: String,
         /// Its offset from the image base.
-        rva: Hex,
+        rva: Hex<u32>,
         /// Its mapped size.
-        size: Hex,
+        size: Hex<u32>,
         /// Mapped permissions as `rwx`, `-` for a missing one.
         permissions: String,
     }
@@ -315,7 +316,7 @@ shapes! {
         name: Option<String>,
         ordinal: u32,
         /// The exported address, `None` for a forwarder.
-        address: Option<Hex>,
+        address: Option<VirtAddr>,
         /// The forwarding target (`OTHER.Function`), for a forwarder.
         forwarder: Option<String>,
     }
@@ -327,14 +328,14 @@ pub fn module(module: &ModuleInfo) -> LoadedModule {
         name: module.name.clone(),
         short_name: module.short_name.clone(),
         path: module.path.clone(),
-        base: Hex(module.base_address.0),
-        end: Hex(module.end_address().0),
+        base: module.base_address,
+        end: module.end_address().0,
         size: module.size,
-        time_date_stamp: Omit(module.time_date_stamp.map(|stamp| Hex(stamp.into()))),
-        checksum: Omit(module.checksum.map(|checksum| Hex(checksum.into()))),
-        file_version: Omit(module.file_version.clone()),
-        product_version: Omit(module.product_version.clone()),
-        symbols: Omit(None),
+        time_date_stamp: module.time_date_stamp,
+        checksum: module.checksum,
+        file_version: module.file_version.clone(),
+        product_version: module.product_version.clone(),
+        symbols: None,
     }
 }
 
@@ -399,7 +400,7 @@ unions! {
 /// `inspect()`).
 pub fn module_with_symbols(target: &Target, info: &ModuleInfo, dtb: Dtb) -> LoadedModule {
     LoadedModule {
-        symbols: Omit(Some(module_symbols(target, info, dtb))),
+        symbols: Some(module_symbols(target, info, dtb)),
         ..module(info)
     }
 }
@@ -410,52 +411,52 @@ fn version((major, minor): (u16, u16)) -> String {
 
 fn file_header(file: &FileHeader) -> ImageFileHeader {
     ImageFileHeader {
-        machine: Hex(file.machine.into()),
+        machine: file.machine,
         machine_name: machine_name(file.machine),
         number_of_sections: file.number_of_sections,
-        time_date_stamp: Hex(file.time_date_stamp.into()),
-        pointer_to_symbol_table: Hex(file.pointer_to_symbol_table.into()),
+        time_date_stamp: file.time_date_stamp,
+        pointer_to_symbol_table: file.pointer_to_symbol_table,
         number_of_symbols: file.number_of_symbols,
-        size_of_optional_header: Hex(file.size_of_optional_header.into()),
-        characteristics: Hex(file.characteristics.into()),
+        size_of_optional_header: file.size_of_optional_header,
+        characteristics: file.characteristics,
         characteristics_names: file_characteristics(file.characteristics),
     }
 }
 
 fn optional_header(optional: &OptionalHeader, base: u64) -> ImageOptionalHeader {
     ImageOptionalHeader {
-        magic: Hex(optional.magic.into()),
+        magic: optional.magic,
         linker_version: format!(
             "{}.{}",
             optional.linker_version.0, optional.linker_version.1
         ),
-        size_of_code: Hex(optional.size_of_code.into()),
-        size_of_initialized_data: Hex(optional.size_of_initialized_data.into()),
-        size_of_uninitialized_data: Hex(optional.size_of_uninitialized_data.into()),
-        entry_point_rva: Hex(optional.address_of_entry_point.into()),
+        size_of_code: optional.size_of_code,
+        size_of_initialized_data: optional.size_of_initialized_data,
+        size_of_uninitialized_data: optional.size_of_uninitialized_data,
+        entry_point_rva: optional.address_of_entry_point,
         entry_point: (optional.address_of_entry_point != 0)
-            .then(|| Hex(base.wrapping_add(optional.address_of_entry_point.into()))),
-        base_of_code: Hex(optional.base_of_code.into()),
-        base_of_data: optional.base_of_data.map(|base| Hex(base.into())),
-        image_base: Hex(optional.image_base),
-        section_alignment: Hex(optional.section_alignment.into()),
-        file_alignment: Hex(optional.file_alignment.into()),
+            .then(|| base.wrapping_add(optional.address_of_entry_point.into())),
+        base_of_code: optional.base_of_code,
+        base_of_data: optional.base_of_data,
+        image_base: optional.image_base,
+        section_alignment: optional.section_alignment,
+        file_alignment: optional.file_alignment,
         operating_system_version: version(optional.operating_system_version),
         image_version: version(optional.image_version),
         subsystem_version: version(optional.subsystem_version),
-        win32_version_value: Hex(optional.win32_version_value.into()),
-        size_of_image: Hex(optional.size_of_image.into()),
-        size_of_headers: Hex(optional.size_of_headers.into()),
-        checksum: Hex(optional.checksum.into()),
+        win32_version_value: optional.win32_version_value,
+        size_of_image: optional.size_of_image,
+        size_of_headers: optional.size_of_headers,
+        checksum: optional.checksum,
         subsystem: optional.subsystem,
         subsystem_name: subsystem_name(optional.subsystem),
-        dll_characteristics: Hex(optional.dll_characteristics.into()),
+        dll_characteristics: optional.dll_characteristics,
         dll_characteristics_names: dll_characteristics(optional.dll_characteristics),
-        size_of_stack_reserve: Hex(optional.size_of_stack_reserve),
-        size_of_stack_commit: Hex(optional.size_of_stack_commit),
-        size_of_heap_reserve: Hex(optional.size_of_heap_reserve),
-        size_of_heap_commit: Hex(optional.size_of_heap_commit),
-        loader_flags: Hex(optional.loader_flags.into()),
+        size_of_stack_reserve: optional.size_of_stack_reserve,
+        size_of_stack_commit: optional.size_of_stack_commit,
+        size_of_heap_reserve: optional.size_of_heap_reserve,
+        size_of_heap_commit: optional.size_of_heap_commit,
+        loader_flags: optional.loader_flags,
         number_of_rva_and_sizes: optional.number_of_rva_and_sizes,
     }
 }
@@ -463,15 +464,15 @@ fn optional_header(optional: &OptionalHeader, base: u64) -> ImageOptionalHeader 
 fn section_header(section: &SectionHeader) -> ImageSectionHeader {
     ImageSectionHeader {
         name: section.name.clone(),
-        virtual_size: Hex(section.virtual_size.into()),
-        virtual_address: Hex(section.virtual_address.into()),
-        size_of_raw_data: Hex(section.size_of_raw_data.into()),
-        pointer_to_raw_data: Hex(section.pointer_to_raw_data.into()),
-        pointer_to_relocations: Hex(section.pointer_to_relocations.into()),
-        pointer_to_linenumbers: Hex(section.pointer_to_linenumbers.into()),
+        virtual_size: section.virtual_size,
+        virtual_address: section.virtual_address,
+        size_of_raw_data: section.size_of_raw_data,
+        pointer_to_raw_data: section.pointer_to_raw_data,
+        pointer_to_relocations: section.pointer_to_relocations,
+        pointer_to_linenumbers: section.pointer_to_linenumbers,
         number_of_relocations: section.number_of_relocations,
         number_of_linenumbers: section.number_of_linenumbers,
-        characteristics: Hex(section.characteristics.into()),
+        characteristics: section.characteristics,
         characteristics_names: section_characteristics(section.characteristics),
     }
 }
@@ -492,7 +493,7 @@ fn codeview(record: &CodeView) -> CodeViewRecord {
         } => CodeViewRecord {
             format: "NB10",
             guid: None,
-            signature: Some(Hex((*signature).into())),
+            signature: Some(*signature),
             age: *age,
             pdb: path.clone(),
         },
@@ -504,40 +505,39 @@ fn debug_entry(record: &DebugRecord) -> ImageDebugEntry {
     ImageDebugEntry {
         r#type: entry.kind,
         type_name: debug_type_name(entry.kind),
-        characteristics: Hex(entry.characteristics.into()),
-        time_date_stamp: Hex(entry.time_date_stamp.into()),
+        characteristics: entry.characteristics,
+        time_date_stamp: entry.time_date_stamp,
         version: version(entry.version),
-        size_of_data: Hex(entry.size_of_data.into()),
-        address_of_raw_data: Hex(entry.address_of_raw_data.into()),
-        pointer_to_raw_data: Hex(entry.pointer_to_raw_data.into()),
+        size_of_data: entry.size_of_data,
+        address_of_raw_data: entry.address_of_raw_data,
+        pointer_to_raw_data: entry.pointer_to_raw_data,
         codeview: record.codeview.as_ref().map(|record| {
-            Diag::of(
-                &record.as_ref().map_or_else(
+            record.as_ref().map_or_else(
                     |error| DiagnosticValue::Unavailable(error.clone()),
                     DiagnosticValue::Available,
-                ),
-                |record| codeview(record),
-            )
+                ).map(|record| codeview(record))
         }),
     }
 }
 
-fn debug_directory(records: &DiagnosticValue<Vec<DebugRecord>>) -> Diag<Vec<ImageDebugEntry>> {
-    Diag::of(records, |records| records.iter().map(debug_entry).collect())
+fn debug_directory(
+    records: &DiagnosticValue<Vec<DebugRecord>>,
+) -> DiagnosticValue<Vec<ImageDebugEntry>> {
+    records.map(|records| records.iter().map(debug_entry).collect())
 }
 
 fn export_directory(directory: &ExportDirectory) -> ImageExportDirectory {
     ImageExportDirectory {
         name: directory.name.clone(),
-        characteristics: Hex(directory.characteristics.into()),
-        time_date_stamp: Hex(directory.time_date_stamp.into()),
+        characteristics: directory.characteristics,
+        time_date_stamp: directory.time_date_stamp,
         version: version(directory.version),
         ordinal_base: directory.ordinal_base,
         number_of_functions: directory.number_of_functions,
         number_of_names: directory.number_of_names,
-        address_of_functions: Hex(directory.address_of_functions.into()),
-        address_of_names: Hex(directory.address_of_names.into()),
-        address_of_name_ordinals: Hex(directory.address_of_name_ordinals.into()),
+        address_of_functions: directory.address_of_functions,
+        address_of_names: directory.address_of_names,
+        address_of_name_ordinals: directory.address_of_name_ordinals,
     }
 }
 
@@ -552,8 +552,8 @@ fn image_exports(exports: &pe::ImageExports, base: u64) -> ImageExports {
                 name: export.name.clone(),
                 rva: export
                     .address
-                    .map(|address| Hex(address.0.wrapping_sub(base))),
-                address: export.address.map(|address| Hex(address.0)),
+                    .map(|address| address.0.wrapping_sub(base)),
+                address: export.address,
                 forwarder: export.forwarder.clone(),
             })
             .collect(),
@@ -564,10 +564,10 @@ fn import_descriptor(descriptor: &ImportDescriptor) -> ImageImportDescriptor {
     ImageImportDescriptor {
         name: descriptor.name.as_ref().ok().cloned(),
         name_error: descriptor.name.as_ref().err().cloned(),
-        import_address_table: Hex(descriptor.first_thunk.into()),
-        import_name_table: Hex(descriptor.original_first_thunk.into()),
-        time_date_stamp: Hex(descriptor.time_date_stamp.into()),
-        forwarder_chain: Hex(descriptor.forwarder_chain.into()),
+        import_address_table: descriptor.first_thunk,
+        import_name_table: descriptor.original_first_thunk,
+        time_date_stamp: descriptor.time_date_stamp,
+        forwarder_chain: descriptor.forwarder_chain,
         imports: descriptor
             .entries
             .iter()
@@ -584,7 +584,7 @@ fn import_descriptor(descriptor: &ImportDescriptor) -> ImageImportDescriptor {
                     name,
                     hint,
                     ordinal,
-                    bound: entry.bound.map(Hex),
+                    bound: entry.bound,
                     error,
                 }
             })
@@ -599,7 +599,7 @@ pub fn image_headers(detail: &ImageHeadersDetail) -> ImageHeaders {
     let headers = &detail.headers;
     let base = detail.base.0;
     ImageHeaders {
-        base: Hex(base),
+        base,
         module: detail.module.clone(),
         format: if headers.is_pe32_plus() {
             "PE32+"
@@ -614,23 +614,21 @@ pub fn image_headers(detail: &ImageHeadersDetail) -> ImageHeaders {
             .map(|directory| ImageDataDirectory {
                 index: directory.index,
                 name: directory.name,
-                rva: Hex(directory.rva.into()),
-                size: Hex(directory.size.into()),
+                rva: directory.rva,
+                size: directory.size,
             })
             .collect(),
         sections: headers.sections.iter().map(section_header).collect(),
-        debug_directory: Omit(detail.debug.as_ref().map(debug_directory)),
-        exports: Omit(
-            detail
+        debug_directory: detail.debug.as_ref().map(debug_directory),
+        exports: detail
                 .exports
                 .as_ref()
-                .map(|exports| Diag::of(exports, |exports| image_exports(exports, base))),
-        ),
-        imports: Omit(detail.imports.as_ref().map(|imports| {
-            Diag::of(imports, |descriptors| {
+                .map(|exports| exports.map(|exports| image_exports(exports, base))),
+        imports: detail.imports.as_ref().map(|imports| {
+            imports.map(|descriptors| {
                 descriptors.iter().map(import_descriptor).collect()
             })
-        })),
+        }),
     }
 }
 
@@ -641,12 +639,12 @@ pub fn module_image_info(target: &Target, detail: &image::ModuleImageInfo) -> Mo
     let optional = &detail.headers.optional;
     ModuleImageInfo {
         module: module(&detail.module),
-        machine: Hex(file.machine.into()),
+        machine: file.machine,
         machine_name: machine_name(file.machine),
-        time_date_stamp: Hex(file.time_date_stamp.into()),
-        size_of_image: Hex(optional.size_of_image.into()),
-        checksum: Hex(optional.checksum.into()),
-        characteristics: Hex(file.characteristics.into()),
+        time_date_stamp: file.time_date_stamp,
+        size_of_image: optional.size_of_image,
+        checksum: optional.checksum,
+        characteristics: file.characteristics,
         characteristics_names: file_characteristics(file.characteristics),
         debug_directory: debug_directory(&detail.debug),
         symbols: module_symbols(target, &detail.module, detail.dtb),

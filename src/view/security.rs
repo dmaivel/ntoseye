@@ -2,6 +2,7 @@
 
 use super::process::process;
 use super::shape::{Diag, Hex, shapes};
+use crate::types::VirtAddr;
 use crate::target::security::{
     self, AceDetail, AclDetail, ObjectSecurityDetail, PrivilegeInfo, SecurityDescriptorDetail,
     SessionDetail, SessionProcessDetail, SessionProcessesDetail, SessionsDetail, SidDetail,
@@ -11,7 +12,7 @@ use crate::target::security::{
 shapes! {
     /// A decoded SID (`!sid`).
     Sid {
-        address: Hex,
+        address: VirtAddr,
         /// The canonical string form (`S-1-5-18`).
         sid: String,
         revision: u8,
@@ -30,15 +31,15 @@ shapes! {
         r#type: u8,
         type_name: String,
         /// The inheritance flags.
-        flags: Hex,
+        flags: Hex<u8>,
         flag_names: String,
-        access_mask: Diag<Hex>,
+        access_mask: Diag<Hex<u32>>,
         sid: Diag<Sid>,
     }
 
     /// A decoded ACL header and its ACEs (`!acl`).
     Acl {
-        address: Hex,
+        address: VirtAddr,
         revision: u8,
         /// Bytes.
         size: u16,
@@ -54,10 +55,10 @@ shapes! {
 
     /// A decoded absolute or self-relative security descriptor (`!sd`).
     SecurityDescriptor {
-        address: Hex,
+        address: VirtAddr,
         revision: Diag<u8>,
         /// `SECURITY_DESCRIPTOR.Control`.
-        control: Diag<Hex>,
+        control: Diag<Hex<u16>>,
         /// The names of the control bits set.
         control_names: Diag<String>,
         /// Whether `control` has `SE_SELF_RELATIVE`.
@@ -76,14 +77,14 @@ shapes! {
 
     /// An object's security descriptor, from its header (`!objsd`).
     ObjectSecurity {
-        object: Hex,
+        object: VirtAddr,
         /// The `_OBJECT_HEADER`.
-        header: Hex,
+        header: VirtAddr,
         /// `SecurityDescriptor`, a fast reference (reference count in the
         /// low bits).
         fast_reference: Hex,
         /// `fast_reference` without its count bits.
-        descriptor_address: Hex,
+        descriptor_address: VirtAddr,
         /// `None` when the object has no descriptor.
         descriptor: Option<SecurityDescriptor>,
     }
@@ -132,13 +133,13 @@ shapes! {
     /// A token SID and its `SE_GROUP_*` attributes.
     SidAndAttributes {
         sid: String,
-        attributes: Hex,
+        attributes: Hex<u32>,
     }
 
     /// A token privilege and its `SE_PRIVILEGE_*` attributes.
     TokenPrivilege {
         luid: Hex,
-        attributes: Hex,
+        attributes: Hex<u32>,
     }
 
     /// A process's primary token (`!token`).
@@ -146,7 +147,7 @@ shapes! {
         /// The process record.
         process: super::process::ProcessIdentity,
         /// The `_TOKEN`.
-        token: Hex,
+        token: VirtAddr,
         token_id: Diag<Hex>,
         /// The logon session's LUID.
         authentication_id: Diag<Hex>,
@@ -155,7 +156,7 @@ shapes! {
         /// `SECURITY_IMPERSONATION_LEVEL`.
         impersonation_level: Diag<u32>,
         /// `TokenFlags`.
-        flags: Diag<Hex>,
+        flags: Diag<Hex<u32>>,
         /// Its value is `None` when the token names no user.
         user: Diag<Option<SidAndAttributes>>,
         groups: Diag<Vec<SidAndAttributes>>,
@@ -166,7 +167,7 @@ shapes! {
 /// Render `!sid`.
 pub fn sid(detail: &SidDetail) -> Sid {
     Sid {
-        address: Hex(detail.address.0),
+        address: detail.address,
         sid: detail.sid.clone(),
         revision: detail.revision,
         authority: detail.authority,
@@ -180,17 +181,17 @@ fn ace(detail: &AceDetail) -> Ace {
         index: detail.index,
         r#type: detail.ace_type,
         type_name: detail.type_name.clone(),
-        flags: Hex(detail.flags.into()),
+        flags: detail.flags,
         flag_names: detail.flag_names.clone(),
-        access_mask: Diag::of(&detail.access_mask, |value| Hex((*value).into())),
-        sid: Diag::of(&detail.sid, sid),
+        access_mask: detail.access_mask.map(|value| *value),
+        sid: detail.sid.map(sid),
     }
 }
 
 /// Render `!acl`.
 pub fn acl(detail: &AclDetail) -> Acl {
     Acl {
-        address: Hex(detail.address.0),
+        address: detail.address,
         revision: detail.revision,
         size: detail.size,
         ace_count: detail.ace_count,
@@ -203,15 +204,15 @@ pub fn acl(detail: &AclDetail) -> Acl {
 /// Render `!sd`.
 pub fn security_descriptor(detail: &SecurityDescriptorDetail) -> SecurityDescriptor {
     SecurityDescriptor {
-        address: Hex(detail.address.0),
-        revision: Diag::of(&detail.revision, |value| *value),
-        control: Diag::of(&detail.control, |value| Hex((*value).into())),
-        control_names: Diag::of(&detail.control_names, String::clone),
-        self_relative: Diag::of(&detail.self_relative, |value| *value),
-        owner: Diag::of(&detail.owner, |value| value.as_ref().map(sid)),
-        group: Diag::of(&detail.group, |value| value.as_ref().map(sid)),
-        dacl: Diag::of(&detail.dacl, |value| value.as_ref().map(acl)),
-        sacl: Diag::of(&detail.sacl, |value| value.as_ref().map(acl)),
+        address: detail.address,
+        revision: detail.revision.clone(),
+        control: detail.control.map(|value| *value),
+        control_names: detail.control_names.map(String::clone),
+        self_relative: detail.self_relative.clone(),
+        owner: detail.owner.map(|value| value.as_ref().map(sid)),
+        group: detail.group.map(|value| value.as_ref().map(sid)),
+        dacl: detail.dacl.map(|value| value.as_ref().map(acl)),
+        sacl: detail.sacl.map(|value| value.as_ref().map(acl)),
         unsupported_revision: detail.unsupported_revision,
     }
 }
@@ -219,10 +220,10 @@ pub fn security_descriptor(detail: &SecurityDescriptorDetail) -> SecurityDescrip
 /// Render `!objsd`.
 pub fn object_security(detail: &ObjectSecurityDetail) -> ObjectSecurity {
     ObjectSecurity {
-        object: Hex(detail.object.0),
-        header: Hex(detail.header.0),
-        fast_reference: Hex(detail.fast_reference),
-        descriptor_address: Hex(detail.descriptor_address.0),
+        object: detail.object,
+        header: detail.header,
+        fast_reference: detail.fast_reference,
+        descriptor_address: detail.descriptor_address,
         descriptor: detail.descriptor.as_ref().map(security_descriptor),
     }
 }
@@ -266,14 +267,14 @@ pub fn session_processes(detail: &SessionProcessesDetail) -> SessionProcesses {
 fn sid_and_attributes(sid: &security::SidAndAttributes) -> SidAndAttributes {
     SidAndAttributes {
         sid: sid.sid.clone(),
-        attributes: Hex(sid.attributes.into()),
+        attributes: sid.attributes,
     }
 }
 
 fn privilege(privilege: &PrivilegeInfo) -> TokenPrivilege {
     TokenPrivilege {
-        luid: Hex(privilege.luid),
-        attributes: Hex(privilege.attributes.into()),
+        luid: privilege.luid,
+        attributes: privilege.attributes,
     }
 }
 
@@ -281,17 +282,17 @@ fn privilege(privilege: &PrivilegeInfo) -> TokenPrivilege {
 pub fn token(token: &TokenDetail) -> Token {
     Token {
         process: process(&token.process),
-        token: Hex(token.token.0),
-        token_id: Diag::of(&token.token_id, |value| Hex(*value)),
-        authentication_id: Diag::of(&token.authentication_id, |value| Hex(*value)),
-        token_type: Diag::of(&token.token_type, |value| *value),
-        impersonation_level: Diag::of(&token.impersonation_level, |value| *value),
-        flags: Diag::of(&token.flags, |value| Hex((*value).into())),
-        user: Diag::of(&token.user, |user| user.as_ref().map(sid_and_attributes)),
-        groups: Diag::of(&token.groups, |groups| {
+        token: token.token,
+        token_id: token.token_id.clone(),
+        authentication_id: token.authentication_id.clone(),
+        token_type: token.token_type.clone(),
+        impersonation_level: token.impersonation_level.clone(),
+        flags: token.flags.map(|value| *value),
+        user: token.user.map(|user| user.as_ref().map(sid_and_attributes)),
+        groups: token.groups.map(|groups| {
             groups.iter().map(sid_and_attributes).collect()
         }),
-        privileges: Diag::of(&token.privileges, |privileges| {
+        privileges: token.privileges.map(|privileges| {
             privileges.iter().map(privilege).collect()
         }),
     }

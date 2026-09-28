@@ -2,6 +2,7 @@
 //! VPBs, the file cache, and the filter manager.
 
 use super::shape::{Diag, Hex, shapes};
+use crate::types::VirtAddr;
 use crate::target::fltmgr::{
     FltFilterDetail, FltFrame, FltFrames, FltInstanceDetail, FltVolumeDetail,
 };
@@ -19,14 +20,14 @@ shapes! {
         committed_pages: u64,
         /// `None` for a data file's segment, whose prototype PTEs are in its
         /// subsections.
-        prototype_ptes: Option<Hex>,
+        prototype_ptes: Option<VirtAddr>,
     }
 
     /// A `_SUBSECTION` following a control area.
     Subsection {
-        address: Hex,
+        address: VirtAddr,
         /// Its first prototype PTE.
-        base_pte: Hex,
+        base_pte: VirtAddr,
         ptes: u64,
         unused_ptes: u64,
         starting_sector: Hex,
@@ -37,8 +38,8 @@ shapes! {
 
     /// A section's `_CONTROL_AREA`, its segment, and its subsections (`!ca`).
     ControlArea {
-        address: Hex,
-        segment: Hex,
+        address: VirtAddr,
+        segment: VirtAddr,
         section_references: u64,
         pfn_references: u64,
         mapped_views: u64,
@@ -47,7 +48,7 @@ shapes! {
         flags: Hex,
         /// The `_MMSECTION_FLAGS` bits set in `flags`.
         flag_names: Vec<String>,
-        file_object: Hex,
+        file_object: VirtAddr,
         file_name: Diag<String>,
         segment_detail: Diag<ControlAreaSegment>,
         subsections: Vec<Subsection>,
@@ -58,25 +59,25 @@ shapes! {
 
     /// A volume parameter block (`!vpb`).
     Vpb {
-        address: Hex,
+        address: VirtAddr,
         flags: Hex,
         /// The `VPB_*` bits set in `flags`.
         flag_names: Vec<&'static str>,
         /// The mounted file system's volume device object.
-        device_object: Hex,
+        device_object: VirtAddr,
         device_name: Option<String>,
         /// The storage device the volume is on.
-        real_device: Hex,
+        real_device: VirtAddr,
         real_device_name: Option<String>,
-        serial_number: Hex,
+        serial_number: Hex<u32>,
         reference_count: u32,
         volume_label: String,
     }
 
     /// A file the cache manager maps a view of.
     CachedFile {
-        shared_cache_map: Hex,
-        file_object: Hex,
+        shared_cache_map: VirtAddr,
+        file_object: VirtAddr,
         file_name: Diag<String>,
         /// Bytes.
         file_size: Diag<u64>,
@@ -110,23 +111,23 @@ shapes! {
 
     /// A minifilter attached to a volume (`_FLT_INSTANCE`).
     FltInstance {
-        address: Hex,
+        address: VirtAddr,
         name: String,
         altitude: String,
         /// Its `_FLT_FILTER`.
-        filter: Hex,
+        filter: VirtAddr,
         filter_name: Option<String>,
         /// Its `_FLT_VOLUME`.
-        volume: Hex,
+        volume: VirtAddr,
         volume_name: Option<String>,
     }
 
     /// A registered minifilter (`_FLT_FILTER`) and its instances.
     FltFilter {
-        address: Hex,
+        address: VirtAddr,
         name: String,
         altitude: String,
-        driver_object: Hex,
+        driver_object: VirtAddr,
         instances: Vec<FltInstance>,
         /// Why the instance walk stopped short of its head; `None` when it
         /// completed.
@@ -136,7 +137,7 @@ shapes! {
     /// A volume the filter manager attached to (`_FLT_VOLUME`) and the
     /// instances on it.
     FltVolume {
-        address: Hex,
+        address: VirtAddr,
         device_name: String,
         /// The `_FLT_FILESYSTEM_TYPE` name without its `FLT_FSTYPE_` prefix.
         file_system: Option<String>,
@@ -149,7 +150,7 @@ shapes! {
     /// A filter manager frame and its registered minifilters.
     FltFilterFrame {
         /// The `_FLTP_FRAME`.
-        address: Hex,
+        address: VirtAddr,
         frame_id: u64,
         filters: Vec<FltFilter>,
         /// Why the frame's list walk stopped short of its head; `None` when it
@@ -160,7 +161,7 @@ shapes! {
     /// A filter manager frame and its minifilter instances.
     FltInstanceFrame {
         /// The `_FLTP_FRAME`.
-        address: Hex,
+        address: VirtAddr,
         frame_id: u64,
         instances: Vec<FltInstance>,
         /// Why the frame's list walk stopped short of its head; `None` when it
@@ -171,7 +172,7 @@ shapes! {
     /// A filter manager frame and its volumes.
     FltVolumeFrame {
         /// The `_FLTP_FRAME`.
-        address: Hex,
+        address: VirtAddr,
         frame_id: u64,
         volumes: Vec<FltVolume>,
         /// Why the frame's list walk stopped short of its head; `None` when it
@@ -208,38 +209,38 @@ shapes! {
 fn segment(segment: &SegmentDetail) -> ControlAreaSegment {
     ControlAreaSegment {
         total_ptes: segment.total_ptes,
-        size: Hex(segment.size),
+        size: segment.size,
         committed_pages: segment.committed_pages,
-        prototype_ptes: segment.prototype_ptes.map(|ptes| Hex(ptes.0)),
+        prototype_ptes: segment.prototype_ptes,
     }
 }
 
 fn subsection(subsection: &SubsectionDetail) -> Subsection {
     Subsection {
-        address: Hex(subsection.address.0),
-        base_pte: Hex(subsection.base_pte.0),
+        address: subsection.address,
+        base_pte: subsection.base_pte,
         ptes: subsection.ptes,
         unused_ptes: subsection.unused_ptes,
-        starting_sector: Hex(subsection.starting_sector),
-        sectors: Hex(subsection.sectors),
-        protection: Hex(subsection.protection),
+        starting_sector: subsection.starting_sector,
+        sectors: subsection.sectors,
+        protection: subsection.protection,
     }
 }
 
 /// Render `!ca`.
 pub fn control_area(detail: &ControlAreaDetail) -> ControlArea {
     ControlArea {
-        address: Hex(detail.address.0),
-        segment: Hex(detail.segment.0),
+        address: detail.address,
+        segment: detail.segment,
         section_references: detail.section_references,
         pfn_references: detail.pfn_references,
         mapped_views: detail.mapped_views,
         user_references: detail.user_references,
-        flags: Hex(detail.flags),
+        flags: detail.flags,
         flag_names: detail.flag_names.clone(),
-        file_object: Hex(detail.file_object.0),
-        file_name: Diag::of(&detail.file_name, String::clone),
-        segment_detail: Diag::of(&detail.segment_detail, segment),
+        file_object: detail.file_object,
+        file_name: detail.file_name.map(String::clone),
+        segment_detail: detail.segment_detail.map(segment),
         subsections: detail.subsections.iter().map(subsection).collect(),
         subsections_stopped: detail.subsections_stopped.clone(),
     }
@@ -248,14 +249,14 @@ pub fn control_area(detail: &ControlAreaDetail) -> ControlArea {
 /// Render `!vpb`.
 pub fn vpb(detail: &VpbDetail) -> Vpb {
     Vpb {
-        address: Hex(detail.address.0),
-        flags: Hex(detail.flags),
+        address: detail.address,
+        flags: detail.flags,
         flag_names: detail.flag_names.clone(),
-        device_object: Hex(detail.device_object.0),
+        device_object: detail.device_object,
         device_name: detail.device_name.clone(),
-        real_device: Hex(detail.real_device.0),
+        real_device: detail.real_device,
         real_device_name: detail.real_device_name.clone(),
-        serial_number: Hex(detail.serial_number.into()),
+        serial_number: detail.serial_number,
         reference_count: detail.reference_count,
         volume_label: detail.volume_label.clone(),
     }
@@ -263,13 +264,13 @@ pub fn vpb(detail: &VpbDetail) -> Vpb {
 
 fn cached_file(file: &CachedFileDetail) -> CachedFile {
     CachedFile {
-        shared_cache_map: Hex(file.shared_cache_map.0),
-        file_object: Hex(file.file_object.0),
-        file_name: Diag::of(&file.file_name, String::clone),
-        file_size: Diag::of(&file.file_size, |value| *value),
-        valid_data_length: Diag::of(&file.valid_data_length, |value| *value),
-        open_count: Diag::of(&file.open_count, |value| *value),
-        dirty_pages: Diag::of(&file.dirty_pages, |value| *value),
+        shared_cache_map: file.shared_cache_map,
+        file_object: file.file_object,
+        file_name: file.file_name.map(String::clone),
+        file_size: file.file_size.clone(),
+        valid_data_length: file.valid_data_length.clone(),
+        open_count: file.open_count.clone(),
+        dirty_pages: file.dirty_pages.clone(),
         mapped_vacbs: file.mapped_vacbs,
         valid_bytes: file.valid_bytes,
     }
@@ -280,7 +281,7 @@ fn cached_file(file: &CachedFileDetail) -> CachedFile {
 pub fn file_cache(detail: &FileCacheDetail) -> FileCache {
     FileCache {
         vacb_arrays: detail.vacb_arrays,
-        free_vacbs: Diag::of(&detail.free_vacbs, |value| *value),
+        free_vacbs: detail.free_vacbs.clone(),
         active_vacbs: detail.active_vacbs,
         mapped_bytes: detail.mapped_bytes,
         valid_bytes: detail.valid_bytes,
@@ -292,22 +293,22 @@ pub fn file_cache(detail: &FileCacheDetail) -> FileCache {
 
 fn flt_instance(instance: &FltInstanceDetail) -> FltInstance {
     FltInstance {
-        address: Hex(instance.address.0),
+        address: instance.address,
         name: instance.name.clone(),
         altitude: instance.altitude.clone(),
-        filter: Hex(instance.filter.0),
+        filter: instance.filter,
         filter_name: instance.filter_name.clone(),
-        volume: Hex(instance.volume.0),
+        volume: instance.volume,
         volume_name: instance.volume_name.clone(),
     }
 }
 
 fn flt_filter(filter: &FltFilterDetail) -> FltFilter {
     FltFilter {
-        address: Hex(filter.address.0),
+        address: filter.address,
         name: filter.name.clone(),
         altitude: filter.altitude.clone(),
-        driver_object: Hex(filter.driver_object.0),
+        driver_object: filter.driver_object,
         instances: filter.instances.iter().map(flt_instance).collect(),
         instances_stopped: filter.instances_stopped.clone(),
     }
@@ -315,7 +316,7 @@ fn flt_filter(filter: &FltFilterDetail) -> FltFilter {
 
 fn flt_volume(volume: &FltVolumeDetail) -> FltVolume {
     FltVolume {
-        address: Hex(volume.address.0),
+        address: volume.address,
         device_name: volume.device_name.clone(),
         file_system: volume.file_system.clone(),
         instances: volume.instances.iter().map(flt_instance).collect(),
@@ -325,9 +326,12 @@ fn flt_volume(volume: &FltVolumeDetail) -> FltVolume {
 
 /// A frame's address, id, items rendered by `item`, and why its walk
 /// stopped.
-fn flt_frame<T, U>(frame: &FltFrame<T>, item: fn(&T) -> U) -> (Hex, u64, Vec<U>, Option<String>) {
+fn flt_frame<T, U>(
+    frame: &FltFrame<T>,
+    item: fn(&T) -> U,
+) -> (VirtAddr, u64, Vec<U>, Option<String>) {
     (
-        Hex(frame.address.0),
+        frame.address,
         frame.frame_id,
         frame.items.iter().map(item).collect(),
         frame.stopped.clone(),
