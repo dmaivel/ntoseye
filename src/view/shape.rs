@@ -171,9 +171,13 @@ impl<T: ViewValue> ViewValue for Diag<T> {
     fn view(value: Self::Source) -> View {
         diagnostic::<T>(value, None)
     }
+    /// `ntoseye.Diagnostic[T]`: the package declares `Diagnostic` in Python,
+    /// generic over its value.
     #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr =
-        <crate::python::record::Diagnostic as pyo3::PyTypeInfo>::TYPE_HINT;
+    const HINT: pyo3::inspect::PyStaticExpr = pyo3::type_hint_subscript!(
+        pyo3::type_hint_identifier!("ntoseye", "Diagnostic"),
+        T::HINT
+    );
 }
 
 impl<T: ViewValue> ViewValue for Metric<T> {

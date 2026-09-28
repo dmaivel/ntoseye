@@ -7,7 +7,9 @@ category (the grouping `.hh` prints), each command a `command` object that
 `reference/command-line/` is `ntoseye --help` and each subcommand's.
 
 `reference/sdk/` is written from the Python SDK's checked-in type stub
-(`python/ntoseye/_ntoseye.pyi`) and `ntoseye.repl`, one page per class.
+(`python/ntoseye/_ntoseye.pyi`), the classes the package itself declares
+(`ntoseye/__init__.py`: `Diagnostic` and the exceptions), and `ntoseye.repl`,
+one page per class.
 
 These directories are regenerated on every build and are not checked in. The
 command and command-line help come from `ntoseye --dump-command-reference`: the
@@ -37,6 +39,7 @@ from sphinx.roles import XRefRole
 ROOT = Path(__file__).resolve().parents[2]
 STUB = ROOT / "python" / "ntoseye" / "_ntoseye.pyi"
 REPL_MODULE = ROOT / "python" / "ntoseye" / "repl.py"
+PACKAGE = ROOT / "python" / "ntoseye" / "__init__.py"
 
 # Reading order of the command categories; any category not listed follows,
 # alphabetically, so a new one still gets a page.
@@ -379,7 +382,12 @@ def class_block(node: ast.ClassDef, qualify: Qualify) -> Block:
     if "final" in decorators(node):
         options.append(":final:")
     body = docstring(node)
-    bases = [ast.unparse(base) for base in node.bases]
+    # `Generic[T]` declares a type parameter, not a base worth linking.
+    bases = [
+        ast.unparse(base)
+        for base in node.bases
+        if not (isinstance(base, ast.Subscript) and ast.unparse(base.value) == "Generic")
+    ]
     if bases:
         links = ", ".join(f"{{py:class}}`{base}`" for base in bases)
         body = f"Subclass of {links}.\n\n{body}".strip()
@@ -431,10 +439,20 @@ def sdk_pages() -> dict[str, str]:
     qualify = Qualify(imported_names(stub), members)
     docs = attribute_docs(stub.body)
 
-    classes = sorted(
-        (node for node in stub.body if isinstance(node, ast.ClassDef) and public(node.name)),
-        key=lambda node: node.name.lower(),
-    )
+    package = ast.parse(PACKAGE.read_text())
+    package_qualify = Qualify(imported_names(package), members)
+    # Each class with the qualifier of the module that declares it.
+    declared = [
+        (node, qualify)
+        for node in stub.body
+        if isinstance(node, ast.ClassDef) and public(node.name)
+    ] + [
+        (node, package_qualify)
+        for node in package.body
+        if isinstance(node, ast.ClassDef) and public(node.name)
+    ]
+    declared.sort(key=lambda pair: pair[0].name.lower())
+    classes = [node for node, _ in declared]
     module_blocks = []
     for node in stub.body:
         if isinstance(node, ast.FunctionDef) and public(node.name):
@@ -454,14 +472,14 @@ def sdk_pages() -> dict[str, str]:
                 )
             )
 
-    for node in classes:
+    for node, node_qualify in declared:
         page = [
             f"# {node.name}",
             "",
             "```{py:currentmodule} ntoseye",
             "```",
             "",
-            class_block(node, qualify).render(),
+            class_block(node, node_qualify).render(),
             "",
         ]
         pages[f"{node.name}.md"] = "\n".join(page)

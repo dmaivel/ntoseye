@@ -4,6 +4,7 @@ all of it.
 """
 
 from collections.abc import Callable, Sequence
+from ntoseye import Diagnostic
 from typing import Any, Final, Literal, final
 
 __version__: Final[str]
@@ -25,7 +26,7 @@ class Ace(BaseRecord):
     body does not hide the header's type and flags.
     """
     @property
-    def access_mask(self, /) -> Diagnostic: ...
+    def access_mask(self, /) -> Diagnostic[int]: ...
     @property
     def flag_names(self, /) -> str: ...
     @property
@@ -39,7 +40,7 @@ class Ace(BaseRecord):
         Its position in the ACL.
         """
     @property
-    def sid(self, /) -> Diagnostic: ...
+    def sid(self, /) -> Diagnostic[Sid]: ...
     @property
     def type(self, /) -> int: ...
     @property
@@ -651,22 +652,22 @@ class Apc(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def kernel_routine(self, /) -> Diagnostic:
+    def kernel_routine(self, /) -> Diagnostic[int |None]:
         """
         `KernelRoutine`.
         """
     @property
-    def kernel_routine_symbol(self, /) -> Diagnostic:
+    def kernel_routine_symbol(self, /) -> Diagnostic[str |None]:
         """
         `kernel_routine` as a symbol, when one resolves.
         """
     @property
-    def normal_routine(self, /) -> Diagnostic:
+    def normal_routine(self, /) -> Diagnostic[int |None]:
         """
         `NormalRoutine`; `None` inside for a special kernel APC.
         """
     @property
-    def normal_routine_symbol(self, /) -> Diagnostic:
+    def normal_routine_symbol(self, /) -> Diagnostic[str |None]:
         """
         `normal_routine` as a symbol, when one resolves.
         """
@@ -1540,20 +1541,20 @@ class CachedFile(BaseRecord):
     A file the cache manager maps a view of.
     """
     @property
-    def dirty_pages(self, /) -> Diagnostic: ...
+    def dirty_pages(self, /) -> Diagnostic[int]: ...
     @property
-    def file_name(self, /) -> Diagnostic: ...
+    def file_name(self, /) -> Diagnostic[str]: ...
     @property
     def file_object(self, /) -> int: ...
     @property
-    def file_size(self, /) -> Diagnostic:
+    def file_size(self, /) -> Diagnostic[int]:
         """
         Bytes.
         """
     @property
     def mapped_vacbs(self, /) -> int: ...
     @property
-    def open_count(self, /) -> Diagnostic: ...
+    def open_count(self, /) -> Diagnostic[int]: ...
     @property
     def shared_cache_map(self, /) -> int: ...
     @property
@@ -1562,7 +1563,7 @@ class CachedFile(BaseRecord):
         Present bytes in the mapped views.
         """
     @property
-    def valid_data_length(self, /) -> Diagnostic:
+    def valid_data_length(self, /) -> Diagnostic[int]:
         """
         Bytes.
         """
@@ -1649,7 +1650,7 @@ class ControlArea(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def file_name(self, /) -> Diagnostic: ...
+    def file_name(self, /) -> Diagnostic[str]: ...
     @property
     def file_object(self, /) -> int: ...
     @property
@@ -1671,7 +1672,7 @@ class ControlArea(BaseRecord):
     @property
     def segment(self, /) -> int: ...
     @property
-    def segment_detail(self, /) -> Diagnostic: ...
+    def segment_detail(self, /) -> Diagnostic[ControlAreaSegment]: ...
     @property
     def subsections(self, /) -> list[Subsection]: ...
     @property
@@ -1797,7 +1798,7 @@ class CpuFeatureBits(BaseRecord):
         The `_KPRCB` field.
         """
     @property
-    def value(self, /) -> Diagnostic: ...
+    def value(self, /) -> Diagnostic[int]: ...
 
 @final
 class CpuInfo(BaseRecord):
@@ -1806,21 +1807,21 @@ class CpuInfo(BaseRecord):
     (`!cpuinfo`).
     """
     @property
-    def family(self, /) -> Diagnostic: ...
+    def family(self, /) -> Diagnostic[int]: ...
     @property
     def feature_bits(self, /) -> list[CpuFeatureBits]: ...
     @property
-    def kprcb(self, /) -> Diagnostic:
+    def kprcb(self, /) -> Diagnostic[int]:
         """
         The `_KPRCB` address.
         """
     @property
-    def mhz(self, /) -> Diagnostic:
+    def mhz(self, /) -> Diagnostic[int]:
         """
         The processor speed, in MHz.
         """
     @property
-    def model(self, /) -> Diagnostic: ...
+    def model(self, /) -> Diagnostic[int]: ...
     @property
     def processor(self, /) -> int:
         """
@@ -1832,19 +1833,19 @@ class CpuInfo(BaseRecord):
         Where the values came from: `_KPRCB` or `triage-dump PRCB metadata`.
         """
     @property
-    def stepping(self, /) -> Diagnostic: ...
+    def stepping(self, /) -> Diagnostic[int]: ...
     @property
     def triage_fallback(self, /) -> CpuTriageFallback |None:
         """
         Triage metadata, present when the KPRCB could not be found.
         """
     @property
-    def vendor(self, /) -> Diagnostic:
+    def vendor(self, /) -> Diagnostic[str]:
         """
         The vendor string (`GenuineIntel`, ...).
         """
     @property
-    def vendor_id(self, /) -> Diagnostic:
+    def vendor_id(self, /) -> Diagnostic[int]:
         """
         `_KPRCB.CpuVendor`.
         """
@@ -2479,28 +2480,6 @@ class DeviceStackLayer(BaseRecord):
     def object_name(self, /) -> str: ...
 
 @final
-class Diagnostic:
-    """
-    One field that reads independently: `value` when it did, `error` when it
-    did not. Truthy exactly when available.
-    """
-    def __bool__(self, /) -> bool: ...
-    def __eq__(self, other: object, /) -> bool: ...
-    def __repr__(self, /) -> str: ...
-    @property
-    def available(self, /) -> bool: ...
-    @property
-    def error(self, /) -> str |None: ...
-    @property
-    def source(self, /) -> str |None: ...
-    def to_dict(self, /) -> dict[str, Any]:
-        """
-        The `{available, value, error[, source]}` dict the MCP surface returns.
-        """
-    @property
-    def value(self, /) -> Any: ...
-
-@final
 class DisassembledInstruction(BaseRecord):
     """
     One decoded instruction.
@@ -2531,22 +2510,22 @@ class Dpc(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def context(self, /) -> Diagnostic:
+    def context(self, /) -> Diagnostic[int |None]:
         """
         `DeferredContext`.
         """
     @property
-    def deferred_routine(self, /) -> Diagnostic:
+    def deferred_routine(self, /) -> Diagnostic[int |None]:
         """
         `DeferredRoutine`.
         """
     @property
-    def deferred_routine_symbol(self, /) -> Diagnostic:
+    def deferred_routine_symbol(self, /) -> Diagnostic[str |None]:
         """
         `deferred_routine` as a symbol, when one resolves.
         """
     @property
-    def importance(self, /) -> Diagnostic:
+    def importance(self, /) -> Diagnostic[int |None]:
         """
         `Importance`.
         """
@@ -3435,25 +3414,25 @@ class ExecutiveResource(BaseRecord):
     An `_ERESOURCE` (`!locks <address>`).
     """
     @property
-    def active_count(self, /) -> Diagnostic: ...
+    def active_count(self, /) -> Diagnostic[int]: ...
     @property
     def address(self, /) -> int: ...
     @property
-    def contention_count(self, /) -> Diagnostic: ...
+    def contention_count(self, /) -> Diagnostic[int]: ...
     @property
-    def exclusive_waiters(self, /) -> Diagnostic:
+    def exclusive_waiters(self, /) -> Diagnostic[int]:
         """
         Threads waiting for exclusive access.
         """
     @property
-    def flags(self, /) -> Diagnostic: ...
+    def flags(self, /) -> Diagnostic[int]: ...
     @property
-    def owners(self, /) -> Diagnostic:
+    def owners(self, /) -> Diagnostic[list[ResourceOwner]]:
         """
         The owning threads.
         """
     @property
-    def shared_waiters(self, /) -> Diagnostic:
+    def shared_waiters(self, /) -> Diagnostic[int]:
         """
         Threads waiting for shared access.
         """
@@ -3579,7 +3558,7 @@ class FileCache(BaseRecord):
         first, up to 1,024.
         """
     @property
-    def free_vacbs(self, /) -> Diagnostic:
+    def free_vacbs(self, /) -> Diagnostic[int]:
         """
         `CcNumberOfFreeVacbs`.
         """
@@ -3606,64 +3585,64 @@ class FileObject(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def current_byte_offset(self, /) -> Diagnostic: ...
+    def current_byte_offset(self, /) -> Diagnostic[int]: ...
     @property
-    def delete_access(self, /) -> Diagnostic: ...
+    def delete_access(self, /) -> Diagnostic[bool]: ...
     @property
-    def delete_pending(self, /) -> Diagnostic: ...
+    def delete_pending(self, /) -> Diagnostic[bool]: ...
     @property
-    def device_name(self, /) -> Diagnostic:
+    def device_name(self, /) -> Diagnostic[str |None]:
         """
         The device's object name; the value is None for an unnamed device.
         """
     @property
-    def device_object(self, /) -> Diagnostic: ...
+    def device_object(self, /) -> Diagnostic[int]: ...
     @property
-    def device_type(self, /) -> Diagnostic: ...
+    def device_type(self, /) -> Diagnostic[int]: ...
     @property
-    def file_name(self, /) -> Diagnostic: ...
+    def file_name(self, /) -> Diagnostic[str]: ...
     @property
-    def file_type(self, /) -> Diagnostic:
+    def file_type(self, /) -> Diagnostic[int]:
         """
         `Type` (`IO_TYPE_FILE`, 5, for a valid file object).
         """
     @property
-    def final_status(self, /) -> Diagnostic:
+    def final_status(self, /) -> Diagnostic[int]:
         """
         The NTSTATUS the file object completed with.
         """
     @property
-    def flags(self, /) -> Diagnostic: ...
+    def flags(self, /) -> Diagnostic[int]: ...
     @property
-    def fs_context(self, /) -> Diagnostic:
+    def fs_context(self, /) -> Diagnostic[int]:
         """
         The file system's `FsContext` (its FCB).
         """
     @property
-    def fs_context2(self, /) -> Diagnostic:
+    def fs_context2(self, /) -> Diagnostic[int]:
         """
         The file system's `FsContext2` (its CCB).
         """
     @property
-    def lock_operation(self, /) -> Diagnostic: ...
+    def lock_operation(self, /) -> Diagnostic[bool]: ...
     @property
-    def private_cache_map(self, /) -> Diagnostic: ...
+    def private_cache_map(self, /) -> Diagnostic[int]: ...
     @property
-    def read_access(self, /) -> Diagnostic: ...
+    def read_access(self, /) -> Diagnostic[bool]: ...
     @property
-    def related_file_object(self, /) -> Diagnostic: ...
+    def related_file_object(self, /) -> Diagnostic[int]: ...
     @property
-    def section_object_pointer(self, /) -> Diagnostic: ...
+    def section_object_pointer(self, /) -> Diagnostic[int]: ...
     @property
-    def shared_delete(self, /) -> Diagnostic: ...
+    def shared_delete(self, /) -> Diagnostic[bool]: ...
     @property
-    def shared_read(self, /) -> Diagnostic: ...
+    def shared_read(self, /) -> Diagnostic[bool]: ...
     @property
-    def shared_write(self, /) -> Diagnostic: ...
+    def shared_write(self, /) -> Diagnostic[bool]: ...
     @property
-    def size(self, /) -> Diagnostic: ...
+    def size(self, /) -> Diagnostic[int]: ...
     @property
-    def write_access(self, /) -> Diagnostic: ...
+    def write_access(self, /) -> Diagnostic[bool]: ...
 
 @final
 class FindStack(BaseRecord):
@@ -4021,32 +4000,32 @@ class GdtDescriptor(BaseRecord):
     One decoded GDT descriptor. A system descriptor spans two slots.
     """
     @property
-    def base(self, /) -> Diagnostic:
+    def base(self, /) -> Diagnostic[int]:
         """
         The segment base.
         """
     @property
-    def default_size(self, /) -> Diagnostic:
+    def default_size(self, /) -> Diagnostic[bool]:
         """
         The D/B bit: 32-bit default operand size.
         """
     @property
-    def descriptor_kind(self, /) -> Diagnostic:
+    def descriptor_kind(self, /) -> Diagnostic[str]:
         """
         `system` or `code/data`.
         """
     @property
-    def dpl(self, /) -> Diagnostic:
+    def dpl(self, /) -> Diagnostic[int]:
         """
         The descriptor privilege level.
         """
     @property
-    def granularity(self, /) -> Diagnostic:
+    def granularity(self, /) -> Diagnostic[bool]:
         """
         The G bit: the limit counts 4 KiB pages.
         """
     @property
-    def high_raw(self, /) -> Diagnostic:
+    def high_raw(self, /) -> Diagnostic[int |None]:
         """
         A system descriptor's second slot; the diagnostic's value is None
         for other descriptors.
@@ -4057,24 +4036,24 @@ class GdtDescriptor(BaseRecord):
         The slot index.
         """
     @property
-    def limit(self, /) -> Diagnostic:
+    def limit(self, /) -> Diagnostic[int]:
         """
         The segment limit, in bytes.
         """
     @property
-    def long_mode(self, /) -> Diagnostic:
+    def long_mode(self, /) -> Diagnostic[bool]:
         """
         The L bit: a 64-bit code segment.
         """
     @property
-    def present(self, /) -> Diagnostic: ...
+    def present(self, /) -> Diagnostic[bool]: ...
     @property
-    def raw(self, /) -> Diagnostic:
+    def raw(self, /) -> Diagnostic[int]:
         """
         The descriptor's raw 8 bytes.
         """
     @property
-    def type_code(self, /) -> Diagnostic:
+    def type_code(self, /) -> Diagnostic[int]:
         """
         The raw type field.
         """
@@ -4121,7 +4100,7 @@ class GlobalFlags(BaseRecord):
         The current process; `None` with no process selected.
         """
     @property
-    def process_flags(self, /) -> Diagnostic:
+    def process_flags(self, /) -> Diagnostic[ProcessGlobalFlags]:
         """
         The current process's flags, read from its PEB.
         """
@@ -4132,7 +4111,7 @@ class HandleEntry(BaseRecord):
     A handle-table entry (`!handle <handle>`).
     """
     @property
-    def attributes(self, /) -> Diagnostic:
+    def attributes(self, /) -> Diagnostic[int]:
         """
         The entry's attribute bits (inherit, protect-from-close, audit).
         """
@@ -4142,21 +4121,21 @@ class HandleEntry(BaseRecord):
         The `_HANDLE_TABLE_ENTRY`.
         """
     @property
-    def granted_access(self, /) -> Diagnostic: ...
+    def granted_access(self, /) -> Diagnostic[int]: ...
     @property
     def handle(self, /) -> int: ...
     @property
-    def name(self, /) -> Diagnostic:
+    def name(self, /) -> Diagnostic[str |None]:
         """
         The object's name; the value is None for an unnamed object.
         """
     @property
-    def object(self, /) -> Diagnostic:
+    def object(self, /) -> Diagnostic[int]:
         """
         The object's body.
         """
     @property
-    def type_name(self, /) -> Diagnostic: ...
+    def type_name(self, /) -> Diagnostic[str |None]: ...
 
 @final
 class HandleTable(BaseRecord):
@@ -4740,7 +4719,7 @@ class HeapOverview(BaseRecord):
         `nt`, `segment`, or `unknown (<signature>)`.
         """
     @property
-    def stats(self, /) -> Diagnostic:
+    def stats(self, /) -> Diagnostic[HeapStats]:
         """
         Unavailable when the heap's signature, layout, memory, or symbols
         cannot be read.
@@ -4967,51 +4946,51 @@ class IdtGate(BaseRecord):
         The gate's address in the table.
         """
     @property
-    def dpl(self, /) -> Diagnostic:
+    def dpl(self, /) -> Diagnostic[int]:
         """
         The descriptor privilege level.
         """
     @property
-    def gate_name(self, /) -> Diagnostic:
+    def gate_name(self, /) -> Diagnostic[str]:
         """
         `interrupt`, `trap`, `task`, or `reserved`.
         """
     @property
-    def gate_type(self, /) -> Diagnostic:
+    def gate_type(self, /) -> Diagnostic[int]:
         """
         The raw gate type.
         """
     @property
-    def handler(self, /) -> Diagnostic:
+    def handler(self, /) -> Diagnostic[int]:
         """
         The interrupt handler the gate points at.
         """
     @property
-    def ist(self, /) -> Diagnostic:
+    def ist(self, /) -> Diagnostic[int]:
         """
         The interrupt stack table index (0: none).
         """
     @property
-    def ki_isr_thunk(self, /) -> Diagnostic:
+    def ki_isr_thunk(self, /) -> Diagnostic[str |None]:
         """
         For a handler inside `KiIsrThunk` (a chained interrupt), its offset
         there and where `_KINTERRUPT.DispatchCode` sits; the diagnostic's
         value is None for other handlers.
         """
     @property
-    def non_nt_hook(self, /) -> Diagnostic:
+    def non_nt_hook(self, /) -> Diagnostic[bool]:
         """
         Whether the handler lies in a module other than NT's.
         """
     @property
-    def present(self, /) -> Diagnostic: ...
+    def present(self, /) -> Diagnostic[bool]: ...
     @property
-    def selector(self, /) -> Diagnostic:
+    def selector(self, /) -> Diagnostic[int]:
         """
         The code segment selector.
         """
     @property
-    def symbol(self, /) -> Diagnostic:
+    def symbol(self, /) -> Diagnostic[str |None]:
         """
         The handler's symbol; the diagnostic's value is None when none
         resolved.
@@ -5128,7 +5107,7 @@ class ImageDebugEntry(BaseRecord):
     @property
     def characteristics(self, /) -> int: ...
     @property
-    def codeview(self, /) -> Diagnostic |None:
+    def codeview(self, /) -> Diagnostic[CodeViewRecord] |None:
         """
         The decoded CodeView record, `None` for other entry types.
         """
@@ -5267,12 +5246,12 @@ class ImageHeaders(BaseRecord):
     @property
     def data_directories(self, /) -> list[ImageDataDirectory]: ...
     @property
-    def debug_directory(self, /) -> Diagnostic |None:
+    def debug_directory(self, /) -> Diagnostic[list[ImageDebugEntry]] |None:
         """
         The debug directory, absent unless asked for.
         """
     @property
-    def exports(self, /) -> Diagnostic |None:
+    def exports(self, /) -> Diagnostic[ImageExports] |None:
         """
         The export directory, absent unless asked for.
         """
@@ -5284,7 +5263,7 @@ class ImageHeaders(BaseRecord):
         `PE32` or `PE32+`.
         """
     @property
-    def imports(self, /) -> Diagnostic |None:
+    def imports(self, /) -> Diagnostic[list[ImageImportDescriptor]] |None:
         """
         The import descriptors, absent unless asked for.
         """
@@ -6041,7 +6020,7 @@ class IpiProcessor(BaseRecord):
         `Diagnostic` of its value.
         """
     @property
-    def frozen_state(self, /) -> Diagnostic |None:
+    def frozen_state(self, /) -> Diagnostic[str] |None:
         """
         `IpiFrozen` decoded (`Running`, `Frozen`, ...); `None` when the
         build lacks the field.
@@ -6049,7 +6028,7 @@ class IpiProcessor(BaseRecord):
     @property
     def kprcb(self, /) -> int: ...
     @property
-    def pending(self, /) -> Diagnostic:
+    def pending(self, /) -> Diagnostic[list[IpiRequest]]:
         """
         Requests queued to this processor and not yet taken, in list
         order; unavailable on builds without per-sender mailboxes or when
@@ -6075,14 +6054,14 @@ class IpiRequest(BaseRecord):
         The sender's `_REQUEST_MAILBOX` slot in the receiver's array.
         """
     @property
-    def parameters(self, /) -> Diagnostic:
+    def parameters(self, /) -> Diagnostic[list[int]]:
         """
         `RequestPacket.CurrentPacket`: the worker's three parameters.
         """
     @property
-    def request_summary(self, /) -> Diagnostic: ...
+    def request_summary(self, /) -> Diagnostic[int]: ...
     @property
-    def request_type(self, /) -> Diagnostic:
+    def request_type(self, /) -> Diagnostic[str |None]:
         """
         The request summary's type, when it is a known one.
         """
@@ -6093,7 +6072,7 @@ class IpiRequest(BaseRecord):
         receiver's array.
         """
     @property
-    def worker_routine(self, /) -> Diagnostic: ...
+    def worker_routine(self, /) -> Diagnostic[int]: ...
     @property
     def worker_symbol(self, /) -> str |None:
         """
@@ -6254,7 +6233,7 @@ class Irql(BaseRecord):
     A processor's current IRQL (`!irql`).
     """
     @property
-    def level_name(self, /) -> Diagnostic:
+    def level_name(self, /) -> Diagnostic[str]:
         """
         The Windows name of the level (`DISPATCH_LEVEL`, ...).
         """
@@ -6270,7 +6249,7 @@ class Irql(BaseRecord):
         The processor number.
         """
     @property
-    def value(self, /) -> Diagnostic:
+    def value(self, /) -> Diagnostic[int]:
         """
         The IRQL.
         """
@@ -6471,37 +6450,37 @@ class KernelTimer(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def dpc(self, /) -> Diagnostic:
+    def dpc(self, /) -> Diagnostic[int |None]:
         """
         The decoded `_KDPC` address; `None` inside when the timer has none.
         """
     @property
-    def dpc_encoded(self, /) -> Diagnostic:
+    def dpc_encoded(self, /) -> Diagnostic[int |None]:
         """
         `Dpc` as stored, encoded by the kernel.
         """
     @property
-    def dpc_routine(self, /) -> Diagnostic:
+    def dpc_routine(self, /) -> Diagnostic[int |None]:
         """
         The DPC's `DeferredRoutine`.
         """
     @property
-    def dpc_routine_symbol(self, /) -> Diagnostic:
+    def dpc_routine_symbol(self, /) -> Diagnostic[str |None]:
         """
         `dpc_routine` as a symbol, when one resolves.
         """
     @property
-    def due_time(self, /) -> Diagnostic:
+    def due_time(self, /) -> Diagnostic[int]:
         """
         `DueTime`: the interrupt time it expires at.
         """
     @property
-    def interrupt_time(self, /) -> Diagnostic:
+    def interrupt_time(self, /) -> Diagnostic[int |None]:
         """
         The current interrupt time, to compare `due_time` against.
         """
     @property
-    def period(self, /) -> Diagnostic:
+    def period(self, /) -> Diagnostic[int]:
         """
         `Period` in milliseconds; 0 for a one-shot timer.
         """
@@ -6512,19 +6491,19 @@ class LastError(BaseRecord):
     A thread's Win32 last error and last NTSTATUS (`!gle`).
     """
     @property
-    def last_error_name(self, /) -> Diagnostic:
+    def last_error_name(self, /) -> Diagnostic[str |None]:
         """
         The error's symbolic name; value `None` when unknown.
         """
     @property
-    def last_error_value(self, /) -> Diagnostic: ...
+    def last_error_value(self, /) -> Diagnostic[int]: ...
     @property
-    def last_status_name(self, /) -> Diagnostic:
+    def last_status_name(self, /) -> Diagnostic[str |None]:
         """
         The status's symbolic name; value `None` when unknown.
         """
     @property
-    def last_status_value(self, /) -> Diagnostic: ...
+    def last_status_value(self, /) -> Diagnostic[int]: ...
     @property
     def teb(self, /) -> int:
         """
@@ -6542,19 +6521,19 @@ class LastError32(BaseRecord):
     A WOW64 thread's 32-bit last error and last NTSTATUS.
     """
     @property
-    def last_error_name(self, /) -> Diagnostic:
+    def last_error_name(self, /) -> Diagnostic[str |None]:
         """
         The error's symbolic name; value `None` when unknown.
         """
     @property
-    def last_error_value(self, /) -> Diagnostic: ...
+    def last_error_value(self, /) -> Diagnostic[int]: ...
     @property
-    def last_status_name(self, /) -> Diagnostic:
+    def last_status_name(self, /) -> Diagnostic[str |None]:
         """
         The status's symbolic name; value `None` when unknown.
         """
     @property
-    def last_status_value(self, /) -> Diagnostic: ...
+    def last_status_value(self, /) -> Diagnostic[int]: ...
     @property
     def teb(self, /) -> int:
         """
@@ -6694,12 +6673,12 @@ class LoaderListHead(BaseRecord):
         The `LIST_ENTRY` head itself.
         """
     @property
-    def blink(self, /) -> Diagnostic:
+    def blink(self, /) -> Diagnostic[int]:
         """
         The last entry.
         """
     @property
-    def flink(self, /) -> Diagnostic:
+    def flink(self, /) -> Diagnostic[int]:
         """
         The first entry.
         """
@@ -6710,11 +6689,11 @@ class LoaderLists(BaseRecord):
     The three `_PEB_LDR_DATA` module lists' heads.
     """
     @property
-    def in_initialization_order(self, /) -> Diagnostic: ...
+    def in_initialization_order(self, /) -> Diagnostic[LoaderListHead]: ...
     @property
-    def in_load_order(self, /) -> Diagnostic: ...
+    def in_load_order(self, /) -> Diagnostic[LoaderListHead]: ...
     @property
-    def in_memory_order(self, /) -> Diagnostic: ...
+    def in_memory_order(self, /) -> Diagnostic[LoaderListHead]: ...
 
 @final
 class LoaderModule(BaseRecord):
@@ -6837,25 +6816,25 @@ class LookasideList(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def allocate_misses(self, /) -> Diagnostic: ...
+    def allocate_misses(self, /) -> Diagnostic[int]: ...
     @property
-    def depth(self, /) -> Diagnostic: ...
+    def depth(self, /) -> Diagnostic[int]: ...
     @property
     def index(self, /) -> int:
         """
         Position in the list walk.
         """
     @property
-    def size(self, /) -> Diagnostic:
+    def size(self, /) -> Diagnostic[int]:
         """
         Allocation size in bytes.
         """
     @property
-    def tag(self, /) -> Diagnostic: ...
+    def tag(self, /) -> Diagnostic[PoolTag]: ...
     @property
-    def total_allocates(self, /) -> Diagnostic: ...
+    def total_allocates(self, /) -> Diagnostic[int]: ...
     @property
-    def total_frees(self, /) -> Diagnostic: ...
+    def total_frees(self, /) -> Diagnostic[int]: ...
 
 @final
 class LookasideLists(BaseRecord):
@@ -7347,7 +7326,7 @@ class ModuleImageInfo(BaseRecord):
     @property
     def checksum(self, /) -> int: ...
     @property
-    def debug_directory(self, /) -> Diagnostic: ...
+    def debug_directory(self, /) -> Diagnostic[list[ImageDebugEntry]]: ...
     @property
     def machine(self, /) -> int: ...
     @property
@@ -8186,42 +8165,42 @@ class Pcr(BaseRecord):
     to read on their own are diagnostics.
     """
     @property
-    def current_prcb(self, /) -> Diagnostic:
+    def current_prcb(self, /) -> Diagnostic[int]:
         """
         `_KPCR.CurrentPrcb`.
         """
     @property
-    def current_thread(self, /) -> Diagnostic:
+    def current_thread(self, /) -> Diagnostic[int]:
         """
         The running `_KTHREAD`.
         """
     @property
-    def gdtr(self, /) -> Diagnostic:
+    def gdtr(self, /) -> Diagnostic[DescriptorRegister]:
         """
         The global descriptor table register.
         """
     @property
-    def idle_thread(self, /) -> Diagnostic:
+    def idle_thread(self, /) -> Diagnostic[int]:
         """
         The processor's idle `_KTHREAD`.
         """
     @property
-    def idtr(self, /) -> Diagnostic:
+    def idtr(self, /) -> Diagnostic[DescriptorRegister]:
         """
         The interrupt descriptor table register.
         """
     @property
-    def irql(self, /) -> Diagnostic:
+    def irql(self, /) -> Diagnostic[int]:
         """
         The current IRQL.
         """
     @property
-    def kd_version_block(self, /) -> Diagnostic:
+    def kd_version_block(self, /) -> Diagnostic[int]:
         """
         `_KPCR.KdVersionBlock`.
         """
     @property
-    def kpcr(self, /) -> Diagnostic:
+    def kpcr(self, /) -> Diagnostic[int]:
         """
         The `_KPCR` address.
         """
@@ -8231,7 +8210,7 @@ class Pcr(BaseRecord):
         The `_KPRCB` address.
         """
     @property
-    def next_thread(self, /) -> Diagnostic:
+    def next_thread(self, /) -> Diagnostic[int]:
         """
         The `_KTHREAD` selected to run next.
         """
@@ -8241,12 +8220,12 @@ class Pcr(BaseRecord):
         The processor number.
         """
     @property
-    def self_pcr(self, /) -> Diagnostic:
+    def self_pcr(self, /) -> Diagnostic[int]:
         """
         `_KPCR.Self`.
         """
     @property
-    def tss_base(self, /) -> Diagnostic:
+    def tss_base(self, /) -> Diagnostic[int]:
         """
         The task state segment's address.
         """
@@ -8259,64 +8238,64 @@ class Peb(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def api_set_map(self, /) -> Diagnostic:
+    def api_set_map(self, /) -> Diagnostic[int]:
         """
         The API set schema.
         """
     @property
-    def being_debugged(self, /) -> Diagnostic:
+    def being_debugged(self, /) -> Diagnostic[int]:
         """
         `BeingDebugged`: nonzero while a user-mode debugger is attached.
         """
     @property
-    def image_base_address(self, /) -> Diagnostic: ...
+    def image_base_address(self, /) -> Diagnostic[int]: ...
     @property
-    def ldr(self, /) -> Diagnostic:
+    def ldr(self, /) -> Diagnostic[int]:
         """
         The `_PEB_LDR_DATA` address.
         """
     @property
-    def loader_lists(self, /) -> Diagnostic:
+    def loader_lists(self, /) -> Diagnostic[LoaderLists]:
         """
         The loader's module list heads.
         """
     @property
-    def number_of_heaps(self, /) -> Diagnostic: ...
+    def number_of_heaps(self, /) -> Diagnostic[int]: ...
     @property
-    def number_of_processors(self, /) -> Diagnostic: ...
+    def number_of_processors(self, /) -> Diagnostic[int]: ...
     @property
-    def os_build_number(self, /) -> Diagnostic: ...
+    def os_build_number(self, /) -> Diagnostic[int]: ...
     @property
-    def os_major_version(self, /) -> Diagnostic: ...
+    def os_major_version(self, /) -> Diagnostic[int]: ...
     @property
-    def os_minor_version(self, /) -> Diagnostic: ...
+    def os_minor_version(self, /) -> Diagnostic[int]: ...
     @property
     def peb32(self, /) -> Peb32 |None:
         """
         The WOW64 `_PEB32`; `None` for a native process.
         """
     @property
-    def process_heap(self, /) -> Diagnostic:
+    def process_heap(self, /) -> Diagnostic[int]:
         """
         The default heap.
         """
     @property
-    def process_heaps(self, /) -> Diagnostic:
+    def process_heaps(self, /) -> Diagnostic[int]:
         """
         The heap pointer array.
         """
     @property
-    def process_parameters(self, /) -> Diagnostic:
+    def process_parameters(self, /) -> Diagnostic[int]:
         """
         The `_RTL_USER_PROCESS_PARAMETERS` address.
         """
     @property
-    def process_parameters_detail(self, /) -> Diagnostic:
+    def process_parameters_detail(self, /) -> Diagnostic[ProcessParameters]:
         """
         The decoded process parameters.
         """
     @property
-    def session_id(self, /) -> Diagnostic: ...
+    def session_id(self, /) -> Diagnostic[int]: ...
 
 @final
 class Peb32(BaseRecord):
@@ -8326,54 +8305,54 @@ class Peb32(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def being_debugged(self, /) -> Diagnostic:
+    def being_debugged(self, /) -> Diagnostic[int]:
         """
         `BeingDebugged`: nonzero while a user-mode debugger is attached.
         """
     @property
-    def image_base_address(self, /) -> Diagnostic: ...
+    def image_base_address(self, /) -> Diagnostic[int]: ...
     @property
-    def ldr(self, /) -> Diagnostic:
+    def ldr(self, /) -> Diagnostic[int]:
         """
         The `_PEB_LDR_DATA32` address.
         """
     @property
-    def loader_lists(self, /) -> Diagnostic:
+    def loader_lists(self, /) -> Diagnostic[LoaderLists]:
         """
         The loader's 32-bit module list heads.
         """
     @property
-    def number_of_heaps(self, /) -> Diagnostic: ...
+    def number_of_heaps(self, /) -> Diagnostic[int]: ...
     @property
-    def number_of_processors(self, /) -> Diagnostic: ...
+    def number_of_processors(self, /) -> Diagnostic[int]: ...
     @property
-    def os_build_number(self, /) -> Diagnostic: ...
+    def os_build_number(self, /) -> Diagnostic[int]: ...
     @property
-    def os_major_version(self, /) -> Diagnostic: ...
+    def os_major_version(self, /) -> Diagnostic[int]: ...
     @property
-    def os_minor_version(self, /) -> Diagnostic: ...
+    def os_minor_version(self, /) -> Diagnostic[int]: ...
     @property
-    def process_heap(self, /) -> Diagnostic:
+    def process_heap(self, /) -> Diagnostic[int]:
         """
         The default heap.
         """
     @property
-    def process_heaps(self, /) -> Diagnostic:
+    def process_heaps(self, /) -> Diagnostic[int]:
         """
         The heap pointer array.
         """
     @property
-    def process_parameters(self, /) -> Diagnostic:
+    def process_parameters(self, /) -> Diagnostic[int]:
         """
         The 32-bit process parameters' address.
         """
     @property
-    def process_parameters_detail(self, /) -> Diagnostic:
+    def process_parameters_detail(self, /) -> Diagnostic[ProcessParameters]:
         """
         The decoded 32-bit process parameters.
         """
     @property
-    def session_id(self, /) -> Diagnostic: ...
+    def session_id(self, /) -> Diagnostic[int]: ...
 
 @final
 class Pfn(BaseRecord):
@@ -8384,25 +8363,25 @@ class Pfn(BaseRecord):
     is in transition.
     """
     @property
-    def blink(self, /) -> Diagnostic |None: ...
+    def blink(self, /) -> Diagnostic[int] |None: ...
     @property
-    def cache_attribute(self, /) -> Diagnostic: ...
+    def cache_attribute(self, /) -> Diagnostic[CacheAttribute]: ...
     @property
-    def event(self, /) -> Diagnostic |None: ...
+    def event(self, /) -> Diagnostic[int] |None: ...
     @property
-    def flink(self, /) -> Diagnostic |None: ...
+    def flink(self, /) -> Diagnostic[int] |None: ...
     @property
-    def modified(self, /) -> Diagnostic: ...
+    def modified(self, /) -> Diagnostic[bool]: ...
     @property
-    def node_blink_low(self, /) -> Diagnostic |None: ...
+    def node_blink_low(self, /) -> Diagnostic[int] |None: ...
     @property
-    def node_flink_low(self, /) -> Diagnostic |None: ...
+    def node_flink_low(self, /) -> Diagnostic[int] |None: ...
     @property
-    def original_pte(self, /) -> Diagnostic: ...
+    def original_pte(self, /) -> Diagnostic[int]: ...
     @property
-    def page_color(self, /) -> Diagnostic: ...
+    def page_color(self, /) -> Diagnostic[int]: ...
     @property
-    def page_location(self, /) -> Diagnostic: ...
+    def page_location(self, /) -> Diagnostic[PageLocation]: ...
     @property
     def pfn(self, /) -> int:
         """
@@ -8414,11 +8393,11 @@ class Pfn(BaseRecord):
         The requested physical address, for a physical-address selector.
         """
     @property
-    def priority(self, /) -> Diagnostic: ...
+    def priority(self, /) -> Diagnostic[int]: ...
     @property
-    def pte_address(self, /) -> Diagnostic: ...
+    def pte_address(self, /) -> Diagnostic[int]: ...
     @property
-    def pte_frame(self, /) -> Diagnostic:
+    def pte_frame(self, /) -> Diagnostic[int]:
         """
         The PFN of the page table holding the page's PTE.
         """
@@ -8428,15 +8407,15 @@ class Pfn(BaseRecord):
         The `_MMPFN` record's address.
         """
     @property
-    def reference_count(self, /) -> Diagnostic: ...
+    def reference_count(self, /) -> Diagnostic[int]: ...
     @property
     def selector(self, /) -> PfnSelector: ...
     @property
-    def share_count(self, /) -> Diagnostic |None: ...
+    def share_count(self, /) -> Diagnostic[int] |None: ...
     @property
-    def used_entry_count(self, /) -> Diagnostic: ...
+    def used_entry_count(self, /) -> Diagnostic[int]: ...
     @property
-    def ws_index(self, /) -> Diagnostic |None:
+    def ws_index(self, /) -> Diagnostic[int] |None:
         """
         The working-set index.
         """
@@ -8928,22 +8907,22 @@ class Prcb(BaseRecord):
     Selected `_KPRCB` fields of a processor (`!prcb`).
     """
     @property
-    def current_thread(self, /) -> Diagnostic:
+    def current_thread(self, /) -> Diagnostic[int]:
         """
         The running `_KTHREAD`.
         """
     @property
-    def dpc_routine_active(self, /) -> Diagnostic:
+    def dpc_routine_active(self, /) -> Diagnostic[int]:
         """
         `_KPRCB.DpcRoutineActive`.
         """
     @property
-    def idle_thread(self, /) -> Diagnostic:
+    def idle_thread(self, /) -> Diagnostic[int]:
         """
         The processor's idle `_KTHREAD`.
         """
     @property
-    def interrupt_count(self, /) -> Diagnostic:
+    def interrupt_count(self, /) -> Diagnostic[int]:
         """
         `_KPRCB.InterruptCount`.
         """
@@ -8953,12 +8932,12 @@ class Prcb(BaseRecord):
         The `_KPRCB` address.
         """
     @property
-    def next_thread(self, /) -> Diagnostic:
+    def next_thread(self, /) -> Diagnostic[int]:
         """
         The `_KTHREAD` selected to run next.
         """
     @property
-    def number(self, /) -> Diagnostic:
+    def number(self, /) -> Diagnostic[int]:
         """
         `_KPRCB.Number`.
         """
@@ -8968,7 +8947,7 @@ class Prcb(BaseRecord):
         The processor number.
         """
     @property
-    def processor_state(self, /) -> Diagnostic: ...
+    def processor_state(self, /) -> Diagnostic[ProcessorStateArea]: ...
 
 @final
 class ProcedureLocal(BaseRecord):
@@ -9176,21 +9155,21 @@ class ProcessMemoryUsage(BaseRecord):
     One process's memory counters, in bytes.
     """
     @property
-    def pagefile_usage(self, /) -> Diagnostic: ...
+    def pagefile_usage(self, /) -> Diagnostic[int]: ...
     @property
-    def peak_pagefile_usage(self, /) -> Diagnostic: ...
+    def peak_pagefile_usage(self, /) -> Diagnostic[int]: ...
     @property
-    def peak_virtual_size(self, /) -> Diagnostic: ...
+    def peak_virtual_size(self, /) -> Diagnostic[int]: ...
     @property
-    def peak_working_set_size(self, /) -> Diagnostic: ...
+    def peak_working_set_size(self, /) -> Diagnostic[int]: ...
     @property
-    def private_usage(self, /) -> Diagnostic: ...
+    def private_usage(self, /) -> Diagnostic[int]: ...
     @property
     def process(self, /) -> ProcessIdentity: ...
     @property
-    def virtual_size(self, /) -> Diagnostic: ...
+    def virtual_size(self, /) -> Diagnostic[int]: ...
     @property
-    def working_set_size(self, /) -> Diagnostic: ...
+    def working_set_size(self, /) -> Diagnostic[int]: ...
 
 @final
 class ProcessParameters(BaseRecord):
@@ -9201,37 +9180,37 @@ class ProcessParameters(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def command_line(self, /) -> Diagnostic: ...
+    def command_line(self, /) -> Diagnostic[str]: ...
     @property
-    def current_directory(self, /) -> Diagnostic: ...
+    def current_directory(self, /) -> Diagnostic[str]: ...
     @property
-    def desktop_info(self, /) -> Diagnostic: ...
+    def desktop_info(self, /) -> Diagnostic[str]: ...
     @property
-    def dll_path(self, /) -> Diagnostic:
+    def dll_path(self, /) -> Diagnostic[str]:
         """
         The DLL search path.
         """
     @property
-    def environment(self, /) -> Diagnostic:
+    def environment(self, /) -> Diagnostic[int]:
         """
         The environment block's address.
         """
     @property
-    def environment_size(self, /) -> Diagnostic:
+    def environment_size(self, /) -> Diagnostic[int]:
         """
         The environment block's size in bytes.
         """
     @property
-    def image_path_name(self, /) -> Diagnostic:
+    def image_path_name(self, /) -> Diagnostic[str]:
         """
         The image's full path.
         """
     @property
-    def runtime_data(self, /) -> Diagnostic: ...
+    def runtime_data(self, /) -> Diagnostic[str]: ...
     @property
-    def shell_info(self, /) -> Diagnostic: ...
+    def shell_info(self, /) -> Diagnostic[str]: ...
     @property
-    def window_title(self, /) -> Diagnostic: ...
+    def window_title(self, /) -> Diagnostic[str]: ...
 
 @final
 class Processes:
@@ -9270,7 +9249,7 @@ class ProcessorStateArea(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def context_frame(self, /) -> Diagnostic:
+    def context_frame(self, /) -> Diagnostic[int]:
         """
         Address of the `_CONTEXT` embedded in the processor state.
         """
@@ -9285,7 +9264,7 @@ class ProcessorStateArea(BaseRecord):
         Bytes of the structure.
         """
     @property
-    def special_registers(self, /) -> Diagnostic: ...
+    def special_registers(self, /) -> Diagnostic[SpecialRegistersArea]: ...
 
 @final
 class PteWalk(BaseRecord):
@@ -9418,7 +9397,7 @@ class ReadyThread(BaseRecord):
         The `_KTHREAD` linked on the queue.
         """
     @property
-    def thread(self, /) -> Diagnostic:
+    def thread(self, /) -> Diagnostic[ThreadSummary |None]:
         """
         The thread decoded; `None` inside when it could not be.
         """
@@ -9603,12 +9582,12 @@ class RunningProcessor(BaseRecord):
     A processor's running, next, and idle threads (`!running`).
     """
     @property
-    def current_thread(self, /) -> Diagnostic:
+    def current_thread(self, /) -> Diagnostic[ThreadSummary |None]:
         """
         The thread running on it; `None` inside when there is none.
         """
     @property
-    def idle_thread(self, /) -> Diagnostic:
+    def idle_thread(self, /) -> Diagnostic[ThreadSummary |None]:
         """
         The processor's idle thread.
         """
@@ -9618,16 +9597,16 @@ class RunningProcessor(BaseRecord):
         Processor number.
         """
     @property
-    def kpcr(self, /) -> Diagnostic: ...
+    def kpcr(self, /) -> Diagnostic[int]: ...
     @property
-    def next_thread(self, /) -> Diagnostic:
+    def next_thread(self, /) -> Diagnostic[ThreadSummary |None]:
         """
         The thread selected to run next; `None` inside when there is none.
         """
     @property
-    def prcb(self, /) -> Diagnostic: ...
+    def prcb(self, /) -> Diagnostic[int]: ...
     @property
-    def short_stack(self, /) -> Diagnostic |None:
+    def short_stack(self, /) -> Diagnostic[list[StackFrame]] |None:
         """
         The running thread's first frames; absent unless stacks were
         requested.
@@ -9783,39 +9762,39 @@ class SecurityDescriptor(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def control(self, /) -> Diagnostic:
+    def control(self, /) -> Diagnostic[int]:
         """
         `SECURITY_DESCRIPTOR.Control`.
         """
     @property
-    def control_names(self, /) -> Diagnostic:
+    def control_names(self, /) -> Diagnostic[str]:
         """
         The names of the control bits set.
         """
     @property
-    def dacl(self, /) -> Diagnostic:
+    def dacl(self, /) -> Diagnostic[Acl |None]:
         """
         Its value is `None` when absent or a null (unrestricted) ACL.
         """
     @property
-    def group(self, /) -> Diagnostic:
+    def group(self, /) -> Diagnostic[Sid |None]:
         """
         The group SID; its value is `None` for a null group.
         """
     @property
-    def owner(self, /) -> Diagnostic:
+    def owner(self, /) -> Diagnostic[Sid |None]:
         """
         The owner SID; its value is `None` for a null owner.
         """
     @property
-    def revision(self, /) -> Diagnostic: ...
+    def revision(self, /) -> Diagnostic[int]: ...
     @property
-    def sacl(self, /) -> Diagnostic:
+    def sacl(self, /) -> Diagnostic[Acl |None]:
         """
         Its value is `None` when absent or a null ACL.
         """
     @property
-    def self_relative(self, /) -> Diagnostic:
+    def self_relative(self, /) -> Diagnostic[bool]:
         """
         Whether `control` has `SE_SELF_RELATIVE`.
         """
@@ -10586,17 +10565,17 @@ class SystemMemoryUsage(BaseRecord):
     System memory counters and per-process usage (`!memusage`).
     """
     @property
-    def available_pages(self, /) -> Diagnostic: ...
+    def available_pages(self, /) -> Diagnostic[int]: ...
     @property
-    def commit_limit_pages(self, /) -> Diagnostic: ...
+    def commit_limit_pages(self, /) -> Diagnostic[int]: ...
     @property
-    def committed_pages(self, /) -> Diagnostic: ...
+    def committed_pages(self, /) -> Diagnostic[int]: ...
     @property
-    def nonpaged_pool_bytes(self, /) -> Diagnostic: ...
+    def nonpaged_pool_bytes(self, /) -> Diagnostic[int]: ...
     @property
-    def paged_pool_pages(self, /) -> Diagnostic: ...
+    def paged_pool_pages(self, /) -> Diagnostic[int]: ...
     @property
-    def physical_pages(self, /) -> Diagnostic: ...
+    def physical_pages(self, /) -> Diagnostic[int]: ...
     @property
     def process_count(self, /) -> int:
         """
@@ -10938,54 +10917,54 @@ class Teb(BaseRecord):
     A thread's `_TEB` (`!teb`), each field read on its own.
     """
     @property
-    def activation_context(self, /) -> Diagnostic:
+    def activation_context(self, /) -> Diagnostic[int |None]:
         """
         The active activation context; value `None` when there is none.
         """
     @property
     def address(self, /) -> int: ...
     @property
-    def client_id_unique_process(self, /) -> Diagnostic: ...
+    def client_id_unique_process(self, /) -> Diagnostic[int]: ...
     @property
-    def client_id_unique_thread(self, /) -> Diagnostic: ...
+    def client_id_unique_thread(self, /) -> Diagnostic[int]: ...
     @property
-    def count_of_owned_critical_sections(self, /) -> Diagnostic: ...
+    def count_of_owned_critical_sections(self, /) -> Diagnostic[int]: ...
     @property
-    def last_error_value(self, /) -> Diagnostic:
+    def last_error_value(self, /) -> Diagnostic[int]:
         """
         The Win32 last error.
         """
     @property
-    def last_status_value(self, /) -> Diagnostic:
+    def last_status_value(self, /) -> Diagnostic[int]:
         """
         The last NTSTATUS.
         """
     @property
-    def peb(self, /) -> Diagnostic:
+    def peb(self, /) -> Diagnostic[int]:
         """
         The process's `_PEB`.
         """
     @property
-    def stack_base(self, /) -> Diagnostic: ...
+    def stack_base(self, /) -> Diagnostic[int]: ...
     @property
-    def stack_limit(self, /) -> Diagnostic: ...
+    def stack_limit(self, /) -> Diagnostic[int]: ...
     @property
     def teb32(self, /) -> Teb32 |None:
         """
         The WOW64 `_TEB32`; `None` for a native thread.
         """
     @property
-    def tls_pointer(self, /) -> Diagnostic:
+    def tls_pointer(self, /) -> Diagnostic[int]:
         """
         The thread-local storage array.
         """
     @property
-    def wow64_reserved(self, /) -> Diagnostic:
+    def wow64_reserved(self, /) -> Diagnostic[int]:
         """
         `WOW32Reserved`: the WOW64 transition thunk.
         """
     @property
-    def wow_teb_offset(self, /) -> Diagnostic:
+    def wow_teb_offset(self, /) -> Diagnostic[int]:
         """
         `WowTebOffset`: the byte offset to the WOW64 `_TEB32` (0 for none).
         """
@@ -10998,32 +10977,32 @@ class Teb32(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def client_id_unique_process(self, /) -> Diagnostic: ...
+    def client_id_unique_process(self, /) -> Diagnostic[int]: ...
     @property
-    def client_id_unique_thread(self, /) -> Diagnostic: ...
+    def client_id_unique_thread(self, /) -> Diagnostic[int]: ...
     @property
-    def count_of_owned_critical_sections(self, /) -> Diagnostic: ...
+    def count_of_owned_critical_sections(self, /) -> Diagnostic[int]: ...
     @property
-    def last_error_value(self, /) -> Diagnostic:
+    def last_error_value(self, /) -> Diagnostic[int]:
         """
         The Win32 last error.
         """
     @property
-    def last_status_value(self, /) -> Diagnostic:
+    def last_status_value(self, /) -> Diagnostic[int]:
         """
         The last NTSTATUS.
         """
     @property
-    def peb(self, /) -> Diagnostic:
+    def peb(self, /) -> Diagnostic[int]:
         """
         The process's `_PEB32`.
         """
     @property
-    def stack_base(self, /) -> Diagnostic: ...
+    def stack_base(self, /) -> Diagnostic[int]: ...
     @property
-    def stack_limit(self, /) -> Diagnostic: ...
+    def stack_limit(self, /) -> Diagnostic[int]: ...
     @property
-    def tls_pointer(self, /) -> Diagnostic:
+    def tls_pointer(self, /) -> Diagnostic[int]:
         """
         The thread-local storage array.
         """
@@ -11196,7 +11175,7 @@ class ThreadStack(BaseRecord):
     @property
     def thread(self, /) -> ThreadSummary: ...
     @property
-    def top_symbol(self, /) -> Diagnostic:
+    def top_symbol(self, /) -> Diagnostic[str |None]:
         """
         The top frame's symbol.
         """
@@ -11243,42 +11222,42 @@ class ThreadSummary(BaseRecord):
     @property
     def kthread(self, /) -> int: ...
     @property
-    def pid(self, /) -> Diagnostic:
+    def pid(self, /) -> Diagnostic[int |None]:
         """
         Owning process's id.
         """
     @property
-    def priority(self, /) -> Diagnostic:
+    def priority(self, /) -> Diagnostic[int |None]:
         """
         Current scheduling priority.
         """
     @property
-    def process_name(self, /) -> Diagnostic:
+    def process_name(self, /) -> Diagnostic[str |None]:
         """
         Owning process's image name.
         """
     @property
-    def state(self, /) -> Diagnostic:
+    def state(self, /) -> Diagnostic[int |None]:
         """
         `_KTHREAD.State`.
         """
     @property
-    def state_name(self, /) -> Diagnostic:
+    def state_name(self, /) -> Diagnostic[str |None]:
         """
         `state` by name (`Running`, `Waiting`, ...).
         """
     @property
-    def tid(self, /) -> Diagnostic:
+    def tid(self, /) -> Diagnostic[int |None]:
         """
         Thread id.
         """
     @property
-    def wait_reason(self, /) -> Diagnostic:
+    def wait_reason(self, /) -> Diagnostic[int |None]:
         """
         `_KTHREAD.WaitReason`.
         """
     @property
-    def wait_reason_name(self, /) -> Diagnostic:
+    def wait_reason_name(self, /) -> Diagnostic[str |None]:
         """
         `wait_reason` by name (`Executive`, `UserRequest`, ...).
         """
@@ -11327,7 +11306,7 @@ class TimerTable(BaseRecord):
     @property
     def errors(self, /) -> list[SchedulerError]: ...
     @property
-    def interrupt_time(self, /) -> Diagnostic:
+    def interrupt_time(self, /) -> Diagnostic[int |None]:
         """
         The current interrupt time.
         """
@@ -11373,24 +11352,24 @@ class Token(BaseRecord):
     A process's primary token (`!token`).
     """
     @property
-    def authentication_id(self, /) -> Diagnostic:
+    def authentication_id(self, /) -> Diagnostic[int]:
         """
         The logon session's LUID.
         """
     @property
-    def flags(self, /) -> Diagnostic:
+    def flags(self, /) -> Diagnostic[int]:
         """
         `TokenFlags`.
         """
     @property
-    def groups(self, /) -> Diagnostic: ...
+    def groups(self, /) -> Diagnostic[list[SidAndAttributes]]: ...
     @property
-    def impersonation_level(self, /) -> Diagnostic:
+    def impersonation_level(self, /) -> Diagnostic[int]:
         """
         `SECURITY_IMPERSONATION_LEVEL`.
         """
     @property
-    def privileges(self, /) -> Diagnostic: ...
+    def privileges(self, /) -> Diagnostic[list[TokenPrivilege]]: ...
     @property
     def process(self, /) -> ProcessIdentity:
         """
@@ -11402,14 +11381,14 @@ class Token(BaseRecord):
         The `_TOKEN`.
         """
     @property
-    def token_id(self, /) -> Diagnostic: ...
+    def token_id(self, /) -> Diagnostic[int]: ...
     @property
-    def token_type(self, /) -> Diagnostic:
+    def token_type(self, /) -> Diagnostic[int]:
         """
         `TOKEN_TYPE`: 1 primary, 2 impersonation.
         """
     @property
-    def user(self, /) -> Diagnostic:
+    def user(self, /) -> Diagnostic[SidAndAttributes |None]:
         """
         Its value is `None` when the token names no user.
         """
@@ -11856,12 +11835,12 @@ class Verifier(BaseRecord):
     configured-but-unloaded suspect drivers (`!verifier`).
     """
     @property
-    def configured_but_unloaded(self, /) -> Diagnostic:
+    def configured_but_unloaded(self, /) -> Diagnostic[list[VerifierSuspectDriver]]:
         """
         Suspect drivers configured for verification that are not loaded.
         """
     @property
-    def drivers(self, /) -> Diagnostic:
+    def drivers(self, /) -> Diagnostic[list[VerifierDriverSummary]]:
         """
         The verified drivers.
         """
@@ -11872,17 +11851,17 @@ class Verifier(BaseRecord):
         so the walk stopped before visiting every driver.
         """
     @property
-    def level(self, /) -> Diagnostic:
+    def level(self, /) -> Diagnostic[int]:
         """
         The verification level (`MmVerifierData.Level`).
         """
     @property
-    def level_options(self, /) -> Diagnostic:
+    def level_options(self, /) -> Diagnostic[list[str]]:
         """
         The names of the checks `level` enables.
         """
     @property
-    def option_flags(self, /) -> Diagnostic:
+    def option_flags(self, /) -> Diagnostic[int]:
         """
         The option flags (`VerifierOptionFlags`).
         """
@@ -11894,7 +11873,7 @@ class Verifier(BaseRecord):
         How the suspect-list walk ended.
         """
     @property
-    def verify_mode(self, /) -> Diagnostic: ...
+    def verify_mode(self, /) -> Diagnostic[int]: ...
 
 @final
 class VerifierDriver(BaseRecord):
@@ -12077,43 +12056,43 @@ class VerifierStatistics(BaseRecord):
     fail.
     """
     @property
-    def acquire_spin_locks(self, /) -> Diagnostic: ...
+    def acquire_spin_locks(self, /) -> Diagnostic[int]: ...
     @property
-    def allocations_attempted(self, /) -> Diagnostic: ...
+    def allocations_attempted(self, /) -> Diagnostic[int]: ...
     @property
-    def allocations_failed(self, /) -> Diagnostic: ...
+    def allocations_failed(self, /) -> Diagnostic[int]: ...
     @property
-    def allocations_succeeded(self, /) -> Diagnostic: ...
+    def allocations_succeeded(self, /) -> Diagnostic[int]: ...
     @property
-    def allocations_succeeded_special_pool(self, /) -> Diagnostic: ...
+    def allocations_succeeded_special_pool(self, /) -> Diagnostic[int]: ...
     @property
-    def allocations_with_no_tag(self, /) -> Diagnostic: ...
+    def allocations_with_no_tag(self, /) -> Diagnostic[int]: ...
     @property
-    def current_nonpaged_pool_allocations(self, /) -> Diagnostic: ...
+    def current_nonpaged_pool_allocations(self, /) -> Diagnostic[int]: ...
     @property
-    def current_paged_pool_allocations(self, /) -> Diagnostic: ...
+    def current_paged_pool_allocations(self, /) -> Diagnostic[int]: ...
     @property
-    def loads(self, /) -> Diagnostic: ...
+    def loads(self, /) -> Diagnostic[int]: ...
     @property
-    def nonpaged_bytes(self, /) -> Diagnostic: ...
+    def nonpaged_bytes(self, /) -> Diagnostic[int]: ...
     @property
-    def paged_bytes(self, /) -> Diagnostic: ...
+    def paged_bytes(self, /) -> Diagnostic[int]: ...
     @property
-    def peak_nonpaged_bytes(self, /) -> Diagnostic: ...
+    def peak_nonpaged_bytes(self, /) -> Diagnostic[int]: ...
     @property
-    def peak_nonpaged_pool_allocations(self, /) -> Diagnostic: ...
+    def peak_nonpaged_pool_allocations(self, /) -> Diagnostic[int]: ...
     @property
-    def peak_paged_bytes(self, /) -> Diagnostic: ...
+    def peak_paged_bytes(self, /) -> Diagnostic[int]: ...
     @property
-    def peak_paged_pool_allocations(self, /) -> Diagnostic: ...
+    def peak_paged_pool_allocations(self, /) -> Diagnostic[int]: ...
     @property
-    def raise_irqls(self, /) -> Diagnostic: ...
+    def raise_irqls(self, /) -> Diagnostic[int]: ...
     @property
-    def synchronize_executions(self, /) -> Diagnostic: ...
+    def synchronize_executions(self, /) -> Diagnostic[int]: ...
     @property
-    def trims(self, /) -> Diagnostic: ...
+    def trims(self, /) -> Diagnostic[int]: ...
     @property
-    def unloads(self, /) -> Diagnostic: ...
+    def unloads(self, /) -> Diagnostic[int]: ...
 
 @final
 class VerifierSuspectDriver(BaseRecord):
@@ -12153,7 +12132,7 @@ class VmCounter(BaseRecord):
         What `value` counts: `pages`, `bytes`, or empty for a plain count.
         """
     @property
-    def value(self, /) -> Diagnostic: ...
+    def value(self, /) -> Diagnostic[int]: ...
 
 @final
 class VmPool(BaseRecord):
@@ -12166,11 +12145,11 @@ class VmPool(BaseRecord):
         The symbol-backed pool fields of `MiState`.
         """
     @property
-    def nonpaged_pool_bytes(self, /) -> Diagnostic: ...
+    def nonpaged_pool_bytes(self, /) -> Diagnostic[int]: ...
     @property
-    def nonpaged_pool_maximum(self, /) -> Diagnostic: ...
+    def nonpaged_pool_maximum(self, /) -> Diagnostic[int]: ...
     @property
-    def paged_pool_pages(self, /) -> Diagnostic: ...
+    def paged_pool_pages(self, /) -> Diagnostic[int]: ...
 
 @final
 class VmPte(BaseRecord):
@@ -12546,13 +12525,13 @@ class WorkerThread(BaseRecord):
     @property
     def kthread(self, /) -> int: ...
     @property
-    def stack(self, /) -> Diagnostic |None:
+    def stack(self, /) -> Diagnostic[list[StackFrame]] |None:
         """
         The thread's stack; `None` unless stacks were requested and the
         thread decoded.
         """
     @property
-    def thread(self, /) -> Diagnostic: ...
+    def thread(self, /) -> Diagnostic[ThreadSummary]: ...
 
 @final
 class ZombieProcess(BaseRecord):

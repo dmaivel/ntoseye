@@ -1,9 +1,9 @@
 //! Attribute-shaped results: every [`View::Object`](crate::view::View) the SDK
 //! returns is a [`Record`] (`frame.ip`, `thread.state_name`), every declared
 //! shape ([`shapes!`](crate::view::shape::shapes)) its own [`BaseRecord`]
-//! subclass with a property per field, and every field
-//! that can fail to read on its own is a [`Diagnostic`] (`peb.ldr.value`,
-//! `if peb.ldr:`). Both keep dict access (`record["ip"]`, `to_dict()`) so the
+//! subclass with a property per field, and every field that can fail to read
+//! on its own is the package's generic `Diagnostic` (`peb.ldr.value`,
+//! `if peb.ldr:`). Records keep dict access (`record["ip"]`, `to_dict()`) so the
 //! shape stays the one the MCP JSON surface documents.
 
 use std::convert::Infallible;
@@ -12,13 +12,15 @@ use pyo3::exceptions::{PyAttributeError, PyKeyError};
 #[cfg(feature = "python-stubs")]
 use pyo3::inspect::PyStaticExpr;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::PyDict;
 #[cfg(feature = "python-stubs")]
 use pyo3::types::PyString;
-use pyo3::types::{PyDict, PyList, PyTuple};
 #[cfg(feature = "python-stubs")]
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
 use super::iter::NameIterator;
+use super::package_attr;
 
 /// A `to_dict()` result: a plain `dict` of string keys and plain values,
 /// typed as `dict[str, Any]` for type checkers.
@@ -187,116 +189,37 @@ impl BaseRecord {
     }
 }
 
-/// One field that reads independently: `value` when it did, `error` when it
-/// did not. Truthy exactly when available.
-#[pyclass(module = "ntoseye", frozen)]
-pub struct Diagnostic {
-    pub value: Py<PyAny>,
-    /// Whether `value` is an address, rendered as hex by `__repr__`.
-    pub hex: bool,
-    pub error: Option<String>,
-    /// Provenance of a metric (`"dump header"`, `"KDBG"`, ...); `None` for a
-    /// field that is not a metric.
-    pub source: Option<Option<String>>,
+/// The package's generic `Diagnostic` class, which fields that can fail to
+/// read on their own are built as.
+pub(crate) fn diagnostic_class(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    cached(py, &DIAGNOSTIC, "Diagnostic")
 }
 
-#[pymethods]
-impl Diagnostic {
-    #[getter]
-    fn available(&self) -> bool {
-        self.error.is_none()
-    }
+// Records and diagnostics share one rendering (`_summary`, `_plain`), which
+// lives beside `Diagnostic` because that is Python.
+static DIAGNOSTIC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SUMMARY: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static PLAIN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-    #[getter]
-    fn value<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        self.value.bind(py).clone()
-    }
-
-    #[getter]
-    fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
-    #[getter]
-    fn source(&self) -> Option<&str> {
-        self.source.as_ref().and_then(|source| source.as_deref())
-    }
-
-    fn __bool__(&self) -> bool {
-        self.error.is_none()
-    }
-
-    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let Ok(other) = other.cast::<Diagnostic>() else {
-            return Ok(false);
-        };
-        let other = other.get();
-        Ok(self.error == other.error
-            && self.source == other.source
-            && self.value.bind(py).eq(other.value.bind(py))?)
-    }
-
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(match &self.error {
-            Some(error) => format!("Diagnostic(error={error:?})"),
-            None if self.hex => format!("Diagnostic({:#x})", self.value.extract::<u64>(py)?),
-            None => format!("Diagnostic({})", summarize(self.value.bind(py))?),
-        })
-    }
-
-    /// The `{available, value, error[, source]}` dict the MCP surface returns.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let dict = PyDict::new(py);
-        dict.set_item("available", self.error.is_none())?;
-        dict.set_item("value", plain(self.value.bind(py))?)?;
-        dict.set_item("error", self.error.as_deref())?;
-        if let Some(source) = &self.source {
-            dict.set_item("source", source.as_deref())?;
-        }
-        Ok(PlainDict(dict))
-    }
+fn cached<'py>(
+    py: Python<'py>,
+    cell: &'static PyOnceLock<Py<PyAny>>,
+    name: &str,
+) -> PyResult<&'py Bound<'py, PyAny>> {
+    Ok(cell
+        .get_or_try_init(py, || package_attr(py, name).map(Bound::unbind))?
+        .bind(py))
 }
 
 /// A one-line rendering for `__repr__`: scalars in full, containers by size,
 /// so a record with a 700-thread list stays readable.
 fn summarize(value: &Bound<'_, PyAny>) -> PyResult<String> {
-    if let Ok(record) = value.cast::<BaseRecord>() {
-        return Ok(format!(
-            "{}(<{} fields>)",
-            record.get_type().name()?,
-            record.get().fields.bind(value.py()).len()
-        ));
-    }
-    if let Ok(diagnostic) = value.cast::<Diagnostic>() {
-        return diagnostic.get().__repr__(value.py());
-    }
-    if let Ok(list) = value.cast::<PyList>() {
-        return Ok(format!("[<{} items>]", list.len()));
-    }
-    Ok(value.repr()?.to_string())
+    cached(value.py(), &SUMMARY, "_summary")?
+        .call1((value,))?
+        .extract()
 }
 
-/// Convert records and diagnostics to dicts throughout a value.
+/// `value` with records and diagnostics converted to dicts throughout.
 fn plain<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    if let Ok(record) = value.cast::<BaseRecord>() {
-        return Ok(record.get().to_dict(value.py())?.0.into_any());
-    }
-    if let Ok(diagnostic) = value.cast::<Diagnostic>() {
-        return Ok(diagnostic.get().to_dict(value.py())?.0.into_any());
-    }
-    if let Ok(list) = value.cast::<PyList>() {
-        let out = PyList::empty(value.py());
-        for item in list.iter() {
-            out.append(plain(&item)?)?;
-        }
-        return Ok(out.into_any());
-    }
-    if let Ok(tuple) = value.cast::<PyTuple>() {
-        let items: Vec<Bound<'py, PyAny>> = tuple
-            .iter()
-            .map(|item| plain(&item))
-            .collect::<PyResult<_>>()?;
-        return Ok(PyTuple::new(value.py(), items)?.into_any());
-    }
-    Ok(value.clone())
+    cached(value.py(), &PLAIN, "_plain")?.call1((value,))
 }

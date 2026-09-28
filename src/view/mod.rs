@@ -158,7 +158,7 @@ pub fn to_py<'py>(
     v: &View,
     shape: PyShape,
 ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
-    use crate::python::record::{BaseRecord, Diagnostic, Record};
+    use crate::python::record::{BaseRecord, Record, diagnostic_class};
     use pyo3::IntoPyObjectExt;
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
@@ -198,16 +198,13 @@ pub fn to_py<'py>(
                 None => py.None().into_bound(py),
             };
             match shape {
-                PyShape::Records => Bound::new(
-                    py,
-                    Diagnostic {
-                        value: value.unbind(),
-                        hex: matches!(diagnostic.value, Some(View::Hex(_))),
-                        error: diagnostic.error.clone(),
-                        source: diagnostic.source.clone(),
-                    },
-                )?
-                .into_any(),
+                PyShape::Records => diagnostic_class(py)?.call1((
+                    value,
+                    diagnostic.error.as_deref(),
+                    diagnostic.source.as_ref().and_then(Option::as_deref),
+                    diagnostic.source.is_some(),
+                    matches!(diagnostic.value, Some(View::Hex(_))),
+                ))?,
                 PyShape::Plain => {
                     let dict = PyDict::new(py);
                     dict.set_item("available", diagnostic.error.is_none())?;

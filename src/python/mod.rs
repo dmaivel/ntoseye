@@ -92,6 +92,19 @@ impl ErrorKind {
 static ERROR_TYPES: [PyOnceLock<Py<PyType>>; ErrorKind::COUNT] =
     [const { PyOnceLock::new() }; ErrorKind::COUNT];
 
+/// An object the package's own Python declares (`ntoseye/__init__.py`): the
+/// exceptions, `Diagnostic` (Python so that it can be generic), and the
+/// helpers records share with it.
+pub fn package_attr<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    // Embedded, `ntoseye` must be the binary's own package even when one is
+    // needed before any script ran: importing it first would load whichever
+    // `ntoseye` is on `sys.path` (a checkout or wheel), whose objects scripts
+    // never see.
+    #[cfg(feature = "python-embed")]
+    embed::install_package(py)?;
+    py.import("ntoseye")?.getattr(name)
+}
+
 /// An SDK exception of `kind` carrying `message`. Callable from the session
 /// thread (it takes the GIL to look the class up); a package that failed to
 /// import surfaces as that import error instead.
@@ -99,15 +112,8 @@ pub fn error(kind: ErrorKind, message: impl std::fmt::Display) -> PyErr {
     let message = message.to_string();
     Python::attach(|py| {
         let class = ERROR_TYPES[kind as usize].get_or_try_init(py, || {
-            // Embedded, `ntoseye` must be the binary's own package even when
-            // an error is raised before any script ran: importing it first
-            // would load whichever `ntoseye` is on `sys.path` (a checkout or
-            // wheel), whose exception classes scripts never see.
-            #[cfg(feature = "python-embed")]
-            embed::install_package(py)?;
             Ok::<_, PyErr>(
-                py.import("ntoseye")?
-                    .getattr(kind.name())?
+                package_attr(py, kind.name())?
                     .cast_into::<PyType>()?
                     .unbind(),
             )
@@ -274,7 +280,7 @@ pub mod _ntoseye {
     #[pymodule_export]
     use super::process::{Heap, Heaps, Process, Processes, Regions};
     #[pymodule_export]
-    use super::record::{BaseRecord, Diagnostic, Record};
+    use super::record::{BaseRecord, Record};
     #[pymodule_export]
     use super::secure::{SecureKernel, Trustlet};
     #[pymodule_export]
