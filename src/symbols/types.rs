@@ -110,6 +110,26 @@ impl SymbolStore {
             .unwrap_or(0)
     }
 
+    /// The field list of the base class `index` names: its own, or, for the
+    /// forward reference a base usually is, the complete definition's.
+    fn base_field_list(
+        &self,
+        guid: u128,
+        finder: &TypeFinder<'_>,
+        index: TypeIndex,
+    ) -> pdb2::Result<Option<TypeIndex>> {
+        let TypeData::Class(class) = finder.find(index)?.parse()? else {
+            return Ok(None);
+        };
+        if !class.properties.forward_reference() {
+            return Ok(class.fields);
+        }
+        Ok(self.struct_defs.get(&guid).and_then(|defs| {
+            defs.get(class.name.to_string().as_ref())
+                .map(|(_, fields)| *fields)
+        }))
+    }
+
     /// Pointer width of the PDB `guid` (see [`TypeInfo::pointer_size`]).
     pub fn pointer_size(&self, guid: u128) -> u8 {
         self.pdb_pointer_sizes.get(&guid).map_or(8, |size| *size)
@@ -327,21 +347,46 @@ impl SymbolStore {
 
         if let Ok(TypeData::FieldList(list)) = field_item.parse() {
             for field in list.fields {
-                if let TypeData::Member(member) = field {
-                    let name = member.name.to_string().into_owned();
-                    let offset = member.offset;
+                match field {
+                    TypeData::Member(member) => {
+                        let name = member.name.to_string().into_owned();
+                        let offset = member.offset;
 
-                    let type_info =
-                        self.resolve_type(guid, type_finder, member.field_type, prefix)?;
+                        let type_info =
+                            self.resolve_type(guid, type_finder, member.field_type, prefix)?;
 
-                    fields_map.insert(
-                        name,
-                        FieldInfo {
-                            offset: offset as u32,
-                            size: self.type_size(guid, type_finder, member.field_type)?,
-                            type_data: type_info,
-                        },
-                    );
+                        fields_map.insert(
+                            name,
+                            FieldInfo {
+                                offset: offset as u32,
+                                size: self.type_size(guid, type_finder, member.field_type)?,
+                                type_data: type_info,
+                            },
+                        );
+                    }
+                    // A C++ base class's members are the class's own, at the
+                    // base's offset; a member the class redeclares hides the
+                    // base's.
+                    TypeData::BaseClass(base) => {
+                        let Some(base_fields) =
+                            self.base_field_list(guid, type_finder, base.base_class)?
+                        else {
+                            continue;
+                        };
+                        let mut inherited = HashMap::new();
+                        self.process_field_list(
+                            guid,
+                            type_finder,
+                            base_fields,
+                            prefix,
+                            &mut inherited,
+                        )?;
+                        for (name, mut info) in inherited {
+                            info.offset += base.offset;
+                            fields_map.entry(name).or_insert(info);
+                        }
+                    }
+                    _ => {}
                 }
             }
 
