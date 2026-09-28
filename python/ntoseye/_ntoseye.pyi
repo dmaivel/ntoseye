@@ -1577,7 +1577,8 @@ class CallTrace(BaseRecord):
     @property
     def end(self, /) -> str:
         """
-        `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
+        `returned`, `limit`, `interrupted`, `breakpoint`, `diverted` (a
+        step an interrupt diverted, with the traced thread not known), or
         `failed`; anything but `returned` leaves a partial tree.
         """
     @property

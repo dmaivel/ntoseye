@@ -305,7 +305,8 @@ shapes! {
     /// A `wt` call trace: why it stopped, the instructions it stepped, and
     /// the call tree.
     CallTrace {
-        /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
+        /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted` (a
+        /// step an interrupt diverted, with the traced thread not known), or
         /// `failed`; anything but `returned` leaves a partial tree.
         end: &'static str,
         /// What failed, for `failed`.

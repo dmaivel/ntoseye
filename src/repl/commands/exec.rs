@@ -955,7 +955,7 @@ impl ReplState<'_> {
             CallTraceEnd::Breakpoint => error!("watch-trace stopped at a code breakpoint"),
             CallTraceEnd::Diverted => error!(
                 "watch-trace stopped after {count} instructions: a step was diverted into an \
-                 interrupt handler"
+                 interrupt handler, and the traced thread is not known to follow"
             ),
             CallTraceEnd::Failed(error) => {
                 error!("watch-trace stopped after {count} instructions: {error}")

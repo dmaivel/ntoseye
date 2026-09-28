@@ -209,7 +209,8 @@ pub enum CallTraceEnd {
     /// A step landed on an enabled code breakpoint.
     Breakpoint,
     /// A step was diverted into an interrupt handler that waits on a held
-    /// vCPU; see [`Session::step`].
+    /// vCPU, and the traced thread is not known to follow; see
+    /// [`Session::trace_calls`].
     Diverted,
     /// A step or register/instruction read failed.
     Failed(String),

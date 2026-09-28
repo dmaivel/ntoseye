@@ -1508,6 +1508,22 @@ fn a_walk_follows_its_thread_past_a_step_that_switched_it_out() {
     assert_eq!(continues.load(Ordering::Relaxed), 3);
 }
 
+/// A call trace follows its thread past a step that switched it out, as a
+/// walk does, rather than ending there.
+#[test]
+fn a_call_trace_follows_its_thread_past_a_step_that_switched_it_out() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, continues) = walk_session(
+        &[at(0x1030, 0x8000, OTHER)],
+        &[at(0x1001, 0x2000, OTHER), at(0x1001, 0x2000, WALKED)],
+    );
+
+    let trace = session.trace_calls(2).unwrap();
+    assert_eq!(trace.end, CallTraceEnd::Limit);
+    assert_eq!(trace.instructions, 2);
+    assert_eq!(continues.load(Ordering::Relaxed), 2);
+}
+
 /// A step that reached the next instruction stays in the walk even when it
 /// made another thread current, as the instruction that switches does.
 #[test]

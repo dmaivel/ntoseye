@@ -28,8 +28,8 @@ use crate::session::{
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
-    build_stacktrace, format_symbol, halted_in_windows_hypervisor, preferred_code_dtb,
-    resolve_thread_trace_context, thread_root,
+    build_stacktrace, halted_in_windows_hypervisor, preferred_code_dtb,
+    resolve_thread_trace_context, thread_root, try_format_symbol_at,
 };
 
 impl Session {
@@ -537,10 +537,13 @@ impl Session {
     /// Single-step the current function and collect its call tree (`wt`), up
     /// to `limit` instructions. A frame closes on a `ret` that moves the stack
     /// pointer above the one it was entered with, so a `ret` that does not
-    /// the frame (a retpoline) is not taken for a return. An interrupt
-    /// request ([`Target::interrupt`]), a breakpoint, a step diverted into an
-    /// interrupt handler, or a failed step ends the trace early;
-    /// [`CallTrace::end`] says which.
+    /// the frame (a retpoline) is not taken for a return. The trace follows
+    /// the Windows thread it started in, as a walk does (see
+    /// [`Self::step_until`]): a step an interrupt diverted runs until that
+    /// thread has executed the instruction. An interrupt request
+    /// ([`Target::interrupt`]), a breakpoint, a diverted step whose thread is
+    /// not known, or a failed step ends the trace early; [`CallTrace::end`]
+    /// says which.
     pub fn trace_calls(&mut self, limit: usize) -> Result<CallTrace> {
         if limit == 0 {
             return Err(Error::InvalidArgument(
@@ -549,15 +552,18 @@ impl Session {
         }
         self.require_steppable_vcpu()?;
         let name = |target: &Target, state: &ControlState| {
-            let trace = resolve_thread_trace_context(target, state.dtb);
-            format_symbol(target, &trace, state.ip)
+            try_format_symbol_at(target, state.dtb, state.ip)
+                .unwrap_or_else(|| format!("{:#x}", state.ip))
         };
         let frame = |name| CallTraceFrame {
             name,
             instructions: 0,
             children: Vec::new(),
         };
-        let mut current = self.control_state()?;
+        let (mut current, mut registers, mut bytes) = self.read_control()?;
+        let walked = windows_thread_on_backend_thread(&self.target, &self.current_thread)
+            .map(|thread| ThreadScope::new(&thread));
+        let cancel = Arc::clone(&self.target.interrupt);
         // Each open frame with the stack pointer it was entered with.
         let mut stack = vec![(frame(name(&self.target, &current)), current.sp)];
         let mut instructions = 0usize;
@@ -569,17 +575,37 @@ impl Session {
             if self.target.interrupt.swap(false, Ordering::SeqCst) {
                 break CallTraceEnd::Interrupted;
             }
-            match self.step_once() {
-                Ok((_, RunPast::Reached)) => {}
-                Ok((_, RunPast::Diverted)) => {
-                    self.note_diverted();
-                    break CallTraceEnd::Diverted;
+            match self.walk_step(&current, &registers, &bytes, walked.as_ref()) {
+                Ok(WalkStep::At(_)) => {}
+                Ok(WalkStep::Follow(sites)) => match self.run_to_any(&sites, None, &cancel) {
+                    Ok(ContinueOutcome::Step { .. }) => {}
+                    // Cancelled: the target is halted where it was.
+                    Ok(ContinueOutcome::Running) => {
+                        cancel.store(false, Ordering::SeqCst);
+                        break CallTraceEnd::Interrupted;
+                    }
+                    Ok(ContinueOutcome::Breakpoint { .. }) => break CallTraceEnd::Breakpoint,
+                    Ok(_) => {
+                        break CallTraceEnd::Failed(
+                            "the target stopped on an exception while the traced thread was \
+                             switched out"
+                                .into(),
+                        );
+                    }
+                    Err(error) => break CallTraceEnd::Failed(error.to_string()),
+                },
+                Ok(WalkStep::Stop(ContinueOutcome::Breakpoint { .. })) => {
+                    break CallTraceEnd::Breakpoint;
                 }
+                Ok(WalkStep::Stop(_)) => break CallTraceEnd::Diverted,
                 Err(error) => break CallTraceEnd::Failed(error.to_string()),
             }
             instructions += 1;
-            let next = match self.control_state() {
-                Ok(state) => state,
+            let next = match self.read_control() {
+                Ok((state, next_registers, next_bytes)) => {
+                    (registers, bytes) = (next_registers, next_bytes);
+                    state
+                }
                 Err(error) => break CallTraceEnd::Failed(error.to_string()),
             };
             if self
