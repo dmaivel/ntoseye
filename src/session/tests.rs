@@ -5,7 +5,9 @@ use super::inspection::DBG_STATUS_WORKER;
 use super::lifecycle::prepare_backend_after_cleanup;
 use super::stepping::{RunPast, site_successors, step_over_current_breakpoint};
 use super::*;
-use crate::breakpoints::{Breakpoint, BreakpointConfig, HardwareBreakpoint};
+use crate::breakpoints::{
+    Breakpoint, BreakpointConfig, HardwareBreakpoint, StepFrame, ThreadScope,
+};
 use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
@@ -1338,6 +1340,86 @@ fn a_hit_interrupted_on_its_site_is_reported_once() {
     session.backend.interrupt().unwrap();
     assert!(matches!(
         returned(&mut session),
+        BreakpointStopAction::Hit { .. }
+    ));
+}
+
+/// A hit the SDK's `when=` callback declines on another vCPU than a step's
+/// is stepped off its site, and the step's vCPU is selected again; a hit on
+/// the step's own vCPU is left for the step to go on from.
+#[test]
+fn a_declined_hit_on_another_vcpu_hands_the_step_back() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    let rip = |session: &mut Session| {
+        let regs = session.backend.read_registers().unwrap();
+        session.register_map.read_u64("rip", &regs).unwrap()
+    };
+
+    session.current_thread = "p01.01".into();
+    session.pass_declined_hit("p01.01").unwrap();
+    assert_eq!(rip(&mut session), 0x1000);
+
+    session.current_thread = "p01.02".into();
+    session.pass_declined_hit("p01.01").unwrap();
+    assert_eq!(session.current_thread, "p01.01");
+    assert_eq!(rip(&mut session), 0x1001);
+}
+
+/// A step's run-to (`gu`, `p` over a call) stops only for its own frame: the
+/// same return site reached by a deeper call (a lower stack pointer) runs
+/// on, and the return to the stepping frame stops.
+#[test]
+fn a_step_run_to_runs_past_a_deeper_call_of_the_same_code() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    session.current_thread = "p01.01".into();
+    let frame = StepFrame {
+        thread: ThreadScope {
+            ethread: VirtAddr(0xffff_8000_0000_1000),
+            tid: Some(4),
+        },
+        min_stack_pointer: Some(0x2000),
+    };
+    session
+        .breakpoints
+        .add_temporary_code(
+            session.backend.as_mut(),
+            &session.target,
+            VirtAddr(0x1000),
+            Some(frame),
+        )
+        .unwrap();
+    let hit_with_stack = |session: &mut Session, rsp| {
+        let mut regs = session.backend.read_registers().unwrap();
+        for (name, value) in [("rip", 0x1000), ("rsp", rsp)] {
+            session
+                .register_map
+                .write_u64(name, &mut regs, value)
+                .unwrap();
+        }
+        session.backend.write_registers(&regs).unwrap();
+        session.resolve_breakpoint_stop(0x1000, 0).unwrap()
+    };
+    assert!(matches!(
+        hit_with_stack(&mut session, 0x1ff8),
+        BreakpointStopAction::Resumed
+    ));
+    assert!(matches!(
+        hit_with_stack(&mut session, 0x2000),
         BreakpointStopAction::Hit { .. }
     ));
 }

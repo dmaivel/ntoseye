@@ -138,6 +138,7 @@ impl BreakpointManager {
                 hardware: Some(HardwareBreakpoint { access, len, slot }),
                 thread: config.thread,
                 processor: config.processor,
+                min_stack_pointer: None,
                 backend: BreakpointBackend::Hardware,
             },
         );

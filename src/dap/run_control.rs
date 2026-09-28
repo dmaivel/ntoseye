@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::disasm::{fallthrough_run_end, instruction_length};
 use crate::output;
 use crate::repl::{DispatchContext, ReplState, ReplStore};
-use crate::session::{ContinueOutcome, StepMode};
+use crate::session::{ContinueOutcome, StepMode, StepStack};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 
@@ -188,7 +188,11 @@ impl Server {
             return self.step_once(mode);
         };
         let cancel = Arc::clone(&self.cancel);
-        match self.session()?.run_to(end, None, &cancel) {
+        let session = self.session()?;
+        let frame = session
+            .step_frame(StepStack::Any)
+            .map_err(|error| error.to_string())?;
+        match session.run_to(end, frame, None, &cancel) {
             Ok(outcome) => Ok(outcome),
             // The temporary breakpoint could not be written (a non-resident or
             // read-only page at that address). Stepping needs no breakpoint.

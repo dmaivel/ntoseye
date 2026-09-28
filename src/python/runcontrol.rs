@@ -13,10 +13,11 @@ use super::handle::{Debugger, require_halted};
 use super::stop::{Stop, from_outcome};
 use super::symbols::Location;
 use super::{err, raise, timeout_arg};
+use crate::breakpoints::StepFrame;
 use crate::dbg_backend::ContinueDisposition;
 use crate::disasm::ControlFlow;
 use crate::error::Result as CoreResult;
-use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode};
+use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack};
 use crate::types::VirtAddr;
 use crate::view;
 use crate::view::shape::Typed;
@@ -134,7 +135,7 @@ pub fn run(
 ) -> PyResult<Option<Py<Stop>>> {
     reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
-    settle(dbg, timeout, move |session, remaining| {
+    settle(dbg, timeout, None, move |session, remaining| {
         let cancel = Arc::clone(&session.target.interrupt);
         let outcome = session.continue_until_break(remaining, &cancel, disposition);
         // Past a declined hit, which the guest raised for us, not an exception.
@@ -146,7 +147,7 @@ pub fn run(
 pub fn wait(dbg: &Bound<'_, Debugger>, timeout: Option<f64>) -> PyResult<Option<Py<Stop>>> {
     let timeout = timeout_arg(timeout)?;
     let mut declined = false;
-    settle(dbg, timeout, move |session, remaining| {
+    settle(dbg, timeout, None, move |session, remaining| {
         let cancel = Arc::clone(&session.target.interrupt);
         if declined {
             session.continue_until_break(remaining, &cancel, ContinueDisposition::Handled)
@@ -162,12 +163,15 @@ pub fn wait(dbg: &Bound<'_, Debugger>, timeout: Option<f64>) -> PyResult<Option<
 
 /// Run `attempt` on the session until its stop surfaces, the one loop every
 /// run and step goes through. A breakpoint hit whose `when=` callback
-/// declines it is passed by attempting again from the hit: a run resumes,
-/// a run-to re-arms the same target, a step walk keeps stepping. `None`: the
-/// target is still running when `timeout` ran out.
+/// declines it is passed by attempting again: a run resumes from the hit, a
+/// run-to re-arms the same target, a step walk keeps stepping. A step names
+/// its vCPU (`stepping`), which a hit on another vCPU is stepped past and
+/// handed back to (see [`Session::pass_declined_hit`]). `None`: the target
+/// is still running when `timeout` ran out.
 fn settle(
     dbg: &Bound<'_, Debugger>,
     timeout: Option<Duration>,
+    stepping: Option<String>,
     mut attempt: impl FnMut(&mut Session, Option<Duration>) -> CoreResult<ContinueOutcome> + Send,
 ) -> PyResult<Option<Py<Stop>>> {
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
@@ -183,6 +187,10 @@ fn settle(
         if let Some(stop) = surface(dbg, outcome)? {
             return Ok(Some(stop));
         }
+        if let Some(stepping) = &stepping {
+            dbg.get()
+                .with_session(|session| session.pass_declined_hit(stepping).map_err(err))?;
+        }
     }
 }
 
@@ -191,7 +199,10 @@ fn settle_stop(
     dbg: &Bound<'_, Debugger>,
     attempt: impl FnMut(&mut Session, Option<Duration>) -> CoreResult<ContinueOutcome> + Send,
 ) -> PyResult<Py<Stop>> {
-    settle(dbg, None, attempt)?.ok_or_else(no_stop)
+    let stepping = dbg
+        .get()
+        .with_session(|session| Ok(session.current_thread.clone()))?;
+    settle(dbg, None, Some(stepping), attempt)?.ok_or_else(no_stop)
 }
 
 /// Drop `when=` callbacks of breakpoints that no longer exist (a one-shot
@@ -223,10 +234,24 @@ pub fn run_to(
         require_halted(session, "run_to")?;
         location.resolve(session, session.target.current_dtb())
     })?;
-    settle(dbg, timeout, move |session, remaining| match step {
-        None => run_to_address(session, VirtAddr(address), remaining),
-        Some(mode) => session.step_until(mode, STEP_UNTIL_LIMIT, remaining, |ip, _| ip == address),
-    })
+    let stepping = match step {
+        Some(_) => Some(
+            dbg.get()
+                .with_session(|session| Ok(session.current_thread.clone()))?,
+        ),
+        None => None,
+    };
+    settle(
+        dbg,
+        timeout,
+        stepping,
+        move |session, remaining| match step {
+            None => run_to_address(session, VirtAddr(address), None, remaining),
+            Some(mode) => {
+                session.step_until(mode, STEP_UNTIL_LIMIT, remaining, |ip, _| ip == address)
+            }
+        },
+    )
 }
 
 /// [`Session::run_to`], reporting a timeout or cancel that halted the target
@@ -234,10 +259,11 @@ pub fn run_to(
 fn run_to_address(
     session: &mut Session,
     address: VirtAddr,
+    frame: Option<StepFrame>,
     timeout: Option<Duration>,
 ) -> CoreResult<ContinueOutcome> {
     let cancel = Arc::clone(&session.target.interrupt);
-    match session.run_to(address, timeout, &cancel)? {
+    match session.run_to(address, frame, timeout, &cancel)? {
         ContinueOutcome::Running if !session.backend.is_running() => Ok(ContinueOutcome::Halted {
             rip: session.current_rip(),
         }),
@@ -261,14 +287,22 @@ pub fn step_over(dbg: &Bound<'_, Debugger>, until: Option<UntilFlow>) -> PyResul
         require_halted(session, "step_over")?;
         match until {
             Some(_) => Ok(None),
-            None => session.step_over_target().map(Some).map_err(err),
+            None => match session.step_over_target().map_err(err)? {
+                StepKind::RunTo(next) => {
+                    let frame = session.step_frame(StepStack::CallReturn).map_err(err)?;
+                    Ok(Some((next, frame)))
+                }
+                StepKind::Single => Ok(None),
+            },
         }
     })?;
     match (until, plan) {
         (Some(kind), _) => step_to_flow(dbg, StepMode::Over, kind),
-        (None, Some(StepKind::RunTo(next))) => {
+        (None, Some((next, frame))) => {
             // A call: run to the instruction after it, again past declined hits.
-            settle_stop(dbg, move |session, _| run_to_address(session, next, None))
+            settle_stop(dbg, move |session, _| {
+                run_to_address(session, next, frame.clone(), None)
+            })
         }
         (None, _) => settle_stop(dbg, single_step),
     }
@@ -289,11 +323,15 @@ fn step_to_flow(dbg: &Bound<'_, Debugger>, mode: StepMode, kind: UntilFlow) -> P
 
 pub fn step_out(dbg: &Bound<'_, Debugger>) -> PyResult<Py<Stop>> {
     reject_condition_mutation()?;
-    let target = dbg.get().with_session(|session| {
+    let (target, frame) = dbg.get().with_session(|session| {
         require_halted(session, "step_out")?;
-        session.step_out_target().map_err(err)
+        let target = session.step_out_target().map_err(err)?;
+        let frame = session.step_frame(StepStack::FunctionReturn).map_err(err)?;
+        Ok((target, frame))
     })?;
-    settle_stop(dbg, move |session, _| run_to_address(session, target, None))
+    settle_stop(dbg, move |session, _| {
+        run_to_address(session, target, frame.clone(), None)
+    })
 }
 
 impl UntilFlow {

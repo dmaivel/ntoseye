@@ -71,6 +71,9 @@ pub struct Breakpoint {
     pub thread: Option<ThreadScope>,
     /// Which processor may surface a hit (`/c`), if restricted.
     pub processor: Option<u16>,
+    /// Lowest stack pointer a hit may have, if restricted: a step's run-to
+    /// breakpoint (see [`StepFrame`]).
+    pub min_stack_pointer: Option<u64>,
     /// Whether `scope` was inferred from the resolved address and the process
     /// selected when this breakpoint was created. Explicit `/p` scopes remain
     /// fixed across symbol re-resolution.
@@ -107,6 +110,15 @@ pub enum BreakpointScope {
 pub struct ThreadScope {
     pub ethread: VirtAddr,
     pub tid: Option<u64>,
+}
+
+/// The execution a step's run-to breakpoint (`p` over a call, `gu`) belongs
+/// to. A hit by another thread, or by the same thread with its stack below
+/// `min_stack_pointer` (a deeper call of the same code), is stepped past.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepFrame {
+    pub thread: ThreadScope,
+    pub min_stack_pointer: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

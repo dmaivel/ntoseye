@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::install::{BreakpointBackend, forget_site};
 use super::spec::CodeSite;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager};
+use super::{Breakpoint, BreakpointConfig, BreakpointManager, StepFrame};
 #[cfg(test)]
 use super::{BreakpointScope, HardwareBreakpoint, install::BreakpointPatch};
 use crate::backend::MemoryOps;
@@ -55,6 +55,7 @@ impl BreakpointManager {
                 automatic_scope: false,
                 thread: None,
                 processor: None,
+                min_stack_pointer: None,
                 condition: None,
                 condition_expr: None,
                 pass_count: 0,
@@ -104,15 +105,22 @@ impl BreakpointManager {
         )
     }
 
+    /// A one-shot breakpoint for a run to `address`; `frame` restricts it to
+    /// a step's execution.
     pub fn add_temporary_code(
         &mut self,
         client: &mut dyn DebugBackend,
         debugger: &Target,
         address: VirtAddr,
+        frame: Option<StepFrame>,
     ) -> Result<u32> {
+        let config = BreakpointConfig {
+            thread: frame.as_ref().map(|frame| frame.thread.clone()),
+            ..BreakpointConfig::default()
+        };
         // Secure-kernel code is never patched: a run-to there (`p` over a
         // call, `gu`) takes a debug-register slot for the run instead.
-        if debugger.is_secure_address(address) {
+        let (id, hardware) = if debugger.is_secure_address(address) {
             let id = self.add_hardware_configured(
                 client,
                 debugger,
@@ -120,19 +128,19 @@ impl BreakpointManager {
                 HwBreakpointAccess::Execute,
                 1,
                 None,
-                BreakpointConfig::default(),
+                config,
             )?;
-            if let Some(bp) = self.breakpoints.get_mut(&id) {
-                bp.temporary = true;
-            }
-            return Ok(id);
+            (id, true)
+        } else {
+            let id =
+                self.add_code_configured(client, debugger, CodeSite::Temporary(address), config)?;
+            (id, false)
+        };
+        if let Some(bp) = self.breakpoints.get_mut(&id) {
+            bp.temporary |= hardware;
+            bp.min_stack_pointer = frame.and_then(|frame| frame.min_stack_pointer);
         }
-        self.add_code_configured(
-            client,
-            debugger,
-            CodeSite::Temporary(address),
-            BreakpointConfig::default(),
-        )
+        Ok(id)
     }
 
     pub(super) fn add_code_configured(
@@ -197,6 +205,7 @@ impl BreakpointManager {
                 temporary,
                 thread: config.thread,
                 processor: config.processor,
+                min_stack_pointer: None,
                 hardware: None,
                 backend,
             },

@@ -248,6 +248,18 @@ pub enum StepMode {
     Over,
 }
 
+/// Where a step's run-to must find the stepping thread's stack pointer (see
+/// [`Session::step_frame`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStack {
+    /// Anywhere: a run through straight-line code, which may push.
+    Any,
+    /// At or above the current one: the return from the call at the PC.
+    CallReturn,
+    /// Above the current frame: the return from the current function.
+    FunctionReturn,
+}
+
 /// Architecture-neutral summary of the instruction at the program counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentInstruction {

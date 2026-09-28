@@ -47,6 +47,7 @@ impl Session {
                 // costs a KPRCB walk that only a filtered breakpoint owes.
                 if !self.stopped_thread_matches(bp.thread.as_ref())
                     || !stopped_processor_matches(bp.processor, &self.current_thread)
+                    || !self.stopped_stack_reaches(bp.min_stack_pointer)
                 {
                     self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
@@ -111,6 +112,20 @@ impl Session {
         scope.matches(stopped.as_ref())
     }
 
+    /// Whether the stopped stack pointer is at least `min`, the floor of a
+    /// step's run-to breakpoint. An unreadable one matches, as an
+    /// unresolved thread does.
+    fn stopped_stack_reaches(&mut self, min: Option<u64>) -> bool {
+        let Some(min) = min else {
+            return true;
+        };
+        self.backend
+            .read_registers()
+            .ok()
+            .and_then(|registers| stack_pointer(&self.register_map, &registers))
+            .is_none_or(|sp| sp >= min)
+    }
+
     /// Silently continue past the breakpoint at the PC: step over it, rewrite
     /// whatever sites the stop dropped, and resume without surfacing anything.
     fn step_over_and_resume(&mut self) -> Result<()> {
@@ -124,6 +139,26 @@ impl Session {
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)
+    }
+
+    /// Leave a hit a host declined (the SDK's `when=` callback) on another
+    /// vCPU than `stepping`, whose step it interrupted: step that vCPU past
+    /// its site and select `stepping` again, so the step goes on from where
+    /// it was rather than from the hit.
+    pub fn pass_declined_hit(&mut self, stepping: &str) -> Result<()> {
+        if self.current_thread == stepping {
+            return Ok(());
+        }
+        step_over_current_breakpoint(
+            self.backend.as_mut(),
+            &self.register_map,
+            &self.target,
+            &mut self.breakpoints,
+            &self.current_thread,
+        )?;
+        self.breakpoints
+            .refresh_enabled(self.backend.as_mut(), &self.target)?;
+        self.set_current_thread(stepping)
     }
 
     /// Whether a stop at `rip` is an execution returning to the breakpoint
@@ -161,6 +196,14 @@ pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool 
         return true;
     };
     processor_index_from_backend_thread_id(stopped).is_none_or(|stopped| stopped == processor)
+}
+
+/// The stack pointer in `registers` (`rsp`, or AArch64's `sp`).
+pub fn stack_pointer(register_map: &RegisterMap, registers: &[u8]) -> Option<u64> {
+    register_map
+        .read_u64("rsp", registers)
+        .or_else(|_| register_map.read_u64("sp", registers))
+        .ok()
 }
 
 /// If `event` is a hardware-debug stop, return the breakpoint that fired.
@@ -410,6 +453,7 @@ pub fn resolve_watchpoint_stop(
     let scope_dtb = register_map
         .read_u64(target.arch().dtb_register(), &registers)
         .unwrap_or(0);
+    let sp = stack_pointer(register_map, &registers);
     update_target_context_from_registers(target, register_map, Ok(registers));
     if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
         backend.continue_execution()?;
@@ -422,7 +466,11 @@ pub fn resolve_watchpoint_stop(
             return Ok(WatchpointStopAction::Resumed);
         }
     }
-    if !stopped_processor_matches(breakpoint.processor, current_thread) {
+    if !stopped_processor_matches(breakpoint.processor, current_thread)
+        || breakpoint
+            .min_stack_pointer
+            .is_some_and(|min| sp.is_some_and(|sp| sp < min))
+    {
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }

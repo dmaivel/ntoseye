@@ -3,12 +3,13 @@ use std::sync::atomic::Ordering;
 use owo_colors::OwoColorize;
 
 use crate::breakpoints::Breakpoint;
+use crate::breakpoints::StepFrame;
 use crate::dbg_backend::ContinueDisposition;
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::session::{
-    CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StepMode,
+    CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StepMode, StepStack,
     StopResolution,
 };
 use crate::types::VirtAddr;
@@ -66,6 +67,7 @@ repl_command! {
     names: ["p", "ni"],
     usage: "p or ni",
     summary: "Step over the current instruction.",
+    details: "Over a call, runs to the instruction after it and stops there only for the stepping thread returning from that call; other threads reaching the address, and deeper calls of the same code, run on.",
     run_state: Halted,
     run: Run,
 }
@@ -75,6 +77,7 @@ repl_command! {
     names: ["gu", "finish"],
     usage: "gu or finish",
     summary: "Run until the current function returns.",
+    details: "Stops at the return address only for the stepping thread returning from this call; other threads reaching the address, and deeper calls of the same function, run on.",
     run_state: Halted,
     run: Run,
 }
@@ -349,7 +352,7 @@ impl ReplState<'_> {
         }
         match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
             Ok(address) => self
-                .run_to_temporary_code_breakpoint_with_disposition(address, disposition)
+                .run_to_temporary_code_breakpoint_with_disposition(address, None, disposition)
                 .map(|_| ()),
             Err(error) => {
                 error!("invalid {} address: {error}", invocation.name);
@@ -702,9 +705,13 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn run_to_temporary_code_breakpoint(&mut self, address: VirtAddr) -> Result<bool> {
+    /// Run a step to `address`: stop there only for the stepping thread,
+    /// with its stack where `stack` requires.
+    fn run_step_to(&mut self, address: VirtAddr, stack: StepStack) -> Result<bool> {
+        let frame = self.ctx.step_frame(stack)?;
         self.run_to_temporary_code_breakpoint_with_disposition(
             address,
+            frame,
             ContinueDisposition::Handled,
         )
     }
@@ -722,6 +729,7 @@ impl ReplState<'_> {
     fn run_to_temporary_code_breakpoint_with_disposition(
         &mut self,
         address: VirtAddr,
+        frame: Option<StepFrame>,
         disposition: ContinueDisposition,
     ) -> Result<bool> {
         if self
@@ -738,6 +746,7 @@ impl ReplState<'_> {
             &mut *self.ctx.backend,
             &self.ctx.target,
             address,
+            frame,
         ) {
             Ok(id) => id,
             Err(e) => {
@@ -805,7 +814,7 @@ impl ReplState<'_> {
     fn step_over_once(&mut self) -> Result<bool> {
         match self.ctx.step_over_target()? {
             StepKind::Single => self.single_step_checked().map(|_| true),
-            StepKind::RunTo(target) => self.run_to_temporary_code_breakpoint(target),
+            StepKind::RunTo(target) => self.run_step_to(target, StepStack::CallReturn),
         }
     }
 
@@ -937,7 +946,9 @@ impl ReplState<'_> {
 
     fn cmd_gu(&mut self) -> Result<()> {
         match self.ctx.step_out_target() {
-            Ok(target) => self.run_to_temporary_code_breakpoint(target).map(|_| ()),
+            Ok(target) => self
+                .run_step_to(target, StepStack::FunctionReturn)
+                .map(|_| ()),
             Err(e) => {
                 error!("{}", e);
                 Ok(())

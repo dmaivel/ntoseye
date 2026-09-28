@@ -10,7 +10,7 @@ use iced_x86::{
 };
 
 use crate::backend::MemoryOps;
-use crate::breakpoints::BreakpointManager;
+use crate::breakpoints::{BreakpointManager, StepFrame, ThreadScope};
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
     clear_trap_flag, processor_index_from_backend_thread_id,
@@ -18,9 +18,11 @@ use crate::dbg_backend::{
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
+use crate::session::context::windows_thread_on_backend_thread;
+use crate::session::hits::stack_pointer;
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
-    STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
+    STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode, StepStack,
 };
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
@@ -302,7 +304,8 @@ impl Session {
                 StepKind::RunTo(next) if mode == StepMode::Over => {
                     let remaining =
                         deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-                    self.run_to(next, remaining, &cancel)?
+                    let frame = self.step_frame(StepStack::CallReturn)?;
+                    self.run_to(next, frame, remaining, &cancel)?
                 }
                 _ => {
                     let (rip, stepped) = self.step_once()?;
@@ -428,7 +431,38 @@ impl Session {
         })
     }
 
-    /// Run until `address` is reached. If a breakpoint is already set there in
+    /// The stepping thread's [`StepFrame`] for a run-to whose arrival must
+    /// find its stack per `stack`. `None` when the thread cannot be
+    /// identified (a VTL1 stop, no kernel symbols): the run-to then stops for
+    /// any thread.
+    pub fn step_frame(&mut self, stack: StepStack) -> Result<Option<StepFrame>> {
+        let Some(thread) = windows_thread_on_backend_thread(&self.target, &self.current_thread)
+        else {
+            return Ok(None);
+        };
+        let min_stack_pointer = match stack {
+            StepStack::Any => None,
+            StepStack::CallReturn | StepStack::FunctionReturn => {
+                let registers = self.read_registers()?;
+                stack_pointer(&self.register_map, &registers).map(|sp| {
+                    // An x86 `ret` pops its return address; an AArch64 `ret`
+                    // leaves the stack pointer where the callee found it.
+                    if stack == StepStack::FunctionReturn && self.target.arch() != Arch::Arm64 {
+                        sp + 1
+                    } else {
+                        sp
+                    }
+                })
+            }
+        };
+        Ok(Some(StepFrame {
+            thread: ThreadScope::new(&thread),
+            min_stack_pointer,
+        }))
+    }
+
+    /// Run until `address` is reached, by the execution `frame` names when
+    /// given. If a breakpoint is already set there in
     /// the current context this is a plain [`Self::continue_until_break`];
     /// otherwise it installs a temporary breakpoint, runs to it, removes it, and
     /// reports reaching it as [`ContinueOutcome::Step`]. A *different* breakpoint,
@@ -440,6 +474,7 @@ impl Session {
     pub fn run_to(
         &mut self,
         address: VirtAddr,
+        frame: Option<StepFrame>,
         timeout: Option<Duration>,
         cancel: &AtomicBool,
     ) -> Result<ContinueOutcome> {
@@ -455,6 +490,7 @@ impl Session {
                 self.backend.as_mut(),
                 &self.target,
                 address,
+                frame,
             )?)
         };
         let outcome = self.continue_until_break(timeout, cancel, ContinueDisposition::Handled);
@@ -488,14 +524,18 @@ impl Session {
     pub fn step_over(&mut self, cancel: &AtomicBool) -> Result<ContinueOutcome> {
         match self.step_over_target()? {
             StepKind::Single => Ok(ContinueOutcome::Step { rip: self.step()? }),
-            StepKind::RunTo(addr) => self.run_to(addr, None, cancel),
+            StepKind::RunTo(addr) => {
+                let frame = self.step_frame(StepStack::CallReturn)?;
+                self.run_to(addr, frame, None, cancel)
+            }
         }
     }
 
     /// Step out of the current function: run to the caller's return address.
     pub fn step_out(&mut self, cancel: &AtomicBool) -> Result<ContinueOutcome> {
         let target = self.step_out_target()?;
-        self.run_to(target, None, cancel)
+        let frame = self.step_frame(StepStack::FunctionReturn)?;
+        self.run_to(target, frame, None, cancel)
     }
 }
 
