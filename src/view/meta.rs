@@ -38,7 +38,7 @@ shapes! {
     }
 
     /// Driver Verifier's aggregate counters; each reads on its own and can
-    /// fail. Byte counts are in bytes.
+    /// fail.
     VerifierStatistics {
         raise_irqls: Diag<u64>,
         acquire_spin_locks: Diag<u64>,
@@ -84,7 +84,7 @@ shapes! {
     }
 
     /// One verified driver's image, signing level, and counters
-    /// (`!verifier <module>`). Byte counts are in bytes.
+    /// (`!verifier <module>`).
     VerifierDriver {
         module: String,
         image_base: VirtAddr,

@@ -42,7 +42,7 @@ shapes! {
         /// The directory table base (page-table root).
         dtb: Hex,
         eprocess: VirtAddr,
-        /// A 32-bit process running under WOW64.
+        /// Whether it is a 32-bit process running under WOW64.
         wow64: bool,
     }
 
@@ -120,7 +120,7 @@ shapes! {
         root_job: Option<VirtAddr>,
         child_jobs: Vec<VirtAddr>,
         child_job_list_termination: ListEnd,
-        /// The job is a silo.
+        /// Whether the job is a silo.
         silo: bool,
         /// `None` for a job that is not a server silo.
         server_silo_globals: Option<VirtAddr>,
@@ -208,9 +208,9 @@ shapes! {
         /// The scanned pool region's end.
         region_end: VirtAddr,
         scanned_pages: u64,
-        /// The scan was interrupted before it finished.
+        /// Whether the scan was interrupted before it finished.
         interrupted: bool,
-        /// A result list hit its cap.
+        /// Whether a result list hit its cap.
         truncated: bool,
     }
 }

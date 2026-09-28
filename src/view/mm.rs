@@ -115,7 +115,7 @@ shapes! {
         /// The frame the entry points at.
         pfn: Hex,
         present: bool,
-        /// The entry maps a large page rather than a lower table.
+        /// Whether the entry maps a large page rather than a lower table.
         large_page: bool,
         writable: bool,
         user: bool,
@@ -132,12 +132,12 @@ shapes! {
         levels: Vec<PageTableEntry>,
         /// The physical address; `None` when the address is not mapped.
         physical: Option<Hex>,
-        /// Mapped by a large page.
+        /// Whether a large page maps it.
         large: bool,
-        /// The leaf is a transition PTE: `physical` is a frame the guest still
+        /// Whether the leaf is a transition PTE: `physical` is a frame the guest still
         /// holds, but nothing maps it here and it cannot be written.
         transition: bool,
-        /// Nothing maps the page here; `physical` is the frame its section
+        /// Whether nothing maps the page here and `physical` is the frame its section
         /// PTE holds (a page of a shared image or file view not yet touched).
         section: bool,
     }
@@ -145,7 +145,7 @@ shapes! {
     /// A virtual address that maps a physical page.
     PhysicalMapping {
         virtual_address: VirtAddr,
-        /// Mapped by a large page.
+        /// Whether a large page maps it.
         large: bool,
     }
 
@@ -186,7 +186,7 @@ shapes! {
         /// The tag as its four characters.
         tag_name: String,
         allocated: bool,
-        /// The block holds the requested address.
+        /// Whether the block holds the requested address.
         marked: bool,
         /// `allocated`, `free`, or a description of what is wrong.
         state: String,
@@ -413,7 +413,7 @@ shapes! {
         /// Where the PFN array starts (just past the header).
         pfn_array: VirtAddr,
         pfns: Vec<Hex>,
-        /// Fewer PFNs are listed than the buffer spans: a smaller count was
+        /// Whether fewer PFNs are listed than the buffer spans: a smaller count was
         /// requested.
         truncated: bool,
     }
@@ -463,7 +463,7 @@ shapes! {
         /// The free runs in address order, when listing was requested.
         free_runs: Vec<SystemPteRun>,
         free_runs_truncated: bool,
-        /// The kernel tracks which driver mapped each PTE (`TrackPtes`).
+        /// Whether the kernel tracks which driver mapped each PTE (`TrackPtes`).
         tracking: bool,
     }
 
@@ -532,7 +532,7 @@ shapes! {
         type_name: &'static str,
         /// The VAD node; `None` for free memory.
         vad: Option<VirtAddr>,
-        /// The scan stopped at its bound or an unreadable page table before
+        /// Whether the scan stopped at its bound or an unreadable page table before
         /// the region ended, so `region_size` is a lower bound.
         truncated: bool,
     }
@@ -550,7 +550,7 @@ shapes! {
         module: Option<AddressModule>,
         /// The module section containing the address, if any.
         section: Option<String>,
-        /// The `MI_SYSTEM_VA_TYPE` name, for a kernel region.
+        /// The `_MI_SYSTEM_VA_TYPE` name, for a kernel region.
         va_type: Option<String>,
         /// The region containing the address, if any.
         region: Option<MemoryRegion>,
@@ -572,7 +572,7 @@ shapes! {
         module: Option<AddressModule>,
         /// The module section containing the match, if any.
         section: Option<String>,
-        /// The `MI_SYSTEM_VA_TYPE` name, for a kernel-region match.
+        /// The `_MI_SYSTEM_VA_TYPE` name, for a kernel-region match.
         va_type: Option<String>,
         /// The region containing the match, if any.
         region: Option<MemoryRegion>,

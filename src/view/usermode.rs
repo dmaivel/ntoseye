@@ -156,7 +156,7 @@ shapes! {
         base_address: VirtAddr,
         /// The image size in bytes.
         size: u32,
-        /// On the WOW64 (32-bit) loader list.
+        /// Whether the module is on the WOW64 (32-bit) loader list.
         is_32bit: bool,
         /// `None` when the loader entry has none (or it is unreadable).
         entry_point: Option<VirtAddr>,
@@ -233,7 +233,7 @@ shapes! {
         /// Mismatched bytes, known self-patches included.
         total_mismatches: u64,
         self_patches: ImageSelfPatchCounts,
-        /// The section was not compared.
+        /// Whether the section was skipped, not compared.
         skipped: bool,
         /// Why it was skipped; `None` when compared.
         skip_reason: Option<String>,

@@ -113,7 +113,7 @@ class AddressDescription(BaseRecord):
     @property
     def va_type(self, /) -> str |None:
         """
-        The `MI_SYSTEM_VA_TYPE` name, for a kernel region.
+        The `_MI_SYSTEM_VA_TYPE` name, for a kernel region.
         """
 
 @final
@@ -154,7 +154,7 @@ class AddressTranslation(BaseRecord):
     @property
     def large(self, /) -> bool:
         """
-        Mapped by a large page.
+        Whether a large page maps it.
         """
     @property
     def levels(self, /) -> list[PageTableEntry]:
@@ -169,13 +169,13 @@ class AddressTranslation(BaseRecord):
     @property
     def section(self, /) -> bool:
         """
-        Nothing maps the page here; `physical` is the frame its section
+        Whether nothing maps the page here and `physical` is the frame its section
         PTE holds (a page of a shared image or file view not yet touched).
         """
     @property
     def transition(self, /) -> bool:
         """
-        The leaf is a transition PTE: `physical` is a frame the guest still
+        Whether the leaf is a transition PTE: `physical` is a frame the guest still
         holds, but nothing maps it here and it cannot be written.
         """
 
@@ -1125,7 +1125,7 @@ class BlackboxStream(BaseRecord):
     @property
     def present(self, /) -> bool |None:
         """
-        `True` when the stream is recorded; `None` when the dump exposes
+        Whether the stream is recorded; `None` when the dump exposes
         no stream directory to tell.
         """
     @property
@@ -4389,7 +4389,7 @@ class HeapBlockSearch(BaseRecord):
     @property
     def found(self, /) -> bool:
         """
-        A heap holds the address.
+        Whether a heap holds the address.
         """
     @property
     def heap(self, /) -> HeapIdentity |None:
@@ -4399,7 +4399,7 @@ class HeapBlockSearch(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        A heap list or walk was cut at its limit, so the search may have
+        Whether a heap list or walk was cut at its limit, so the search may have
         missed the block.
         """
 
@@ -4797,7 +4797,7 @@ class HeapPageRange(BaseRecord):
     @property
     def truncated(self, /) -> bool |None:
         """
-        The subsegment held more blocks than the walk limit. Absent outside
+        Whether the subsegment held more blocks than the walk limit. Absent outside
         a heap decoding.
         """
     @property
@@ -4895,7 +4895,7 @@ class HeapSummary(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        The list was longer than the walk limit and was cut short.
+        Whether the list was longer than the walk limit and was cut short.
         """
 
 @final
@@ -5493,7 +5493,7 @@ class ImageSectionCheck(BaseRecord):
     @property
     def skipped(self, /) -> bool:
         """
-        The section was not compared.
+        Whether the section was skipped, not compared.
         """
     @property
     def total_mismatches(self, /) -> int:
@@ -6338,7 +6338,7 @@ class Job(BaseRecord):
     @property
     def silo(self, /) -> bool:
         """
-        The job is a silo.
+        Whether the job is a silo.
         """
     @property
     def unreadable_processes(self, /) -> list[int]:
@@ -6741,7 +6741,7 @@ class LoaderModule(BaseRecord):
     @property
     def is_32bit(self, /) -> bool:
         """
-        On the WOW64 (32-bit) loader list.
+        Whether the module is on the WOW64 (32-bit) loader list.
         """
     @property
     def name(self, /) -> str:
@@ -6941,7 +6941,7 @@ class Mdl(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        Fewer PFNs are listed than the buffer spans: a smaller count was
+        Whether fewer PFNs are listed than the buffer spans: a smaller count was
         requested.
         """
 
@@ -7108,7 +7108,7 @@ class MemoryBasicInformation(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        The scan stopped at its bound or an unreadable page table before
+        Whether the scan stopped at its bound or an unreadable page table before
         the region ended, so `region_size` is a lower bound.
         """
     @property
@@ -7221,7 +7221,7 @@ class MemorySearchMatch(BaseRecord):
     @property
     def va_type(self, /) -> str |None:
         """
-        The `MI_SYSTEM_VA_TYPE` name, for a kernel-region match.
+        The `_MI_SYSTEM_VA_TYPE` name, for a kernel-region match.
         """
 
 @final
@@ -7582,7 +7582,7 @@ class NtHeapEntry(BaseRecord):
     @property
     def checksum_ok(self, /) -> bool:
         """
-        The header's XOR checksum held (always true when headers are not
+        Whether the header's XOR checksum held (always true when headers are not
         encoded).
         """
     @property
@@ -7615,7 +7615,7 @@ class NtHeapEntry(BaseRecord):
     @property
     def lfh_truncated(self, /) -> bool |None:
         """
-        The region's `blocks` were cut at the walk limit. Absent outside a
+        Whether the region's `blocks` were cut at the walk limit. Absent outside a
         heap decoding.
         """
     @property
@@ -7859,7 +7859,7 @@ class PageTableEntry(BaseRecord):
     @property
     def large_page(self, /) -> bool:
         """
-        The entry maps a large page rather than a lower table.
+        Whether the entry maps a large page rather than a lower table.
         """
     @property
     def level(self, /) -> str:
@@ -8462,7 +8462,7 @@ class PhysicalMapping(BaseRecord):
     @property
     def large(self, /) -> bool:
         """
-        Mapped by a large page.
+        Whether a large page maps it.
         """
     @property
     def virtual_address(self, /) -> int: ...
@@ -8521,7 +8521,7 @@ class PoolBlock(BaseRecord):
     @property
     def marked(self, /) -> bool:
         """
-        The block holds the requested address.
+        Whether the block holds the requested address.
         """
     @property
     def pool_type(self, /) -> int:
@@ -9159,7 +9159,7 @@ class ProcessIdentity(BaseRecord):
     @property
     def wow64(self, /) -> bool:
         """
-        A 32-bit process running under WOW64.
+        Whether it is a 32-bit process running under WOW64.
         """
 
 @final
@@ -9944,7 +9944,7 @@ class Session(BaseRecord):
     @property
     def processes(self, /) -> list[ProcessIdentity]:
         """
-        Each a process record.
+        The session's processes.
         """
 
 @final
@@ -10124,7 +10124,7 @@ class SsdtEntry(BaseRecord):
 @final
 class SsdtTable(BaseRecord):
     """
-    A system-service table: the kernel SSDT or the win32k shadow (`!ssdt`).
+    A system-service table: the kernel SSDT or the win32k shadow (`ssdt`).
     """
     @property
     def base(self, /) -> int: ...
@@ -10693,7 +10693,7 @@ class SystemPteType(BaseRecord):
     @property
     def tracking(self, /) -> bool:
         """
-        The kernel tracks which driver mapped each PTE (`TrackPtes`).
+        Whether the kernel tracks which driver mapped each PTE (`TrackPtes`).
         """
     @property
     def unreadable_bitmap_bytes(self, /) -> int:
@@ -11900,7 +11900,7 @@ class Verifier(BaseRecord):
 class VerifierDriver(BaseRecord):
     """
     One verified driver's image, signing level, and counters
-    (`!verifier <module>`). Byte counts are in bytes.
+    (`!verifier <module>`).
     """
     @property
     def acquire_spin_locks(self, /) -> int: ...
@@ -12074,7 +12074,7 @@ class VerifierFindingArgument(BaseRecord):
 class VerifierStatistics(BaseRecord):
     """
     Driver Verifier's aggregate counters; each reads on its own and can
-    fail. Byte counts are in bytes.
+    fail.
     """
     @property
     def acquire_spin_locks(self, /) -> Diagnostic: ...
@@ -12311,7 +12311,7 @@ class VsSubsegment(BaseRecord):
     @property
     def signature_ok(self, /) -> bool:
         """
-        The subsegment's signature matched.
+        Whether the subsegment's signature matched.
         """
 
 @final
@@ -12635,7 +12635,7 @@ class Zombies(BaseRecord):
     @property
     def interrupted(self, /) -> bool:
         """
-        The scan was interrupted before it finished.
+        Whether the scan was interrupted before it finished.
         """
     @property
     def live_processes(self, /) -> int:
@@ -12672,7 +12672,7 @@ class Zombies(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        A result list hit its cap.
+        Whether a result list hit its cap.
         """
 
 @final

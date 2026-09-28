@@ -191,7 +191,7 @@ shapes! {
         module: Option<String>,
     }
 
-    /// A system-service table: the kernel SSDT or the win32k shadow (`!ssdt`).
+    /// A system-service table: the kernel SSDT or the win32k shadow (`ssdt`).
     SsdtTable {
         /// Which table.
         label: String,

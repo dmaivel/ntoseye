@@ -196,7 +196,7 @@ shapes! {
         name: String,
         /// The stream's size in bytes, when recorded.
         size: Option<u64>,
-        /// `True` when the stream is recorded; `None` when the dump exposes
+        /// Whether the stream is recorded; `None` when the dump exposes
         /// no stream directory to tell.
         present: Option<bool>,
         /// Whether the payload is available; always `False`.

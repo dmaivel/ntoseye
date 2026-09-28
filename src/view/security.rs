@@ -93,7 +93,7 @@ shapes! {
     Session {
         /// `None` for processes whose session is unknown.
         id: Option<u64>,
-        /// Each a process record.
+        /// The session's processes.
         processes: Vec<super::process::ProcessIdentity>,
     }
 

@@ -9,7 +9,7 @@ shapes! {
     HeapSummary {
         /// The process environment block the list was read from.
         peb: VirtAddr,
-        /// The list was longer than the walk limit and was cut short.
+        /// Whether the list was longer than the walk limit and was cut short.
         truncated: bool,
         heaps: Vec<HeapOverview>,
     }
@@ -162,7 +162,7 @@ shapes! {
         kind: &'static str,
         /// Slack at the end of the block, in bytes.
         unused_bytes: u8,
-        /// The header's XOR checksum held (always true when headers are not
+        /// Whether the header's XOR checksum held (always true when headers are not
         /// encoded).
         checksum_ok: bool,
         /// Header size in bytes (see `NtHeap.granule`).
@@ -177,7 +177,7 @@ shapes! {
         /// Why the entry's LFH region could not be read. Absent outside a heap
         /// decoding.
         lfh_error: Omit<Option<String>>,
-        /// The region's `blocks` were cut at the walk limit. Absent outside a
+        /// Whether the region's `blocks` were cut at the walk limit. Absent outside a
         /// heap decoding.
         lfh_truncated: Omit<bool>,
     }
@@ -307,7 +307,7 @@ shapes! {
         /// Why the subsegment could not be read. Absent outside a heap
         /// decoding.
         error: Omit<Option<String>>,
-        /// The subsegment held more blocks than the walk limit. Absent outside
+        /// Whether the subsegment held more blocks than the walk limit. Absent outside
         /// a heap decoding.
         truncated: Omit<bool>,
     }
@@ -315,7 +315,7 @@ shapes! {
     /// A segment-heap variable-size subsegment (`_HEAP_VS_SUBSEGMENT`).
     VsSubsegment {
         address: VirtAddr,
-        /// The subsegment's signature matched.
+        /// Whether the subsegment's signature matched.
         signature_ok: bool,
         /// The subsegment's chunks; empty unless entries were listed.
         chunks: Vec<HeapBlock>,
@@ -387,9 +387,9 @@ shapes! {
     HeapBlockSearch {
         /// The address searched for.
         address: VirtAddr,
-        /// A heap holds the address.
+        /// Whether a heap holds the address.
         found: bool,
-        /// A heap list or walk was cut at its limit, so the search may have
+        /// Whether a heap list or walk was cut at its limit, so the search may have
         /// missed the block.
         truncated: bool,
         /// The heap holding the address; None when not found.
