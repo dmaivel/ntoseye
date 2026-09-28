@@ -11,6 +11,8 @@ Standalone [Python SDK](../../docs/scripting/sdk.md) scripts. Run one directly, 
 | `user_process.py` | PEB/process-parameter cursors, loader modules, and heap handles (read-only). |
 | `search_details.py` | `Memory.search()` and per-hit module/section/symbol attribution (read-only). |
 | `kernel_snapshot.py` | Version, pool usage, and sessions; `kd`/`gdb` also inspect CPUs, `kd` reads MSRs, and `--dump` writes/reopens a dump. |
+| `pci_devices.py` | Every PCI function, `lspci`-style, and a chosen vendor/device's BARs, capabilities, and command/status flags (`kd` or `gdb`). |
+| `kernel_hooks.py` | SSDT entries outside `nt`/`win32k`, notify callbacks by owning module, and IDT gates outside NT, reading `Diagnostic` fields; exits 1 when anything is flagged. |
 | `breakpoint_trace.py` | A breakpoint handle, typed stops, and a `run()` loop. |
 | `step_and_handles.py` | `step()`, live `Breakpoint` handles, and the writable `enabled` property. |
 | `scoped_breakpoint.py` | Process-scoped, conditional, pass-counted, and one-shot breakpoints; `step_out()` and `run_to()`. |
