@@ -7,6 +7,7 @@ use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
 use crate::{
     backend::MemoryOps,
+    breakpoints::BreakpointManager,
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
@@ -329,6 +330,12 @@ pub fn thread_root(debugger: &Target, cr3: u64) -> Dtb {
 }
 
 pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceContext {
+    thread_trace_context(debugger, cr3, true)
+}
+
+/// [`resolve_thread_trace_context`], walking a process root's own module
+/// list (its PEB loader list) only when `process_modules` asks for it.
+fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> ThreadTraceContext {
     let cr3_masked = cr3 & debugger.arch().dtb_page_mask();
     let kernel_dtb = debugger.kernel_dtb();
     match root_owner(debugger, cr3_masked) {
@@ -363,6 +370,7 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
             process_modules: debugger
                 .guest
                 .as_ref()
+                .filter(|_| process_modules)
                 .and_then(|guest| guest.process_modules(&proc_info).ok())
                 .unwrap_or_default(),
             foreign_image: None,
@@ -424,7 +432,18 @@ pub fn resolve_thread_trace_context_at(
     cr3: u64,
     rip: u64,
 ) -> ThreadTraceContext {
-    let mut trace = resolve_thread_trace_context(debugger, cr3);
+    code_trace_context_at(debugger, cr3, rip, true)
+}
+
+/// [`resolve_thread_trace_context_at`], walking a process root's module
+/// list only when `process_modules` asks for it.
+fn code_trace_context_at(
+    debugger: &Target,
+    cr3: u64,
+    rip: u64,
+    process_modules: bool,
+) -> ThreadTraceContext {
+    let mut trace = thread_trace_context(debugger, cr3, process_modules);
     if trace.description != UNKNOWN_CONTEXT || try_format_symbol(debugger, &trace, rip).is_some() {
         return trace;
     }
@@ -456,10 +475,25 @@ pub fn halted_in_windows_hypervisor(debugger: &Target, cr3: u64, rip: u64) -> bo
 /// [`try_format_symbol`] for code a vCPU runs at `rip` with root `cr3`,
 /// named in that vCPU's own address space (code outside NT, such as the
 /// Windows hypervisor, for what it is) whatever the inspection scope is.
+/// Kernel code in an NT root is named from the modules whose symbols are
+/// loaded before any module list is walked: the lists are walked again at
+/// every halt, which over KD memory costs hundreds of reads a stop.
 pub fn try_format_symbol_at(debugger: &Target, cr3: u64, rip: u64) -> Option<String> {
+    let kernel = BreakpointManager::is_kernel_space(debugger.arch(), VirtAddr(rip));
+    if kernel
+        && matches!(
+            root_owner(debugger, cr3 & debugger.arch().dtb_page_mask()),
+            RootOwner::Kernel | RootOwner::Process(_)
+        )
+        && let Some(symbol) = debugger
+            .symbols
+            .format_closest_symbol_for_address(debugger.kernel_dtb(), VirtAddr(rip))
+    {
+        return Some(symbol);
+    }
     try_format_symbol(
         debugger,
-        &resolve_thread_trace_context_at(debugger, cr3, rip),
+        &code_trace_context_at(debugger, cr3, rip, !kernel),
         rip,
     )
 }
