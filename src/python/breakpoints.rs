@@ -663,9 +663,8 @@ impl Exceptions {
                 }
                 self.owner.with(py, |session| {
                     session
-                        .exception_policies
-                        .set_module_load(module, mode, None);
-                    Ok(())
+                        .set_module_load_filter(module, mode, None)
+                        .map_err(err)
                 })
             }
         }

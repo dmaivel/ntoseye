@@ -197,9 +197,10 @@ impl ReplState<'_> {
             error!("{err}");
             return;
         }
-        self.ctx
-            .exception_policies
-            .set_module_load(module, mode, command);
+        if let Err(err) = self.ctx.set_module_load_filter(module, mode, command) {
+            error!("{err}");
+            return;
+        }
         let policy = self
             .ctx
             .exception_policies

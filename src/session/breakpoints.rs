@@ -209,6 +209,30 @@ impl Session {
         }
     }
 
+    /// Set an `sx* ld` filter.
+    /// One that makes a GDB stub's load trap wanted while the target runs
+    /// halts it briefly to plant the trap, so it applies to the next load
+    /// rather than only after the next resume.
+    pub fn set_module_load_filter(
+        &mut self,
+        module: Option<String>,
+        mode: ExceptionPolicyMode,
+        command: Option<String>,
+    ) -> Result<()> {
+        self.exception_policies
+            .set_module_load(module, mode, command);
+        if self.load_trap.is_none()
+            && self.load_awaited()
+            && !self.backend_supports(DebugCapability::ModuleLoadEvents)
+        {
+            self.with_target_halted(|session| {
+                session.sync_load_trap();
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
     /// Whether something waits on a module load: an `sxe`/`sxn ld` filter,
     /// or a breakpoint not resolved yet.
     fn load_awaited(&self) -> bool {
