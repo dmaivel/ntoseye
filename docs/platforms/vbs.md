@@ -22,6 +22,8 @@ VTL1 requires direct host memory. Inspection works with the `memory` and `gdb` b
 
 VBS itself needs nested virtualization exposed to the VM; the [KVM/QEMU setup](../setup/kvm-qemu.md#virtualization-based-security-vbs) gives a CPU model that works.
 
+With VBS running, Windows refuses KD writes to user-mode code pages (physical or virtual; data pages and kernel code are written), so `kd` and `kdnet` cannot set user-mode breakpoints: `bp` reports the target's refusal.
+
 ## Inspecting VTL1 memory
 
 - {command}`.vtl` `[0|1 [pid]]`: Display or select the inspection scope. A bare {command}`.vtl` prints the current scope, `0` returns to the NT kernel (at a stop in VTL1 or the Windows hypervisor, to the vCPU's own address space; {command}`.vtlcxr` or {command}`.thread` selects NT there), `1` selects the secure kernel's system address space, and `1 <pid>` selects a trustlet's address space by its NT PID (always decimal).

@@ -383,7 +383,7 @@ impl BreakpointManager {
     /// bit 55, the same test the executable-permission check above relies on.
     /// Windows places its kernel in the upper half on both, so the AMD64 bound
     /// also holds there, but the bit is what the hardware actually uses.
-    fn is_kernel_space(arch: Arch, address: VirtAddr) -> bool {
+    pub fn is_kernel_space(arch: Arch, address: VirtAddr) -> bool {
         match arch {
             Arch::Amd64 => looks_like_kernel_pointer(address.0),
             Arch::Arm64 => address.0 & (1 << 55) != 0,
@@ -397,9 +397,21 @@ impl BreakpointManager {
     ) -> Result<()> {
         Self::require_patchable_address(debugger, address)?;
         let module = Self::find_kernel_module_containing_address(debugger, address);
-        let dtb = match scope {
+        let root = match scope {
             BreakpointScope::Kernel => debugger.kernel_dtb(),
             BreakpointScope::Process { dtb, .. } => *dtb,
+        };
+        // User code runs on the process's KVA-shadow root when it has one:
+        // the kernel root's copy of the user half is non-executable.
+        let dtb = if Self::is_kernel_space(debugger.arch(), address) {
+            root
+        } else {
+            let mask = debugger.arch().dtb_page_mask();
+            debugger
+                .process_for_cr3(root & mask)
+                .zip(debugger.guest().ok())
+                .and_then(|(process, guest)| guest.user_root(&process, mask))
+                .unwrap_or(root)
         };
         let memory = debugger.address_space(dtb);
         let translation = match memory.virt_to_phys(address) {

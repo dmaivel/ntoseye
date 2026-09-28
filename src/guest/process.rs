@@ -169,13 +169,7 @@ impl Guest {
     /// (`_KPROCESS.UserDirectoryTableBase`), compared under `mask`. `None`
     /// when no process owns it or the kernel has no shadow roots.
     pub fn process_for_user_root(&self, user_root: Dtb, mask: u64) -> Option<ProcessInfo> {
-        let types = self.ntoskrnl.types();
-        let user_root_offset = types.layout("_EPROCESS").ok()?.field_offset("Pcb").ok()?
-            + types
-                .layout("_KPROCESS")
-                .ok()?
-                .field_offset("UserDirectoryTableBase")
-                .ok()?;
+        let user_root_offset = self.user_root_offset()?;
         let memory = self.ntoskrnl.memory();
         self.enumerate_processes()
             .ok()?
@@ -185,6 +179,31 @@ impl Guest {
                     .read::<u64>(process.eprocess_va + user_root_offset)
                     .is_ok_and(|root| root & mask == user_root)
             })
+    }
+
+    /// The KVA-shadow root user mode runs `process` on
+    /// (`_KPROCESS.UserDirectoryTableBase`), masked with `mask`. `None` when
+    /// the process has none (no KVA shadow) or the field is unreadable.
+    pub fn user_root(&self, process: &ProcessInfo, mask: u64) -> Option<Dtb> {
+        let root = self
+            .ntoskrnl
+            .memory()
+            .read::<u64>(process.eprocess_va + self.user_root_offset()?)
+            .ok()?
+            & mask;
+        (root != 0).then_some(root)
+    }
+
+    fn user_root_offset(&self) -> Option<u64> {
+        let types = self.ntoskrnl.types();
+        Some(
+            types.layout("_EPROCESS").ok()?.field_offset("Pcb").ok()?
+                + types
+                    .layout("_KPROCESS")
+                    .ok()?
+                    .field_offset("UserDirectoryTableBase")
+                    .ok()?,
+        )
     }
 
     /// The 32-bit PEB behind `_EPROCESS.WoW64Process`: since Windows 10 1511

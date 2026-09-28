@@ -375,7 +375,8 @@ fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
 }
 
 /// A KVA-shadow user root, what CR3 holds at a user-mode stop, names the
-/// process whose `UserDirectoryTableBase` it is.
+/// process whose `UserDirectoryTableBase` it is, and a process's user root
+/// is that field without its PCID bits; a process without one has none.
 #[test]
 fn kva_shadow_user_root_resolves_to_its_process() {
     let (guest, backend, worker) = two_process_guest();
@@ -385,6 +386,9 @@ fn kva_shadow_user_root_resolves_to_its_process() {
 
     assert_eq!((owner.pid, owner.dtb), (0x1d8, 0x2be000));
     assert!(guest.process_for_user_root(0x3c0000, mask).is_none());
+    assert_eq!(guest.user_root(&owner, mask), Some(0x2bf000));
+    let system = guest.process_at(VirtAddr(0xffff_e000_0001_0000)).unwrap();
+    assert_eq!(guest.user_root(&system, mask), None);
 
     drop(guest);
     drop(backend);

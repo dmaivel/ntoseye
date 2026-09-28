@@ -4,11 +4,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::BreakpointScope;
 use super::install::{BreakpointBackend, forget_site};
 use super::spec::CodeSite;
 use super::{Breakpoint, BreakpointConfig, BreakpointManager, StepFrame};
 #[cfg(test)]
-use super::{BreakpointScope, HardwareBreakpoint, install::BreakpointPatch};
+use super::{HardwareBreakpoint, install::BreakpointPatch};
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
 use crate::error::{Error, Result};
@@ -115,6 +116,12 @@ impl BreakpointManager {
         frame: Option<StepFrame>,
     ) -> Result<u32> {
         let config = BreakpointConfig {
+            // A user-space target is in the process the stop is in, whichever
+            // process inspection is attached to.
+            scope: (!Self::is_kernel_space(debugger.arch(), address))
+                .then(|| debugger.process_for_cr3(debugger.normalize_dtb(debugger.current_dtb())))
+                .flatten()
+                .map(|process| BreakpointScope::process(&process)),
             thread: frame.as_ref().map(|frame| frame.thread.clone()),
             ..BreakpointConfig::default()
         };
