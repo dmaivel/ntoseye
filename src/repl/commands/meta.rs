@@ -822,7 +822,7 @@ fn print_target_version(detail: &TargetVersionDetail) {
     outln!(
         "  {} {}",
         ui::muted("uptime"),
-        detail.uptime.as_deref().unwrap_or("unknown")
+        detail.time.uptime.as_deref().unwrap_or("unknown")
     );
     outln!(
         "  {} {}",
@@ -836,7 +836,7 @@ fn print_target_version(detail: &TargetVersionDetail) {
         ui::muted("symbol status"),
         detail.symbol_status.as_deref().unwrap_or("unknown")
     );
-    if let Some(time) = detail.system_time_iso.as_deref() {
+    if let Some(time) = detail.time.system_time_iso.as_deref() {
         outln!("  {} {}", ui::muted("system time"), time);
     }
     if let Some(dump) = &detail.dump {

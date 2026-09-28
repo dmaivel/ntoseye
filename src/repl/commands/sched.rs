@@ -393,7 +393,7 @@ impl ReplState<'_> {
                     return Ok(());
                 }
             };
-            print_timer_detail(&detail);
+            print_timer_detail(&detail, interrupt_value(&self.ctx.target.interrupt_time()));
             return Ok(());
         }
         let detail = match self.ctx.target.timer_list() {
@@ -615,19 +615,20 @@ fn routine_cell(
     }
 }
 
-fn interrupt_value(detail: &TimerDetail) -> Option<u64> {
-    match detail.interrupt_time {
-        DiagnosticValue::Available(value) => Some(value),
+fn interrupt_value(interrupt_time: &DiagnosticValue<u64>) -> Option<u64> {
+    match interrupt_time {
+        DiagnosticValue::Available(value) => Some(*value),
         DiagnosticValue::Unavailable(_) => None,
     }
 }
 
-fn format_due_time(detail: &TimerDetail) -> String {
+/// `detail`'s due time, and how far it is from `now` (the interrupt time).
+fn format_due_time(detail: &TimerDetail, now: Option<u64>) -> String {
     let DiagnosticValue::Available(raw) = &detail.due_time else {
         return diagnostic_cell(&detail.due_time);
     };
     let raw = *raw;
-    let Some(now) = interrupt_value(detail) else {
+    let Some(now) = now else {
         return format!("{raw:#x}");
     };
     let (future, delta) = if raw >= now {
@@ -656,9 +657,9 @@ fn timer_dpc_cell(detail: &TimerDetail) -> String {
     routine_cell(&detail.dpc_routine, &detail.dpc_routine_symbol)
 }
 
-fn print_timer_detail(detail: &TimerDetail) {
+fn print_timer_detail(detail: &TimerDetail, now: Option<u64>) {
     outln!("timer {}", ui::addr(detail.address.0));
-    outln!("  DueTime : {}", format_due_time(detail));
+    outln!("  DueTime : {}", format_due_time(detail, now));
     outln!("  Period  : {}", diagnostic_cell(&detail.period));
     outln!("  DPC     : {}", timer_dpc_cell(detail));
     outln!();
@@ -673,6 +674,7 @@ fn print_timer_list(detail: &TimerListDetail) {
             DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
         }
     );
+    let now = interrupt_value(&detail.interrupt_time);
     let mut builder = tabled::builder::Builder::default();
     builder.push_record(["CPU", "Bucket", "KTIMER", "DueTime", "Period", "DPC"]);
     for entry in &detail.entries {
@@ -680,7 +682,7 @@ fn print_timer_list(detail: &TimerListDetail) {
             entry.processor.to_string(),
             entry.bucket.to_string(),
             ui::addr(entry.timer.address.0).to_string(),
-            format_due_time(&entry.timer),
+            format_due_time(&entry.timer, now),
             diagnostic_cell(&entry.timer.period),
             timer_dpc_cell(&entry.timer),
         ]);

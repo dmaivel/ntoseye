@@ -104,7 +104,6 @@ pub struct TimerDetail {
     pub dpc: DiagnosticValue<Option<VirtAddr>>,
     pub dpc_routine: DiagnosticValue<Option<VirtAddr>>,
     pub dpc_routine_symbol: DiagnosticValue<Option<String>>,
-    pub interrupt_time: DiagnosticValue<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -987,7 +986,7 @@ impl Target {
     }
 
     /// `KUSER_SHARED_DATA.InterruptTime`, which timers' due times count in.
-    fn interrupt_time(&self) -> DiagnosticValue<u64> {
+    pub fn interrupt_time(&self) -> DiagnosticValue<u64> {
         KuserSharedData::new(self).interrupt_time().map_or_else(
             || DiagnosticValue::unavailable("KUSER_SHARED_DATA.InterruptTime unavailable"),
             DiagnosticValue::Available,
@@ -998,7 +997,6 @@ impl Target {
         &self,
         timer: VirtAddr,
         timer_layout: &TypeInfo,
-        interrupt_time: DiagnosticValue<u64>,
         keys: Option<(u64, u64)>,
         trace: &ThreadTraceContext,
     ) -> TimerDetail {
@@ -1059,7 +1057,6 @@ impl Target {
                             dpc,
                             dpc_routine: DiagnosticValue::unavailable(error.to_string()),
                             dpc_routine_symbol: DiagnosticValue::unavailable(error.to_string()),
-                            interrupt_time,
                         };
                     }
                 };
@@ -1082,20 +1079,18 @@ impl Target {
             dpc,
             dpc_routine,
             dpc_routine_symbol,
-            interrupt_time,
         }
     }
 
     /// Decode one `_KTIMER` and its encoded DPC at `timer`.  `due_time`,
-    /// `period`, encoded/decoded DPC pointers, DPC routine, and interrupt time
-    /// are independent diagnostics; a missing field or encoding key marks only
+    /// `period`, encoded/decoded DPC pointers, and DPC routine are
+    /// independent diagnostics; a missing field or encoding key marks only
     /// the affected value unavailable.
     pub fn inspect_timer(&self, timer: VirtAddr) -> Result<TimerDetail> {
         let timer_layout = layout_for(self, "_KTIMER")?;
-        let interrupt_time = self.interrupt_time();
         let keys = self.timer_dpc_keys();
         let trace = resolve_thread_trace_context(self, self.kernel_dtb());
-        Ok(self.decode_timer_with_context(timer, &timer_layout, interrupt_time, keys, &trace))
+        Ok(self.decode_timer_with_context(timer, &timer_layout, keys, &trace))
     }
 
     /// Walk every processor's timer table and decode each bounded timer.  The
@@ -1222,13 +1217,7 @@ impl Target {
                         .map(|offset| node - offset)
                         .unwrap_or(node);
                     let detail = if timer_link_offset.is_some() {
-                        self.decode_timer_with_context(
-                            timer,
-                            &timer_layout,
-                            interrupt_time.clone(),
-                            keys,
-                            &trace,
-                        )
+                        self.decode_timer_with_context(timer, &timer_layout, keys, &trace)
                     } else {
                         TimerDetail {
                             address: timer,
@@ -1246,7 +1235,6 @@ impl Target {
                             dpc_routine_symbol: DiagnosticValue::unavailable(
                                 "_KTIMER link field not present",
                             ),
-                            interrupt_time: interrupt_time.clone(),
                         }
                     };
                     list_entries.push(TimerListEntry {

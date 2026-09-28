@@ -6436,13 +6436,8 @@ class KernelTimer(BaseRecord):
     @property
     def due_time(self, /) -> Diagnostic[int]:
         """
-        `DueTime`: the interrupt time it expires at.
-        """
-    @property
-    def interrupt_time(self, /) -> Diagnostic[int]:
-        """
-        The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`),
-        to compare `due_time` against.
+        `DueTime`: the interrupt time it expires at (see
+        `TargetTime.interrupt_time`).
         """
     @property
     def period(self, /) -> Diagnostic[int]:
@@ -10751,6 +10746,12 @@ class TargetTime(BaseRecord):
     The target's UTC time and uptime (`.time`).
     """
     @property
+    def interrupt_time(self, /) -> int |None:
+        """
+        `KUSER_SHARED_DATA.InterruptTime`: 100 ns units since boot, not
+        counting sleep. Timers' `due_time` counts in it.
+        """
+    @property
     def system_time(self, /) -> int |None:
         """
         The target's UTC time (FILETIME).
@@ -10826,25 +10827,7 @@ class TargetVersion(BaseRecord):
         found.
         """
     @property
-    def system_time(self, /) -> int |None:
-        """
-        The target's UTC time (FILETIME).
-        """
-    @property
-    def system_time_iso(self, /) -> str |None:
-        """
-        `system_time` as ISO 8601.
-        """
-    @property
-    def uptime(self, /) -> str |None:
-        """
-        The uptime, formatted.
-        """
-    @property
-    def uptime_seconds(self, /) -> int |None:
-        """
-        Seconds since boot.
-        """
+    def time(self, /) -> TargetTime: ...
 
 @final
 class Teb(BaseRecord):
@@ -11193,7 +11176,8 @@ class TimerTable(BaseRecord):
     @property
     def interrupt_time(self, /) -> Diagnostic[int]:
         """
-        The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`).
+        The interrupt time (`KUSER_SHARED_DATA.InterruptTime`) when the
+        tables were read, which the entries' `due_time` counts in.
         """
     @property
     def terminations(self, /) -> list[TimerBucketEnd]:

@@ -106,7 +106,8 @@ shapes! {
     /// A `_KTIMER` and its decoded DPC.
     KernelTimer {
         address: VirtAddr,
-        /// `DueTime`: the interrupt time it expires at.
+        /// `DueTime`: the interrupt time it expires at (see
+        /// `TargetTime.interrupt_time`).
         due_time: Diag<Hex>,
         /// `Period` in milliseconds; 0 for a one-shot timer.
         period: Diag<u32>,
@@ -118,9 +119,6 @@ shapes! {
         dpc_routine: Diag<Option<VirtAddr>>,
         /// `dpc_routine` as a symbol, when one resolves.
         dpc_routine_symbol: Diag<Option<String>>,
-        /// The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`),
-        /// to compare `due_time` against.
-        interrupt_time: Diag<Hex>,
     }
 
     /// A timer found in a processor's timer table.
@@ -140,7 +138,8 @@ shapes! {
 
     /// Every processor's timer table (`!timer`).
     TimerTable {
-        /// The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`).
+        /// The interrupt time (`KUSER_SHARED_DATA.InterruptTime`) when the
+        /// tables were read, which the entries' `due_time` counts in.
         interrupt_time: Diag<Hex>,
         entries: Vec<TimerTableEntry>,
         /// Buckets whose walk ended abnormally.
@@ -488,7 +487,6 @@ pub fn timer(timer: &detail::TimerDetail) -> KernelTimer {
         dpc: timer.dpc.clone(),
         dpc_routine: timer.dpc_routine.clone(),
         dpc_routine_symbol: timer.dpc_routine_symbol.clone(),
-        interrupt_time: timer.interrupt_time.clone(),
     }
 }
 

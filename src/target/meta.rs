@@ -663,10 +663,7 @@ pub struct TargetVersionDetail {
     pub symbol_status: Option<String>,
     pub debugger_version: String,
     pub symbol_path: String,
-    pub system_time: Option<u64>,
-    pub system_time_iso: Option<String>,
-    pub uptime_seconds: Option<u64>,
-    pub uptime: Option<String>,
+    pub time: TargetTimeDetail,
     pub backend: Option<String>,
     pub dump: Option<TargetDumpMetadata>,
 }
@@ -675,6 +672,7 @@ pub struct TargetVersionDetail {
 pub struct TargetTimeDetail {
     pub system_time: Option<u64>,
     pub system_time_iso: Option<String>,
+    pub interrupt_time: Option<u64>,
     pub uptime_seconds: Option<u64>,
     pub uptime: Option<String>,
 }
@@ -703,10 +701,10 @@ fn system_time(target: &Target, kuser: &KuserSharedData<'_>) -> Option<u64> {
     dump_system_time(target).or_else(|| kuser.system_time().filter(|time| *time > 0))
 }
 
-fn uptime_seconds(target: &Target, kuser: &KuserSharedData<'_>) -> Option<u64> {
+/// Seconds since boot: the dump header's, else the interrupt time's.
+fn uptime_seconds(target: &Target, interrupt_time: Option<u64>) -> Option<u64> {
     dump_uptime_seconds(target).or_else(|| {
-        kuser
-            .interrupt_time()
+        interrupt_time
             .filter(|ticks| *ticks > 0)
             .map(|ticks| ticks / 10_000_000)
     })
@@ -714,10 +712,12 @@ fn uptime_seconds(target: &Target, kuser: &KuserSharedData<'_>) -> Option<u64> {
 
 fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail {
     let system_time = system_time(target, kuser);
-    let uptime_seconds = uptime_seconds(target, kuser);
+    let interrupt_time = kuser.interrupt_time();
+    let uptime_seconds = uptime_seconds(target, interrupt_time);
     TargetTimeDetail {
         system_time,
         system_time_iso: system_time.and_then(filetime_to_iso),
+        interrupt_time,
         uptime_seconds,
         uptime: uptime_seconds.map(format_uptime),
     }
@@ -903,10 +903,7 @@ impl Target {
                 .map(|source| source.to_string())
                 .collect::<Vec<_>>()
                 .join("; "),
-            system_time: time.system_time,
-            system_time_iso: time.system_time_iso,
-            uptime_seconds: time.uptime_seconds,
-            uptime: time.uptime,
+            time,
             backend: None,
             dump,
         })

@@ -187,14 +187,7 @@ shapes! {
         symbol_status: Option<String>,
         debugger_version: String,
         symbol_path: String,
-        /// The target's UTC time (FILETIME).
-        system_time: Option<Hex>,
-        /// `system_time` as ISO 8601.
-        system_time_iso: Option<String>,
-        /// Seconds since boot.
-        uptime_seconds: Option<u64>,
-        /// The uptime, formatted.
-        uptime: Option<String>,
+        time: TargetTime,
         /// The backend attached to the target.
         backend: Option<String>,
         /// The crash dump's header; `None` for a live target.
@@ -207,6 +200,9 @@ shapes! {
         system_time: Option<Hex>,
         /// `system_time` as ISO 8601.
         system_time_iso: Option<String>,
+        /// `KUSER_SHARED_DATA.InterruptTime`: 100 ns units since boot, not
+        /// counting sleep. Timers' `due_time` counts in it.
+        interrupt_time: Option<Hex>,
         /// Seconds since boot.
         uptime_seconds: Option<u64>,
         /// The uptime, formatted.
@@ -400,10 +396,7 @@ pub fn target_version(detail: &TargetVersionDetail) -> TargetVersion {
         symbol_status: detail.symbol_status.clone(),
         debugger_version: detail.debugger_version.clone(),
         symbol_path: detail.symbol_path.clone(),
-        system_time: detail.system_time,
-        system_time_iso: detail.system_time_iso.clone(),
-        uptime_seconds: detail.uptime_seconds,
-        uptime: detail.uptime.clone(),
+        time: target_time(&detail.time),
         backend: detail.backend.clone(),
         dump: detail.dump.as_ref().map(target_dump),
     }
@@ -414,6 +407,7 @@ pub fn target_time(detail: &TargetTimeDetail) -> TargetTime {
     TargetTime {
         system_time: detail.system_time,
         system_time_iso: detail.system_time_iso.clone(),
+        interrupt_time: detail.interrupt_time,
         uptime_seconds: detail.uptime_seconds,
         uptime: detail.uptime.clone(),
     }
