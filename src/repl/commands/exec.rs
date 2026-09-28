@@ -452,7 +452,14 @@ impl ReplState<'_> {
             match stop_result {
                 Ok(Some(event)) => {
                     let resolution = match self.ctx.classify_stop_event(event) {
-                        Ok(StopResolution::Resumed | StopResolution::ModulesChanged) => continue,
+                        // A stream of absorbed hits (a temporary site other
+                        // threads reach) must not outlast the budget either.
+                        Ok(StopResolution::Resumed | StopResolution::ModulesChanged) => {
+                            if self.stop_budget_spent() {
+                                break;
+                            }
+                            continue;
+                        }
                         Ok(resolution) => resolution,
                         Err(error) => {
                             error!("failed to classify stop: {error}");
@@ -615,23 +622,11 @@ impl ReplState<'_> {
                         }
                     }
                 }
-                Ok(None)
-                    if self
-                        .stop_wait
-                        .as_ref()
-                        .is_some_and(StopWaitBudget::exhausted) =>
-                {
-                    let hint = if self.context == DispatchContext::Remote(RemoteClient::Sdk) {
-                        "target still running; `dbg.wait()` to keep waiting, or \
-                         `dbg.interrupt()` to break in"
-                    } else {
-                        "target still running; call again to keep waiting, or `break` to \
-                         interrupt"
-                    };
-                    outln!("{}", ui::muted(hint));
-                    break;
+                Ok(None) => {
+                    if self.stop_budget_spent() {
+                        break;
+                    }
                 }
-                Ok(None) => {}
                 Err(e) => {
                     error!("error waiting for stop: {e}");
                     if self.ctx.backend.is_running() {
@@ -646,6 +641,26 @@ impl ReplState<'_> {
         }
 
         Ok(())
+    }
+
+    /// Whether a remote client's stop budget has run out, saying so: the
+    /// target is left running.
+    fn stop_budget_spent(&self) -> bool {
+        if !self
+            .stop_wait
+            .as_ref()
+            .is_some_and(StopWaitBudget::exhausted)
+        {
+            return false;
+        }
+        let hint = if self.context == DispatchContext::Remote(RemoteClient::Sdk) {
+            "target still running; `dbg.wait()` to keep waiting, or `dbg.interrupt()` to \
+             break in"
+        } else {
+            "target still running; call again to keep waiting, or `break` to interrupt"
+        };
+        outln!("{}", ui::muted(hint));
+        true
     }
 
     /// Print a hardware (DR) breakpoint hit, mirroring the software-breakpoint
@@ -836,7 +851,13 @@ impl ReplState<'_> {
         mode: StepMode,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<()> {
-        match self.ctx.step_until(mode, STEP_UNTIL_LIMIT, None, stop) {
+        // A remote client's budget ends the walk where it is.
+        let remaining = self
+            .stop_wait
+            .as_ref()
+            .and_then(|budget| budget.deadline)
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        match self.ctx.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop) {
             Ok(ContinueOutcome::Step { .. }) => self.print_current_stop(),
             Ok(outcome) => print_parked_outcome(self.ctx, &self.caches, outcome),
             Err(error @ Error::StepLimit(_)) => {
