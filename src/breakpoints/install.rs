@@ -453,10 +453,10 @@ impl BreakpointManager {
                 .as_ref()
                 .map(|module| module.short_name.as_str())
                 .unwrap_or("unknown");
-            return Err(Error::Breakpoint(format!(
-                "refusing breakpoint at {:#x}: target page is non-executable ({})",
-                address.0, context
-            )));
+            return Err(Error::NotCode {
+                address: address.0,
+                reason: format!("target page is non-executable ({context})"),
+            });
         }
 
         if let Some(module) = module {
@@ -472,10 +472,13 @@ impl BreakpointManager {
             });
 
             if !in_executable_section {
-                return Err(Error::Breakpoint(format!(
-                    "refusing breakpoint at {:#x}: address falls in non-executable section of {}",
-                    address.0, module.short_name
-                )));
+                return Err(Error::NotCode {
+                    address: address.0,
+                    reason: format!(
+                        "address falls in non-executable section of {}",
+                        module.short_name
+                    ),
+                });
             }
         }
 

@@ -12,6 +12,8 @@ bm mydriver!Dispatch*
 ba w8 nt!KiBalanceSetManagerLastCheckTick
 ```
 
+A target names a symbol as its PDB records it, including C++ template and Rust generic arguments (`bp mydriver!mydriver::impl$0::tally<u32>`, `bp nt!ST_STORE<SM_TRAITS>::StStart`); a space is allowed only after a comma in the argument list. {command}`bm` sets breakpoints on code symbols only and skips data the pattern also matches, such as vtables.
+
 A kernel code breakpoint can target a non-resident page. KD records the site and writes the breakpoint when the page arrives. Until then, {command}`bl` shows `o` (owed).
 
 User-space code breakpoints require resident memory. If the page is absent, set the breakpoint after the code has run, or use `ba e1 <address>`, which requires no memory write.

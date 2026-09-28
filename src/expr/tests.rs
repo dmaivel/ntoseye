@@ -495,6 +495,26 @@ fn test_parse_template_symbol_names_and_comparisons() {
     // No `::` after the closing bracket, so this is two comparisons rather
     // than a name, and chaining them is rejected.
     assert!(Expr::parse("index<0n10>0n2").is_err());
+    // A generic list closing a qualified name (Rust monomorphs, C++
+    // function templates), with a space after its commas.
+    for name in [
+        "drv!drv::impl$0::tally<u32>",
+        "drv!drv::inner::accumulate<drv::run::closure_env$0>",
+        "drv!impl$<drv::Probe<u32>, drv::Tally>::vtable$",
+        "drv!Fn<int>",
+    ] {
+        assert_eq!(Expr::parse(name).unwrap(), Expr::Symbol(name.to_string()));
+    }
+    assert_eq!(
+        Expr::parse("drv!f<u32>+0x10").unwrap(),
+        Expr::Binary(
+            Box::new(Expr::Symbol("drv!f<u32>".to_string())),
+            ExprBinaryOp::Add,
+            Box::new(Expr::Literal(VirtAddr(0x10)))
+        )
+    );
+    // Unqualified, a closing `>` is still a comparison.
+    assert!(Expr::parse("index<limit>").is_err());
 }
 
 #[test]

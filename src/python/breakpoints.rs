@@ -257,10 +257,12 @@ impl Breakpoints {
         )?;
         let (breakpoints, errors) = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.add_pattern")?;
-            let (ids, errors) = session
+            let set = session
                 .add_pattern_breakpoints(pattern, config.clone(), limit.clamp(1, 4096))
                 .map_err(err)?;
-            let breakpoints = ids
+            let errors = set.errors;
+            let breakpoints = set
+                .ids
                 .into_iter()
                 .map(|id| {
                     session
@@ -280,7 +282,7 @@ impl Breakpoints {
             )));
         }
         if breakpoints.is_empty() {
-            return Err(raise(format!("no symbols match '{pattern}'")));
+            return Err(raise(format!("no code symbols match '{pattern}'")));
         }
         make_handles(py, self.owner.dbg(), breakpoints, callback.as_ref())
     }

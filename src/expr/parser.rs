@@ -707,14 +707,16 @@ fn parse_symbol_name<'a>(input: &mut ExprInput<'a>) -> ParseResult<&'a str> {
     let mut end = 0;
     let mut chars = remaining.char_indices();
     while let Some((offset, ch)) = chars.next() {
-        // A C++ template argument list is part of the name, not a pair of
-        // comparisons: real kernel symbols look like
-        // `nt!ST_STORE<SM_TRAITS>::StStart`. Only a balanced list whose `>`
-        // is followed by `::` counts, so `index<10` in a breakpoint
-        // condition stays a comparison.
+        // A C++ template or Rust generic argument list is part of the name,
+        // not a pair of comparisons: real symbols look like
+        // `nt!ST_STORE<SM_TRAITS>::StStart` and `drv!drv::impl$0::f<u32>`.
+        // A balanced list counts when `::` follows it, or, closing a
+        // qualified name, when it ends the operand; so `index<10` in a
+        // breakpoint condition stays a comparison.
+        let qualified = remaining[..offset].contains('!') || remaining[..offset].contains("::");
         if ch == '<'
             && end > 0
-            && let Some(len) = template_argument_len(&remaining[offset..])
+            && let Some(len) = template_argument_len(&remaining[offset..], qualified)
         {
             for _ in 1..remaining[offset..offset + len].chars().count() {
                 chars.next();
@@ -744,11 +746,15 @@ fn parse_symbol_name<'a>(input: &mut ExprInput<'a>) -> ParseResult<&'a str> {
     Ok(input.next_slice(end))
 }
 
-/// Byte length of the `<...>` template argument list starting at `text`, when
-/// it is balanced, contains no whitespace, and is followed by `::`. Anything
-/// else is a comparison operator and belongs to the expression.
-fn template_argument_len(text: &str) -> Option<usize> {
+/// Byte length of the `<...>` argument list starting at `text`, when it is
+/// balanced, has whitespace only after a comma, and is followed by `::` or,
+/// when it may end the name (`trailing`), by the end of the operand: the end
+/// of input, whitespace, or a character that cannot continue a name or start
+/// another comparison. Anything else is a comparison operator and belongs
+/// to the expression.
+fn template_argument_len(text: &str, trailing: bool) -> Option<usize> {
     let mut depth = 0usize;
+    let mut previous = '<';
     for (offset, ch) in text.char_indices() {
         match ch {
             '<' => depth += 1,
@@ -756,11 +762,18 @@ fn template_argument_len(text: &str) -> Option<usize> {
                 depth -= 1;
                 if depth == 0 {
                     let end = offset + ch.len_utf8();
-                    return text[end..].starts_with("::").then_some(end);
+                    let rest = &text[end..];
+                    let ends_operand = rest.chars().next().is_none_or(|next| {
+                        is_expr_boundary(next) && !matches!(next, '<' | '>' | '=') || next == ']'
+                    });
+                    return (rest.starts_with("::") || (trailing && ends_operand)).then_some(end);
                 }
             }
-            ch if ch.is_whitespace() => return None,
+            ch if ch.is_whitespace() && previous != ',' => return None,
             _ => {}
+        }
+        if !ch.is_whitespace() {
+            previous = ch;
         }
     }
     None

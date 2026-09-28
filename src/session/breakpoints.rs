@@ -14,6 +14,15 @@ use crate::guest::ModuleSymbolLoadReport;
 use crate::session::Session;
 use crate::types::{Arch, VirtAddr};
 
+/// What [`Session::add_pattern_breakpoints`] set.
+pub struct PatternBreakpoints {
+    pub ids: Vec<u32>,
+    /// Matches that failed to install, other than data symbols.
+    pub errors: Vec<Error>,
+    /// Whether the match count reached the limit, so more may match.
+    pub limited: bool,
+}
+
 impl Session {
     /// Set a code breakpoint at `addr` with an optional display `symbol` and
     /// its configuration (condition, pass count, one-shot, command action;
@@ -53,16 +62,17 @@ impl Session {
             .add_source(self.backend.as_mut(), &self.target, source, config)
     }
 
-    /// Set one symbol-identity breakpoint per symbol matching `pattern`
-    /// (`bm`): `*`/`?` globs, optionally `module!`-qualified; at most `limit`
-    /// matches. Returns the ids created, and the count of matches that
-    /// failed to install (already reported through `errors`).
+    /// Set one symbol-identity breakpoint per code symbol matching
+    /// `pattern` (`bm`): `*`/`?` globs, optionally `module!`-qualified; at
+    /// most `limit` matches. Data symbols the pattern also matches are
+    /// skipped, as WinDbg's `bm` does. Returns the ids created and the
+    /// errors of matches that failed to install.
     pub fn add_pattern_breakpoints(
         &mut self,
         pattern: &str,
         config: BreakpointConfig,
         limit: usize,
-    ) -> Result<(Vec<u32>, Vec<Error>)> {
+    ) -> Result<PatternBreakpoints> {
         let dtb = self.target.current_dtb();
         let names: Vec<String> = match pattern.split_once('!') {
             Some((module, query)) => self
@@ -76,6 +86,7 @@ impl Session {
         };
         let mut ids = Vec::new();
         let mut errors = Vec::new();
+        let matched = names.len();
         for name in names.into_iter().take(limit) {
             let canonical = self
                 .target
@@ -90,10 +101,15 @@ impl Session {
                 .unwrap_or_else(|| name.clone());
             match self.add_symbol_breakpoint(canonical, config.clone()) {
                 Ok(id) => ids.push(id),
+                Err(Error::NotCode { .. }) => {}
                 Err(error) => errors.push(error),
             }
         }
-        Ok((ids, errors))
+        Ok(PatternBreakpoints {
+            ids,
+            errors,
+            limited: matched >= limit,
+        })
     }
 
     /// The `/p <pid>` breakpoint scope: hits are reported only from that

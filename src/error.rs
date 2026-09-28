@@ -55,6 +55,11 @@ pub enum Error {
     #[error("breakpoint: {0}")]
     Breakpoint(String),
 
+    /// A code breakpoint refused because its address is not code: a
+    /// non-executable page or section.
+    #[error("breakpoint: refusing breakpoint at {address:#x}: {reason}")]
+    NotCode { address: u64, reason: String },
+
     #[error("Register '{0}' not found")]
     RegisterNotFound(String),
 

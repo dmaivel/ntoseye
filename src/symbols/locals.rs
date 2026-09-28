@@ -207,6 +207,13 @@ impl SymbolStore {
                         block_scopes.push((block.end, contains));
                         current_local = None;
                     }
+                    // An inlined call's variables are the inlined function's,
+                    // and stacks show no frame for it: none is the
+                    // procedure's own.
+                    pdb2::SymbolData::InlineSite(site) => {
+                        block_scopes.push((site.end, false));
+                        current_local = None;
+                    }
                     pdb2::SymbolData::Local(local) if visible => {
                         current_optimized_out = local.flags.isoptimizedout;
                         let reason = if current_optimized_out {

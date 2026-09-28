@@ -42,6 +42,7 @@ repl_command! {
     names: ["bm"],
     usage: "bm [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set deferred symbolic breakpoints for matching symbols.",
+    details: "Only code symbols are matched; data symbols the pattern also matches are skipped.",
     completion: Expression,
     run_state: Halted,
 }
@@ -725,57 +726,22 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let dtb = self.ctx.target.current_dtb();
-        let (module_filter, names) = match args.spec.split_once('!') {
-            Some((module, query)) => (
-                Some(module.to_string()),
-                self.ctx
-                    .target
-                    .symbols
-                    .search_symbols_in_module(dtb, module, query, BM_LIMIT),
-            ),
-            None => (
-                None,
-                self.caches
-                    .symbols
-                    .read()
-                    .unwrap()
-                    .search(&args.spec, BM_LIMIT),
-            ),
-        };
-        let mut created = 0usize;
-        for name in names.iter().take(BM_LIMIT) {
-            let lookup = module_filter
-                .as_ref()
-                .map(|module| format!("{module}!{name}"))
-                .unwrap_or_else(|| name.clone());
-            let canonical = self
-                .ctx
-                .target
-                .symbols
-                .find_symbol_with_module(dtb, &lookup)?
-                .map(|(_, module)| format!("{module}!{name}"))
-                .unwrap_or(lookup);
-            match self.ctx.breakpoints.add_symbolic(
-                &mut *self.ctx.backend,
-                &self.ctx.target,
-                canonical,
-                args.config.clone(),
-            ) {
-                Ok(_) => created += 1,
-                Err(error) => error!("bm: {error}"),
-            }
+        let set = self
+            .ctx
+            .add_pattern_breakpoints(&args.spec, args.config.clone(), BM_LIMIT)?;
+        for error in &set.errors {
+            error!("bm: {error}");
         }
         self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-        if created == 0 {
-            outln!("no symbols match '{}'\n", args.spec);
+        if set.ids.is_empty() {
+            outln!("no code symbols match '{}'\n", args.spec);
         } else {
-            let suffix = if names.len() >= BM_LIMIT {
+            let suffix = if set.limited {
                 "; results limited to 256, refine the pattern"
             } else {
                 ""
             };
-            outln!("{created} symbolic breakpoint(s) set{suffix}\n");
+            outln!("{} symbolic breakpoint(s) set{suffix}\n", set.ids.len());
         }
         Ok(())
     }
