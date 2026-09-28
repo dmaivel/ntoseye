@@ -200,8 +200,8 @@ shapes! {
         system_time: Option<Hex>,
         /// `system_time` as ISO 8601.
         system_time_iso: Option<String>,
-        /// `KUSER_SHARED_DATA.InterruptTime`: 100 ns units since boot, not
-        /// counting sleep. Timers' `due_time` counts in it.
+        /// `KUSER_SHARED_DATA.InterruptTime`: 100 ns units since boot, the
+        /// clock timers' `due_time` counts in.
         interrupt_time: Option<Hex>,
         /// Seconds since boot.
         uptime_seconds: Option<u64>,

@@ -4763,8 +4763,8 @@ class HeapPageRange(BaseRecord):
     def subsegment(self, /) -> VsSubsegment |LfhSubsegment |None:
         """
         The VS or LFH subsegment the range holds, with its blocks; `None`
-        for other kinds, when it could not be read, or outside a heap
-        decoding.
+        for other kinds or when it could not be read, and in a
+        `Heaps.find_block()` result, which does not decode it.
         """
     @property
     def truncated(self, /) -> bool:
@@ -7517,8 +7517,8 @@ class NtHeapEntry(BaseRecord):
     def lfh(self, /) -> NtLfhUserBlocks |None:
         """
         The legacy-LFH user block region inside this busy entry; `None`
-        when there is none, it could not be read, or outside a heap
-        decoding.
+        when there is none or it could not be read, and in a
+        `Heaps.find_block()` result, which does not decode it.
         """
     @property
     def lfh_error(self, /) -> str |None:
@@ -8314,8 +8314,7 @@ class Pfn(BaseRecord):
     @property
     def page_color(self, /) -> Diagnostic[int]:
         """
-        The only member without a raw-bit fallback when the layout lacks
-        it.
+        Unavailable when this build's `_MMPFN` has no `PageColor`.
         """
     @property
     def page_location(self, /) -> PageLocation: ...
@@ -10748,8 +10747,8 @@ class TargetTime(BaseRecord):
     @property
     def interrupt_time(self, /) -> int |None:
         """
-        `KUSER_SHARED_DATA.InterruptTime`: 100 ns units since boot, not
-        counting sleep. Timers' `due_time` counts in it.
+        `KUSER_SHARED_DATA.InterruptTime`: 100 ns units since boot, the
+        clock timers' `due_time` counts in.
         """
     @property
     def system_time(self, /) -> int |None:

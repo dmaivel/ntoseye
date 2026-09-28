@@ -93,8 +93,7 @@ shapes! {
         ws_index: Option<Hex>,
         event: Option<Hex>,
         used_entry_count: u64,
-        /// The only member without a raw-bit fallback when the layout lacks
-        /// it.
+        /// Unavailable when this build's `_MMPFN` has no `PageColor`.
         page_color: Diag<u64>,
         /// The PFN of the page table holding the page's PTE.
         pte_frame: Hex,

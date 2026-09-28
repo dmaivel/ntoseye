@@ -172,8 +172,8 @@ shapes! {
         /// Bytes the caller asked for: the block less its header and slack.
         user_size: u64,
         /// The legacy-LFH user block region inside this busy entry; `None`
-        /// when there is none, it could not be read, or outside a heap
-        /// decoding.
+        /// when there is none or it could not be read, and in a
+        /// `Heaps.find_block()` result, which does not decode it.
         lfh: Option<NtLfhUserBlocks>,
         /// Why the entry's LFH region could not be read.
         lfh_error: Option<String>,
@@ -298,8 +298,8 @@ shapes! {
         /// `vs`, or `lfh`.
         kind: &'static str,
         /// The VS or LFH subsegment the range holds, with its blocks; `None`
-        /// for other kinds, when it could not be read, or outside a heap
-        /// decoding.
+        /// for other kinds or when it could not be read, and in a
+        /// `Heaps.find_block()` result, which does not decode it.
         subsegment: Option<HeapSubsegment>,
         /// Why the subsegment could not be read.
         error: Option<String>,

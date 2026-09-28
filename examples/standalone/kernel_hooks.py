@@ -8,8 +8,8 @@ Checks three places rootkits and security products hook:
 - each processor's IDT gates whose handler lies outside NT (skipped with
   `--backend memory`, which cannot read the vCPUs' IDTR).
 
-An IDT gate that could not be read is reported as such rather than guessed
-at. Exits 1 when anything is flagged, so it can gate a test run.
+IDT gates that could not be read are listed as unreadable. Exits 1 when
+anything is flagged.
 
     python3 kernel_hooks.py
     python3 kernel_hooks.py --backend memory
