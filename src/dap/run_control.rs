@@ -10,6 +10,7 @@ use serde_json::json;
 use crate::disasm::{fallthrough_run_end, instruction_length};
 use crate::output;
 use crate::repl::{DispatchContext, ReplState, ReplStore};
+use crate::session::stops::module_load_line;
 use crate::session::{ContinueOutcome, StepMode, StepStack};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
@@ -326,6 +327,17 @@ impl Server {
                 detail: None,
                 breakpoint_id: None,
             },
+            ContinueOutcome::ModuleLoad { module, rip } => {
+                let line = module_load_line(&module);
+                self.emit_output("console", format!("{line}\n"));
+                StopInfo {
+                    reason: "module load",
+                    description: format!("module load {} at {rip:#x}", module.name),
+                    exception_id: None,
+                    detail: Some(line),
+                    breakpoint_id: None,
+                }
+            }
             ContinueOutcome::Halted { rip } => StopInfo {
                 reason: "entry",
                 description: format!("halted at {rip:#x}"),

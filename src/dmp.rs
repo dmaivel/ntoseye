@@ -1054,6 +1054,7 @@ impl DebugBackend for DmpBackend {
             BackendCapability::unsupported(DebugCapability::KernelBaseHint),
             BackendCapability::supported(DebugCapability::BugcheckDetection),
             BackendCapability::supported(DebugCapability::BugcheckDetails),
+            BackendCapability::unsupported(DebugCapability::ModuleLoadEvents),
             BackendCapability::unsupported(DebugCapability::DebugOutput),
             BackendCapability::unsupported(DebugCapability::Msr),
             BackendCapability::unsupported(DebugCapability::IoPorts),

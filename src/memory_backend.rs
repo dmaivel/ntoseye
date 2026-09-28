@@ -48,6 +48,7 @@ impl DebugBackend for MemoryBackend {
             BackendCapability::unsupported(DebugCapability::KernelBaseHint),
             BackendCapability::unsupported(DebugCapability::BugcheckDetection),
             BackendCapability::unsupported(DebugCapability::BugcheckDetails),
+            BackendCapability::unsupported(DebugCapability::ModuleLoadEvents),
             BackendCapability::unsupported(DebugCapability::DebugOutput),
             BackendCapability::unsupported(DebugCapability::Msr),
             BackendCapability::unsupported(DebugCapability::IoPorts),

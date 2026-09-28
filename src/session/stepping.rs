@@ -11,7 +11,9 @@ use iced_x86::{
 };
 
 use crate::backend::MemoryOps;
-use crate::breakpoints::{BreakpointManager, StepFrame, ThreadScope};
+use crate::breakpoints::{
+    BreakpointManager, StepFrame, ThreadScope, lift_target_site, plant_target_site,
+};
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
     clear_trap_flag, processor_index_from_backend_thread_id,
@@ -59,13 +61,7 @@ impl Session {
         self.parked_stop = None;
         self.current_stop = None;
         self.backend.set_current_thread(&self.current_thread)?;
-        let stepped = match step_over_current_breakpoint(
-            self.backend.as_mut(),
-            &self.register_map,
-            &self.target,
-            &mut self.breakpoints,
-            &self.current_thread,
-        )? {
+        let stepped = match self.step_over_site_at_pc()? {
             Some(stepped) => stepped,
             None if self.backend.single_step_unsafe() => step_without_trap(
                 self.backend.as_mut(),
@@ -126,6 +122,69 @@ impl Session {
         ));
     }
 
+    /// Step the current thread past the debugger site its PC is on: one of
+    /// the manager's breakpoints, the module-load trap, or both at one
+    /// address; `None` when it is on neither. The trap is lifted for the step
+    /// and planted again, as a breakpoint is; one that cannot be planted
+    /// again is dropped, and the next resume arms it anew. Callers must have
+    /// selected the current thread on the backend.
+    pub fn step_over_site_at_pc(&mut self) -> Result<Option<RunPast>> {
+        let trap = match &self.load_trap {
+            Some(trap) => trap.clone(),
+            None => return self.step_over_breakpoint_at_pc(),
+        };
+        let regs = self.backend.read_registers()?;
+        let rip = self.register_map.read_u64("rip", &regs)?;
+        if rip != trap.address.0 {
+            return self.step_over_breakpoint_at_pc();
+        }
+        let cr3 = self
+            .register_map
+            .read_u64(self.target.arch().dtb_register(), &regs)
+            .ok();
+        lift_target_site(self.backend.as_mut(), &self.target, trap.address)?;
+        let stepped = match self.step_over_breakpoint_at_pc() {
+            Ok(Some(stepped)) => Ok(stepped),
+            Ok(None) => execute_lifted_site(
+                self.backend.as_mut(),
+                &self.register_map,
+                &self.target,
+                &self.current_thread,
+                &regs,
+                rip,
+                cr3,
+            ),
+            Err(error) => Err(error),
+        };
+        // Planted again whether or not the step worked, as a breakpoint is.
+        let original = (!trap.original.is_empty()).then_some(trap.original.as_slice());
+        if let Err(error) =
+            plant_target_site(self.backend.as_mut(), &self.target, trap.address, original)
+        {
+            self.load_trap = None;
+            self.notices
+                .push(format!("failed to re-arm the module-load trap: {error}"));
+        }
+        // Interrupted on the trap itself, the thread returns to it and hits
+        // it again; that hit is this load, not a new one.
+        if matches!(stepped, Ok(RunPast::Diverted)) {
+            self.load_trap_interrupted =
+                interrupted_on(&self.target, &self.register_map, &regs, rip, cr3);
+        }
+        stepped.map(Some)
+    }
+
+    /// [`step_over_current_breakpoint`] on the current thread.
+    fn step_over_breakpoint_at_pc(&mut self) -> Result<Option<RunPast>> {
+        step_over_current_breakpoint(
+            self.backend.as_mut(),
+            &self.register_map,
+            &self.target,
+            &mut self.breakpoints,
+            &self.current_thread,
+        )
+    }
+
     /// Decode the instruction at the current thread's program counter, masking
     /// any software-breakpoint patch and reading through the thread's own root,
     /// which it fetches through. Selects the current thread first; the VM must
@@ -154,7 +213,7 @@ impl Session {
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
         self.breakpoints
             .mask_breakpoint_bytes(&self.target, VirtAddr(pc), &mut bytes, active_dtb);
-        self.mask_bugcheck_trap(VirtAddr(pc), &mut bytes);
+        self.mask_traps(VirtAddr(pc), &mut bytes);
 
         if self.target.arch() == Arch::Arm64 {
             let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -849,11 +908,7 @@ pub fn step_over_current_breakpoint(
         (Err(err), _) => return Err(err),
     }
 
-    let stepped = if backend.single_step_unsafe() {
-        run_past_site(backend, register_map, debugger, thread, &regs, rip, cr3)
-    } else {
-        step_one_and_clear_tf(backend, register_map).map(|()| RunPast::Reached)
-    };
+    let stepped = execute_lifted_site(backend, register_map, debugger, thread, &regs, rip, cr3);
 
     // Re-arm whether or not the step worked: a failed step must not leave the
     // site unpatched with the manager still believing it is enabled.
@@ -874,6 +929,25 @@ pub fn step_over_current_breakpoint(
         breakpoints.note_interrupted_hit(bp_id, rsp);
     }
     stepped.map(Some)
+}
+
+/// Execute the instruction at `rip` of `thread`, whose registers are
+/// `regs`, under a site already lifted: single-step it, or where a single
+/// step is unsafe (the Windows hypervisor), run the vCPU alone past it.
+fn execute_lifted_site(
+    backend: &mut dyn DebugBackend,
+    register_map: &RegisterMap,
+    debugger: &Target,
+    thread: &str,
+    regs: &[u8],
+    rip: u64,
+    cr3: Option<u64>,
+) -> Result<RunPast> {
+    if backend.single_step_unsafe() {
+        run_past_site(backend, register_map, debugger, thread, regs, rip, cr3)
+    } else {
+        step_one_and_clear_tf(backend, register_map).map(|()| RunPast::Reached)
+    }
 }
 
 /// The stack pointer of the execution at `regs` when an interrupt it took on

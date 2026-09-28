@@ -6,47 +6,47 @@ use crate::ui;
 repl_command! {
     cmd_sxe;
     names: ["sxe"],
-    usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias>",
-    summary: "Break when an exception occurs.",
-    details: "Current backends acknowledge module load/unload events internally; ld/ud policies are unavailable.",
+    usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
+    summary: "Break when an exception occurs or a kernel module loads.",
+    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxe ld` stops when any kernel image loads, `sxe ld:<module>` when that one does (case-insensitive, with or without extension, `*`/`?` globs), after it is listed and its deferred breakpoints are armed and before its entry point runs. `-c` works with `sxe ld`; `-f` does not apply to ld. `sxn ld` prints a `ModLoad:` line and continues; `sxd ld` and `sxi ld` continue silently. A named filter takes precedence over bare `ld`. Module unload (`ud`) filters are not supported.",
 }
 
 repl_command! {
     cmd_sxd;
     names: ["sxd"],
-    usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias>",
+    usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Pass first-chance exceptions and break on second chance.",
-    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action.",
+    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxd ld[:<module>]` lets the load continue silently; see sxe.",
 }
 
 repl_command! {
     cmd_sxn;
     names: ["sxn"],
-    usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias>",
+    usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Notify and pass exceptions without breaking.",
-    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action.",
+    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues; see sxe.",
 }
 
 repl_command! {
     cmd_sxi;
     names: ["sxi"],
-    usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias>",
+    usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Pass exceptions without breaking or notification.",
-    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action.",
+    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxi ld[:<module>]` lets the load continue silently; see sxe.",
 }
 
 repl_command! {
     cmd_sx();
     names: ["sx", "sxl"],
     usage: "sx or sxl",
-    summary: "List configured exception policies.",
+    summary: "List configured exception policies and module-load filters.",
 }
 
 repl_command! {
     cmd_sxr();
     names: ["sxr"],
     usage: "sxr",
-    summary: "Reset exception policies to default break behavior.",
+    summary: "Reset exception policies to default break behavior and clear module-load filters.",
 }
 
 repl_command! {
@@ -79,6 +79,15 @@ fn validate_exception_command(command: &str) -> std::result::Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// What a module-load filter in `mode` does at a load.
+fn module_load_label(mode: ExceptionPolicyMode) -> &'static str {
+    match mode {
+        ExceptionPolicyMode::Break => "break",
+        ExceptionPolicyMode::Notify => "notify",
+        ExceptionPolicyMode::SecondChance | ExceptionPolicyMode::Ignore => "ignore",
+    }
 }
 
 impl ReplState<'_> {
@@ -129,8 +138,12 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         };
-        let code = match parse_exception_code(value) {
-            Ok(code) => code,
+        let code = match parse_event_filter(value) {
+            Ok(EventFilter::Exception(code)) => code,
+            Ok(EventFilter::ModuleLoad(module)) => {
+                self.set_module_load_filter(module, mode, command, final_action);
+                return Ok(());
+            }
             Err(err) => {
                 error!("{err}");
                 return Ok(());
@@ -163,6 +176,44 @@ impl ReplState<'_> {
         Ok(())
     }
 
+    fn set_module_load_filter(
+        &mut self,
+        module: Option<String>,
+        mode: ExceptionPolicyMode,
+        command: Option<String>,
+        final_action: Option<ExceptionPolicyFinalAction>,
+    ) {
+        if final_action.is_some() {
+            error!("-f does not apply to ld: a module load either stops (sxe) or continues");
+            return;
+        }
+        if command.is_some() && mode != ExceptionPolicyMode::Break {
+            error!("-c applies to ld only with sxe, where it runs at the stop");
+            return;
+        }
+        if let Some(event_command) = command.as_deref()
+            && let Err(err) = validate_exception_command(event_command)
+        {
+            error!("{err}");
+            return;
+        }
+        self.ctx
+            .exception_policies
+            .set_module_load(module, mode, command);
+        let policy = self
+            .ctx
+            .exception_policies
+            .module_load_entries()
+            .last()
+            .expect("the filter was just set");
+        outln!(
+            "{} {}: {}\n",
+            mode.command(),
+            policy.event_name(),
+            module_load_label(mode)
+        );
+    }
+
     fn cmd_sxe(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         self.set_exception_policy(invocation, ExceptionPolicyMode::Break)
     }
@@ -181,9 +232,30 @@ impl ReplState<'_> {
 
     fn cmd_sx(&mut self) -> Result<()> {
         let entries: Vec<_> = self.ctx.exception_policies.entries().collect();
-        if entries.is_empty() {
+        let module_loads: Vec<_> = self.ctx.exception_policies.module_load_entries().collect();
+        if entries.is_empty() && module_loads.is_empty() {
             outln!("No exception policies configured (ordinary exceptions break by default).\n");
             return Ok(());
+        }
+        if !module_loads.is_empty() {
+            outln!("Module-load filters:");
+            for policy in module_loads {
+                let command = policy
+                    .command
+                    .as_deref()
+                    .map(|command| format!("  -c {command:?}"))
+                    .unwrap_or_default();
+                outln!(
+                    "  {:<24} {:<8} ({}){command}",
+                    policy.event_name(),
+                    module_load_label(policy.mode),
+                    policy.mode.command()
+                );
+            }
+            if entries.is_empty() {
+                outln!();
+                return Ok(());
+            }
         }
         outln!("Exception policies:");
         for (code, policy) in entries {
@@ -211,7 +283,9 @@ impl ReplState<'_> {
 
     fn cmd_sxr(&mut self) -> Result<()> {
         self.ctx.exception_policies.reset();
-        outln!("Exception policies reset; ordinary exceptions break by default.\n");
+        outln!(
+            "Exception policies reset; ordinary exceptions break by default and module loads do not stop.\n"
+        );
         Ok(())
     }
 

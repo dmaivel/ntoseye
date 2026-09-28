@@ -16,6 +16,7 @@ use gdbstub::target::ext::base::multithread::{
 use crate::gdb::trace_packet;
 use crate::repl::STATUS_BREAKPOINT;
 use crate::session::ContinueOutcome;
+use crate::session::stops::module_load_line;
 use crate::triage_report::exception_code_name;
 
 use super::connection::Client;
@@ -169,6 +170,10 @@ impl GdbTarget<'_> {
                 Signal::SIGTRAP
             }
             ContinueOutcome::Step { .. } => Signal::SIGTRAP,
+            ContinueOutcome::ModuleLoad { module, .. } => {
+                self.note(module_load_line(&module));
+                Signal::SIGTRAP
+            }
             ContinueOutcome::Halted { .. } if interrupted => Signal::SIGINT,
             ContinueOutcome::Halted { .. } => Signal::SIGTRAP,
             ContinueOutcome::Stopped {

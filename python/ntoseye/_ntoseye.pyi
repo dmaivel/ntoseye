@@ -3387,13 +3387,25 @@ class Exceptions:
         Number of configured policies.
         """
     def __repr__(self, /) -> str: ...
+    @property
+    def module_loads(self, /) -> list[ModuleLoadPolicy]:
+        """
+        The module-load filters (`sx* ld[:<module>]`), in the order they were
+        set. Iterating `dbg.exceptions` lists exception policies only.
+        """
     def reset(self, /) -> None:
         """
-        Remove all configured policies; ordinary exceptions break by default.
+        Remove all configured policies and module-load filters; ordinary
+        exceptions break by default and module loads do not stop.
         """
     def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"], *, disposition: Literal["handled", "not_handled"] |None = None) -> None:
         """
-        Configure an exception's stop policy (`sxe`/`sxd`/`sxn`/`sxi`).
+        Configure an exception's stop policy (`sxe`/`sxd`/`sxn`/`sxi`), or a
+        module-load filter: `"ld"` for every kernel module, `"ld:<module>"`
+        for one (case-insensitive, with or without extension, `*`/`?`
+        globs). A `"break"` filter stops as `Stop.ModuleLoad` before the
+        module's entry point runs, `"notify"` queues a `ModLoad:` line in
+        `dbg.notices()`; `disposition` does not apply to `ld`.
         """
 
 @final
@@ -7399,6 +7411,29 @@ class ModuleIterator:
     def __next__(self, /) -> Module: ...
 
 @final
+class ModuleLoadPolicy(BaseRecord):
+    """
+    One module-load filter (`sx* ld[:<module>]`).
+    """
+    @property
+    def command(self, /) -> str |None:
+        """
+        Commands run at a `break` stop.
+        """
+    @property
+    def mode(self, /) -> str:
+        """
+        `break` stops at the load, `notify` reports it; `second_chance`
+        and `ignore` let it continue silently.
+        """
+    @property
+    def module(self, /) -> str |None:
+        """
+        The image-name glob it matches, with or without extension; None
+        for every module (bare `ld`).
+        """
+
+@final
 class ModuleSymbols(BaseRecord):
     """
     A module's symbol status and PDB identity (`lmv`).
@@ -10352,6 +10387,23 @@ class Stop:
         def __new__(cls, /, _context: _StopContext) -> Stop.Interrupt: ...
         @property
         def _context(self, /) -> _StopContext: ...
+    @final
+    class ModuleLoad(Stop):
+        """
+        A kernel image a `"ld"` filter set to `"break"` loaded
+        (`dbg.exceptions.set("ld:<module>", "break")`, `sxe ld`). The module
+        is listed, its symbols are loaded, breakpoints in it are armed, and its
+        entry point has not run.
+        """
+        __match_args__: Final = ("module", "_context")
+        def __new__(cls, /, module: Module, _context: _StopContext) -> Stop.ModuleLoad: ...
+        @property
+        def _context(self, /) -> _StopContext: ...
+        @property
+        def module(self, /) -> Module:
+            """
+            The loaded kernel module.
+            """
     @final
     class Reboot(Stop):
         """

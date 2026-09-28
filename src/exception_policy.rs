@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::dbg_backend::{ContinueDisposition, StopEvent};
+use crate::symbols::glob_matches;
 
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
@@ -94,9 +95,51 @@ pub struct ExceptionPolicy {
     pub final_action: Option<ExceptionPolicyFinalAction>,
 }
 
+/// A module-load event filter (`sx* ld[:<module>]`). `module` is a
+/// case-insensitive `*`/`?` glob over the image name, with or without its
+/// extension; `None` (bare `ld`) matches every image. Only `Break` stops and
+/// only `Notify` reports; `command` runs at a `Break` stop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleLoadPolicy {
+    pub module: Option<String>,
+    pub mode: ExceptionPolicyMode,
+    pub command: Option<String>,
+}
+
+impl ModuleLoadPolicy {
+    /// Whether this filter names the image `name` (a file name or path).
+    pub fn matches(&self, name: &str) -> bool {
+        let Some(pattern) = self.module.as_deref() else {
+            return true;
+        };
+        let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
+        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+        glob_matches(pattern, file, true) || glob_matches(pattern, stem, true)
+    }
+
+    /// The filter as `sx` spells it: `ld` or `ld:<module>`.
+    pub fn event_name(&self) -> String {
+        match &self.module {
+            Some(module) => format!("ld:{module}"),
+            None => "ld".to_string(),
+        }
+    }
+}
+
+/// What an `sx*` argument names: an exception code, or the module-load event
+/// with its optional module filter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventFilter {
+    Exception(u32),
+    ModuleLoad(Option<String>),
+}
+
 #[derive(Default)]
 pub struct ExceptionPolicyTable {
     policies: BTreeMap<u32, ExceptionPolicy>,
+    /// In the order they were set; a module's latest setting replaces its
+    /// earlier one.
+    module_loads: Vec<ModuleLoadPolicy>,
 }
 
 impl ExceptionPolicyTable {
@@ -123,6 +166,7 @@ impl ExceptionPolicyTable {
 
     pub fn reset(&mut self) {
         self.policies.clear();
+        self.module_loads.clear();
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (u32, &ExceptionPolicy)> + '_ {
@@ -131,6 +175,46 @@ impl ExceptionPolicyTable {
 
     pub fn mode_for(&self, code: u32) -> Option<ExceptionPolicyMode> {
         self.policies.get(&code).map(|policy| policy.mode)
+    }
+
+    /// Set the module-load filter for `module` (`None`: every module),
+    /// replacing an earlier one for the same module.
+    pub fn set_module_load(
+        &mut self,
+        module: Option<String>,
+        mode: ExceptionPolicyMode,
+        command: Option<String>,
+    ) {
+        let same = |policy: &ModuleLoadPolicy| match (&policy.module, &module) {
+            (Some(existing), Some(module)) => existing.eq_ignore_ascii_case(module),
+            (None, None) => true,
+            _ => false,
+        };
+        self.module_loads.retain(|policy| !same(policy));
+        self.module_loads.push(ModuleLoadPolicy {
+            module,
+            mode,
+            command,
+        });
+    }
+
+    pub fn module_load_entries(&self) -> impl Iterator<Item = &ModuleLoadPolicy> + '_ {
+        self.module_loads.iter()
+    }
+
+    /// The filter that applies to a load of the image `name`: the most
+    /// recently set one naming it, else the bare `ld` filter.
+    pub fn module_load_policy(&self, name: &str) -> Option<&ModuleLoadPolicy> {
+        let named = self
+            .module_loads
+            .iter()
+            .rev()
+            .find(|policy| policy.module.is_some() && policy.matches(name));
+        named.or_else(|| {
+            self.module_loads
+                .iter()
+                .find(|policy| policy.module.is_none())
+        })
     }
 
     /// Classify only ordinary target exceptions. Debugger-managed control stops
@@ -181,13 +265,30 @@ impl ExceptionPolicyTable {
     }
 }
 
-pub fn parse_exception_code(value: &str) -> Result<u32, String> {
-    let normalized = value.trim().to_ascii_lowercase();
-    if matches!(normalized.as_str(), "ld" | "ud") {
+/// Parse an `sx*` event argument: `ld`, `ld:<module>`, or an exception code
+/// or alias. Module unload (`ud`) is refused.
+pub fn parse_event_filter(value: &str) -> Result<EventFilter, String> {
+    let trimmed = value.trim();
+    let (event, argument) = match trimmed.split_once(':') {
+        Some((event, argument)) => (event, Some(argument.trim())),
+        None => (trimmed, None),
+    };
+    if event.eq_ignore_ascii_case("ld") {
+        return match argument {
+            Some("") => Err(format!("'{value}' names no module (use ld or ld:<module>)")),
+            argument => Ok(EventFilter::ModuleLoad(argument.map(str::to_string))),
+        };
+    }
+    if event.eq_ignore_ascii_case("ud") {
         return Err(format!(
-            "event '{value}' is not configurable: current backends acknowledge module load/unload notifications internally and do not surface them as stop events"
+            "event '{value}' is not configurable: module unload filters are not supported"
         ));
     }
+    parse_exception_code(trimmed).map(EventFilter::Exception)
+}
+
+fn parse_exception_code(value: &str) -> Result<u32, String> {
+    let normalized = value.trim().to_ascii_lowercase();
     if let Some((_, code)) = EXCEPTION_ALIASES
         .iter()
         .find(|(alias, _)| *alias == normalized)
@@ -247,6 +348,7 @@ mod tests {
             target_reloaded: false,
             target_kernel_base_hint: None,
             modules_changed: false,
+            loaded_image_base: None,
             assisted_breakin: false,
         }
     }
@@ -350,10 +452,80 @@ mod tests {
             ExceptionPolicyFinalAction::Continue(ContinueDisposition::NotHandled)
         );
         assert!(parse_exception_final_action("continue-somehow").is_err());
-        assert!(
-            parse_exception_code("ld")
-                .unwrap_err()
-                .contains("internally")
+    }
+
+    #[test]
+    fn event_filters_parse_module_loads_and_refuse_unloads() {
+        assert_eq!(
+            parse_event_filter("ld").unwrap(),
+            EventFilter::ModuleLoad(None)
         );
+        assert_eq!(
+            parse_event_filter("LD:PdbProbe.sys").unwrap(),
+            EventFilter::ModuleLoad(Some("PdbProbe.sys".into()))
+        );
+        assert_eq!(
+            parse_event_filter("av").unwrap(),
+            EventFilter::Exception(0xc000_0005)
+        );
+        assert!(parse_event_filter("ld:").is_err());
+        assert!(parse_event_filter("ud").is_err());
+        assert!(parse_event_filter("ud:pdbprobe").is_err());
+    }
+
+    #[test]
+    fn module_load_filters_match_image_names_with_or_without_extension() {
+        let filter = |module: &str| ModuleLoadPolicy {
+            module: Some(module.into()),
+            mode: ExceptionPolicyMode::Break,
+            command: None,
+        };
+        assert!(filter("pdbprobe").matches("PdbProbe.sys"));
+        assert!(filter("PDBPROBE.SYS").matches("PdbProbe.sys"));
+        assert!(filter("pdbprobe").matches(r"\SystemRoot\System32\drivers\PdbProbe.sys"));
+        assert!(filter("pdb*").matches("PdbProbe.sys"));
+        assert!(filter("pdbprob?").matches("PdbProbe.sys"));
+        assert!(filter("*.sys").matches("PdbProbe.sys"));
+        assert!(!filter("pdbprobe").matches("PdbProbe2.sys"));
+        assert!(!filter("probe").matches("PdbProbe.sys"));
+        assert!(!filter("pdbprobe.dll").matches("PdbProbe.sys"));
+    }
+
+    #[test]
+    fn a_named_module_load_filter_takes_precedence_over_bare_ld() {
+        let mut policies = ExceptionPolicyTable::default();
+        assert_eq!(policies.module_load_policy("PdbProbe.sys"), None);
+
+        policies.set_module_load(None, ExceptionPolicyMode::Break, None);
+        policies.set_module_load(Some("pdbprobe".into()), ExceptionPolicyMode::Ignore, None);
+        let mode = |policies: &ExceptionPolicyTable, name| {
+            policies.module_load_policy(name).map(|policy| policy.mode)
+        };
+        assert_eq!(
+            mode(&policies, "PdbProbe.sys"),
+            Some(ExceptionPolicyMode::Ignore)
+        );
+        assert_eq!(
+            mode(&policies, "appid.sys"),
+            Some(ExceptionPolicyMode::Break)
+        );
+
+        // Setting a module again replaces its filter, whatever its case.
+        policies.set_module_load(Some("PDBPROBE".into()), ExceptionPolicyMode::Notify, None);
+        assert_eq!(policies.module_load_entries().count(), 2);
+        assert_eq!(
+            mode(&policies, "PdbProbe.sys"),
+            Some(ExceptionPolicyMode::Notify)
+        );
+
+        // Of two named filters for one image, the later one applies.
+        policies.set_module_load(Some("pdb*".into()), ExceptionPolicyMode::Break, None);
+        assert_eq!(
+            mode(&policies, "PdbProbe.sys"),
+            Some(ExceptionPolicyMode::Break)
+        );
+
+        policies.reset();
+        assert_eq!(mode(&policies, "PdbProbe.sys"), None);
     }
 }

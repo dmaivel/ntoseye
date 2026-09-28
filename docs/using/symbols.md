@@ -44,7 +44,7 @@ g
 
 {command}`lmv` reports the loaded image range, symbol status, where the image was read from (for example, guest memory), and the accepted PDB GUID and age. `.reload mydriver` is equivalent to `ld mydriver`; {command}`.reload` without a module reloads every module in the current inspection scope.
 
-The paths and breakpoint can also be configured before loading the driver. In that case, omit {command}`ld`: `bu MyDriver.c:42` creates a deferred breakpoint, and {command}`bl` shows `deferred` with no address. Load and trigger the driver in Windows after {command}`g`. At the next debugger stop, ntoseye refreshes the module list, loads the matching PDB, and enables the same breakpoint ID with its existing settings.
+The paths and breakpoint can also be configured before loading the driver. In that case, omit {command}`ld`: `bu MyDriver.c:42` creates a deferred breakpoint, and {command}`bl` shows `deferred` with no address. Load and trigger the driver in Windows after {command}`g`. When the driver loads, ntoseye refreshes the module list, loads the matching PDB, and enables the same breakpoint ID with its existing settings, before `DriverEntry` runs, on every live backend (see [stopping at a driver load](breakpoints.md#stopping-at-a-driver-load)), so `bu mydriver!DriverEntry` stops at the driver's first instruction.
 
 At the source hit, these commands verify the complete private-symbol workflow:
 
@@ -72,4 +72,4 @@ Kernel modules load at each stop. Everything else is on demand:
 - **A process-scoped breakpoint** resolves in the process it names: `bu /p <pid> user32!PeekMessageW` reads that process's loader list and loads `user32`'s symbols itself, with no prior `.process /p <pid>`. A `file:line` specification loads every module in the process, since the line can be in any of them. Only a symbol that really is absent from the process stays deferred.
 - **`.process /p <pid>`** still loads the whole process up front, which is what you want before browsing it.
 
-A deferred breakpoint is re-resolved whenever symbols become available, whoever loaded them: a background fetch finishing, a backtrace, a process attach, or a module load observed at a stop. Installing the site needs the target halted, so a breakpoint that becomes resolvable while the guest runs is installed at the next stop.
+A deferred breakpoint is re-resolved whenever symbols become available, whoever loaded them: a background fetch finishing, a backtrace, a process attach, or a kernel module load. Installing the site needs the target halted, so a breakpoint that becomes resolvable while the guest runs is installed at the next stop.

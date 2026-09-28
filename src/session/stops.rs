@@ -9,8 +9,8 @@ use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, StopEvent, clear_trap_flag,
 };
 use crate::error::Result;
-use crate::exception_policy::ExceptionPolicyAction;
-use crate::guest::ProcessInfo;
+use crate::exception_policy::{ExceptionPolicyAction, ExceptionPolicyMode};
+use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::kd::trace_enabled;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -23,7 +23,7 @@ use crate::session::{
     Session, StopResolution, WatchpointStopAction,
 };
 use crate::target::ThreadInfo;
-use crate::types::VirtAddr;
+use crate::types::{Arch, VirtAddr};
 use crate::unwind::try_format_symbol_at;
 
 /// The low bits of a CR3/DTB that select the page-directory base physical
@@ -50,6 +50,7 @@ impl Session {
         let event = match resolution {
             StopResolution::Breakpoint { event, .. }
             | StopResolution::Bugcheck { event }
+            | StopResolution::ModuleLoad { event, .. }
             | StopResolution::TargetReloaded { event, .. }
             | StopResolution::Stopped { event, .. } => event,
             StopResolution::Resumed | StopResolution::ModulesChanged => return,
@@ -110,6 +111,9 @@ impl Session {
                 rip: event.program_counter,
                 info: event.bugcheck,
             },
+            StopResolution::ModuleLoad { module, rip, .. } => {
+                ContinueOutcome::ModuleLoad { module, rip }
+            }
             StopResolution::TargetReloaded { event, coherent } => ContinueOutcome::TargetReloaded {
                 rip: event.program_counter,
                 kernel_base: self.target.kernel_base().map(|address| address.0),
@@ -300,6 +304,25 @@ impl Session {
 
         if event.modules_changed {
             self.unreported_module_change = self.refresh_modules_on_stop();
+            if let Some(module) = event
+                .loaded_image_base
+                .and_then(|base| self.module_load_to_surface(base))
+            {
+                let registers = self.backend.read_registers()?;
+                let rip = self.register_map.read_u64("rip", &registers).unwrap_or(0);
+                update_target_context_from_registers(
+                    &mut self.target,
+                    &self.register_map,
+                    Ok(registers),
+                );
+                let resolution = StopResolution::ModuleLoad {
+                    module: Box::new(module),
+                    event,
+                    rip,
+                };
+                self.record_visible_stop(&resolution);
+                return Ok(resolution);
+            }
             self.continue_backend(ContinueDisposition::Handled)?;
             return Ok(StopResolution::ModulesChanged);
         }
@@ -363,7 +386,11 @@ impl Session {
             .unwrap_or(0);
         update_target_context_from_registers(&mut self.target, &self.register_map, Ok(registers));
 
-        if self.bugcheck_trap == Some(VirtAddr(rip)) {
+        if self
+            .bugcheck_trap
+            .as_ref()
+            .is_some_and(|trap| trap.address.0 == rip)
+        {
             event.is_bugcheck = true;
             event.bugcheck = self.bugcheck_from_trap();
             // Re-record: the event was stored before the trap enriched it,
@@ -372,6 +399,14 @@ impl Session {
             let resolution = StopResolution::Bugcheck { event };
             self.record_visible_stop(&resolution);
             return Ok(resolution);
+        }
+
+        if self
+            .load_trap
+            .as_ref()
+            .is_some_and(|trap| trap.address.0 == rip)
+        {
+            return self.classify_load_trap_hit(event, rip);
         }
 
         let resolution = match self.resolve_breakpoint_stop(rip, cr3)? {
@@ -498,11 +533,95 @@ impl Session {
                 StopResolution::Resumed | StopResolution::ModulesChanged => continue,
                 StopResolution::Breakpoint { event, .. }
                 | StopResolution::Bugcheck { event }
+                | StopResolution::ModuleLoad { event, .. }
                 | StopResolution::TargetReloaded { event, .. }
                 | StopResolution::Stopped { event, .. } => return Ok(event),
             }
         }
     }
+
+    /// A stop on the module-load trap ([`Self::arm_load_trap`]), at the first
+    /// instruction of `nt!DbgLoadImageSymbols` with the image base in its
+    /// second argument. The load is a module change like KD's notification:
+    /// the module list is refreshed and deferred breakpoints reconciled. A
+    /// `sxe ld` filter naming the image surfaces the stop; otherwise the
+    /// thread is stepped past the trap and resumed. A thread returning to the
+    /// trap after an interrupt diverted it is the same load, resumed again.
+    fn classify_load_trap_hit(&mut self, event: StopEvent, rip: u64) -> Result<StopResolution> {
+        let stack = self
+            .target
+            .register_value("rsp")
+            .or_else(|| self.target.register_value("sp"));
+        let repeated = self
+            .load_trap_interrupted
+            .take_if(|interrupted| Some(*interrupted) == stack)
+            .is_some();
+        self.unreported_module_change = self.refresh_modules_on_stop();
+        let argument = match self.target.arch() {
+            Arch::Amd64 => "rdx",
+            Arch::Arm64 => "x1",
+        };
+        let module = self
+            .target
+            .register_value(argument)
+            .filter(|_| !repeated)
+            .and_then(|base| self.module_load_to_surface(VirtAddr(base)));
+        if let Some(module) = module {
+            let resolution = StopResolution::ModuleLoad {
+                module: Box::new(module),
+                event,
+                rip,
+            };
+            self.record_visible_stop(&resolution);
+            return Ok(resolution);
+        }
+        self.backend.set_current_thread(&self.current_thread)?;
+        self.step_over_site_at_pc()?;
+        self.breakpoints
+            .refresh_enabled(self.backend.as_mut(), &self.target)?;
+        self.continue_backend(ContinueDisposition::Handled)?;
+        Ok(StopResolution::ModulesChanged)
+    }
+
+    /// Apply the `sx* ld` filters to a load of the kernel image at `base`,
+    /// with the module list already refreshed: the module to stop for
+    /// (`sxe`), else `None`, with its [`module_load_line`] queued as a notice
+    /// for `sxn`. An image the kernel module list does not hold matches no
+    /// filter.
+    fn module_load_to_surface(&mut self, base: VirtAddr) -> Option<ModuleInfo> {
+        let module = self
+            .target
+            .kernel_modules()
+            .ok()?
+            .into_iter()
+            .find(|module| module.base_address == base)?;
+        match self
+            .exception_policies
+            .module_load_policy(&module.name)?
+            .mode
+        {
+            ExceptionPolicyMode::Break => Some(module),
+            ExceptionPolicyMode::Notify => {
+                self.notices.push(module_load_line(&module));
+                None
+            }
+            ExceptionPolicyMode::SecondChance | ExceptionPolicyMode::Ignore => None,
+        }
+    }
+}
+
+/// WinDbg's line for a module load: `ModLoad: <base> <end>   <image>`.
+pub fn module_load_line(module: &ModuleInfo) -> String {
+    let image = module
+        .name
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(&module.name);
+    format!(
+        "ModLoad: {:016x} {:016x}   {image}",
+        module.base_address.0,
+        module.end_address().0
+    )
 }
 
 /// Whether `event` is a *stray* single-step: a `STATUS_SINGLE_STEP` trap that

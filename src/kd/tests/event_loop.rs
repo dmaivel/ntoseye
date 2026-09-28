@@ -28,6 +28,7 @@ fn transparent_arm64_state_change_uses_arm64_continue_layout() {
         exception_address: None,
         program_counter: 0xffff_f800_1234_5678,
         kernel_base_hint: None,
+        unload_symbols: false,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -106,6 +107,30 @@ fn parse_load_symbols_state_change_extracts_base_hint() {
 
     assert_eq!(s.program_counter, 0xfffff800004f9325);
     assert_eq!(s.kernel_base_hint, Some(VirtAddr(0xfffff80000000000)));
+}
+
+/// A load reports the image it maps; an unload of the same image (the
+/// `UnloadSymbols` flag at payload offset 64) is still a module change but
+/// names no loaded image, so no load filter applies to it.
+#[test]
+fn load_symbols_unload_flag_separates_loads_from_unloads() {
+    let mut payload = vec![0u8; 72];
+    payload[0..4].copy_from_slice(&DBG_KD_LOAD_SYMBOLS_STATE_CHANGE.to_le_bytes());
+    payload[8..12].copy_from_slice(&1u32.to_le_bytes());
+    payload[40..48].copy_from_slice(&0xfffff807_12340000u64.to_le_bytes());
+
+    let load = stop_event(parse_state_change(&payload).unwrap());
+    assert!(load.modules_changed);
+    assert_eq!(load.loaded_image_base, Some(VirtAddr(0xfffff807_12340000)));
+
+    payload[64] = 1;
+    let unload = stop_event(parse_state_change(&payload).unwrap());
+    assert!(unload.modules_changed);
+    assert_eq!(unload.loaded_image_base, None);
+    assert_eq!(
+        unload.target_kernel_base_hint,
+        Some(VirtAddr(0xfffff807_12340000))
+    );
 }
 
 /// A real 240-byte AMD64 exception state change, captured from a Windows 11
@@ -226,6 +251,7 @@ fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() 
         exception_address: Some(pc),
         program_counter: pc,
         kernel_base_hint: None,
+        unload_symbols: false,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,

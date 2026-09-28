@@ -9,6 +9,8 @@ use crate::dbg_backend::{
 };
 use crate::error::Result;
 use crate::gdb::RegisterMap;
+use crate::guest::ModuleInfo;
+use crate::session::stops::module_load_line;
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
@@ -139,6 +141,7 @@ pub fn print_async_stop_resolution(
                 (!breakpoint.temporary).then_some(cause),
             );
         }
+        StopResolution::ModuleLoad { module, .. } => print_module_load_stop(session, &module),
         StopResolution::Bugcheck { event } => {
             print_bugcheck_summary(&session.target, event.bugcheck.as_ref());
             outln!();
@@ -221,6 +224,10 @@ pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome:
                 cause.filter(|_| !temporary),
             );
         }
+        ContinueOutcome::ModuleLoad { module, .. } => {
+            print_stop_separator();
+            print_module_load_stop(session, &module);
+        }
         ContinueOutcome::Bugcheck { info, .. } => {
             print_stop_separator();
             print_bugcheck_summary(&session.target, info.as_ref());
@@ -267,6 +274,22 @@ pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome:
             );
         }
     }
+}
+
+/// Render a stop at a module load a `sxe ld` filter names: WinDbg's
+/// `ModLoad:` line, then the stop context like any other stop.
+pub fn print_module_load_stop(session: &mut Session, module: &ModuleInfo) {
+    outln!("{}", module_load_line(module));
+    let cause = format!("{} {}", ui::muted("module load"), module.name);
+    print_break_context_at(
+        &mut *session.backend,
+        &session.register_map,
+        &mut session.target,
+        &session.breakpoints,
+        &session.current_thread,
+        None,
+        Some(cause),
+    );
 }
 
 /// Announce a reboot the session has already rebuilt debugger state for, so

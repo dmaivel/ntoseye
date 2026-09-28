@@ -11,7 +11,7 @@ use crate::dbg_backend::{BugcheckInfo, DebugCapability, WatchpointAccess};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::guest::ModuleSymbolLoadReport;
-use crate::session::Session;
+use crate::session::{Session, TrapSite};
 use crate::types::{Arch, VirtAddr};
 
 /// What [`Session::add_pattern_breakpoints`] set.
@@ -127,39 +127,78 @@ impl Session {
         Ok(BreakpointScope::process(&process))
     }
 
+    /// Arm the debugger's own kernel traps the backend needs: the bugcheck
+    /// trap ([`Self::arm_bugcheck_trap`]) and the module-load trap
+    /// ([`Self::arm_load_trap`]). Armed at attach, where the operator can see
+    /// them reported, and retried on every resume: the sites need kernel
+    /// symbols, which can arrive late and move across a reboot.
+    pub fn arm_traps(&mut self) {
+        self.arm_bugcheck_trap();
+        self.arm_load_trap();
+    }
+
+    /// Whether the backend reports `capability` as supported.
+    fn backend_supports(&self, capability: DebugCapability) -> bool {
+        self.backend
+            .capabilities()
+            .iter()
+            .any(|entry| entry.capability == capability && entry.supported)
+    }
+
     /// Arm an automatic breakpoint on `nt!KeBugCheckEx` when the backend
     /// cannot recognize a bugcheck on its own.
     ///
     /// KD learns of a crash from the target itself; a hypervisor stub never
     /// does, so the crash is only observable by stopping the guest as it
-    /// enters the bugcheck. Armed at attach, where the operator can see it
-    /// reported, and retried on every resume: the site needs kernel symbols,
-    /// which can arrive late and move across a reboot.
-    pub(super) fn arm_bugcheck_trap(&mut self) {
-        let capabilities = self.backend.capabilities();
-        let supports = |capability| {
-            capabilities
-                .iter()
-                .any(|entry| entry.capability == capability && entry.supported)
-        };
-        // A target that reports its own bugchecks needs no trap, and one that
-        // cannot hold a breakpoint cannot be given one.
-        if self.bugcheck_trap.is_some()
-            || supports(DebugCapability::BugcheckDetection)
-            || !supports(DebugCapability::KernelBreakpoints)
+    /// enters the bugcheck.
+    fn arm_bugcheck_trap(&mut self) {
+        // A target that reports its own bugchecks needs no trap.
+        if self.bugcheck_trap.is_some() || self.backend_supports(DebugCapability::BugcheckDetection)
         {
             return;
         }
-        let Some(guest) = self.target.guest.as_ref() else {
+        self.bugcheck_trap = self.plant_trap(
+            "nt!KeBugCheckEx",
+            "a bugcheck trap",
+            "cannot detect a bugcheck by itself",
+        );
+    }
+
+    /// Arm an automatic breakpoint on `nt!DbgLoadImageSymbols` when the
+    /// backend reports no module loads on its own.
+    ///
+    /// The kernel calls it for every kernel image it maps, with the image
+    /// listed in `PsLoadedModuleList` and before its entry point runs, whether
+    /// or not kernel debugging is enabled; it is where KD's load notification
+    /// comes from. A hit refreshes the module list, arms deferred breakpoints
+    /// in the new image, and applies the `sx* ld` filters (see
+    /// [`Self::classify_stop_event`]).
+    fn arm_load_trap(&mut self) {
+        if self.load_trap.is_some() || self.backend_supports(DebugCapability::ModuleLoadEvents) {
             return;
-        };
-        let kernel_dtb = guest.ntoskrnl.dtb();
+        }
+        self.load_trap = self.plant_trap(
+            "nt!DbgLoadImageSymbols",
+            "a module-load trap",
+            "reports no module loads by itself",
+        );
+    }
+
+    /// Plant a debugger-owned breakpoint at the kernel `symbol`, reporting
+    /// the outcome as `what` (`a bugcheck trap`) and why the backend `needs`
+    /// it. `None` when the backend cannot hold a breakpoint, the kernel
+    /// symbol is not known yet, or planting failed.
+    fn plant_trap(&mut self, symbol: &str, what: &str, needs: &str) -> Option<TrapSite> {
+        if !self.backend_supports(DebugCapability::KernelBreakpoints) {
+            return None;
+        }
+        let kernel_dtb = self.target.guest.as_ref()?.ntoskrnl.dtb();
         let Ok(Some(address)) = self
             .target
             .symbols
-            .find_symbol_across_modules(kernel_dtb, "nt!KeBugCheckEx")
+            .find_symbol_across_modules(kernel_dtb, symbol)
         else {
-            return;
+            return None;
         };
         // Read the code before the trap displaces it: the stub writes the
         // breakpoint into guest memory, and memory here is read out of band
@@ -182,17 +221,18 @@ impl Session {
             (!original.is_empty()).then_some(original.as_slice()),
         ) {
             Ok(()) => {
-                self.bugcheck_trap = Some(address);
-                self.bugcheck_trap_original = original;
                 self.notices.push(format!(
-                    "armed a bugcheck trap at nt!KeBugCheckEx ({:#x}); the {} backend cannot detect a bugcheck by itself",
+                    "armed {what} at {symbol} ({:#x}); the {} backend {needs}",
                     address.0,
                     self.backend.name()
                 ));
+                Some(TrapSite { address, original })
             }
-            Err(error) => self.notices.push(format!(
-                "failed to arm a bugcheck trap at nt!KeBugCheckEx: {error}"
-            )),
+            Err(error) => {
+                self.notices
+                    .push(format!("failed to arm {what} at {symbol}: {error}"));
+                None
+            }
         }
     }
 
@@ -301,21 +341,20 @@ impl Session {
         self.breakpoints.list().into_iter().find(|bp| bp.id == id)
     }
 
-    /// Put the bugcheck trap's displaced instruction back into a read that
-    /// covers it. The trap is not one of the manager's breakpoints, so the
-    /// manager cannot mask it, and without this `u nt!KeBugCheckEx` shows the
+    /// Put the traps' displaced instructions back into a read that covers
+    /// them. The traps are not the manager's breakpoints, so the manager
+    /// cannot mask them, and without this `u nt!KeBugCheckEx` shows the
     /// debugger's own trap instead of the guest's code.
-    pub(super) fn mask_bugcheck_trap(&self, start: VirtAddr, buf: &mut [u8]) {
-        let Some(address) = self.bugcheck_trap else {
-            return;
-        };
-        if self.bugcheck_trap_original.is_empty() || address.0 < start.0 {
-            return;
-        }
-        let offset = (address.0 - start.0) as usize;
-        let end = offset + self.bugcheck_trap_original.len();
-        if end <= buf.len() {
-            buf[offset..end].copy_from_slice(&self.bugcheck_trap_original);
+    pub fn mask_traps(&self, start: VirtAddr, buf: &mut [u8]) {
+        for trap in [&self.bugcheck_trap, &self.load_trap].into_iter().flatten() {
+            if trap.original.is_empty() || trap.address.0 < start.0 {
+                continue;
+            }
+            let offset = (trap.address.0 - start.0) as usize;
+            let end = offset + trap.original.len();
+            if end <= buf.len() {
+                buf[offset..end].copy_from_slice(&trap.original);
+            }
         }
     }
 
@@ -327,26 +366,32 @@ impl Session {
             .remove_all(self.backend.as_mut(), &self.target)
     }
 
-    /// Whether any debugger-owned site is installed in the guest. The
-    /// bugcheck trap is not one of the manager's breakpoints, so a caller
-    /// asking whether there is anything to restore has to ask for both.
+    /// Whether any debugger-owned site is installed in the guest. The traps
+    /// are not the manager's breakpoints, so a caller asking whether there is
+    /// anything to restore has to ask for them too.
     pub fn has_installed_sites(&self) -> bool {
-        !self.breakpoints.list().is_empty() || self.bugcheck_trap.is_some()
+        !self.breakpoints.list().is_empty()
+            || self.bugcheck_trap.is_some()
+            || self.load_trap.is_some()
     }
 
-    /// Take the automatic bugcheck trap back out of the guest.
+    /// Take the automatic bugcheck and module-load traps back out of the
+    /// guest.
     ///
-    /// Nothing else does while the session lives: it is not one of the
-    /// manager's breakpoints. Left behind, it is executed by the next thread
-    /// to reach `nt!KeBugCheckEx` with no debugger attached; if the session
-    /// dies first, the site journal covers it.
-    pub fn disarm_bugcheck_trap(&mut self) -> Result<()> {
-        let Some(address) = self.bugcheck_trap else {
-            return Ok(());
-        };
-        lift_target_site(self.backend.as_mut(), &self.target, address)?;
-        self.bugcheck_trap = None;
-        self.bugcheck_trap_original.clear();
+    /// Nothing else does while the session lives: they are not the manager's
+    /// breakpoints. Left behind, a trap is executed by the next thread to
+    /// reach it with no debugger attached; if the session dies first, the
+    /// site journal covers them.
+    pub fn disarm_traps(&mut self) -> Result<()> {
+        if let Some(trap) = &self.bugcheck_trap {
+            lift_target_site(self.backend.as_mut(), &self.target, trap.address)?;
+            self.bugcheck_trap = None;
+        }
+        if let Some(trap) = &self.load_trap {
+            lift_target_site(self.backend.as_mut(), &self.target, trap.address)?;
+            self.load_trap = None;
+            self.load_trap_interrupted = None;
+        }
         Ok(())
     }
 

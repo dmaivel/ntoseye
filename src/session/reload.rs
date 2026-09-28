@@ -136,9 +136,11 @@ impl Session {
 
         if stop_event_requires_target_reload(&self.target, event) {
             event.target_reloaded = true;
-            // The reboot invalidates the site: the kernel is re-based and
-            // the target's breakpoint is gone. The next resume re-arms it.
+            // The reboot invalidates the sites: the kernel is re-based and
+            // the target's breakpoints are gone. The next resume re-arms them.
             self.bugcheck_trap = None;
+            self.load_trap = None;
+            self.load_trap_interrupted = None;
             let TargetReloadOutcome {
                 report,
                 hint,

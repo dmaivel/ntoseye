@@ -99,6 +99,11 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
     } else {
         None
     };
+    // DBGKD_LOAD_SYMBOLS64 at 32: PathNameLength u32 @32, BaseOfDll u64 @40,
+    // ProcessId u64 @48, CheckSum u32 @56, SizeOfImage u32 @60,
+    // UnloadSymbols BOOLEAN @64.
+    let unload_symbols = new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE
+        && payload.get(64).is_some_and(|&flag| flag != 0);
     let processor = read_u16(payload, 6);
     let number_processors = read_u32(payload, 8);
     // Both drive thread ids and per-processor requests; a malformed count
@@ -123,6 +128,7 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         exception_address,
         program_counter: read_u64(payload, 24),
         kernel_base_hint,
+        unload_symbols,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,

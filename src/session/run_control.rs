@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use crate::dbg_backend::{ContinueDisposition, DebugCapability, StopEvent};
 use crate::error::{Error, Result};
-use crate::session::stepping::step_over_current_breakpoint;
 use crate::session::{ContinueOutcome, STATUS_BREAKPOINT, Session, StopResolution};
 
 /// How many noise stops [`Session::interrupt`] resumes past before surfacing
@@ -55,6 +54,7 @@ impl Session {
             .map(|(resolution, _)| match resolution {
                 StopResolution::Breakpoint { event, .. }
                 | StopResolution::Bugcheck { event }
+                | StopResolution::ModuleLoad { event, .. }
                 | StopResolution::TargetReloaded { event, .. }
                 | StopResolution::Stopped { event, .. } => event,
                 StopResolution::Resumed | StopResolution::ModulesChanged => {
@@ -226,10 +226,10 @@ impl Session {
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
         self.target.selected_frame = None;
         self.module_refresh_report = None;
-        // A bugcheck can only happen while the guest runs, so the trap has to
-        // be in place before it does. Arming on stop alone would miss a crash
-        // provoked immediately after attach.
-        self.arm_bugcheck_trap();
+        // A bugcheck or module load can only happen while the guest runs, so
+        // the traps have to be in place before it does. Arming on stop alone
+        // would miss a crash or load provoked immediately after attach.
+        self.arm_traps();
         if self.parked_windows_thread().is_some() {
             self.parked_windows_thread = None;
             self.target.clear_current_windows_thread_context();
@@ -245,15 +245,9 @@ impl Session {
         // halted, so the next `continue` starts the pump with the reconnect-assist
         // poking already off, instead of resuming into another forced break-in.
         self.try_finish_rediscovery_from_memory();
-        if self.breakpoints.has_enabled_breakpoints() {
+        if self.breakpoints.has_enabled_breakpoints() || self.load_trap.is_some() {
             self.backend.set_current_thread(&self.current_thread)?;
-            step_over_current_breakpoint(
-                self.backend.as_mut(),
-                &self.register_map,
-                &self.target,
-                &mut self.breakpoints,
-                &self.current_thread,
-            )?;
+            self.step_over_site_at_pc()?;
         }
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints

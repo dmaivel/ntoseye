@@ -154,7 +154,7 @@ impl Session {
         }
         self.breakpoints
             .mask_breakpoint_bytes(&self.target, addr, buf, dtb);
-        self.mask_bugcheck_trap(addr, buf);
+        self.mask_traps(addr, buf);
         Ok(())
     }
 

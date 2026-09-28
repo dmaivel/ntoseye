@@ -136,7 +136,7 @@ print(hv.disassemble(cpu.rip, 4))
 
 While the target is halted, the stop it is halted at stays current until it moves again: `dbg.stop`, `wait()`, and `interrupt()` all return it, and reading it consumes nothing.
 
-Stop kinds are `ntoseye.Stop.Breakpoint`, `.Exception`, `.Interrupt`, `.Step`, `.Bugcheck`, and `.Reboot`. Inspect the specific stop with `isinstance` (available on Python 3.9+); shared fields include `rip`, `symbol`, `thread`, `process`, `cpu`, and `breakpoints`. `stop.breakpoints` is empty for other stop kinds, so `if bp in stop.breakpoints:` works without dispatching on the stop type. A crash dump opened with `backend="dmp"` is halted at its bugcheck, so its `dbg.stop` is a `Stop.Bugcheck`.
+Stop kinds are `ntoseye.Stop.Breakpoint`, `.Exception`, `.Interrupt`, `.Step`, `.ModuleLoad`, `.Bugcheck`, and `.Reboot`. Inspect the specific stop with `isinstance` (available on Python 3.9+); shared fields include `rip`, `symbol`, `thread`, `process`, `cpu`, and `breakpoints`. `stop.breakpoints` is empty for other stop kinds, so `if bp in stop.breakpoints:` works without dispatching on the stop type. A crash dump opened with `backend="dmp"` is halted at its bugcheck, so its `dbg.stop` is a `Stop.Bugcheck`.
 
 ```python
 bp = dbg.breakpoints.add("nt!NtCreateFile")
@@ -145,6 +145,16 @@ if stop is None:
     print("still running")
 elif isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
     print("hit", stop.symbol, stop.thread)
+```
+
+`dbg.exceptions.set(code, mode)` sets an exception policy (`"av"`, `0xC0000005`) or a module-load filter (`"ld"`, `"ld:<module>"`), as the REPL's {command}`sx` commands do; `dbg.exceptions.module_loads` lists the filters. With a `"break"` filter, the load of a matching kernel module stops as `Stop.ModuleLoad`, whose `module` is the loaded `Module`, before its `DriverEntry` runs and with deferred breakpoints in it already armed:
+
+```python
+dbg.exceptions.set("ld:mydriver", "break")
+stop = dbg.run()
+if isinstance(stop, ntoseye.Stop.ModuleLoad):
+    print(stop.module.name, hex(stop.module.base))
+    dbg.breakpoints.add("mydriver!MyDispatchCreate")
 ```
 
 `dbg.breakpoints` is a live iterable/ID-keyed collection. A breakpoint handle owns its state: set `bp.enabled`, `bp.condition`, or `bp.pass_count`; remove it with `bp.delete()`.

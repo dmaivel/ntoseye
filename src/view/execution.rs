@@ -341,6 +341,18 @@ shapes! {
         command: Option<String>,
     }
 
+    /// One module-load filter (`sx* ld[:<module>]`).
+    ModuleLoadPolicy {
+        /// The image-name glob it matches, with or without extension; None
+        /// for every module (bare `ld`).
+        module: Option<String>,
+        /// `break` stops at the load, `notify` reports it; `second_chance`
+        /// and `ignore` let it continue silently.
+        mode: &'static str,
+        /// Commands run at a `break` stop.
+        command: Option<String>,
+    }
+
     /// An evaluated debugger expression (`?`).
     ExpressionValue {
         expression: String,
@@ -625,6 +637,15 @@ fn call_trace_frame(frame: &session::CallTraceFrame) -> CallTraceFrame {
         name: frame.name.clone(),
         instructions: frame.instructions,
         children: frame.children.iter().map(call_trace_frame).collect(),
+    }
+}
+
+/// One module-load filter (`sx`).
+pub fn module_load_policy(policy: &exception_policy::ModuleLoadPolicy) -> ModuleLoadPolicy {
+    ModuleLoadPolicy {
+        module: policy.module.clone(),
+        mode: policy.mode.name(),
+        command: policy.command.clone(),
     }
 }
 

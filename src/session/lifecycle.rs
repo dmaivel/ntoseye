@@ -335,7 +335,8 @@ impl Session {
             parked_windows_thread: None,
             reload_module_list_pending,
             bugcheck_trap: None,
-            bugcheck_trap_original: Vec::new(),
+            load_trap: None,
+            load_trap_interrupted: None,
             reload_surface_pending: false,
             parked_stop: None,
             pending_walk: None,
@@ -360,9 +361,10 @@ impl Session {
             session.open_site_journal(resource);
         }
         // Arm here rather than at the first resume, so the operator reads
-        // about it in the attach output alongside the capability warning that
-        // explains why it is needed, instead of beside an unrelated stop.
-        session.arm_bugcheck_trap();
+        // about them in the attach output alongside the capability warning
+        // that explains why they are needed, instead of beside an unrelated
+        // stop.
+        session.arm_traps();
 
         // A crash dump sits at its bugcheck: that is the stop it is halted at.
         if let Some(dump) = session.target.phys.dmp_info()
@@ -414,7 +416,7 @@ impl Session {
 
         let cleanup = self
             .remove_all_breakpoints()
-            .and_then(|()| self.disarm_bugcheck_trap());
+            .and_then(|()| self.disarm_traps());
         prepare_backend_after_cleanup(self.backend.as_mut(), cleanup)
     }
 }

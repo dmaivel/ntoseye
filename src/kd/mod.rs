@@ -89,6 +89,10 @@ pub struct StateChange {
     exception_address: Option<u64>,
     program_counter: u64,
     kernel_base_hint: Option<VirtAddr>,
+    /// `DBGKD_LOAD_SYMBOLS64.UnloadSymbols` of a load-symbols state change:
+    /// the image at `kernel_base_hint` is unloading. False for every other
+    /// kind.
+    unload_symbols: bool,
     is_bugcheck: bool,
     bugcheck: Option<BugcheckInfo>,
     target_reloaded: bool,
@@ -636,6 +640,7 @@ impl DebugBackend for KdBackend {
             BackendCapability::supported(DebugCapability::KernelBaseHint),
             BackendCapability::supported(DebugCapability::BugcheckDetection),
             BackendCapability::supported(DebugCapability::BugcheckDetails),
+            BackendCapability::supported(DebugCapability::ModuleLoadEvents),
             BackendCapability::supported(DebugCapability::DebugOutput),
             BackendCapability {
                 capability: DebugCapability::Msr,

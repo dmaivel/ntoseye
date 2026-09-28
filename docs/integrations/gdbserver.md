@@ -94,7 +94,7 @@ Every stop halts the whole target. A stop on a breakpoint the client planted is 
 
 | Stop | Signal |
 | --- | --- |
-| Step, `STATUS_BREAKPOINT`, `monitor bp` hit, reboot | `SIGTRAP` |
+| Step, `STATUS_BREAKPOINT`, `monitor bp` hit, reboot, `sxe ld` module load | `SIGTRAP` |
 | Access violation, in-page error | `SIGSEGV` |
 | Illegal or privileged instruction | `SIGILL` |
 | Integer or floating-point fault | `SIGFPE` |

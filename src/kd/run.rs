@@ -27,6 +27,7 @@ use super::{
 const POST_BUGCHECK_RECONNECT_ASSIST_DELAY: Duration = Duration::from_secs(20);
 
 pub(super) fn stop_event(stop: StateChange) -> StopEvent {
+    let load_symbols = stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE;
     StopEvent {
         thread_id: Some(thread_id_for(stop.processor)),
         exception_code: (stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE)
@@ -39,7 +40,10 @@ pub(super) fn stop_event(stop: StateChange) -> StopEvent {
         bugcheck: stop.bugcheck,
         target_reloaded: stop.target_reloaded,
         target_kernel_base_hint: stop.kernel_base_hint,
-        modules_changed: stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE,
+        modules_changed: load_symbols,
+        loaded_image_base: stop
+            .kernel_base_hint
+            .filter(|_| load_symbols && !stop.unload_symbols),
         assisted_breakin: stop.assisted_breakin,
     }
 }

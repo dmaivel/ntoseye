@@ -156,6 +156,7 @@ impl StopReply {
             target_reloaded: false,
             target_kernel_base_hint: None,
             modules_changed: false,
+            loaded_image_base: None,
             assisted_breakin: false,
         }
     }

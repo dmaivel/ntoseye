@@ -14,7 +14,6 @@ use crate::kd::hwbp;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
-use crate::session::stepping::step_over_current_breakpoint;
 use crate::session::stops::set_current_thread_from_stop;
 use crate::session::{BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction};
 use crate::target::Target;
@@ -129,13 +128,7 @@ impl Session {
     /// Silently continue past the breakpoint at the PC: step over it, rewrite
     /// whatever sites the stop dropped, and resume without surfacing anything.
     fn step_over_and_resume(&mut self) -> Result<()> {
-        step_over_current_breakpoint(
-            self.backend.as_mut(),
-            &self.register_map,
-            &self.target,
-            &mut self.breakpoints,
-            &self.current_thread,
-        )?;
+        self.step_over_site_at_pc()?;
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)
@@ -149,13 +142,7 @@ impl Session {
         if self.current_thread == stepping {
             return Ok(());
         }
-        step_over_current_breakpoint(
-            self.backend.as_mut(),
-            &self.register_map,
-            &self.target,
-            &mut self.breakpoints,
-            &self.current_thread,
-        )?;
+        self.step_over_site_at_pc()?;
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.set_current_thread(stepping)

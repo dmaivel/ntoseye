@@ -8,6 +8,7 @@ use crate::dbg_backend::ContinueDisposition;
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
+use crate::guest::ModuleInfo;
 use crate::session::{
     CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StepMode, StepStack,
     StopResolution,
@@ -361,6 +362,17 @@ impl ReplState<'_> {
         }
     }
 
+    /// Run the `-c` commands of the `sxe ld` filter that stopped at the load
+    /// of `module`.
+    fn run_module_load_command(&mut self, module: &ModuleInfo) -> Result<()> {
+        let command = self
+            .ctx
+            .exception_policies
+            .module_load_policy(&module.name)
+            .and_then(|policy| policy.command.clone());
+        self.run_exception_policy_command(command.as_deref())
+    }
+
     fn run_exception_policy_command(&mut self, command: Option<&str>) -> Result<()> {
         if let Some(command) = command {
             self.dispatch_exception_command(command)?;
@@ -373,6 +385,9 @@ impl ReplState<'_> {
     /// outcome is applied afterward; command-free auto-continues were already
     /// completed by the helper.
     fn apply_buffered_exception_policy(&mut self) -> Result<()> {
+        if let Some(ContinueOutcome::ModuleLoad { module, .. }) = self.ctx.current_stop().cloned() {
+            return self.run_module_load_command(&module);
+        }
         let Some(event) = self.ctx.last_event.as_ref().map(|last| last.stop.clone()) else {
             return Ok(());
         };
@@ -455,6 +470,8 @@ impl ReplState<'_> {
                         // A stream of absorbed hits (a temporary site other
                         // threads reach) must not outlast the budget either.
                         Ok(StopResolution::Resumed | StopResolution::ModulesChanged) => {
+                            // An `sxn ld` line reads as the load happens.
+                            self.flush_notices();
                             if self.stop_budget_spent() {
                                 break;
                             }
@@ -522,6 +539,14 @@ impl ReplState<'_> {
                                     None,
                                     cause,
                                 );
+                            }
+                            break;
+                        }
+                        StopResolution::ModuleLoad { module, .. } => {
+                            print_stop_separator();
+                            print_module_load_stop(self.ctx, &module);
+                            if let Err(error) = self.run_module_load_command(&module) {
+                                error!("module load command failed: {error}");
                             }
                             break;
                         }

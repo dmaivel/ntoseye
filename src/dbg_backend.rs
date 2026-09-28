@@ -237,6 +237,9 @@ pub struct StopEvent {
     pub target_kernel_base_hint: Option<VirtAddr>,
     /// Set when the transport surfaced a kernel module load/unload notification.
     pub modules_changed: bool,
+    /// Base of the image a module-load notification reports loading; `None`
+    /// for an unload and for every other stop.
+    pub loaded_image_base: Option<VirtAddr>,
     /// Set when this stop was caused by a debugger-generated assist break-in
     /// during a target refresh/reconnect sequence, rather than by a user break
     /// or target exception.
@@ -367,6 +370,7 @@ pub enum DebugCapability {
     KernelBaseHint,
     BugcheckDetection,
     BugcheckDetails,
+    ModuleLoadEvents,
     DebugOutput,
     Msr,
     IoPorts,
@@ -394,6 +398,7 @@ impl DebugCapability {
             Self::KernelBaseHint => "kernel_base_hint",
             Self::BugcheckDetection => "bugcheck_detection",
             Self::BugcheckDetails => "bugcheck_details",
+            Self::ModuleLoadEvents => "module_load_events",
             Self::DebugOutput => "debug_output",
             Self::Msr => "msr",
             Self::IoPorts => "io_ports",
@@ -420,6 +425,7 @@ impl DebugCapability {
             Self::KernelBaseHint => "kernel base hint",
             Self::BugcheckDetection => "bugcheck stop detection",
             Self::BugcheckDetails => "bugcheck details",
+            Self::ModuleLoadEvents => "module load events",
             Self::DebugOutput => "debug output",
             Self::Msr => "model-specific registers",
             Self::IoPorts => "I/O ports",
@@ -675,6 +681,7 @@ pub trait DebugBackend {
             BackendCapability::unsupported(DebugCapability::KernelBaseHint),
             BackendCapability::unsupported(DebugCapability::BugcheckDetection),
             BackendCapability::unsupported(DebugCapability::BugcheckDetails),
+            BackendCapability::unsupported(DebugCapability::ModuleLoadEvents),
             BackendCapability::unsupported(DebugCapability::DebugOutput),
             BackendCapability {
                 capability: DebugCapability::Msr,

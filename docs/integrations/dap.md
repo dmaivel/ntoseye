@@ -194,7 +194,7 @@ Instruction breakpoints, set from the disassembly view, are `bp <address>`.
 
 Data breakpoints use {command}`ba` on variable storage, including fields and array elements. Register-held locals and bitfields have no separately watchable address. Only KD and KDNET support them.
 
-Exception breakpoints are unsupported. Configure exception policy with console {command}`sx` commands.
+Exception breakpoints are unsupported. Configure exception policy with console {command}`sx` commands. A stop at a module load that `sxe ld` asked for is reported with reason `module load` and its `ModLoad:` line in the console.
 
 All breakpoint kinds accept conditions and hit counts. `hitCondition` must be a decimal pass count, not `>5` or `0x10`. Editor breakpoint conditions also use decimal literals; console conditions use the session radix.
 

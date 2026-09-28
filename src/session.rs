@@ -21,7 +21,7 @@ use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::RegisterMap;
-use crate::guest::{ModuleSymbolLoadReport, ProcessInfo};
+use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::lifecycle::InstanceGuard;
 use crate::target::{ReloadReport, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
@@ -85,6 +85,11 @@ pub enum ContinueOutcome {
     /// A single-step / step-over / step-out completed and landed at `rip`
     /// (no user breakpoint was hit en route).
     Step { rip: u64 },
+    /// A kernel image a `sxe ld` filter names loaded: it is in the module
+    /// list, its symbols are loaded like any refreshed module's, deferred
+    /// breakpoints in it are armed, and its entry point has not run. `rip`
+    /// is where the target stopped, inside the kernel's image-load path.
+    ModuleLoad { module: Box<ModuleInfo>, rip: u64 },
     /// The guest rebooted (KD stream reset) and debugger state was rebuilt.
     /// Surfaced exactly once per reboot, as early as possible: normally at the
     /// earliest post-reboot stop where the new kernel is discoverable
@@ -338,6 +343,13 @@ pub enum StopResolution {
     },
     /// The guest entered a bugcheck.
     Bugcheck { event: StopEvent },
+    /// A kernel image a `sxe ld` filter names loaded (see
+    /// [`ContinueOutcome::ModuleLoad`]).
+    ModuleLoad {
+        module: Box<ModuleInfo>,
+        event: StopEvent,
+        rip: u64,
+    },
     /// The guest rebooted and target state was rebuilt.
     TargetReloaded { event: StopEvent, coherent: bool },
     /// A genuine non-breakpoint stop, including a user interrupt.
@@ -388,6 +400,16 @@ impl VcpuInfo {
 
 /// `STATUS_BREAKPOINT`, the NTSTATUS an `int3` raises (e.g. `nt!DbgBreakPoint`).
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
+
+/// A breakpoint the session plants in the kernel for itself, outside the
+/// breakpoint manager, and the instruction bytes it displaced (empty when
+/// they could not be read). A read of `address` shows `original`, not the
+/// trap.
+#[derive(Debug, Clone)]
+pub struct TrapSite {
+    pub address: VirtAddr,
+    pub original: Vec<u8>,
+}
 
 /// What [`Session::page_in`] observed once the target came back.
 #[derive(Debug, Clone, Copy)]
@@ -472,6 +494,8 @@ pub struct Session {
     /// so every host shares one table: the REPL loop applies it (including
     /// its `-c` commands), and the shared [`Self::wait_for_stop_bounded`]
     /// auto-continues the command-free `Continue` policies for the SDK/MCP.
+    /// Its module-load filters (`sx* ld`) are applied by
+    /// [`Self::classify_stop_event`] for every host.
     pub exception_policies: ExceptionPolicyTable,
     /// ETHREAD selected for stack-only inspection while the backend remains on
     /// `current_thread`. Its register file does not exist as a coherent snapshot.
@@ -483,14 +507,18 @@ pub struct Session {
     /// stops the backend's reconnect-assist poking. Seeded at attach, which
     /// may land mid-boot; hosts read it through [`Self::kernel_coherent`].
     reload_module_list_pending: bool,
-    /// Address of the automatic `nt!KeBugCheckEx` breakpoint, once armed,
-    /// and the instruction bytes it displaced. Only backends that cannot
-    /// report a bugcheck themselves get one; see [`Self::arm_bugcheck_trap`].
-    /// The bytes are kept for the same reason the breakpoint manager keeps
-    /// its own: a read of that address must show the guest's code, not our
-    /// trap.
-    bugcheck_trap: Option<VirtAddr>,
-    bugcheck_trap_original: Vec<u8>,
+    /// The automatic `nt!KeBugCheckEx` breakpoint, once armed. Only backends
+    /// that cannot report a bugcheck themselves get one; see
+    /// [`Self::arm_bugcheck_trap`].
+    bugcheck_trap: Option<TrapSite>,
+    /// The automatic `nt!DbgLoadImageSymbols` breakpoint, once armed. Only
+    /// backends that report no module loads themselves get one; see
+    /// [`Self::arm_load_trap`].
+    load_trap: Option<TrapSite>,
+    /// The stack pointer of a thread that took an interrupt on the load trap
+    /// while being run past it, before executing it: its next hit there is
+    /// the same load, not a new one.
+    load_trap_interrupted: Option<u64>,
     /// Whether a detected reload has not yet been surfaced to the host: the
     /// guest-state rebuild failed at the detection stop, so no
     /// [`ContinueOutcome::TargetReloaded`] went out. While set, the eventual

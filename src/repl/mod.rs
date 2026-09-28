@@ -957,7 +957,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         .ctx
         .breakpoints
         .remove_all(&mut *state.ctx.backend, &state.ctx.target)
-        .and_then(|()| state.ctx.disarm_bugcheck_trap())
+        .and_then(|()| state.ctx.disarm_traps())
     {
         Ok(()) => true,
         Err(error) => {

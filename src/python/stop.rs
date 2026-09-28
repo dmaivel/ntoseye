@@ -2,7 +2,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use super::breakpoints::{self, Breakpoint};
+use super::context::Space;
 use super::handle::{Debugger, Owner};
+use super::module::Module;
 use super::process::Process;
 use super::raise;
 use super::record::PlainDict;
@@ -56,6 +58,15 @@ pub enum Stop {
     Interrupt { _context: Py<StopContext> },
     /// A completed step.
     Step { _context: Py<StopContext> },
+    /// A kernel image a `"ld"` filter set to `"break"` loaded
+    /// (`dbg.exceptions.set("ld:<module>", "break")`, `sxe ld`). The module
+    /// is listed, its symbols are loaded, breakpoints in it are armed, and its
+    /// entry point has not run.
+    ModuleLoad {
+        /// The loaded kernel module.
+        module: Py<Module>,
+        _context: Py<StopContext>,
+    },
     /// The guest is bugchecking (BSOD); `info` is the bugcheck analysis.
     Bugcheck {
         /// The bugcheck analysis (`!analyze`'s code, parameters, and culprit).
@@ -81,6 +92,7 @@ impl Stop {
             | Self::Exception { _context, .. }
             | Self::Interrupt { _context }
             | Self::Step { _context }
+            | Self::ModuleLoad { _context, .. }
             | Self::Bugcheck { _context, .. }
             | Self::Reboot { _context, .. } => _context,
         }
@@ -93,6 +105,7 @@ impl Stop {
             Self::Exception { .. } => "Exception",
             Self::Interrupt { .. } => "Interrupt",
             Self::Step { .. } => "Step",
+            Self::ModuleLoad { .. } => "ModuleLoad",
             Self::Bugcheck { .. } => "Bugcheck",
             Self::Reboot { .. } => "Reboot",
         }
@@ -185,6 +198,10 @@ impl Stop {
             .unwrap_or_default();
         Ok(match self {
             Self::Exception { code, .. } => format!("<Stop.Exception code={code:#x}{location}>"),
+            Self::ModuleLoad { module, .. } => format!(
+                "<Stop.ModuleLoad module={}{location}>",
+                module.bind(py).borrow().info.name
+            ),
             _ => format!("<Stop.{}{location}>", self.kind()),
         })
     }
@@ -243,6 +260,13 @@ impl Stop {
                 dict.set_item("kernel_base", kernel_base)?;
                 dict.set_item("coherent", coherent)?;
             }
+            Self::ModuleLoad { module, .. } => {
+                let module = module.bind(py).borrow();
+                let info = &module.info;
+                dict.set_item("module", &info.name)?;
+                dict.set_item("base", info.base_address.0)?;
+                dict.set_item("size", info.size)?;
+            }
             Self::Interrupt { .. } | Self::Step { .. } => {}
         }
         Ok(PlainDict(dict))
@@ -279,9 +303,9 @@ pub fn from_outcome(
         ContinueOutcome::Bugcheck { rip, .. } | ContinueOutcome::TargetReloaded { rip, .. } => {
             (*rip, None, None)
         }
-        ContinueOutcome::Stopped { rip, .. } | ContinueOutcome::Step { rip } => {
-            (Some(*rip), None, None)
-        }
+        ContinueOutcome::Stopped { rip, .. }
+        | ContinueOutcome::Step { rip }
+        | ContinueOutcome::ModuleLoad { rip, .. } => (Some(*rip), None, None),
         ContinueOutcome::Running | ContinueOutcome::Halted { .. } => unreachable!(),
     };
     let exception_record_hint = match &outcome {
@@ -354,6 +378,10 @@ pub fn from_outcome(
             ..
         } => Stop::Interrupt { _context: context },
         ContinueOutcome::Step { .. } => Stop::Step { _context: context },
+        ContinueOutcome::ModuleLoad { module, .. } => Stop::ModuleLoad {
+            module: Py::new(py, Module::new(owner, Space::Kernel, *module))?,
+            _context: context,
+        },
         ContinueOutcome::Bugcheck { info, .. } => {
             let bugcheck = debugger.with_session(|session| {
                 let analysis = info

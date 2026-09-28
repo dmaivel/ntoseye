@@ -30,6 +30,21 @@ KD has a fixed 32-entry software-breakpoint table. A session killed with `SIGKIL
 
 Attach reclaims entries that no live session owns, restores displaced instructions, and reports the count. A colliding install also reclaims stale entries and retries. `bc *` only clears the current session’s handles. Normal exit, `SIGTERM`, and `SIGHUP` release them.
 
+## Stopping at a driver load
+
+`sxe ld:<module>` stops the target when that kernel image loads; bare `sxe ld` stops at every kernel image load. The module name is matched case-insensitively, with or without its extension, and takes `*` and `?` (`sxe ld:mydriver`, `sxe ld:MyDriver.sys`, `sxe ld:my*`). At the stop the module is in the module list, its symbols are loaded, deferred {command}`bu` breakpoints in it are armed, and its `DriverEntry` has not run, so breakpoints set there catch the driver's initialization. The stop prints WinDbg's `ModLoad: <base> <end>   <image>` line above the usual stop context.
+
+`sxn ld[:<module>]` prints the `ModLoad:` line and continues; `sxd` and `sxi` let the load continue silently. A filter naming a module takes precedence over bare `ld`, so `sxe ld` with `sxi ld:ksecdd` stops at every load but that one. `sxe -c "<commands>" ld:<module>` runs the commands at the stop; `-f` does not apply to `ld`. {command}`sx` lists the filters and {command}`sxr` clears them. Module unload (`ud`) filters are not supported.
+
+```text
+sxe ld:mydriver
+g
+bp mydriver!MyDispatchCreate
+g
+```
+
+KD and KDNET learn of each load from the target's load notification. A GDB stub reports none, so on the `gdb` backend ntoseye plants its own breakpoint at `nt!DbgLoadImageSymbols`, which the kernel calls for every kernel image it maps, after listing it and before its entry point runs, with or without kernel debugging enabled. Attach reports the trap; it is masked out of memory reads, recorded in the site journal like other patched sites, and removed at exit. Each load halts the target briefly to refresh the module list, then resumes it unless a filter stops there.
+
 ## User-mode breakpoints in shared pages
 
 A software breakpoint is an `int3` written into a physical frame, and an image page is shared by every process mapping it. `bu /p <pid> user32!PeekMessageW` puts the byte in the single frame backing `user32.dll` for the whole machine, so every process calling that function traps. Scoping is a host-side filter: `ntoseye` compares the trapping process against the breakpoint's scope and *absorbs* a hit belonging to anyone else, removing the byte, single-stepping the instruction, writing the byte back and resuming without reporting anything.
