@@ -213,22 +213,37 @@ impl Debugger {
     }
 
     /// Single-step one instruction, or with `until` ("call", "ret", "branch")
-    /// step into until the next such instruction (`tc`/`tt`/`th`).
-    #[pyo3(signature = (until=None))]
-    fn step(slf: &Bound<'_, Self>, until: Option<Until>) -> PyResult<Py<Stop>> {
-        runcontrol::step(slf, until.map(|Until(flow)| flow))
+    /// step into until the next such instruction (`tc`/`tt`/`th`). With
+    /// `timeout` (seconds), an `until` walk still going is interrupted where
+    /// it is.
+    #[pyo3(signature = (until=None, timeout=None))]
+    fn step(
+        slf: &Bound<'_, Self>,
+        until: Option<Until>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<Stop>> {
+        runcontrol::step(slf, until.map(|Until(flow)| flow), timeout)
     }
 
     /// Step over the current instruction, or with `until` step over until the
-    /// next call/ret/branch (`pc`/`pt`/`ph`).
-    #[pyo3(signature = (until=None))]
-    fn step_over(slf: &Bound<'_, Self>, until: Option<Until>) -> PyResult<Py<Stop>> {
-        runcontrol::step_over(slf, until.map(|Until(flow)| flow))
+    /// next call/ret/branch (`pc`/`pt`/`ph`). A call runs until the stepping
+    /// thread returns from it; with `timeout` (seconds), a run or walk still
+    /// going is interrupted where it is.
+    #[pyo3(signature = (until=None, timeout=None))]
+    fn step_over(
+        slf: &Bound<'_, Self>,
+        until: Option<Until>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<Stop>> {
+        runcontrol::step_over(slf, until.map(|Until(flow)| flow), timeout)
     }
 
-    /// Run until the current function returns (`gu`).
-    fn step_out(slf: &Bound<'_, Self>) -> PyResult<Py<Stop>> {
-        runcontrol::step_out(slf)
+    /// Run until the stepping thread returns from the current function
+    /// (`gu`). With `timeout` (seconds), a thread that has not returned is
+    /// interrupted where it is.
+    #[pyo3(signature = (timeout=None))]
+    fn step_out(slf: &Bound<'_, Self>, timeout: Option<f64>) -> PyResult<Py<Stop>> {
+        runcontrol::step_out(slf, timeout)
     }
 
     /// Trace calls until the current function returns (`wt`), single-stepping

@@ -2164,19 +2164,25 @@ class Debugger:
         raises `NtoseyeError` when VBS is not running or the backend cannot
         read host memory. Experimental.
         """
-    def step(self, /, until: Literal["call", "ret", "branch"] |None = None) -> Stop:
+    def step(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
         """
         Single-step one instruction, or with `until` ("call", "ret", "branch")
-        step into until the next such instruction (`tc`/`tt`/`th`).
+        step into until the next such instruction (`tc`/`tt`/`th`). With
+        `timeout` (seconds), an `until` walk still going is interrupted where
+        it is.
         """
-    def step_out(self, /) -> Stop:
+    def step_out(self, /, timeout: float |None = None) -> Stop:
         """
-        Run until the current function returns (`gu`).
+        Run until the stepping thread returns from the current function
+        (`gu`). With `timeout` (seconds), a thread that has not returned is
+        interrupted where it is.
         """
-    def step_over(self, /, until: Literal["call", "ret", "branch"] |None = None) -> Stop:
+    def step_over(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
         """
         Step over the current instruction, or with `until` step over until the
-        next call/ret/branch (`pc`/`pt`/`ph`).
+        next call/ret/branch (`pc`/`pt`/`ph`). A call runs until the stepping
+        thread returns from it; with `timeout` (seconds), a run or walk still
+        going is interrupted where it is.
         """
     @property
     def stop(self, /) -> Stop |None:

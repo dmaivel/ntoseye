@@ -194,15 +194,17 @@ fn settle(
     }
 }
 
-/// [`settle`] for a call that always ends on a stop (a step).
+/// [`settle`] for a call that always ends on a stop (a step): one that
+/// `timeout` cuts short is halted where it is.
 fn settle_stop(
     dbg: &Bound<'_, Debugger>,
+    timeout: Option<Duration>,
     attempt: impl FnMut(&mut Session, Option<Duration>) -> CoreResult<ContinueOutcome> + Send,
 ) -> PyResult<Py<Stop>> {
     let stepping = dbg
         .get()
         .with_session(|session| Ok(session.current_thread.clone()))?;
-    settle(dbg, None, Some(stepping), attempt)?.ok_or_else(no_stop)
+    settle(dbg, timeout, Some(stepping), attempt)?.ok_or_else(no_stop)
 }
 
 /// Drop `when=` callbacks of breakpoints that no longer exist (a one-shot
@@ -271,18 +273,28 @@ fn run_to_address(
     }
 }
 
-pub fn step(dbg: &Bound<'_, Debugger>, until: Option<UntilFlow>) -> PyResult<Py<Stop>> {
+pub fn step(
+    dbg: &Bound<'_, Debugger>,
+    until: Option<UntilFlow>,
+    timeout: Option<f64>,
+) -> PyResult<Py<Stop>> {
     reject_condition_mutation()?;
+    let timeout = timeout_arg(timeout)?;
     dbg.get()
         .with_session(|session| require_halted(session, "step"))?;
     match until {
-        None => settle_stop(dbg, single_step),
-        Some(kind) => step_to_flow(dbg, StepMode::Into, kind),
+        None => settle_stop(dbg, None, single_step),
+        Some(kind) => step_to_flow(dbg, StepMode::Into, kind, timeout),
     }
 }
 
-pub fn step_over(dbg: &Bound<'_, Debugger>, until: Option<UntilFlow>) -> PyResult<Py<Stop>> {
+pub fn step_over(
+    dbg: &Bound<'_, Debugger>,
+    until: Option<UntilFlow>,
+    timeout: Option<f64>,
+) -> PyResult<Py<Stop>> {
     reject_condition_mutation()?;
+    let timeout = timeout_arg(timeout)?;
     let plan = dbg.get().with_session(|session| {
         require_halted(session, "step_over")?;
         match until {
@@ -297,14 +309,14 @@ pub fn step_over(dbg: &Bound<'_, Debugger>, until: Option<UntilFlow>) -> PyResul
         }
     })?;
     match (until, plan) {
-        (Some(kind), _) => step_to_flow(dbg, StepMode::Over, kind),
+        (Some(kind), _) => step_to_flow(dbg, StepMode::Over, kind, timeout),
         (None, Some((next, frame))) => {
             // A call: run to the instruction after it, again past declined hits.
-            settle_stop(dbg, move |session, _| {
-                run_to_address(session, next, frame.clone(), None)
+            settle_stop(dbg, timeout, move |session, remaining| {
+                run_to_address(session, next, frame.clone(), remaining)
             })
         }
-        (None, _) => settle_stop(dbg, single_step),
+        (None, _) => settle_stop(dbg, None, single_step),
     }
 }
 
@@ -315,22 +327,30 @@ fn single_step(session: &mut Session, _: Option<Duration>) -> CoreResult<Continu
 }
 
 /// Step into or over calls per `mode` until the next instruction of `kind`.
-fn step_to_flow(dbg: &Bound<'_, Debugger>, mode: StepMode, kind: UntilFlow) -> PyResult<Py<Stop>> {
-    settle_stop(dbg, move |session, _| {
-        session.step_until(mode, STEP_UNTIL_LIMIT, None, |_, flow| kind.matches(flow))
+fn step_to_flow(
+    dbg: &Bound<'_, Debugger>,
+    mode: StepMode,
+    kind: UntilFlow,
+    timeout: Option<Duration>,
+) -> PyResult<Py<Stop>> {
+    settle_stop(dbg, timeout, move |session, remaining| {
+        session.step_until(mode, STEP_UNTIL_LIMIT, remaining, |_, flow| {
+            kind.matches(flow)
+        })
     })
 }
 
-pub fn step_out(dbg: &Bound<'_, Debugger>) -> PyResult<Py<Stop>> {
+pub fn step_out(dbg: &Bound<'_, Debugger>, timeout: Option<f64>) -> PyResult<Py<Stop>> {
     reject_condition_mutation()?;
+    let timeout = timeout_arg(timeout)?;
     let (target, frame) = dbg.get().with_session(|session| {
         require_halted(session, "step_out")?;
         let target = session.step_out_target().map_err(err)?;
         let frame = session.step_frame(StepStack::FunctionReturn).map_err(err)?;
         Ok((target, frame))
     })?;
-    settle_stop(dbg, move |session, _| {
-        run_to_address(session, target, frame.clone(), None)
+    settle_stop(dbg, timeout, move |session, remaining| {
+        run_to_address(session, target, frame.clone(), remaining)
     })
 }
 
