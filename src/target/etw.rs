@@ -28,6 +28,7 @@ use crate::layout::TypeInfo;
 use crate::target::{ListCursor, Target};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
+use crate::wpp::{TmfMessage, format_message};
 
 /// Most `GlobalList` nodes walked for one logger; a logger's `MaximumBuffers`
 /// is far below this.
@@ -394,6 +395,38 @@ pub struct EtwDecodeStop {
     pub reason: String,
 }
 
+/// A WPP message with the TMF an indexed PDB declares for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EtwMessageFormat {
+    /// The TMF's provider (component) name.
+    pub provider: String,
+    pub function: Option<String>,
+    pub level: Option<String>,
+    pub flags: Option<String>,
+    /// The rendered message, or why the payload does not fit the TMF's
+    /// argument types.
+    pub text: std::result::Result<String, String>,
+}
+
+/// Render a WPP message record from the TMF `lookup` finds for its message
+/// GUID and number. `None` for other records, messages without a GUID
+/// (component ids), and messages no TMF describes.
+pub fn format_message_record(
+    record: &EtwRecord,
+    lookup: impl FnOnce(&[u8; 16], u16) -> Option<Arc<TmfMessage>>,
+    pointer_size: u8,
+) -> Option<EtwMessageFormat> {
+    let message = record.message.as_ref()?;
+    let tmf = lookup(message.guid.as_ref()?, message.number)?;
+    Some(EtwMessageFormat {
+        provider: tmf.provider.clone(),
+        function: tmf.function.clone(),
+        level: tmf.level.clone(),
+        flags: tmf.flags.clone(),
+        text: format_message(&tmf, &record.payload, pointer_size),
+    })
+}
+
 /// An event with the buffer it came from and its time.
 #[derive(Debug, Clone)]
 pub struct EtwEvent {
@@ -402,6 +435,9 @@ pub struct EtwEvent {
     /// FILETIME, when the logger's clock converts to one.
     pub system_time: Option<u64>,
     pub record: EtwRecord,
+    /// A WPP message's TMF rendering; `None` when no indexed PDB declares
+    /// its TMF, or the record is not a WPP message.
+    pub message_format: Option<EtwMessageFormat>,
 }
 
 /// A buffer whose events could not all be decoded.
@@ -428,8 +464,27 @@ pub struct EtwEventDump {
     pub qpc_frequency: Option<u64>,
     /// Processor speed used for CpuCycle timestamps.
     pub cpu_mhz: Option<u64>,
-    /// Why WPP messages are shown raw.
+    /// Why some WPP messages have no `message_format`; `None` when every
+    /// one has.
     pub message_format_note: Option<String>,
+}
+
+/// Why WPP messages among `events` have no TMF rendering, when some do not.
+fn message_format_note(events: &[EtwEvent]) -> Option<String> {
+    let raw = events
+        .iter()
+        .filter(|event| {
+            event.record.kind == EtwHeaderKind::Message && event.message_format.is_none()
+        })
+        .count();
+    (raw > 0).then(|| {
+        format!(
+            "{raw} WPP message{} shown raw: no loaded PDB carries their trace message \
+             format (TMF), which only a provider's private PDB holds; add its directory \
+             with .sympath+ <dir>, then .reload <driver>",
+            if raw == 1 { " is" } else { "s are" }
+        )
+    })
 }
 
 /// Byte offsets of `_EVENT_HEADER` and its `_EVENT_DESCRIPTOR`, from the PDB.
@@ -1217,11 +1272,17 @@ impl Target {
             events.extend(records.into_iter().map(|record| {
                 let order = record.timestamp.unwrap_or(previous);
                 previous = order;
+                let message_format = format_message_record(
+                    &record,
+                    |guid, number| self.symbols.wpp_message(guid, number),
+                    types.buffer.pointer_size,
+                );
                 let event = EtwEvent {
                     buffer: buffer.address,
                     processor: buffer.processor,
                     system_time: record.timestamp.and_then(|t| time.system_time(t)),
                     record,
+                    message_format,
                 };
                 (order, event)
             }));
@@ -1233,14 +1294,7 @@ impl Target {
             .skip(most_recent.map_or(0, |count| total_events.saturating_sub(count)))
             .map(|(_, event)| event)
             .collect();
-        let message_format_note = events
-            .iter()
-            .any(|event| event.record.kind == EtwHeaderKind::Message)
-            .then(|| {
-                "WPP messages are shown raw: their trace message format (TMF) is kept only \
-                 in the provider's private PDB, and no loaded symbol file carries it"
-                    .to_string()
-            });
+        let message_format_note = message_format_note(&events);
         Ok(EtwEventDump {
             logger,
             buffers_walked: walked,
@@ -1646,6 +1700,69 @@ mod tests {
         assert_eq!(second.offset, 0x28);
         assert_eq!(second.message.unwrap().number, 0x0d);
         assert_eq!(second.payload.len(), 0x50 - 0x28);
+    }
+
+    #[test]
+    fn formats_wpp_messages_whose_tmf_is_known() {
+        // The NtfsLog records above: the second's payload is two pointers,
+        // a GUID and a 64-bit count. Its TMF is written here, as ntfs.pdb
+        // has none.
+        let data = hex(
+            "28 00 00 90 0a 00 aa 00 38 5a 46 26 75 b7 bf 37 c9 af 18 10 e9 18 87 cd \
+             f3 48 35 28 5b 4e dd 01 c0 00 00 00 8c 0b 00 00 \
+             50 00 00 90 0d 00 aa 00 bb 68 90 6e 21 fb 30 34 ae c3 b8 c3 6d 4e b7 a8 \
+             39 fb 36 28 5b 4e dd 01 cc 08 00 00 8c 0b 00 00 \
+             90 97 a2 8b 8b be ff ff e0 2c 3f 8c 8b be ff ff \
+             73 94 ce 4f 36 ba f1 11 98 b0 e6 00 ef 9c be aa 48 00 00 00 00 00 00 00",
+        );
+        let tmf = Arc::new(
+            TmfMessage::parse(
+                &[
+                    "TMF:",
+                    "6e9068bb-fb21-3430-aec3-b8c36d4eb7a8 NtfsLog // SRC=ntfs.c MJ= MN=",
+                    "#typev ntfs_c10 13 \"%0Scb %10!p! Fcb %11!p! id %12!s! size %13!I64u!\" //   LEVEL=TRACE_LEVEL_INFORMATION FLAGS=NTFS_ALL FUNC=NtfsCommonWrite",
+                    "{",
+                    "Scb, ItemPtr -- 10",
+                    "Scb->Fcb, ItemPtr -- 11",
+                    "&Id, ItemGuid -- 12",
+                    "Size, ItemULongLong -- 13",
+                    "}",
+                ],
+                None,
+            )
+            .unwrap(),
+        );
+        let lookup =
+            |guid: &[u8; 16], number: u16| ((*guid, number) == tmf.key()).then(|| tmf.clone());
+        let (records, _) = decode_buffer_records(&data, 0, data.len(), &layout());
+        let events: Vec<EtwEvent> = records
+            .into_iter()
+            .map(|record| EtwEvent {
+                buffer: VirtAddr(0),
+                processor: 0,
+                system_time: None,
+                message_format: format_message_record(&record, lookup, 8),
+                record,
+            })
+            .collect();
+
+        assert_eq!(events[0].message_format, None);
+        let format = events[1].message_format.as_ref().unwrap();
+        assert_eq!(
+            (format.provider.as_str(), format.function.as_deref()),
+            ("NtfsLog", Some("NtfsCommonWrite"))
+        );
+        assert_eq!(
+            format.text.as_deref(),
+            Ok("Scb FFFFBE8B8BA29790 Fcb FFFFBE8B8C3F2CE0 \
+                id {4fce9473-ba36-11f1-98b0-e600ef9cbeaa} size 72")
+        );
+        // The raw payload stays.
+        assert_eq!(events[1].record.payload.len(), 0x28);
+        // Only the message without a TMF counts as raw.
+        let note = message_format_note(&events).unwrap();
+        assert!(note.starts_with("1 WPP message "));
+        assert_eq!(message_format_note(&events[1..]), None);
     }
 
     #[test]

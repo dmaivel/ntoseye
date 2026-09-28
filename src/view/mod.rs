@@ -21,7 +21,7 @@ macro_rules! view_modules {
     };
 }
 
-view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, list, meta, mm, module, object, pnp, process, sched, security, symbols, triage, usermode);
+view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, list, meta, mm, module, object, pnp, process, sched, security, symbols, triage, usermode, wdf);
 
 /// One step of [`with_shape_classes!`]: asks the next module for its classes
 /// (its `shape_classes!`), then emits the module once none are left.

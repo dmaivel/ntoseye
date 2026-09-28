@@ -184,3 +184,4 @@ pub mod ui;
 pub mod unwind;
 #[cfg(any(feature = "mcp", feature = "python"))]
 pub mod view;
+pub mod wpp;

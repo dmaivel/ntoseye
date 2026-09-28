@@ -109,6 +109,8 @@ shapes! {
 
     /// The fields a `MESSAGE_TRACE_HEADER` carries after itself, as its
     /// `TRACE_MESSAGE_*` option flags select; each `None` when not selected.
+    /// The TMF fields are `None` when no loaded PDB declares the message's
+    /// trace message format (TMF).
     EtwEventMessage {
         /// The message number.
         number: u16,
@@ -116,6 +118,18 @@ shapes! {
         sequence: Option<u32>,
         guid: Option<String>,
         component_id: Option<u32>,
+        /// The TMF's provider (component) name.
+        provider: Option<String>,
+        /// The function that traced it.
+        function: Option<String>,
+        /// The TMF's trace level (`TRACE_LEVEL_ERROR`, or a number).
+        level: Option<String>,
+        /// The TMF's trace flag name.
+        flags: Option<String>,
+        /// The message rendered from its TMF and the payload.
+        text: Option<String>,
+        /// Why the payload does not fit the TMF's argument types.
+        format_error: Option<String>,
     }
 
     /// `Class.Type`/`Level`/`Version` of a classic event.
@@ -199,7 +213,7 @@ shapes! {
         cpu_mhz: Option<u64>,
         /// Buffers skipped whole (compressed) and walks that stopped early.
         issues: Vec<EtwEventIssue>,
-        /// Why WPP messages are shown raw.
+        /// Why some WPP messages have no `text`; `None` when every one has.
         message_format_note: Option<String>,
         events: Vec<EtwEvent>,
     }
@@ -323,12 +337,21 @@ fn event(e: &etw::EtwEvent) -> EtwEvent {
             level,
             version,
         }),
-        message: r.message.map(|m| EtwEventMessage {
-            number: m.number,
-            option_flags: m.option_flags,
-            sequence: m.sequence,
-            guid: guid(m.guid.as_ref()),
-            component_id: m.component_id,
+        message: r.message.map(|m| {
+            let format = e.message_format.as_ref();
+            EtwEventMessage {
+                number: m.number,
+                option_flags: m.option_flags,
+                sequence: m.sequence,
+                guid: guid(m.guid.as_ref()),
+                component_id: m.component_id,
+                provider: format.map(|f| f.provider.clone()),
+                function: format.and_then(|f| f.function.clone()),
+                level: format.and_then(|f| f.level.clone()),
+                flags: format.and_then(|f| f.flags.clone()),
+                text: format.and_then(|f| f.text.clone().ok()),
+                format_error: format.and_then(|f| f.text.clone().err()),
+            }
         }),
         extended: r
             .extended

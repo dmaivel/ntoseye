@@ -51,6 +51,8 @@ dv
 
 The stack and disassembly include mapped source locations. {command}`dv` displays the current procedure's private parameters and locals, including register- or stack-relative locations and live values when the current register context matches the procedure.
 
+A private PDB also carries the driver's WPP trace message formats (TMF): `tracewpp` stores each message's format string and argument types as an annotation in it. With the PDB loaded, {command}`!wmitrace.logdump` prints the driver's WPP messages formatted (provider, function, and text), and `message.text` holds the same in MCP results and `dbg.inspect.etw_events()`. Without it, a message shows only its GUID, number, and payload bytes, and the dump says how many stayed raw. Public PDBs strip the annotations, except Microsoft's `Wdf01000.pdb`, which keeps KMDF's own.
+
 Keep a {command}`bu` breakpoint installed if the driver will be cycled. Once ntoseye observes the unload, {command}`bl` changes it from `enabled` to `deferred` without losing its ID, source specification, conditions, pass count, hit count, or action. After the module reload is observed at a later stop, the same breakpoint becomes `enabled` at the new address.
 
 {command}`.reload` is reserved for Rust-owned symbol reload behavior; {command}`reload-scripts` reloads custom commands and aliases.

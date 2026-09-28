@@ -83,6 +83,7 @@ using/symbols
 using/bugchecks
 using/dumps
 using/kdfiles
+using/kmdf
 ```
 
 ```{toctree}

@@ -30,6 +30,7 @@ mod symbols;
 pub mod usermode;
 mod variables;
 mod vtl;
+pub mod wdf;
 pub mod workqueue;
 pub mod zombies;
 

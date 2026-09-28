@@ -783,6 +783,82 @@ impl Inspect {
         })
     }
 
+    /// The KMDF client drivers on `Wdf01000!FxLibraryGlobals`'s driver
+    /// list (`!wdfkd.wdfldr`).
+    fn wdf_loader<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::wdf::WdfLoader>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_loader().map_err(err)?;
+            Ok(view::wdf::loader(&detail))
+        })
+    }
+
+    /// A KMDF client driver, named as `wdf_loader` lists it (without case,
+    /// `.sys` optional), and its device objects with the WDFDEVICEs behind
+    /// them (`!wdfkd.wdfdriverinfo`).
+    fn wdf_driver_info<'py>(
+        &self,
+        py: Python<'py>,
+        driver: &str,
+    ) -> PyResult<Typed<'py, view::wdf::WdfDriverInfo>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_driver_info(driver).map_err(err)?;
+            Ok(view::wdf::driver_info(&detail))
+        })
+    }
+
+    /// Decode a WDF handle and the object it names; a value that is not a
+    /// live KMDF object's handle raises (`!wdfkd.wdfhandle`).
+    fn wdf_handle<'py>(
+        &self,
+        py: Python<'py>,
+        handle: u64,
+    ) -> PyResult<Typed<'py, view::wdf::WdfHandle>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_handle(handle).map_err(err)?;
+            Ok(view::wdf::handle(&detail))
+        })
+    }
+
+    /// A WDFDEVICE's device objects, state machines, and queues
+    /// (`!wdfkd.wdfdevice`).
+    fn wdf_device<'py>(
+        &self,
+        py: Python<'py>,
+        handle: u64,
+    ) -> PyResult<Typed<'py, view::wdf::WdfDevice>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_device(handle).map_err(err)?;
+            Ok(view::wdf::device(&detail))
+        })
+    }
+
+    /// A WDFQUEUE's configuration, state, callbacks, and requests
+    /// (`!wdfkd.wdfqueue`).
+    fn wdf_queue<'py>(
+        &self,
+        py: Python<'py>,
+        handle: u64,
+    ) -> PyResult<Typed<'py, view::wdf::WdfQueue>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_queue(handle).map_err(err)?;
+            Ok(view::wdf::queue(&detail))
+        })
+    }
+
+    /// A KMDF client driver's In-Flight Recorder log, oldest record first,
+    /// each record formatted from its TMF message when a loaded PDB declares
+    /// it (`!wdfkd.wdflogdump`).
+    fn wdf_log<'py>(
+        &self,
+        py: Python<'py>,
+        driver: &str,
+    ) -> PyResult<Typed<'py, view::wdf::WdfLog>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_log_dump(driver).map_err(err)?;
+            Ok(view::wdf::log(&detail))
+        })
+    }
+
     /// Report system memory, pool, PTE, and page-file counters (`!vm`).
     #[pyo3(signature = (include_processes=true))]
     fn vm<'py>(
@@ -1056,6 +1132,8 @@ impl Inspect {
 
     /// Decode the events still in an ETW trace session's buffers, oldest
     /// first (`!wmitrace.logdump`); `count` keeps only the most recent.
+    /// A WPP message's `message.text` is its rendering from the TMF a loaded
+    /// PDB declares; the raw `payload` is kept either way.
     #[pyo3(signature = (logger, count=None))]
     fn etw_events<'py>(
         &self,

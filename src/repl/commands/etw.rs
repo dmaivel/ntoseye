@@ -6,9 +6,9 @@ use owo_colors::OwoColorize;
 
 use crate::error::Result;
 use crate::target::etw::{
-    EtwBufferIssue, EtwClock, EtwEvent, EtwHeaderKind, EtwLogger, LogDumpArguments,
-    event_trace_group_name, extended_type_name, format_filetime_precise, format_guid,
-    logger_mode_names,
+    EtwBufferIssue, EtwClock, EtwEvent, EtwHeaderKind, EtwLogger, EtwMessageFormat,
+    LogDumpArguments, event_trace_group_name, extended_type_name, format_filetime_precise,
+    format_guid, logger_mode_names,
 };
 use crate::ui;
 
@@ -44,7 +44,7 @@ repl_command! {
     names: ["!wmitrace.logdump", "wmitrace.logdump"],
     usage: "!wmitrace.logdump [-t count] <logger-id|logger-name|context-address>",
     summary: "Print the events still in an ETW trace session's buffers, oldest first.",
-    details: "Walks every buffer on the session's GlobalList (each processor's current buffer, buffers waiting to be flushed, and free buffers whose events were already delivered but not yet overwritten) and decodes each event record by its trace header: EVENT_HEADER (manifest and TraceLogging providers: provider GUID, event id, version, opcode, task, level, keyword), EVENT_TRACE_HEADER (classic providers), SYSTEM_TRACE_HEADER and PERFINFO_TRACE_HEADER (kernel events: group and hook id), and MESSAGE_TRACE_HEADER (WPP: message GUID and number). Each event is printed as [cpu]pid.tid::time (hex ids, UTC time converted from the session's clock) with its payload in hex (the first 256 bytes). -t count keeps the most recent count events. WPP messages are printed raw: their trace message format lives only in the provider's private PDB. A buffer whose records stop making sense is reported with the offset, not resynchronized.",
+    details: "Walks every buffer on the session's GlobalList (each processor's current buffer, buffers waiting to be flushed, and free buffers whose events were already delivered but not yet overwritten) and decodes each event record by its trace header: EVENT_HEADER (manifest and TraceLogging providers: provider GUID, event id, version, opcode, task, level, keyword), EVENT_TRACE_HEADER (classic providers), SYSTEM_TRACE_HEADER and PERFINFO_TRACE_HEADER (kernel events: group and hook id), and MESSAGE_TRACE_HEADER (WPP: message GUID and number). Each event is printed as [cpu]pid.tid::time (hex ids, UTC time converted from the session's clock) with its payload in hex (the first 256 bytes). A WPP message whose trace message format (TMF) a loaded PDB declares is printed formatted instead: provider, function, and the rendered text; one whose payload does not fit its TMF is printed raw with the reason. Microsoft's public Wdf01000.pdb carries KMDF's own TMF; any other provider's is only in its private PDB, so add the driver's PDB directory with .sympath+ and .reload the driver. -t count keeps the most recent count events. A buffer whose records stop making sense is reported with the offset, not resynchronized.",
 }
 
 repl_command! {
@@ -390,15 +390,30 @@ fn print_event(event: &EtwEvent) {
                 d.keyword
             )
         }
-        EtwHeaderKind::Message => {
-            let message = record.message.expect("message records carry their header");
-            let source = match (guid, message.component_id) {
-                (Some(guid), _) => guid,
-                (None, Some(component)) => format!("component {component:#x}"),
-                (None, None) => "(no guid)".to_string(),
-            };
-            format!("wpp {source} #{}", message.number)
-        }
+        EtwHeaderKind::Message => match &event.message_format {
+            Some(EtwMessageFormat {
+                provider,
+                function,
+                text: Ok(text),
+                ..
+            }) => {
+                // Format strings written for DbgPrint end their line.
+                let text = text.trim_end_matches(['\r', '\n']);
+                match function {
+                    Some(function) => format!("{provider} {function}: {text}"),
+                    None => format!("{provider}: {text}"),
+                }
+            }
+            _ => {
+                let message = record.message.expect("message records carry their header");
+                let source = match (guid, message.component_id) {
+                    (Some(guid), _) => guid,
+                    (None, Some(component)) => format!("component {component:#x}"),
+                    (None, None) => "(no guid)".to_string(),
+                };
+                format!("wpp {source} #{}", message.number)
+            }
+        },
         EtwHeaderKind::FullHeader | EtwHeaderKind::Instance => {
             let (kind, level, version) = record.class.unwrap_or_default();
             format!(
@@ -423,6 +438,17 @@ fn print_event(event: &EtwEvent) {
         ui::muted(record.kind.name()),
         what
     );
+    if let Some(format) = &event.message_format {
+        match &format.text {
+            // The rendered text stands in for the payload.
+            Ok(_) => return,
+            Err(error) => outln!(
+                "    {} {} ({error})",
+                ui::muted("unformatted:"),
+                format.provider
+            ),
+        }
+    }
     for item in &record.extended {
         let name = extended_type_name(item.ext_type)
             .map_or_else(|| format!("type {}", item.ext_type), str::to_string);

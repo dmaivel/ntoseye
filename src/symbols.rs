@@ -3,6 +3,7 @@ use crate::{
     layout::{EnumDef, ParsedType, TypeInfo},
     pe::PeImage,
     types::{Dtb, VirtAddr},
+    wpp::{MessageKey, TmfMessage},
 };
 use dashmap::DashMap;
 use memmap2::Mmap;
@@ -124,6 +125,9 @@ pub struct SymbolStore {
     symbol_addresses: DashMap<u128, Vec<AddressEntry>>,
     source_lines: DashMap<u128, Vec<SourceLineEntry>>,
     index_diagnostics: DashMap<u128, Vec<SymbolIndexDiagnostic>>,
+    /// GUID -> WPP messages its `TMF:` annotations declare, by message GUID
+    /// and number. PDBs without any have no entry.
+    wpp_messages: DashMap<u128, HashMap<MessageKey, Arc<TmfMessage>>>,
 
     /// (guid, struct name) -> parsed layout. `dump_struct_with_types`
     /// otherwise rescans the entire PDB type stream on every call; keying on
@@ -607,6 +611,7 @@ impl SymbolStore {
             symbol_addresses: DashMap::new(),
             source_lines: DashMap::new(),
             index_diagnostics: DashMap::new(),
+            wpp_messages: DashMap::new(),
             type_cache: DashMap::new(),
             enum_cache: DashMap::new(),
             locals_cache: DashMap::new(),
@@ -664,6 +669,19 @@ impl SymbolStore {
             .get(&guid)
             .map(|diagnostics| diagnostics.clone())
             .unwrap_or_default()
+    }
+
+    /// The TMF message `number` of message GUID `guid` (raw 16 GUID bytes as
+    /// stored in memory), from any indexed PDB that declares it, with its
+    /// `ItemEnum` types resolved from that PDB.
+    pub fn wpp_message(&self, guid: &[u8; 16], number: u16) -> Option<Arc<TmfMessage>> {
+        let (pdb, message) = self.wpp_messages.iter().find_map(|messages| {
+            messages
+                .get(&(*guid, number))
+                .map(|message| (*messages.key(), message.clone()))
+        })?;
+        message.resolve_enums(|name| self.enum_def(pdb, name));
+        Some(message)
     }
 
     pub fn symbol_sources(&self) -> Vec<SymbolSource> {
@@ -936,6 +954,7 @@ impl SymbolStore {
             self.symbol_addresses.remove(&guid);
             self.source_lines.remove(&guid);
             self.index_diagnostics.remove(&guid);
+            self.wpp_messages.remove(&guid);
             self.type_cache
                 .retain(|(cached_guid, _), _| *cached_guid != guid);
             self.enum_cache

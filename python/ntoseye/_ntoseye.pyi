@@ -3043,7 +3043,7 @@ class EtwEventDump(BaseRecord):
     @property
     def message_format_note(self, /) -> str |None:
         """
-        Why WPP messages are shown raw.
+        Why some WPP messages have no `text`; `None` when every one has.
         """
     @property
     def qpc_frequency(self, /) -> int |None:
@@ -3076,11 +3076,33 @@ class EtwEventMessage(BaseRecord):
     """
     The fields a `MESSAGE_TRACE_HEADER` carries after itself, as its
     `TRACE_MESSAGE_*` option flags select; each `None` when not selected.
+    The TMF fields are `None` when no loaded PDB declares the message's
+    trace message format (TMF).
     """
     @property
     def component_id(self, /) -> int |None: ...
     @property
+    def flags(self, /) -> str |None:
+        """
+        The TMF's trace flag name.
+        """
+    @property
+    def format_error(self, /) -> str |None:
+        """
+        Why the payload does not fit the TMF's argument types.
+        """
+    @property
+    def function(self, /) -> str |None:
+        """
+        The function that traced it.
+        """
+    @property
     def guid(self, /) -> str |None: ...
+    @property
+    def level(self, /) -> str |None:
+        """
+        The TMF's trace level (`TRACE_LEVEL_ERROR`, or a number).
+        """
     @property
     def number(self, /) -> int:
         """
@@ -3089,7 +3111,17 @@ class EtwEventMessage(BaseRecord):
     @property
     def option_flags(self, /) -> int: ...
     @property
+    def provider(self, /) -> str |None:
+        """
+        The TMF's provider (component) name.
+        """
+    @property
     def sequence(self, /) -> int |None: ...
+    @property
+    def text(self, /) -> str |None:
+        """
+        The message rendered from its TMF and the payload.
+        """
 
 @final
 class EtwExtendedData(BaseRecord):
@@ -5666,6 +5698,8 @@ class Inspect:
         """
         Decode the events still in an ETW trace session's buffers, oldest
         first (`!wmitrace.logdump`); `count` keeps only the most recent.
+        A WPP message's `message.text` is its rendering from the TMF a loaded
+        PDB declares; the raw `payload` is kept either way.
         """
     def etw_logger(self, /, logger: int |str) -> EtwLogger:
         """
@@ -5903,6 +5937,38 @@ class Inspect:
     def vpb(self, /, address: int) -> Vpb:
         """
         Decode a volume parameter block (`!vpb`).
+        """
+    def wdf_device(self, /, handle: int) -> WdfDevice:
+        """
+        A WDFDEVICE's device objects, state machines, and queues
+        (`!wdfkd.wdfdevice`).
+        """
+    def wdf_driver_info(self, /, driver: str) -> WdfDriverInfo:
+        """
+        A KMDF client driver, named as `wdf_loader` lists it (without case,
+        `.sys` optional), and its device objects with the WDFDEVICEs behind
+        them (`!wdfkd.wdfdriverinfo`).
+        """
+    def wdf_handle(self, /, handle: int) -> WdfHandle:
+        """
+        Decode a WDF handle and the object it names; a value that is not a
+        live KMDF object's handle raises (`!wdfkd.wdfhandle`).
+        """
+    def wdf_loader(self, /) -> WdfLoader:
+        """
+        The KMDF client drivers on `Wdf01000!FxLibraryGlobals`'s driver
+        list (`!wdfkd.wdfldr`).
+        """
+    def wdf_log(self, /, driver: str) -> WdfLog:
+        """
+        A KMDF client driver's In-Flight Recorder log, oldest record first,
+        each record formatted from its TMF message when a loaded PDB declares
+        it (`!wdfkd.wdflogdump`).
+        """
+    def wdf_queue(self, /, handle: int) -> WdfQueue:
+        """
+        A WDFQUEUE's configuration, state, callbacks, and requests
+        (`!wdfkd.wdfqueue`).
         """
     def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[str] |None = None) -> WorkQueues:
         """
@@ -12255,6 +12321,707 @@ class Watchpoint(Breakpoint):
         """
         Width of the watched memory access in bytes.
         """
+
+@final
+class WdfCallback(BaseRecord):
+    """
+    A queue event callback.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def name(self, /) -> str:
+        """
+        `EvtIoRead`, ...
+        """
+    @property
+    def symbol(self, /) -> str |None: ...
+
+@final
+class WdfClient(BaseRecord):
+    """
+    A KMDF client driver (`_FX_DRIVER_GLOBALS`).
+    """
+    @property
+    def driver(self, /) -> int |None:
+        """
+        The `FxDriver`; `None` before `WdfDriverCreate`.
+        """
+    @property
+    def driver_object(self, /) -> int: ...
+    @property
+    def driver_object_name(self, /) -> str |None:
+        """
+        The `DRIVER_OBJECT`'s name (`\\Driver\\kdnic`).
+        """
+    @property
+    def globals(self, /) -> int:
+        """
+        The `_FX_DRIVER_GLOBALS`.
+        """
+    @property
+    def image_base(self, /) -> int: ...
+    @property
+    def image_size(self, /) -> int:
+        """
+        Bytes.
+        """
+    @property
+    def log_header(self, /) -> int |None:
+        """
+        The IFR log's `_WDF_IFR_HEADER` (`WdfLogHeader`); `None` without
+        one.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        `Public.DriverName`; `None` when it is empty or not printable.
+        """
+    @property
+    def problems(self, /) -> list[str]:
+        """
+        What in the globals failed validation; the fields it concerns are
+        `None`.
+        """
+    @property
+    def registry_path(self, /) -> str |None:
+        """
+        The `FxDriver`'s registry path.
+        """
+    @property
+    def verifier_on(self, /) -> bool:
+        """
+        `FxVerifierOn`.
+        """
+    @property
+    def version(self, /) -> WdfVersion |None:
+        """
+        The KMDF version the driver bound to (`WdfBindInfo->Version`).
+        """
+    @property
+    def wdf_driver(self, /) -> int |None:
+        """
+        The WDFDRIVER handle (`Public.Driver`).
+        """
+
+@final
+class WdfContext(BaseRecord):
+    """
+    An object's context (`FxContextHeader`).
+    """
+    @property
+    def context(self, /) -> int:
+        """
+        The context itself.
+        """
+    @property
+    def header(self, /) -> int:
+        """
+        The `FxContextHeader`.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The context type's name.
+        """
+    @property
+    def size(self, /) -> int |None:
+        """
+        Bytes.
+        """
+    @property
+    def type_info(self, /) -> int |None:
+        """
+        The `_WDF_OBJECT_CONTEXT_TYPE_INFO`; `None` for a header without a
+        context type.
+        """
+
+@final
+class WdfDevice(BaseRecord):
+    """
+    A WDFDEVICE: its device objects, state machines, and queues
+    (`!wdfkd.wdfdevice`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxDevice`.
+        """
+    @property
+    def attached_device(self, /) -> int:
+        """
+        The device object this one is attached to.
+        """
+    @property
+    def default_child_list(self, /) -> int |None:
+        """
+        An FDO's default child list (WDFCHILDLIST).
+        """
+    @property
+    def default_queue(self, /) -> int |None:
+        """
+        The default queue's WDFQUEUE handle.
+        """
+    @property
+    def device_name(self, /) -> str |None: ...
+    @property
+    def device_object(self, /) -> int: ...
+    @property
+    def device_power_state(self, /) -> WdfState |None:
+        """
+        `_DEVICE_POWER_STATE`.
+        """
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The owning driver's name, when it has one.
+        """
+    @property
+    def globals(self, /) -> int:
+        """
+        The owning driver's `_FX_DRIVER_GLOBALS`.
+        """
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        `FDO`, `filter`, `PDO`, or `control`.
+        """
+    @property
+    def parent(self, /) -> WdfObjectRef |None:
+        """
+        A PDO's parent WDFDEVICE.
+        """
+    @property
+    def physical_device(self, /) -> int:
+        """
+        The device stack's PDO.
+        """
+    @property
+    def pkg_io(self, /) -> int:
+        """
+        The `FxPkgIo`.
+        """
+    @property
+    def pkg_pnp(self, /) -> int:
+        """
+        The `FxPkgPnp`; null for a control device.
+        """
+    @property
+    def pnp_state(self, /) -> WdfState:
+        """
+        `_WDF_DEVICE_PNP_STATE`.
+        """
+    @property
+    def power_policy_state(self, /) -> WdfState:
+        """
+        `_WDF_DEVICE_POWER_POLICY_STATE`.
+        """
+    @property
+    def power_state(self, /) -> WdfState:
+        """
+        `_WDF_DEVICE_POWER_STATE`.
+        """
+    @property
+    def queues(self, /) -> list[WdfQueueSummary]: ...
+    @property
+    def queues_stopped(self, /) -> str |None:
+        """
+        Why the queue list walk stopped short of its head; `None` when it
+        completed.
+        """
+    @property
+    def static_child_list(self, /) -> int |None:
+        """
+        An FDO's static child list (WDFCHILDLIST).
+        """
+    @property
+    def system_power_state(self, /) -> WdfState |None:
+        """
+        `_SYSTEM_POWER_STATE`.
+        """
+
+@final
+class WdfDriverDevice(BaseRecord):
+    """
+    One of a driver's device objects and the WDFDEVICE behind it.
+    """
+    @property
+    def device(self, /) -> int |None:
+        """
+        The `FxDevice`; `None` when the device object is not one of this
+        driver's WDFDEVICEs.
+        """
+    @property
+    def device_object(self, /) -> int: ...
+    @property
+    def handle(self, /) -> int |None:
+        """
+        The WDFDEVICE handle.
+        """
+    @property
+    def kind(self, /) -> str |None:
+        """
+        `FDO`, `filter`, `PDO`, or `control`.
+        """
+    @property
+    def pnp_state(self, /) -> WdfState |None:
+        """
+        `m_CurrentPnpState` (`_WDF_DEVICE_PNP_STATE`).
+        """
+    @property
+    def unlinked(self, /) -> str |None:
+        """
+        Why the device object does not lead to one of this driver's
+        WDFDEVICEs.
+        """
+
+@final
+class WdfDriverInfo(BaseRecord):
+    """
+    A KMDF client driver and its device objects (`!wdfkd.wdfdriverinfo`).
+    """
+    @property
+    def client(self, /) -> WdfClient: ...
+    @property
+    def devices(self, /) -> list[WdfDriverDevice]:
+        """
+        The driver object's `DeviceObject`/`NextDevice` chain.
+        """
+    @property
+    def devices_stopped(self, /) -> str |None:
+        """
+        Why the device chain walk stopped before a null link; `None` when
+        it reached one.
+        """
+
+@final
+class WdfHandle(BaseRecord):
+    """
+    A WDF handle and the object it names (`!wdfkd.wdfhandle`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxObject`.
+        """
+    @property
+    def contexts(self, /) -> list[WdfContext]: ...
+    @property
+    def contexts_stopped(self, /) -> str |None:
+        """
+        Why the context header chain stopped before a null `NextHeader`;
+        `None` when it reached one.
+        """
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The owning driver's name, when it has one.
+        """
+    @property
+    def flag_names(self, /) -> list[str]:
+        """
+        The `FXOBJECT_FLAGS` set in `flags`.
+        """
+    @property
+    def flags(self, /) -> int:
+        """
+        `m_ObjectFlags`.
+        """
+    @property
+    def globals(self, /) -> int:
+        """
+        The owning driver's `_FX_DRIVER_GLOBALS`.
+        """
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def object_size(self, /) -> int:
+        """
+        `m_ObjectSize`: the object and its extra bytes.
+        """
+    @property
+    def offset(self, /) -> int |None:
+        """
+        The `WDFOBJECT_OFFSET` an offset handle subtracts from what it
+        points at.
+        """
+    @property
+    def parent(self, /) -> WdfObjectRef |None: ...
+    @property
+    def refcount(self, /) -> int: ...
+    @property
+    def state(self, /) -> WdfState:
+        """
+        `m_ObjectState` (`FxObjectState`).
+        """
+    @property
+    def type_name(self, /) -> str:
+        """
+        Its `FX_OBJECT_TYPES` name.
+        """
+    @property
+    def type_value(self, /) -> int:
+        """
+        `m_Type`.
+        """
+
+@final
+class WdfLoader(BaseRecord):
+    """
+    The KMDF client drivers on `FxLibraryGlobals.FxDriverGlobalsList`
+    (`!wdfkd.wdfldr`).
+    """
+    @property
+    def clients(self, /) -> list[WdfClient]: ...
+    @property
+    def library_globals(self, /) -> int:
+        """
+        `Wdf01000!FxLibraryGlobals`.
+        """
+    @property
+    def stopped(self, /) -> str |None:
+        """
+        Why the client list walk stopped short of its head; `None` when it
+        completed.
+        """
+
+@final
+class WdfLog(BaseRecord):
+    """
+    A client driver's In-Flight Recorder log, oldest record first
+    (`!wdfkd.wdflogdump`).
+    """
+    @property
+    def base(self, /) -> int:
+        """
+        The record area.
+        """
+    @property
+    def corruption(self, /) -> str |None:
+        """
+        What failed validation, when `end` is `corrupt`.
+        """
+    @property
+    def current(self, /) -> int:
+        """
+        Where the next record goes.
+        """
+    @property
+    def driver(self, /) -> str: ...
+    @property
+    def end(self, /) -> str:
+        """
+        Why the walk ended: `empty`, `first_record`, `overwritten`, or
+        `corrupt`.
+        """
+    @property
+    def globals(self, /) -> int:
+        """
+        The `_FX_DRIVER_GLOBALS`.
+        """
+    @property
+    def header(self, /) -> int:
+        """
+        The `_WDF_IFR_HEADER`.
+        """
+    @property
+    def previous(self, /) -> int:
+        """
+        The newest record's offset.
+        """
+    @property
+    def records(self, /) -> list[WdfLogRecord]: ...
+    @property
+    def sequence(self, /) -> int:
+        """
+        The header's sequence number.
+        """
+    @property
+    def size(self, /) -> int:
+        """
+        The record area's size, bytes.
+        """
+    @property
+    def use_timestamps(self, /) -> bool:
+        """
+        Whether records carry timestamps ('L2').
+        """
+
+@final
+class WdfLogRecord(BaseRecord):
+    """
+    An In-Flight Recorder record.
+    """
+    @property
+    def args(self, /) -> str:
+        """
+        The argument bytes, as hex.
+        """
+    @property
+    def error(self, /) -> str |None:
+        """
+        Why the message is not formatted.
+        """
+    @property
+    def flags(self, /) -> str |None:
+        """
+        Its `FLAGS=`.
+        """
+    @property
+    def function(self, /) -> str |None:
+        """
+        Its `FUNC=`.
+        """
+    @property
+    def level(self, /) -> str |None:
+        """
+        Its `LEVEL=`.
+        """
+    @property
+    def message_guid(self, /) -> str: ...
+    @property
+    def message_number(self, /) -> int: ...
+    @property
+    def offset(self, /) -> int:
+        """
+        Its offset in the log.
+        """
+    @property
+    def provider(self, /) -> str |None:
+        """
+        The TMF message's provider, when a loaded PDB declares it.
+        """
+    @property
+    def sequence(self, /) -> int: ...
+    @property
+    def text(self, /) -> str |None:
+        """
+        The formatted message.
+        """
+    @property
+    def timestamp(self, /) -> int |None:
+        """
+        FILETIME; `None` for an 'LR' record, which has none.
+        """
+    @property
+    def timestamp_utc(self, /) -> str |None:
+        """
+        `timestamp` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
+        """
+
+@final
+class WdfObjectRef(BaseRecord):
+    """
+    A KMDF object's address, handle, and type, as far as they read.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def handle(self, /) -> int |None:
+        """
+        `None` for an object without a handle or one that does not read.
+        """
+    @property
+    def type_name(self, /) -> str |None:
+        """
+        The `FX_OBJECT_TYPES` name of its `m_Type`.
+        """
+
+@final
+class WdfQueue(BaseRecord):
+    """
+    A WDFQUEUE: its configuration, state, and requests (`!wdfkd.wdfqueue`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxIoQueue`.
+        """
+    @property
+    def allow_zero_length_requests(self, /) -> bool: ...
+    @property
+    def callbacks(self, /) -> list[WdfCallback]:
+        """
+        The callbacks the driver set.
+        """
+    @property
+    def deleted(self, /) -> bool: ...
+    @property
+    def device(self, /) -> WdfObjectRef |None: ...
+    @property
+    def dispatch_type(self, /) -> WdfState:
+        """
+        `_WDF_IO_QUEUE_DISPATCH_TYPE`.
+        """
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The owning driver's name, when it has one.
+        """
+    @property
+    def driver_cancelable(self, /) -> list[WdfRequest]:
+        """
+        Requests the driver marked cancelable.
+        """
+    @property
+    def driver_cancelable_count(self, /) -> int:
+        """
+        Requests the driver marked cancelable.
+        """
+    @property
+    def driver_cancelable_stopped(self, /) -> str |None:
+        """
+        Why the walk stopped short; `None` when it completed.
+        """
+    @property
+    def driver_owned(self, /) -> list[WdfRequest]:
+        """
+        Requests presented to the driver.
+        """
+    @property
+    def driver_owned_count(self, /) -> int:
+        """
+        Requests the driver owns.
+        """
+    @property
+    def driver_owned_stopped(self, /) -> str |None:
+        """
+        Why the walk stopped short; `None` when it completed.
+        """
+    @property
+    def execution_level(self, /) -> WdfState:
+        """
+        `_WDF_EXECUTION_LEVEL`.
+        """
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def max_parallel_requests(self, /) -> int:
+        """
+        `m_MaxParallelQueuePresentedRequests`.
+        """
+    @property
+    def pending(self, /) -> list[WdfRequest]:
+        """
+        Requests waiting in the queue.
+        """
+    @property
+    def pending_count(self, /) -> int:
+        """
+        Requests waiting in the queue.
+        """
+    @property
+    def pending_stopped(self, /) -> str |None:
+        """
+        Why the walk stopped short; `None` when it completed.
+        """
+    @property
+    def power_managed(self, /) -> bool: ...
+    @property
+    def power_state(self, /) -> WdfState:
+        """
+        `FxIoQueuePowerState`.
+        """
+    @property
+    def state(self, /) -> int:
+        """
+        `m_QueueState`.
+        """
+    @property
+    def state_names(self, /) -> list[str]:
+        """
+        The `_FX_IO_QUEUE_STATE` bits set in `state`.
+        """
+    @property
+    def synchronization_scope(self, /) -> WdfState:
+        """
+        `_WDF_SYNCHRONIZATION_SCOPE`.
+        """
+    @property
+    def two_phase_completions(self, /) -> int: ...
+
+@final
+class WdfQueueSummary(BaseRecord):
+    """
+    A device's queue.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxIoQueue`.
+        """
+    @property
+    def dispatch_type(self, /) -> WdfState:
+        """
+        `_WDF_IO_QUEUE_DISPATCH_TYPE`.
+        """
+    @property
+    def driver_owned(self, /) -> int:
+        """
+        Requests the driver owns.
+        """
+    @property
+    def handle(self, /) -> int:
+        """
+        The WDFQUEUE handle.
+        """
+    @property
+    def is_default(self, /) -> bool:
+        """
+        Whether it is the device's default queue.
+        """
+    @property
+    def pending(self, /) -> int:
+        """
+        Requests waiting in the queue.
+        """
+    @property
+    def power_managed(self, /) -> bool: ...
+
+@final
+class WdfRequest(BaseRecord):
+    """
+    A request on a queue's list.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxRequest`.
+        """
+    @property
+    def handle(self, /) -> int:
+        """
+        The WDFREQUEST handle.
+        """
+    @property
+    def irp(self, /) -> int: ...
+
+@final
+class WdfState(BaseRecord):
+    """
+    A PDB enum value and its name.
+    """
+    @property
+    def name(self, /) -> str |None:
+        """
+        `None` when the enum has no name for `value`.
+        """
+    @property
+    def value(self, /) -> int: ...
+
+@final
+class WdfVersion(BaseRecord):
+    """
+    A KMDF version.
+    """
+    @property
+    def build(self, /) -> int: ...
+    @property
+    def major(self, /) -> int: ...
+    @property
+    def minor(self, /) -> int: ...
 
 @final
 class WheaFinding(BaseRecord):

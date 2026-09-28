@@ -20,6 +20,7 @@ mod sched;
 mod security;
 mod symbols;
 mod usermode;
+mod wdf;
 
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -33,7 +34,7 @@ use crate::view::View;
 type Handler = fn(&str, &mut Args<'_, '_>) -> Option<Result<View>>;
 
 /// Every domain's decoder; command names are disjoint across domains.
-const HANDLERS: [Handler; 15] = [
+const HANDLERS: [Handler; 16] = [
     object::command,
     process::command,
     execution::command,
@@ -49,6 +50,7 @@ const HANDLERS: [Handler; 15] = [
     fs::command,
     meta::command,
     hardware::command,
+    wdf::command,
 ];
 
 /// Dispatch `line` to its structured decoding, if it has one.

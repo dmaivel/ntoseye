@@ -21,10 +21,11 @@
 | `x` exact wildcard match | {command}`x` is a fuzzy search: `*` and `?` still glob, and `^`, `$`, `'`, `!`, and spaces refine it. |
 | `as Name Text` with `${Name}` substituted in later commands | {command}`as` defines a command alias: `as ubp bp ${1}; g`, then `ubp nt!NtCreateFile`. `${1}`, `${2}`, ... and `${*}` are the alias's arguments. |
 | `.process /i` (invasive switch, then `g`) | {command}`.process` switches immediately, with or without `/i`: `ntoseye` reads any process's memory through its page tables. `attach <pid>` is the same. |
-| `!wmitrace.searchpath`, `!wmitrace.tmffile` (WPP message formatting) | {command}`!wmitrace.logdump` shows each event's provider or WPP message GUID and its raw payload; WPP messages are not formatted. |
+| `!wmitrace.searchpath`, `!wmitrace.tmffile` (WPP message formatting) | Not needed, and `.tmf` files are not read: {command}`!wmitrace.logdump` formats a WPP message from the trace message format (TMF) annotations in any loaded PDB that declares it, and shows it raw otherwise. Microsoft's public `Wdf01000.pdb` carries KMDF's own TMF; any other driver's is only in its private PDB, which {command}`.sympath+` adds (see [Symbols and source](../using/symbols.md)). |
 | `.detach` | Not available. {command}`q` (also spelled `qd`) removes the session's breakpoints and exits with the guest running. |
 | `a` (assemble), `.fnret`, `!for_each_local` | Not available: `ntoseye` does not assemble code, and public symbols carry no return or local types. Write bytes with {command}`eb`. |
-| `!wdfkd.*`, `!rcdrkd.*`, `!ndiskd.*`, `!apic`, `!ioapic`, `!sysinfo` | Not available. |
+| `!wdfkd.*` (KMDF) | {command}`!wdfkd.wdfldr`, {command}`!wdfkd.wdfdriverinfo`, {command}`!wdfkd.wdfhandle`, {command}`!wdfkd.wdfdevice`, {command}`!wdfkd.wdfqueue`, and {command}`!wdfkd.wdflogdump`, from `Wdf01000.pdb`; the rest of `!wdfkd`, and UMDF, are not available. See [KMDF drivers](../using/kmdf.md). |
+| `!rcdrkd.*`, `!ndiskd.*`, `!apic`, `!ioapic`, `!sysinfo` | Not available. |
 | `~` lists threads of a user-mode process | {command}`~` lists processors (vCPUs), `~Ns` selects one. Windows threads are {command}`threads` and {command}`!thread`. |
 
 ## Behaves differently

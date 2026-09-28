@@ -39,6 +39,7 @@ mod types;
 mod usermode;
 mod verifier;
 mod vtl;
+mod wdf;
 
 pub use meta::{command_reference_json, json_string};
 

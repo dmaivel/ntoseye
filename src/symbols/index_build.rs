@@ -7,6 +7,7 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::layout::aggregate_key;
+use crate::wpp::{MessageKey, TmfMessage};
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
 use std::{
     collections::HashMap,
@@ -24,6 +25,7 @@ struct ParsedIndexData {
     type_strings: Vec<String>,
     enum_strings: Vec<String>,
     struct_defs: HashMap<String, (u64, TypeIndex)>,
+    wpp_messages: HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: Vec<SymbolIndexDiagnostic>,
 }
 
@@ -103,6 +105,9 @@ fn record_index_diagnostic(
     }
 }
 
+/// `S_ANNOTATION`: carries WPP's `TMF:` message formats.
+const S_ANNOTATION: u16 = 0x1019;
+
 // CodeView kinds consumed by the private address index. pdb2 keeps these
 // constants private, so keep the upstream S_* names beside their wire values.
 fn is_private_address_symbol_kind(kind: u16) -> bool {
@@ -167,6 +172,7 @@ impl SymbolStore {
         let mut strings = Vec::new();
         let mut rvas: HashMap<String, Vec<IndexedSymbol>> = HashMap::new();
         let mut source_lines = Vec::new();
+        let mut wpp_messages = HashMap::new();
 
         // Module streams contain private procedures and addressable data that
         // are absent from the global public stream. SymbolData::Local records
@@ -178,6 +184,7 @@ impl SymbolStore {
             &mut strings,
             &mut rvas,
             &mut source_lines,
+            &mut wpp_messages,
             &mut diagnostics,
         );
 
@@ -220,6 +227,7 @@ impl SymbolStore {
             type_strings,
             enum_strings,
             struct_defs,
+            wpp_messages,
             diagnostics,
         })
     }
@@ -249,6 +257,9 @@ impl SymbolStore {
         self.index_enums
             .insert(guid, SymbolIndex::from_names(parsed.enum_strings));
         self.struct_defs.insert(guid, parsed.struct_defs);
+        if !parsed.wpp_messages.is_empty() {
+            self.wpp_messages.insert(guid, parsed.wpp_messages);
+        }
         self.index_diagnostics.insert(guid, parsed.diagnostics);
         Ok(())
     }
@@ -263,8 +274,9 @@ impl SymbolStore {
     }
 }
 
-/// Private procedures and addressable data from every module stream, and the
-/// C13 source lines of each module.
+/// Private procedures and addressable data from every module stream, the
+/// C13 source lines of each module, and its WPP `TMF:` annotations.
+#[allow(clippy::too_many_arguments)]
 fn parse_module_streams(
     pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
     address_map: &AddressMap<'_>,
@@ -272,6 +284,7 @@ fn parse_module_streams(
     strings: &mut Vec<String>,
     rvas: &mut HashMap<String, Vec<IndexedSymbol>>,
     source_lines: &mut Vec<SourceLineEntry>,
+    wpp_messages: &mut HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) {
     match pdb.debug_information() {
@@ -307,6 +320,9 @@ fn parse_module_streams(
                     }
                 };
 
+                // Index in `strings` of the procedure the module's symbols
+                // are in: a TMF annotation without FUNC= belongs to it.
+                let mut procedure: Option<usize> = None;
                 match module_info.symbols() {
                     Ok(mut module_symbols) => loop {
                         let symbol = match module_symbols.next() {
@@ -322,6 +338,16 @@ fn parse_module_streams(
                                 break;
                             }
                         };
+                        if symbol.raw_kind() == S_ANNOTATION {
+                            collect_tmf_annotation(
+                                &symbol,
+                                procedure.map(|index| strings[index].as_str()),
+                                &compiland,
+                                wpp_messages,
+                                diagnostics,
+                            );
+                            continue;
+                        }
                         if !is_private_address_symbol_kind(symbol.raw_kind()) {
                             continue;
                         }
@@ -337,6 +363,10 @@ fn parse_module_streams(
                                 continue;
                             }
                         };
+                        let is_procedure = matches!(data, pdb2::SymbolData::Procedure(_));
+                        if is_procedure {
+                            procedure = None;
+                        }
                         let named_offset: Option<(String, pdb2::PdbInternalSectionOffset)> =
                             match data {
                                 pdb2::SymbolData::Procedure(procedure) => {
@@ -357,6 +387,9 @@ fn parse_module_streams(
                                 SymbolVisibility::Private,
                                 Some(compiland.clone()),
                             );
+                            if is_procedure {
+                                procedure = Some(strings.len());
+                            }
                             strings.push(name);
                         }
                     },
@@ -464,6 +497,34 @@ fn parse_module_streams(
         },
         Err(error) => {
             record_index_diagnostic(diagnostics, "debug information", None, error.to_string())
+        }
+    }
+}
+
+/// Parse an `S_ANNOTATION` whose first string is `TMF:` into `wpp_messages`;
+/// other annotations are ignored. The first declaration of a message wins.
+fn collect_tmf_annotation(
+    symbol: &pdb2::Symbol<'_>,
+    procedure: Option<&str>,
+    compiland: &str,
+    wpp_messages: &mut HashMap<MessageKey, Arc<TmfMessage>>,
+    diagnostics: &mut Vec<SymbolIndexDiagnostic>,
+) {
+    let Ok(pdb2::SymbolData::Annotation(annotation)) = symbol.parse() else {
+        return;
+    };
+    if annotation.strings.first().map(|s| s.as_bytes()) != Some(b"TMF:") {
+        return;
+    }
+    let strings: Vec<_> = annotation.strings.iter().map(|s| s.to_string()).collect();
+    match TmfMessage::parse(&strings, procedure) {
+        Ok(message) => {
+            wpp_messages
+                .entry(message.key())
+                .or_insert_with(|| Arc::new(message));
+        }
+        Err(error) => {
+            record_index_diagnostic(diagnostics, "wpp annotation", Some(compiland), error)
         }
     }
 }
