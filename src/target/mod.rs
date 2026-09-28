@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(test)]
+use parking_lot::Mutex;
+
 pub mod alpc;
 mod context;
 pub mod cpu;
@@ -129,6 +132,10 @@ pub struct Target {
     /// into guest memory itself, so a session that dies with them in place is
     /// repaired by the next; `None` for targets nothing is patched into.
     pub site_journal: Option<SiteJournal>,
+    /// The `_ETHREAD` each processor runs, standing in for the KPRCB walk
+    /// in tests over bare memory; shared so a mock backend can switch it.
+    #[cfg(test)]
+    pub test_current_threads: Option<Arc<Mutex<HashMap<u16, VirtAddr>>>>,
 }
 
 /// The inspection scope a host has selected (`.process`, `.context`, `.frame`,

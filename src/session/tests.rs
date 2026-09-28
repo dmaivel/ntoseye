@@ -3,7 +3,7 @@ use super::hits::{
 };
 use super::inspection::DBG_STATUS_WORKER;
 use super::lifecycle::prepare_backend_after_cleanup;
-use super::stepping::{RunPast, site_successors, step_over_current_breakpoint};
+use super::stepping::{RunPast, site_successors, stack_floor, step_over_current_breakpoint};
 use super::*;
 use crate::breakpoints::{
     Breakpoint, BreakpointConfig, HardwareBreakpoint, StepFrame, ThreadScope,
@@ -15,8 +15,9 @@ use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
 use crate::target::SelectedFrame;
 use crate::types::{Arch, VirtAddr};
+use iced_x86::{Decoder, DecoderOptions};
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Duration;
@@ -84,6 +85,22 @@ pub struct MockBackend {
     released_stop_by: Option<&'static str>,
     /// Accept selecting (and report) one vCPU, as a stub does.
     one_vcpu: bool,
+    /// The `_ETHREAD` each processor runs, shared with the session's target
+    /// (see [`MockBackend::scheduling`]).
+    threads: Arc<Mutex<HashMap<u16, VirtAddr>>>,
+    /// Where single steps end, before stepping one byte on.
+    step_landings: VecDeque<Landing>,
+    /// Where runs of every vCPU stop on a breakpoint, before `released_to`.
+    schedule: VecDeque<Landing>,
+}
+
+/// Where processor 0 stands after a mock step or run: its IP and stack
+/// pointer, and the thread it runs.
+#[derive(Clone, Copy)]
+struct Landing {
+    rip: u64,
+    rsp: u64,
+    ethread: u64,
 }
 
 impl Default for MockBackend {
@@ -115,6 +132,9 @@ impl Default for MockBackend {
             released_to: None,
             released_stop_by: None,
             one_vcpu: false,
+            threads: Arc::new(Mutex::new(HashMap::new())),
+            step_landings: VecDeque::new(),
+            schedule: VecDeque::new(),
         }
     }
 }
@@ -183,6 +203,13 @@ impl MockBackend {
     fn get(&self, name: &str) -> u64 {
         self.register_map.read_u64(name, &self.regs).unwrap()
     }
+
+    /// Put processor 0 at `landing`.
+    fn land(&mut self, landing: Landing) {
+        self.set("rip", landing.rip);
+        self.set("rsp", landing.rsp);
+        self.threads.lock().insert(0, VirtAddr(landing.ethread));
+    }
 }
 
 impl DebugBackend for MockBackend {
@@ -243,7 +270,11 @@ impl DebugBackend for MockBackend {
     fn continue_execution(&mut self) -> Result<()> {
         self.continues.fetch_add(1, Ordering::Relaxed);
         self.running = true;
-        if let Some(address) = self.released_to {
+        if let Some(landing) = self.schedule.pop_front() {
+            self.land(landing);
+            self.interrupt_events
+                .push_back(breakpoint_event(landing.rip));
+        } else if let Some(address) = self.released_to {
             self.set("rip", address);
             self.interrupt_events.push_back(breakpoint_event(address));
         }
@@ -265,14 +296,19 @@ impl DebugBackend for MockBackend {
         }
         Ok(())
     }
-    /// A step lands one byte on, reported by the queued single-step event.
+    /// A step lands on `step_landings`, then one byte on, reported by the
+    /// queued single-step event.
     fn step(&mut self) -> Result<()> {
         assert!(
             !self.single_step_unsafe,
             "single-stepped where it is unsafe"
         );
-        let rip = self.get("rip");
-        self.set("rip", rip + 1);
+        if let Some(landing) = self.step_landings.pop_front() {
+            self.land(landing);
+        } else {
+            let rip = self.get("rip");
+            self.set("rip", rip + 1);
+        }
         self.interrupt_events.push_back(single_step_event());
         Ok(())
     }
@@ -1421,6 +1457,121 @@ fn a_resumed_walk_finishes_the_run_it_was_waiting_on() {
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1011 }));
     assert_eq!(session.current_thread, "p01.01");
+}
+
+const WALKED: u64 = 0xffff_8000_0000_a000;
+const OTHER: u64 = 0xffff_8000_0000_b000;
+
+/// A walk over `nops` from 0x1000 on processor 0 (`p01.01`), stack at
+/// 0x2000, running thread [`WALKED`]; steps and runs land per the lists.
+fn walk_session(steps: &[Landing], runs: &[Landing]) -> (Session, Arc<AtomicUsize>) {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        step_landings: steps.iter().copied().collect(),
+        schedule: runs.iter().copied().collect(),
+        ..MockBackend::default()
+    };
+    backend.land(Landing {
+        rip: 0x1000,
+        rsp: 0x2000,
+        ethread: WALKED,
+    });
+    let continues = Arc::clone(&backend.continues);
+    let threads = Arc::clone(&backend.threads);
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    session.target.test_current_threads = Some(threads);
+    session.current_thread = "p01.01".into();
+    (session, continues)
+}
+
+/// A step that an interrupt switched to another thread goes on in the
+/// walked thread: the walk runs until that thread executes past the
+/// instruction at the stack it left, passing other threads and deeper
+/// calls of the same code there.
+#[test]
+fn a_walk_follows_its_thread_past_a_step_that_switched_it_out() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, continues) = walk_session(
+        &[at(0x1030, 0x8000, OTHER)],
+        &[
+            at(0x1001, 0x1ff8, WALKED),
+            at(0x1001, 0x2000, OTHER),
+            at(0x1001, 0x2000, WALKED),
+        ],
+    );
+
+    let outcome = session
+        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
+    assert_eq!(continues.load(Ordering::Relaxed), 3);
+}
+
+/// A step that reached the next instruction stays in the walk even when it
+/// made another thread current, as the instruction that switches does.
+#[test]
+fn a_walk_step_that_reached_its_successor_is_not_followed() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, continues) = walk_session(&[at(0x1001, 0x2000, OTHER)], &[]);
+
+    let outcome = session
+        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
+    assert_eq!(continues.load(Ordering::Relaxed), 0);
+}
+
+/// A walk whose step ended on a breakpoint in another thread surfaces it;
+/// resumed past it, it goes on where the walked thread executes past the
+/// instruction.
+#[test]
+fn a_walk_resumed_past_a_hit_in_another_thread_goes_on_in_its_own() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, _) = walk_session(
+        &[at(0x1030, 0x8000, OTHER)],
+        &[at(0x1001, 0x2000, OTHER), at(0x1001, 0x2000, WALKED)],
+    );
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1030), true, None);
+
+    let outcome = session
+        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ContinueOutcome::Breakpoint { rip: 0x1030, .. }
+    ));
+    let outcome = session
+        .resume_step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
+}
+
+/// The stack an instruction can leave is bounded below by what it pushes or
+/// subtracts, and unknown when it switches stacks or sets the pointer.
+#[test]
+fn a_stack_floor_is_the_lowest_stack_an_instruction_leaves() {
+    let floor = |bitness, bytes: &[u8]| {
+        let instruction = Decoder::new(bitness, bytes, DecoderOptions::NONE).decode();
+        stack_floor(&instruction, 0x1000)
+    };
+    assert_eq!(floor(64, &[0x90]), Some(0x1000)); // nop
+    assert_eq!(floor(64, &[0x48, 0x8b, 0x44, 0x24, 0x08]), Some(0x1000)); // mov rax, [rsp+8]
+    assert_eq!(floor(64, &[0x55]), Some(0xff8)); // push rbp
+    assert_eq!(floor(64, &[0xe8, 0, 0, 0, 0]), Some(0xff8)); // call
+    assert_eq!(floor(64, &[0xc3]), Some(0x1000)); // ret
+    assert_eq!(floor(64, &[0x48, 0x83, 0xec, 0x30]), Some(0xfd0)); // sub rsp, 0x30
+    assert_eq!(floor(64, &[0x48, 0x81, 0xec, 0, 1, 0, 0]), Some(0xf00)); // sub rsp, 0x100
+    assert_eq!(floor(64, &[0x48, 0x83, 0xc4, 0xe0]), Some(0xfe0)); // add rsp, -0x20
+    assert_eq!(floor(64, &[0x48, 0x83, 0xc4, 0x20]), Some(0x1000)); // add rsp, 0x20
+    assert_eq!(floor(32, &[0x83, 0xec, 0x10]), Some(0xff0)); // sub esp, 0x10
+    assert_eq!(floor(64, &[0x48, 0x83, 0xe4, 0xf0]), None); // and rsp, -16
+    assert_eq!(floor(64, &[0x48, 0x89, 0xdc]), None); // mov rsp, rbx
+    assert_eq!(floor(64, &[0xc9]), None); // leave
+    assert_eq!(floor(64, &[0x48, 0xcf]), None); // iretq
+    assert_eq!(floor(64, &[0x0f, 0x05]), None); // syscall
 }
 
 /// A step's run-to (`gu`, `p` over a call) stops only for its own frame: the

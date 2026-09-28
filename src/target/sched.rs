@@ -14,6 +14,9 @@ use crate::target::{
     DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
 };
 use crate::types::VirtAddr;
+
+#[cfg(test)]
+use crate::target::sample_thread;
 use crate::unwind::{
     StackFrame, StackTrace, ThreadTraceContext, format_symbol, resolve_thread_trace_context,
 };
@@ -1600,12 +1603,27 @@ impl Target {
     }
 
     pub fn current_windows_thread_for_processor(&self, processor: u16) -> Result<ThreadInfo> {
-        self.thread_info_from_ethread(self.current_ethread_for_processor(processor)?)
+        let ethread = self.current_ethread_for_processor(processor)?;
+        #[cfg(test)]
+        if self.test_current_threads.is_some() {
+            return Ok(ThreadInfo {
+                ethread,
+                kthread: ethread,
+                ..sample_thread()
+            });
+        }
+        self.thread_info_from_ethread(ethread)
     }
 
     /// The `_ETHREAD` `processor`'s KPRCB says it runs, without reading the
     /// thread.
     pub fn current_ethread_for_processor(&self, processor: u16) -> Result<VirtAddr> {
+        #[cfg(test)]
+        if let Some(threads) = &self.test_current_threads {
+            return threads.lock().get(&processor).copied().ok_or_else(|| {
+                Error::DebugInfo(format!("no test thread on processor {processor}"))
+            });
+        }
         let prcb = kprcb_for_processor(self, processor)?;
         let guest = self.guest()?;
         let memory = guest.ntoskrnl.memory();

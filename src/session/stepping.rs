@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use iced_x86::{
-    Code, Decoder, DecoderOptions, FlowControl, Instruction, MemorySize, Mnemonic, OpKind, Register,
+    Code, Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, MemorySize,
+    Mnemonic, OpAccess, OpKind, Register,
 };
 
 use crate::backend::MemoryOps;
@@ -224,6 +225,12 @@ impl Session {
     /// The halted vCPU's [`ControlState`]: IP, SP, page-table root, and the
     /// control flow of the instruction at the IP (read breakpoint-masked).
     pub fn control_state(&mut self) -> Result<ControlState> {
+        self.read_control().map(|(state, ..)| state)
+    }
+
+    /// [`Self::control_state`] with the registers and the (masked)
+    /// instruction bytes it was read from.
+    fn read_control(&mut self) -> Result<(ControlState, Vec<u8>, [u8; 16])> {
         let registers = self.read_registers()?;
         let ip = self
             .register_map
@@ -245,12 +252,13 @@ impl Session {
         };
         self.read_masked(VirtAddr(ip), &mut bytes[..length])?;
         let bitness = self.target.code_bitness(VirtAddr(ip));
-        Ok(ControlState {
+        let state = ControlState {
             ip,
             sp,
             dtb,
             flow: classify(&bytes[..length], self.target.arch(), bitness),
-        })
+        };
+        Ok((state, registers, bytes))
     }
 
     /// The enabled code breakpoint (in the current context) that a step from
@@ -360,7 +368,7 @@ impl Session {
                 self.note_stop(&outcome);
                 return Ok(outcome);
             }
-            let state = self.control_state()?;
+            let (state, registers, bytes) = self.read_control()?;
             if stop(state.ip, state.flow)
                 || deadline.is_some_and(|deadline| Instant::now() >= deadline)
             {
@@ -374,7 +382,7 @@ impl Session {
                     let sites = vec![(next, self.step_frame(StepStack::CallReturn)?)];
                     (self.run_to_any(&sites, remaining(), &cancel)?, sites)
                 }
-                _ => match self.walk_step(&state, walked.as_ref())? {
+                _ => match self.walk_step(&state, &registers, &bytes, walked.as_ref())? {
                     WalkStep::At(rip) => (ContinueOutcome::Step { rip }, Vec::new()),
                     WalkStep::Follow(sites) => {
                         (self.run_to_any(&sites, remaining(), &cancel)?, sites)
@@ -425,19 +433,22 @@ impl Session {
     /// ended at a successor on its own vCPU completed in `walked`, even if the
     /// instruction made another thread current (NT's `CurrentThread` changes
     /// before the stacks do). Where `walked` goes on is known only before the
-    /// step, so the successors are decoded first.
+    /// step, so it is decoded first, from the `registers` and instruction
+    /// `bytes` `state` was read from.
     fn walk_step(
         &mut self,
         state: &ControlState,
+        registers: &[u8],
+        bytes: &[u8; 16],
         walked: Option<&ThreadScope>,
     ) -> Result<WalkStep> {
         // An instruction without known successors is not followed; one run
         // alone fails its step the same way.
-        let successors = match walked {
-            Some(_) if self.target.arch() != Arch::Arm64 => {
-                self.successors_at(state.ip).unwrap_or_default()
-            }
-            _ => Vec::new(),
+        let (successors, floor) = match walked {
+            Some(_) if self.target.arch() != Arch::Arm64 => self
+                .walk_continuation(state, registers, bytes)
+                .unwrap_or_default(),
+            _ => (Vec::new(), None),
         };
         let vcpu = self.current_thread.clone();
         let (rip, stepped) = self.step_once()?;
@@ -456,16 +467,17 @@ impl Session {
             return Ok(WalkStep::At(rip));
         }
         // Where the walked thread goes on: past the instruction, which it
-        // executes whether the interrupt came before or after it. Stopping
-        // it on the instruction instead, to step it again, can starve it:
-        // under load, the step after such a stop was switched out again
-        // every time.
+        // executes whether the interrupt came before or after it, at no
+        // lower a stack than the instruction leaves (the same code reached
+        // by a deeper call is not it). Stopping it on the instruction
+        // instead, to step it again, can starve it: under load, the step
+        // after such a stop was switched out again every time.
         let sites = successors
             .iter()
             .map(|&address| {
                 let frame = StepFrame {
                     thread: walked.clone(),
-                    min_stack_pointer: None,
+                    min_stack_pointer: floor,
                 };
                 (VirtAddr(address), Some(frame))
             })
@@ -490,26 +502,31 @@ impl Session {
         })
     }
 
-    /// Every address the current vCPU can continue at after the instruction
-    /// at `ip`, read with this session's breakpoints masked (see
-    /// [`site_successors`]).
-    fn successors_at(&mut self, ip: u64) -> Result<Vec<u64>> {
-        let regs = self.read_registers()?;
+    /// Where the execution at `state` continues past its instruction: every
+    /// address it can continue at (see [`site_successors`]), and the lowest
+    /// stack pointer it can have there (see [`stack_floor`]).
+    fn walk_continuation(
+        &self,
+        state: &ControlState,
+        registers: &[u8],
+        bytes: &[u8; 16],
+    ) -> Result<(Vec<u64>, Option<u64>)> {
         let cr3 = self
             .register_map
-            .read_u64(self.target.arch().dtb_register(), &regs)
+            .read_u64(self.target.arch().dtb_register(), registers)
             .ok();
-        let mut bytes = [0u8; 16];
-        self.read_masked_in(code_root(&self.target, cr3, ip), VirtAddr(ip), &mut bytes)?;
-        instruction_successors(
+        let successors = instruction_successors(
             &self.target,
             &self.register_map,
             &self.current_thread,
-            &regs,
-            ip,
+            registers,
+            state.ip,
             cr3,
-            &bytes,
-        )
+            bytes,
+        )?;
+        let bitness = self.target.code_bitness(VirtAddr(state.ip));
+        let instruction = Decoder::with_ip(bitness, bytes, state.ip, DecoderOptions::NONE).decode();
+        Ok((successors, stack_floor(&instruction, state.sp)))
     }
 
     fn breakpoint_outcome(&self, id: u32, rip: u64) -> Option<ContinueOutcome> {
@@ -1406,6 +1423,83 @@ fn instruction_successors(
     };
     successors.dedup();
     Ok(successors)
+}
+
+/// The lowest stack pointer an execution at `sp` has once past
+/// `instruction`, for a pop, push, call, return, `enter`, or `add`/`sub` of
+/// an immediate; `sp` for one that leaves the stack pointer alone. `None`
+/// when it is not known from here: an instruction that switches stacks
+/// (interrupts, system calls and their returns, far transfers) or sets the
+/// stack pointer some other way (`mov`, `and`, `leave`, ...).
+pub fn stack_floor(instruction: &Instruction, sp: u64) -> Option<u64> {
+    let switches_stack = matches!(
+        instruction.mnemonic(),
+        Mnemonic::Iret
+            | Mnemonic::Iretd
+            | Mnemonic::Iretq
+            | Mnemonic::Syscall
+            | Mnemonic::Sysret
+            | Mnemonic::Sysretq
+            | Mnemonic::Sysenter
+            | Mnemonic::Sysexit
+            | Mnemonic::Sysexitq
+            | Mnemonic::Int
+            | Mnemonic::Int1
+            | Mnemonic::Int3
+            | Mnemonic::Into
+            | Mnemonic::Ud0
+            | Mnemonic::Ud1
+            | Mnemonic::Ud2
+            | Mnemonic::Retf
+    ) || instruction.is_jmp_far()
+        || instruction.is_call_far()
+        || instruction.is_jmp_far_indirect()
+        || instruction.is_call_far_indirect();
+    if switches_stack {
+        return None;
+    }
+    let lowered_by = |delta: i64| Some(sp.wrapping_add_signed(delta.min(0)));
+    let increment = instruction.stack_pointer_increment();
+    if increment != 0 {
+        return lowered_by(i64::from(increment));
+    }
+    let writes_sp = InstructionInfoFactory::new()
+        .info(instruction)
+        .used_registers()
+        .iter()
+        .any(|used| {
+            used.register().full_register() == Register::RSP
+                && matches!(
+                    used.access(),
+                    OpAccess::Write
+                        | OpAccess::CondWrite
+                        | OpAccess::ReadWrite
+                        | OpAccess::ReadCondWrite
+                )
+        });
+    if !writes_sp {
+        return Some(sp);
+    }
+    if instruction.op0_kind() != OpKind::Register
+        || instruction.op0_register().full_register() != Register::RSP
+    {
+        return None;
+    }
+    let immediate = match instruction.op1_kind() {
+        OpKind::Immediate8to64 | OpKind::Immediate32to64 => instruction.immediate(1) as i64,
+        OpKind::Immediate8to32 | OpKind::Immediate32 => {
+            i64::from(instruction.immediate(1) as u32 as i32)
+        }
+        OpKind::Immediate8to16 | OpKind::Immediate16 => {
+            i64::from(instruction.immediate(1) as u16 as i16)
+        }
+        _ => return None,
+    };
+    match instruction.mnemonic() {
+        Mnemonic::Add => lowered_by(immediate),
+        Mnemonic::Sub => lowered_by(immediate.wrapping_neg()),
+        _ => None,
+    }
 }
 
 /// Where `syscall` enters the kernel: the `LSTAR` (64-bit) or `CSTAR`

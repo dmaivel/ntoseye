@@ -132,6 +132,8 @@ impl Target {
             notices,
             generation: Arc::new(AtomicU64::new(0)),
             site_journal: None,
+            #[cfg(test)]
+            test_current_threads: None,
         })
     }
 
@@ -178,6 +180,8 @@ impl Target {
             notices: Vec::new(),
             generation: Arc::new(AtomicU64::new(0)),
             site_journal: None,
+            #[cfg(test)]
+            test_current_threads: None,
         })
     }
 
