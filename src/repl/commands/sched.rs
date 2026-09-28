@@ -4,11 +4,13 @@ use crate::repl::disasm::{format_stack_frame, more_frames};
 use crate::repl::*;
 use crate::target::sched::{
     ApcDetail, ApcListDetail, ApcSelector, FindStackDetail, ReadyQueuesDetail, StacksDetail,
-    ThreadSummary, TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions, UniqStackScope,
-    UnwalkedThread, findstack_level, thread_summary,
+    TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions, UniqStackScope,
+    UnwalkedThread, findstack_level,
 };
 use crate::target::workqueue::{ExQueueDetail, WorkItemDetail};
-use crate::target::{DiagnosticValue, ListTermination, kthread_state_name, wait_reason_name};
+use crate::target::{
+    DiagnosticValue, ListTermination, ThreadInfo, kthread_state_name, wait_reason_name,
+};
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::StackFrame;
@@ -120,51 +122,55 @@ fn diagnostic_option_cell<T>(
     }
 }
 
-fn thread_tid(thread: &ThreadSummary) -> String {
-    diagnostic_option_cell(
-        &thread.tid,
+fn option_cell<T>(value: Option<&T>, render: impl FnOnce(&T) -> String, none: &str) -> String {
+    value.map_or_else(|| none.to_string(), render)
+}
+
+fn thread_tid(thread: &ThreadInfo) -> String {
+    option_cell(
+        thread.tid.as_ref(),
         |tid| tid.to_string(),
         &ui::addr(thread.ethread.0).to_string(),
     )
 }
 
-fn thread_pid(thread: &ThreadSummary) -> String {
-    diagnostic_option_cell(&thread.pid, |pid| pid.to_string(), "<unavailable>")
+fn thread_pid(thread: &ThreadInfo) -> String {
+    option_cell(thread.pid.as_ref(), |pid| pid.to_string(), "<unavailable>")
 }
 
-fn thread_process(thread: &ThreadSummary) -> String {
-    diagnostic_option_cell(&thread.process_name, |name| name.clone(), "<unknown>")
+fn thread_process(thread: &ThreadInfo) -> String {
+    option_cell(thread.process_name.as_ref(), Clone::clone, "<unknown>")
 }
 
-fn thread_priority(thread: &ThreadSummary) -> String {
-    diagnostic_option_cell(
-        &thread.priority,
+fn thread_priority(thread: &ThreadInfo) -> String {
+    option_cell(
+        thread.priority.as_ref(),
         |priority| priority.to_string(),
         "<unavailable>",
     )
 }
 
-fn thread_state(thread: &ThreadSummary) -> String {
-    diagnostic_option_cell(
-        &thread.state,
+fn thread_state(thread: &ThreadInfo) -> String {
+    option_cell(
+        thread.state.as_ref(),
         |state| format!("{} ({state})", kthread_state_name(*state)),
         "<unavailable>",
     )
 }
 
-fn thread_wait_reason(thread: &ThreadSummary) -> String {
-    diagnostic_option_cell(
-        &thread.wait_reason,
+fn thread_wait_reason(thread: &ThreadInfo) -> String {
+    option_cell(
+        thread.wait_reason.as_ref(),
         |reason| format!("{} ({reason})", wait_reason_name(*reason)),
         "<unavailable>",
     )
 }
 
-fn running_thread_kthread(value: &DiagnosticValue<Option<ThreadSummary>>) -> String {
+fn running_thread_kthread(value: &DiagnosticValue<Option<ThreadInfo>>) -> String {
     diagnostic_option_cell(value, |thread| ui::addr(thread.kthread.0).to_string(), "-")
 }
 
-fn running_thread_detail(value: &DiagnosticValue<Option<ThreadSummary>>) -> String {
+fn running_thread_detail(value: &DiagnosticValue<Option<ThreadInfo>>) -> String {
     diagnostic_option_cell(
         value,
         |thread| {
@@ -854,7 +860,7 @@ fn print_work_queues(detail: &ExQueueDetail) {
         for worker in &queue.threads {
             match &worker.thread {
                 DiagnosticValue::Available(info) => {
-                    let thread = &thread_summary(info);
+                    let thread = info;
                     outln!(
                         "    THREAD {}  Cid {}.{}  {}  {}  Priority {}",
                         ui::addr(thread.ethread.0),
@@ -948,7 +954,7 @@ fn print_stacks(detail: &StacksDetail) {
     }
 }
 
-fn thread_label(thread: &ThreadSummary) -> String {
+fn thread_label(thread: &ThreadInfo) -> String {
     format!(
         "{} {} ({})  {}  {}",
         thread_tid(thread),
@@ -964,7 +970,7 @@ fn print_unwalked(unwalked: &[UnwalkedThread]) {
         return;
     }
     outln!("{} thread stack(s) could not be walked:", unwalked.len());
-    let mut by_error: Vec<(&str, Vec<ThreadSummary>)> = Vec::new();
+    let mut by_error: Vec<(&str, Vec<ThreadInfo>)> = Vec::new();
     for thread in unwalked {
         match by_error
             .iter_mut()
@@ -1087,7 +1093,7 @@ fn print_uniqstack(detail: &UniqStackDetail, options: UniqStackOptions) {
 }
 
 /// `System (4): 12 16 20; smss.exe (544): 548`, in the threads' order.
-fn thread_ids_by_process(threads: &[ThreadSummary]) -> String {
+fn thread_ids_by_process(threads: &[ThreadInfo]) -> String {
     let mut runs: Vec<(String, Vec<String>)> = Vec::new();
     for thread in threads {
         let process = format!("{} ({})", thread_process(thread), thread_pid(thread));

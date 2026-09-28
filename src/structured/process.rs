@@ -18,7 +18,10 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             .map(|processes| View::list(processes.iter().map(view::process::process))),
         "threads" => args.state.ctx.windows_threads().map(|(threads, active)| {
             View::list(threads.iter().map(|thread| {
-                view::process::thread(thread, active.get(&thread.ethread.0).map(String::as_str))
+                view::process::thread_summary(
+                    thread,
+                    active.get(&thread.ethread.0).map(String::as_str),
+                )
             }))
         }),
         "!job" | "job" => (|| {

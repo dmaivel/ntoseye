@@ -3,7 +3,7 @@
 
 use super::shape::{Hex, Omit, shapes};
 use crate::layout::{FieldInfo, TypeInfo};
-use crate::symbols::{self, SymbolVisibility, format_symbol_with_offset};
+use crate::symbols::{self, SymbolVisibility};
 use crate::target::{self, Target};
 use crate::types::VirtAddr;
 
@@ -47,27 +47,14 @@ shapes! {
         module: Option<String>,
     }
 
-    /// The symbol nearest below an address (`ln`); the symbol fields are
-    /// `None` when no symbol covers it.
-    NearestSymbol {
-        /// The queried address.
-        address: VirtAddr,
-        /// `module!name+0xoffset`.
-        symbol: Option<String>,
-        module: Option<String>,
-        name: Option<String>,
-        /// Bytes from the symbol to `address`.
-        offset: Option<u32>,
-    }
-
-    /// A symbol identity nearest to an address.
+    /// The symbol nearest below an address (`ln`, `Symbols.nearest()`).
     Symbol {
         /// The module the symbol belongs to.
         module: String,
         /// The symbol name.
         name: String,
         /// The symbol's address.
-        address: Hex,
+        address: VirtAddr,
         /// How far past the symbol the queried address is.
         offset: u32;
 
@@ -76,7 +63,7 @@ shapes! {
             use pyo3::types::PyAnyMethods;
             let record = slf.as_super().get();
             let py = slf.py();
-            Ok(format_symbol_with_offset(
+            Ok(symbols::format_symbol_with_offset(
                 &record.field(py, "module")?.extract::<String>()?,
                 &record.field(py, "name")?.extract::<String>()?,
                 record.field(py, "offset")?.extract()?,
@@ -170,31 +157,12 @@ pub fn symbol_search_match(symbol: &target::SymbolSearchMatch) -> SymbolSearchMa
     }
 }
 
-pub fn nearest_symbol(address: VirtAddr, symbol: Option<(String, String, u32)>) -> NearestSymbol {
-    let (formatted, module, name, offset) = match symbol {
-        Some((module, name, offset)) => (
-            Some(format_symbol_with_offset(&module, &name, offset)),
-            Some(module),
-            Some(name),
-            Some(offset),
-        ),
-        None => (None, None, None, None),
-    };
-    NearestSymbol {
-        address,
-        symbol: formatted,
-        module,
-        name,
-        offset,
-    }
-}
-
 /// The symbol `offset` bytes below `address`.
-pub fn symbol(address: u64, module: String, name: String, offset: u32) -> Symbol {
+pub fn symbol(address: VirtAddr, module: String, name: String, offset: u32) -> Symbol {
     Symbol {
         module,
         name,
-        address: address.saturating_sub(u64::from(offset)),
+        address: VirtAddr(address.0.saturating_sub(u64::from(offset))),
         offset,
     }
 }

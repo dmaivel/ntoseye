@@ -40,11 +40,11 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             )),
         },
         "ln" => args.addr(0).map(|address| {
-            view::symbols::nearest_symbol(
-                address,
-                args.target().nearest_symbol_current_context(address),
-            )
-            .into_view()
+            args.target()
+                .nearest_symbol_current_context(address)
+                .map_or(View::Null, |(module, name, offset)| {
+                    view::symbols::symbol(address, module, name, offset).into_view()
+                })
         }),
         "x" if !args.raw_tail.is_empty() => Ok(View::list(
             args.target()

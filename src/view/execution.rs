@@ -2,7 +2,7 @@
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 
-use super::process::{process, thread};
+use super::process::{ProcessIdentity, ThreadSummary, process, thread_summary};
 use super::shape::{Hex, Omit, shapes, unions};
 use super::symbols::source_location;
 use crate::types::VirtAddr;
@@ -90,12 +90,12 @@ shapes! {
         saved_vtl: Vec<String>,
         /// The process chosen with `.process` whose memory `dt`, `dq`, ...
         /// read; it survives resumes.
-        attached_process: Option<super::process::ProcessIdentity>,
+        attached_process: Option<ProcessIdentity>,
         /// The process whose page tables the stopped vCPU has loaded.
-        stopped_process: Option<super::process::ProcessIdentity>,
+        stopped_process: Option<ProcessIdentity>,
         /// The Windows thread the stopped vCPU runs; its owner can differ
         /// from `stopped_process` (`KeStackAttachProcess`).
-        stopped_thread: Option<super::process::ThreadOverview>,
+        stopped_thread: Option<ThreadSummary>,
         /// False after a reboot until the kernel's loaded-module list exists:
         /// process and module enumeration is not yet meaningful.
         coherent: bool,
@@ -382,7 +382,10 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
         saved_vtl: status.saved_vtl.clone(),
         attached_process: status.attached_process.as_ref().map(process),
         stopped_process: status.stopped_process.as_ref().map(process),
-        stopped_thread: status.stopped_thread.as_ref().map(|t| thread(t, None)),
+        stopped_thread: status
+            .stopped_thread
+            .as_ref()
+            .map(|thread| thread_summary(thread, None)),
         coherent: status.coherent,
         kernel_base: status.kernel_base,
     }

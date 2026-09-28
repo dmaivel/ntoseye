@@ -10,9 +10,9 @@ use crate::target::zombies::ZombiesDetail;
 use crate::target::{ThreadInfo, kthread_state_name, wait_reason_name};
 
 shapes! {
-    /// A Windows thread from the kernel thread walk (`threads`, `!thread`).
-    /// Fields the walk could not read are `None`.
-    ThreadOverview {
+    /// A Windows thread, as `threads`, `!thread`, and every scheduler
+    /// listing report it. Fields the walk could not read are `None`.
+    ThreadSummary {
         tid: Option<u64>,
         pid: Option<u64>,
         /// The owning process's image name.
@@ -22,15 +22,17 @@ shapes! {
         /// The owning `_EPROCESS`.
         eprocess: Option<VirtAddr>,
         /// `_KTHREAD.State`.
-        state: Option<u64>,
+        state: Option<u8>,
         /// The state's name (`Running`, `Waiting`, ...).
-        state_name: Option<String>,
+        state_name: Option<&'static str>,
         /// `_KTHREAD.WaitReason`.
-        wait_reason: Option<u64>,
+        wait_reason: Option<u8>,
         /// The wait reason's name (`Executive`, `UserRequest`, ...).
-        wait_reason_name: Option<String>,
-        /// The vCPU currently running the thread; `None` when none is, or
-        /// when the target is running.
+        wait_reason_name: Option<&'static str>,
+        /// Current scheduling priority.
+        priority: Option<u8>,
+        /// The vCPU running the thread, when the listing resolves it; `None`
+        /// when none runs it, and while the target runs.
         active: Option<String>,
     }
 
@@ -217,18 +219,19 @@ shapes! {
 
 /// One Windows thread from the kernel thread walk; `active` is the vCPU id
 /// currently running it (only resolved while halted).
-pub fn thread(t: &ThreadInfo, active: Option<&str>) -> ThreadOverview {
-    ThreadOverview {
+pub fn thread_summary(t: &ThreadInfo, active: Option<&str>) -> ThreadSummary {
+    ThreadSummary {
         tid: t.tid,
         pid: t.pid,
         process_name: t.process_name.clone(),
         ethread: t.ethread,
         kthread: t.kthread,
         eprocess: t.eprocess,
-        state: t.state.map(u64::from),
-        state_name: t.state.map(|s| kthread_state_name(s).to_string()),
-        wait_reason: t.wait_reason.map(u64::from),
-        wait_reason_name: t.wait_reason.map(|r| wait_reason_name(r).to_string()),
+        state: t.state,
+        state_name: t.state.map(kthread_state_name),
+        wait_reason: t.wait_reason,
+        wait_reason_name: t.wait_reason.map(wait_reason_name),
+        priority: t.priority,
         active: active.map(str::to_string),
     }
 }

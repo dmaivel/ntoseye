@@ -109,7 +109,9 @@ impl Symbols {
         })?;
         Typed::new(
             py,
-            nearest.map(|(module, name, offset)| view::symbols::symbol(addr, module, name, offset)),
+            nearest.map(|(module, name, offset)| {
+                view::symbols::symbol(VirtAddr(addr), module, name, offset)
+            }),
         )
     }
 

@@ -12,7 +12,7 @@ use crate::target::sched::{
     ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
     MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UniqStackDetail,
     UniqStackScope, UnwalkedThread, available, findstack_level_error, frame_symbol_matches,
-    group_stacks, select_threads, thread_summary, unavailable, walk_list_nodes,
+    group_stacks, select_threads, unavailable, walk_list_nodes,
 };
 use crate::target::workqueue::ExQueueDetail;
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
@@ -160,7 +160,6 @@ impl Session {
         let mut total = 0usize;
         let mut truncated = false;
         for thread in threads.into_iter().take(APC_THREAD_DISPLAY_LIMIT) {
-            let summary = thread_summary(&thread);
             let (mut kernel_entries, mut user_entries) = (Vec::new(), Vec::new());
             let (mut kernel_termination, mut user_termination) =
                 (ListTermination::Head, ListTermination::Head);
@@ -218,7 +217,7 @@ impl Session {
                 }
             }
             detail_threads.push(ApcThread {
-                thread: summary,
+                thread,
                 kernel: kernel_entries,
                 user: user_entries,
                 kernel_termination,
@@ -312,8 +311,8 @@ impl Session {
                     return;
                 }
                 details.push(StackThreadDetail {
-                    thread: thread_summary(&thread),
                     active_vcpu: active_vcpus.get(&thread.ethread.0).cloned(),
+                    thread,
                     top_symbol,
                     frames,
                     truncated,
@@ -363,15 +362,15 @@ impl Session {
                         .collect();
                     if !matches.is_empty() {
                         matched.push(FindStackThread {
-                            thread: thread_summary(&thread),
                             active_vcpu: active_vcpus.get(&thread.ethread.0).cloned(),
+                            thread,
                             stack,
                             matches,
                         });
                     }
                 }
                 Err(error) => unwalked.push(UnwalkedThread {
-                    thread: thread_summary(&thread),
+                    thread,
                     error: error.to_string(),
                 }),
             },
@@ -402,9 +401,9 @@ impl Session {
             &active_vcpus,
             MAX_STACK_FRAMES_LEVEL_2,
             |thread, stack| match stack {
-                Ok(trace) => stacks.push((thread_summary(&thread), trace.stacktrace)),
+                Ok(trace) => stacks.push((thread, trace.stacktrace)),
                 Err(error) => unwalked.push(UnwalkedThread {
-                    thread: thread_summary(&thread),
+                    thread,
                     error: error.to_string(),
                 }),
             },

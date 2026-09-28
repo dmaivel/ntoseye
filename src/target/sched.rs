@@ -24,25 +24,13 @@ const DPC_QUEUE_COUNT: usize = 2;
 const TIMER_BUCKET_COUNT: usize = 256;
 
 #[derive(Debug, Clone)]
-pub struct ThreadSummary {
-    pub ethread: VirtAddr,
-    pub kthread: VirtAddr,
-    pub tid: DiagnosticValue<Option<u64>>,
-    pub pid: DiagnosticValue<Option<u64>>,
-    pub process_name: DiagnosticValue<Option<String>>,
-    pub state: DiagnosticValue<Option<u8>>,
-    pub wait_reason: DiagnosticValue<Option<u8>>,
-    pub priority: DiagnosticValue<Option<u8>>,
-}
-
-#[derive(Debug, Clone)]
 pub struct RunningProcessor {
     pub index: u16,
     pub kpcr: DiagnosticValue<VirtAddr>,
     pub prcb: DiagnosticValue<VirtAddr>,
-    pub current_thread: DiagnosticValue<Option<ThreadSummary>>,
-    pub next_thread: DiagnosticValue<Option<ThreadSummary>>,
-    pub idle_thread: DiagnosticValue<Option<ThreadSummary>>,
+    pub current_thread: DiagnosticValue<Option<ThreadInfo>>,
+    pub next_thread: DiagnosticValue<Option<ThreadInfo>>,
+    pub idle_thread: DiagnosticValue<Option<ThreadInfo>>,
     /// Present only when `include_stacks` was requested. The vector is bounded
     /// to the short running-thread stack limit.
     pub short_stack: Option<DiagnosticValue<Vec<StackFrame>>>,
@@ -56,7 +44,7 @@ pub struct RunningDetail {
 #[derive(Debug, Clone)]
 pub struct ReadyQueueEntry {
     pub kthread: VirtAddr,
-    pub thread: DiagnosticValue<Option<ThreadSummary>>,
+    pub thread: DiagnosticValue<Option<ThreadInfo>>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,7 +189,7 @@ pub struct ApcDetail {
 
 #[derive(Debug, Clone)]
 pub struct ApcThread {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
     pub kernel: Vec<ApcDetail>,
     pub user: Vec<ApcDetail>,
     pub kernel_termination: ListTermination,
@@ -220,7 +208,7 @@ pub struct ApcListDetail {
 
 #[derive(Debug, Clone)]
 pub struct StackThreadDetail {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
     pub active_vcpu: Option<String>,
     pub top_symbol: DiagnosticValue<Option<String>>,
     pub frames: Vec<StackFrame>,
@@ -242,7 +230,7 @@ pub struct StacksDetail {
 /// whether it matches and `!uniqstack` cannot group it.
 #[derive(Debug, Clone)]
 pub struct UnwalkedThread {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
     pub error: String,
 }
 
@@ -251,7 +239,7 @@ pub struct UnwalkedThread {
 /// matched.
 #[derive(Debug, Clone)]
 pub struct FindStackThread {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
     pub active_vcpu: Option<String>,
     pub stack: StackTrace,
     /// Indices into `stack.frames` of the frames whose symbol matched.
@@ -273,7 +261,7 @@ pub struct FindStackDetail {
 /// pointers the others do not share.
 #[derive(Debug, Clone)]
 pub struct UniqStackGroup {
-    pub threads: Vec<ThreadSummary>,
+    pub threads: Vec<ThreadInfo>,
     pub stack: StackTrace,
 }
 
@@ -435,7 +423,7 @@ pub fn findstack_level_error(level: impl std::fmt::Display) -> Error {
 /// Group walked stacks by their frames' instruction pointers and truncation,
 /// keeping the order in which each group's first thread came.
 pub fn group_stacks(
-    stacks: impl IntoIterator<Item = (ThreadSummary, StackTrace)>,
+    stacks: impl IntoIterator<Item = (ThreadInfo, StackTrace)>,
 ) -> Vec<UniqStackGroup> {
     let mut groups: Vec<UniqStackGroup> = Vec::new();
     let mut index: HashMap<(Vec<u64>, usize), usize> = HashMap::new();
@@ -504,10 +492,6 @@ pub fn unavailable<T>(error: impl Into<String>) -> DiagnosticValue<T> {
     DiagnosticValue::Unavailable(error.into())
 }
 
-fn optional<T>(value: Option<T>) -> DiagnosticValue<Option<T>> {
-    available(value)
-}
-
 /// The integer at the first readable path below `root`. Every segment but
 /// the last names an embedded struct, or a pointer to one, to step into.
 fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
@@ -535,25 +519,12 @@ fn parent_pid(eprocess: &StructRef<'_>) -> Result<u64> {
         .or_else(|error| eprocess.read_uint("ParentCid").map_err(|_| error))
 }
 
-pub fn thread_summary(thread: &ThreadInfo) -> ThreadSummary {
-    ThreadSummary {
-        ethread: thread.ethread,
-        kthread: thread.kthread,
-        tid: optional(thread.tid),
-        pid: optional(thread.pid),
-        process_name: optional(thread.process_name.clone()),
-        state: optional(thread.state),
-        wait_reason: optional(thread.wait_reason),
-        priority: optional(thread.priority),
-    }
-}
-
-fn thread_is_idle(thread: &ThreadSummary) -> bool {
-    matches!(thread.pid, DiagnosticValue::Available(Some(0)))
-        || matches!(
-            &thread.process_name,
-            DiagnosticValue::Available(Some(name)) if name.eq_ignore_ascii_case("idle")
-        )
+fn thread_is_idle(thread: &ThreadInfo) -> bool {
+    thread.pid == Some(0)
+        || thread
+            .process_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("idle"))
 }
 
 pub(super) fn layout_for(target: &Target, name: &str) -> Result<Arc<TypeInfo>> {
@@ -670,7 +641,7 @@ fn decode_running_thread(
     target: &Target,
     pointer: Result<VirtAddr>,
     ethread_tcb_offset: u64,
-) -> DiagnosticValue<Option<ThreadSummary>> {
+) -> DiagnosticValue<Option<ThreadInfo>> {
     let pointer = match pointer {
         Ok(pointer) => pointer,
         Err(error) => return unavailable(error.to_string()),
@@ -679,7 +650,7 @@ fn decode_running_thread(
         return available(None);
     }
     match target.thread_info_from_ethread(pointer - ethread_tcb_offset) {
-        Ok(thread) => available(Some(thread_summary(&thread))),
+        Ok(thread) => available(Some(thread)),
         Err(error) => unavailable(error.to_string()),
     }
 }
@@ -808,7 +779,7 @@ impl Target {
                     let thread = match thread_link_offset {
                         Some(_) => {
                             match self.thread_info_from_ethread(kthread - ethread_tcb_offset) {
-                                Ok(thread) => available(Some(thread_summary(&thread))),
+                                Ok(thread) => available(Some(thread)),
                                 Err(error) => unavailable(error.to_string()),
                             }
                         }
@@ -1690,6 +1661,7 @@ impl Target {
 mod tests {
     use super::*;
     use crate::session::session_over_memory;
+    use crate::target::sample_thread;
     use crate::unwind::FrameSource;
 
     #[test]
@@ -1719,15 +1691,11 @@ mod tests {
 
     #[test]
     fn stacks_group_by_instruction_pointers_not_stack_pointers() {
-        let thread = |tid| ThreadSummary {
+        let thread = |tid| ThreadInfo {
             ethread: VirtAddr(tid),
             kthread: VirtAddr(tid),
-            tid: optional(Some(tid)),
-            pid: optional(Some(4)),
-            process_name: optional(Some("System".to_string())),
-            state: optional(None),
-            wait_reason: optional(None),
-            priority: optional(None),
+            tid: Some(tid),
+            ..sample_thread()
         };
         let stack = |sp: u64, ips: &[u64], truncated| StackTrace {
             frames: ips
@@ -1758,10 +1726,7 @@ mod tests {
                 group
                     .threads
                     .iter()
-                    .map(|thread| match thread.tid {
-                        DiagnosticValue::Available(Some(tid)) => tid,
-                        _ => unreachable!(),
-                    })
+                    .map(|thread| thread.tid.expect("sample threads have a tid"))
                     .collect()
             })
             .collect();
@@ -1773,21 +1738,16 @@ mod tests {
 
     #[test]
     fn idle_detection_uses_pid_zero_or_idle_name() {
-        let mut summary = ThreadSummary {
-            ethread: VirtAddr(1),
-            kthread: VirtAddr(2),
-            tid: optional(Some(3)),
-            pid: optional(Some(42)),
-            process_name: optional(Some("Idle".to_string())),
-            state: optional(None),
-            wait_reason: optional(None),
-            priority: optional(None),
+        let mut summary = ThreadInfo {
+            pid: Some(42),
+            process_name: Some("Idle".to_string()),
+            ..sample_thread()
         };
         assert!(thread_is_idle(&summary));
-        summary.process_name = optional(Some("System".to_string()));
-        summary.pid = optional(Some(0));
+        summary.process_name = Some("System".to_string());
+        summary.pid = Some(0);
         assert!(thread_is_idle(&summary));
-        summary.pid = optional(Some(4));
+        summary.pid = Some(4);
         assert!(!thread_is_idle(&summary));
     }
 

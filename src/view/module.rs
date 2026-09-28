@@ -214,11 +214,12 @@ shapes! {
     ImageExports {
         /// `None` when the image exports nothing.
         directory: Option<ImageExportDirectory>,
-        exports: Vec<ImageExport>,
+        exports: Vec<Export>,
     }
 
-    /// One export from an image's export directory.
-    ImageExport {
+    /// One PE export (`Module.exports`, `!dh -e`), by name or ordinal only;
+    /// a forwarder has no address.
+    Export {
         ordinal: u32,
         /// `None` for an ordinal-only export.
         name: Option<String>,
@@ -310,16 +311,6 @@ shapes! {
         permissions: String,
     }
 
-    /// One PE export, by name or ordinal only; a forwarder has no address.
-    Export {
-        /// The export name, `None` for an ordinal-only export.
-        name: Option<String>,
-        ordinal: u32,
-        /// The exported address, `None` for a forwarder.
-        address: Option<VirtAddr>,
-        /// The forwarding target (`OTHER.Function`), for a forwarder.
-        forwarder: Option<String>,
-    }
 }
 
 /// A loaded image's identity, without its symbol status.
@@ -541,21 +532,26 @@ fn export_directory(directory: &ExportDirectory) -> ImageExportDirectory {
     }
 }
 
+/// One export of the image mapped at `base`.
+pub fn export(export: &pe::ModuleExportInfo, base: u64) -> Export {
+    Export {
+        ordinal: export.ordinal,
+        name: export.name.clone(),
+        rva: export
+            .address
+            .map(|address| address.0.wrapping_sub(base)),
+        address: export.address,
+        forwarder: export.forwarder.clone(),
+    }
+}
+
 fn image_exports(exports: &pe::ImageExports, base: u64) -> ImageExports {
     ImageExports {
         directory: exports.directory.as_ref().map(export_directory),
         exports: exports
             .exports
             .iter()
-            .map(|export| ImageExport {
-                ordinal: export.ordinal,
-                name: export.name.clone(),
-                rva: export
-                    .address
-                    .map(|address| address.0.wrapping_sub(base)),
-                address: export.address,
-                forwarder: export.forwarder.clone(),
-            })
+            .map(|export| self::export(export, base))
             .collect(),
     }
 }

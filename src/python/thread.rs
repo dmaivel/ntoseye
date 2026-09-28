@@ -317,15 +317,21 @@ impl Thread {
     }
 
     /// Thread summary and saved scheduling details (`!thread`).
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::process::ThreadOverview>> {
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::process::ThreadSummary>> {
         let active = self.cpu_id(py)?;
-        Typed::new(py, view::process::thread(&self.info, active.as_deref()))
+        Typed::new(
+            py,
+            view::process::thread_summary(&self.info, active.as_deref()),
+        )
     }
 
     /// The thread as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let active = self.cpu_id(py)?;
-        view_dict(py, view::process::thread(&self.info, active.as_deref()))
+        view_dict(
+            py,
+            view::process::thread_summary(&self.info, active.as_deref()),
+        )
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

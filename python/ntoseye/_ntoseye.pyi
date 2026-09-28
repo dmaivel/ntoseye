@@ -3440,12 +3440,13 @@ class ExecutiveResource(BaseRecord):
 @final
 class Export(BaseRecord):
     """
-    One PE export, by name or ordinal only; a forwarder has no address.
+    One PE export (`Module.exports`, `!dh -e`), by name or ordinal only;
+    a forwarder has no address.
     """
     @property
     def address(self, /) -> int |None:
         """
-        The exported address, `None` for a forwarder.
+        The mapped address, `None` for a forwarder.
         """
     @property
     def forwarder(self, /) -> str |None:
@@ -3455,10 +3456,15 @@ class Export(BaseRecord):
     @property
     def name(self, /) -> str |None:
         """
-        The export name, `None` for an ordinal-only export.
+        `None` for an ordinal-only export.
         """
     @property
     def ordinal(self, /) -> int: ...
+    @property
+    def rva(self, /) -> int |None:
+        """
+        `None` for a forwarder.
+        """
 
 @final
 class ExpressionValue(BaseRecord):
@@ -3674,11 +3680,6 @@ class FindStackThread(BaseRecord):
     """
     A thread whose stack has a frame matching `!findstack`'s pattern.
     """
-    @property
-    def active(self, /) -> str |None:
-        """
-        The vCPU running the thread, when it is running.
-        """
     @property
     def frames(self, /) -> list[StackFrame] |None:
         """
@@ -5134,34 +5135,6 @@ class ImageDebugEntry(BaseRecord):
         """
 
 @final
-class ImageExport(BaseRecord):
-    """
-    One export from an image's export directory.
-    """
-    @property
-    def address(self, /) -> int |None:
-        """
-        The mapped address, `None` for a forwarder.
-        """
-    @property
-    def forwarder(self, /) -> str |None:
-        """
-        The forwarding target (`OTHER.Function`), for a forwarder.
-        """
-    @property
-    def name(self, /) -> str |None:
-        """
-        `None` for an ordinal-only export.
-        """
-    @property
-    def ordinal(self, /) -> int: ...
-    @property
-    def rva(self, /) -> int |None:
-        """
-        `None` for a forwarder.
-        """
-
-@final
 class ImageExportDirectory(BaseRecord):
     """
     `IMAGE_EXPORT_DIRECTORY`.
@@ -5204,7 +5177,7 @@ class ImageExports(BaseRecord):
         `None` when the image exports nothing.
         """
     @property
-    def exports(self, /) -> list[ImageExport]: ...
+    def exports(self, /) -> list[Export]: ...
 
 @final
 class ImageFileHeader(BaseRecord):
@@ -7431,32 +7404,6 @@ class NameIterator:
     def __next__(self, /) -> str: ...
 
 @final
-class NearestSymbol(BaseRecord):
-    """
-    The symbol nearest below an address (`ln`); the symbol fields are
-    `None` when no symbol covers it.
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        The queried address.
-        """
-    @property
-    def module(self, /) -> str |None: ...
-    @property
-    def name(self, /) -> str |None: ...
-    @property
-    def offset(self, /) -> int |None:
-        """
-        Bytes from the symbol to `address`.
-        """
-    @property
-    def symbol(self, /) -> str |None:
-        """
-        `module!name+0xoffset`.
-        """
-
-@final
 class NotifyCallback(BaseRecord):
     """
     A process, thread, or image notification callback (`callbacks`).
@@ -9564,7 +9511,7 @@ class RunStatus(BaseRecord):
         The process whose page tables the stopped vCPU has loaded.
         """
     @property
-    def stopped_thread(self, /) -> ThreadOverview |None:
+    def stopped_thread(self, /) -> ThreadSummary |None:
         """
         The Windows thread the stopped vCPU runs; its owner can differ
         from `stopped_process` (`KeStackAttachProcess`).
@@ -10384,7 +10331,7 @@ class Subsection(BaseRecord):
 @final
 class Symbol(BaseRecord):
     """
-    A symbol identity nearest to an address.
+    The symbol nearest below an address (`ln`, `Symbols.nearest()`).
     """
     def __str__(self, /) -> str:
         """
@@ -11035,7 +10982,7 @@ class Thread:
         """
         The `_ETHREAD` address: the thread's identity.
         """
-    def inspect(self, /) -> ThreadOverview:
+    def inspect(self, /) -> ThreadSummary:
         """
         Thread summary and saved scheduling details (`!thread`).
         """
@@ -11101,66 +11048,10 @@ class ThreadIterator:
     def __next__(self, /) -> Thread: ...
 
 @final
-class ThreadOverview(BaseRecord):
-    """
-    A Windows thread from the kernel thread walk (`threads`, `!thread`).
-    Fields the walk could not read are `None`.
-    """
-    @property
-    def active(self, /) -> str |None:
-        """
-        The vCPU currently running the thread; `None` when none is, or
-        when the target is running.
-        """
-    @property
-    def eprocess(self, /) -> int |None:
-        """
-        The owning `_EPROCESS`.
-        """
-    @property
-    def ethread(self, /) -> int: ...
-    @property
-    def kthread(self, /) -> int: ...
-    @property
-    def pid(self, /) -> int |None: ...
-    @property
-    def process_name(self, /) -> str |None:
-        """
-        The owning process's image name.
-        """
-    @property
-    def state(self, /) -> int |None:
-        """
-        `_KTHREAD.State`.
-        """
-    @property
-    def state_name(self, /) -> str |None:
-        """
-        The state's name (`Running`, `Waiting`, ...).
-        """
-    @property
-    def tid(self, /) -> int |None: ...
-    @property
-    def wait_reason(self, /) -> int |None:
-        """
-        `_KTHREAD.WaitReason`.
-        """
-    @property
-    def wait_reason_name(self, /) -> str |None:
-        """
-        The wait reason's name (`Executive`, `UserRequest`, ...).
-        """
-
-@final
 class ThreadStack(BaseRecord):
     """
     A thread's state and walked stack (`!stacks`).
     """
-    @property
-    def active(self, /) -> str |None:
-        """
-        The vCPU running the thread, when it is running.
-        """
     @property
     def error(self, /) -> str |None:
         """
@@ -11215,51 +11106,57 @@ class ThreadStacks(BaseRecord):
 @final
 class ThreadSummary(BaseRecord):
     """
-    A thread's identity and scheduling state, each read on its own.
+    A Windows thread, as `threads`, `!thread`, and every scheduler
+    listing report it. Fields the walk could not read are `None`.
     """
+    @property
+    def active(self, /) -> str |None:
+        """
+        The vCPU running the thread, when the listing resolves it; `None`
+        when none runs it, and while the target runs.
+        """
+    @property
+    def eprocess(self, /) -> int |None:
+        """
+        The owning `_EPROCESS`.
+        """
     @property
     def ethread(self, /) -> int: ...
     @property
     def kthread(self, /) -> int: ...
     @property
-    def pid(self, /) -> Diagnostic[int |None]:
-        """
-        Owning process's id.
-        """
+    def pid(self, /) -> int |None: ...
     @property
-    def priority(self, /) -> Diagnostic[int |None]:
+    def priority(self, /) -> int |None:
         """
         Current scheduling priority.
         """
     @property
-    def process_name(self, /) -> Diagnostic[str |None]:
+    def process_name(self, /) -> str |None:
         """
-        Owning process's image name.
+        The owning process's image name.
         """
     @property
-    def state(self, /) -> Diagnostic[int |None]:
+    def state(self, /) -> int |None:
         """
         `_KTHREAD.State`.
         """
     @property
-    def state_name(self, /) -> Diagnostic[str |None]:
+    def state_name(self, /) -> str |None:
         """
-        `state` by name (`Running`, `Waiting`, ...).
-        """
-    @property
-    def tid(self, /) -> Diagnostic[int |None]:
-        """
-        Thread id.
+        The state's name (`Running`, `Waiting`, ...).
         """
     @property
-    def wait_reason(self, /) -> Diagnostic[int |None]:
+    def tid(self, /) -> int |None: ...
+    @property
+    def wait_reason(self, /) -> int |None:
         """
         `_KTHREAD.WaitReason`.
         """
     @property
-    def wait_reason_name(self, /) -> Diagnostic[str |None]:
+    def wait_reason_name(self, /) -> str |None:
         """
-        `wait_reason` by name (`Executive`, `UserRequest`, ...).
+        The wait reason's name (`Executive`, `UserRequest`, ...).
         """
 
 @final

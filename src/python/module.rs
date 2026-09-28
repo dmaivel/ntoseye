@@ -17,7 +17,7 @@ use crate::pe;
 use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
-use crate::view::module::{Export, Section};
+use crate::view::module::Section;
 use crate::view::shape::Typed;
 use crate::view::{self};
 use pelite::PeView;
@@ -245,16 +245,13 @@ impl Module {
             let dtb = self.space.dtb(&session.target)?;
             session.target.module_exports(dtb, base).map_err(err)
         })?;
-        let exports = exports
-            .into_iter()
-            .map(|export| Export {
-                name: export.name,
-                ordinal: export.ordinal,
-                address: export.address,
-                forwarder: export.forwarder,
-            })
-            .collect::<Vec<_>>();
-        Typed::new(py, exports)
+        Typed::new(
+            py,
+            exports
+                .iter()
+                .map(|export| view::module::export(export, base.0))
+                .collect(),
+        )
     }
 
     /// Module symbol and PDB identity (`lmv`).

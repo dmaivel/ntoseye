@@ -5,33 +5,12 @@ use super::shape::{Diag, Hex, Omit, shapes, unions};
 use super::list::{ListEnd, list_termination};
 use crate::target::sched::{self as detail, ApcSelector};
 use crate::target::workqueue::{self, ExQueueDetail};
-use crate::target::{DiagnosticValue, kthread_state_name, wait_reason_name};
+use super::process::{ThreadSummary, thread_summary};
+use crate::target::{DiagnosticValue, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::StackFrame;
 
 shapes! {
-    /// A thread's identity and scheduling state, each read on its own.
-    ThreadSummary {
-        ethread: VirtAddr,
-        kthread: VirtAddr,
-        /// Thread id.
-        tid: Diag<Option<u64>>,
-        /// Owning process's id.
-        pid: Diag<Option<u64>>,
-        /// Owning process's image name.
-        process_name: Diag<Option<String>>,
-        /// `_KTHREAD.State`.
-        state: Diag<Option<u8>>,
-        /// `state` by name (`Running`, `Waiting`, ...).
-        state_name: Diag<Option<&'static str>>,
-        /// `_KTHREAD.WaitReason`.
-        wait_reason: Diag<Option<u8>>,
-        /// `wait_reason` by name (`Executive`, `UserRequest`, ...).
-        wait_reason_name: Diag<Option<&'static str>>,
-        /// Current scheduling priority.
-        priority: Diag<Option<u8>>,
-    }
-
     /// A processor's running, next, and idle threads (`!running`).
     RunningProcessor {
         /// Processor number.
@@ -225,8 +204,6 @@ shapes! {
     /// A thread's state and walked stack (`!stacks`).
     ThreadStack {
         thread: ThreadSummary,
-        /// The vCPU running the thread, when it is running.
-        active: Option<String>,
         /// The top frame's symbol.
         top_symbol: Diag<Option<String>>,
         /// Frames, innermost first: the top one at level 0, up to 32 at
@@ -262,8 +239,6 @@ shapes! {
     /// A thread whose stack has a frame matching `!findstack`'s pattern.
     FindStackThread {
         thread: ThreadSummary,
-        /// The vCPU running the thread, when it is running.
-        active: Option<String>,
         /// Frames that matched.
         match_count: usize,
         /// The frames that matched, each with its `index` in the stack;
@@ -417,25 +392,8 @@ unions! {
     }
 }
 
-fn thread_summary(thread: &detail::ThreadSummary) -> ThreadSummary {
-    ThreadSummary {
-        ethread: thread.ethread,
-        kthread: thread.kthread,
-        tid: thread.tid.clone(),
-        pid: thread.pid.clone(),
-        process_name: thread.process_name.clone(),
-        state: thread.state.clone(),
-        state_name: thread.state.map(|value| value.map(kthread_state_name)),
-        wait_reason: thread.wait_reason.clone(),
-        wait_reason_name: thread.wait_reason.map(|value| value.map(wait_reason_name)),
-        priority: thread.priority.clone(),
-    }
-}
-
-fn optional_thread(
-    value: &DiagnosticValue<Option<detail::ThreadSummary>>,
-) -> DiagnosticValue<Option<ThreadSummary>> {
-    value.map(|thread| thread.as_ref().map(thread_summary))
+fn optional_thread(value: &DiagnosticValue<Option<ThreadInfo>>) -> DiagnosticValue<Option<ThreadSummary>> {
+    value.map(|thread| thread.as_ref().map(|thread| thread_summary(thread, None)))
 }
 
 fn scheduler_error(error: &detail::SchedulerError) -> SchedulerError {
@@ -600,7 +558,7 @@ pub fn apcs(detail: &detail::ApcListDetail) -> ApcQueues {
             .threads
             .iter()
             .map(|thread| ApcThread {
-                thread: thread_summary(&thread.thread),
+                thread: thread_summary(&thread.thread, None),
                 kernel: thread.kernel.iter().map(apc).collect(),
                 user: thread.user.iter().map(apc).collect(),
                 kernel_termination: list_termination(&thread.kernel_termination),
@@ -625,8 +583,7 @@ pub fn stacks(detail: &detail::StacksDetail) -> ThreadStacks {
             .threads
             .iter()
             .map(|thread| ThreadStack {
-                thread: thread_summary(&thread.thread),
-                active: thread.active_vcpu.clone(),
+                thread: thread_summary(&thread.thread, thread.active_vcpu.as_deref()),
                 top_symbol: thread.top_symbol.clone(),
                 frames: frames(&thread.frames),
                 truncated: thread.truncated,
@@ -640,7 +597,7 @@ fn unwalked_threads(threads: &[detail::UnwalkedThread]) -> Vec<UnwalkedThread> {
     threads
         .iter()
         .map(|thread| UnwalkedThread {
-            thread: thread_summary(&thread.thread),
+            thread: thread_summary(&thread.thread, None),
             error: thread.error.clone(),
         })
         .collect()
@@ -649,8 +606,7 @@ fn unwalked_threads(threads: &[detail::UnwalkedThread]) -> Vec<UnwalkedThread> {
 fn findstack_thread(thread: &detail::FindStackThread, level: u8) -> FindStackThread {
     let whole = level >= 2;
     FindStackThread {
-        thread: thread_summary(&thread.thread),
-        active: thread.active_vcpu.clone(),
+        thread: thread_summary(&thread.thread, thread.active_vcpu.as_deref()),
         match_count: thread.matches.len(),
         matching_frames: (level >= 1).then(|| {
             thread
@@ -725,9 +681,7 @@ fn work_queue(queue: &workqueue::WorkQueueDetail) -> WorkQueue {
             .iter()
             .map(|worker| WorkerThread {
                 kthread: worker.kthread,
-                thread: worker.thread.map(|info| {
-                    thread_summary(&detail::thread_summary(info))
-                }),
+                thread: worker.thread.map(|info| thread_summary(info, None)),
                 stack: worker
                     .stack
                     .as_ref()
@@ -770,7 +724,11 @@ pub fn uniqstack(detail: &detail::UniqStackDetail) -> UniqStacks {
             .iter()
             .map(|group| UniqStackGroup {
                 thread_count: group.threads.len(),
-                threads: group.threads.iter().map(thread_summary).collect(),
+                threads: group
+                    .threads
+                    .iter()
+                    .map(|thread| thread_summary(thread, None))
+                    .collect(),
                 frames: frames(&group.stack.frames),
                 truncated: group.stack.truncated,
             })
