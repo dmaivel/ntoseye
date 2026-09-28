@@ -742,11 +742,7 @@ fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
 fn source_value(location: &SourceLocation) -> Value {
     let name = file_stem_of(&location.file);
     let mut source = json!({"name": name});
-    match location
-        .local_path
-        .as_ref()
-        .filter(|_| location.local_exists)
-    {
+    match location.found_local() {
         Some(path) => source["path"] = json!(path.to_string_lossy()),
         // No local file: naming the recorded path lets the client show where
         // the source would come from without pretending it can open it.

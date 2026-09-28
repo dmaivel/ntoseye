@@ -51,7 +51,7 @@ Reload VS Code, then add a configuration to `launch.json`.
       "backend": "kd",
       "connect": "/tmp/ntoseye-kd.sock",
       "symbolPath": "/path/to/your/driver/symbols",
-      "sourcePath": "C:\\Users\\you\\source\\repos\\MyDriver\\MyDriver=/home/you/src/MyDriver"
+      "sourcePath": "/home/you/src/MyDriver"
     }
   ]
 }
@@ -114,7 +114,7 @@ dap.configurations.c = {
     backend = "kd",
     connect = "/tmp/ntoseye-kd.sock",
     symbolPath = "/path/to/your/driver/symbols",
-    sourcePath = [[C:\Users\you\source\repos\MyDriver\MyDriver=/home/you/src/MyDriver]],
+    sourcePath = "/home/you/src/MyDriver",
   },
 }
 ```
@@ -135,7 +135,7 @@ Kernel debugging has no process to start, so `launch` and `attach` behave identi
 
 `symbolPath` accepts a local directory, a symbol server (`https://...`, `srv*a*b`), a `;`-separated list, or a JSON array. Entries are appended to the managed cache and Microsoft server. Symbols are reloaded at attach.
 
-`sourcePath` takes `<prefix-recorded-in-the-pdb>=<local-root>` or a bare local root, in the same `;`-separated or JSON array forms. A source view needs it whenever the driver was not built on this host.
+`sourcePath` takes the local directory holding the source tree, matched as {command}`.srcpath` describes, or `<prefix-recorded-in-the-pdb>=<local-root>`, in the same `;`-separated or JSON array forms. A source view needs it whenever the driver was not built on this host.
 
 When the command line already pinned a target (`ntoseye dap --dump crash.dmp`), the attach request adopts that session and ignores its own target arguments. `symbolPath` and `sourcePath` still apply.
 

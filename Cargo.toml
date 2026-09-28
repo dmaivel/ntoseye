@@ -50,6 +50,8 @@ aes = "0.8"
 cbc = "0.1"
 getrandom = "0.3"
 hmac = "0.12"
+md-5 = "0.10"
+sha1 = "0.10"
 sha2 = "0.10"
 subtle = "2.6"
 

@@ -11,7 +11,7 @@ use crate::kd::context::{OFFSET_RIP, OFFSET_RSP};
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::session::session_over_memory;
 use crate::session::tests::{MockBackend, session_with_mock};
-use crate::symbols::{LocalVariableLocation, ProcedureLocal};
+use crate::symbols::{LocalSource, LocalSourceState, LocalVariableLocation, ProcedureLocal};
 use crate::target::SelectedFrame;
 
 #[test]
@@ -195,16 +195,21 @@ fn addresses_parse_from_hex_and_decimal() {
 
 #[test]
 fn source_without_a_local_file_is_not_advertised_as_openable() {
-    let location = SourceLocation {
-        file: "d:\\src\\driver.c".to_string(),
-        line: 42,
-        column: None,
-        local_path: Some(PathBuf::from("/tmp/nonexistent/driver.c")),
-        local_exists: false,
-    };
-    let value = source_value(&location);
-    assert!(value.get("path").is_none());
-    assert_eq!(value["name"], json!("driver.c"));
+    // Neither a missing file nor one that is not the source compiled.
+    for state in [LocalSourceState::Missing, LocalSourceState::Differs] {
+        let location = SourceLocation {
+            file: "d:\\src\\driver.c".to_string(),
+            line: 42,
+            column: None,
+            local: Some(LocalSource {
+                path: PathBuf::from("/tmp/checkout/driver.c"),
+                state,
+            }),
+        };
+        let value = source_value(&location);
+        assert!(value.get("path").is_none(), "{state:?}");
+        assert_eq!(value["name"], json!("driver.c"));
+    }
 }
 
 #[test]
@@ -419,8 +424,7 @@ fn stack_frames_use_recovered_symbol_and_source_metadata() {
             file: r"C:\build\driver.c".to_string(),
             line: 42,
             column: Some(7),
-            local_path: None,
-            local_exists: false,
+            local: None,
         }),
         frame_base: None,
         registers: HashMap::new(),

@@ -78,10 +78,13 @@ shapes! {
         line: u32,
         /// `None` when the PDB records no column.
         column: Option<u32>,
-        /// The file after source-path remapping, when one applies.
+        /// The local file the source path maps it to, `None` when no mapping
+        /// applies.
         local_path: Option<String>,
-        /// Whether `local_path` exists on this machine.
-        local_exists: bool,
+        /// `found` (there, and the file compiled when the PDB records a
+        /// checksum), `missing`, or `differs` (there, but its checksum is
+        /// not the one compiled); `None` with `local_path`.
+        local_state: Option<&'static str>,
     }
 
     /// Where a local variable lives.
@@ -170,10 +173,14 @@ pub fn source_location(location: &symbols::SourceLocation) -> SourceLocation {
         line: location.line,
         column: location.column,
         local_path: location
-            .local_path
+            .local
             .as_ref()
-            .map(|path| path.display().to_string()),
-        local_exists: location.local_exists,
+            .map(|local| local.path.display().to_string()),
+        local_state: location.local.as_ref().map(|local| match local.state {
+            symbols::LocalSourceState::Found => "found",
+            symbols::LocalSourceState::Missing => "missing",
+            symbols::LocalSourceState::Differs => "differs",
+        }),
     }
 }
 

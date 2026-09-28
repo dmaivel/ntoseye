@@ -374,8 +374,7 @@ fn source_line_lookup_obeys_line_ranges() {
                 file: "private.c".to_string(),
                 line: 10,
                 column: Some(2),
-                local_path: None,
-                local_exists: false,
+                local: None,
             },
         },
         SourceLineEntry {
@@ -385,8 +384,7 @@ fn source_line_lookup_obeys_line_ranges() {
                 file: "private.c".to_string(),
                 line: 11,
                 column: None,
-                local_path: None,
-                local_exists: false,
+                local: None,
             },
         },
         SourceLineEntry {
@@ -396,8 +394,7 @@ fn source_line_lookup_obeys_line_ranges() {
                 file: "private.c".to_string(),
                 line: 12,
                 column: None,
-                local_path: None,
-                local_exists: false,
+                local: None,
             },
         },
     ];
@@ -457,6 +454,14 @@ fn source_file_matching_supports_windows_paths_and_basenames() {
     assert!(!SourceFileQuery::new("other.c").matches(recorded));
 }
 
+fn unverified(_: &Path) -> Option<bool> {
+    None
+}
+
+fn local(path: PathBuf, state: LocalSourceState) -> Option<LocalSource> {
+    Some(LocalSource { path, state })
+}
+
 #[test]
 fn source_path_remapping_prefers_existing_ordered_candidate() {
     let root = temp_root("source-remap");
@@ -467,7 +472,7 @@ fn source_path_remapping_prefers_existing_ordered_candidate() {
     let mappings = vec![
         SourcePathMapping {
             recorded_prefix: Some(r"C:\agent\src".to_string()),
-            local_root: first,
+            local_root: first.clone(),
         },
         SourcePathMapping {
             recorded_prefix: Some(r"C:\agent\src".to_string()),
@@ -475,9 +480,109 @@ fn source_path_remapping_prefers_existing_ordered_candidate() {
         },
     ];
 
-    let (candidate, exists) = remap_source_file(r"C:\agent\src\private.c", &mappings);
-    assert!(exists);
-    assert_eq!(candidate, Some(second.join("private.c")));
+    assert_eq!(
+        remap_source_file(r"C:\agent\src\private.c", &mappings, &mut unverified),
+        local(second.join("private.c"), LocalSourceState::Found)
+    );
+    assert_eq!(
+        remap_source_file(r"C:\agent\src\gone.c", &mappings, &mut unverified),
+        local(first.join("gone.c"), LocalSourceState::Missing)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A bare root holds the recorded path's trailing components: the longest
+/// that names a file under it wins, exact case first, then ignoring case.
+#[test]
+fn a_bare_source_root_matches_the_longest_recorded_suffix() {
+    let root = temp_root("source-suffix");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("Inc")).unwrap();
+    std::fs::write(root.join("src/queue.c"), "queue\n").unwrap();
+    std::fs::write(root.join("queue.c"), "other queue\n").unwrap();
+    std::fs::write(root.join("Inc/Driver.h"), "driver\n").unwrap();
+    let mappings = [SourcePathMapping {
+        recorded_prefix: None,
+        local_root: root.clone(),
+    }];
+
+    assert_eq!(
+        remap_source_file(
+            r"C:\Users\me\repos\MyDriver\src\queue.c",
+            &mappings,
+            &mut unverified
+        ),
+        local(root.join("src/queue.c"), LocalSourceState::Found)
+    );
+    assert_eq!(
+        remap_source_file(r"C:\build\inc\driver.h", &mappings, &mut unverified),
+        local(root.join("Inc/Driver.h"), LocalSourceState::Found)
+    );
+    assert_eq!(
+        remap_source_file(r"C:\build\src\absent.c", &mappings, &mut unverified),
+        local(root.join("absent.c"), LocalSourceState::Missing)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A file that is not the one compiled is passed over for one that is, and
+/// reported only when no candidate is.
+#[test]
+fn source_remapping_passes_over_files_that_are_not_the_one_compiled() {
+    let root = temp_root("source-verify");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/queue.c"), "edited\n").unwrap();
+    std::fs::write(root.join("queue.c"), "compiled\n").unwrap();
+    let mappings = [SourcePathMapping {
+        recorded_prefix: None,
+        local_root: root.clone(),
+    }];
+    let compiled = |path: &Path| Some(std::fs::read(path).unwrap() == b"compiled\n");
+
+    assert_eq!(
+        remap_source_file(r"C:\drv\src\queue.c", &mappings, &mut { compiled }),
+        local(root.join("queue.c"), LocalSourceState::Found)
+    );
+    std::fs::remove_file(root.join("queue.c")).unwrap();
+    assert_eq!(
+        remap_source_file(r"C:\drv\src\queue.c", &mappings, &mut { compiled }),
+        local(root.join("src/queue.c"), LocalSourceState::Differs)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The store checks a mapped file against the checksum the PDB records,
+/// again after the file changes.
+#[test]
+fn source_lines_report_whether_the_local_file_is_the_one_compiled() {
+    let root = temp_root("source-checksum");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let file = root.join("src/driver.c");
+    std::fs::write(&file, "int compiled;\n").unwrap();
+    let store = SymbolStore::new();
+    let (guid, dtb, base) = (0x77, 0x1000, VirtAddr(0xffff_f800_1000_0000));
+    let recorded = r"C:\agent\src\driver.c";
+    store.inject_source_lines_for_test(guid, dtb, base, 0x1000, recorded, &[(0x100, Some(4), 7)]);
+    let checksum = source::source_digest(&SourceChecksum::Sha256([0; 32]), b"int compiled;\n");
+    store
+        .source_checksums
+        .insert(guid, HashMap::from([(recorded.to_string(), checksum)]));
+    store.set_source_paths(parse_source_paths(&[root.to_str().unwrap()]));
+    let state = || {
+        store
+            .source_location(dtb, base + 0x100_u64)
+            .and_then(|location| location.local)
+            .map(|local| local.state)
+    };
+
+    assert_eq!(state(), Some(LocalSourceState::Found));
+    std::fs::write(&file, "int edited since;\n").unwrap();
+    assert_eq!(state(), Some(LocalSourceState::Differs));
+    std::fs::write(&file, "int compiled;\n").unwrap();
+    assert_eq!(state(), Some(LocalSourceState::Found));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -497,13 +602,18 @@ fn source_path_remapping_rejects_traversal_and_symlink_escape() {
     }];
 
     assert_eq!(
-        remap_source_file(r"C:\agent\src\..\outside\secret.c", &mappings),
-        (None, false)
+        remap_source_file(
+            r"C:\agent\src\..\outside\secret.c",
+            &mappings,
+            &mut unverified
+        ),
+        None
     );
-    let (candidate, exists) = remap_source_file(r"C:\agent\src\link\secret.c", &mappings);
-    assert_eq!(candidate, Some(checkout.join("link/secret.c")));
-    assert!(!exists);
-    assert_eq!(remap_source_file("/etc/passwd", &[]), (None, false));
+    assert_eq!(
+        remap_source_file(r"C:\agent\src\link\secret.c", &mappings, &mut unverified),
+        local(checkout.join("link/secret.c"), LocalSourceState::Missing)
+    );
+    assert_eq!(remap_source_file("/etc/passwd", &[], &mut unverified), None);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -534,8 +644,7 @@ fn source_addresses_resolve_cached_file_and_line() {
                     file: r"C:\agent\src\private.c".to_string(),
                     line: 42,
                     column: None,
-                    local_path: None,
-                    local_exists: false,
+                    local: None,
                 },
             },
             SourceLineEntry {
@@ -545,8 +654,7 @@ fn source_addresses_resolve_cached_file_and_line() {
                     file: r"C:\agent\src\private.c".to_string(),
                     line: 42,
                     column: None,
-                    local_path: None,
-                    local_exists: false,
+                    local: None,
                 },
             },
         ],

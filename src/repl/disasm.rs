@@ -7,7 +7,7 @@ use crate::breakpoints::BreakpointManager;
 use crate::error::Error;
 use crate::gdb::RegisterMap;
 use crate::gdb::registers::repeats_another_register;
-use crate::symbols::SourceLocation;
+use crate::symbols::{LocalSourceState, SourceLocation};
 use crate::target::Target;
 use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
@@ -457,9 +457,15 @@ pub fn frame_size_cell(previous_sp: Option<u64>, sp: u64) -> String {
 }
 
 fn format_source_location(location: &SourceLocation) -> String {
-    let (label, path) = match location.local_path.as_ref() {
-        Some(path) if location.local_exists => ("local", path.display().to_string()),
-        Some(path) => ("mapped", path.display().to_string()),
+    let (label, path) = match &location.local {
+        Some(local) => (
+            match local.state {
+                LocalSourceState::Found => "local",
+                LocalSourceState::Missing => "mapped",
+                LocalSourceState::Differs => "differs",
+            },
+            local.path.display().to_string(),
+        ),
         None => ("recorded", location.file.clone()),
     };
     match location.column {
@@ -557,6 +563,7 @@ pub fn more_frames(hidden: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbols::LocalSource;
 
     #[test]
     fn stop_disassembly_starts_at_rip_and_only_looks_forward() {
@@ -580,8 +587,7 @@ mod tests {
             file: r"C:\build\driver.c".into(),
             line: 42,
             column: Some(7),
-            local_path: None,
-            local_exists: false,
+            local: None,
         };
         assert_eq!(
             format_source_location(&recorded),
@@ -589,8 +595,10 @@ mod tests {
         );
 
         let local = SourceLocation {
-            local_path: Some("/checkout/driver.c".into()),
-            local_exists: true,
+            local: Some(LocalSource {
+                path: "/checkout/driver.c".into(),
+                state: LocalSourceState::Found,
+            }),
             ..recorded
         };
         assert_eq!(

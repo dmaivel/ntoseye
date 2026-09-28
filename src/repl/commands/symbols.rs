@@ -10,7 +10,7 @@ use crate::expr::{Expr, ExprValue};
 use crate::guest::ModuleInfo;
 use crate::layout::{FieldInfo, nested_layout_name};
 use crate::symbols::{
-    ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, glob_matches,
+    LocalSourceState, ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, glob_matches,
     parse_source_paths, parse_symbol_sources,
 };
 use crate::target::UserVar;
@@ -95,6 +95,7 @@ repl_command! {
     names: [".srcpath"],
     usage: ".srcpath [<local-root|recorded-prefix=local-root> ...]",
     summary: "Display or replace ordered local source path mappings.",
+    details: "A local root holds the source tree: a recorded path such as C:\\Users\\me\\repos\\MyDriver\\src\\queue.c maps to the longest of its trailing parts that names a file under the root (root/src/queue.c before root/queue.c), matched exactly, then ignoring case. recorded-prefix=local-root replaces the prefix instead. Where the PDB records a source file's checksum, only a file with that checksum is shown; one that differs is reported as not the source compiled.",
 }
 
 repl_command! {
@@ -102,6 +103,7 @@ repl_command! {
     names: [".srcpath+"],
     usage: ".srcpath+ <local-root|recorded-prefix=local-root> ...",
     summary: "Append local source path mappings.",
+    details: "Mappings are matched as .srcpath describes, in order.",
 }
 
 repl_command! {
@@ -561,13 +563,17 @@ impl ReplState<'_> {
                 ui::addr(address.0)
             ));
         };
-        match location
-            .local_path
-            .clone()
-            .filter(|_| location.local_exists)
-        {
-            Some(path) => Ok((path, location)),
-            None => Err(format!(
+        match &location.local {
+            Some(local) if local.state == LocalSourceState::Found => {
+                Ok((local.path.clone(), location))
+            }
+            Some(local) if local.state == LocalSourceState::Differs => Err(format!(
+                "{} is not the source compiled for {} (its checksum differs from the one {} records)",
+                local.path.display(),
+                ui::addr(address.0),
+                location.file
+            )),
+            _ => Err(format!(
                 "source file for {} is not available locally (recorded as {}); map it with .srcpath",
                 ui::addr(address.0),
                 location.file

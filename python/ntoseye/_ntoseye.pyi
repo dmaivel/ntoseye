@@ -10132,14 +10132,17 @@ class SourceLocation(BaseRecord):
     @property
     def line(self, /) -> int: ...
     @property
-    def local_exists(self, /) -> bool:
-        """
-        Whether `local_path` exists on this machine.
-        """
-    @property
     def local_path(self, /) -> str |None:
         """
-        The file after source-path remapping, when one applies.
+        The local file the source path maps it to, `None` when no mapping
+        applies.
+        """
+    @property
+    def local_state(self, /) -> str |None:
+        """
+        `found` (there, and the file compiled when the PDB records a
+        checksum), `missing`, or `differs` (there, but its checksum is
+        not the one compiled); `None` with `local_path`.
         """
 
 @final

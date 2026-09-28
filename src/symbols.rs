@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     io::Cursor,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, LazyLock, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -124,6 +124,12 @@ pub struct SymbolStore {
     /// GUID -> the same records sorted by RVA, for address-to-symbol lookups.
     symbol_addresses: DashMap<u128, Vec<AddressEntry>>,
     source_lines: DashMap<u128, Vec<SourceLineEntry>>,
+    /// GUID -> recorded source file -> the checksum the compiler recorded for
+    /// its contents. Files without one have no entry.
+    source_checksums: DashMap<u128, HashMap<String, SourceChecksum>>,
+    /// Digests of local source files, by path, with the modification time
+    /// and length they were computed at.
+    local_source_digests: Mutex<HashMap<PathBuf, LocalSourceDigest>>,
     index_diagnostics: DashMap<u128, Vec<SymbolIndexDiagnostic>>,
     /// GUID -> WPP messages its `TMF:` annotations declare, by message GUID
     /// and number. PDBs without any have no entry.
@@ -328,9 +334,53 @@ pub struct SourceLocation {
     pub file: String,
     pub line: u32,
     pub column: Option<u32>,
-    /// First configured remapping candidate (or first existing candidate).
-    pub local_path: Option<PathBuf>,
-    pub local_exists: bool,
+    /// The file on this machine the source path maps it to, `None` when no
+    /// mapping applies.
+    pub local: Option<LocalSource>,
+}
+
+impl SourceLocation {
+    /// The local file, when it is there and is the one compiled.
+    pub fn found_local(&self) -> Option<&Path> {
+        self.local
+            .as_ref()
+            .filter(|local| local.state == LocalSourceState::Found)
+            .map(|local| local.path.as_path())
+    }
+}
+
+/// A recorded source file's place on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSource {
+    pub path: PathBuf,
+    pub state: LocalSourceState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalSourceState {
+    /// The file is there and, when the PDB records a checksum, has it.
+    Found,
+    /// No file is there (the first place the mapping points).
+    Missing,
+    /// A file is there, but its checksum is not the one compiled.
+    Differs,
+}
+
+/// A source file checksum the compiler records in the PDB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceChecksum {
+    Md5([u8; 16]),
+    Sha1([u8; 20]),
+    Sha256([u8; 32]),
+}
+
+/// A local file's digest of one kind (the kind of the checksum it is
+/// compared with), valid while its modification time and length hold.
+#[derive(Debug, Clone)]
+struct LocalSourceDigest {
+    modified: std::time::SystemTime,
+    len: u64,
+    digest: SourceChecksum,
 }
 
 /// The source-line address range containing an instruction. `end` is
@@ -610,6 +660,8 @@ impl SymbolStore {
             symbol_rvas: DashMap::new(),
             symbol_addresses: DashMap::new(),
             source_lines: DashMap::new(),
+            source_checksums: DashMap::new(),
+            local_source_digests: Mutex::new(HashMap::new()),
             index_diagnostics: DashMap::new(),
             wpp_messages: DashMap::new(),
             type_cache: DashMap::new(),
@@ -882,8 +934,7 @@ impl SymbolStore {
                         file: file.to_string(),
                         line: *line,
                         column: None,
-                        local_path: None,
-                        local_exists: false,
+                        local: None,
                     },
                 })
                 .collect(),
@@ -953,6 +1004,7 @@ impl SymbolStore {
             self.symbol_rvas.remove(&guid);
             self.symbol_addresses.remove(&guid);
             self.source_lines.remove(&guid);
+            self.source_checksums.remove(&guid);
             self.index_diagnostics.remove(&guid);
             self.wpp_messages.remove(&guid);
             self.type_cache

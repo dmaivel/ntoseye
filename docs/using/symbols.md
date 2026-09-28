@@ -10,20 +10,16 @@ Append the directory containing the PDB with {command}`.sympath+`. The `+` prese
 .sympath+ <directory-containing-the-pdb>
 ```
 
-{command}`.srcpath` maps a source-path prefix recorded in the PDB to the corresponding source directory on the host:
-
-```text
-.srcpath <source-prefix-recorded-in-pdb>=<local-source-root>
-```
-
-For example:
+{command}`.srcpath` names the host directory holding the source tree:
 
 ```text
 .sympath+ /home/me/symbols/mydriver
-.srcpath C:\Users\me\source\repos\MyDriver=/home/me/src/MyDriver
+.srcpath /home/me/src/MyDriver
 ```
 
-The left side of {command}`.srcpath` is a build-time source path such as the prefix shown in an unmapped source location; it is not the PDB path embedded in the image. The right side is the local directory containing the same source files.
+A source path the PDB records, such as `C:\Users\me\source\repos\MyDriver\src\queue.c`, maps to the longest of its trailing parts that names a file under that directory: `/home/me/src/MyDriver/src/queue.c` before `/home/me/src/MyDriver/queue.c`. Case is matched exactly first, then ignored, for an `#include` spelled differently from the file. A mapping `<prefix-recorded-in-the-pdb>=<local-root>` (`C:\Users\me\source\repos\MyDriver=/home/me/src/MyDriver`) replaces the prefix instead.
+
+The compiler records each source file's checksum (MD5, SHA-1, or SHA-256) in the PDB. Where it did, a host file is shown only if it has that checksum, so a file edited since the build is not shown against the old line numbers: {command}`ls` reports it as not the source compiled, and the disassembly labels its location `differs`.
 
 If the driver is already loaded, force source selection and indexing once after changing the path, inspect the accepted identity, and set the source breakpoint:
 

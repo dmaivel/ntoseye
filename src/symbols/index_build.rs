@@ -2,8 +2,8 @@
 //! streams under the PDB lock, then publishing the derived indexes.
 
 use super::{
-    AddressEntry, IndexedSymbol, SourceLineEntry, SourceLocation, SymbolIndex,
-    SymbolIndexDiagnostic, SymbolStore, SymbolVisibility,
+    AddressEntry, IndexedSymbol, SourceChecksum, SourceLineEntry, SourceLocation, SymbolIndex,
+    SymbolIndexDiagnostic, SymbolStore, SymbolVisibility, source::recorded_checksum,
 };
 use crate::error::{Error, Result};
 use crate::layout::aggregate_key;
@@ -22,6 +22,7 @@ struct ParsedIndexData {
     strings: Vec<String>,
     rvas: HashMap<String, Vec<IndexedSymbol>>,
     source_lines: Vec<SourceLineEntry>,
+    source_checksums: HashMap<String, SourceChecksum>,
     type_strings: Vec<String>,
     enum_strings: Vec<String>,
     struct_defs: HashMap<String, (u64, TypeIndex)>,
@@ -172,6 +173,7 @@ impl SymbolStore {
         let mut strings = Vec::new();
         let mut rvas: HashMap<String, Vec<IndexedSymbol>> = HashMap::new();
         let mut source_lines = Vec::new();
+        let mut source_checksums = HashMap::new();
         let mut wpp_messages = HashMap::new();
 
         // Module streams contain private procedures and addressable data that
@@ -184,6 +186,7 @@ impl SymbolStore {
             &mut strings,
             &mut rvas,
             &mut source_lines,
+            &mut source_checksums,
             &mut wpp_messages,
             &mut diagnostics,
         );
@@ -224,6 +227,7 @@ impl SymbolStore {
             strings,
             rvas,
             source_lines,
+            source_checksums,
             type_strings,
             enum_strings,
             struct_defs,
@@ -252,6 +256,7 @@ impl SymbolStore {
             .insert(guid, SymbolIndex::from_names(parsed.strings));
         self.publish_symbol_rvas(guid, parsed.rvas);
         self.source_lines.insert(guid, parsed.source_lines);
+        self.source_checksums.insert(guid, parsed.source_checksums);
         self.index_types
             .insert(guid, SymbolIndex::from_names(parsed.type_strings));
         self.index_enums
@@ -275,7 +280,8 @@ impl SymbolStore {
 }
 
 /// Private procedures and addressable data from every module stream, the
-/// C13 source lines of each module, and its WPP `TMF:` annotations.
+/// C13 source lines of each module with the checksums its source files were
+/// compiled from, and its WPP `TMF:` annotations.
 #[allow(clippy::too_many_arguments)]
 fn parse_module_streams(
     pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
@@ -284,6 +290,7 @@ fn parse_module_streams(
     strings: &mut Vec<String>,
     rvas: &mut HashMap<String, Vec<IndexedSymbol>>,
     source_lines: &mut Vec<SourceLineEntry>,
+    source_checksums: &mut HashMap<String, SourceChecksum>,
     wpp_messages: &mut HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) {
@@ -478,15 +485,20 @@ fn parse_module_streams(
                             continue;
                         }
                     };
+                    let file: String = file.to_string().into();
+                    if !source_checksums.contains_key(&file)
+                        && let Some(checksum) = recorded_checksum(&file_info.checksum)
+                    {
+                        source_checksums.insert(file.clone(), checksum);
+                    }
                     source_lines.push(SourceLineEntry {
                         rva: rva.0,
                         length: line.length,
                         location: SourceLocation {
-                            file: file.to_string().into(),
+                            file,
                             line: line.line_start,
                             column: line.column_start.filter(|column| *column != 0),
-                            local_path: None,
-                            local_exists: false,
+                            local: None,
                         },
                     });
                 }
