@@ -64,7 +64,7 @@ pub enum Error {
     #[error("Breakpoint '{0}' not found")]
     BPNotFound(u32),
 
-    #[error("Not supported")]
+    #[error("the current backend does not support this")]
     NotSupported,
 
     /// The payload says what the halted target is needed for.
