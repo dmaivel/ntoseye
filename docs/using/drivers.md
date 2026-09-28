@@ -62,7 +62,7 @@ The PDB loads when the driver does, and {command}`lmv` `mydriver` shows it.
 
 ### PDB in the guest
 
-Usually nothing to do. When no symbol directory or server has the PDB, `ntoseye` reads it out of the guest's memory: the linker has just written it, so Windows still holds the file in its cache. The driver's image records where the PDB was written, so `ntoseye` finds it by that path, uses it only if it matches the driver, and saves it to the host's symbol cache for later sessions. The load says so:
+Usually nothing to do, provided the driver was built in the guest since the guest last booted, and preferably just before loading it. When no symbol directory or server has the PDB, `ntoseye` reads it out of the guest's memory: the build wrote it, so Windows still holds the file in its cache. The driver's image records where the PDB was written, so `ntoseye` finds it by that path, uses it only if it matches the driver, and saves it to the host's symbol cache for later sessions. The load says so:
 
 ```text
 rebuilt C:\Users\me\source\repos\mydriver\x64\Debug\mydriver.pdb for mydriver.sys from guest memory
@@ -70,7 +70,7 @@ rebuilt C:\Users\me\source\repos\mydriver\x64\Debug\mydriver.pdb for mydriver.sy
 
 This happens by itself with the `gdb` backend and with KD reading memory from the host (the default). With KD reading memory through the target (`--memory-source kd`), it runs only when asked: {command}`.reload` `mydriver`.
 
-It needs the file still in the guest's cache. A reboot empties it: rebuild the driver, or read the PDB once in the guest (`Get-FileHash mydriver.pdb`), before loading. If it is still missing, {command}`lmv` `mydriver` says why; copy the PDB to the host and use `.sympath+` as above. [Symbols and source](symbols.md) has the details, and `--no-pdb-from-memory` turns this off.
+That cache is why the build has to be recent. A reboot empties it, and memory the guest needs reclaims it over time, so the longer since the build, the likelier pages are missing. If the guest has rebooted since, or much time has passed, rebuild the driver before loading it; reading the PDB once in the guest (`Get-FileHash mydriver.pdb`) also brings it back. If it is still missing, {command}`lmv` `mydriver` says why; copy the PDB to the host and use `.sympath+` as above. [Symbols and source](symbols.md) has the details, and `--no-pdb-from-memory` turns this off.
 
 ### Source files
 
@@ -81,6 +81,12 @@ A PDB records source paths as they were at build time. {command}`.srcpath` maps 
 ```
 
 A file edited since the build is reported as not the source compiled, rather than shown against the wrong lines.
+
+Usually not needed: a mapping `<recorded-prefix>=<local-root>` replaces the prefix the PDB records instead of matching by suffix, for a checkout where suffix matching could pick the wrong file (two files ending in the same path under the root):
+
+```text
+.srcpath C:\Users\me\source\repos\mydriver=/home/me/mydriver
+```
 
 ## Stop in the driver
 
