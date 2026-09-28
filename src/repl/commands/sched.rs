@@ -341,11 +341,7 @@ impl ReplState<'_> {
                         |address| ui::addr(address.0).to_string(),
                         "0x0",
                     ),
-                    diagnostic_option_cell(
-                        &entry.importance,
-                        |value| value.to_string(),
-                        "<unavailable: field not present>",
-                    ),
+                    diagnostic_cell(&entry.importance),
                 ]);
             }
             if let Some(stop) = termination_message(&queue.termination) {
@@ -565,17 +561,11 @@ fn print_ready_queues(detail: &ReadyQueuesDetail) {
     for queue in &detail.queues {
         for entry in &queue.entries {
             let (tid, process, priority, state) = match &entry.thread {
-                DiagnosticValue::Available(Some(thread)) => (
+                DiagnosticValue::Available(thread) => (
                     thread_tid(thread),
                     thread_process(thread),
                     thread_priority(thread),
                     thread_state(thread),
-                ),
-                DiagnosticValue::Available(None) => (
-                    "<unavailable>".to_string(),
-                    "<unavailable>".to_string(),
-                    "<unavailable>".to_string(),
-                    "<unavailable>".to_string(),
                 ),
                 DiagnosticValue::Unavailable(error) => (
                     "<unavailable>".to_string(),
@@ -638,9 +628,9 @@ fn routine_cell(
 }
 
 fn interrupt_value(detail: &TimerDetail) -> Option<u64> {
-    match &detail.interrupt_time {
-        DiagnosticValue::Available(Some(value)) => Some(*value),
-        _ => None,
+    match detail.interrupt_time {
+        DiagnosticValue::Available(value) => Some(value),
+        DiagnosticValue::Unavailable(_) => None,
     }
 }
 
@@ -690,11 +680,8 @@ fn print_timer_list(detail: &TimerListDetail) {
     outln!(
         "interrupt time {}",
         match &detail.interrupt_time {
-            DiagnosticValue::Available(Some(value)) => format!(
-                "{value:#x} [{}]",
-                detail.interrupt_time_source.as_deref().unwrap_or("unknown")
-            ),
-            DiagnosticValue::Available(None) => "<unavailable>".to_string(),
+            DiagnosticValue::Available(value) =>
+                format!("{value:#x} [KUSER_SHARED_DATA.InterruptTime]"),
             DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
         }
     );

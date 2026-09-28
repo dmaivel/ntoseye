@@ -79,23 +79,19 @@ impl BaseRecord {
         Self { fields, hex }
     }
 
-    /// Field `name`, or `None` when the record leaves it out.
+    /// Field `name`; a `KeyError` when the record has no such field.
     pub fn field<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
-        Ok(self
-            .fields
+        self.fields
             .bind(py)
             .get_item(name)?
-            .unwrap_or_else(|| py.None().into_bound(py)))
+            .ok_or_else(|| PyKeyError::new_err(name.to_string()))
     }
 }
 
 #[pymethods]
 impl BaseRecord {
     fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
-        let fields = self.fields.bind(py);
-        fields
-            .get_item(key)?
-            .ok_or_else(|| PyKeyError::new_err(key.to_string()))
+        self.field(py, key)
     }
 
     fn __contains__(&self, py: Python<'_>, key: &str) -> PyResult<bool> {

@@ -2,20 +2,21 @@
 //! dump metadata, failure signature, and findings it aggregates.
 
 use super::bugcheck::{Bugcheck, bugcheck};
-use super::execution::{run_status, stack_frame};
+use super::execution::{run_status, stack_frames};
 use super::module::module;
-use super::shape::{Hex, Omit, shapes};
+use super::shape::{Diag, Hex, shapes};
 use crate::dmp::{self, DmpException, DmpSystemInfo, TriageCrashInfo};
 use crate::triage::TriagePrcbInfo;
 use crate::triage_report::{
     BlackboxFinding, BlackboxKind, BlackboxState, CulpritAttribution, CulpritConfidence,
-    CulpritEvidenceKind, FailureCodeKind, FailureSignatureSource, WheaFinding, WheaRecordState,
+    CulpritEvidenceKind, FailureCodeKind, FailureSignatureSource, WheaRecordState,
     WheaSectionKind, exception_code_name, time::filetime_to_iso,
 };
 use crate::triage_report::{
     FailureSignature as SignatureDetail, TriageReport as ReportDetail,
-    VerifierFinding as VerifierFindingDetail,
+    VerifierFinding as VerifierFindingDetail, WheaFinding as WheaFindingDetail,
 };
+use crate::target::DiagnosticValue;
 
 shapes! {
     /// The exception a crash dump recorded.
@@ -53,21 +54,20 @@ shapes! {
         suite_mask: Hex<u32>,
     }
 
-    /// The process and thread a triage dump recorded as crashing. The
-    /// fields after `thread_id` are absent when the dump does not record
-    /// them.
+    /// The process and thread a triage dump recorded as crashing; a field
+    /// the dump does not record is `None`.
     CrashContext {
         process_name: Option<String>,
         process_id: Option<u64>,
         thread_id: Option<u64>,
-        parent_process_id: Omit<u64>,
+        parent_process_id: Option<u64>,
         /// The process's exit status (NTSTATUS).
-        exit_status: Omit<Hex>,
-        /// When the process was created (ISO 8601 UTC); `None` when absent
-        /// or the recorded time does not convert.
-        create_time: Omit<Option<String>>,
+        exit_status: Option<Hex>,
+        /// When the process was created (ISO 8601 UTC); also `None` when the
+        /// recorded time does not convert.
+        create_time: Option<String>,
         /// The thread's exit status (NTSTATUS).
-        thread_exit_status: Omit<Hex>,
+        thread_exit_status: Option<Hex>,
     }
 
     /// The crashing processor's `_KPRCB` essentials a triage dump recorded.
@@ -152,24 +152,24 @@ shapes! {
         address: Hex,
     }
 
-    /// The WHEA error record a hardware-error bugcheck carries. When the
-    /// record could not be decoded, `reason` says why and the decoded fields
-    /// are absent; otherwise `reason` is absent.
-    WheaRecord {
+    /// The WHEA error record a hardware-error bugcheck carries.
+    WheaFinding {
         /// Where the record lives; `None` when the bugcheck names none.
         record_address: Option<Hex>,
-        /// Whether the record decoded.
-        available: bool,
-        /// Why the record could not be decoded.
-        reason: Omit<String>,
-        revision: Omit<Hex<u16>>,
+        /// The decoded record, or why it could not be decoded.
+        record: Diag<WheaRecord>,
+    }
+
+    /// A decoded WHEA error record.
+    WheaRecord {
+        revision: Hex<u16>,
         /// The record's error severity (`WHEA_ERROR_SEVERITY`).
-        severity: Omit<u32>,
+        severity: u32,
         /// The record's length in bytes.
-        length: Omit<u32>,
+        length: u32,
         /// How many sections the record has; `sections` holds at most 64.
-        sections_total: Omit<usize>,
-        sections: Omit<Vec<WheaSection>>,
+        sections_total: usize,
+        sections: Vec<WheaSection>,
     }
 
     /// One section of a WHEA error record.
@@ -249,7 +249,7 @@ shapes! {
         /// The Driver Verifier violation, for a verifier bugcheck.
         verifier: Option<VerifierFinding>,
         /// The hardware error record, for a WHEA bugcheck.
-        whea: Option<WheaRecord>,
+        whea: Option<WheaFinding>,
         blackboxes: Vec<BlackboxStream>,
         /// Best-effort collection failures that did not prevent the report.
         warnings: Vec<String>,
@@ -304,7 +304,7 @@ pub fn crash_context(context: &TriageCrashInfo) -> CrashContext {
         thread_id: context.thread_id,
         parent_process_id: context.parent_process_id,
         exit_status: context.exit_status.map(|status| status as u64),
-        create_time: context.create_time.map(filetime_to_iso),
+        create_time: context.create_time.and_then(filetime_to_iso),
         thread_exit_status: context.thread_exit_status.map(|status| status as u64),
     }
 }
@@ -397,30 +397,18 @@ fn verifier(verifier: &VerifierFindingDetail) -> VerifierFinding {
     }
 }
 
-fn whea(whea: &WheaFinding) -> WheaRecord {
+fn whea(whea: &WheaFindingDetail) -> WheaFinding {
     const SECTION_LIMIT: usize = 64;
-    let record_address = whea.record_address;
-    match &whea.state {
-        WheaRecordState::Unavailable { reason } => WheaRecord {
-            record_address,
-            available: false,
-            reason: Some(reason.clone()),
-            revision: None,
-            severity: None,
-            length: None,
-            sections_total: None,
-            sections: None,
-        },
-        WheaRecordState::Decoded(record) => WheaRecord {
-            record_address,
-            available: true,
-            reason: None,
-            revision: Some(record.revision),
-            severity: Some(record.severity),
-            length: Some(record.length),
-            sections_total: Some(record.sections.len()),
-            sections: Some(
-                record
+    WheaFinding {
+        record_address: whea.record_address,
+        record: match &whea.state {
+            WheaRecordState::Unavailable { reason } => DiagnosticValue::Unavailable(reason.clone()),
+            WheaRecordState::Decoded(record) => DiagnosticValue::Available(WheaRecord {
+                revision: record.revision,
+                severity: record.severity,
+                length: record.length,
+                sections_total: record.sections.len(),
+                sections: record
                     .sections
                     .iter()
                     .take(SECTION_LIMIT)
@@ -438,7 +426,7 @@ fn whea(whea: &WheaFinding) -> WheaRecord {
                         },
                     })
                     .collect(),
-            ),
+            }),
         },
     }
 }
@@ -488,7 +476,7 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport
         backtrace: report
             .backtrace
             .as_ref()
-            .map(|trace| trace.frames.iter().map(stack_frame).collect()),
+            .map(|trace| stack_frames(&trace.frames)),
         modules: report
             .modules
             .iter()

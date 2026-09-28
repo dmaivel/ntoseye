@@ -1,7 +1,7 @@
 //! Loaded-module [`View`] builders: module identity and symbol
 //! load status.
 
-use super::shape::{Diag, Hex, Omit, shapes, unions};
+use super::shape::{Diag, Hex, shapes, unions};
 use crate::types::VirtAddr;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::pe::headers::{
@@ -29,16 +29,16 @@ shapes! {
         end: Hex,
         /// Mapped image size in bytes.
         size: u32,
-        /// PE timestamp, absent when the loader record lacks one.
-        time_date_stamp: Omit<Hex<u32>>,
-        /// PE checksum, absent when the loader record lacks one.
-        checksum: Omit<Hex<u32>>,
-        /// File version from the version resource, absent when unread.
-        file_version: Omit<String>,
-        /// Product version from the version resource, absent when unread.
-        product_version: Omit<String>,
-        /// Symbol status; present only on a kernel module's `inspect()`.
-        symbols: Omit<ModuleSymbols>,
+        /// PE timestamp; `None` when the loader record lacks one.
+        time_date_stamp: Option<Hex<u32>>,
+        /// PE checksum; `None` when the loader record lacks one.
+        checksum: Option<Hex<u32>>,
+        /// File version from the version resource; `None` when unread.
+        file_version: Option<String>,
+        /// Product version from the version resource; `None` when unread.
+        product_version: Option<String>,
+        /// Symbol status; `None` except on a kernel module's `inspect()`.
+        symbols: Option<ModuleSymbols>,
     }
 
     /// A module's symbol status and PDB identity (`lmv`).
@@ -271,12 +271,12 @@ shapes! {
         optional_header: ImageOptionalHeader,
         data_directories: Vec<ImageDataDirectory>,
         sections: Vec<ImageSectionHeader>,
-        /// The debug directory, absent unless asked for.
-        debug_directory: Omit<Diag<Vec<ImageDebugEntry>>>,
-        /// The export directory, absent unless asked for.
-        exports: Omit<Diag<ImageExports>>,
-        /// The import descriptors, absent unless asked for.
-        imports: Omit<Diag<Vec<ImageImportDescriptor>>>,
+        /// The debug directory; `None` unless asked for.
+        debug_directory: Option<Diag<Vec<ImageDebugEntry>>>,
+        /// The export directory; `None` unless asked for.
+        exports: Option<Diag<ImageExports>>,
+        /// The import descriptors; `None` unless asked for.
+        imports: Option<Diag<Vec<ImageImportDescriptor>>>,
     }
 
     /// A module's image identity (`!lmi`): its file-header identity, debug

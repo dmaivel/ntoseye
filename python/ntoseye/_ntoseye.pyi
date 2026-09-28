@@ -1890,15 +1890,14 @@ class Cpus:
 @final
 class CrashContext(BaseRecord):
     """
-    The process and thread a triage dump recorded as crashing. The
-    fields after `thread_id` are absent when the dump does not record
-    them.
+    The process and thread a triage dump recorded as crashing; a field
+    the dump does not record is `None`.
     """
     @property
-    def create_time(self, /) -> str |None |None:
+    def create_time(self, /) -> str |None:
         """
-        When the process was created (ISO 8601 UTC); `None` when absent
-        or the recorded time does not convert.
+        When the process was created (ISO 8601 UTC); also `None` when the
+        recorded time does not convert.
         """
     @property
     def exit_status(self, /) -> int |None:
@@ -2525,7 +2524,7 @@ class Dpc(BaseRecord):
         `deferred_routine` as a symbol, when one resolves.
         """
     @property
-    def importance(self, /) -> Diagnostic[int |None]:
+    def importance(self, /) -> Diagnostic[int]:
         """
         `Importance`.
         """
@@ -3683,7 +3682,7 @@ class FindStackThread(BaseRecord):
     @property
     def frames(self, /) -> list[StackFrame] |None:
         """
-        The whole walked stack, innermost first; present at level 2.
+        The whole walked stack, innermost first; `None` below level 2.
         """
     @property
     def match_count(self, /) -> int:
@@ -3693,15 +3692,14 @@ class FindStackThread(BaseRecord):
     @property
     def matching_frames(self, /) -> list[StackFrame] |None:
         """
-        The frames that matched, each with its `index` in the stack;
-        absent at level 0.
+        The frames that matched; `None` at level 0.
         """
     @property
     def thread(self, /) -> ThreadSummary: ...
     @property
     def truncated(self, /) -> int |None:
         """
-        Frames past the walk bound, not searched; present at level 2.
+        Frames past the walk bound, not searched; `None` below level 2.
         """
 
 @final
@@ -4734,12 +4732,6 @@ class HeapPageRange(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def blocks(self, /) -> list[HeapBlock] |None:
-        """
-        The range's blocks; empty unless entries were listed. Absent
-        outside a heap decoding.
-        """
-    @property
     def committed_pages(self, /) -> int: ...
     @property
     def end(self, /) -> int:
@@ -4747,10 +4739,9 @@ class HeapPageRange(BaseRecord):
         Byte past the range.
         """
     @property
-    def error(self, /) -> str |None |None:
+    def error(self, /) -> str |None:
         """
-        Why the subsegment could not be read. Absent outside a heap
-        decoding.
+        Why the subsegment could not be read.
         """
     @property
     def flags(self, /) -> int:
@@ -4769,16 +4760,16 @@ class HeapPageRange(BaseRecord):
         Bytes: `units * unit_size`.
         """
     @property
-    def subsegment(self, /) -> VsSubsegment |LfhSubsegment |None |None:
+    def subsegment(self, /) -> VsSubsegment |LfhSubsegment |None:
         """
-        The VS or LFH subsegment the range holds; None for other kinds or
-        when it could not be read. Absent outside a heap decoding.
+        The VS or LFH subsegment the range holds, with its blocks; `None`
+        for other kinds, when it could not be read, or outside a heap
+        decoding.
         """
     @property
-    def truncated(self, /) -> bool |None:
+    def truncated(self, /) -> bool:
         """
-        Whether the subsegment held more blocks than the walk limit. Absent outside
-        a heap decoding.
+        Whether the subsegment held more blocks than the walk limit.
         """
     @property
     def unit_size(self, /) -> int:
@@ -5221,12 +5212,12 @@ class ImageHeaders(BaseRecord):
     @property
     def debug_directory(self, /) -> Diagnostic[list[ImageDebugEntry]] |None:
         """
-        The debug directory, absent unless asked for.
+        The debug directory; `None` unless asked for.
         """
     @property
     def exports(self, /) -> Diagnostic[ImageExports] |None:
         """
-        The export directory, absent unless asked for.
+        The export directory; `None` unless asked for.
         """
     @property
     def file_header(self, /) -> ImageFileHeader: ...
@@ -5238,7 +5229,7 @@ class ImageHeaders(BaseRecord):
     @property
     def imports(self, /) -> Diagnostic[list[ImageImportDescriptor]] |None:
         """
-        The import descriptors, absent unless asked for.
+        The import descriptors; `None` unless asked for.
         """
     @property
     def module(self, /) -> str |None:
@@ -6448,9 +6439,10 @@ class KernelTimer(BaseRecord):
         `DueTime`: the interrupt time it expires at.
         """
     @property
-    def interrupt_time(self, /) -> Diagnostic[int |None]:
+    def interrupt_time(self, /) -> Diagnostic[int]:
         """
-        The current interrupt time, to compare `due_time` against.
+        The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`),
+        to compare `due_time` against.
         """
     @property
     def period(self, /) -> Diagnostic[int]:
@@ -6587,7 +6579,7 @@ class LoadedModule(BaseRecord):
     @property
     def checksum(self, /) -> int |None:
         """
-        PE checksum, absent when the loader record lacks one.
+        PE checksum; `None` when the loader record lacks one.
         """
     @property
     def end(self, /) -> int:
@@ -6597,7 +6589,7 @@ class LoadedModule(BaseRecord):
     @property
     def file_version(self, /) -> str |None:
         """
-        File version from the version resource, absent when unread.
+        File version from the version resource; `None` when unread.
         """
     @property
     def name(self, /) -> str:
@@ -6612,7 +6604,7 @@ class LoadedModule(BaseRecord):
     @property
     def product_version(self, /) -> str |None:
         """
-        Product version from the version resource, absent when unread.
+        Product version from the version resource; `None` when unread.
         """
     @property
     def short_name(self, /) -> str:
@@ -6627,12 +6619,12 @@ class LoadedModule(BaseRecord):
     @property
     def symbols(self, /) -> ModuleSymbols |None:
         """
-        Symbol status; present only on a kernel module's `inspect()`.
+        Symbol status; `None` except on a kernel module's `inspect()`.
         """
     @property
     def time_date_stamp(self, /) -> int |None:
         """
-        PE timestamp, absent when the loader record lacks one.
+        PE timestamp; `None` when the loader record lacks one.
         """
 
 @final
@@ -7527,22 +7519,21 @@ class NtHeapEntry(BaseRecord):
         Always `entry`.
         """
     @property
-    def lfh(self, /) -> NtLfhUserBlocks |None |None:
+    def lfh(self, /) -> NtLfhUserBlocks |None:
         """
-        The legacy-LFH user block region inside this busy entry, or None.
-        Absent outside a heap decoding.
-        """
-    @property
-    def lfh_error(self, /) -> str |None |None:
-        """
-        Why the entry's LFH region could not be read. Absent outside a heap
+        The legacy-LFH user block region inside this busy entry; `None`
+        when there is none, it could not be read, or outside a heap
         decoding.
         """
     @property
-    def lfh_truncated(self, /) -> bool |None:
+    def lfh_error(self, /) -> str |None:
         """
-        Whether the region's `blocks` were cut at the walk limit. Absent outside a
-        heap decoding.
+        Why the entry's LFH region could not be read.
+        """
+    @property
+    def lfh_truncated(self, /) -> bool:
+        """
+        Whether the region's `blocks` were cut at the walk limit.
         """
     @property
     def previous_size(self, /) -> int:
@@ -7899,7 +7890,7 @@ class PciCapability(BaseRecord):
     @property
     def version(self, /) -> int |None:
         """
-        The version of an extended capability; absent for a standard one.
+        The version of an extended capability; `None` for a standard one.
         """
 
 @final
@@ -8310,25 +8301,29 @@ class Pfn(BaseRecord):
     is in transition.
     """
     @property
-    def blink(self, /) -> Diagnostic[int] |None: ...
+    def blink(self, /) -> int |None: ...
     @property
-    def cache_attribute(self, /) -> Diagnostic[CacheAttribute]: ...
+    def cache_attribute(self, /) -> CacheAttribute: ...
     @property
-    def event(self, /) -> Diagnostic[int] |None: ...
+    def event(self, /) -> int |None: ...
     @property
-    def flink(self, /) -> Diagnostic[int] |None: ...
+    def flink(self, /) -> int |None: ...
     @property
-    def modified(self, /) -> Diagnostic[bool]: ...
+    def modified(self, /) -> bool: ...
     @property
-    def node_blink_low(self, /) -> Diagnostic[int] |None: ...
+    def node_blink_low(self, /) -> int |None: ...
     @property
-    def node_flink_low(self, /) -> Diagnostic[int] |None: ...
+    def node_flink_low(self, /) -> int |None: ...
     @property
-    def original_pte(self, /) -> Diagnostic[int]: ...
+    def original_pte(self, /) -> int: ...
     @property
-    def page_color(self, /) -> Diagnostic[int]: ...
+    def page_color(self, /) -> Diagnostic[int]:
+        """
+        The only member without a raw-bit fallback when the layout lacks
+        it.
+        """
     @property
-    def page_location(self, /) -> Diagnostic[PageLocation]: ...
+    def page_location(self, /) -> PageLocation: ...
     @property
     def pfn(self, /) -> int:
         """
@@ -8340,11 +8335,11 @@ class Pfn(BaseRecord):
         The requested physical address, for a physical-address selector.
         """
     @property
-    def priority(self, /) -> Diagnostic[int]: ...
+    def priority(self, /) -> int: ...
     @property
-    def pte_address(self, /) -> Diagnostic[int]: ...
+    def pte_address(self, /) -> int: ...
     @property
-    def pte_frame(self, /) -> Diagnostic[int]:
+    def pte_frame(self, /) -> int:
         """
         The PFN of the page table holding the page's PTE.
         """
@@ -8354,15 +8349,15 @@ class Pfn(BaseRecord):
         The `_MMPFN` record's address.
         """
     @property
-    def reference_count(self, /) -> Diagnostic[int]: ...
+    def reference_count(self, /) -> int: ...
     @property
     def selector(self, /) -> PfnSelector: ...
     @property
-    def share_count(self, /) -> Diagnostic[int] |None: ...
+    def share_count(self, /) -> int |None: ...
     @property
-    def used_entry_count(self, /) -> Diagnostic[int]: ...
+    def used_entry_count(self, /) -> int: ...
     @property
-    def ws_index(self, /) -> Diagnostic[int] |None:
+    def ws_index(self, /) -> int |None:
         """
         The working-set index.
         """
@@ -8743,28 +8738,28 @@ class PoolTagUsage(BaseRecord):
     has no entry for that pool.
     """
     @property
-    def nonpaged_allocs(self, /) -> int |None |None:
+    def nonpaged_allocs(self, /) -> int |None:
         """
-        Absent unless allocation counts were requested.
+        `None` unless allocation counts were requested.
         """
     @property
     def nonpaged_bytes(self, /) -> int |None: ...
     @property
-    def nonpaged_frees(self, /) -> int |None |None:
+    def nonpaged_frees(self, /) -> int |None:
         """
-        Absent unless allocation counts were requested.
+        `None` unless allocation counts were requested.
         """
     @property
-    def paged_allocs(self, /) -> int |None |None:
+    def paged_allocs(self, /) -> int |None:
         """
-        Absent unless allocation counts were requested.
+        `None` unless allocation counts were requested.
         """
     @property
     def paged_bytes(self, /) -> int |None: ...
     @property
-    def paged_frees(self, /) -> int |None |None:
+    def paged_frees(self, /) -> int |None:
         """
-        Absent unless allocation counts were requested.
+        `None` unless allocation counts were requested.
         """
     @property
     def tag(self, /) -> int: ...
@@ -8919,12 +8914,6 @@ class ProcedureLocal(BaseRecord):
     def type_name(self, /) -> str:
         """
         The PDB type spelling.
-        """
-    @property
-    def value(self, /) -> int |None |None:
-        """
-        Its value, absent from a layout-only listing (`locals_at`);
-        `None` when it did not evaluate.
         """
 
 @final
@@ -9344,9 +9333,9 @@ class ReadyThread(BaseRecord):
         The `_KTHREAD` linked on the queue.
         """
     @property
-    def thread(self, /) -> Diagnostic[ThreadSummary |None]:
+    def thread(self, /) -> Diagnostic[ThreadSummary]:
         """
-        The thread decoded; `None` inside when it could not be.
+        The thread decoded.
         """
 
 @final
@@ -9555,7 +9544,7 @@ class RunningProcessor(BaseRecord):
     @property
     def short_stack(self, /) -> Diagnostic[list[StackFrame]] |None:
         """
-        The running thread's first frames; absent unless stacks were
+        The running thread's first frames; `None` unless stacks were
         requested.
         """
 
@@ -10073,10 +10062,9 @@ class StackFrame(BaseRecord):
     One frame of a walked stack.
     """
     @property
-    def index(self, /) -> int |None:
+    def index(self, /) -> int:
         """
-        The frame's position in the walked stack, present in a selection
-        of a stack's frames.
+        The frame's position in the walked stack, innermost 0.
         """
     @property
     def ip(self, /) -> int:
@@ -11203,14 +11191,9 @@ class TimerTable(BaseRecord):
     @property
     def errors(self, /) -> list[SchedulerError]: ...
     @property
-    def interrupt_time(self, /) -> Diagnostic[int |None]:
+    def interrupt_time(self, /) -> Diagnostic[int]:
         """
-        The current interrupt time.
-        """
-    @property
-    def interrupt_time_source(self, /) -> str |None:
-        """
-        Where `interrupt_time` was read from.
+        The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`).
         """
     @property
     def terminations(self, /) -> list[TimerBucketEnd]:
@@ -11432,7 +11415,7 @@ class TriageReport(BaseRecord):
         Best-effort collection failures that did not prevent the report.
         """
     @property
-    def whea(self, /) -> WheaRecord |None:
+    def whea(self, /) -> WheaFinding |None:
         """
         The hardware error record, for a WHEA bugcheck.
         """
@@ -12207,43 +12190,42 @@ class Watchpoint(Breakpoint):
         """
 
 @final
-class WheaRecord(BaseRecord):
+class WheaFinding(BaseRecord):
     """
-    The WHEA error record a hardware-error bugcheck carries. When the
-    record could not be decoded, `reason` says why and the decoded fields
-    are absent; otherwise `reason` is absent.
+    The WHEA error record a hardware-error bugcheck carries.
     """
     @property
-    def available(self, /) -> bool:
+    def record(self, /) -> Diagnostic[WheaRecord]:
         """
-        Whether the record decoded.
-        """
-    @property
-    def length(self, /) -> int |None:
-        """
-        The record's length in bytes.
-        """
-    @property
-    def reason(self, /) -> str |None:
-        """
-        Why the record could not be decoded.
+        The decoded record, or why it could not be decoded.
         """
     @property
     def record_address(self, /) -> int |None:
         """
         Where the record lives; `None` when the bugcheck names none.
         """
+
+@final
+class WheaRecord(BaseRecord):
+    """
+    A decoded WHEA error record.
+    """
     @property
-    def revision(self, /) -> int |None: ...
+    def length(self, /) -> int:
+        """
+        The record's length in bytes.
+        """
     @property
-    def sections(self, /) -> list[WheaSection] |None: ...
+    def revision(self, /) -> int: ...
     @property
-    def sections_total(self, /) -> int |None:
+    def sections(self, /) -> list[WheaSection]: ...
+    @property
+    def sections_total(self, /) -> int:
         """
         How many sections the record has; `sections` holds at most 64.
         """
     @property
-    def severity(self, /) -> int |None:
+    def severity(self, /) -> int:
         """
         The record's error severity (`WHEA_ERROR_SEVERITY`).
         """

@@ -1,6 +1,6 @@
 //! Heap [`View`] builders for the structured inspectors.
 
-use super::shape::{Diag, Hex, Omit, shapes, unions};
+use super::shape::{Diag, Hex, shapes, unions};
 use crate::target::heap::{self as target, BlockMatch, HeapKind, SegmentSubsegment};
 use crate::types::VirtAddr;
 
@@ -171,15 +171,14 @@ shapes! {
         user: Hex,
         /// Bytes the caller asked for: the block less its header and slack.
         user_size: u64,
-        /// The legacy-LFH user block region inside this busy entry, or None.
-        /// Absent outside a heap decoding.
-        lfh: Omit<Option<NtLfhUserBlocks>>,
-        /// Why the entry's LFH region could not be read. Absent outside a heap
+        /// The legacy-LFH user block region inside this busy entry; `None`
+        /// when there is none, it could not be read, or outside a heap
         /// decoding.
-        lfh_error: Omit<Option<String>>,
-        /// Whether the region's `blocks` were cut at the walk limit. Absent outside a
-        /// heap decoding.
-        lfh_truncated: Omit<bool>,
+        lfh: Option<NtLfhUserBlocks>,
+        /// Why the entry's LFH region could not be read.
+        lfh_error: Option<String>,
+        /// Whether the region's `blocks` were cut at the walk limit.
+        lfh_truncated: bool,
     }
 
     /// A legacy-LFH user block region living inside one busy NT-heap entry.
@@ -298,18 +297,14 @@ shapes! {
         /// `unused`, `free`, `page` (allocated straight from the segment),
         /// `vs`, or `lfh`.
         kind: &'static str,
-        /// The VS or LFH subsegment the range holds; None for other kinds or
-        /// when it could not be read. Absent outside a heap decoding.
-        subsegment: Omit<Option<HeapSubsegment>>,
-        /// The range's blocks; empty unless entries were listed. Absent
-        /// outside a heap decoding.
-        blocks: Omit<Vec<HeapBlock>>,
-        /// Why the subsegment could not be read. Absent outside a heap
+        /// The VS or LFH subsegment the range holds, with its blocks; `None`
+        /// for other kinds, when it could not be read, or outside a heap
         /// decoding.
-        error: Omit<Option<String>>,
-        /// Whether the subsegment held more blocks than the walk limit. Absent outside
-        /// a heap decoding.
-        truncated: Omit<bool>,
+        subsegment: Option<HeapSubsegment>,
+        /// Why the subsegment could not be read.
+        error: Option<String>,
+        /// Whether the subsegment held more blocks than the walk limit.
+        truncated: bool,
     }
 
     /// A segment-heap variable-size subsegment (`_HEAP_VS_SUBSEGMENT`).
@@ -602,7 +597,7 @@ fn nt_entry(entry: &target::NtEntry) -> NtHeapEntry {
         user_size: entry.user_size(),
         lfh: None,
         lfh_error: None,
-        lfh_truncated: None,
+        lfh_truncated: false,
     }
 }
 
@@ -644,14 +639,12 @@ fn nt_lfh(region: &target::NtUserBlocks, blocks: &[target::HeapBlockDetail]) -> 
 
 fn nt_entry_detail(entry: &target::NtEntryDetail) -> NtHeapEntry {
     NtHeapEntry {
-        lfh: Some(
-            entry
-                .lfh
-                .as_ref()
-                .map(|region| nt_lfh(region, &entry.lfh_blocks)),
-        ),
-        lfh_error: Some(entry.lfh_error.clone()),
-        lfh_truncated: Some(entry.lfh_truncated),
+        lfh: entry
+            .lfh
+            .as_ref()
+            .map(|region| nt_lfh(region, &entry.lfh_blocks)),
+        lfh_error: entry.lfh_error.clone(),
+        lfh_truncated: entry.lfh_truncated,
         ..nt_entry(&entry.entry)
     }
 }
@@ -762,9 +755,8 @@ fn page_range(range: &target::PageRange) -> HeapPageRange {
         unused_bytes: range.unused_bytes,
         kind: range.kind.name(),
         subsegment: None,
-        blocks: None,
         error: None,
-        truncated: None,
+        truncated: false,
     }
 }
 
@@ -784,10 +776,9 @@ fn segment_range(range: &target::SegmentRangeDetail) -> HeapPageRange {
             }
         });
     HeapPageRange {
-        subsegment: Some(subsegment),
-        blocks: Some(heap_blocks(&range.blocks)),
-        error: Some(range.error.clone()),
-        truncated: Some(range.truncated),
+        subsegment,
+        error: range.error.clone(),
+        truncated: range.truncated,
         ..page_range(&range.range)
     }
 }

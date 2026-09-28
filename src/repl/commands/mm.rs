@@ -343,20 +343,6 @@ fn print_system_ptes(detail: &SystemPtesDetail) {
     outln!();
 }
 
-fn diagnostic_hex(value: &DiagnosticValue<u64>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => format!("{value:#x}"),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-fn diagnostic_addr(value: &DiagnosticValue<VirtAddr>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => ui::addr(value.0).to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
 fn metric_cell(metric: &DiagnosticMetric<u64>) -> String {
     diagnostic_metric_cell(metric)
 }
@@ -462,44 +448,29 @@ fn print_pfn(detail: &PfnDetail) {
     if let PfnSelector::PhysicalAddress(value) = detail.selector {
         outln!("  {:<20}: {}", "physical address", ui::addr(value));
     }
-    outln!(
-        "  {:<20}: {}",
-        "PteAddress",
-        diagnostic_addr(&detail.pte_address)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "OriginalPte",
-        diagnostic_hex(&detail.original_pte)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "ReferenceCount",
-        diagnostic_cell(&detail.reference_count)
-    );
-    if let DiagnosticValue::Unavailable(error) = &detail.page_location {
-        outln!("  {:<20}: <unavailable: {error}>", "PageLocation");
+    outln!("  {:<20}: {}", "PteAddress", ui::addr(detail.pte_address.0));
+    outln!("  {:<20}: {:#x}", "OriginalPte", detail.original_pte);
+    outln!("  {:<20}: {}", "ReferenceCount", detail.reference_count);
+    if let Some(value) = detail.flink {
+        outln!("  {:<20}: {value:#x}", "Flink");
     }
-    if let Some(value) = &detail.flink {
-        outln!("  {:<20}: {}", "Flink", diagnostic_hex(value));
-    }
-    if let Some(value) = &detail.blink {
-        outln!("  {:<20}: {}", "Blink", diagnostic_hex(value));
+    if let Some(value) = detail.blink {
+        outln!("  {:<20}: {value:#x}", "Blink");
     }
     if detail.flink.is_some() {
-        if let Some(value) = &detail.node_flink_low {
-            outln!("  {:<20}: {}", "NodeFlinkLow", diagnostic_hex(value));
+        if let Some(value) = detail.node_flink_low {
+            outln!("  {:<20}: {value:#x}", "NodeFlinkLow");
         }
-        if let Some(value) = &detail.node_blink_low {
-            outln!("  {:<20}: {}", "NodeBlinkLow", diagnostic_hex(value));
+        if let Some(value) = detail.node_blink_low {
+            outln!("  {:<20}: {value:#x}", "NodeBlinkLow");
         }
-    } else if let Some(value) = &detail.share_count {
-        outln!("  {:<20}: {}", "ShareCount", diagnostic_cell(value));
-        if let Some(value) = &detail.ws_index {
-            outln!("  {:<20}: {}", "WsIndex", diagnostic_hex(value));
+    } else if let Some(value) = detail.share_count {
+        outln!("  {:<20}: {value}", "ShareCount");
+        if let Some(value) = detail.ws_index {
+            outln!("  {:<20}: {value:#x}", "WsIndex");
         }
-        if let Some(value) = &detail.event {
-            outln!("  {:<20}: {}", "Event", diagnostic_hex(value));
+        if let Some(value) = detail.event {
+            outln!("  {:<20}: {value:#x}", "Event");
         }
     } else {
         outln!("  {:<20}: <unavailable>", "ShareCount");
@@ -507,7 +478,7 @@ fn print_pfn(detail: &PfnDetail) {
     outln!(
         "  {:<20}: {}",
         "UsedPageTableEntries",
-        diagnostic_cell(&detail.used_entry_count)
+        detail.used_entry_count
     );
     outln!(
         "  {:<20}: {}",
@@ -515,36 +486,22 @@ fn print_pfn(detail: &PfnDetail) {
         diagnostic_cell(&detail.page_color)
     );
     outln!(
-        "  {:<20}: {} (containing page)",
+        "  {:<20}: {:#x} (containing page)",
         "PteFrame",
-        diagnostic_hex(&detail.pte_frame)
+        detail.pte_frame
     );
-    match &detail.page_location {
-        DiagnosticValue::Available(value) => outln!(
-            "  PageLocation          : {} ({})",
-            *value & 0x7,
-            pfn_page_location(*value)
-        ),
-        DiagnosticValue::Unavailable(_) => {}
-    }
     outln!(
-        "  Modified              : {}",
-        diagnostic_cell(&detail.modified)
+        "  PageLocation          : {} ({})",
+        detail.page_location & 0x7,
+        pfn_page_location(detail.page_location)
     );
-    match detail.cache_attribute {
-        DiagnosticValue::Available(value) => outln!(
-            "  CacheAttribute        : {} ({})",
-            value & 0x3,
-            pfn_cache_attribute(value)
-        ),
-        DiagnosticValue::Unavailable(ref error) => {
-            outln!("  CacheAttribute        : <unavailable: {error}>")
-        }
-    }
+    outln!("  Modified              : {}", detail.modified);
     outln!(
-        "  Priority              : {}",
-        diagnostic_cell(&detail.priority)
+        "  CacheAttribute        : {} ({})",
+        detail.cache_attribute & 0x3,
+        pfn_cache_attribute(detail.cache_attribute)
     );
+    outln!("  Priority              : {}", detail.priority);
 }
 
 fn print_pte_entry(level: &VtopLevel) {

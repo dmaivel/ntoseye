@@ -206,10 +206,6 @@ struct VerifiedDriver {
     module_name: String,
 }
 
-fn unavailable<T>(error: impl ToString) -> DiagnosticValue<T> {
-    DiagnosticValue::Unavailable(error.to_string())
-}
-
 fn read_verifier_state(guest: &Guest) -> VerifierStateRead {
     let types = guest.ntoskrnl.types();
     let verifier = guest
@@ -218,11 +214,11 @@ fn read_verifier_state(guest: &Guest) -> VerifierStateRead {
         .and_then(|symbol| types.struct_at("_MM_DRIVER_VERIFIER_DATA", symbol.address()));
     let read = |name: &str| match verifier.as_ref() {
         Ok(verifier) => DiagnosticValue::from_result(verifier.read_uint(name)),
-        Err(error) => unavailable(error),
+        Err(error) => DiagnosticValue::unavailable(error.to_string()),
     };
     let option_flags = match guest.ntoskrnl.symbol("VfOptionFlags") {
         Ok(symbol) => DiagnosticValue::from_result(symbol.read::<u32>().map(u64::from)),
-        Err(error) => unavailable(error),
+        Err(error) => DiagnosticValue::unavailable(error.to_string()),
     };
     VerifierStateRead {
         level: read("Level"),
@@ -558,7 +554,7 @@ impl Target {
                     truncated,
                 )
             }
-            Err(error) => (unavailable(error), None, false),
+            Err(error) => (DiagnosticValue::unavailable(error.to_string()), None, false),
         };
         let (configured_but_unloaded, suspect_list_termination) = match read_suspect_list(guest) {
             Ok((suspects, termination)) => {
@@ -576,7 +572,10 @@ impl Target {
             }
             Err(error) => {
                 let error = error.to_string();
-                (unavailable(error.clone()), ListTermination::Corrupt(error))
+                (
+                    DiagnosticValue::unavailable(error.clone()),
+                    ListTermination::Corrupt(error),
+                )
             }
         };
 

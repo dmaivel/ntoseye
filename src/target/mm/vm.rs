@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::{
     ProcessMemoryUsage, SystemMemorySummary, VmCounter, VmDetail, VmPageFileDetail, VmPoolDetail,
-    VmPteDetail, diagnostic_unavailable, find_mi_state_fields,
+    VmPteDetail, find_mi_state_fields,
 };
 use crate::backend::MemoryOps;
 use crate::debugger_data::{
@@ -94,9 +94,9 @@ fn vm_processes(target: &Target, include: bool) -> Result<(Vec<ProcessMemoryUsag
             Ok((eprocess_layout, vm_layout)) => {
                 target.process_memory_usage(eprocess_layout, vm_layout, process)
             }
-            Err(error) => {
-                ProcessMemoryUsage::from_counters(process, |_| diagnostic_unavailable(error))
-            }
+            Err(error) => ProcessMemoryUsage::from_counters(process, |_| {
+                DiagnosticValue::unavailable(error.to_string())
+            }),
         })
         .collect();
     Ok((processes, process_count, process_count > process_limit))

@@ -3,7 +3,7 @@
 //! disassembly.
 
 use super::process::{ProcessIdentity, ThreadSummary, process, thread_summary};
-use super::shape::{Hex, Omit, shapes, unions};
+use super::shape::{Hex, shapes, unions};
 use super::symbols::source_location;
 use crate::types::VirtAddr;
 use crate::breakpoints::Breakpoint;
@@ -105,9 +105,8 @@ shapes! {
 
     /// One frame of a walked stack.
     StackFrame {
-        /// The frame's position in the walked stack, present in a selection
-        /// of a stack's frames.
-        index: Omit<usize>,
+        /// The frame's position in the walked stack, innermost 0.
+        index: usize,
         /// The instruction pointer.
         ip: Hex,
         /// The stack pointer.
@@ -391,9 +390,10 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
     }
 }
 
-pub fn stack_frame(frame: &unwind::StackFrame) -> StackFrame {
+/// Frame `index` of a walked stack.
+pub fn stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFrame {
     StackFrame {
-        index: None,
+        index,
         ip: frame.ip,
         sp: frame.sp,
         symbol: frame.symbol.clone(),
@@ -402,13 +402,9 @@ pub fn stack_frame(frame: &unwind::StackFrame) -> StackFrame {
     }
 }
 
-/// [`stack_frame`] with its position in the walked stack, for a selection of
-/// a stack's frames.
-pub fn numbered_stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFrame {
-    StackFrame {
-        index: Some(index),
-        ..stack_frame(frame)
-    }
+/// A walked stack's frames, innermost first.
+pub fn stack_frames(frames: &[unwind::StackFrame]) -> Vec<StackFrame> {
+    frames.iter().enumerate().map(|(index, frame)| stack_frame(index, frame)).collect()
 }
 
 /// One decoded instruction.

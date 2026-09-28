@@ -24,11 +24,6 @@ pub trait ViewValue {
 
     fn view(source: Self::Source) -> View;
 
-    /// The field as its object holds it; `None` leaves the field out.
-    fn field(source: Self::Source) -> Option<View> {
-        Some(Self::view(source))
-    }
-
     /// The type the field's SDK property returns, for the stub.
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr;
@@ -38,10 +33,6 @@ pub trait ViewValue {
 /// JSON, an int the SDK's `repr` shows in hex. Addresses are declared
 /// [`VirtAddr`], which renders the same way.
 pub struct Hex<T = u64>(PhantomData<T>);
-
-/// A field left out of its object when `None`, rather than rendered `null`.
-/// Its SDK property returns `None` then.
-pub struct Omit<T>(PhantomData<T>);
 
 /// A field that reads on its own and can fail: `{available, value, error}`
 /// in JSON, a `Diagnostic` in the SDK. Takes the [`DiagnosticValue`] read.
@@ -117,18 +108,6 @@ impl<T: ViewValue> ViewValue for Option<T> {
         hint_union!(T::HINT, pyo3::type_hint_identifier!("builtins", "None"));
 }
 
-impl<T: ViewValue> ViewValue for Omit<T> {
-    type Source = Option<T::Source>;
-    fn view(value: Self::Source) -> View {
-        <Option<T>>::view(value)
-    }
-    fn field(value: Self::Source) -> Option<View> {
-        value.map(T::view)
-    }
-    #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr = <Option<T>>::HINT;
-}
-
 impl<T: ViewValue> ViewValue for Vec<T> {
     type Source = Vec<T::Source>;
     fn view(items: Self::Source) -> View {
@@ -143,9 +122,6 @@ impl<T: ViewValue> ViewValue for Box<T> {
     type Source = Box<T::Source>;
     fn view(value: Self::Source) -> View {
         T::view(*value)
-    }
-    fn field(value: Self::Source) -> Option<View> {
-        T::field(*value)
     }
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr = T::HINT;
@@ -350,16 +326,11 @@ macro_rules! shapes {
             impl $crate::view::shape::ViewValue for $name {
                 type Source = Self;
                 fn view(shape: Self) -> $crate::view::View {
-                    let mut fields = Vec::new();
-                    $(
-                        if let Some(value) =
-                            <$ty as $crate::view::shape::ViewValue>::field(shape.$field)
-                        {
-                            fields.push(($crate::view::shape::key!($field $(, $key)?), value));
-                        }
-                    )*
                     $crate::view::View::Shaped($crate::view::shape::Shaped {
-                        fields,
+                        fields: vec![$((
+                            $crate::view::shape::key!($field $(, $key)?),
+                            <$ty as $crate::view::shape::ViewValue>::view(shape.$field),
+                        )),*],
                         #[cfg(feature = "python")]
                         class: py::$name::wrap,
                     })
@@ -504,8 +475,6 @@ mod tests {
             r#type: &'static str,
             address: VirtAddr,
             id: Hex<u16>,
-            missing: Omit<u8>,
-            present: Omit<u8>,
             null: Option<String>,
             read: Diag<VirtAddr>,
             failed: Diag<VirtAddr>,
@@ -522,8 +491,6 @@ mod tests {
             r#type: "port",
             address: VirtAddr(0x1000),
             id: 0x1f,
-            missing: None,
-            present: Some(3),
             null: None,
             read: DiagnosticValue::Available(VirtAddr(0x20)),
             failed: DiagnosticValue::Unavailable("paged out".into()),
@@ -535,9 +502,7 @@ mod tests {
         let keys: Vec<&str> = shaped.fields.iter().map(|(key, _)| *key).collect();
         assert_eq!(
             keys,
-            [
-                "type", "address", "id", "present", "null", "read", "failed", "items"
-            ]
+            ["type", "address", "id", "null", "read", "failed", "items"]
         );
         assert_eq!(
             to_json(&View::Shaped(shaped)),
@@ -545,7 +510,6 @@ mod tests {
                 "type": "port",
                 "address": "0x1000",
                 "id": "0x1f",
-                "present": 3,
                 "null": null,
                 "read": {"available": true, "value": "0x20", "error": null},
                 "failed": {"available": false, "value": null, "error": "paged out"},

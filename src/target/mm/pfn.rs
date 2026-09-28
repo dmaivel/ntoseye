@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use super::{PfnDetail, PfnSelector, diagnostic_unavailable, nested_type_name};
+use super::{PfnDetail, PfnSelector, nested_type_name};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, le_uint};
@@ -66,22 +66,9 @@ impl Target {
         memory.read_bytes(record, &mut buf)?;
         let pte = pool_field_from_buf(&ti, &buf, "PteAddress")
             .or_else(|| pool_field_from_buf(&ti, &buf, "PteLong"))
-            .or_else(|| {
-                Some(member_raw(
-                    &ti,
-                    &buf,
-                    "PteAddress",
-                    MMPFN_PTE_ADDRESS_OFFSET,
-                ))
-            });
-        let original_pte = pool_field_from_buf(&ti, &buf, "OriginalPte").or_else(|| {
-            Some(member_raw(
-                &ti,
-                &buf,
-                "OriginalPte",
-                MMPFN_ORIGINAL_PTE_OFFSET,
-            ))
-        });
+            .unwrap_or_else(|| member_raw(&ti, &buf, "PteAddress", MMPFN_PTE_ADDRESS_OFFSET));
+        let original_pte = pool_field_from_buf(&ti, &buf, "OriginalPte")
+            .unwrap_or_else(|| member_raw(&ti, &buf, "OriginalPte", MMPFN_ORIGINAL_PTE_OFFSET));
         let u1_raw = member_raw(&ti, &buf, "u1", MMPFN_U1_OFFSET);
         let u2_raw = member_raw(&ti, &buf, "u2", MMPFN_U2_OFFSET);
         let u3_raw = member_raw(&ti, &buf, "u3", MMPFN_U3_OFFSET);
@@ -180,7 +167,7 @@ impl Target {
             None
         };
         let pte_frame = scalar_from_pfn_member(self, &ti, &buf, "u4", "PteFrame")
-            .or(Some(u4_raw & ((1u64 << 40) - 1)));
+            .unwrap_or(u4_raw & ((1u64 << 40) - 1));
         let page_color = scalar_from_pfn_member(self, &ti, &buf, "u4", "PageColor").or_else(|| {
             scalar_from_named_type(
                 self,
@@ -190,57 +177,40 @@ impl Target {
                 "PageColor",
             )
         });
-        let used_entry_count = original_pte
-            .and_then(|value| {
-                scalar_from_named_type(
-                    self,
-                    "_MMPTE_SOFTWARE",
-                    &value.to_le_bytes(),
-                    MMPTE_SOFTWARE_OFFSET,
-                    "UsedPageTableEntries",
-                )
-            })
-            .or_else(|| {
-                scalar_from_pfn_member(self, &ti, &buf, "OriginalPte", "UsedPageTableEntries")
-            })
-            .or_else(|| original_pte.map(|value| (value >> 12) & 0x3ff));
+        let used_entry_count = scalar_from_named_type(
+            self,
+            "_MMPTE_SOFTWARE",
+            &original_pte.to_le_bytes(),
+            MMPTE_SOFTWARE_OFFSET,
+            "UsedPageTableEntries",
+        )
+        .or_else(|| scalar_from_pfn_member(self, &ti, &buf, "OriginalPte", "UsedPageTableEntries"))
+        .unwrap_or((original_pte >> 12) & 0x3ff);
         Ok(PfnDetail {
             selector,
             pfn,
             record,
             physical_address: selector.physical_address(),
-            pte_address: pte.map_or_else(
-                || diagnostic_unavailable("PteAddress"),
-                |value| DiagnosticValue::Available(VirtAddr(value)),
-            ),
-            original_pte: original_pte.map_or_else(
-                || diagnostic_unavailable("OriginalPte"),
-                DiagnosticValue::Available,
-            ),
-            reference_count: DiagnosticValue::Available(reference_count),
-            flink: flink.map(DiagnosticValue::Available),
-            blink: blink.map(DiagnosticValue::Available),
-            node_flink_low: node_flink_low.map(DiagnosticValue::Available),
-            node_blink_low: node_blink_low.map(DiagnosticValue::Available),
-            share_count: share_count.map(DiagnosticValue::Available),
-            ws_index: ws_index.map(DiagnosticValue::Available),
-            event: event.map(DiagnosticValue::Available),
-            used_entry_count: used_entry_count.map_or_else(
-                || diagnostic_unavailable("UsedPageTableEntries"),
-                DiagnosticValue::Available,
-            ),
+            pte_address: VirtAddr(pte),
+            original_pte,
+            reference_count,
+            flink,
+            blink,
+            node_flink_low,
+            node_blink_low,
+            share_count,
+            ws_index,
+            event,
+            used_entry_count,
             page_color: page_color.map_or_else(
-                || diagnostic_unavailable("PageColor"),
+                || DiagnosticValue::unavailable("PageColor"),
                 DiagnosticValue::Available,
             ),
-            pte_frame: pte_frame.map_or_else(
-                || diagnostic_unavailable("PteFrame"),
-                DiagnosticValue::Available,
-            ),
-            page_location: DiagnosticValue::Available(page_location as u8),
-            modified: DiagnosticValue::Available(modified),
-            cache_attribute: DiagnosticValue::Available(cache_attribute as u8),
-            priority: DiagnosticValue::Available(priority as u8),
+            pte_frame,
+            page_location: page_location as u8,
+            modified,
+            cache_attribute: cache_attribute as u8,
+            priority: priority as u8,
         })
     }
 }

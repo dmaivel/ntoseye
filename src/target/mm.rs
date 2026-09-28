@@ -90,31 +90,33 @@ impl PfnSelector {
     }
 }
 
-/// A decoded `_MMPFN` record. Fields represented by `DiagnosticValue` retain a
-/// precise unavailable reason when a layout member or record read is missing.
+/// A decoded `_MMPFN` record. A member the layout lacks is decoded from the
+/// record's raw bits at its known offset, so only `page_color`, which has no
+/// such fallback, can be unavailable. Union members the page's state does
+/// not use are `None`.
 #[derive(Debug, Clone)]
 pub struct PfnDetail {
     pub selector: PfnSelector,
     pub pfn: u64,
     pub record: VirtAddr,
     pub physical_address: Option<u64>,
-    pub pte_address: DiagnosticValue<VirtAddr>,
-    pub original_pte: DiagnosticValue<u64>,
-    pub reference_count: DiagnosticValue<u64>,
-    pub flink: Option<DiagnosticValue<u64>>,
-    pub blink: Option<DiagnosticValue<u64>>,
-    pub node_flink_low: Option<DiagnosticValue<u64>>,
-    pub node_blink_low: Option<DiagnosticValue<u64>>,
-    pub share_count: Option<DiagnosticValue<u64>>,
-    pub ws_index: Option<DiagnosticValue<u64>>,
-    pub event: Option<DiagnosticValue<u64>>,
-    pub used_entry_count: DiagnosticValue<u64>,
+    pub pte_address: VirtAddr,
+    pub original_pte: u64,
+    pub reference_count: u64,
+    pub flink: Option<u64>,
+    pub blink: Option<u64>,
+    pub node_flink_low: Option<u64>,
+    pub node_blink_low: Option<u64>,
+    pub share_count: Option<u64>,
+    pub ws_index: Option<u64>,
+    pub event: Option<u64>,
+    pub used_entry_count: u64,
     pub page_color: DiagnosticValue<u64>,
-    pub pte_frame: DiagnosticValue<u64>,
-    pub page_location: DiagnosticValue<u8>,
-    pub modified: DiagnosticValue<bool>,
-    pub cache_attribute: DiagnosticValue<u8>,
-    pub priority: DiagnosticValue<u8>,
+    pub pte_frame: u64,
+    pub page_location: u8,
+    pub modified: bool,
+    pub cache_attribute: u8,
+    pub priority: u8,
 }
 
 /// One page-table level reached by [`Target::vtop`].
@@ -438,10 +440,6 @@ pub struct SystemPtesDetail {
     pub types: Vec<SystemPteTypeDetail>,
     pub total: u64,
     pub free: u64,
-}
-
-fn diagnostic_unavailable<T>(error: impl std::fmt::Display) -> DiagnosticValue<T> {
-    DiagnosticValue::Unavailable(error.to_string())
 }
 
 fn nested_type_name(data: &ParsedType) -> Option<&str> {

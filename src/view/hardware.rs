@@ -1,6 +1,6 @@
 //! hardware: [`View`] builders for hang diagnosis (`!qlocks`, `!ipi`) and PCI.
 
-use super::shape::{Diag, Hex, Keyed, Omit, shapes};
+use super::shape::{Diag, Hex, Keyed, shapes};
 use crate::types::VirtAddr;
 use crate::target::hang::{
     self, IpiDetail, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
@@ -266,8 +266,8 @@ shapes! {
         id: Hex<u16>,
         /// The capability's name, when it is a known one.
         name: Option<&'static str>,
-        /// The version of an extended capability; absent for a standard one.
-        version: Omit<u8>,
+        /// The version of an extended capability; `None` for a standard one.
+        version: Option<u8>,
     }
 
     /// Requested raw configuration bytes.

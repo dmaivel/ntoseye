@@ -1,6 +1,6 @@
 //! Process, thread, job, global-flag, and zombie [`View`] builders.
 
-use super::shape::{Diag, Hex, Omit, shapes};
+use super::shape::{Diag, Hex, shapes};
 use super::list::{ListEnd, list_termination};
 use crate::types::VirtAddr;
 use crate::guest::ProcessInfo;
@@ -51,52 +51,52 @@ shapes! {
     /// A job's `_EJOB` accounting; a field this build lacks is `None`.
     JobAccounting {
         /// In 100 ns units.
-        total_user_time: Omit<u64>,
+        total_user_time: Option<u64>,
         /// In 100 ns units.
-        total_kernel_time: Omit<u64>,
+        total_kernel_time: Option<u64>,
         /// In CPU cycles.
-        total_cycle_time: Omit<u64>,
+        total_cycle_time: Option<u64>,
         /// In 100 ns units.
-        this_period_total_user_time: Omit<u64>,
+        this_period_total_user_time: Option<u64>,
         /// In 100 ns units.
-        this_period_total_kernel_time: Omit<u64>,
-        total_page_fault_count: Omit<u64>,
+        this_period_total_kernel_time: Option<u64>,
+        total_page_fault_count: Option<u64>,
         /// Processes ever assigned.
-        total_processes: Omit<u64>,
-        active_processes: Omit<u64>,
+        total_processes: Option<u64>,
+        active_processes: Option<u64>,
         /// Processes terminated by a job limit violation.
-        total_terminated_processes: Omit<u64>,
+        total_terminated_processes: Option<u64>,
         /// In pages.
-        peak_process_memory_used: Omit<u64>,
+        peak_process_memory_used: Option<u64>,
         /// In pages.
-        peak_job_memory_used: Omit<u64>,
+        peak_job_memory_used: Option<u64>,
         /// In pages.
-        current_job_memory_used: Omit<u64>,
+        current_job_memory_used: Option<u64>,
     }
 
     /// A job's `_EJOB` limit settings; a field this build lacks is `None`.
     JobLimits {
         /// `JOB_OBJECT_LIMIT_*` bits set.
-        limit_flags: Omit<u64>,
+        limit_flags: Option<u64>,
         /// Limit bits in effect, nesting included.
-        effective_limit_flags: Omit<u64>,
-        active_process_limit: Omit<u64>,
+        effective_limit_flags: Option<u64>,
+        active_process_limit: Option<u64>,
         /// In 100 ns units.
-        per_process_user_time_limit: Omit<u64>,
+        per_process_user_time_limit: Option<u64>,
         /// In 100 ns units.
-        per_job_user_time_limit: Omit<u64>,
+        per_job_user_time_limit: Option<u64>,
         /// In pages.
-        minimum_working_set_size: Omit<u64>,
+        minimum_working_set_size: Option<u64>,
         /// In pages.
-        maximum_working_set_size: Omit<u64>,
+        maximum_working_set_size: Option<u64>,
         /// In pages.
-        process_memory_limit: Omit<u64>,
+        process_memory_limit: Option<u64>,
         /// In pages.
-        job_memory_limit: Omit<u64>,
-        priority_class: Omit<u64>,
-        scheduling_class: Omit<u64>,
+        job_memory_limit: Option<u64>,
+        priority_class: Option<u64>,
+        scheduling_class: Option<u64>,
         /// `JOB_OBJECT_UILIMIT_*` bits set.
-        ui_restrictions_class: Omit<u64>,
+        ui_restrictions_class: Option<u64>,
     }
 
     /// A job object (`!job`): its accounting, limits, flags, nesting, and

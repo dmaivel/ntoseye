@@ -176,7 +176,7 @@ impl Symbols {
                 .unwrap_or_default();
             Ok(locals
                 .iter()
-                .map(view::symbols::procedure_local_layout)
+                .map(view::symbols::procedure_local)
                 .collect::<Vec<_>>())
         })?;
         Typed::new(py, rows)

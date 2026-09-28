@@ -334,14 +334,6 @@ struct SelfPatchMatch {
     function: Option<String>,
 }
 
-fn diagnostic<T>(result: Result<T>) -> DiagnosticValue<T> {
-    DiagnosticValue::from_result(result)
-}
-
-fn unavailable<T>(error: &str) -> DiagnosticValue<T> {
-    DiagnosticValue::Unavailable(error.to_string())
-}
-
 fn attached_dtb(target: &Target) -> Result<u64> {
     target
         .attached_process()
@@ -370,7 +362,7 @@ fn read_tib_pointer(teb: &StructRef<'_>, field: &str) -> Result<VirtAddr> {
 }
 
 fn read_unicode_or_empty(record: &StructRef<'_>, field: &str) -> DiagnosticValue<String> {
-    diagnostic(record.unicode_string(field))
+    DiagnosticValue::from_result(record.unicode_string(field))
 }
 
 fn decode_process_parameters(
@@ -385,14 +377,14 @@ fn decode_process_parameters(
         address: record.addr(),
         command_line: read_unicode_or_empty(record, "CommandLine"),
         image_path_name: read_unicode_or_empty(record, "ImagePathName"),
-        current_directory: diagnostic(current_directory),
+        current_directory: DiagnosticValue::from_result(current_directory),
         dll_path: read_unicode_or_empty(record, "DllPath"),
         window_title: read_unicode_or_empty(record, "WindowTitle"),
         desktop_info: read_unicode_or_empty(record, "DesktopInfo"),
         shell_info: read_unicode_or_empty(record, "ShellInfo"),
         runtime_data: read_unicode_or_empty(record, "RuntimeData"),
-        environment: diagnostic(record.read_pointer("Environment")),
-        environment_size: diagnostic(environment_size),
+        environment: DiagnosticValue::from_result(record.read_pointer("Environment")),
+        environment_size: DiagnosticValue::from_result(environment_size),
     }
 }
 
@@ -400,8 +392,8 @@ fn read_loader_list_head(ldr: &StructRef<'_>, field: &str) -> DiagnosticValue<Lo
     match ldr.embedded(field) {
         Ok(head) => DiagnosticValue::Available(LoaderListHead {
             address: head.addr(),
-            flink: diagnostic(head.read_pointer("Flink")),
-            blink: diagnostic(head.read_pointer("Blink")),
+            flink: DiagnosticValue::from_result(head.read_pointer("Flink")),
+            blink: DiagnosticValue::from_result(head.read_pointer("Blink")),
         }),
         Err(error) => DiagnosticValue::Unavailable(error.to_string()),
     }
@@ -438,20 +430,20 @@ fn make_unavailable_peb32(address: VirtAddr, error: impl ToString) -> Peb32Detai
     let error = error.to_string();
     Peb32Detail {
         address,
-        image_base_address: unavailable(&error),
-        ldr: unavailable(&error),
-        process_parameters: unavailable(&error),
-        process_parameters_detail: unavailable(&error),
-        process_heap: unavailable(&error),
-        number_of_heaps: unavailable(&error),
-        process_heaps: unavailable(&error),
-        being_debugged: unavailable(&error),
-        os_major_version: unavailable(&error),
-        os_minor_version: unavailable(&error),
-        os_build_number: unavailable(&error),
-        session_id: unavailable(&error),
-        number_of_processors: unavailable(&error),
-        loader_lists: unavailable(&error),
+        image_base_address: DiagnosticValue::unavailable(&error),
+        ldr: DiagnosticValue::unavailable(&error),
+        process_parameters: DiagnosticValue::unavailable(&error),
+        process_parameters_detail: DiagnosticValue::unavailable(&error),
+        process_heap: DiagnosticValue::unavailable(&error),
+        number_of_heaps: DiagnosticValue::unavailable(&error),
+        process_heaps: DiagnosticValue::unavailable(&error),
+        being_debugged: DiagnosticValue::unavailable(&error),
+        os_major_version: DiagnosticValue::unavailable(&error),
+        os_minor_version: DiagnosticValue::unavailable(&error),
+        os_build_number: DiagnosticValue::unavailable(&error),
+        session_id: DiagnosticValue::unavailable(&error),
+        number_of_processors: DiagnosticValue::unavailable(&error),
+        loader_lists: DiagnosticValue::unavailable(&error),
     }
 }
 
@@ -483,9 +475,11 @@ impl Target {
         let types = self.guest()?.ntoskrnl.types_in(dtb);
         let peb_ref = types.struct_at("_PEB", peb_address)?.prefetch();
 
-        let image_base_address = diagnostic(peb_ref.read_pointer("ImageBaseAddress"));
-        let ldr = diagnostic(peb_ref.read_pointer("Ldr"));
-        let process_parameters = diagnostic(peb_ref.read_pointer("ProcessParameters"));
+        let image_base_address =
+            DiagnosticValue::from_result(peb_ref.read_pointer("ImageBaseAddress"));
+        let ldr = DiagnosticValue::from_result(peb_ref.read_pointer("Ldr"));
+        let process_parameters =
+            DiagnosticValue::from_result(peb_ref.read_pointer("ProcessParameters"));
         let process_parameters_detail = match &process_parameters {
             DiagnosticValue::Available(address) if !address.is_zero() => {
                 match types.struct_at("_RTL_USER_PROCESS_PARAMETERS", *address) {
@@ -527,24 +521,30 @@ impl Target {
             ldr,
             process_parameters,
             process_parameters_detail,
-            process_heap: diagnostic(peb_ref.read_pointer("ProcessHeap")),
-            number_of_heaps: diagnostic(peb_ref.read_field::<u32>("NumberOfHeaps").map(u64::from)),
-            process_heaps: diagnostic(peb_ref.read_pointer("ProcessHeaps")),
-            being_debugged: diagnostic(peb_ref.read_field::<u8>("BeingDebugged")),
-            os_major_version: diagnostic(
+            process_heap: DiagnosticValue::from_result(peb_ref.read_pointer("ProcessHeap")),
+            number_of_heaps: DiagnosticValue::from_result(
+                peb_ref.read_field::<u32>("NumberOfHeaps").map(u64::from),
+            ),
+            process_heaps: DiagnosticValue::from_result(peb_ref.read_pointer("ProcessHeaps")),
+            being_debugged: DiagnosticValue::from_result(peb_ref.read_field::<u8>("BeingDebugged")),
+            os_major_version: DiagnosticValue::from_result(
                 peb_ref.read_field::<u32>("OSMajorVersion").map(u64::from),
             ),
-            os_minor_version: diagnostic(
+            os_minor_version: DiagnosticValue::from_result(
                 peb_ref.read_field::<u32>("OSMinorVersion").map(u64::from),
             ),
-            os_build_number: diagnostic(peb_ref.read_field::<u16>("OSBuildNumber").map(u64::from)),
-            session_id: diagnostic(peb_ref.read_field::<u32>("SessionId").map(u64::from)),
-            number_of_processors: diagnostic(
+            os_build_number: DiagnosticValue::from_result(
+                peb_ref.read_field::<u16>("OSBuildNumber").map(u64::from),
+            ),
+            session_id: DiagnosticValue::from_result(
+                peb_ref.read_field::<u32>("SessionId").map(u64::from),
+            ),
+            number_of_processors: DiagnosticValue::from_result(
                 peb_ref
                     .read_field::<u32>("NumberOfProcessors")
                     .map(u64::from),
             ),
-            api_set_map: diagnostic(peb_ref.read_pointer("ApiSetMap")),
+            api_set_map: DiagnosticValue::from_result(peb_ref.read_pointer("ApiSetMap")),
             loader_lists,
             peb32,
         })
@@ -556,8 +556,12 @@ impl Target {
             let address = ldr + offset;
             LoaderListHead {
                 address,
-                flink: diagnostic(memory.read::<u32>(address).map(VirtAddr::from)),
-                blink: diagnostic(memory.read::<u32>(address + 4u64).map(VirtAddr::from)),
+                flink: DiagnosticValue::from_result(
+                    memory.read::<u32>(address).map(VirtAddr::from),
+                ),
+                blink: DiagnosticValue::from_result(
+                    memory.read::<u32>(address + 4u64).map(VirtAddr::from),
+                ),
             }
         };
         DiagnosticValue::Available(LoaderListHeads {
@@ -576,8 +580,9 @@ impl Target {
             Ok(peb_ref) => peb_ref.prefetch(),
             Err(error) => return make_unavailable_peb32(address, error),
         };
-        let ldr = diagnostic(peb_ref.read_field::<u32>("Ldr").map(VirtAddr::from));
-        let process_parameters = diagnostic(
+        let ldr =
+            DiagnosticValue::from_result(peb_ref.read_field::<u32>("Ldr").map(VirtAddr::from));
+        let process_parameters = DiagnosticValue::from_result(
             peb_ref
                 .read_field::<u32>("ProcessParameters")
                 .map(VirtAddr::from),
@@ -611,7 +616,7 @@ impl Target {
         };
         Peb32Detail {
             address,
-            image_base_address: diagnostic(
+            image_base_address: DiagnosticValue::from_result(
                 peb_ref
                     .read_field::<u32>("ImageBaseAddress")
                     .map(VirtAddr::from),
@@ -619,23 +624,31 @@ impl Target {
             ldr,
             process_parameters,
             process_parameters_detail,
-            process_heap: diagnostic(peb_ref.read_field::<u32>("ProcessHeap").map(VirtAddr::from)),
-            number_of_heaps: diagnostic(peb_ref.read_field::<u32>("NumberOfHeaps").map(u64::from)),
-            process_heaps: diagnostic(
+            process_heap: DiagnosticValue::from_result(
+                peb_ref.read_field::<u32>("ProcessHeap").map(VirtAddr::from),
+            ),
+            number_of_heaps: DiagnosticValue::from_result(
+                peb_ref.read_field::<u32>("NumberOfHeaps").map(u64::from),
+            ),
+            process_heaps: DiagnosticValue::from_result(
                 peb_ref
                     .read_field::<u32>("ProcessHeaps")
                     .map(VirtAddr::from),
             ),
-            being_debugged: diagnostic(peb_ref.read_field::<u8>("BeingDebugged")),
-            os_major_version: diagnostic(
+            being_debugged: DiagnosticValue::from_result(peb_ref.read_field::<u8>("BeingDebugged")),
+            os_major_version: DiagnosticValue::from_result(
                 peb_ref.read_field::<u32>("OSMajorVersion").map(u64::from),
             ),
-            os_minor_version: diagnostic(
+            os_minor_version: DiagnosticValue::from_result(
                 peb_ref.read_field::<u32>("OSMinorVersion").map(u64::from),
             ),
-            os_build_number: diagnostic(peb_ref.read_field::<u16>("OSBuildNumber").map(u64::from)),
-            session_id: diagnostic(peb_ref.read_field::<u32>("SessionId").map(u64::from)),
-            number_of_processors: diagnostic(
+            os_build_number: DiagnosticValue::from_result(
+                peb_ref.read_field::<u16>("OSBuildNumber").map(u64::from),
+            ),
+            session_id: DiagnosticValue::from_result(
+                peb_ref.read_field::<u32>("SessionId").map(u64::from),
+            ),
+            number_of_processors: DiagnosticValue::from_result(
                 peb_ref
                     .read_field::<u32>("NumberOfProcessors")
                     .map(u64::from),
@@ -665,7 +678,8 @@ impl Target {
         };
         let types = self.guest()?.ntoskrnl.types_in(dtb);
         let teb_ref = types.struct_at("_TEB", teb_address)?.prefetch();
-        let wow_teb_offset = diagnostic(teb_ref.read_field::<i32>("WowTebOffset"));
+        let wow_teb_offset =
+            DiagnosticValue::from_result(teb_ref.read_field::<i32>("WowTebOffset"));
         let teb32 = match &wow_teb_offset {
             DiagnosticValue::Available(offset) => teb32_address(teb_address, Some(*offset))
                 .map(|address| self.decode_teb32(dtb, address)),
@@ -673,41 +687,45 @@ impl Target {
         };
         Ok(TebDetail {
             address: teb_address,
-            stack_base: diagnostic(read_tib_pointer(&teb_ref, "StackBase")),
-            stack_limit: diagnostic(read_tib_pointer(&teb_ref, "StackLimit")),
-            tls_pointer: diagnostic(
+            stack_base: DiagnosticValue::from_result(read_tib_pointer(&teb_ref, "StackBase")),
+            stack_limit: DiagnosticValue::from_result(read_tib_pointer(&teb_ref, "StackLimit")),
+            tls_pointer: DiagnosticValue::from_result(
                 teb_ref
                     .read_pointer("ThreadLocalStoragePointer")
                     .or_else(|_| teb_ref.read_pointer("TlsPointer")),
             ),
-            last_error_value: diagnostic(teb_ref.read_field::<u32>("LastErrorValue")),
-            last_status_value: diagnostic(teb_ref.read_field::<u32>("LastStatusValue")),
-            count_of_owned_critical_sections: diagnostic(
+            last_error_value: DiagnosticValue::from_result(
+                teb_ref.read_field::<u32>("LastErrorValue"),
+            ),
+            last_status_value: DiagnosticValue::from_result(
+                teb_ref.read_field::<u32>("LastStatusValue"),
+            ),
+            count_of_owned_critical_sections: DiagnosticValue::from_result(
                 teb_ref.read_field::<u32>("CountOfOwnedCriticalSections"),
             ),
-            peb: diagnostic(
+            peb: DiagnosticValue::from_result(
                 teb_ref
                     .read_pointer("ProcessEnvironmentBlock")
                     .or_else(|_| teb_ref.read_pointer("Peb")),
             ),
             wow_teb_offset,
-            wow64_reserved: diagnostic(
+            wow64_reserved: DiagnosticValue::from_result(
                 teb_ref
                     .read_pointer("Wow32Reserved")
                     .or_else(|_| teb_ref.read_pointer("Wow64Reserved")),
             ),
-            activation_context: diagnostic(
+            activation_context: DiagnosticValue::from_result(
                 teb_ref
                     .read_pointer("ActivationContextStackPointer")
                     .or_else(|_| teb_ref.read_pointer("ActivationContextStack"))
                     .map(|address| (!address.is_zero()).then_some(address)),
             ),
-            client_id_unique_process: diagnostic(
+            client_id_unique_process: DiagnosticValue::from_result(
                 teb_ref
                     .embedded("ClientId")
                     .and_then(|client| client.read_pointer("UniqueProcess")),
             ),
-            client_id_unique_thread: diagnostic(
+            client_id_unique_thread: DiagnosticValue::from_result(
                 teb_ref
                     .embedded("ClientId")
                     .and_then(|client| client.read_pointer("UniqueThread")),
@@ -727,42 +745,46 @@ impl Target {
         };
         Teb32Detail {
             address,
-            stack_base: diagnostic(
+            stack_base: DiagnosticValue::from_result(
                 teb_ref
                     .embedded("NtTib")
                     .and_then(|tib| tib.read_field::<u32>("StackBase"))
                     .map(VirtAddr::from),
             ),
-            stack_limit: diagnostic(
+            stack_limit: DiagnosticValue::from_result(
                 teb_ref
                     .embedded("NtTib")
                     .and_then(|tib| tib.read_field::<u32>("StackLimit"))
                     .map(VirtAddr::from),
             ),
-            tls_pointer: diagnostic(
+            tls_pointer: DiagnosticValue::from_result(
                 teb_ref
                     .read_field::<u32>("ThreadLocalStoragePointer")
                     .or_else(|_| teb_ref.read_field("TlsPointer"))
                     .map(VirtAddr::from),
             ),
-            last_error_value: diagnostic(teb_ref.read_field::<u32>("LastErrorValue")),
-            last_status_value: diagnostic(teb_ref.read_field::<u32>("LastStatusValue")),
-            count_of_owned_critical_sections: diagnostic(
+            last_error_value: DiagnosticValue::from_result(
+                teb_ref.read_field::<u32>("LastErrorValue"),
+            ),
+            last_status_value: DiagnosticValue::from_result(
+                teb_ref.read_field::<u32>("LastStatusValue"),
+            ),
+            count_of_owned_critical_sections: DiagnosticValue::from_result(
                 teb_ref.read_field::<u32>("CountOfOwnedCriticalSections"),
             ),
-            peb: diagnostic(
+            peb: DiagnosticValue::from_result(
                 teb_ref
                     .read_field::<u32>("ProcessEnvironmentBlock")
                     .or_else(|_| teb_ref.read_field("Peb"))
                     .map(VirtAddr::from),
             ),
-            client_id_unique_process: diagnostic(
+            client_id_unique_process: DiagnosticValue::from_result(
                 teb_ref
                     .embedded("ClientId")
                     .and_then(|client| client.read_field::<u32>("UniqueProcess"))
                     .map(VirtAddr::from),
             ),
-            client_id_unique_thread: diagnostic(
+            client_id_unique_thread: DiagnosticValue::from_result(
                 teb_ref
                     .embedded("ClientId")
                     .and_then(|client| client.read_field::<u32>("UniqueThread"))
@@ -1183,15 +1205,15 @@ fn make_unavailable_teb32(address: VirtAddr, error: impl ToString) -> Teb32Detai
     let error = error.to_string();
     Teb32Detail {
         address,
-        stack_base: unavailable(&error),
-        stack_limit: unavailable(&error),
-        tls_pointer: unavailable(&error),
-        last_error_value: unavailable(&error),
-        last_status_value: unavailable(&error),
-        count_of_owned_critical_sections: unavailable(&error),
-        peb: unavailable(&error),
-        client_id_unique_process: unavailable(&error),
-        client_id_unique_thread: unavailable(&error),
+        stack_base: DiagnosticValue::unavailable(&error),
+        stack_limit: DiagnosticValue::unavailable(&error),
+        tls_pointer: DiagnosticValue::unavailable(&error),
+        last_error_value: DiagnosticValue::unavailable(&error),
+        last_status_value: DiagnosticValue::unavailable(&error),
+        count_of_owned_critical_sections: DiagnosticValue::unavailable(&error),
+        peb: DiagnosticValue::unavailable(&error),
+        client_id_unique_process: DiagnosticValue::unavailable(&error),
+        client_id_unique_thread: DiagnosticValue::unavailable(&error),
     }
 }
 

@@ -44,7 +44,7 @@ pub struct RunningDetail {
 #[derive(Debug, Clone)]
 pub struct ReadyQueueEntry {
     pub kthread: VirtAddr,
-    pub thread: DiagnosticValue<Option<ThreadInfo>>,
+    pub thread: DiagnosticValue<ThreadInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +76,7 @@ pub struct DpcDetail {
     pub deferred_routine: DiagnosticValue<Option<VirtAddr>>,
     pub deferred_routine_symbol: DiagnosticValue<Option<String>>,
     pub context: DiagnosticValue<Option<VirtAddr>>,
-    pub importance: DiagnosticValue<Option<u8>>,
+    pub importance: DiagnosticValue<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +104,7 @@ pub struct TimerDetail {
     pub dpc: DiagnosticValue<Option<VirtAddr>>,
     pub dpc_routine: DiagnosticValue<Option<VirtAddr>>,
     pub dpc_routine_symbol: DiagnosticValue<Option<String>>,
-    pub interrupt_time: DiagnosticValue<Option<u64>>,
+    pub interrupt_time: DiagnosticValue<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,8 +123,7 @@ pub struct TimerBucketTermination {
 
 #[derive(Debug, Clone)]
 pub struct TimerListDetail {
-    pub interrupt_time: DiagnosticValue<Option<u64>>,
-    pub interrupt_time_source: Option<String>,
+    pub interrupt_time: DiagnosticValue<u64>,
     pub entries: Vec<TimerListEntry>,
     pub terminations: Vec<TimerBucketTermination>,
     pub total: usize,
@@ -484,14 +483,6 @@ pub struct ThreadExtendedDetail {
     pub quantum_target: Option<u64>,
 }
 
-pub fn available<T>(value: T) -> DiagnosticValue<T> {
-    DiagnosticValue::Available(value)
-}
-
-pub fn unavailable<T>(error: impl Into<String>) -> DiagnosticValue<T> {
-    DiagnosticValue::Unavailable(error.into())
-}
-
 /// The integer at the first readable path below `root`. Every segment but
 /// the last names an embedded struct, or a pointer to one, to step into.
 fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
@@ -644,14 +635,14 @@ fn decode_running_thread(
 ) -> DiagnosticValue<Option<ThreadInfo>> {
     let pointer = match pointer {
         Ok(pointer) => pointer,
-        Err(error) => return unavailable(error.to_string()),
+        Err(error) => return DiagnosticValue::unavailable(error.to_string()),
     };
     if pointer.is_zero() {
-        return available(None);
+        return DiagnosticValue::Available(None);
     }
     match target.thread_info_from_ethread(pointer - ethread_tcb_offset) {
-        Ok(thread) => available(Some(thread)),
-        Err(error) => unavailable(error.to_string()),
+        Ok(thread) => DiagnosticValue::Available(Some(thread)),
+        Err(error) => DiagnosticValue::unavailable(error.to_string()),
     }
 }
 
@@ -669,24 +660,24 @@ impl Target {
         let mut rows = Vec::with_capacity(processors.len());
         for index in processors {
             let kpcr = kpcr_for_processor(self, index)
-                .map(available)
-                .unwrap_or_else(|error| unavailable(error.to_string()));
+                .map(DiagnosticValue::Available)
+                .unwrap_or_else(|error| DiagnosticValue::unavailable(error.to_string()));
             let prcb_address = match kprcb_for_processor(self, index) {
                 Ok(prcb) => prcb,
                 Err(error) => {
                     rows.push(RunningProcessor {
                         index,
                         kpcr,
-                        prcb: unavailable(error.to_string()),
-                        current_thread: unavailable(error.to_string()),
-                        next_thread: unavailable(error.to_string()),
-                        idle_thread: unavailable(error.to_string()),
+                        prcb: DiagnosticValue::unavailable(error.to_string()),
+                        current_thread: DiagnosticValue::unavailable(error.to_string()),
+                        next_thread: DiagnosticValue::unavailable(error.to_string()),
+                        idle_thread: DiagnosticValue::unavailable(error.to_string()),
                         short_stack: None,
                     });
                     continue;
                 }
             };
-            let prcb = available(prcb_address);
+            let prcb = DiagnosticValue::Available(prcb_address);
             let current = decode_running_thread(
                 self,
                 read_kthread_pointer(self, prcb_address, "CurrentThread"),
@@ -779,11 +770,11 @@ impl Target {
                     let thread = match thread_link_offset {
                         Some(_) => {
                             match self.thread_info_from_ethread(kthread - ethread_tcb_offset) {
-                                Ok(thread) => available(Some(thread)),
-                                Err(error) => unavailable(error.to_string()),
+                                Ok(thread) => DiagnosticValue::Available(thread),
+                                Err(error) => DiagnosticValue::unavailable(error.to_string()),
                             }
                         }
-                        None => unavailable("_KTHREAD link field not present"),
+                        None => DiagnosticValue::unavailable("_KTHREAD link field not present"),
                     };
                     entries.push(ReadyQueueEntry { kthread, thread });
                     total += 1;
@@ -819,16 +810,16 @@ impl Target {
         field: Option<&str>,
     ) -> DiagnosticValue<Option<VirtAddr>> {
         let Some(field) = field else {
-            return unavailable("field not present");
+            return DiagnosticValue::unavailable("field not present");
         };
         match self
             .guest()
             .and_then(|guest| guest.ntoskrnl.types().struct_at(type_name, base))
             .and_then(|cursor| cursor.read_field::<VirtAddr>(field))
         {
-            Ok(value) if value.is_zero() => available(None),
-            Ok(value) => available(Some(value)),
-            Err(error) => unavailable(error.to_string()),
+            Ok(value) if value.is_zero() => DiagnosticValue::Available(None),
+            Ok(value) => DiagnosticValue::Available(Some(value)),
+            Err(error) => DiagnosticValue::unavailable(error.to_string()),
         }
     }
 
@@ -838,10 +829,10 @@ impl Target {
         trace: &ThreadTraceContext,
     ) -> DiagnosticValue<Option<String>> {
         match pointer {
-            DiagnosticValue::Unavailable(error) => unavailable(error.clone()),
-            DiagnosticValue::Available(None) => available(None),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
+            DiagnosticValue::Available(None) => DiagnosticValue::Available(None),
             DiagnosticValue::Available(Some(address)) => {
-                available(Some(format_symbol(self, trace, address.0)))
+                DiagnosticValue::Available(Some(format_symbol(self, trace, address.0)))
             }
         }
     }
@@ -935,24 +926,22 @@ impl Target {
                     let context = self.pointer_field("_KDPC", dpc, context_field);
                     let importance = importance_field
                         .map(|field| {
-                            self.guest()
-                                .and_then(|guest| guest.ntoskrnl.types().struct_at("_KDPC", dpc))
-                                .and_then(|cursor| cursor.read_field::<u8>(field))
-                                .map(Some)
-                                .map_err(|error| error.to_string())
-                                .map_or_else(
-                                    DiagnosticValue::Unavailable,
-                                    DiagnosticValue::Available,
-                                )
+                            DiagnosticValue::from_result(
+                                self.guest()
+                                    .and_then(|guest| {
+                                        guest.ntoskrnl.types().struct_at("_KDPC", dpc)
+                                    })
+                                    .and_then(|cursor| cursor.read_field::<u8>(field)),
+                            )
                         })
-                        .unwrap_or_else(|| unavailable("field not present"));
+                        .unwrap_or_else(|| DiagnosticValue::unavailable("field not present"));
                     let (routine, context, importance) = if dpc_link_offset.is_some() {
                         (routine, context, importance)
                     } else {
                         (
-                            unavailable("_KDPC link field not present"),
-                            unavailable("_KDPC link field not present"),
-                            unavailable("_KDPC link field not present"),
+                            DiagnosticValue::unavailable("_KDPC link field not present"),
+                            DiagnosticValue::unavailable("_KDPC link field not present"),
+                            DiagnosticValue::unavailable("_KDPC link field not present"),
                         )
                     };
                     entries.push(DpcDetail {
@@ -1001,24 +990,19 @@ impl Target {
         Some(VirtAddr((rotated ^ timer.0).swap_bytes() ^ wait_always))
     }
 
-    fn interrupt_time(&self) -> (DiagnosticValue<Option<u64>>, Option<String>) {
-        match KuserSharedData::new(self).interrupt_time() {
-            Some(value) => (
-                available(Some(value)),
-                Some("KUSER_SHARED_DATA.InterruptTime".to_string()),
-            ),
-            None => (
-                unavailable("KUSER_SHARED_DATA.InterruptTime unavailable"),
-                None,
-            ),
-        }
+    /// `KUSER_SHARED_DATA.InterruptTime`, which timers' due times count in.
+    fn interrupt_time(&self) -> DiagnosticValue<u64> {
+        KuserSharedData::new(self).interrupt_time().map_or_else(
+            || DiagnosticValue::unavailable("KUSER_SHARED_DATA.InterruptTime unavailable"),
+            DiagnosticValue::Available,
+        )
     }
 
     fn decode_timer_with_context(
         &self,
         timer: VirtAddr,
         timer_layout: &TypeInfo,
-        interrupt_time: DiagnosticValue<Option<u64>>,
+        interrupt_time: DiagnosticValue<u64>,
         keys: Option<(u64, u64)>,
         trace: &ThreadTraceContext,
     ) -> TimerDetail {
@@ -1026,29 +1010,29 @@ impl Target {
             .guest()
             .and_then(|guest| guest.ntoskrnl.types().struct_at("_KTIMER", timer));
         let due_time = if !timer_layout.fields.contains_key("DueTime") {
-            unavailable("DueTime field not present")
+            DiagnosticValue::unavailable("DueTime field not present")
         } else {
             match cursor.as_ref() {
                 Ok(cursor) => cursor
                     .read_field::<u64>("DueTime")
                     .map_err(|error| error.to_string())
                     .map_or_else(DiagnosticValue::Unavailable, DiagnosticValue::Available),
-                Err(error) => unavailable(error.to_string()),
+                Err(error) => DiagnosticValue::unavailable(error.to_string()),
             }
         };
         let period = if !timer_layout.fields.contains_key("Period") {
-            unavailable("Period field not present")
+            DiagnosticValue::unavailable("Period field not present")
         } else {
             match cursor.as_ref() {
                 Ok(cursor) => cursor
                     .read_field::<u32>("Period")
                     .map_err(|error| error.to_string())
                     .map_or_else(DiagnosticValue::Unavailable, DiagnosticValue::Available),
-                Err(error) => unavailable(error.to_string()),
+                Err(error) => DiagnosticValue::unavailable(error.to_string()),
             }
         };
         let dpc_encoded = if !timer_layout.fields.contains_key("Dpc") {
-            unavailable("Dpc field not present")
+            DiagnosticValue::unavailable("Dpc field not present")
         } else {
             match cursor.as_ref() {
                 Ok(cursor) => cursor
@@ -1056,23 +1040,23 @@ impl Target {
                     .map(|address| (!address.is_zero()).then_some(address))
                     .map_err(|error| error.to_string())
                     .map_or_else(DiagnosticValue::Unavailable, DiagnosticValue::Available),
-                Err(error) => unavailable(error.to_string()),
+                Err(error) => DiagnosticValue::unavailable(error.to_string()),
             }
         };
         let dpc = match &dpc_encoded {
-            DiagnosticValue::Unavailable(error) => unavailable(error.clone()),
-            DiagnosticValue::Available(None) => available(None),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
+            DiagnosticValue::Available(None) => DiagnosticValue::Available(None),
             DiagnosticValue::Available(Some(encoded)) => {
                 match self.decode_timer_dpc(encoded.0, timer, keys) {
-                    Some(address) if address.is_zero() => available(None),
-                    Some(address) => available(Some(address)),
-                    None => unavailable("timer DPC encoding keys unavailable"),
+                    Some(address) if address.is_zero() => DiagnosticValue::Available(None),
+                    Some(address) => DiagnosticValue::Available(Some(address)),
+                    None => DiagnosticValue::unavailable("timer DPC encoding keys unavailable"),
                 }
             }
         };
         let dpc_routine = match &dpc {
-            DiagnosticValue::Unavailable(error) => unavailable(error.clone()),
-            DiagnosticValue::Available(None) => available(None),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
+            DiagnosticValue::Available(None) => DiagnosticValue::Available(None),
             DiagnosticValue::Available(Some(address)) => {
                 let layout = match layout_for(self, "_KDPC") {
                     Ok(layout) => layout,
@@ -1083,8 +1067,8 @@ impl Target {
                             period,
                             dpc_encoded,
                             dpc,
-                            dpc_routine: unavailable(error.to_string()),
-                            dpc_routine_symbol: unavailable(error.to_string()),
+                            dpc_routine: DiagnosticValue::unavailable(error.to_string()),
+                            dpc_routine_symbol: DiagnosticValue::unavailable(error.to_string()),
                             interrupt_time,
                         };
                     }
@@ -1118,7 +1102,7 @@ impl Target {
     /// the affected value unavailable.
     pub fn inspect_timer(&self, timer: VirtAddr) -> Result<TimerDetail> {
         let timer_layout = layout_for(self, "_KTIMER")?;
-        let (interrupt_time, _) = self.interrupt_time();
+        let interrupt_time = self.interrupt_time();
         let keys = self.timer_dpc_keys();
         let trace = resolve_thread_trace_context(self, self.kernel_dtb());
         Ok(self.decode_timer_with_context(timer, &timer_layout, interrupt_time, keys, &trace))
@@ -1130,7 +1114,7 @@ impl Target {
     /// are retained in `errors` and per-timer diagnostics.
     pub fn timer_list(&self) -> Result<TimerListDetail> {
         let timer_layout = layout_for(self, "_KTIMER")?;
-        let (interrupt_time, interrupt_time_source) = self.interrupt_time();
+        let interrupt_time = self.interrupt_time();
         let keys = self.timer_dpc_keys();
         let trace = resolve_thread_trace_context(self, self.kernel_dtb());
         let prcb_layout = layout_for(self, "_KPRCB")?;
@@ -1258,12 +1242,20 @@ impl Target {
                     } else {
                         TimerDetail {
                             address: timer,
-                            due_time: unavailable("_KTIMER link field not present"),
-                            period: unavailable("_KTIMER link field not present"),
-                            dpc_encoded: unavailable("_KTIMER link field not present"),
-                            dpc: unavailable("_KTIMER link field not present"),
-                            dpc_routine: unavailable("_KTIMER link field not present"),
-                            dpc_routine_symbol: unavailable("_KTIMER link field not present"),
+                            due_time: DiagnosticValue::unavailable(
+                                "_KTIMER link field not present",
+                            ),
+                            period: DiagnosticValue::unavailable("_KTIMER link field not present"),
+                            dpc_encoded: DiagnosticValue::unavailable(
+                                "_KTIMER link field not present",
+                            ),
+                            dpc: DiagnosticValue::unavailable("_KTIMER link field not present"),
+                            dpc_routine: DiagnosticValue::unavailable(
+                                "_KTIMER link field not present",
+                            ),
+                            dpc_routine_symbol: DiagnosticValue::unavailable(
+                                "_KTIMER link field not present",
+                            ),
                             interrupt_time: interrupt_time.clone(),
                         }
                     };
@@ -1281,7 +1273,6 @@ impl Target {
         }
         Ok(TimerListDetail {
             interrupt_time,
-            interrupt_time_source,
             entries: list_entries,
             terminations,
             total,

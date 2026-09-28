@@ -1,7 +1,7 @@
 //! Neutral value-tree views for memory-manager inspectors.
 
 use super::process::process;
-use super::shape::{Diag, Hex, Metric, Omit, shapes};
+use super::shape::{Diag, Hex, Metric, shapes};
 use crate::target::mm::{
     self as target_mm, BigPoolDetail, LookasideDetail, LookasideListsDetail, MdlDetail,
     MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange,
@@ -81,25 +81,27 @@ shapes! {
         record: VirtAddr,
         /// The requested physical address, for a physical-address selector.
         physical_address: Option<Hex>,
-        pte_address: Diag<VirtAddr>,
-        original_pte: Diag<Hex>,
-        reference_count: Diag<u64>,
-        flink: Option<Diag<Hex>>,
-        blink: Option<Diag<Hex>>,
-        node_flink_low: Option<Diag<Hex>>,
-        node_blink_low: Option<Diag<Hex>>,
-        share_count: Option<Diag<u64>>,
+        pte_address: VirtAddr,
+        original_pte: Hex,
+        reference_count: u64,
+        flink: Option<Hex>,
+        blink: Option<Hex>,
+        node_flink_low: Option<Hex>,
+        node_blink_low: Option<Hex>,
+        share_count: Option<u64>,
         /// The working-set index.
-        ws_index: Option<Diag<Hex>>,
-        event: Option<Diag<Hex>>,
-        used_entry_count: Diag<u64>,
+        ws_index: Option<Hex>,
+        event: Option<Hex>,
+        used_entry_count: u64,
+        /// The only member without a raw-bit fallback when the layout lacks
+        /// it.
         page_color: Diag<u64>,
         /// The PFN of the page table holding the page's PTE.
-        pte_frame: Diag<Hex>,
-        page_location: Diag<PageLocation>,
-        modified: Diag<bool>,
-        cache_attribute: Diag<CacheAttribute>,
-        priority: Diag<u8>,
+        pte_frame: Hex,
+        page_location: PageLocation,
+        modified: bool,
+        cache_attribute: CacheAttribute,
+        priority: u8,
     }
 
     /// One page-table level of a walk, its entry decoded with WinDbg-style
@@ -275,14 +277,14 @@ shapes! {
         tag_name: String,
         nonpaged_bytes: Option<u64>,
         paged_bytes: Option<u64>,
-        /// Absent unless allocation counts were requested.
-        nonpaged_allocs: Omit<Option<u64>>,
-        /// Absent unless allocation counts were requested.
-        nonpaged_frees: Omit<Option<u64>>,
-        /// Absent unless allocation counts were requested.
-        paged_allocs: Omit<Option<u64>>,
-        /// Absent unless allocation counts were requested.
-        paged_frees: Omit<Option<u64>>,
+        /// `None` unless allocation counts were requested.
+        nonpaged_allocs: Option<u64>,
+        /// `None` unless allocation counts were requested.
+        nonpaged_frees: Option<u64>,
+        /// `None` unless allocation counts were requested.
+        paged_allocs: Option<u64>,
+        /// `None` unless allocation counts were requested.
+        paged_frees: Option<u64>,
     }
 
     /// Pool usage by tag, from the pool tracker (`!poolused`).
@@ -680,29 +682,29 @@ pub fn pfn(detail: &PfnDetail) -> Pfn {
         pfn: detail.pfn,
         record: detail.record,
         physical_address: detail.physical_address,
-        pte_address: detail.pte_address.clone(),
-        original_pte: detail.original_pte.clone(),
-        reference_count: detail.reference_count.clone(),
-        flink: detail.flink.clone(),
-        blink: detail.blink.clone(),
-        node_flink_low: detail.node_flink_low.clone(),
-        node_blink_low: detail.node_blink_low.clone(),
-        share_count: detail.share_count.clone(),
-        ws_index: detail.ws_index.clone(),
-        event: detail.event.clone(),
-        used_entry_count: detail.used_entry_count.clone(),
+        pte_address: detail.pte_address,
+        original_pte: detail.original_pte,
+        reference_count: detail.reference_count,
+        flink: detail.flink,
+        blink: detail.blink,
+        node_flink_low: detail.node_flink_low,
+        node_blink_low: detail.node_blink_low,
+        share_count: detail.share_count,
+        ws_index: detail.ws_index,
+        event: detail.event,
+        used_entry_count: detail.used_entry_count,
         page_color: detail.page_color.clone(),
-        pte_frame: detail.pte_frame.clone(),
-        page_location: detail.page_location.map(|value| PageLocation {
-            value: *value,
-            name: page_location_name(*value),
-        }),
-        modified: detail.modified.clone(),
-        cache_attribute: detail.cache_attribute.map(|value| CacheAttribute {
-            value: *value,
-            name: cache_attribute_name(*value),
-        }),
-        priority: detail.priority.clone(),
+        pte_frame: detail.pte_frame,
+        page_location: PageLocation {
+            value: detail.page_location,
+            name: page_location_name(detail.page_location),
+        },
+        modified: detail.modified,
+        cache_attribute: CacheAttribute {
+            value: detail.cache_attribute,
+            name: cache_attribute_name(detail.cache_attribute),
+        },
+        priority: detail.priority,
     }
 }
 
@@ -842,7 +844,7 @@ pub fn pool_validation(detail: &PoolValidationDetail) -> PoolValidation {
 
 fn usage_row(row: &PoolUsageRow, include_counts: bool) -> PoolTagUsage {
     let bytes = |value: Option<i64>| value.map(|value| value.max(0) as u64);
-    let count = |value: Option<i64>| include_counts.then(|| bytes(value));
+    let count = |value: Option<i64>| bytes(value).filter(|_| include_counts);
     PoolTagUsage {
         tag: row.tag,
         tag_name: tag_string(row.tag),

@@ -1,14 +1,13 @@
 //! sched: [`View`] builders for the structured inspectors.
 
-use super::execution::{self, numbered_stack_frame, stack_frame};
-use super::shape::{Diag, Hex, Omit, shapes, unions};
+use super::execution::{self, stack_frame, stack_frames};
+use super::shape::{Diag, Hex, shapes, unions};
 use super::list::{ListEnd, list_termination};
 use crate::target::sched::{self as detail, ApcSelector};
 use crate::target::workqueue::{self, ExQueueDetail};
 use super::process::{ThreadSummary, thread_summary};
 use crate::target::{DiagnosticValue, ThreadInfo};
 use crate::types::VirtAddr;
-use crate::unwind::StackFrame;
 
 shapes! {
     /// A processor's running, next, and idle threads (`!running`).
@@ -23,9 +22,9 @@ shapes! {
         next_thread: Diag<Option<ThreadSummary>>,
         /// The processor's idle thread.
         idle_thread: Diag<Option<ThreadSummary>>,
-        /// The running thread's first frames; absent unless stacks were
+        /// The running thread's first frames; `None` unless stacks were
         /// requested.
-        short_stack: Omit<Diag<Vec<execution::StackFrame>>>,
+        short_stack: Option<Diag<Vec<execution::StackFrame>>>,
     }
 
     /// Every processor's running threads (`!running`).
@@ -37,8 +36,8 @@ shapes! {
     ReadyThread {
         /// The `_KTHREAD` linked on the queue.
         kthread: VirtAddr,
-        /// The thread decoded; `None` inside when it could not be.
-        thread: Diag<Option<ThreadSummary>>,
+        /// The thread decoded.
+        thread: Diag<ThreadSummary>,
     }
 
     /// One processor's ready list for one priority.
@@ -80,7 +79,7 @@ shapes! {
         /// `DeferredContext`.
         context: Diag<Option<VirtAddr>>,
         /// `Importance`.
-        importance: Diag<Option<u8>>,
+        importance: Diag<u8>,
     }
 
     /// One of a processor's DPC queues.
@@ -119,8 +118,9 @@ shapes! {
         dpc_routine: Diag<Option<VirtAddr>>,
         /// `dpc_routine` as a symbol, when one resolves.
         dpc_routine_symbol: Diag<Option<String>>,
-        /// The current interrupt time, to compare `due_time` against.
-        interrupt_time: Diag<Option<Hex>>,
+        /// The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`),
+        /// to compare `due_time` against.
+        interrupt_time: Diag<Hex>,
     }
 
     /// A timer found in a processor's timer table.
@@ -140,10 +140,8 @@ shapes! {
 
     /// Every processor's timer table (`!timer`).
     TimerTable {
-        /// The current interrupt time.
-        interrupt_time: Diag<Option<Hex>>,
-        /// Where `interrupt_time` was read from.
-        interrupt_time_source: Option<String>,
+        /// The current interrupt time (`KUSER_SHARED_DATA.InterruptTime`).
+        interrupt_time: Diag<Hex>,
         entries: Vec<TimerTableEntry>,
         /// Buckets whose walk ended abnormally.
         terminations: Vec<TimerBucketEnd>,
@@ -241,13 +239,12 @@ shapes! {
         thread: ThreadSummary,
         /// Frames that matched.
         match_count: usize,
-        /// The frames that matched, each with its `index` in the stack;
-        /// absent at level 0.
-        matching_frames: Omit<Vec<execution::StackFrame>>,
-        /// The whole walked stack, innermost first; present at level 2.
-        frames: Omit<Vec<execution::StackFrame>>,
-        /// Frames past the walk bound, not searched; present at level 2.
-        truncated: Omit<usize>,
+        /// The frames that matched; `None` at level 0.
+        matching_frames: Option<Vec<execution::StackFrame>>,
+        /// The whole walked stack, innermost first; `None` below level 2.
+        frames: Option<Vec<execution::StackFrame>>,
+        /// Frames past the walk bound, not searched; `None` below level 2.
+        truncated: Option<usize>,
     }
 
     /// Threads whose stack has a frame matching a symbol or module
@@ -408,10 +405,6 @@ fn scheduler_errors(errors: &[detail::SchedulerError]) -> Vec<SchedulerError> {
     errors.iter().map(scheduler_error).collect()
 }
 
-fn frames(frames: &[StackFrame]) -> Vec<execution::StackFrame> {
-    frames.iter().map(stack_frame).collect()
-}
-
 pub fn running(detail: &detail::RunningDetail) -> RunningProcessors {
     RunningProcessors {
         processors: detail
@@ -427,7 +420,7 @@ pub fn running(detail: &detail::RunningDetail) -> RunningProcessors {
                 short_stack: processor
                         .short_stack
                         .as_ref()
-                        .map(|stack| stack.map(|stack| frames(stack))),
+                        .map(|stack| stack.map(|stack| stack_frames(stack))),
             })
             .collect(),
     }
@@ -446,7 +439,7 @@ pub fn ready_queues(detail: &detail::ReadyQueuesDetail) -> ReadyQueues {
                     .iter()
                     .map(|entry| ReadyThread {
                         kthread: entry.kthread,
-                        thread: optional_thread(&entry.thread),
+                        thread: entry.thread.map(|thread| thread_summary(thread, None)),
                     })
                     .collect(),
                 termination: list_termination(&queue.termination),
@@ -502,7 +495,6 @@ pub fn timer(timer: &detail::TimerDetail) -> KernelTimer {
 pub fn timer_list(detail: &detail::TimerListDetail) -> TimerTable {
     TimerTable {
         interrupt_time: detail.interrupt_time.clone(),
-        interrupt_time_source: detail.interrupt_time_source.clone(),
         entries: detail
             .entries
             .iter()
@@ -585,7 +577,7 @@ pub fn stacks(detail: &detail::StacksDetail) -> ThreadStacks {
             .map(|thread| ThreadStack {
                 thread: thread_summary(&thread.thread, thread.active_vcpu.as_deref()),
                 top_symbol: thread.top_symbol.clone(),
-                frames: frames(&thread.frames),
+                frames: stack_frames(&thread.frames),
                 truncated: thread.truncated,
                 error: thread.error.clone(),
             })
@@ -612,10 +604,10 @@ fn findstack_thread(thread: &detail::FindStackThread, level: u8) -> FindStackThr
             thread
                 .matches
                 .iter()
-                .map(|&index| numbered_stack_frame(index, &thread.stack.frames[index]))
+                .map(|&index| stack_frame(index, &thread.stack.frames[index]))
                 .collect()
         }),
-        frames: whole.then(|| frames(&thread.stack.frames)),
+        frames: whole.then(|| stack_frames(&thread.stack.frames)),
         truncated: whole.then_some(thread.stack.truncated),
     }
 }
@@ -685,7 +677,7 @@ fn work_queue(queue: &workqueue::WorkQueueDetail) -> WorkQueue {
                 stack: worker
                     .stack
                     .as_ref()
-                    .map(|stack| stack.map(|stack| frames(stack))),
+                    .map(|stack| stack.map(|stack| stack_frames(stack))),
             })
             .collect(),
         threads_termination: list_termination(&queue.threads_termination),
@@ -729,7 +721,7 @@ pub fn uniqstack(detail: &detail::UniqStackDetail) -> UniqStacks {
                     .iter()
                     .map(|thread| thread_summary(thread, None))
                     .collect(),
-                frames: frames(&group.stack.frames),
+                frames: stack_frames(&group.stack.frames),
                 truncated: group.stack.truncated,
             })
             .collect(),

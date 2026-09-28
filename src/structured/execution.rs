@@ -26,9 +26,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .state
                 .ctx
                 .backtrace(count.map_or(64, |count| count as usize))?;
-            Ok(View::list(
-                trace.frames.iter().map(view::execution::stack_frame),
-            ))
+            Ok(View::list(view::execution::stack_frames(&trace.frames)))
         }),
         "u" | "disasm" => args.addr(0).and_then(|address| {
             let count = argv

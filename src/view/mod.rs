@@ -78,13 +78,12 @@ pub enum View {
     /// [`Object`](Self::Object), and as its own class in the SDK.
     Shaped(shape::Shaped),
     /// A value that can fail to read on its own: `{available, value, error}`
-    /// for MCP, an [`ntoseye.Diagnostic`](crate::python::record::Diagnostic)
-    /// for Python.
+    /// for MCP, an `ntoseye.Diagnostic` for Python.
     Diagnostic(Box<DiagnosticView>),
 }
 
 impl View {
-    /// A list of rendered values: `View::list(frames.iter().map(stack_frame))`.
+    /// A list of rendered values: `View::list(stack_frames(&trace.frames))`.
     pub fn list<T: shape::ViewValue<Source = T>>(items: impl IntoIterator<Item = T>) -> View {
         View::List(items.into_iter().map(T::view).collect())
     }
@@ -143,8 +142,8 @@ pub fn to_json(v: &View) -> serde_json::Value {
 #[cfg(feature = "python")]
 #[derive(Clone, Copy)]
 pub enum PyShape {
-    /// [`Record`](crate::python::record::Record)s and
-    /// [`Diagnostic`](crate::python::record::Diagnostic)s with attribute access.
+    /// [`Record`](crate::python::record::Record)s and `ntoseye.Diagnostic`s
+    /// with attribute access.
     Records,
     /// Plain `dict`s throughout, the shape `to_dict()` returns: a diagnostic
     /// becomes `{available, value, error[, source]}` as in [`to_json`].

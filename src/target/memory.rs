@@ -2,10 +2,7 @@
 //! views over them, byte-pattern search, fields, and counted and C strings.
 
 use super::mm::PfnSelector;
-use super::{
-    CODE_BITNESS_AMD64, CODE_BITNESS_X86, DiagnosticValue, MemorySearchMatch, StringDescriptor,
-    Target,
-};
+use super::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, MemorySearchMatch, StringDescriptor, Target};
 use std::sync::atomic::Ordering;
 
 use crate::{
@@ -324,10 +321,8 @@ impl Target {
                     let pte = self
                         .inspect_pfn(PfnSelector::Pfn(pfn))
                         .ok()
-                        .and_then(|detail| match detail.pte_address {
-                            DiagnosticValue::Available(pte) if !pte.is_zero() => Some(pte),
-                            _ => None,
-                        });
+                        .map(|detail| detail.pte_address)
+                        .filter(|pte| !pte.is_zero());
                     mapping = Some((pfn, pte));
                     pte
                 }

@@ -11,8 +11,8 @@ use crate::session::Session;
 use crate::target::sched::{
     ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
     MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UniqStackDetail,
-    UniqStackScope, UnwalkedThread, available, findstack_level_error, frame_symbol_matches,
-    group_stacks, select_threads, unavailable, walk_list_nodes,
+    UniqStackScope, UnwalkedThread, findstack_level_error, frame_symbol_matches, group_stacks,
+    select_threads, walk_list_nodes,
 };
 use crate::target::workqueue::ExQueueDetail;
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
@@ -51,8 +51,8 @@ impl Session {
         let mut stacks = Vec::with_capacity(threads.len());
         self.walk_thread_stacks(threads, &active, MAX_STACK_FRAMES_LEVEL_1, |_, stack| {
             stacks.push(match stack {
-                Ok(trace) => available(trace.stacktrace.frames),
-                Err(error) => unavailable(error.to_string()),
+                Ok(trace) => DiagnosticValue::Available(trace.stacktrace.frames),
+                Err(error) => DiagnosticValue::unavailable(error.to_string()),
             });
         });
         let mut stacks = stacks.into_iter();
@@ -62,7 +62,11 @@ impl Session {
             .flat_map(|queue| &mut queue.threads)
             .filter(|worker| matches!(worker.thread, DiagnosticValue::Available(_)))
         {
-            worker.stack = Some(stacks.next().unwrap_or_else(|| unavailable("interrupted")));
+            worker.stack = Some(
+                stacks
+                    .next()
+                    .unwrap_or_else(|| DiagnosticValue::unavailable("interrupted")),
+            );
         }
         Ok(detail)
     }
@@ -91,14 +95,18 @@ impl Session {
                                 vcpu,
                                 MAX_RUNNING_STACK_FRAMES,
                             ) {
-                                Ok(trace) => available(trace.stacktrace.frames),
-                                Err(error) => unavailable(error.to_string()),
+                                Ok(trace) => DiagnosticValue::Available(trace.stacktrace.frames),
+                                Err(error) => DiagnosticValue::unavailable(error.to_string()),
                             },
-                            Err(error) => unavailable(error.to_string()),
+                            Err(error) => DiagnosticValue::unavailable(error.to_string()),
                         }
                     }
-                    DiagnosticValue::Available(None) => unavailable("current thread is null"),
-                    DiagnosticValue::Unavailable(error) => unavailable(error.clone()),
+                    DiagnosticValue::Available(None) => {
+                        DiagnosticValue::unavailable("current thread is null")
+                    }
+                    DiagnosticValue::Unavailable(error) => {
+                        DiagnosticValue::unavailable(error.clone())
+                    }
                 };
                 processor.short_stack = Some(stack);
             }
@@ -286,11 +294,21 @@ impl Session {
                     Ok(trace) => {
                         let frames = trace.stacktrace.frames;
                         let top = frames.first().map(|frame| frame.symbol.clone());
-                        (frames, trace.stacktrace.truncated, None, available(top))
+                        (
+                            frames,
+                            trace.stacktrace.truncated,
+                            None,
+                            DiagnosticValue::Available(top),
+                        )
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        (Vec::new(), 0, Some(message.clone()), unavailable(message))
+                        (
+                            Vec::new(),
+                            0,
+                            Some(message.clone()),
+                            DiagnosticValue::unavailable(message),
+                        )
                     }
                 };
                 let process = thread

@@ -685,6 +685,11 @@ impl<T> DiagnosticValue<T> {
         }
     }
 
+    /// A value that could not be read, and why.
+    pub fn unavailable(error: impl Into<String>) -> Self {
+        Self::Unavailable(error.into())
+    }
+
     fn from_result(result: Result<T>) -> Self {
         match result {
             Ok(value) => Self::Available(value),

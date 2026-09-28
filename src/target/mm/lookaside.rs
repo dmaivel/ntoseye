@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use super::{LookasideDetail, LookasideListsDetail, diagnostic_unavailable};
+use super::{LookasideDetail, LookasideListsDetail};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::TypeInfo;
@@ -25,7 +25,7 @@ impl Target {
         let memory = self.kernel_address_space();
         let field = |name: &str| match read_pool_field(&ti, &memory, address, name) {
             Some(value) => DiagnosticValue::Available(value),
-            None => diagnostic_unavailable(format!("{name} unavailable")),
+            None => DiagnosticValue::unavailable(format!("{name} unavailable")),
         };
         let tag = match field("Tag") {
             DiagnosticValue::Available(value) => DiagnosticValue::Available(value as u32),

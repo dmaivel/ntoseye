@@ -1,10 +1,10 @@
 //! Symbol, source-line, local-variable, and type-layout [`View`]
 //! builders.
 
-use super::shape::{Hex, Omit, shapes};
+use super::shape::shapes;
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::symbols::{self, SymbolVisibility};
-use crate::target::{self, Target};
+use crate::target;
 use crate::types::VirtAddr;
 
 shapes! {
@@ -108,9 +108,6 @@ shapes! {
         /// Whether it is a parameter rather than a local.
         parameter: bool,
         location: LocalVariableLocation,
-        /// Its value, absent from a layout-only listing (`locals_at`);
-        /// `None` when it did not evaluate.
-        value: Omit<Option<Hex>>,
     }
 }
 
@@ -206,28 +203,13 @@ fn local_location(location: &symbols::LocalVariableLocation) -> LocalVariableLoc
     }
 }
 
-fn local(local: &symbols::ProcedureLocal, value: Option<Option<u64>>) -> ProcedureLocal {
+/// A PDB local or parameter's layout.
+pub fn procedure_local(local: &symbols::ProcedureLocal) -> ProcedureLocal {
     ProcedureLocal {
         name: local.name.clone(),
         type_name: local.type_name.clone(),
         byte_size: local.byte_size,
         parameter: local.is_parameter,
         location: local_location(&local.location),
-        value,
     }
-}
-
-/// A PDB local or parameter with its value at `address`.
-pub fn procedure_local(
-    target: &Target,
-    address: VirtAddr,
-    local: &symbols::ProcedureLocal,
-) -> ProcedureLocal {
-    let value = target.resolve_procedure_local_value(address, local);
-    self::local(local, Some(value))
-}
-
-/// A PDB local or parameter's layout, without evaluating it.
-pub fn procedure_local_layout(local: &symbols::ProcedureLocal) -> ProcedureLocal {
-    self::local(local, None)
 }
