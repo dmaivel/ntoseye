@@ -16,7 +16,8 @@ use crate::types::VirtAddr;
 use crate::view;
 use crate::view::shape::Typed;
 
-/// A guest address space: `dbg.memory` (kernel), `proc.memory`, `dbg.physical`.
+/// A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
+/// `dbg.physical`.
 #[pyclass(module = "ntoseye")]
 pub struct Memory {
     pub owner: Owner,
@@ -249,7 +250,12 @@ impl Memory {
         }
         let context = self.space.context();
         let physical = matches!(self.space, Space::Physical);
-        let secure = matches!(self.space, Space::Secure(_));
+        // NT's region descriptions cover neither VTL1 nor roots outside NT.
+        let undescribed = match self.space {
+            Space::Secure(_) => Some("vtl1"),
+            Space::Root(_) => Some("foreign"),
+            _ => None,
+        };
         let matches = self.owner.with_in(py, &context, move |session| {
             if physical {
                 let mut bytes = vec![0; length];
@@ -272,8 +278,7 @@ impl Memory {
                     .search(VirtAddr(start), pattern, length)
                     .map_err(err)?
                     .matches;
-                if secure {
-                    // NT's region descriptions do not cover VTL1 addresses.
+                if let Some(kind) = undescribed {
                     return Ok(hits
                         .into_iter()
                         .map(|address| {
@@ -283,7 +288,7 @@ impl Memory {
                                 session
                                     .target
                                     .closest_symbol_current_context(VirtAddr(address)),
-                                "vtl1",
+                                kind,
                             )
                         })
                         .collect::<Vec<_>>());
@@ -362,7 +367,7 @@ impl Memory {
         let process = match &self.space {
             Space::Process(info) => Some(info.eprocess_va.0),
             Space::Kernel => None,
-            Space::Physical | Space::Secure(_) => unreachable!(),
+            Space::Physical | Space::Secure(_) | Space::Root(_) => unreachable!(),
         };
         self.owner.with_in(py, &context, |session| {
             require_halted(session, "page_in")?;

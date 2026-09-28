@@ -24,6 +24,8 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
     and metrics with a source."""
     inspect = dbg.inspect
     cpu = next(iter(dbg.cpus))
+    # Under VBS a vCPU halted in the Windows hypervisor has saved VTL states.
+    hypervisor_cpu = next((c for c in dbg.cpus if c.saved_vtl), cpu)
     user = next(p for p in dbg.processes if p.name.lower() in {"lsass.exe", "explorer.exe", "svchost.exe"})
     heap = next(iter(user.heaps))
     kernel = dbg.modules["nt"]
@@ -44,6 +46,7 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
         (cpu, "prcb", cpu.prcb),
         (cpu, "gdt", cpu.gdt),
         (cpu, "idt", cpu.idt),
+        (hypervisor_cpu, "saved_vtl", lambda: hypervisor_cpu.saved_vtl),
         (user, "token", user.token),
         (user, "handles", user.handles),
         (heap, "inspect", heap.inspect),

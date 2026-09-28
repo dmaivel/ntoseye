@@ -109,7 +109,7 @@ impl Module {
     fn process_key(&self) -> Option<VirtAddr> {
         match &self.space {
             Space::Process(info) => Some(info.eprocess_va),
-            Space::Kernel | Space::Physical | Space::Secure(_) => None,
+            Space::Kernel | Space::Physical | Space::Secure(_) | Space::Root(_) => None,
         }
     }
 

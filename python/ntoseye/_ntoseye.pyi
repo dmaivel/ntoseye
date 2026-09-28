@@ -1735,6 +1735,14 @@ class Cpu:
         Read this processor's current IRQL (`!irql`).
         """
     @property
+    def memory(self, /) -> Memory:
+        """
+        Memory through the page tables this processor has loaded (its CR3)
+        when read: the kernel's or a process's, a VTL1 root (read-only), or a
+        root outside NT, such as the Windows hypervisor's at a vCPU halted in
+        it (read-only).
+        """
+    @property
     def msr(self, /) -> Msrs:
         """
         Model-specific registers: `cpu.msr[0xC0000082]`, `cpu.msr["IA32_LSTAR"]`.
@@ -1764,13 +1772,13 @@ class Cpu:
         The instruction pointer (needs a halted target).
         """
     @property
-    def saved_vtl(self, /) -> list[str]:
+    def saved_vtl(self, /) -> list[SavedVtlState]:
         """
-        For a vCPU halted in the Windows hypervisor (VBS), where its VTLs
-        left off, from the hypervisor's saved state: `["VTL0
-        nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered
-        from it or is about to enter it. Needs the VM's `hv-evmcs`; empty
-        otherwise, or when the saved state fails validation.
+        For a vCPU halted in the Windows hypervisor (VBS), the VTL states the
+        hypervisor saved for its virtual processor (`.vtlcxr`), VTL0's first:
+        where each left off, its control and segment registers, and the exit
+        it last took. Needs the VM's `hv-evmcs`; empty otherwise, or when the
+        saved state fails validation.
         """
     @property
     def symbol(self, /) -> str |None:
@@ -6887,7 +6895,8 @@ class Mdl(BaseRecord):
 @final
 class Memory:
     """
-    A guest address space: `dbg.memory` (kernel), `proc.memory`, `dbg.physical`.
+    A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
+    `dbg.physical`.
     """
     def describe(self, /, addr: int) -> AddressDescription:
         """
@@ -7129,8 +7138,8 @@ class MemorySearchMatch(BaseRecord):
     def kind(self, /) -> str:
         """
         What the address is: `kernel-module`, `user-image`,
-        `kernel-region`, `private`, `mapped`, `unknown`, `physical`, or
-        `vtl1`.
+        `kernel-region`, `private`, `mapped`, `unknown`, `physical`,
+        `vtl1`, or `foreign` (a root outside NT and VTL1).
         """
     @property
     def module(self, /) -> AddressModule |None:
@@ -9483,10 +9492,10 @@ class RunStatus(BaseRecord):
     @property
     def running(self, /) -> bool: ...
     @property
-    def saved_vtl(self, /) -> list[str]:
+    def saved_vtl(self, /) -> list[SavedVtlState]:
         """
-        For a vCPU halted in the Windows hypervisor, where each VTL left
-        off (`VTL0 nt!HalProcessorIdle+0xf`).
+        For a vCPU halted in the Windows hypervisor, the VTL states it
+        saved for the vCPU's virtual processor, VTL0's first.
         """
     @property
     def stopped_process(self, /) -> ProcessIdentity |None:
@@ -9584,6 +9593,81 @@ class RuntimeFunction(BaseRecord):
     def unwind_info(self, /) -> int |None:
         """
         The unwind info's address; None for ARM64 packed unwind data.
+        """
+
+@final
+class SavedVtlState(BaseRecord):
+    """
+    One VTL of a virtual processor, as the Windows hypervisor last saved
+    it in the VTL's Enlightened VMCS. A VMCS holds no general-purpose
+    register but `rsp`.
+    """
+    @property
+    def cr0(self, /) -> int: ...
+    @property
+    def cr3(self, /) -> int:
+        """
+        The VTL's page-table root.
+        """
+    @property
+    def cr4(self, /) -> int: ...
+    @property
+    def cs(self, /) -> int: ...
+    @property
+    def current(self, /) -> bool:
+        """
+        Whether the VP's assist page names this state's eVMCS current:
+        the VTL the hypervisor was entered from, or is about to enter.
+        """
+    @property
+    def dr7(self, /) -> int: ...
+    @property
+    def ds(self, /) -> int: ...
+    @property
+    def es(self, /) -> int: ...
+    @property
+    def evmcs(self, /) -> int:
+        """
+        The physical address of the eVMCS page the state was read from.
+        """
+    @property
+    def exit_reason(self, /) -> int:
+        """
+        The VM-exit reason the VTL last left with: the basic reason in
+        bits 15:0, bit 31 set for a failed VM entry.
+        """
+    @property
+    def exit_reason_name(self, /) -> str |None:
+        """
+        The exit reason's name (`HLT`, `VMCALL`, ...), when it is a
+        common one.
+        """
+    @property
+    def fs(self, /) -> int: ...
+    @property
+    def fs_base(self, /) -> int: ...
+    @property
+    def gs(self, /) -> int: ...
+    @property
+    def gs_base(self, /) -> int: ...
+    @property
+    def rflags(self, /) -> int: ...
+    @property
+    def rip(self, /) -> int: ...
+    @property
+    def rsp(self, /) -> int: ...
+    @property
+    def ss(self, /) -> int: ...
+    @property
+    def symbol(self, /) -> str |None:
+        """
+        The symbol at `rip` in the VTL's own address space, when one
+        resolved.
+        """
+    @property
+    def vtl(self, /) -> int:
+        """
+        0 or 1.
         """
 
 @final
@@ -11680,10 +11764,10 @@ class VcpuStatus(BaseRecord):
         None when the register context was unreadable.
         """
     @property
-    def saved_vtl(self, /) -> list[str]:
+    def saved_vtl(self, /) -> list[SavedVtlState]:
         """
-        For a vCPU halted in the Windows hypervisor, where each VTL left
-        off (`VTL0 nt!HalProcessorIdle+0xf`).
+        For a vCPU halted in the Windows hypervisor, the VTL states it
+        saved for the vCPU's virtual processor, VTL0's first.
         """
     @property
     def symbol(self, /) -> str |None:

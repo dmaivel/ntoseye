@@ -11,6 +11,7 @@ use pyo3::types::{PyDict, PyInt};
 use super::context::{Context, Space};
 use super::handle::{Owner, require_halted};
 use super::iter::{CpuIterator, NameIterator, ThreadIterator};
+use super::memory::Memory;
 use super::process::Process;
 use super::record::PlainDict;
 use super::types::{Struct, enum_value};
@@ -435,6 +436,7 @@ impl Frame {
         Context {
             process: self.process_info.clone(),
             secure: None,
+            root: None,
             vcpu: None,
             thread: self.thread_info.clone(),
             frame: (self.live_thread && self.thread_info.is_some()).then_some(self.index),
@@ -825,14 +827,44 @@ impl Cpu {
         Ok(self.current_info(py)?.symbol)
     }
 
-    /// For a vCPU halted in the Windows hypervisor (VBS), where its VTLs
-    /// left off, from the hypervisor's saved state: `["VTL0
-    /// nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered
-    /// from it or is about to enter it. Needs the VM's `hv-evmcs`; empty
-    /// otherwise, or when the saved state fails validation.
+    /// For a vCPU halted in the Windows hypervisor (VBS), the VTL states the
+    /// hypervisor saved for its virtual processor (`.vtlcxr`), VTL0's first:
+    /// where each left off, its control and segment registers, and the exit
+    /// it last took. Needs the VM's `hv-evmcs`; empty otherwise, or when the
+    /// saved state fails validation.
     #[getter]
-    fn saved_vtl(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        Ok(self.current_info(py)?.saved_vtl)
+    fn saved_vtl<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, Vec<view::execution::SavedVtlState>>> {
+        let info = self.current_info(py)?;
+        Typed::new(
+            py,
+            info.saved_vtl
+                .iter()
+                .map(view::execution::saved_vtl_state)
+                .collect(),
+        )
+    }
+
+    /// Memory through the page tables this processor has loaded (its CR3)
+    /// when read: the kernel's or a process's, a VTL1 root (read-only), or a
+    /// root outside NT, such as the Windows hypervisor's at a vCPU halted in
+    /// it (read-only).
+    #[getter]
+    fn memory(&self, py: Python<'_>) -> PyResult<Memory> {
+        let context = self.context();
+        let space = self.owner.with_in(py, &context, |session| {
+            require_halted(session, "cpu.memory")?;
+            let registers = session.read_registers().map_err(err)?;
+            let name = session.target.arch().dtb_register();
+            let dtb = session
+                .register_map
+                .read_u64(name, &registers)
+                .map_err(err)?;
+            Ok(Space::for_root(&session.target, dtb))
+        })?;
+        Ok(Memory::new(self.owner.derive(py), space))
     }
 
     /// The process whose page tables are loaded on this processor.

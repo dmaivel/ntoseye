@@ -468,32 +468,45 @@ pub fn format_symbol(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -
     try_format_symbol(debugger, trace, addr).unwrap_or_else(|| format!("{addr:#x}"))
 }
 
-/// Where a VTL state the Windows hypervisor saved left off, as `VTL0
-/// nt!HalProcessorIdle+0xf`, resolved in that state's own address space.
-pub fn describe_saved_vtl(debugger: &Target, saved: &SavedVtlContext) -> String {
-    let trace = resolve_thread_trace_context_at(debugger, saved.state.cr3, saved.state.rip);
-    format!(
-        "VTL{} {}",
-        saved.vtl,
-        format_symbol(debugger, &trace, saved.state.rip)
-    )
+/// A VTL state the Windows hypervisor saved, with the symbol where it left
+/// off.
+#[derive(Debug, Clone)]
+pub struct SavedVtl {
+    pub context: SavedVtlContext,
+    /// The symbol at the saved `rip`, resolved in the state's own address
+    /// space.
+    pub symbol: Option<String>,
 }
 
-/// Where the VTLs of the virtual processor a vCPU halted in the Windows
-/// hypervisor left off: VTL0, and VTL1 too when its eVMCS is the current one
-/// (the hypervisor was entered from VTL1, or is about to enter it). `cr3` is
-/// the vCPU's and `processor` its NT processor, as in
-/// [`Target::saved_vtl_contexts`].
-pub fn saved_vtl_summary(
-    debugger: &Target,
-    cr3: u64,
-    processor: Option<u16>,
-) -> Result<Vec<String>> {
+impl SavedVtl {
+    /// Where the state left off, as `VTL0 nt!HalProcessorIdle+0xf`.
+    pub fn describe(&self) -> String {
+        let rip = self.context.state.rip;
+        match &self.symbol {
+            Some(symbol) => format!("VTL{} {symbol}", self.context.vtl),
+            None => format!("VTL{} {rip:#x}", self.context.vtl),
+        }
+    }
+
+    /// Whether a one-line summary of the vCPU names this state: VTL0's
+    /// always, VTL1's when its eVMCS is the current one (the hypervisor was
+    /// entered from VTL1, or is about to enter it).
+    pub fn summarized(&self) -> bool {
+        self.context.vtl == 0 || self.context.state.current
+    }
+}
+
+/// The VTL states the Windows hypervisor saved for the virtual processor a
+/// vCPU halted in it runs, each with its symbol. `cr3` is the vCPU's and
+/// `processor` its NT processor, as in [`Target::saved_vtl_contexts`].
+pub fn saved_vtls(debugger: &Target, cr3: u64, processor: Option<u16>) -> Result<Vec<SavedVtl>> {
     Ok(debugger
         .saved_vtl_contexts(cr3, processor)?
-        .iter()
-        .filter(|saved| saved.vtl == 0 || saved.state.current)
-        .map(|saved| describe_saved_vtl(debugger, saved))
+        .into_iter()
+        .map(|context| {
+            let symbol = try_format_symbol_at(debugger, context.state.cr3, context.state.rip);
+            SavedVtl { context, symbol }
+        })
         .collect())
 }
 

@@ -566,8 +566,8 @@ shapes! {
         /// The nearest symbol, if one resolved.
         symbol: Option<String>,
         /// What the address is: `kernel-module`, `user-image`,
-        /// `kernel-region`, `private`, `mapped`, `unknown`, `physical`, or
-        /// `vtl1`.
+        /// `kernel-region`, `private`, `mapped`, `unknown`, `physical`,
+        /// `vtl1`, or `foreign` (a root outside NT and VTL1).
         kind: &'static str,
         /// The module containing the match, if any.
         module: Option<AddressModule>,
@@ -1082,7 +1082,7 @@ pub fn memory_search_match(m: &target::MemorySearchMatch) -> MemorySearchMatch {
 }
 
 /// A memory-search hit outside NT's address descriptions: `kind` is
-/// `physical` or `vtl1`.
+/// `physical`, `vtl1`, or `foreign`.
 pub fn undescribed_search_match(
     address: u64,
     offset: u64,

@@ -109,14 +109,25 @@ finally:
 
 `stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops: their temporary sites in secure-kernel code are debug-register breakpoints in free slots, never code patches. NT process/thread filters, software breakpoints, and data watches in secure modules are refused. See the [VTL1 limits and tested configuration](../platforms/vbs.md).
 
-A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, reports where its VTLs left off in `cpu.saved_vtl`, read from the hypervisor's saved state: `["VTL0 nt!HalProcessorIdle+0xf"]`, plus VTL1 when the hypervisor was entered from it. It needs the VM's `hv-evmcs` enlightenment and is empty otherwise; see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor). The NT thread on that vCPU unwinds from the saved VTL0 state, so `backtrace()` walks NT's stack while `cpu.symbol` still names the hypervisor:
+A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, lists the VTL states the hypervisor saved for its virtual processor in `cpu.saved_vtl`, VTL0's first, as {command}`.vtlcxr` does. Each `SavedVtlState` holds where the VTL left off (`rip`, `symbol`, `rsp`), its control and segment registers, its last VM exit (`exit_reason`, `exit_reason_name`), whether it is the `current` one (the VTL the hypervisor was entered from or is about to enter), and the physical address of the Enlightened VMCS it was read from (`evmcs`). The list needs the VM's `hv-evmcs` enlightenment and is empty otherwise, or when the saved state fails validation; see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor). The NT thread on that vCPU unwinds from the saved VTL0 state, so `backtrace()` walks NT's stack while `cpu.symbol` still names the hypervisor:
 
 ```python
 for cpu in dbg.cpus:
-    print(cpu.id, cpu.symbol, cpu.saved_vtl)   # p01.01 hvix64+0x3a6bde ['VTL0 nt!HalProcessorIdle+0xf']
+    print(cpu.id, cpu.symbol)                  # p01.01 hvix64+0x3a6bde
+    for saved in cpu.saved_vtl:
+        print("   ", saved.vtl, saved.symbol, saved.exit_reason_name)  # 0 nt!HalProcessorIdle+0xf HLT
     if cpu.thread:
         for frame in cpu.thread.backtrace(limit=5):
             print("   ", frame.symbol)              # nt!HalProcessorIdle+0xf, nt!PpmIdleDefaultExecute+0x2b, ...
+```
+
+`cpu.memory` reads through the page tables the vCPU has loaded, whatever owns them: the kernel's or a process's (as `dbg.memory` or `proc.memory`), a VTL1 root (as `sk.memory`), or, at a vCPU halted in the Windows hypervisor, the hypervisor's own address space, where `hvix64` is mapped. The root is the one loaded when `cpu.memory` is read. A root outside NT and VTL1 is read-only, as VTL1 is: writes, `describe`, `page_in`, and `ptov` raise `NtoseyeError`, and `search` reports its matches as `foreign`.
+
+```python
+cpu = next(cpu for cpu in dbg.cpus if cpu.saved_vtl)
+hv = cpu.memory                                 # the hypervisor's address space
+print(hex(hv.dtb), hv.translate(cpu.rip))
+print(hv.disassemble(cpu.rip, 4))
 ```
 
 ## Run control and breakpoints

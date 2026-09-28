@@ -118,6 +118,7 @@ impl Types {
             Space::Process(_) => "process",
             Space::Physical => "physical",
             Space::Secure(_) => "secure",
+            Space::Root(_) => "foreign",
         };
         format!("<Types space={space}>")
     }

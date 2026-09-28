@@ -14,8 +14,8 @@ use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, RecoveredStackTrace,
     StackTrace, UNKNOWN_CONTEXT, UnwindDetail, build_stacktrace_with_register_values,
-    build_thread_stacktrace, describe_saved_vtl, halted_in_windows_hypervisor,
-    resolve_thread_trace_context, try_format_symbol,
+    build_thread_stacktrace, halted_in_windows_hypervisor, resolve_thread_trace_context,
+    saved_vtls, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -290,7 +290,7 @@ impl ReplState<'_> {
             return Ok(());
         }
         let processor = processor_index_from_backend_thread_id(&self.ctx.current_thread);
-        let saved = match target.saved_vtl_contexts(cr3, processor) {
+        let saved = match saved_vtls(target, cr3, processor) {
             Ok(saved) => saved,
             Err(error) => {
                 error!("{error}");
@@ -303,14 +303,14 @@ impl ReplState<'_> {
             );
             return Ok(());
         }
-        for context in &saved {
-            let state = &context.state;
+        for vtl in &saved {
+            let state = &vtl.context.state;
             let exit = state
                 .exit_reason_name()
                 .map_or_else(|| format!("exit {:#x}", state.exit_reason), str::to_string);
             outln!(
                 "{}  rsp {}  last exit: {}{}",
-                ui::symbol(&describe_saved_vtl(target, context)),
+                ui::symbol(&vtl.describe()),
                 ui::addr(state.rsp),
                 exit,
                 if state.current {
@@ -320,11 +320,11 @@ impl ReplState<'_> {
                 }
             );
         }
-        let Some(vtl0) = saved.iter().find(|context| context.vtl == 0) else {
+        let Some(vtl0) = saved.iter().find(|saved| saved.context.vtl == 0) else {
             error!("no saved VTL0 state belongs to this vCPU's virtual processor");
             return Ok(());
         };
-        let selected = SelectedFrame::from_registers(0, vtl0.registers());
+        let selected = SelectedFrame::from_registers(0, vtl0.context.registers());
         self.set_selected_frame(selected.clone());
         outln!("selected the VTL0 context the hypervisor saved");
         self.print_selected_frame(&selected, false);

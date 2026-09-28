@@ -162,6 +162,26 @@ def test_secure_kernel_views_are_isolated_from_vtl0(halted: Debugger) -> None:
         assert trustlet.process is not None and trustlet.process.pid == trustlet.pid
 
 
+def test_hypervisor_memory_is_its_own_and_read_only(halted: Debugger) -> None:
+    cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
+    if cpu is None:
+        pytest.skip("no vCPU halted in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
+    assert cpu.saved_vtl[0].vtl == 0
+    assert cpu.rip is not None
+    hypervisor = cpu.memory
+    # The vCPU's own root, the hypervisor's, which maps the code it runs;
+    # not NT's, where the VTL0 state it saved runs.
+    root = 0x000F_FFFF_FFFF_F000
+    assert hypervisor.dtb not in {halted.memory.dtb, cpu.saved_vtl[0].cr3 & root}
+    assert hypervisor.translate(cpu.rip) is not None
+    # Rewriting the byte already there would be harmless if the refusal broke.
+    byte = hypervisor.read_u8(cpu.rip)
+    with pytest.raises(ntoseye.NtoseyeError):
+        hypervisor.write_u8(cpu.rip, byte)
+    with pytest.raises(ntoseye.NtoseyeError):
+        hypervisor.describe(cpu.rip)
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")

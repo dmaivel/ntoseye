@@ -26,11 +26,49 @@ shapes! {
         context: String,
         /// The nearest symbol to `rip`, when one resolved.
         symbol: Option<String>,
-        /// For a vCPU halted in the Windows hypervisor, where each VTL left
-        /// off (`VTL0 nt!HalProcessorIdle+0xf`).
-        saved_vtl: Vec<String>,
+        /// For a vCPU halted in the Windows hypervisor, the VTL states it
+        /// saved for the vCPU's virtual processor, VTL0's first.
+        saved_vtl: Vec<SavedVtlState>,
         /// Why the register context was unavailable, when it was.
         error: Option<String>,
+    }
+
+    /// One VTL of a virtual processor, as the Windows hypervisor last saved
+    /// it in the VTL's Enlightened VMCS. A VMCS holds no general-purpose
+    /// register but `rsp`.
+    SavedVtlState {
+        /// 0 or 1.
+        vtl: u8,
+        /// Whether the VP's assist page names this state's eVMCS current:
+        /// the VTL the hypervisor was entered from, or is about to enter.
+        current: bool,
+        rip: VirtAddr,
+        /// The symbol at `rip` in the VTL's own address space, when one
+        /// resolved.
+        symbol: Option<String>,
+        rsp: VirtAddr,
+        rflags: Hex,
+        cr0: Hex,
+        /// The VTL's page-table root.
+        cr3: Hex,
+        cr4: Hex,
+        dr7: Hex,
+        cs: Hex<u16>,
+        ss: Hex<u16>,
+        ds: Hex<u16>,
+        es: Hex<u16>,
+        fs: Hex<u16>,
+        gs: Hex<u16>,
+        fs_base: VirtAddr,
+        gs_base: VirtAddr,
+        /// The VM-exit reason the VTL last left with: the basic reason in
+        /// bits 15:0, bit 31 set for a failed VM entry.
+        exit_reason: Hex<u32>,
+        /// The exit reason's name (`HLT`, `VMCALL`, ...), when it is a
+        /// common one.
+        exit_reason_name: Option<&'static str>,
+        /// The physical address of the eVMCS page the state was read from.
+        evmcs: Hex,
     }
 
     /// A code breakpoint or data watchpoint (`bl`).
@@ -85,9 +123,9 @@ shapes! {
         /// The nearest symbol to `rip` when halted; code outside NT is named
         /// for what it is (`hvix64+0x3a6bde`).
         symbol: Option<String>,
-        /// For a vCPU halted in the Windows hypervisor, where each VTL left
-        /// off (`VTL0 nt!HalProcessorIdle+0xf`).
-        saved_vtl: Vec<String>,
+        /// For a vCPU halted in the Windows hypervisor, the VTL states it
+        /// saved for the vCPU's virtual processor, VTL0's first.
+        saved_vtl: Vec<SavedVtlState>,
         /// The process chosen with `.process` whose memory `dt`, `dq`, ...
         /// read; it survives resumes.
         attached_process: Option<ProcessIdentity>,
@@ -342,8 +380,36 @@ pub fn vcpu(v: &VcpuInfo) -> VcpuStatus {
         rip: v.rip,
         context: v.context.clone(),
         symbol: v.symbol.clone(),
-        saved_vtl: v.saved_vtl.clone(),
+        saved_vtl: v.saved_vtl.iter().map(saved_vtl_state).collect(),
         error: v.error.clone(),
+    }
+}
+
+/// A VTL state the Windows hypervisor saved.
+pub fn saved_vtl_state(saved: &unwind::SavedVtl) -> SavedVtlState {
+    let state = &saved.context.state;
+    SavedVtlState {
+        vtl: saved.context.vtl,
+        current: state.current,
+        rip: VirtAddr(state.rip),
+        symbol: saved.symbol.clone(),
+        rsp: VirtAddr(state.rsp),
+        rflags: state.rflags,
+        cr0: state.cr0,
+        cr3: state.cr3,
+        cr4: state.cr4,
+        dr7: state.dr7,
+        cs: state.cs,
+        ss: state.ss,
+        ds: state.ds,
+        es: state.es,
+        fs: state.fs,
+        gs: state.gs,
+        fs_base: VirtAddr(state.fs_base),
+        gs_base: VirtAddr(state.gs_base),
+        exit_reason: state.exit_reason,
+        exit_reason_name: state.exit_reason_name(),
+        evmcs: state.address,
     }
 }
 
@@ -378,7 +444,7 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
         current_thread: status.current_thread.clone(),
         rip: status.rip,
         symbol: status.symbol.clone(),
-        saved_vtl: status.saved_vtl.clone(),
+        saved_vtl: status.saved_vtl.iter().map(saved_vtl_state).collect(),
         attached_process: status.attached_process.as_ref().map(process),
         stopped_process: status.stopped_process.as_ref().map(process),
         stopped_thread: status

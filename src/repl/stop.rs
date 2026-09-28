@@ -15,7 +15,7 @@ use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{
     build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context_at,
-    saved_vtl_summary,
+    saved_vtls,
 };
 
 use crate::repl::*;
@@ -507,11 +507,14 @@ pub fn print_break_context_at(
     // Where NT left off on a vCPU the hypervisor holds.
     if trace.description == HYPERVISOR_CONTEXT {
         let processor = processor_index_from_backend_thread_id(thread_id);
-        match saved_vtl_summary(debugger, cr3, processor) {
+        match saved_vtls(debugger, cr3, processor) {
             Ok(saved) => children.extend(
                 saved
                     .iter()
-                    .map(|saved| format!("{} {}", ui::muted("saved"), ui::symbol(saved))),
+                    .filter(|saved| saved.summarized())
+                    .map(|saved| {
+                        format!("{} {}", ui::muted("saved"), ui::symbol(&saved.describe()))
+                    }),
             ),
             Err(error) => children.push(ui::muted(&format!("saved VTL state: {error}"))),
         }

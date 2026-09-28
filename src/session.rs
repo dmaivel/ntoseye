@@ -27,6 +27,7 @@ use crate::target::{ReloadReport, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::VirtAddr;
+use crate::unwind::SavedVtl;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
 /// `NTOSEYE_KD_TRACE` like the KD packet trace so one capture correlates both.
@@ -147,9 +148,9 @@ pub struct RunStatus {
     /// Nearest symbol to `rip` when halted; code outside NT is named for what
     /// it is (`hvix64+0x3a6bde` in the Windows hypervisor).
     pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, where its VTLs left off
-    /// (`VTL0 nt!HalProcessorIdle+0xf`), from the hypervisor's saved state.
-    pub saved_vtl: Vec<String>,
+    /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
+    /// for the vCPU's virtual processor.
+    pub saved_vtl: Vec<SavedVtl>,
     /// Attached process inspection scope, if any. This is where `dt`, `dq` and
     /// friends read from; it is chosen with `.process` and survives resumes,
     /// so it is not necessarily what the guest is executing.
@@ -331,9 +332,9 @@ pub struct VcpuInfo {
     pub context: String,
     /// Nearest symbol to `rip` (`module!name+0x..`), if one resolved.
     pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, where its VTLs left off
-    /// (`VTL0 nt!HalProcessorIdle+0xf`), from the hypervisor's saved state.
-    pub saved_vtl: Vec<String>,
+    /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
+    /// for the vCPU's virtual processor.
+    pub saved_vtl: Vec<SavedVtl>,
     /// Why the vCPU context was unavailable, if it was.
     pub error: Option<String>,
 }
@@ -352,8 +353,8 @@ impl VcpuInfo {
             (None, None, Some(error)) => write!(label, " <{error}>"),
             _ => Ok(()),
         };
-        for saved in &self.saved_vtl {
-            let _ = write!(label, " ({saved})");
+        for saved in self.saved_vtl.iter().filter(|saved| saved.summarized()) {
+            let _ = write!(label, " ({})", saved.describe());
         }
         label
     }

@@ -11,8 +11,7 @@ use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
-    halted_in_windows_hypervisor, resolve_thread_trace_context_at, saved_vtl_summary,
-    try_format_symbol,
+    halted_in_windows_hypervisor, resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
 };
 
 pub(super) fn update_target_context_from_registers(
@@ -572,7 +571,7 @@ impl Session {
         // A refused state is reported by the stop header and .vtlcxr;
         // listed here it would read as a saved state.
         let saved_vtl = if context == HYPERVISOR_CONTEXT {
-            saved_vtl_summary(
+            saved_vtls(
                 &self.target,
                 dtb,
                 processor_index_from_backend_thread_id(id),

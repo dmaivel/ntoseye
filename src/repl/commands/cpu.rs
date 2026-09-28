@@ -1026,8 +1026,8 @@ impl ReplState<'_> {
                 ),
                 None => (ui::muted("unavailable"), vcpu.error.unwrap_or_default()),
             };
-            for saved in &vcpu.saved_vtl {
-                symbol_cell.push_str(&ui::muted(&format!("  saved {saved}")));
+            for saved in vcpu.saved_vtl.iter().filter(|saved| saved.summarized()) {
+                symbol_cell.push_str(&ui::muted(&format!("  saved {}", saved.describe())));
             }
             builder.push_record(vec![
                 vcpu.id.to_string(),

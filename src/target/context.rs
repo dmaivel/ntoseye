@@ -222,6 +222,14 @@ impl Target {
         self.context_dtb_override = Some(self.full_root(dtb));
     }
 
+    /// Inspect through `root`, a root already known to be no process's (the
+    /// Windows hypervisor's), as is: unlike
+    /// [`Self::set_context_dtb_override`], no process's KVA-shadow user root
+    /// is looked for.
+    pub fn set_foreign_context_root(&mut self, root: Dtb) {
+        self.context_dtb_override = Some(self.normalize_dtb(root));
+    }
+
     /// `dtb`, or the full root of the process whose KVA-shadow user root it
     /// is. The probe is a read, not a walk, so a backend that serves kernel
     /// reads itself (KD) keeps the root it was given.
