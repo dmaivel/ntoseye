@@ -162,6 +162,16 @@ def test_secure_kernel_views_are_isolated_from_vtl0(halted: Debugger) -> None:
         assert trustlet.process is not None and trustlet.process.pid == trustlet.pid
 
 
+def test_kernel_memory_reads_at_a_stop_in_the_hypervisor(halted: Debugger) -> None:
+    stop = halted.stop
+    if stop is None or stop.cpu is None or not stop.cpu.saved_vtl:
+        pytest.skip("the stop is not in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
+    # The stop's own vCPU runs on the hypervisor's page tables; the kernel
+    # scope still reads NT.
+    address = halted.symbols["nt!KeBugCheckEx"]
+    assert halted.memory.read(address, 1) == halted.processes[4].memory.read(address, 1)
+
+
 def test_hypervisor_memory_is_its_own_and_read_only(halted: Debugger) -> None:
     cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
     if cpu is None:

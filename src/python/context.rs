@@ -173,7 +173,11 @@ pub fn in_context<R>(
     if same_vcpu {
         if saved.is_recovered_context() {
             // The cache holds that context's registers, not the vCPU's.
+            // Refilling it also follows the vCPU's root (the Windows
+            // hypervisor's, at a stop in it); the scope stays the kernel's,
+            // as with a lent file.
             session.restore_live_register_cache();
+            session.target.clear_context_dtb_override();
         } else {
             session.target.registers = saved.take_live_registers();
         }
