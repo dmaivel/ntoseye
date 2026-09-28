@@ -2,8 +2,8 @@ pub mod shape;
 
 /// Declares the view modules, and `with_shape_classes!`, which adds every
 /// class their shapes declare to the SDK's `#[pymodule]` as exports, so a
-/// class is named only where its shape is. `$d` is a `$` for the macros it
-/// defines.
+/// class is named only where its shape is (see [`shape`]). `$d` is a `$` for
+/// the macros it defines.
 macro_rules! view_modules {
     ([$d:tt] $($module:ident),* $(,)?) => {
         $(pub mod $module;)*

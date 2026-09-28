@@ -1,9 +1,49 @@
-//! Declared result shapes: one Rust struct per [`View`] object, declared with
-//! [`shapes!`], renders the same JSON (MCP) and dict (`to_dict()`) as a
-//! hand-built [`View::Object`], and is also a typed SDK class: a
-//! [`BaseRecord`] subclass with one property per field, which the generated
-//! stub types. Unlike `Record`, it has no catch-all `__getattr__`, so a type
-//! checker flags a misspelt field.
+//! Declared result shapes: a structured result is declared once, in a view
+//! module (`src/view/*.rs`), and rendered from that declaration to every
+//! surface: a JSON object for MCP, a typed class for the SDK, a `dict` for
+//! its `to_dict()`.
+//!
+//! ```text
+//! shapes! {
+//!     /// A capability-list entry.            <- the class's docs
+//!     PciCapability {
+//!         /// Its offset in configuration space.   <- the property's docs
+//!         offset: Hex<u16>,
+//!         name: Option<&'static str>,
+//!     }
+//! }
+//! ```
+//!
+//! **Fields.** A field's declared type is a [`ViewValue`], which fixes three
+//! things together: the value its builder supplies ([`ViewValue::Source`]: a
+//! `Hex<u16>` field takes a `u16`), how it renders ([`ViewValue::view`]), and
+//! its SDK type ([`ViewValue::HINT`], which the stub prints). The scalars,
+//! the wrappers ([`Hex`], [`Diag`], [`Metric`], [`Keyed`], `Option`, `Vec`,
+//! `Box`), declared shapes and [`unions!`] enums are the only `ViewValue`s,
+//! all implemented in this file (the last two by its macros). Each impl's `HINT`
+//! must name the Python type `view::to_py` makes of its `view`;
+//! `python/tests/test_stub_types.py` checks that on a live guest.
+//!
+//! **What [`shapes!`] generates.** For each shape: the struct its builder
+//! fills (`pub fn pci_capability(..) -> PciCapability`, beside the
+//! declaration), whose `ViewValue` impl renders every field, in order, as a
+//! [`View::Shaped`]; the SDK class `py::PciCapability`, a [`BaseRecord`]
+//! subclass with one typed property per field, which `view::to_py` wraps
+//! the fields in; and, once per module, `shape_classes!`, which names
+//! the module's classes (below). SDK methods return `Typed<'py, T>`,
+//! whose `T` types the method in the stub, so a method whose builder returns
+//! another shape does not compile.
+//!
+//! **How classes reach the SDK.** `view_modules!` (in `view/mod.rs`)
+//! declares the view modules and defines `with_shape_classes!`, which wraps
+//! the `#[pymodule]` in `python/mod.rs`. It asks each view module's
+//! `shape_classes!` for its class names in turn, each handing them back
+//! through a callback (a macro cannot read another's expansion, only be
+//! called by it), and finally emits the module with one
+//! `#[pymodule_export] use view::<module>::py::{..}` per view module. PyO3
+//! exports only named `use` items, not globs, and the stub lists only
+//! exported classes, hence the chain. So a new view module needs only its
+//! name in `view_modules!`, and a new shape nothing else.
 //!
 //! [`BaseRecord`]: crate::python::record::BaseRecord
 
@@ -254,19 +294,20 @@ pub const fn is_reserved_property(name: &str) -> bool {
     false
 }
 
-/// Declare result shapes: each becomes a plain struct (build it, then
-/// [`into_view`](ViewValue::view) it) and, in the SDK, a same-named
-/// `BaseRecord` subclass in the invoking module's `py` submodule, with a
-/// property per field. A field's declared type says how it renders; the
-/// struct holds what its builder supplies ([`ViewValue::Source`]). Doc comments on the struct and its fields document the class and
-/// properties. A field named like a `BaseRecord` method (`keys`, `values`,
-/// `items`, `get`, `to_dict`) or a Python keyword (`class`, `from`, ...) is a
-/// compile error: give it another name and keep its key with `=> "items"`
-/// after the type (`work_items: Vec<T> =>
-/// "items"`). Write a keyword as a raw identifier (`r#type`), whose key
-/// drops the `r#`. Methods after a `;` following the fields join the
-/// class's `#[pymethods]` (`fn __str__(slf: &Bound<'_, Self>) -> ...`), for
-/// behavior a record lacks; they resolve names beside the shapes.
+/// Declare result shapes (see the module docs): each becomes a plain
+/// struct (build it, then [`into_view`](ViewValue::view) it) and, in the SDK,
+/// a same-named `BaseRecord` subclass in the invoking module's `py`
+/// submodule, with a property per field. Doc comments on the struct and its
+/// fields document the class and its properties.
+///
+/// A field named like a `BaseRecord` method (`keys`, `values`, `items`,
+/// `get`, `to_dict`) or a Python keyword (`class`, `from`, ...) is a compile
+/// error: give it another name and keep its key with `=> "items"` after the
+/// type (`work_items: Vec<T> => "items"`). Write a keyword as a raw
+/// identifier (`r#type`), whose key drops the `r#`. Methods after a `;`
+/// following the fields join the class's `#[pymethods]`
+/// (`fn __str__(slf: &Bound<'_, Self>) -> ...`), for behavior a record
+/// lacks; they resolve names beside the shapes.
 macro_rules! shapes {
     ($(
         $(#[doc = $doc:literal])*
