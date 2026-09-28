@@ -92,6 +92,11 @@ struct TargetOptions {
     /// Force redownloading of symbols
     #[arg(long = "force-download-symbols", global = true)]
     redownload_symbols: bool,
+
+    /// Never rebuild a missing PDB from the file's pages in guest memory
+    /// (also NTOSEYE_NO_PDB_FROM_MEMORY)
+    #[arg(long, global = true)]
+    no_pdb_from_memory: bool,
 }
 
 #[derive(Subcommand)]
@@ -368,6 +373,11 @@ fn run(cli: Cli) -> Result<()> {
         })?;
 
     let pdb_servers = take(&mut args.pdb_server);
+    symbols::NO_PDB_FROM_MEMORY
+        .set(args.no_pdb_from_memory)
+        .map_err(|_| {
+            Error::DebugInfo("PDB-from-memory flag was initialized before startup".into())
+        })?;
     if !pdb_servers.is_empty() {
         symbols::PDB_SERVERS.set(pdb_servers).map_err(|_| {
             Error::DebugInfo("PDB server list was initialized before startup".into())

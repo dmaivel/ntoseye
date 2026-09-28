@@ -14,8 +14,8 @@ use crate::{
     dbg_backend::processor_index_from_backend_thread_id,
     error::{Error, Result},
     guest::{
-        EvmcsState, Guest, ModuleInfo, ModuleSymbolLoadReport, SecureKernel, SessionSpace,
-        TrustletInfo,
+        EvmcsState, Guest, ModuleInfo, ModuleSymbolLoadReport, PdbRecovery, SecureKernel,
+        SessionSpace, TrustletInfo,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
@@ -314,6 +314,7 @@ impl Target {
             secure.image.dtb(),
             SessionSpace::Load,
             self.arch(),
+            PdbRecovery::Automatic,
         )
     }
 

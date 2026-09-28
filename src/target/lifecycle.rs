@@ -13,7 +13,7 @@ use crate::{
     },
     dmp::DmpInfo,
     error::{Error, Result},
-    guest::{Guest, ModuleInfo, SessionSpace},
+    guest::{Guest, ModuleInfo, PdbRecovery, SessionSpace},
     memory::DTB_IDENTITY,
     phys::PhysMem,
     symbols::SymbolStore,
@@ -104,6 +104,7 @@ impl Target {
                 DTB_IDENTITY,
                 SessionSpace::Load,
                 arch,
+                PdbRecovery::Automatic,
             );
         }
 

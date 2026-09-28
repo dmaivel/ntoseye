@@ -9,7 +9,7 @@ use super::{SymbolSearchMatch, Target, lookup_register};
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, SessionSpace},
+    guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, PdbRecovery, SessionSpace},
     memory::AddressSpace,
     pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
@@ -191,7 +191,13 @@ impl Target {
         if modules.is_empty() {
             return Ok(false);
         }
-        guest.load_symbols_for_modules(&self.phys, &self.symbols, modules, dtb)?;
+        guest.load_symbols_for_modules(
+            &self.phys,
+            &self.symbols,
+            modules,
+            dtb,
+            PdbRecovery::Automatic,
+        )?;
         Ok(true)
     }
 
@@ -240,10 +246,17 @@ impl Target {
                 dtb,
                 SessionSpace::Load,
                 self.arch(),
+                PdbRecovery::Requested,
             );
         }
         match self.guest.as_ref() {
-            Some(guest) => guest.load_symbols_for_modules(&self.phys, &self.symbols, modules, dtb),
+            Some(guest) => guest.load_symbols_for_modules(
+                &self.phys,
+                &self.symbols,
+                modules,
+                dtb,
+                PdbRecovery::Requested,
+            ),
             None => Guest::load_module_symbols(
                 &self.phys,
                 &self.symbols,
@@ -251,6 +264,7 @@ impl Target {
                 dtb,
                 SessionSpace::Load,
                 self.arch(),
+                PdbRecovery::Requested,
             ),
         }
     }

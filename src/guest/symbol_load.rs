@@ -1,8 +1,10 @@
 //! Loading module symbols: discovery plans, acquisition and indexing
 //! workers, per-module status, and the load report.
 
+use super::pdb_recovery::{WantedPdb, recover_pdbs};
 use super::{
-    Guest, ModuleInfo, ModuleSymbolDiagnostic, ModuleSymbolLoadReport, ProcessInfo, SessionSpace,
+    Guest, ModuleInfo, ModuleSymbolDiagnostic, ModuleSymbolLoadReport, PdbRecovery, ProcessInfo,
+    SessionSpace,
 };
 use crate::{
     error::Result,
@@ -10,6 +12,7 @@ use crate::{
     symbols::{
         DownloadJob, ModuleSymbolDiscovery, ModuleSymbolLoad, ModuleSymbolSource,
         ModuleSymbolStatus, SymbolIndexDiagnostic, SymbolStore, download::download_jobs_parallel,
+        pdb_from_memory_enabled,
     },
     types::*,
 };
@@ -171,6 +174,7 @@ impl Guest {
         dtb: Dtb,
         session_space: SessionSpace,
         arch: Arch,
+        recovery: PdbRecovery,
     ) -> Result<ModuleSymbolLoadReport> {
         let mut report = ModuleSymbolLoadReport::new(modules.len());
         let plan = Self::plan_module_symbol_loads(
@@ -180,6 +184,7 @@ impl Guest {
             dtb,
             session_space,
             arch,
+            recovery,
             &mut report,
         );
         let stale_identities =
@@ -198,6 +203,7 @@ impl Guest {
                 dtb,
                 session_space,
                 arch,
+                recovery,
             )?);
         }
 
@@ -231,6 +237,7 @@ impl Guest {
             dtb,
             SessionSpace::Load,
             arch,
+            PdbRecovery::Automatic,
             &mut report,
         );
         let mut deferred = plan.take_fetches();
@@ -246,6 +253,7 @@ impl Guest {
                 dtb,
                 SessionSpace::Load,
                 arch,
+                PdbRecovery::Automatic,
                 &mut report,
             );
             deferred.absorb(replan.take_fetches());
@@ -341,9 +349,13 @@ impl Guest {
         dtb: Dtb,
         session_space: SessionSpace,
         arch: Arch,
+        recovery: PdbRecovery,
         report: &mut ModuleSymbolLoadReport,
     ) -> ModuleSymbolPlan {
         let mut plan = ModuleSymbolPlan::default();
+        // Loads whose PDB no local source has, to rebuild from guest memory
+        // in one walk after every module is planned.
+        let mut from_memory = Vec::new();
 
         for module in modules {
             if session_space == SessionSpace::Skip && Self::is_session_space(module.base_address) {
@@ -377,6 +389,12 @@ impl Guest {
                             &load.module,
                             status,
                         ),
+                        None if !plan.is_ready(symbols, &load)
+                            && pdb_from_memory_enabled()
+                            && load.job.recorded_pdb_path().is_some() =>
+                        {
+                            from_memory.push(load)
+                        }
                         None => plan.queue(symbols, load),
                     }
                 }
@@ -417,7 +435,69 @@ impl Guest {
                 }
             }
         }
+        if recovery == PdbRecovery::Requested || !phys.reads_through_target() {
+            Self::recover_pdbs_from_memory(phys, symbols, arch, &mut from_memory);
+        } else {
+            for load in &mut from_memory {
+                load.memory_recovery = Some(format!(
+                    "not tried automatically while guest memory is read through the target; \
+                     .reload {} rebuilds it",
+                    load.module.short_name
+                ));
+            }
+        }
+        for load in from_memory {
+            plan.queue(symbols, load);
+        }
         plan
+    }
+
+    /// Rebuild the PDBs of `loads` that no local source has from the file's
+    /// pages still in guest memory, installing them in the symbol cache; a
+    /// load that is not rebuilt records why. Only PDBs the image records a
+    /// full path for are asked for: Microsoft's own binaries record a bare
+    /// file name, and their PDBs come from the symbol server.
+    fn recover_pdbs_from_memory(
+        phys: &PhysMem,
+        symbols: &SymbolStore,
+        arch: Arch,
+        loads: &mut [ModuleSymbolLoad],
+    ) {
+        let mut pending: Vec<&mut ModuleSymbolLoad> = Vec::new();
+        for load in loads.iter_mut() {
+            match load.job.acquire_locally() {
+                Ok(true) => {}
+                Ok(false) | Err(_) => pending.push(load),
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let wanted: Vec<WantedPdb<'_>> = pending
+            .iter()
+            .filter_map(|load| {
+                Some(WantedPdb {
+                    recorded_path: load.job.recorded_pdb_path()?,
+                    identity: load.job.pdb_identity()?,
+                })
+            })
+            .collect();
+        let results = recover_pdbs(phys, symbols, arch, &wanted);
+        drop(wanted);
+        for (load, result) in pending.into_iter().zip(results) {
+            let recorded = load.job.recorded_pdb_path().unwrap_or_default().to_string();
+            match result.and_then(|bytes| {
+                load.job
+                    .install_pdb_bytes(&bytes)
+                    .map_err(|error| error.to_string())
+            }) {
+                Ok(()) => symbols.push_notice(format!(
+                    "rebuilt {recorded} for {} from guest memory",
+                    load.module.name
+                )),
+                Err(reason) => load.memory_recovery = Some(reason),
+            }
+        }
     }
 
     /// Acquisition half of a symbol load: download images and PDBs the plan
@@ -504,12 +584,16 @@ impl Guest {
                 }
                 Err(e) => {
                     symbols.remember_unavailable(&load.job, &e.to_string());
+                    let error = match &load.memory_recovery {
+                        Some(reason) => format!("{e}; guest memory: {reason}"),
+                        None => e.to_string(),
+                    };
                     Self::apply_module_symbol_status(
                         symbols,
                         report,
                         dtb,
                         &load.module,
-                        ModuleSymbolStatus::Failed(e.to_string()),
+                        ModuleSymbolStatus::Failed(error),
                     );
                 }
             }
@@ -611,6 +695,7 @@ impl Guest {
             dtb,
             SessionSpace::Skip,
             self.ntoskrnl.arch(),
+            PdbRecovery::Automatic,
         )
     }
 
@@ -642,6 +727,7 @@ impl Guest {
             dtb,
             SessionSpace::Skip,
             self.ntoskrnl.arch(),
+            PdbRecovery::Automatic,
         )?;
         report.unloaded = unloaded;
         Ok(report)
@@ -662,6 +748,7 @@ impl Guest {
             dtb,
             SessionSpace::Load,
             self.ntoskrnl.arch(),
+            PdbRecovery::Automatic,
         )
     }
 
@@ -675,6 +762,7 @@ impl Guest {
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
+        recovery: PdbRecovery,
     ) -> Result<ModuleSymbolLoadReport> {
         Self::load_module_symbols(
             phys,
@@ -683,6 +771,7 @@ impl Guest {
             dtb,
             SessionSpace::Load,
             self.ntoskrnl.arch(),
+            recovery,
         )
     }
 }

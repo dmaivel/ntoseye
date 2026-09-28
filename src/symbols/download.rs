@@ -45,6 +45,46 @@ impl DownloadJob {
     pub(super) fn expected_identity(&self) -> Option<PdbIdentity> {
         self.pdb.as_ref().map(|request| request.identity)
     }
+
+    /// The identity the PDB must have, for a PDB job.
+    pub fn pdb_identity(&self) -> Option<PdbIdentity> {
+        self.expected_identity()
+    }
+
+    /// The path the image records for its PDB, when it has directories.
+    pub fn recorded_pdb_path(&self) -> Option<&str> {
+        self.pdb.as_ref()?.recorded_path.as_deref()
+    }
+
+    /// Acquire the PDB from the cache or a local symbol directory only,
+    /// installing it in the cache: whether one had it.
+    pub fn acquire_locally(&self) -> Result<bool> {
+        let Some(request) = &self.pdb else {
+            return Ok(false);
+        };
+        resolve_local_sources(self, request, &mut Vec::new(), &mut HashSet::new())
+    }
+
+    /// Install `bytes` as this job's PDB in the cache, when they are a PDB
+    /// with the identity the image records.
+    pub fn install_pdb_bytes(&self, bytes: &[u8]) -> Result<()> {
+        let expected = self
+            .expected_identity()
+            .ok_or_else(|| Error::DebugInfo("not a PDB job".into()))?;
+        expected
+            .matches(pdb_bytes_identity(bytes)?)
+            .map_err(Error::DebugInfo)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp_path = unique_temp_path(&self.path);
+        if let Err(error) = std::fs::write(&tmp_path, bytes) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error.into());
+        }
+        std::fs::rename(tmp_path, &self.path)?;
+        Ok(())
+    }
 }
 
 fn format_progress_name(name: &str) -> String {
@@ -142,6 +182,16 @@ fn validate_pdb_identity(path: &Path, expected: PdbIdentity) -> std::result::Res
     expected.matches(actual)
 }
 
+/// The identity of the PDB `bytes` hold.
+pub fn pdb_bytes_identity(bytes: &[u8]) -> Result<PdbIdentity> {
+    let mut pdb = pdb2::PDB::open(std::io::Cursor::new(bytes))?;
+    let info = pdb.pdb_information()?;
+    Ok(PdbIdentity {
+        guid: info.guid.as_u128(),
+        age: info.age,
+    })
+}
+
 pub(super) fn local_source_candidates(
     root: &Path,
     server_name: &str,
@@ -169,11 +219,16 @@ fn install_local_pdb(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> Result<()> {
-    let mut attempts = Vec::new();
-    let mut seen_paths = HashSet::new();
+/// Try the cache and the local symbol directories in `request`'s sources,
+/// in order, noting each miss in `attempts`: whether one had the PDB (it is
+/// then in the cache).
+fn resolve_local_sources(
+    job: &DownloadJob,
+    request: &PdbRequest,
+    attempts: &mut Vec<String>,
+    seen_paths: &mut HashSet<PathBuf>,
+) -> Result<bool> {
     let force = *FORCE_DOWNLOADS.get_or_init(|| false);
-
     for source in &request.sources {
         match source {
             SymbolSource::Cache => {
@@ -187,7 +242,7 @@ fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> 
                     continue;
                 }
                 match validate_pdb_identity(&job.path, request.identity) {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => return Ok(true),
                     Err(reason) => attempts.push(format!("{}: {}", job.path.display(), reason)),
                 }
             }
@@ -205,7 +260,7 @@ fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> 
                     match validate_pdb_identity(&candidate, request.identity) {
                         Ok(()) => {
                             install_local_pdb(&candidate, &job.path)?;
-                            return Ok(());
+                            return Ok(true);
                         }
                         Err(reason) => {
                             attempts.push(format!("{}: {}", candidate.display(), reason))
@@ -213,6 +268,22 @@ fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> 
                     }
                 }
             }
+            SymbolSource::Http(_) => {}
+        }
+    }
+    Ok(false)
+}
+
+fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> Result<()> {
+    let mut attempts = Vec::new();
+    let mut seen_paths = HashSet::new();
+    if resolve_local_sources(job, request, &mut attempts, &mut seen_paths)? {
+        return Ok(());
+    }
+
+    for source in &request.sources {
+        match source {
+            SymbolSource::Cache | SymbolSource::LocalDirectory(_) => {}
             SymbolSource::Http(root) => {
                 let url = format!(
                     "{}/{}/{}/{}",
@@ -292,6 +363,8 @@ impl SymbolStore {
                 identity,
                 server_name: server_name.to_string(),
                 sources: self.symbol_sources(),
+                recorded_path: (pdb_file_name.contains(['\\', '/']))
+                    .then(|| pdb_file_name.to_string()),
             }),
         };
 

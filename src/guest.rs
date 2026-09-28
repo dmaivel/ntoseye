@@ -17,6 +17,7 @@ mod discovery;
 mod evmcs;
 mod image;
 mod modules;
+pub mod pdb_recovery;
 mod process;
 mod secure_kernel;
 mod symbol_load;
@@ -143,6 +144,17 @@ pub struct ModuleSymbolDiagnostic {
 pub enum SessionSpace {
     Load,
     Skip,
+}
+
+/// When a symbol load rebuilds a missing PDB from guest memory (see
+/// [`pdb_recovery`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdbRecovery {
+    /// While guest memory is read from the host, where the walk is cheap:
+    /// loads at attach and at stops.
+    Automatic,
+    /// Whatever the memory source: an explicit reload of the module.
+    Requested,
 }
 
 #[derive(Debug, Clone, Default)]

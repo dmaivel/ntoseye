@@ -24,7 +24,7 @@ Common problems, by symptom. Integration-specific problems are covered with each
 
 ## Symbols
 
-**{command}`lm` shows a module's symbols as `failed`,** or its frames stay `module+offset`. Microsoft has not published a PDB for that build, or the download failed. Add your own symbol server ahead of Microsoft's with `--pdb-server <url>` (repeatable) or `NTOSEYE_PDB_SERVERS="<url>;<url>"`, or point {command}`.sympath` at local PDBs; see [Symbols and source](../using/symbols.md). `--force-download-symbols` downloads again even when the cache has a copy.
+**{command}`lm` shows a module's symbols as `failed`,** or its frames stay `module+offset`. Microsoft has not published a PDB for that build, or the download failed. Add your own symbol server ahead of Microsoft's with `--pdb-server <url>` (repeatable) or `NTOSEYE_PDB_SERVERS="<url>;<url>"`, or point {command}`.sympath` at local PDBs; see [Symbols and source](../using/symbols.md). For a driver built in the guest, {command}`lmv` shows why its PDB could not be [rebuilt from guest memory](../using/symbols.md) (`guest memory: ...`); rebuilding the driver brings the PDB back into the file cache. `--force-download-symbols` downloads again even when the cache has a copy.
 
 **A module shows `fetching`.** Its symbols are downloading in the background; frames in it read `module+offset` until they arrive.
 

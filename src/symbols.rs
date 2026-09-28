@@ -25,6 +25,21 @@ pub static FORCE_DOWNLOADS: OnceLock<bool> = OnceLock::new();
 
 pub static PDB_SERVERS: OnceLock<Vec<String>> = OnceLock::new();
 
+/// Set by `--no-pdb-from-memory`: never rebuild a missing PDB from the
+/// guest's memory (see `crate::guest::recover_pdbs`).
+pub static NO_PDB_FROM_MEMORY: OnceLock<bool> = OnceLock::new();
+
+/// Whether a PDB no symbol source has may be rebuilt from the guest's
+/// memory: unless `--no-pdb-from-memory` or `NTOSEYE_NO_PDB_FROM_MEMORY`
+/// turned it off.
+pub fn pdb_from_memory_enabled() -> bool {
+    static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+        !*NO_PDB_FROM_MEMORY.get_or_init(|| false)
+            && std::env::var_os("NTOSEYE_NO_PDB_FROM_MEMORY").is_none_or(|value| value.is_empty())
+    });
+    *ENABLED
+}
+
 const DEFAULT_SYMBOL_SERVER: &str = "https://msdl.microsoft.com/download/symbols";
 
 /// The symbol path a store starts with: the cache, then `--pdb-server` and
@@ -305,7 +320,7 @@ pub struct PdbIdentity {
 }
 
 impl PdbIdentity {
-    fn matches(self, candidate: Self) -> std::result::Result<(), String> {
+    pub fn matches(self, candidate: Self) -> std::result::Result<(), String> {
         if candidate.guid != self.guid {
             return Err(format!(
                 "GUID mismatch (expected {:032X}, found {:032X})",
@@ -510,6 +525,10 @@ struct PdbRequest {
     identity: PdbIdentity,
     server_name: String,
     sources: Vec<SymbolSource>,
+    /// The full path the image's CodeView record gives the PDB, when it has
+    /// directories (`C:\build\drv.pdb`); Microsoft's own binaries record only
+    /// a file name.
+    recorded_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -573,6 +592,9 @@ pub struct ModuleSymbolLoad {
     pub source: ModuleSymbolSource,
     pub module: ModuleInfo,
     pub dtb: Dtb,
+    /// Why the PDB could not be rebuilt from guest memory, when that was
+    /// tried and failed.
+    pub memory_recovery: Option<String>,
 }
 
 impl ModuleSymbolLoad {
@@ -589,6 +611,7 @@ impl ModuleSymbolLoad {
             source,
             module,
             dtb,
+            memory_recovery: None,
         }
     }
 
@@ -782,6 +805,11 @@ impl SymbolStore {
 
     pub fn kernel_guid(&self) -> Option<u128> {
         *self.kernel_guid.lock()
+    }
+
+    /// The kernel's address space, once a kernel is found.
+    pub fn kernel_dtb(&self) -> Option<Dtb> {
+        *self.kernel_dtb.lock()
     }
 
     /// Record the secure kernel's system root (`kernel`, the address space its

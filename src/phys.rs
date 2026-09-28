@@ -136,6 +136,12 @@ impl PhysMem {
         Self::from_source(Source::Remote(memory))
     }
 
+    /// Whether guest memory is read through the debug target (KD) rather
+    /// than from the host, one request per line or page.
+    pub fn reads_through_target(&self) -> bool {
+        matches!(self.source, Source::Remote(_))
+    }
+
     /// Whether this is a crash dump, which never changes.
     pub fn is_dump(&self) -> bool {
         matches!(self.source, Source::Dmp(_))
