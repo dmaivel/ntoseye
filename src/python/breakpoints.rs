@@ -16,7 +16,7 @@ use super::record::PlainDict;
 use super::runcontrol::reject_condition_mutation;
 use super::symbols::Location;
 use super::thread::Thread;
-use super::{err, raise, symbol_not_found, view_dict, view_record};
+use super::{err, raise, symbol_not_found, view_dict};
 use crate::breakpoints::{Breakpoint as CoreBreakpoint, BreakpointConfig, BreakpointScope};
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::exception_policy::{ExceptionPolicyFinalAction, parse_exception_code};
@@ -589,10 +589,7 @@ impl Breakpoint {
 
     /// The breakpoint's state as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(
-            py,
-            &view::execution::breakpoint(&self.require_snapshot(py)?),
-        )
+        view_dict(py, view::execution::breakpoint(&self.require_snapshot(py)?))
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -661,7 +658,7 @@ impl Exceptions {
         })?;
         let records = rows
             .into_iter()
-            .map(|row| view_record(py, &row.into_view()).map(Bound::unbind))
+            .map(|row| row.into_class(py).map(Bound::unbind))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(ExceptionPolicyIterator::new(records))
     }

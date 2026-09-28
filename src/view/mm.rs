@@ -1,6 +1,5 @@
 //! Neutral value-tree views for memory-manager inspectors.
 
-use super::View;
 use super::process::process;
 use super::shape::{Diag, Hex, Omit, shapes};
 use crate::target::mm::{
@@ -625,9 +624,9 @@ fn vm_counter(counter: &target_mm::VmCounter) -> VmCounter {
 }
 
 /// `!vm`'s statistics.
-pub fn vm(detail: &VmDetail) -> View {
+pub fn vm(detail: &VmDetail) -> VmStatistics {
     VmStatistics {
-        system: system_memory_usage(&detail.system),
+        system: memory_usage(&detail.system),
         pool: VmPool {
             nonpaged_pool_bytes: Diag::metric(&detail.pool.nonpaged_pool_bytes, |value| *value),
             nonpaged_pool_maximum: Diag::metric(&detail.pool.nonpaged_pool_maximum, |value| *value),
@@ -640,7 +639,6 @@ pub fn vm(detail: &VmDetail) -> View {
         page_files: detail.page_files.counters.iter().map(vm_counter).collect(),
         include_processes: detail.include_processes,
     }
-    .into_view()
 }
 
 fn diagnostic_opt<T, U>(
@@ -673,7 +671,7 @@ fn cache_attribute_name(value: u8) -> &'static str {
 }
 
 /// One decoded `_MMPFN` (`!pfn`).
-pub fn pfn(detail: &PfnDetail) -> View {
+pub fn pfn(detail: &PfnDetail) -> Pfn {
     let selector = match detail.selector {
         target_mm::PfnSelector::Pfn(value) => PfnSelector {
             kind: "pfn",
@@ -713,7 +711,6 @@ pub fn pfn(detail: &PfnDetail) -> View {
         }),
         priority: Diag::of(&detail.priority, |value| *value),
     }
-    .into_view()
 }
 
 fn vtop_level(level: &VtopLevel) -> PageTableEntry {
@@ -746,7 +743,7 @@ fn table_level(
 }
 
 /// `!vtop`'s translation.
-pub fn vtop(detail: &VtopDetail) -> View {
+pub fn vtop(detail: &VtopDetail) -> AddressTranslation {
     AddressTranslation {
         address: Hex(detail.address.0),
         dtb: Hex(detail.dtb),
@@ -756,7 +753,6 @@ pub fn vtop(detail: &VtopDetail) -> View {
         transition: detail.transition,
         section: detail.section,
     }
-    .into_view()
 }
 
 fn ptov_mapping(mapping: &PtovMapping) -> PhysicalMapping {
@@ -767,7 +763,7 @@ fn ptov_mapping(mapping: &PtovMapping) -> PhysicalMapping {
 }
 
 /// `!ptov`'s reverse mappings.
-pub fn ptov(detail: &PtovDetail) -> View {
+pub fn ptov(detail: &PtovDetail) -> ReverseTranslation {
     ReverseTranslation {
         physical: Hex(detail.physical),
         dtb: Hex(detail.dtb),
@@ -776,7 +772,6 @@ pub fn ptov(detail: &PtovDetail) -> View {
         bounded: detail.bounded,
         interrupted: detail.interrupted,
     }
-    .into_view()
 }
 
 fn pool_region(region: &PoolRegionDetail) -> PoolRegion {
@@ -821,7 +816,7 @@ fn big_pool(big: &BigPoolDetail) -> BigPoolAllocation {
 }
 
 /// `!pool`'s page.
-pub fn pool_page(detail: &PoolPageDetail) -> View {
+pub fn pool_page(detail: &PoolPageDetail) -> PoolPage {
     PoolPage {
         target: Hex(detail.target.0),
         page: Hex(detail.page.0),
@@ -834,11 +829,10 @@ pub fn pool_page(detail: &PoolPageDetail) -> View {
         near_symbol: detail.near_symbol.clone(),
         message: detail.message.clone(),
     }
-    .into_view()
 }
 
 /// `!poolval`'s check.
-pub fn pool_validation(detail: &PoolValidationDetail) -> View {
+pub fn pool_validation(detail: &PoolValidationDetail) -> PoolValidation {
     PoolValidation {
         address: Hex(detail.address.0),
         page: Hex(detail.page.0),
@@ -851,7 +845,6 @@ pub fn pool_validation(detail: &PoolValidationDetail) -> View {
         }),
         blocks: detail.blocks.iter().map(pool_block).collect(),
     }
-    .into_view()
 }
 
 fn usage_row(row: &PoolUsageRow, include_counts: bool) -> PoolTagUsage {
@@ -870,7 +863,7 @@ fn usage_row(row: &PoolUsageRow, include_counts: bool) -> PoolTagUsage {
 }
 
 /// `!poolused`'s rows.
-pub fn pool_usage(detail: &PoolUsageDetail) -> View {
+pub fn pool_usage(detail: &PoolUsageDetail) -> PoolUsage {
     PoolUsage {
         rows: detail
             .rows
@@ -884,7 +877,6 @@ pub fn pool_usage(detail: &PoolUsageDetail) -> View {
         tag_filter: detail.tag_filter.clone(),
         include_counts: detail.include_counts,
     }
-    .into_view()
 }
 
 fn pool_match(m: &PoolFindMatch) -> PoolMatch {
@@ -914,7 +906,7 @@ fn pool_range_scan(range: &PoolFindRange) -> PoolRangeScan {
 }
 
 /// `!poolfind`'s matches.
-pub fn pool_find(detail: &PoolFindDetail) -> View {
+pub fn pool_find(detail: &PoolFindDetail) -> PoolSearch {
     PoolSearch {
         tag: detail.tag.clone(),
         pool_type: detail.pool_type.map(PoolType::name),
@@ -925,10 +917,10 @@ pub fn pool_find(detail: &PoolFindDetail) -> View {
         truncated: detail.truncated,
         interrupted: detail.interrupted,
     }
-    .into_view()
 }
 
-fn lookaside_list(detail: &LookasideDetail) -> LookasideList {
+/// One lookaside list (`!lookaside <address>`).
+pub fn lookaside(detail: &LookasideDetail) -> LookasideList {
     LookasideList {
         address: Hex(detail.address.0),
         index: detail.index,
@@ -944,15 +936,10 @@ fn lookaside_list(detail: &LookasideDetail) -> LookasideList {
     }
 }
 
-/// One lookaside list (`!lookaside <address>`).
-pub fn lookaside(detail: &LookasideDetail) -> View {
-    lookaside_list(detail).into_view()
-}
-
 /// The system lookaside lists (`!lookaside`).
-pub fn lookaside_lists(detail: &LookasideListsDetail) -> View {
+pub fn lookaside_lists(detail: &LookasideListsDetail) -> LookasideLists {
     LookasideLists {
-        records: detail.records.iter().map(lookaside_list).collect(),
+        records: detail.records.iter().map(lookaside).collect(),
         nonpaged_count: detail.nonpaged_count,
         paged_count: detail.paged_count,
         nonpaged_termination: detail.nonpaged_termination.clone(),
@@ -960,11 +947,10 @@ pub fn lookaside_lists(detail: &LookasideListsDetail) -> View {
         interrupted: detail.interrupted,
         truncated: detail.truncated,
     }
-    .into_view()
 }
 
 /// `!mdl`'s header and PFNs.
-pub fn mdl(detail: &MdlDetail) -> View {
+pub fn mdl(detail: &MdlDetail) -> Mdl {
     Mdl {
         address: Hex(detail.address.0),
         next: Hex(detail.next.0),
@@ -982,7 +968,6 @@ pub fn mdl(detail: &MdlDetail) -> View {
         pfns: detail.pfns.iter().copied().map(Hex).collect(),
         truncated: detail.truncated,
     }
-    .into_view()
 }
 
 fn system_pte_type(detail: &SystemPteTypeDetail) -> SystemPteType {
@@ -1020,7 +1005,7 @@ fn system_pte_type(detail: &SystemPteTypeDetail) -> SystemPteType {
 }
 
 /// `!sysptes`'s allocators.
-pub fn system_ptes(detail: &SystemPtesDetail) -> View {
+pub fn system_ptes(detail: &SystemPtesDetail) -> SystemPtes {
     SystemPtes {
         flags: Hex(detail.flags),
         types: detail.types.iter().map(system_pte_type).collect(),
@@ -1028,7 +1013,6 @@ pub fn system_ptes(detail: &SystemPtesDetail) -> View {
         free: detail.free,
         used: detail.total.saturating_sub(detail.free),
     }
-    .into_view()
 }
 
 fn address_module(m: &target_mm::AddressModule) -> AddressModule {
@@ -1040,7 +1024,8 @@ fn address_module(m: &target_mm::AddressModule) -> AddressModule {
     }
 }
 
-fn region(r: &MemoryRegionInfo) -> MemoryRegion {
+/// One VAD or kernel region.
+pub fn memory_region(r: &MemoryRegionInfo) -> MemoryRegion {
     MemoryRegion {
         start: Hex(r.start.0),
         end: Hex(r.end.0),
@@ -1053,13 +1038,8 @@ fn region(r: &MemoryRegionInfo) -> MemoryRegion {
     }
 }
 
-/// One VAD or kernel region.
-pub fn memory_region(r: &MemoryRegionInfo) -> View {
-    region(r).into_view()
-}
-
 /// `!vprot`'s `VirtualQuery` fields.
-pub fn vprot(detail: &VprotDetail) -> View {
+pub fn vprot(detail: &VprotDetail) -> MemoryBasicInformation {
     MemoryBasicInformation {
         process: process(&detail.process),
         address: Hex(detail.address.0),
@@ -1077,11 +1057,10 @@ pub fn vprot(detail: &VprotDetail) -> View {
         vad: detail.vad.map(|vad| Hex(vad.0)),
         truncated: detail.truncated,
     }
-    .into_view()
 }
 
 /// What an address belongs to (`!address`).
-pub fn address_description(d: &target_mm::AddressDescription) -> View {
+pub fn address_description(d: &target_mm::AddressDescription) -> AddressDescription {
     AddressDescription {
         address: Hex(d.address.0),
         dtb: Hex(d.dtb),
@@ -1089,13 +1068,12 @@ pub fn address_description(d: &target_mm::AddressDescription) -> View {
         module: d.module.as_ref().map(address_module),
         section: d.section.clone(),
         va_type: d.va_type.clone(),
-        region: d.region.as_ref().map(region),
+        region: d.region.as_ref().map(memory_region),
     }
-    .into_view()
 }
 
 /// A memory-search hit, with what its address belongs to.
-pub fn memory_search_match(m: &target::MemorySearchMatch) -> View {
+pub fn memory_search_match(m: &target::MemorySearchMatch) -> MemorySearchMatch {
     let d = &m.description;
     MemorySearchMatch {
         address: Hex(m.address.0),
@@ -1105,9 +1083,8 @@ pub fn memory_search_match(m: &target::MemorySearchMatch) -> View {
         module: d.module.as_ref().map(address_module),
         section: d.section.clone(),
         va_type: d.va_type.clone(),
-        region: d.region.as_ref().map(region),
+        region: d.region.as_ref().map(memory_region),
     }
-    .into_view()
 }
 
 /// A memory-search hit outside NT's address descriptions: `kind` is
@@ -1117,7 +1094,7 @@ pub fn undescribed_search_match(
     offset: u64,
     symbol: Option<String>,
     kind: &'static str,
-) -> View {
+) -> MemorySearchMatch {
     MemorySearchMatch {
         address: Hex(address),
         offset: Hex(offset),
@@ -1128,17 +1105,15 @@ pub fn undescribed_search_match(
         va_type: None,
         region: None,
     }
-    .into_view()
 }
 
 /// `!pte`'s walk.
-pub fn pte_walk(walk: &target_mm::PteWalk) -> View {
+pub fn pte_walk(walk: &target_mm::PteWalk) -> PteWalk {
     PteWalk {
         address: Hex(walk.address.0),
         dtb: Hex(walk.dtb),
         levels: walk.levels().map(pte_level).collect(),
     }
-    .into_view()
 }
 
 fn process_memory_usage(usage: &target_mm::ProcessMemoryUsage) -> ProcessMemoryUsage {
@@ -1154,7 +1129,8 @@ fn process_memory_usage(usage: &target_mm::ProcessMemoryUsage) -> ProcessMemoryU
     }
 }
 
-fn system_memory_usage(summary: &SystemMemorySummary) -> SystemMemoryUsage {
+/// System memory counters and per-process usage.
+pub fn memory_usage(summary: &SystemMemorySummary) -> SystemMemoryUsage {
     SystemMemoryUsage {
         physical_pages: Diag::metric(&summary.physical_pages, |value| *value),
         available_pages: Diag::metric(&summary.available_pages, |value| *value),
@@ -1166,11 +1142,6 @@ fn system_memory_usage(summary: &SystemMemorySummary) -> SystemMemoryUsage {
         process_count: summary.process_count,
         truncated: summary.truncated,
     }
-}
-
-/// System memory counters and per-process usage.
-pub fn memory_usage(summary: &SystemMemorySummary) -> View {
-    system_memory_usage(summary).into_view()
 }
 
 #[cfg(all(test, feature = "mcp"))]
@@ -1203,7 +1174,7 @@ mod tests {
             truncated: true,
         };
 
-        let json = to_json(&memory_usage(&summary));
+        let json = to_json(&memory_usage(&summary).into_view());
         assert_eq!(json["physical_pages"]["value"], 0x1234);
         assert_eq!(json["physical_pages"]["source"], "kernel symbol");
         assert_eq!(json["available_pages"]["available"], false);

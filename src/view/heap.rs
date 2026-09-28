@@ -1,6 +1,5 @@
 //! Heap [`View`] builders for the structured inspectors.
 
-use super::View;
 use super::shape::{Diag, Hex, Omit, shapes, unions};
 use crate::target::heap::{self as target, BlockMatch, HeapKind, SegmentSubsegment};
 use crate::types::VirtAddr;
@@ -571,7 +570,7 @@ fn heap_summary_stats(stats: &target::HeapSummaryStats) -> HeapStats {
     }
 }
 
-pub fn heap_summary(summary: &target::HeapSummaryDetail) -> View {
+pub fn heap_summary(summary: &target::HeapSummaryDetail) -> HeapSummary {
     HeapSummary {
         peb: Hex(summary.peb.0),
         truncated: summary.truncated,
@@ -586,7 +585,6 @@ pub fn heap_summary(summary: &target::HeapSummaryDetail) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
 fn nt_entry(entry: &target::NtEntry) -> NtHeapEntry {
@@ -852,7 +850,7 @@ fn segment_heap(detail: &target::SegmentHeapDetail) -> SegmentHeap {
     }
 }
 
-pub fn heap(detail: &target::HeapDetail) -> View {
+pub fn heap(detail: &target::HeapDetail) -> HeapDetail {
     HeapDetail {
         index: detail.index,
         address: Hex(detail.address.0),
@@ -862,7 +860,6 @@ pub fn heap(detail: &target::HeapDetail) -> View {
         segment: detail.segment.as_ref().map(segment_heap),
         error: detail.error.clone(),
     }
-    .into_view()
 }
 
 fn block_match(block: &BlockMatch) -> HeapBlockMatch {
@@ -947,7 +944,7 @@ fn block_match(block: &BlockMatch) -> HeapBlockMatch {
     }
 }
 
-pub fn heap_block_search(detail: &target::HeapBlockSearchDetail) -> View {
+pub fn heap_block_search(detail: &target::HeapBlockSearchDetail) -> HeapBlockSearch {
     HeapBlockSearch {
         address: Hex(detail.address.0),
         found: detail.found,
@@ -960,5 +957,4 @@ pub fn heap_block_search(detail: &target::HeapBlockSearchDetail) -> View {
         block: detail.block.as_ref().map(block_match),
         errors: detail.errors.clone(),
     }
-    .into_view()
 }

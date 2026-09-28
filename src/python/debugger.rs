@@ -22,12 +22,11 @@ use super::symbols::Location;
 use super::symbols::{self, Symbols};
 use super::thread::{Cpus, Threads};
 use super::types::Types;
-use super::{err, raise, runcontrol, runner, view_record, view_records};
+use super::{err, raise, runcontrol, runner};
 use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::view;
-use crate::view::execution::py::CallTrace;
-use crate::view::shape::ViewValue;
+use crate::view::shape::Typed;
 
 fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
     Owner::unstamped(slf.py(), slf.as_unbound())
@@ -148,15 +147,13 @@ impl Debugger {
     fn capabilities<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Vec<Bound<'py, view::backend::py::BackendCapability>>> {
+    ) -> PyResult<Typed<'py, Vec<view::backend::BackendCapability>>> {
         let rows = self.with_session(|session| Ok(session.capabilities()))?;
-        view_records(
+        Typed::new(
             py,
-            &rows
-                .iter()
+            rows.iter()
                 .map(view::backend::capability)
-                .collect::<Vec<_>>()
-                .into_view(),
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -238,7 +235,10 @@ impl Debugger {
     /// at most `limit` instructions: `{end, error, instructions, root}`, where
     /// `root` is the call tree and `end` says why tracing stopped.
     #[pyo3(signature = (limit=10_000))]
-    fn trace_calls<'py>(slf: &Bound<'py, Self>, limit: usize) -> PyResult<Bound<'py, CallTrace>> {
+    fn trace_calls<'py>(
+        slf: &Bound<'py, Self>,
+        limit: usize,
+    ) -> PyResult<Typed<'py, view::execution::CallTrace>> {
         runcontrol::trace_calls(slf, limit)
     }
 
@@ -291,9 +291,9 @@ impl Debugger {
         &self,
         py: Python<'py>,
         since: u64,
-    ) -> PyResult<Bound<'py, view::backend::py::DebugLog>> {
+    ) -> PyResult<Typed<'py, view::backend::DebugLog>> {
         let page = self.with_session(|session| Ok(session.read_debug_output(since)))?;
-        view_record(py, &view::backend::debug_log(&page))
+        Typed::new(py, view::backend::debug_log(&page))
     }
 
     /// Drain the diagnostics the debugger raised since the last call (a

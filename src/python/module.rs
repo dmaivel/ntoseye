@@ -8,8 +8,8 @@ use pyo3::types::{PyAny, PyBytes, PyDict};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{DriverIterator, ModuleIterator};
-use super::record::{BaseRecord, PlainDict};
-use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict, view_record, view_records};
+use super::record::PlainDict;
+use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict};
 use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
@@ -19,7 +19,8 @@ use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::module::{Export, Section};
 use crate::view::shape::Hex;
-use crate::view::{self, View};
+use crate::view::shape::Typed;
+use crate::view::{self};
 use pelite::PeView;
 
 /// A module collection: `dbg.modules` (kernel), `proc.modules` (loader
@@ -140,7 +141,7 @@ impl Module {
         })
     }
 
-    fn section_data(&self, py: Python<'_>) -> PyResult<Vec<View>> {
+    fn section_data(&self, py: Python<'_>) -> PyResult<Vec<Section>> {
         let base = self.info.base_address;
         self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
@@ -174,7 +175,6 @@ impl Module {
                         size: Hex(header.VirtualSize.max(header.SizeOfRawData).into()),
                         permissions,
                     }
-                    .into_view()
                 })
                 .collect())
         })
@@ -234,16 +234,13 @@ impl Module {
 
     /// PE sections and their mapped permissions.
     #[getter]
-    fn sections<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Vec<Bound<'py, view::module::py::Section>>> {
-        view_records(py, &View::List(self.section_data(py)?))
+    fn sections<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::module::Section>>> {
+        Typed::new(py, self.section_data(py)?)
     }
 
     /// Exports from the mapped PE export directory.
     #[getter]
-    fn exports<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, view::module::py::Export>>> {
+    fn exports<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::module::Export>>> {
         let base = self.info.base_address;
         let exports = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
@@ -251,31 +248,25 @@ impl Module {
         })?;
         let exports = exports
             .into_iter()
-            .map(|export| {
-                Export {
-                    name: export.name,
-                    ordinal: export.ordinal,
-                    address: export.address.map(|address| Hex(address.0)),
-                    forwarder: export.forwarder,
-                }
-                .into_view()
+            .map(|export| Export {
+                name: export.name,
+                ordinal: export.ordinal,
+                address: export.address.map(|address| Hex(address.0)),
+                forwarder: export.forwarder,
             })
-            .collect();
-        view_records(py, &View::List(exports))
+            .collect::<Vec<_>>();
+        Typed::new(py, exports)
     }
 
     /// Module symbol and PDB identity (`lmv`).
     #[getter]
-    fn symbols<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::module::py::ModuleSymbols>> {
+    fn symbols<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::module::ModuleSymbols>> {
         let info = self.info.clone();
         let view = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
-            Ok(view::module::module_symbols(&session.target, &info, dtb).into_view())
+            Ok(view::module::module_symbols(&session.target, &info, dtb))
         })?;
-        view_record(py, &view)
+        Typed::new(py, view)
     }
 
     /// The mapped image in memory layout, for pefile/LIEF. Raises
@@ -302,7 +293,7 @@ impl Module {
     }
 
     /// Symbol status, load diagnostics and PDB identity (`lmv`).
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, BaseRecord>> {
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::module::ModuleDetail>> {
         let info = self.info.clone();
         let process = matches!(self.space, Space::Process(_));
         let view = self.owner.with_in(py, &self.context(), |session| {
@@ -319,23 +310,23 @@ impl Module {
                             info.name
                         )))
                     })?;
-                Ok(view::usermode::loader_module(module).into_view())
+                Ok(view::module::ModuleDetail::Process(
+                    view::usermode::loader_module(module),
+                ))
             } else {
-                Ok(view::module::module_with_symbols(
-                    &session.target,
-                    &info,
-                    dtb,
+                Ok(view::module::ModuleDetail::Kernel(
+                    view::module::module_with_symbols(&session.target, &info, dtb),
                 ))
             }
         })?;
-        view_record(py, &view)
+        Typed::new(py, view)
     }
 
     /// Select, fetch, and index symbols for this module (`ld`, `.reload`).
     fn reload_symbols<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::module::py::SymbolReloadReport>> {
+    ) -> PyResult<Typed<'py, view::module::SymbolReloadReport>> {
         let name = self.info.short_name.clone();
         let report = self.owner.with_in(py, &self.context(), |session| {
             session
@@ -343,7 +334,7 @@ impl Module {
                 .reload_module_symbols(Some(&name))
                 .map_err(err)
         })?;
-        view_record(py, &view::module::module_symbol_report(&report))
+        Typed::new(py, view::module::module_symbol_report(&report))
     }
 
     /// The mapped image's PE headers (`!dh`): file and optional headers,
@@ -355,7 +346,7 @@ impl Module {
         py: Python<'py>,
         exports: bool,
         imports: bool,
-    ) -> PyResult<Bound<'py, view::module::py::ImageHeaders>> {
+    ) -> PyResult<Typed<'py, view::module::ImageHeaders>> {
         let info = self.info.clone();
         let parts = DhParts {
             exports,
@@ -370,7 +361,7 @@ impl Module {
                 .map(|detail| view::module::image_headers(&detail))
                 .map_err(err)
         })?;
-        view_record(py, &view)
+        Typed::new(py, view)
     }
 
     /// The module's image identity (`!lmi`): machine, time stamp, size,
@@ -380,14 +371,14 @@ impl Module {
     fn image_info<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::module::py::ModuleImageInfo>> {
+    ) -> PyResult<Typed<'py, view::module::ModuleImageInfo>> {
         let info = self.info.clone();
         let view = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
             let detail = session.target.image_info(dtb, info).map_err(err)?;
             Ok(view::module::module_image_info(&session.target, &detail))
         })?;
-        view_record(py, &view)
+        Typed::new(py, view)
     }
 
     /// Fetch the matching image from the symbol server cache (`.fetchimage`).
@@ -405,32 +396,29 @@ impl Module {
         &self,
         py: Python<'py>,
         include_diffs: bool,
-    ) -> PyResult<Bound<'py, view::usermode::py::ImageCheck>> {
+    ) -> PyResult<Typed<'py, view::usermode::ImageCheck>> {
         let name = self.info.short_name.clone();
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.check_image(&name, include_diffs).map_err(err)
         })?;
-        view_record(py, &view::usermode::image_check(&detail))
+        Typed::new(py, view::usermode::image_check(&detail))
     }
 
     /// Return verifier data for this driver module.
-    fn verifier<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::meta::py::VerifierDriver>> {
+    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::VerifierDriver>> {
         // Driver Verifier is NT's; it never tracks secure-kernel modules.
         self.space.require_nt("verifier")?;
         let name = self.info.short_name.clone();
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.verifier_driver(&name).map_err(err)
         })?;
-        view_record(py, &view::meta::verifier_driver(&detail))
+        Typed::new(py, view::meta::verifier_driver(&detail))
     }
 
     /// The module as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::module::module(&self.info))
+        view_dict(py, view::module::module(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -481,16 +469,16 @@ impl Modules {
     fn termination<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Option<Bound<'py, view::usermode::py::LoaderTerminations>>> {
+    ) -> PyResult<Typed<'py, Option<view::usermode::LoaderTerminations>>> {
         let Space::Process(process) = &self.space else {
-            return Ok(None);
+            return Typed::new(py, None);
         };
         let detail = self
             .owner
             .with_in(py, &Context::process(process.clone()), |session| {
                 session.target.loader_modules(None).map_err(err)
             })?;
-        view_record(py, &view::usermode::loader_terminations(&detail)).map(Some)
+        Typed::new(py, Some(view::usermode::loader_terminations(&detail)))
     }
 
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<Module> {
@@ -653,10 +641,7 @@ impl Driver {
     }
 
     /// Inspect the `_DRIVER_OBJECT`, its devices, and dispatch table.
-    fn inspect<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::object::py::DriverObject>> {
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::object::DriverObject>> {
         let view = self.owner.with(py, |session| {
             let detail = session
                 .target
@@ -664,13 +649,13 @@ impl Driver {
                 .map_err(err)?;
             Ok(view::object::driver_object(&session.target, &detail))
         })?;
-        view_record(py, &view)
+        Typed::new(py, view)
     }
 
     /// The driver object as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::object::driver_object_info(&self.info))
+        view_dict(py, view::object::driver_object_info(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -715,17 +700,14 @@ impl Device {
     }
 
     /// Inspect this `_DEVICE_OBJECT` and its attachment stack.
-    fn inspect<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::object::py::DeviceObject>> {
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::object::DeviceObject>> {
         let detail = self.owner.with(py, |session| {
             session
                 .target
                 .inspect_device_object(VirtAddr(self.address))
                 .map_err(err)
         })?;
-        view_record(py, &view::object::device_object(&detail))
+        Typed::new(py, view::object::device_object(&detail))
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {

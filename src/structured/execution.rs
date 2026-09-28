@@ -14,26 +14,22 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             .state
             .ctx
             .vcpus()
-            .map(|vcpus| View::List(vcpus.iter().map(view::execution::vcpu).collect())),
-        "bl" => Ok(View::List(
+            .map(|vcpus| View::list(vcpus.iter().map(view::execution::vcpu))),
+        "bl" => Ok(View::list(
             args.state
                 .ctx
                 .list_breakpoints()
                 .into_iter()
-                .map(view::execution::breakpoint)
-                .collect(),
+                .map(view::execution::breakpoint),
         )),
         "k" | "kn" | "kb" | "kp" | "kv" | "kf" => args.opt_value(0).and_then(|count| {
             let trace = args
                 .state
                 .ctx
                 .backtrace(count.map_or(64, |count| count as usize))?;
-            Ok(trace
-                .frames
-                .iter()
-                .map(view::execution::stack_frame)
-                .collect::<Vec<_>>()
-                .into_view())
+            Ok(View::list(
+                trace.frames.iter().map(view::execution::stack_frame),
+            ))
         }),
         "u" | "disasm" => args.addr(0).and_then(|address| {
             let count = argv
@@ -42,11 +38,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .and_then(|count| usize::from_str_radix(count, 16).ok())
                 .unwrap_or(8);
             let rows = args.state.ctx.disassemble(address, count)?;
-            Ok(rows
-                .iter()
-                .map(view::execution::disasm_row)
-                .collect::<Vec<_>>()
-                .into_view())
+            Ok(View::list(rows.iter().map(view::execution::disasm_row)))
         }),
         "?" | "ev" if !args.raw_tail.is_empty() => args.eval(args.raw_tail).map(|value| {
             ExpressionValue {
@@ -57,7 +49,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         }),
         ".fnent" => args.addr(0).and_then(|address| {
             let detail = args.state.ctx.function_entry(address)?;
-            Ok(view::execution::function_entry(&detail))
+            Ok(view::execution::function_entry(&detail).into_view())
         }),
         "r" | "registers" if argv.is_empty() => args.state.ctx.read_registers().map(|regs| {
             let register_map = &args.state.ctx.register_map;

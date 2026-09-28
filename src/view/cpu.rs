@@ -1,6 +1,5 @@
 //! cpu: [`View`] builders for the structured inspectors.
 
-use super::View;
 use super::shape::{Diag, Hex, shapes};
 use crate::target::cpu::{
     CpuFeatureBits as FeatureBitsDetail, CpuInfoDetail, CpuTriageInfo, DescriptorDetail, GdtDetail,
@@ -256,7 +255,7 @@ fn processor_state(value: &ProcessorStateDetail) -> ProcessorStateArea {
 }
 
 /// KPCR/KPRCB inspector.
-pub fn pcr(detail: &PcrDetail) -> View {
+pub fn pcr(detail: &PcrDetail) -> Pcr {
     let address = |address: &VirtAddr| Hex(address.0);
     Pcr {
         processor: detail.processor,
@@ -273,11 +272,10 @@ pub fn pcr(detail: &PcrDetail) -> View {
         gdtr: Diag::of(&detail.gdtr, descriptor),
         tss_base: Diag::of(&detail.tss_base, address),
     }
-    .into_view()
 }
 
 /// KPRCB inspector.
-pub fn prcb(detail: &PrcbDetail) -> View {
+pub fn prcb(detail: &PrcbDetail) -> Prcb {
     let address = |address: &VirtAddr| Hex(address.0);
     Prcb {
         processor: detail.processor,
@@ -290,18 +288,16 @@ pub fn prcb(detail: &PrcbDetail) -> View {
         interrupt_count: Diag::of(&detail.interrupt_count, |value| *value),
         processor_state: Diag::of(&detail.processor_state, processor_state),
     }
-    .into_view()
 }
 
 /// IRQL inspector.
-pub fn irql(detail: &IrqlDetail) -> View {
+pub fn irql(detail: &IrqlDetail) -> Irql {
     Irql {
         processor: detail.processor,
         value: Diag::of(&detail.value, |value| *value),
         level_name: Diag::of(&detail.level_name, String::clone),
         note: detail.note.clone(),
     }
-    .into_view()
 }
 
 fn idt_entry(detail: &IdtEntryDetail) -> IdtGate {
@@ -322,7 +318,7 @@ fn idt_entry(detail: &IdtEntryDetail) -> IdtGate {
 }
 
 /// IDT table inspector.
-pub fn idt(detail: &IdtDetail) -> View {
+pub fn idt(detail: &IdtDetail) -> Idt {
     Idt {
         processor: detail.processor,
         base: Hex(detail.base.0),
@@ -331,7 +327,6 @@ pub fn idt(detail: &IdtDetail) -> View {
         truncated: detail.truncated,
         entries: detail.entries.iter().map(idt_entry).collect(),
     }
-    .into_view()
 }
 
 fn gdt_entry(detail: &GdtEntryDetail) -> GdtDescriptor {
@@ -352,7 +347,7 @@ fn gdt_entry(detail: &GdtEntryDetail) -> GdtDescriptor {
 }
 
 /// GDT table inspector.
-pub fn gdt(detail: &GdtDetail) -> View {
+pub fn gdt(detail: &GdtDetail) -> Gdt {
     Gdt {
         processor: detail.processor,
         base: Hex(detail.base.0),
@@ -361,7 +356,6 @@ pub fn gdt(detail: &GdtDetail) -> View {
         truncated: detail.truncated,
         entries: detail.entries.iter().map(gdt_entry).collect(),
     }
-    .into_view()
 }
 
 fn feature_bits(detail: &FeatureBitsDetail) -> CpuFeatureBits {
@@ -381,7 +375,7 @@ fn triage_fallback(detail: &CpuTriageInfo) -> CpuTriageFallback {
 }
 
 /// CPU information inspector.
-pub fn cpuinfo(detail: &CpuInfoDetail) -> View {
+pub fn cpuinfo(detail: &CpuInfoDetail) -> CpuInfo {
     CpuInfo {
         processor: detail.processor,
         kprcb: Diag::of(&detail.kprcb, |address| Hex(address.0)),
@@ -395,5 +389,4 @@ pub fn cpuinfo(detail: &CpuInfoDetail) -> View {
         feature_bits: detail.feature_bits.iter().map(feature_bits).collect(),
         triage_fallback: detail.triage_fallback.as_ref().map(triage_fallback),
     }
-    .into_view()
 }

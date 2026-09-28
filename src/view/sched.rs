@@ -2,7 +2,7 @@
 
 use super::execution::{self, numbered_stack_frame, stack_frame};
 use super::shape::{Diag, Hex, Omit, shapes, unions};
-use super::{ListEnd, View, list_termination};
+use super::list::{ListEnd, list_termination};
 use crate::target::sched::{self as detail, ApcSelector};
 use crate::target::workqueue::{self, ExQueueDetail};
 use crate::target::{DiagnosticValue, kthread_state_name, wait_reason_name};
@@ -458,7 +458,7 @@ fn opt_hex(address: &Option<VirtAddr>) -> Option<Hex> {
     address.map(|address| Hex(address.0))
 }
 
-pub fn running(detail: &detail::RunningDetail) -> View {
+pub fn running(detail: &detail::RunningDetail) -> RunningProcessors {
     RunningProcessors {
         processors: detail
             .processors
@@ -479,10 +479,9 @@ pub fn running(detail: &detail::RunningDetail) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
-pub fn ready_queues(detail: &detail::ReadyQueuesDetail) -> View {
+pub fn ready_queues(detail: &detail::ReadyQueuesDetail) -> ReadyQueues {
     ReadyQueues {
         queues: detail
             .queues
@@ -505,7 +504,6 @@ pub fn ready_queues(detail: &detail::ReadyQueuesDetail) -> View {
         truncated: detail.truncated,
         errors: scheduler_errors(&detail.errors),
     }
-    .into_view()
 }
 
 fn dpc(dpc: &detail::DpcDetail) -> Dpc {
@@ -518,7 +516,7 @@ fn dpc(dpc: &detail::DpcDetail) -> Dpc {
     }
 }
 
-pub fn dpc_queues(detail: &detail::DpcQueuesDetail) -> View {
+pub fn dpc_queues(detail: &detail::DpcQueuesDetail) -> DpcQueues {
     DpcQueues {
         queues: detail
             .queues
@@ -534,10 +532,9 @@ pub fn dpc_queues(detail: &detail::DpcQueuesDetail) -> View {
         truncated: detail.truncated,
         errors: scheduler_errors(&detail.errors),
     }
-    .into_view()
 }
 
-fn kernel_timer(timer: &detail::TimerDetail) -> KernelTimer {
+pub fn timer(timer: &detail::TimerDetail) -> KernelTimer {
     KernelTimer {
         address: Hex(timer.address.0),
         due_time: Diag::of(&timer.due_time, |value| Hex(*value)),
@@ -550,7 +547,7 @@ fn kernel_timer(timer: &detail::TimerDetail) -> KernelTimer {
     }
 }
 
-pub fn timer_list(detail: &detail::TimerListDetail) -> View {
+pub fn timer_list(detail: &detail::TimerListDetail) -> TimerTable {
     TimerTable {
         interrupt_time: Diag::of(&detail.interrupt_time, |value| value.map(Hex)),
         interrupt_time_source: detail.interrupt_time_source.clone(),
@@ -560,7 +557,7 @@ pub fn timer_list(detail: &detail::TimerListDetail) -> View {
             .map(|entry| TimerTableEntry {
                 processor: entry.processor,
                 bucket: entry.bucket,
-                timer: kernel_timer(&entry.timer),
+                timer: timer(&entry.timer),
             })
             .collect(),
         terminations: detail
@@ -576,11 +573,6 @@ pub fn timer_list(detail: &detail::TimerListDetail) -> View {
         truncated: detail.truncated,
         errors: scheduler_errors(&detail.errors),
     }
-    .into_view()
-}
-
-pub fn timer(detail: &detail::TimerDetail) -> View {
-    kernel_timer(detail).into_view()
 }
 
 fn apc_selector(selector: ApcSelector) -> ApcSelectorValue {
@@ -607,7 +599,7 @@ fn apc(apc: &detail::ApcDetail) -> Apc {
     }
 }
 
-pub fn apcs(detail: &detail::ApcListDetail) -> View {
+pub fn apcs(detail: &detail::ApcListDetail) -> ApcQueues {
     ApcQueues {
         selector: apc_selector(detail.selector),
         threads: detail
@@ -626,10 +618,9 @@ pub fn apcs(detail: &detail::ApcListDetail) -> View {
         truncated: detail.truncated,
         layout_error: detail.layout_error.clone(),
     }
-    .into_view()
 }
 
-pub fn stacks(detail: &detail::StacksDetail) -> View {
+pub fn stacks(detail: &detail::StacksDetail) -> ThreadStacks {
     ThreadStacks {
         level: detail.level,
         filter: detail.filter.clone(),
@@ -649,7 +640,6 @@ pub fn stacks(detail: &detail::StacksDetail) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
 fn unwalked_threads(threads: &[detail::UnwalkedThread]) -> Vec<UnwalkedThread> {
@@ -680,7 +670,7 @@ fn findstack_thread(thread: &detail::FindStackThread, level: u8) -> FindStackThr
     }
 }
 
-pub fn findstack(detail: &detail::FindStackDetail) -> View {
+pub fn findstack(detail: &detail::FindStackDetail) -> FindStack {
     FindStack {
         pattern: detail.pattern.clone(),
         level: detail.level,
@@ -693,7 +683,6 @@ pub fn findstack(detail: &detail::FindStackDetail) -> View {
             .collect(),
         unwalked: unwalked_threads(&detail.unwalked),
     }
-    .into_view()
 }
 
 fn work_item(item: &workqueue::WorkItemDetail) -> WorkItem {
@@ -755,17 +744,16 @@ fn work_queue(queue: &workqueue::WorkQueueDetail) -> WorkQueue {
     }
 }
 
-pub fn work_queues(detail: &ExQueueDetail) -> View {
+pub fn work_queues(detail: &ExQueueDetail) -> WorkQueues {
     WorkQueues {
         flags: Hex(detail.flags),
         priority_filter: detail.priority_filter.clone(),
         queues: detail.queues.iter().map(work_queue).collect(),
         errors: detail.errors.clone(),
     }
-    .into_view()
 }
 
-pub fn uniqstack(detail: &detail::UniqStackDetail) -> View {
+pub fn uniqstack(detail: &detail::UniqStackDetail) -> UniqStacks {
     let scope = match &detail.scope {
         detail::UniqStackScope::AllThreads => UniqStackScope {
             kind: "all",
@@ -795,5 +783,4 @@ pub fn uniqstack(detail: &detail::UniqStackDetail) -> View {
             .collect(),
         unwalked: unwalked_threads(&detail.unwalked),
     }
-    .into_view()
 }

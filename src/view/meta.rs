@@ -1,7 +1,7 @@
 //! `View` builders for the metadata inspectors.
 
 use super::shape::{Diag, Hex, shapes};
-use super::{ListEnd, View};
+use super::list::{ListEnd, list_termination};
 use crate::target::ListTermination;
 use crate::target::meta::{
     ErrorCodeDetail, TargetDumpMetadata, TargetKernelDetail, TargetTimeDetail, TargetVersionDetail,
@@ -280,30 +280,25 @@ fn verifier_statistics(stats: &StatisticsDetail) -> VerifierStatistics {
     }
 }
 
-/// How the verifier's suspect-list walk ended. Unlike the shared
-/// [`super::list_termination`], every end but the list head carries an error.
-fn list_termination(termination: &ListTermination) -> ListEnd {
-    let (kind, address, error) = match termination {
-        ListTermination::Head => ("head", None, None),
-        ListTermination::Null => ("null", None, Some("null link".to_string())),
-        ListTermination::Cycle(address) => (
-            "cycle",
-            Some(Hex(address.0)),
-            Some(format!("non-head cycle at {:#x}", address.0)),
-        ),
-        ListTermination::Bound => ("bound", None, Some("entry bound reached".to_string())),
-        ListTermination::Corrupt(error) => ("corrupt", None, Some(error.clone())),
+/// How the verifier's suspect-list walk ended: as the shared
+/// [`list_termination`], but every end except the list head carries an error.
+fn suspect_list_end(termination: &ListTermination) -> ListEnd {
+    let error = match termination {
+        ListTermination::Null => Some("null link".to_string()),
+        ListTermination::Cycle(address) => Some(format!("non-head cycle at {:#x}", address.0)),
+        ListTermination::Bound => Some("entry bound reached".to_string()),
+        ListTermination::Head | ListTermination::Corrupt(_) => None,
     };
+    let end = list_termination(termination);
     ListEnd {
-        kind,
-        address,
-        error,
+        error: end.error.or(error),
+        ..end
     }
 }
 
 /// Driver Verifier global level/options, aggregate statistics, loaded drivers,
 /// and configured-but-unloaded suspect drivers.
-pub fn verifier(detail: &VerifierDetail) -> View {
+pub fn verifier(detail: &VerifierDetail) -> Verifier {
     Verifier {
         level: Diag::of(&detail.level, |value| Hex(*value)),
         option_flags: Diag::of(&detail.option_flags, |value| Hex(*value)),
@@ -317,13 +312,12 @@ pub fn verifier(detail: &VerifierDetail) -> View {
         configured_but_unloaded: Diag::of(&detail.configured_but_unloaded, |drivers| {
             drivers.iter().map(suspect_driver).collect()
         }),
-        suspect_list_termination: list_termination(&detail.suspect_list_termination),
+        suspect_list_termination: suspect_list_end(&detail.suspect_list_termination),
     }
-    .into_view()
 }
 
 /// One Driver Verifier entry's image, signing, counters, and load history.
-pub fn verifier_driver(detail: &VerifierDriverDetail) -> View {
+pub fn verifier_driver(detail: &VerifierDriverDetail) -> VerifierDriver {
     VerifierDriver {
         module: detail.module_name.clone(),
         image_base: Hex(detail.image_base.0),
@@ -356,7 +350,6 @@ pub fn verifier_driver(detail: &VerifierDriverDetail) -> View {
         peak_contiguous_memory_bytes: detail.peak_contiguous_memory_bytes,
         suspect: detail.suspect.as_ref().map(suspect_driver),
     }
-    .into_view()
 }
 
 fn target_kernel(kernel: &TargetKernelDetail) -> TargetKernel {
@@ -394,7 +387,7 @@ fn target_dump(dump: &TargetDumpMetadata) -> TargetDump {
 
 /// Target/kernel build identity, architecture, processor count, symbols,
 /// debugger version, time, and dump metadata.
-pub fn target_version(detail: &TargetVersionDetail) -> View {
+pub fn target_version(detail: &TargetVersionDetail) -> TargetVersion {
     TargetVersion {
         major_version: detail.major_version,
         minor_version: detail.minor_version,
@@ -414,22 +407,20 @@ pub fn target_version(detail: &TargetVersionDetail) -> View {
         backend: detail.backend.clone(),
         dump: detail.dump.as_ref().map(target_dump),
     }
-    .into_view()
 }
 
 /// Target UTC FILETIME/ISO time and uptime in seconds/formatted form.
-pub fn target_time(detail: &TargetTimeDetail) -> View {
+pub fn target_time(detail: &TargetTimeDetail) -> TargetTime {
     TargetTime {
         system_time: detail.system_time.map(Hex),
         system_time_iso: detail.system_time_iso.clone(),
         uptime_seconds: detail.uptime_seconds,
         uptime: detail.uptime.clone(),
     }
-    .into_view()
 }
 
 /// Decoded NTSTATUS, Win32, or HRESULT metadata.
-pub fn error_code(detail: &ErrorCodeDetail) -> View {
+pub fn error_code(detail: &ErrorCodeDetail) -> ErrorCode {
     ErrorCode {
         code: Hex(detail.code),
         kind: detail.kind.clone(),
@@ -441,5 +432,4 @@ pub fn error_code(detail: &ErrorCodeDetail) -> View {
         win32_code: detail.win32_code.map(|code| Hex(code.into())),
         win32_name: detail.win32_name.clone(),
     }
-    .into_view()
 }

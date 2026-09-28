@@ -1,7 +1,6 @@
 //! Symbol, source-line, local-variable, and type-layout [`View`]
 //! builders.
 
-use super::View;
 use super::shape::{Hex, Omit, shapes};
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::symbols::{self, SymbolVisibility, format_symbol_with_offset};
@@ -139,7 +138,7 @@ pub fn type_field(name: &str, field: &FieldInfo) -> Field {
 }
 
 /// A struct's field layout, sorted by offset.
-pub fn type_layout(name: &str, info: &TypeInfo) -> View {
+pub fn type_layout(name: &str, info: &TypeInfo) -> TypeLayout {
     TypeLayout {
         name: name.to_string(),
         size: info.size,
@@ -149,10 +148,9 @@ pub fn type_layout(name: &str, info: &TypeInfo) -> View {
             .map(|(name, field)| type_field(name, field))
             .collect(),
     }
-    .into_view()
 }
 
-pub fn symbol_candidate(candidate: &symbols::SymbolCandidate) -> View {
+pub fn symbol_candidate(candidate: &symbols::SymbolCandidate) -> SymbolCandidate {
     SymbolCandidate {
         module: candidate.module.clone(),
         address: Hex(candidate.address.0),
@@ -162,19 +160,17 @@ pub fn symbol_candidate(candidate: &symbols::SymbolCandidate) -> View {
         },
         compiland: candidate.compiland.clone(),
     }
-    .into_view()
 }
 
-pub fn symbol_search_match(symbol: &target::SymbolSearchMatch) -> View {
+pub fn symbol_search_match(symbol: &target::SymbolSearchMatch) -> SymbolSearchMatch {
     SymbolSearchMatch {
         name: symbol.name.clone(),
         address: symbol.address.map(|address| Hex(address.0)),
         module: symbol.module.clone(),
     }
-    .into_view()
 }
 
-pub fn nearest_symbol(address: VirtAddr, symbol: Option<(String, String, u32)>) -> View {
+pub fn nearest_symbol(address: VirtAddr, symbol: Option<(String, String, u32)>) -> NearestSymbol {
     let (formatted, module, name, offset) = match symbol {
         Some((module, name, offset)) => (
             Some(format_symbol_with_offset(&module, &name, offset)),
@@ -191,18 +187,16 @@ pub fn nearest_symbol(address: VirtAddr, symbol: Option<(String, String, u32)>) 
         name,
         offset,
     }
-    .into_view()
 }
 
 /// The symbol `offset` bytes below `address`.
-pub fn symbol(address: u64, module: String, name: String, offset: u32) -> View {
+pub fn symbol(address: u64, module: String, name: String, offset: u32) -> Symbol {
     Symbol {
         module,
         name,
         address: Hex(address.saturating_sub(u64::from(offset))),
         offset,
     }
-    .into_view()
 }
 
 pub fn source_location(location: &symbols::SourceLocation) -> SourceLocation {
@@ -260,14 +254,14 @@ pub fn procedure_local(
     target: &Target,
     address: VirtAddr,
     local: &symbols::ProcedureLocal,
-) -> View {
+) -> ProcedureLocal {
     let value = target
         .resolve_procedure_local_value(address, local)
         .map(Hex);
-    self::local(local, Omit(Some(value))).into_view()
+    self::local(local, Omit(Some(value)))
 }
 
 /// A PDB local or parameter's layout, without evaluating it.
-pub fn procedure_local_layout(local: &symbols::ProcedureLocal) -> View {
-    self::local(local, Omit(None)).into_view()
+pub fn procedure_local_layout(local: &symbols::ProcedureLocal) -> ProcedureLocal {
+    self::local(local, Omit(None))
 }

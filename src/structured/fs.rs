@@ -10,28 +10,28 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
     Some(match name {
         "!ca" | "ca" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_control_area(address)?;
-            Ok(view::fs::control_area(&detail))
+            Ok(view::fs::control_area(&detail).into_view())
         }),
         "!vpb" | "vpb" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_vpb(address)?;
-            Ok(view::fs::vpb(&detail))
+            Ok(view::fs::vpb(&detail).into_view())
         }),
         "!filecache" | "filecache" => args
             .target()
             .file_cache()
-            .map(|detail| view::fs::file_cache(&detail)),
+            .map(|detail| view::fs::file_cache(&detail).into_view()),
         "!fltkd.filters" => args
             .target()
             .flt_filters()
-            .map(|detail| view::fs::flt_filters(&detail)),
+            .map(|detail| view::fs::flt_filters(&detail).into_view()),
         "!fltkd.instances" => args
             .target()
             .flt_instances(argv.first().copied(), |text| args.eval(text))
-            .map(|detail| view::fs::flt_instances(&detail)),
+            .map(|detail| view::fs::flt_instances(&detail).into_view()),
         "!fltkd.volumes" => args
             .target()
             .flt_volumes()
-            .map(|detail| view::fs::flt_volumes(&detail)),
+            .map(|detail| view::fs::flt_volumes(&detail).into_view()),
         _ => return None,
     })
 }

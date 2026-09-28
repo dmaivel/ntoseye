@@ -1,6 +1,5 @@
 //! ETW [`View`] builders: trace sessions, their buffers, and their events.
 
-use super::View;
 use super::shape::{Hex, shapes};
 use crate::target::etw::{
     self, EtwEventDump as EtwEventDumpDetail, EtwLoggerBuffers as EtwLoggerBuffersDetail,
@@ -217,7 +216,8 @@ fn filetime(value: Option<u64>) -> Option<String> {
     value.and_then(format_filetime_precise)
 }
 
-fn etw_logger(l: &etw::EtwLogger) -> EtwLogger {
+/// A `_WMI_LOGGER_CONTEXT`: configuration, counters, and clock.
+pub fn logger(l: &etw::EtwLogger) -> EtwLogger {
     EtwLogger {
         address: Hex(l.address.0),
         logger_id: l.logger_id,
@@ -255,20 +255,14 @@ fn etw_logger(l: &etw::EtwLogger) -> EtwLogger {
     }
 }
 
-/// A `_WMI_LOGGER_CONTEXT`: configuration, counters, and clock.
-pub fn logger(l: &etw::EtwLogger) -> View {
-    etw_logger(l).into_view()
-}
-
 /// `!wmitrace.strdump`: every active logger.
-pub fn logger_table(table: &EtwLoggerTableDetail) -> View {
+pub fn logger_table(table: &EtwLoggerTableDetail) -> EtwLoggerTable {
     EtwLoggerTable {
         silo_state: Hex(table.silo_state.0),
         context_array: Hex(table.context_array.0),
         max_loggers: table.max_loggers,
-        loggers: table.loggers.iter().map(etw_logger).collect(),
+        loggers: table.loggers.iter().map(logger).collect(),
     }
-    .into_view()
 }
 
 fn buffer(b: &etw::EtwBuffer) -> EtwBuffer {
@@ -287,13 +281,12 @@ fn buffer(b: &etw::EtwBuffer) -> EtwBuffer {
 }
 
 /// `!wmitrace.strdump <logger>`: a logger and the buffers on its GlobalList.
-pub fn logger_buffers(detail: &EtwLoggerBuffersDetail) -> View {
+pub fn logger_buffers(detail: &EtwLoggerBuffersDetail) -> EtwLoggerBuffers {
     EtwLoggerBuffers {
-        logger: etw_logger(&detail.logger),
+        logger: logger(&detail.logger),
         buffers: detail.buffers.iter().map(buffer).collect(),
         list_stop: detail.list_stop.clone(),
     }
-    .into_view()
 }
 
 fn event(e: &etw::EtwEvent) -> EtwEvent {
@@ -350,9 +343,9 @@ fn event(e: &etw::EtwEvent) -> EtwEvent {
 }
 
 /// `!wmitrace.logdump`: a logger's in-memory events, oldest first.
-pub fn event_dump(dump: &EtwEventDumpDetail) -> View {
+pub fn event_dump(dump: &EtwEventDumpDetail) -> EtwEventDump {
     EtwEventDump {
-        logger: etw_logger(&dump.logger),
+        logger: logger(&dump.logger),
         buffers_walked: dump.buffers_walked,
         list_stop: dump.list_stop.clone(),
         total_events: dump.total_events,
@@ -370,5 +363,4 @@ pub fn event_dump(dump: &EtwEventDumpDetail) -> View {
         message_format_note: dump.message_format_note.clone(),
         events: dump.events.iter().map(event).collect(),
     }
-    .into_view()
 }

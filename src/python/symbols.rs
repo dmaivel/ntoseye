@@ -4,13 +4,14 @@ use pyo3::prelude::*;
 
 use super::context::Space;
 use super::handle::Owner;
-use super::{err, raise, symbol_not_found, view_record, view_records};
+use super::{err, raise, symbol_not_found};
 use crate::breakpoints::BreakpointSpec;
 use crate::expr::Expr;
 use crate::session::Session;
 use crate::symbols::{parse_source_paths, parse_symbol_sources};
 use crate::types::{Dtb, VirtAddr};
-use crate::view::{self, View};
+use crate::view::shape::Typed;
+use crate::view::{self};
 
 /// Symbol lookup scoped to an address space: `dbg.symbols`, `proc.symbols`.
 #[pyclass(module = "ntoseye")]
@@ -80,20 +81,18 @@ impl Symbols {
         &self,
         py: Python<'py>,
         name: &str,
-    ) -> PyResult<Vec<Bound<'py, view::symbols::py::SymbolCandidate>>> {
+    ) -> PyResult<Typed<'py, Vec<view::symbols::SymbolCandidate>>> {
         let space = &self.space;
         let candidates = scoped(py, &self.owner, space, |session| {
             let dtb = space.dtb(&session.target)?;
             Ok(session.target.symbols.find_symbol_candidates(dtb, name))
         })?;
-        view_records(
+        Typed::new(
             py,
-            &View::List(
-                candidates
-                    .iter()
-                    .map(view::symbols::symbol_candidate)
-                    .collect(),
-            ),
+            candidates
+                .iter()
+                .map(view::symbols::symbol_candidate)
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -102,17 +101,16 @@ impl Symbols {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Option<Bound<'py, view::symbols::py::Symbol>>> {
+    ) -> PyResult<Typed<'py, Option<view::symbols::Symbol>>> {
         let nearest = scoped(py, &self.owner, &self.space, |session| {
             Ok(session
                 .target
                 .nearest_symbol_current_context(VirtAddr(addr)))
         })?;
-        nearest
-            .map(|(module, name, offset)| {
-                view_record(py, &view::symbols::symbol(addr, module, name, offset))
-            })
-            .transpose()
+        Typed::new(
+            py,
+            nearest.map(|(module, name, offset)| view::symbols::symbol(addr, module, name, offset)),
+        )
     }
 
     /// Fuzzy-search symbol names; `module!query` scopes the search to a module.
@@ -122,21 +120,19 @@ impl Symbols {
         py: Python<'py>,
         query: &str,
         limit: usize,
-    ) -> PyResult<Vec<Bound<'py, view::symbols::py::SymbolSearchMatch>>> {
+    ) -> PyResult<Typed<'py, Vec<view::symbols::SymbolSearchMatch>>> {
         if !(1..=500).contains(&limit) {
             return Err(raise("limit must be in range 1-500"));
         }
         let results = scoped(py, &self.owner, &self.space, |session| {
             Ok(session.target.search_symbols(query, limit))
         })?;
-        view_records(
+        Typed::new(
             py,
-            &View::List(
-                results
-                    .iter()
-                    .map(view::symbols::symbol_search_match)
-                    .collect(),
-            ),
+            results
+                .iter()
+                .map(view::symbols::symbol_search_match)
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -145,14 +141,11 @@ impl Symbols {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Option<Bound<'py, view::symbols::py::SourceLocation>>> {
+    ) -> PyResult<Typed<'py, Option<view::symbols::SourceLocation>>> {
         let location = scoped(py, &self.owner, &self.space, |session| {
             Ok(session.target.source_location(VirtAddr(addr)))
         })?;
-        location
-            .as_ref()
-            .map(|location| view_record(py, &view::symbols::source_location(location).into_view()))
-            .transpose()
+        Typed::new(py, location.as_ref().map(view::symbols::source_location))
     }
 
     /// Resolve a source file and line to every matching loaded address.
@@ -172,7 +165,7 @@ impl Symbols {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Vec<Bound<'py, view::symbols::py::ProcedureLocal>>> {
+    ) -> PyResult<Typed<'py, Vec<view::symbols::ProcedureLocal>>> {
         let rows = scoped(py, &self.owner, &self.space, |session| {
             let locals = session
                 .target
@@ -184,14 +177,14 @@ impl Symbols {
                 .map(view::symbols::procedure_local_layout)
                 .collect::<Vec<_>>())
         })?;
-        view_records(py, &View::List(rows))
+        Typed::new(py, rows)
     }
 
     /// Reload symbols in this space and re-resolve symbolic breakpoints.
     fn reload<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::module::py::SymbolReloadReport>> {
+    ) -> PyResult<Typed<'py, view::module::SymbolReloadReport>> {
         let report = scoped(py, &self.owner, &self.space, |session| {
             let report = session.target.reload_module_symbols(None).map_err(err)?;
             session
@@ -200,7 +193,7 @@ impl Symbols {
                 .map_err(err)?;
             Ok(view::module::module_symbol_report(&report))
         })?;
-        view_record(py, &report)
+        Typed::new(py, report)
     }
 
     /// Ordered symbol sources (`.sympath`); assignment replaces the full path.

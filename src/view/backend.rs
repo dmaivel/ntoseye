@@ -1,7 +1,6 @@
 //! Debug-backend [`View`] builders: the capability matrix and
 //! captured guest debug output.
 
-use super::View;
 use super::shape::shapes;
 use crate::dbg_backend::{self, DebugLine, DebugOutputPage};
 
@@ -37,13 +36,12 @@ shapes! {
 }
 
 /// A page of captured guest debug output plus the cursor for the next poll.
-pub fn debug_log(page: &DebugOutputPage) -> View {
+pub fn debug_log(page: &DebugOutputPage) -> DebugLog {
     DebugLog {
         lines: page.lines.iter().map(debug_log_line).collect(),
         next_seq: page.next_seq,
         dropped: page.dropped,
     }
-    .into_view()
 }
 
 /// One captured guest debug output line.

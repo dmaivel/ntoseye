@@ -12,14 +12,14 @@ use super::args::UntilFlow;
 use super::handle::{Debugger, require_halted};
 use super::stop::{Stop, from_outcome};
 use super::symbols::Location;
-use super::{err, raise, timeout_arg, view_record};
+use super::{err, raise, timeout_arg};
 use crate::dbg_backend::ContinueDisposition;
 use crate::disasm::ControlFlow;
 use crate::error::Result as CoreResult;
 use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode};
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::execution::py::CallTrace;
+use crate::view::shape::Typed;
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };
@@ -312,14 +312,14 @@ impl UntilFlow {
 pub fn trace_calls<'py>(
     dbg: &Bound<'py, Debugger>,
     limit: usize,
-) -> PyResult<Bound<'py, CallTrace>> {
+) -> PyResult<Typed<'py, view::execution::CallTrace>> {
     reject_condition_mutation()?;
     let trace = dbg.get().with_session(|session| {
         require_halted(session, "trace_calls")?;
         session.trace_calls(limit).map_err(err)
     })?;
     prune_conditions(dbg)?;
-    view_record(dbg.py(), &view::execution::call_trace(&trace))
+    Typed::new(dbg.py(), view::execution::call_trace(&trace))
 }
 
 pub fn interrupt(dbg: &Bound<'_, Debugger>) -> PyResult<Py<Stop>> {

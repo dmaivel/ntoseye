@@ -2,7 +2,6 @@
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 
-use super::View;
 use super::process::{process, thread};
 use super::shape::{Hex, Omit, shapes, unions};
 use super::symbols::source_location;
@@ -337,7 +336,7 @@ unions! {
     }
 }
 
-pub fn vcpu(v: &VcpuInfo) -> View {
+pub fn vcpu(v: &VcpuInfo) -> VcpuStatus {
     VcpuStatus {
         id: v.id.clone(),
         rip: v.rip.map(Hex),
@@ -346,11 +345,10 @@ pub fn vcpu(v: &VcpuInfo) -> View {
         saved_vtl: v.saved_vtl.clone(),
         error: v.error.clone(),
     }
-    .into_view()
 }
 
 /// One code-breakpoint/data-watchpoint row.
-pub fn breakpoint(bp: &Breakpoint) -> View {
+pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
     BreakpointStatus {
         id: bp.id,
         address: bp.resolved_address().map(|address| Hex(address.0)),
@@ -372,7 +370,6 @@ pub fn breakpoint(bp: &Breakpoint) -> View {
         watch_access: bp.watch_access_name(),
         watch_length: bp.watch_length(),
     }
-    .into_view()
 }
 
 pub fn run_status(status: &session::RunStatus) -> RunStatus {
@@ -433,7 +430,7 @@ fn arm64_codes(codes: &[Arm64CodeDetail]) -> Vec<Arm64UnwindCode> {
 
 /// `.fnent`: the function-table entry covering an address and its unwind
 /// info, then each chained parent's.
-pub fn function_entry(detail: &FunctionEntryDetail) -> View {
+pub fn function_entry(detail: &FunctionEntryDetail) -> FunctionEntry {
     let base = detail.image_base;
     let va = |rva: u32| Hex(base.wrapping_add(u64::from(rva)));
     let handler = |handler: &Option<HandlerDetail>| {
@@ -536,11 +533,10 @@ pub fn function_entry(detail: &FunctionEntryDetail) -> View {
         entries,
         incomplete: detail.incomplete.clone(),
     }
-    .into_view()
 }
 
 /// A `wt` call trace.
-pub fn call_trace(trace: &session::CallTrace) -> View {
+pub fn call_trace(trace: &session::CallTrace) -> CallTrace {
     let (end, error) = match &trace.end {
         CallTraceEnd::Returned => ("returned", None),
         CallTraceEnd::Limit => ("limit", None),
@@ -555,7 +551,6 @@ pub fn call_trace(trace: &session::CallTrace) -> View {
         instructions: trace.instructions,
         root: call_trace_frame(&trace.root),
     }
-    .into_view()
 }
 
 fn call_trace_frame(frame: &session::CallTraceFrame) -> CallTraceFrame {

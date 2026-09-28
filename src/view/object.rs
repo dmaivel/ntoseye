@@ -3,8 +3,8 @@
 //! resources, notification callbacks, service tables, and ALPC ports.
 
 use super::process::process;
-use super::shape::{Diag, Hex, shapes};
-use super::{ListEnd, View, list_termination};
+use super::shape::{Diag, Hex, Keyed, shapes};
+use super::list::{ListEnd, list_termination};
 use crate::target::alpc::{
     AlpcConnection as AlpcConnectionDetail, AlpcField, AlpcMessageDetail, AlpcPortDetail,
     AlpcPortKind, AlpcProcessPorts as AlpcProcessPortsDetail, lpc_message_type_name,
@@ -526,10 +526,10 @@ shapes! {
         cancel_sequence_no: Option<u64>,
         extension_buffer_size: Option<u64>,
         /// The message's pointer fields this build has, by snake_case name.
-        pointers: View,
+        pointers: Keyed<VirtAddr>,
         /// The `_KALPC_MESSAGE_ATTRIBUTES` fields this build has, by
         /// snake_case name.
-        attributes: View,
+        attributes: Keyed<VirtAddr>,
     }
 
     /// A connection port a process owns, and its connections.
@@ -588,7 +588,8 @@ fn io_stack(s: &IoStackLocationInfo) -> IoStackLocation {
     }
 }
 
-fn irp_shape(irp: &IrpInfo) -> Irp {
+/// `_IRP` plus its current `_IO_STACK_LOCATION`.
+pub fn irp(irp: &IrpInfo) -> Irp {
     Irp {
         address: Hex(irp.address.0),
         r#type: irp.irp_type,
@@ -606,14 +607,9 @@ fn irp_shape(irp: &IrpInfo) -> Irp {
     }
 }
 
-/// `_IRP` plus its current `_IO_STACK_LOCATION`.
-pub fn irp(irp: &IrpInfo) -> View {
-    irp_shape(irp).into_view()
-}
-
 /// `_DRIVER_OBJECT`: header fields, device chain, and the 28-entry `IRP_MJ_*`
 /// dispatch table (each routine resolved to its nearest symbol).
-pub fn driver_object(target: &Target, d: &DriverObjectDetail) -> View {
+pub fn driver_object(target: &Target, d: &DriverObjectDetail) -> DriverObject {
     let dtb = target.kernel_dtb();
     DriverObject {
         object: Hex(d.object.0),
@@ -649,11 +645,10 @@ pub fn driver_object(target: &Target, d: &DriverObjectDetail) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
 /// `_DEVICE_OBJECT` plus its `AttachedDevice` stack.
-pub fn device_object(d: &DeviceObjectDetail) -> View {
+pub fn device_object(d: &DeviceObjectDetail) -> DeviceObject {
     DeviceObject {
         object: Hex(d.object.0),
         via_pointer: d.via_pointer,
@@ -676,11 +671,10 @@ pub fn device_object(d: &DeviceObjectDetail) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
 /// An object's executive header, type, and name, plus a directory's contents.
-pub fn object(detail: &ObjectDetail) -> View {
+pub fn object(detail: &ObjectDetail) -> ExecutiveObject {
     let o = &detail.header;
     ExecutiveObject {
         input: Hex(o.input.0),
@@ -706,12 +700,11 @@ pub fn object(detail: &ObjectDetail) -> View {
                 .collect()
         }),
     }
-    .into_view()
 }
 
 /// One notification-callback row; `symbol` is resolved by the surface (it also
 /// drives MCP's symbol filter) and passed in.
-pub fn notify_callback(c: &NotifyCallbackInfo, symbol: Option<String>) -> View {
+pub fn notify_callback(c: &NotifyCallbackInfo, symbol: Option<String>) -> NotifyCallback {
     NotifyCallback {
         kind: c.kind,
         index: c.index,
@@ -721,11 +714,10 @@ pub fn notify_callback(c: &NotifyCallbackInfo, symbol: Option<String>) -> View {
         raw: Hex(c.raw.0),
         context: Hex(c.context.0),
     }
-    .into_view()
 }
 
 /// One system-service table (the kernel SSDT or the win32k shadow).
-pub fn ssdt_table(t: &SsdtTableInfo) -> View {
+pub fn ssdt_table(t: &SsdtTableInfo) -> SsdtTable {
     SsdtTable {
         label: t.label.clone(),
         base: Hex(t.base.0),
@@ -741,11 +733,10 @@ pub fn ssdt_table(t: &SsdtTableInfo) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
 /// One discovered in-flight IRP plus the context it was found in.
-pub fn irp_hit(h: &IrpHit) -> View {
+pub fn irp_hit(h: &IrpHit) -> InFlightIrp {
     InFlightIrp {
         irp: Hex(h.irp.0),
         source: h.source,
@@ -759,11 +750,10 @@ pub fn irp_hit(h: &IrpHit) -> View {
         driver: h.driver.clone(),
         device: h.device.map(|d| Hex(d.0)),
     }
-    .into_view()
 }
 
 /// A `_DRIVER_OBJECT` as enumerated from the object directory.
-pub fn driver_object_info(driver: &DriverObjectInfo) -> View {
+pub fn driver_object_info(driver: &DriverObjectInfo) -> DriverObjectSummary {
     DriverObjectSummary {
         name: driver.name.clone(),
         object: Hex(driver.object.0),
@@ -772,10 +762,9 @@ pub fn driver_object_info(driver: &DriverObjectInfo) -> View {
         device_object: Hex(driver.device_object.0),
         driver_unload: Hex(driver.driver_unload.0),
     }
-    .into_view()
 }
 
-fn handle_entry_shape(entry: &HandleEntryDetail) -> HandleEntry {
+pub fn handle_entry(entry: &HandleEntryDetail) -> HandleEntry {
     HandleEntry {
         handle: Hex(entry.handle),
         entry: Hex(entry.entry.0),
@@ -787,11 +776,7 @@ fn handle_entry_shape(entry: &HandleEntryDetail) -> HandleEntry {
     }
 }
 
-pub fn handle_entry(entry: &HandleEntryDetail) -> View {
-    handle_entry_shape(entry).into_view()
-}
-
-pub fn handle_table(summary: &HandleTableSummary) -> View {
+pub fn handle_table(summary: &HandleTableSummary) -> HandleTable {
     HandleTable {
         process: process(&summary.process),
         table: Hex(summary.table.0),
@@ -800,12 +785,11 @@ pub fn handle_table(summary: &HandleTableSummary) -> View {
         scanned_handles: summary.scanned_handles,
         skipped_entries: summary.skipped_entries,
         truncated: summary.truncated,
-        entries: summary.entries.iter().map(handle_entry_shape).collect(),
+        entries: summary.entries.iter().map(handle_entry).collect(),
     }
-    .into_view()
 }
 
-pub fn file_object(file: &FileObjectDetail) -> View {
+pub fn file_object(file: &FileObjectDetail) -> FileObject {
     let hex = |value: &VirtAddr| Hex(value.0);
     let flag = |value: &bool| *value;
     FileObject {
@@ -833,10 +817,9 @@ pub fn file_object(file: &FileObjectDetail) -> View {
         shared_write: Diag::of(&file.shared_write, flag),
         shared_delete: Diag::of(&file.shared_delete, flag),
     }
-    .into_view()
 }
 
-fn resource_shape(resource: &ResourceDetail) -> ExecutiveResource {
+pub fn resource(resource: &ResourceDetail) -> ExecutiveResource {
     ExecutiveResource {
         address: Hex(resource.address.0),
         active_count: Diag::of(&resource.active_count, |value| (*value).into()),
@@ -856,22 +839,17 @@ fn resource_shape(resource: &ResourceDetail) -> ExecutiveResource {
     }
 }
 
-pub fn resource(resource: &ResourceDetail) -> View {
-    resource_shape(resource).into_view()
-}
-
-pub fn resource_list(summary: &ResourceListSummary) -> View {
+pub fn resource_list(summary: &ResourceListSummary) -> ResourceList {
     ResourceList {
         head: Hex(summary.head.0),
-        resources: summary.resources.iter().map(resource_shape).collect(),
+        resources: summary.resources.iter().map(resource).collect(),
         termination: list_termination(&summary.termination),
     }
-    .into_view()
 }
 
 fn irp_find_entry(entry: &IrpFindEntry) -> PoolIrp {
     PoolIrp {
-        irp: irp_shape(&entry.irp),
+        irp: irp(&entry.irp),
         pool_header: entry.pool_header.map(|header| Hex(header.0)),
         tag: entry.tag.clone(),
         original_file_object: Hex(entry.original_file_object.0),
@@ -882,7 +860,7 @@ fn irp_find_entry(entry: &IrpFindEntry) -> PoolIrp {
 }
 
 /// `!irpfind`'s pool scan and the IRPs it found.
-pub fn irp_find(detail: &IrpFindDetail) -> View {
+pub fn irp_find(detail: &IrpFindDetail) -> IrpFindResult {
     IrpFindResult {
         pool: match detail.pool {
             IrpPool::NonPaged => "nonpaged",
@@ -902,11 +880,10 @@ pub fn irp_find(detail: &IrpFindDetail) -> View {
         interrupted: detail.interrupted,
         restart: detail.restart.map(|restart| Hex(restart.0)),
     }
-    .into_view()
 }
 
 /// `!htrace`: a process's handle traces, newest first.
-pub fn handle_traces(detail: &HandleTraceDetail) -> View {
+pub fn handle_traces(detail: &HandleTraceDetail) -> HandleTraces {
     HandleTraces {
         process: process(&detail.process),
         object_table: Hex(detail.object_table.0),
@@ -935,7 +912,6 @@ pub fn handle_traces(detail: &HandleTraceDetail) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
 fn alpc_kind(kind: Option<AlpcPortKind>) -> Option<&'static str> {
@@ -943,13 +919,8 @@ fn alpc_kind(kind: Option<AlpcPortKind>) -> Option<&'static str> {
 }
 
 /// ALPC fields by snake_case name: which ones exist depends on the build.
-fn alpc_fields(fields: &[AlpcField]) -> View {
-    View::Object(
-        fields
-            .iter()
-            .map(|field| (field.key, View::Hex(field.value.0)))
-            .collect(),
-    )
+fn alpc_fields(fields: &[AlpcField]) -> Keyed<VirtAddr> {
+    Keyed(fields.iter().map(|field| (field.key, field.value)).collect())
 }
 
 fn alpc_connection(connection: &AlpcConnectionDetail) -> AlpcConnection {
@@ -965,7 +936,7 @@ fn alpc_connection(connection: &AlpcConnectionDetail) -> AlpcConnection {
 }
 
 /// `!alpc /p`: a port, its queues, and a connection port's connections.
-pub fn alpc_port(port: &AlpcPortDetail) -> View {
+pub fn alpc_port(port: &AlpcPortDetail) -> AlpcPort {
     let hex = |value: Option<VirtAddr>| value.map(|at| Hex(at.0));
     AlpcPort {
         address: Hex(port.address.0),
@@ -1003,11 +974,10 @@ pub fn alpc_port(port: &AlpcPortDetail) -> View {
         connections: port.connections.iter().map(alpc_connection).collect(),
         connection_termination: port.connection_termination.as_ref().map(list_termination),
     }
-    .into_view()
 }
 
 /// `!alpc /m`: a message, its state, and the port queue holding it.
-pub fn alpc_message(message: &AlpcMessageDetail) -> View {
+pub fn alpc_message(message: &AlpcMessageDetail) -> AlpcMessage {
     AlpcMessage {
         address: Hex(message.address.0),
         message_id: message.message_id,
@@ -1034,12 +1004,11 @@ pub fn alpc_message(message: &AlpcMessageDetail) -> View {
         pointers: alpc_fields(&message.pointers),
         attributes: alpc_fields(&message.attributes),
     }
-    .into_view()
 }
 
 /// `!alpc /lpp`: the connection ports a process owns and the client ports it
 /// holds.
-pub fn alpc_process_ports(ports: &AlpcProcessPortsDetail) -> View {
+pub fn alpc_process_ports(ports: &AlpcProcessPortsDetail) -> AlpcProcessPorts {
     AlpcProcessPorts {
         process: process(&ports.process),
         created: ports
@@ -1073,5 +1042,4 @@ pub fn alpc_process_ports(ports: &AlpcProcessPortsDetail) -> View {
         advertised_handles: ports.advertised_handles,
         skipped_entries: ports.skipped_entries,
     }
-    .into_view()
 }

@@ -11,15 +11,15 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         "!qlocks" | "qlocks" => args
             .target()
             .queued_locks()
-            .map(|detail| view::hardware::queued_locks(&detail)),
+            .map(|detail| view::hardware::queued_locks(&detail).into_view()),
         "!ipi" | "ipi" => args.opt_u16_value(0, "processor").and_then(|processor| {
             let detail = args.target().ipi_state(processor)?;
-            Ok(view::hardware::ipi(&detail))
+            Ok(view::hardware::ipi(&detail).into_view())
         }),
         "!pcitree" | "pcitree" => args
             .target()
             .pci_tree()
-            .map(|tree| view::hardware::pci_tree(&tree)),
+            .map(|tree| view::hardware::pci_tree(&tree).into_view()),
         "!pci" | "pci" => pci(args),
         _ => return None,
     })
@@ -36,5 +36,5 @@ fn pci(args: &mut Args<'_, '_>) -> Result<View> {
         ..request.query
     };
     let scan = args.state.ctx.scan_pci(&query)?;
-    Ok(view::hardware::pci(&scan, request.raw))
+    Ok(view::hardware::pci(&scan, request.raw).into_view())
 }

@@ -4,7 +4,6 @@ use crate::target::pnp::{
     self, DevNodeDetail, DeviceStackDetail, DeviceStackEntry, PnpTriageDetail, StateHistoryEntry,
 };
 
-use super::View;
 use super::shape::{Hex, shapes};
 
 shapes! {
@@ -157,7 +156,7 @@ fn device_stack_entry(entry: &DeviceStackEntry) -> DeviceStackLayer {
 }
 
 /// `_DEVICE_NODE` fields plus the optional bounded flat subtree.
-pub fn devnode(detail: &DevNodeDetail) -> View {
+pub fn devnode(detail: &DevNodeDetail) -> DevNode {
     DevNode {
         address: Hex(detail.address.0),
         pdo: Hex(detail.pdo.0),
@@ -186,11 +185,10 @@ pub fn devnode(detail: &DevNodeDetail) -> View {
         subtree: detail.subtree.iter().map(devnode_summary).collect(),
         subtree_truncated: detail.subtree_truncated,
     }
-    .into_view()
 }
 
 /// Ordered top-filter-to-PDO device stack and its PDO devnode summary.
-pub fn device_stack(detail: &DeviceStackDetail) -> View {
+pub fn device_stack(detail: &DeviceStackDetail) -> DeviceStack {
     DeviceStack {
         argument: Hex(detail.argument.0),
         requested_device: Hex(detail.requested_device.0),
@@ -199,11 +197,10 @@ pub fn device_stack(detail: &DeviceStackDetail) -> View {
         pdo_devnode_error: detail.pdo_devnode_error.clone(),
         truncated: detail.truncated,
     }
-    .into_view()
 }
 
 /// PnP triage partitions of one bounded root tree.
-pub fn pnp_triage(detail: &PnpTriageDetail) -> View {
+pub fn pnp_triage(detail: &PnpTriageDetail) -> PnpTriage {
     PnpTriage {
         problems: detail.problems.iter().map(devnode_summary).collect(),
         not_started: detail.not_started.iter().map(devnode_summary).collect(),
@@ -212,5 +209,4 @@ pub fn pnp_triage(detail: &PnpTriageDetail) -> View {
         started: detail.started,
         truncated: detail.truncated,
     }
-    .into_view()
 }

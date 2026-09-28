@@ -17,17 +17,17 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             node.and_then(|node| {
                 let node = node.filter(|address| !address.is_zero());
                 let detail = args.target().inspect_devnode(node, recurse)?;
-                Ok(view::pnp::devnode(&detail))
+                Ok(view::pnp::devnode(&detail).into_view())
             })
         }
         "!devstack" | "devstack" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_device_stack(address)?;
-            Ok(view::pnp::device_stack(&detail))
+            Ok(view::pnp::device_stack(&detail).into_view())
         }),
         "!pnptriage" | "pnptriage" => args
             .target()
             .pnp_triage()
-            .map(|detail| view::pnp::pnp_triage(&detail)),
+            .map(|detail| view::pnp::pnp_triage(&detail).into_view()),
         _ => return None,
     })
 }

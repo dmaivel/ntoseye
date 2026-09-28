@@ -1,7 +1,7 @@
 //! usermode: [`View`] builders for the structured inspectors.
 
 use super::shape::{Diag, Hex, shapes};
-use super::{ListEnd, View, list_termination};
+use super::list::{ListEnd, list_termination};
 use crate::target::usermode::{
     self as target, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
     LoaderListHeads, LoaderModuleDetail, LoaderModulesDetail, Peb32Detail, PebDetail,
@@ -359,7 +359,7 @@ fn peb32(detail: &Peb32Detail) -> Peb32 {
     }
 }
 
-pub fn peb(detail: &PebDetail) -> View {
+pub fn peb(detail: &PebDetail) -> Peb {
     Peb {
         address: hex(&detail.address),
         image_base_address: Diag::of(&detail.image_base_address, hex),
@@ -379,7 +379,6 @@ pub fn peb(detail: &PebDetail) -> View {
         loader_lists: Diag::of(&detail.loader_lists, loader_lists),
         peb32: detail.peb32.as_ref().map(peb32),
     }
-    .into_view()
 }
 
 fn teb32(detail: &Teb32Detail) -> Teb32 {
@@ -400,7 +399,7 @@ fn teb32(detail: &Teb32Detail) -> Teb32 {
     }
 }
 
-pub fn teb(detail: &TebDetail) -> View {
+pub fn teb(detail: &TebDetail) -> Teb {
     Teb {
         address: hex(&detail.address),
         stack_base: Diag::of(&detail.stack_base, hex),
@@ -420,7 +419,6 @@ pub fn teb(detail: &TebDetail) -> View {
         client_id_unique_thread: Diag::of(&detail.client_id_unique_thread, hex),
         teb32: detail.teb32.as_ref().map(teb32),
     }
-    .into_view()
 }
 
 /// One loader-list entry (`!dlls`).
@@ -439,22 +437,20 @@ pub fn loader_module(detail: &LoaderModuleDetail) -> LoaderModule {
     }
 }
 
-pub fn loader_modules(detail: &LoaderModulesDetail) -> View {
+pub fn loader_modules(detail: &LoaderModulesDetail) -> LoaderModules {
     LoaderModules {
         modules: detail.modules.iter().map(loader_module).collect(),
         termination: list_termination(&detail.termination),
         wow64_termination: detail.wow64_termination.as_ref().map(list_termination),
     }
-    .into_view()
 }
 
 /// How a process's native and WOW64 loader lists ended.
-pub fn loader_terminations(detail: &LoaderModulesDetail) -> View {
+pub fn loader_terminations(detail: &LoaderModulesDetail) -> LoaderTerminations {
     LoaderTerminations {
         termination: list_termination(&detail.termination),
         wow64_termination: detail.wow64_termination.as_ref().map(list_termination),
     }
-    .into_view()
 }
 
 fn last_error32(detail: &LastError32Detail) -> LastError32 {
@@ -467,7 +463,7 @@ fn last_error32(detail: &LastError32Detail) -> LastError32 {
     }
 }
 
-pub fn last_error(detail: &LastErrorDetail) -> View {
+pub fn last_error(detail: &LastErrorDetail) -> LastError {
     LastError {
         teb: hex(&detail.teb),
         last_error_value: Diag::of(&detail.last_error_value, |value| *value),
@@ -476,7 +472,6 @@ pub fn last_error(detail: &LastErrorDetail) -> View {
         last_status_name: Diag::of(&detail.last_status_name, Option::clone),
         teb32: detail.teb32.as_ref().map(last_error32),
     }
-    .into_view()
 }
 
 fn self_patch_counts(detail: &target::SelfPatchCounts) -> ImageSelfPatchCounts {
@@ -529,7 +524,7 @@ fn byte_diff(detail: &target::ByteDiff) -> ImageByteDiff {
     }
 }
 
-pub fn image_check(detail: &ImageCheckDetail) -> View {
+pub fn image_check(detail: &ImageCheckDetail) -> ImageCheck {
     ImageCheck {
         module: detail.module.clone(),
         short_name: detail.short_name.clone(),
@@ -555,5 +550,4 @@ pub fn image_check(detail: &ImageCheckDetail) -> View {
         byte_diffs: detail.byte_diffs.iter().map(byte_diff).collect(),
         byte_diffs_truncated: detail.byte_diffs_truncated,
     }
-    .into_view()
 }

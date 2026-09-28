@@ -4,9 +4,9 @@ use pyo3::types::PyDict;
 use super::breakpoints::{self, Breakpoint};
 use super::handle::{Debugger, Owner};
 use super::process::Process;
+use super::raise;
 use super::record::PlainDict;
 use super::thread::{Cpu, Thread};
-use super::{raise, view_record};
 use crate::breakpoints::Breakpoint as CoreBreakpoint;
 use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck};
 use crate::guest::ProcessInfo;
@@ -14,6 +14,7 @@ use crate::session::{ContinueOutcome, ExceptionRecord};
 use crate::target::ThreadInfo;
 use crate::unwind::try_format_symbol_at;
 use crate::view;
+use crate::view::shape::Typed;
 
 /// Rust-only snapshot backing the shared properties of a typed stop.
 #[pyclass(name = "_StopContext", module = "ntoseye")]
@@ -164,7 +165,7 @@ impl Stop {
     fn record<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::bugcheck::py::ExceptionRecord>> {
+    ) -> PyResult<Typed<'py, view::bugcheck::ExceptionRecord>> {
         let context = self.check_context(py)?;
         if !matches!(self, Self::Exception { .. }) {
             return Err(raise("record() is only available on Stop.Exception"));
@@ -173,7 +174,7 @@ impl Stop {
             .record
             .as_ref()
             .ok_or_else(|| raise("no current exception record"))?;
-        view_record(py, &view::bugcheck::exception_record(None, record))
+        Typed::new(py, view::bugcheck::exception_record(None, record))
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -360,11 +361,10 @@ pub fn from_outcome(
                     .map(|info| analyze_bugcheck(&session.target, info))
                     .or_else(|| current_bugcheck(&session.target))
                     .or_else(|| bugcheck_from_dump_info(&session.target));
-                Ok(analysis.map(|analysis| view::bugcheck::bugcheck(&analysis).into_view()))
+                Ok(analysis.map(|analysis| view::bugcheck::bugcheck(&analysis)))
             })?;
             let info = bugcheck
-                .as_ref()
-                .map(|view| view_record(py, view).map(Bound::unbind))
+                .map(|bugcheck| bugcheck.into_class(py).map(Bound::unbind))
                 .transpose()?;
             Stop::Bugcheck {
                 _context: context,

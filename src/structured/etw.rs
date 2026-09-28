@@ -14,11 +14,11 @@ pub fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
             [] => args
                 .target()
                 .etw_loggers()
-                .map(|table| view::etw::logger_table(&table)),
+                .map(|table| view::etw::logger_table(&table).into_view()),
             [logger] => args
                 .target()
                 .etw_logger_buffers(logger, radix)
-                .map(|detail| view::etw::logger_buffers(&detail)),
+                .map(|detail| view::etw::logger_buffers(&detail).into_view()),
             _ => Err(Error::InvalidArgument(
                 "usage: !wmitrace.strdump [logger-id|logger-name|context-address]".into(),
             )),
@@ -28,7 +28,7 @@ pub fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
             [logger] => args
                 .target()
                 .etw_logger(logger, radix)
-                .map(|logger| view::etw::logger(&logger)),
+                .map(|logger| view::etw::logger(&logger).into_view()),
             _ => Err(Error::InvalidArgument(
                 "usage: !wmitrace.logger <logger-id|logger-name|context-address>".into(),
             )),
@@ -39,7 +39,7 @@ pub fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View>> {
                 let dump =
                     args.target()
                         .etw_log_dump(&arguments.logger, radix, arguments.most_recent)?;
-                Ok(view::etw::event_dump(&dump))
+                Ok(view::etw::event_dump(&dump).into_view())
             }),
         _ => return None,
     })

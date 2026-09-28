@@ -12,30 +12,30 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
     Some(match name {
         "!analyze" | "analyze" if !argv.iter().any(|arg| *arg == "-show" || *arg == "-hang") => {
             let report = TriageReport::build(args.state.ctx);
-            Ok(view::triage::triage_report(&report, 64))
+            Ok(view::triage::triage_report(&report, 64).into_view())
         }
         "!verifier" | "verifier" => match argv.first() {
             Some(module) => args
                 .target()
                 .verifier_driver(module)
-                .map(|detail| view::meta::verifier_driver(&detail)),
+                .map(|detail| view::meta::verifier_driver(&detail).into_view()),
             None => args
                 .target()
                 .verifier_status()
-                .map(|detail| view::meta::verifier(&detail)),
+                .map(|detail| view::meta::verifier(&detail).into_view()),
         },
         "vertarget" | "version" => args
             .state
             .ctx
             .target_version()
-            .map(|detail| view::meta::target_version(&detail)),
+            .map(|detail| view::meta::target_version(&detail).into_view()),
         ".time" => args
             .target()
             .target_time()
-            .map(|detail| view::meta::target_time(&detail)),
+            .map(|detail| view::meta::target_time(&detail).into_view()),
         "!error" | "!ntstatus" => args
             .value(0)
-            .map(|code| view::meta::error_code(&decode_error_code(code))),
+            .map(|code| view::meta::error_code(&decode_error_code(code)).into_view()),
         _ => return None,
     })
 }

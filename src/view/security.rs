@@ -1,6 +1,5 @@
 //! security: [`View`] builders for the structured inspectors.
 
-use super::View;
 use super::process::process;
 use super::shape::{Diag, Hex, shapes};
 use crate::target::security::{
@@ -164,7 +163,8 @@ shapes! {
     }
 }
 
-fn sid_shape(detail: &SidDetail) -> Sid {
+/// Render `!sid`.
+pub fn sid(detail: &SidDetail) -> Sid {
     Sid {
         address: Hex(detail.address.0),
         sid: detail.sid.clone(),
@@ -175,11 +175,6 @@ fn sid_shape(detail: &SidDetail) -> Sid {
     }
 }
 
-/// Render `!sid`.
-pub fn sid(detail: &SidDetail) -> View {
-    sid_shape(detail).into_view()
-}
-
 fn ace(detail: &AceDetail) -> Ace {
     Ace {
         index: detail.index,
@@ -188,11 +183,12 @@ fn ace(detail: &AceDetail) -> Ace {
         flags: Hex(detail.flags.into()),
         flag_names: detail.flag_names.clone(),
         access_mask: Diag::of(&detail.access_mask, |value| Hex((*value).into())),
-        sid: Diag::of(&detail.sid, sid_shape),
+        sid: Diag::of(&detail.sid, sid),
     }
 }
 
-fn acl_shape(detail: &AclDetail) -> Acl {
+/// Render `!acl`.
+pub fn acl(detail: &AclDetail) -> Acl {
     Acl {
         address: Hex(detail.address.0),
         revision: detail.revision,
@@ -204,41 +200,31 @@ fn acl_shape(detail: &AclDetail) -> Acl {
     }
 }
 
-/// Render `!acl`.
-pub fn acl(detail: &AclDetail) -> View {
-    acl_shape(detail).into_view()
-}
-
-fn security_descriptor_shape(detail: &SecurityDescriptorDetail) -> SecurityDescriptor {
+/// Render `!sd`.
+pub fn security_descriptor(detail: &SecurityDescriptorDetail) -> SecurityDescriptor {
     SecurityDescriptor {
         address: Hex(detail.address.0),
         revision: Diag::of(&detail.revision, |value| *value),
         control: Diag::of(&detail.control, |value| Hex((*value).into())),
         control_names: Diag::of(&detail.control_names, String::clone),
         self_relative: Diag::of(&detail.self_relative, |value| *value),
-        owner: Diag::of(&detail.owner, |sid| sid.as_ref().map(sid_shape)),
-        group: Diag::of(&detail.group, |sid| sid.as_ref().map(sid_shape)),
-        dacl: Diag::of(&detail.dacl, |acl| acl.as_ref().map(acl_shape)),
-        sacl: Diag::of(&detail.sacl, |acl| acl.as_ref().map(acl_shape)),
+        owner: Diag::of(&detail.owner, |value| value.as_ref().map(sid)),
+        group: Diag::of(&detail.group, |value| value.as_ref().map(sid)),
+        dacl: Diag::of(&detail.dacl, |value| value.as_ref().map(acl)),
+        sacl: Diag::of(&detail.sacl, |value| value.as_ref().map(acl)),
         unsupported_revision: detail.unsupported_revision,
     }
 }
 
-/// Render `!sd`.
-pub fn security_descriptor(detail: &SecurityDescriptorDetail) -> View {
-    security_descriptor_shape(detail).into_view()
-}
-
 /// Render `!objsd`.
-pub fn object_security(detail: &ObjectSecurityDetail) -> View {
+pub fn object_security(detail: &ObjectSecurityDetail) -> ObjectSecurity {
     ObjectSecurity {
         object: Hex(detail.object.0),
         header: Hex(detail.header.0),
         fast_reference: Hex(detail.fast_reference),
         descriptor_address: Hex(detail.descriptor_address.0),
-        descriptor: detail.descriptor.as_ref().map(security_descriptor_shape),
+        descriptor: detail.descriptor.as_ref().map(security_descriptor),
     }
-    .into_view()
 }
 
 fn session(detail: &SessionDetail) -> Session {
@@ -249,14 +235,13 @@ fn session(detail: &SessionDetail) -> Session {
 }
 
 /// Render `!session`.
-pub fn sessions(detail: &SessionsDetail) -> View {
+pub fn sessions(detail: &SessionsDetail) -> Sessions {
     Sessions {
         selected_session: detail.selected_session,
         sessions: detail.sessions.iter().map(session).collect(),
         process_count: detail.process_count,
         truncated: detail.truncated,
     }
-    .into_view()
 }
 
 fn session_process(detail: &SessionProcessDetail) -> SessionProcess {
@@ -267,7 +252,7 @@ fn session_process(detail: &SessionProcessDetail) -> SessionProcess {
 }
 
 /// Render `!sprocess`.
-pub fn session_processes(detail: &SessionProcessesDetail) -> View {
+pub fn session_processes(detail: &SessionProcessesDetail) -> SessionProcesses {
     SessionProcesses {
         selected_session: detail.selected_session,
         detailed: detail.detailed,
@@ -276,7 +261,6 @@ pub fn session_processes(detail: &SessionProcessesDetail) -> View {
         process_count: detail.process_count,
         truncated: detail.truncated,
     }
-    .into_view()
 }
 
 fn sid_and_attributes(sid: &security::SidAndAttributes) -> SidAndAttributes {
@@ -294,7 +278,7 @@ fn privilege(privilege: &PrivilegeInfo) -> TokenPrivilege {
 }
 
 /// Render `!token`: the current process's primary token.
-pub fn token(token: &TokenDetail) -> View {
+pub fn token(token: &TokenDetail) -> Token {
     Token {
         process: process(&token.process),
         token: Hex(token.token.0),
@@ -311,5 +295,4 @@ pub fn token(token: &TokenDetail) -> View {
             privileges.iter().map(privilege).collect()
         }),
     }
-    .into_view()
 }

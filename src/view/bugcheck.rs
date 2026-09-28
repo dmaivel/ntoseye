@@ -1,7 +1,6 @@
 //! Bugcheck [`View`] builders and the fault context they carry:
 //! decoded trap frames and exception records.
 
-use super::View;
 use super::shape::{Hex, shapes, unions};
 use crate::bugchecks::{self, BugcheckAnalysis};
 use crate::session;
@@ -307,7 +306,7 @@ fn ktrap_frame_registers(frame: &KtrapFrame) -> KtrapFrameRegisters {
 /// A decoded `EXCEPTION_RECORD64` (`.exr`). `record_address` is where the
 /// record was read from; `None` for the current event's record, which is
 /// reconstructed from the stop rather than read from guest memory.
-pub fn exception_record(record_address: Option<u64>, record: &session::ExceptionRecord) -> View {
+pub fn exception_record(record_address: Option<u64>, record: &session::ExceptionRecord) -> ExceptionRecord {
     ExceptionRecord {
         record_address: record_address.map(Hex),
         code: Hex(record.code.into()),
@@ -317,17 +316,15 @@ pub fn exception_record(record_address: Option<u64>, record: &session::Exception
         exception_address: Hex(record.address),
         parameters: record.parameters.iter().copied().map(Hex).collect(),
     }
-    .into_view()
 }
 
 /// A decoded `_KTRAP_FRAME` shared by structured host APIs.
-pub fn trap_frame(frame: &KtrapFrame, rip_symbol: Option<String>) -> View {
+pub fn trap_frame(frame: &KtrapFrame, rip_symbol: Option<String>) -> TrapFrame {
     TrapFrame {
         address: Hex(frame.address),
         rip_symbol,
         frame: ktrap_frame_registers(frame),
     }
-    .into_view()
 }
 
 /// A trap frame carried by a bugcheck parameter: its address, the symbol at

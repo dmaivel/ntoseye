@@ -14,14 +14,15 @@ use super::record::PlainDict;
 use super::symbols::{self, Symbols};
 use super::thread::Threads;
 use super::types::{Struct, Types};
-use super::{err, view_dict, view_record};
+use super::{err, view_dict};
 use crate::guest::ProcessInfo;
 use crate::target::heap::HeapSelector;
 use crate::target::mm::MemoryRegionInfo;
 use crate::target::sched::ApcSelector;
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::mm::py::{MemoryBasicInformation, MemoryRegion};
+use crate::view::mm::py::MemoryRegion;
+use crate::view::shape::Typed;
 
 /// Running processes keyed by PID (`dbg.processes`). Iterating walks the
 /// process list afresh; `find(name)` matches image names.
@@ -278,7 +279,7 @@ impl Process {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, MemoryBasicInformation>> {
+    ) -> PyResult<Typed<'py, view::mm::MemoryBasicInformation>> {
         let info = self.info.clone();
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
@@ -286,15 +287,15 @@ impl Process {
                 .virtual_query(&info, VirtAddr(address))
                 .map_err(err)
         })?;
-        view_record(py, &view::mm::vprot(&detail))
+        Typed::new(py, view::mm::vprot(&detail))
     }
 
     /// The process token and its security information.
-    fn token<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::security::py::Token>> {
+    fn token<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::security::Token>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_process_token().map_err(err)
         })?;
-        view_record(py, &view::security::token(&detail))
+        Typed::new(py, view::security::token(&detail))
     }
 
     /// Decode a handle in this process's handle table.
@@ -302,11 +303,11 @@ impl Process {
         &self,
         py: Python<'py>,
         value: u64,
-    ) -> PyResult<Bound<'py, view::object::py::HandleEntry>> {
+    ) -> PyResult<Typed<'py, view::object::HandleEntry>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_handle(value).map_err(err)
         })?;
-        view_record(py, &view::object::handle_entry(&detail))
+        Typed::new(py, view::object::handle_entry(&detail))
     }
 
     /// Enumerate up to `limit` handles in this process's handle table.
@@ -315,11 +316,11 @@ impl Process {
         &self,
         py: Python<'py>,
         limit: usize,
-    ) -> PyResult<Bound<'py, view::object::py::HandleTable>> {
+    ) -> PyResult<Typed<'py, view::object::HandleTable>> {
         let summary = self.owner.with_in(py, &self.context(), |session| {
             session.target.enumerate_handles(limit).map_err(err)
         })?;
-        view_record(py, &view::object::handle_table(&summary))
+        Typed::new(py, view::object::handle_table(&summary))
     }
 
     /// The stacks handle tracing recorded for this process's handles, newest
@@ -331,24 +332,24 @@ impl Process {
         py: Python<'py>,
         handle: Option<u64>,
         max_traces: Option<usize>,
-    ) -> PyResult<Bound<'py, view::object::py::HandleTraces>> {
+    ) -> PyResult<Typed<'py, view::object::HandleTraces>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
                 .target
                 .handle_traces(&self.info, handle, max_traces)
                 .map_err(err)
         })?;
-        view_record(py, &view::object::handle_traces(&detail))
+        Typed::new(py, view::object::handle_traces(&detail))
     }
 
     /// Decode kernel and user APC queues for this process (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::sched::py::ApcQueues>> {
+    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::sched::ApcQueues>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
                 .inspect_apcs(ApcSelector::Process(self.info.pid))
                 .map_err(err)
         })?;
-        view_record(py, &view::sched::apcs(&detail))
+        Typed::new(py, view::sched::apcs(&detail))
     }
 
     /// Evaluate a debugger expression in this process's symbol scope.
@@ -360,7 +361,7 @@ impl Process {
     /// `eprocess`, `wow64`), the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::process::process(&self.info).into_view())
+        view_dict(py, view::process::process(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -409,7 +410,7 @@ impl Regions {
         self.snapshot(py)?
             .iter()
             .find(|region| addr >= region.start.0 && addr < region.end.0)
-            .map(|region| view_record(py, &view::mm::memory_region(region)))
+            .map(|region| view::mm::memory_region(region).into_class(py))
             .transpose()
     }
 
@@ -427,7 +428,9 @@ impl Regions {
             .snapshot(py)?
             .iter()
             .map(|region| {
-                view_record::<MemoryRegion>(py, &view::mm::memory_region(region)).map(Bound::unbind)
+                view::mm::memory_region(region)
+                    .into_class(py)
+                    .map(Bound::unbind)
             })
             .collect::<PyResult<_>>()?;
         Ok(MemoryRegionIterator::new(regions))
@@ -475,13 +478,13 @@ impl Heaps {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Bound<'py, view::heap::py::HeapBlockSearch>> {
+    ) -> PyResult<Typed<'py, view::heap::HeapBlockSearch>> {
         let ctx = Context::process(self.info.clone());
         let detail = self.owner.with_in(py, &ctx, |session| {
             symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;
             session.target.find_heap_block(VirtAddr(addr)).map_err(err)
         })?;
-        view_record(py, &view::heap::heap_block_search(&detail))
+        Typed::new(py, view::heap::heap_block_search(&detail))
     }
 
     fn get(&self, py: Python<'_>, index: usize) -> PyResult<Option<Heap>> {
@@ -556,7 +559,7 @@ impl Heap {
         &self,
         py: Python<'py>,
         list_entries: bool,
-    ) -> PyResult<Bound<'py, view::heap::py::HeapDetail>> {
+    ) -> PyResult<Typed<'py, view::heap::HeapDetail>> {
         let ctx = Context::process(self.info.clone());
         let detail = self.owner.with_in(py, &ctx, |session| {
             symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;
@@ -565,7 +568,7 @@ impl Heap {
                 .inspect_heap(HeapSelector::Address(self.address), list_entries)
                 .map_err(err)
         })?;
-        view_record(py, &view::heap::heap(&detail))
+        Typed::new(py, view::heap::heap(&detail))
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {

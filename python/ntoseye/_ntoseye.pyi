@@ -252,7 +252,7 @@ class AlpcMessage(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def attributes(self, /) -> Any:
+    def attributes(self, /) -> Record:
         """
         The `_KALPC_MESSAGE_ATTRIBUTES` fields this build has, by
         snake_case name.
@@ -292,7 +292,7 @@ class AlpcMessage(BaseRecord):
         WinDbg's port type name of the owner port.
         """
     @property
-    def pointers(self, /) -> Any:
+    def pointers(self, /) -> Record:
         """
         The message's pointer fields this build has, by snake_case name.
         """
@@ -6035,7 +6035,7 @@ class IpiProcessor(BaseRecord):
         Processors whose pending list holds a request from this one.
         """
     @property
-    def fields(self, /) -> Any:
+    def fields(self, /) -> Record:
         """
         The `_KPRCB` IPI fields this build has, by name, each a
         `Diagnostic` of its value.
@@ -7278,7 +7278,7 @@ class Module:
         with the CodeView PDB name, GUID, and age, and its symbol state and
         local PDB file.
         """
-    def inspect(self, /) -> BaseRecord:
+    def inspect(self, /) -> LoadedModule |LoaderModule:
         """
         Symbol status, load diagnostics and PDB identity (`lmv`).
         """

@@ -11,25 +11,25 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         "!token" => args
             .target()
             .inspect_process_token()
-            .map(|token| view::security::token(&token)),
+            .map(|token| view::security::token(&token).into_view()),
         "!sd" | "sd" => args.addr(0).and_then(|address| {
             let annotate = argv.get(1).is_some_and(|arg| *arg == "1");
             let detail = args
                 .target()
                 .inspect_security_descriptor(address, annotate)?;
-            Ok(view::security::security_descriptor(&detail))
+            Ok(view::security::security_descriptor(&detail).into_view())
         }),
         "!acl" | "acl" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_acl(address)?;
-            Ok(view::security::acl(&detail))
+            Ok(view::security::acl(&detail).into_view())
         }),
         "!sid" | "sid" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_sid(address)?;
-            Ok(view::security::sid(&detail))
+            Ok(view::security::sid(&detail).into_view())
         }),
         "!objsd" | "objsd" => args.addr(0).and_then(|object| {
             let detail = args.target().inspect_object_security(object)?;
-            Ok(view::security::object_security(&detail))
+            Ok(view::security::object_security(&detail).into_view())
         }),
         "!session" | "session" => {
             let session = argv
@@ -39,7 +39,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .and_then(|text| text.parse::<i64>().ok());
             args.target()
                 .sessions(session)
-                .map(|detail| view::security::sessions(&detail))
+                .map(|detail| view::security::sessions(&detail).into_view())
         }
         "!sprocess" | "sprocess" => {
             let session = argv.first().and_then(|text| text.parse::<i64>().ok());
@@ -49,7 +49,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .is_some_and(|flags| flags.0 != 0);
             args.target()
                 .session_processes(session, detailed, argv.get(2).copied())
-                .map(|detail| view::security::session_processes(&detail))
+                .map(|detail| view::security::session_processes(&detail).into_view())
         }
         _ => return None,
     })

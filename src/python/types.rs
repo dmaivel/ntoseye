@@ -15,7 +15,7 @@ use super::context::Space;
 use super::handle::Owner;
 use super::record::PlainDict;
 use super::symbols::load_scope_symbols;
-use super::{err, raise, view_dict, view_record};
+use super::{err, raise, view_dict};
 use crate::backend::MemoryOps;
 use crate::error::Result as CoreResult;
 use crate::layout::{
@@ -25,7 +25,7 @@ use crate::layout::{
 use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
-use crate::view::View;
+use crate::view::shape::Typed;
 use crate::view::symbols;
 
 fn lookup_field<'a>(
@@ -153,13 +153,13 @@ impl Type {
     }
 
     /// The fields' views by name, in offset order.
-    fn field_views(&self) -> Vec<(String, View)> {
+    fn field_views(&self) -> Vec<(String, symbols::Field)> {
         let Definition::Layout(info) = &self.definition else {
             return Vec::new();
         };
         info.fields_in_order()
             .into_iter()
-            .map(|(name, field)| (name.clone(), symbols::type_field(name, field).into_view()))
+            .map(|(name, field)| (name.clone(), symbols::type_field(name, field)))
             .collect()
     }
 }
@@ -186,10 +186,10 @@ impl Type {
     fn fields<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<IndexMap<String, Bound<'py, symbols::py::Field>>> {
+    ) -> PyResult<IndexMap<String, Typed<'py, symbols::Field>>> {
         self.field_views()
             .into_iter()
-            .map(|(name, field)| Ok((name, view_record(py, &field)?)))
+            .map(|(name, field)| Ok((name, Typed::new(py, field)?)))
             .collect()
     }
 
@@ -226,7 +226,7 @@ impl Type {
         dict.set_item("size", self.size())?;
         let fields = PyDict::new(py);
         for (name, field) in self.field_views() {
-            fields.set_item(name, view_dict(py, &field)?)?;
+            fields.set_item(name, view_dict(py, field)?)?;
         }
         dict.set_item("fields", fields)?;
         if let Definition::Enum(def) = &self.definition {

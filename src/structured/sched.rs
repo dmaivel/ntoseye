@@ -15,34 +15,34 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             args.state
                 .ctx
                 .inspect_running(include_idle, include_stacks)
-                .map(|detail| view::sched::running(&detail))
+                .map(|detail| view::sched::running(&detail).into_view())
         }
         "!ready" | "ready" => args.opt_u16_value(0, "processor").and_then(|processor| {
             let detail = args.target().inspect_ready_queues(processor)?;
-            Ok(view::sched::ready_queues(&detail))
+            Ok(view::sched::ready_queues(&detail).into_view())
         }),
         "!dpcs" | "dpcs" => args
             .target()
             .inspect_dpc_queues()
-            .map(|detail| view::sched::dpc_queues(&detail)),
+            .map(|detail| view::sched::dpc_queues(&detail).into_view()),
         "!timer" | "timer" => match args.opt_addr(0) {
             Ok(Some(address)) => args
                 .target()
                 .inspect_timer(address)
-                .map(|detail| view::sched::timer(&detail)),
+                .map(|detail| view::sched::timer(&detail).into_view()),
             Ok(None) => args
                 .target()
                 .timer_list()
-                .map(|detail| view::sched::timer_list(&detail)),
+                .map(|detail| view::sched::timer_list(&detail).into_view()),
             Err(error) => Err(error),
         },
         "!apc" | "apc" => args.apc_selector().and_then(|selector| {
             let detail = args.state.ctx.inspect_apcs(selector)?;
-            Ok(view::sched::apcs(&detail))
+            Ok(view::sched::apcs(&detail).into_view())
         }),
         "!exqueue" | "exqueue" => args.opt_value(0).and_then(|flags| {
             let detail = args.state.ctx.inspect_work_queues(flags.unwrap_or(0))?;
-            Ok(view::sched::work_queues(&detail))
+            Ok(view::sched::work_queues(&detail).into_view())
         }),
         "!stacks" | "stacks" => {
             let (level, filter) = match argv.first() {
@@ -55,12 +55,12 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             args.state
                 .ctx
                 .inspect_stacks(level, filter.as_deref())
-                .map(|detail| view::sched::stacks(&detail))
+                .map(|detail| view::sched::stacks(&detail).into_view())
         }
         "!findstack" | "findstack" => match argv {
             [pattern] | [pattern, _] => findstack_level(argv.get(1).copied()).and_then(|level| {
                 let detail = args.state.ctx.inspect_findstack(pattern, level)?;
-                Ok(view::sched::findstack(&detail))
+                Ok(view::sched::findstack(&detail).into_view())
             }),
             _ => Err(Error::InvalidArgument(
                 "usage: !findstack <symbol|module> [0|1|2]".into(),
@@ -69,7 +69,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         "!uniqstack" | "uniqstack" => UniqStackOptions::parse(argv).and_then(|(_, scope)| {
             let scope = args.state.uniqstack_scope(scope)?;
             let detail = args.state.ctx.inspect_uniqstack(scope)?;
-            Ok(view::sched::uniqstack(&detail))
+            Ok(view::sched::uniqstack(&detail).into_view())
         }),
         _ => return None,
     })

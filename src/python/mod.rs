@@ -10,11 +10,10 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
-use pyo3::PyTypeCheck;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyList, PyType};
+use pyo3::types::{PyDict, PyType};
 
 #[cfg(all(feature = "cli", feature = "python-extension"))]
 use crate::cli;
@@ -22,7 +21,8 @@ use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::session::Session;
 use crate::target::meta::decode_error_code;
-use crate::view::{self, PyShape, View};
+use crate::view::shape::{Typed, ViewValue};
+use crate::view::{self, PyShape};
 use crate::{Backend, TargetSpec};
 
 pub mod args;
@@ -163,34 +163,13 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
     }
 }
 
-/// Render a neutral [`View`] object into a [`Record`](record::Record) (the shared shape with
-/// the MCP surface; here addresses come through as ints, there as hex).
-pub fn view_record<'py, T: PyTypeCheck>(py: Python<'py>, v: &View) -> PyResult<Bound<'py, T>> {
-    view::to_py(py, v, PyShape::Records)?
-        .cast_into::<T>()
-        .map_err(|e| raise(e.to_string()))
-}
-
-/// Render a neutral [`View`] object as a plain `dict`: an entity's `to_dict()`
-/// is the shape MCP renders for it.
-pub fn view_dict<'py>(py: Python<'py>, v: &View) -> PyResult<PlainDict<'py>> {
-    view::to_py(py, v, PyShape::Plain)?
+/// A value as a plain `dict`: an entity's `to_dict()` is the shape MCP renders
+/// for it.
+pub fn view_dict<'py>(py: Python<'py>, value: impl ViewValue) -> PyResult<PlainDict<'py>> {
+    view::to_py(py, &value.into_view(), PyShape::Plain)?
         .cast_into::<PyDict>()
         .map(PlainDict)
         .map_err(|e| raise(e.to_string()))
-}
-
-/// Render a neutral [`View`] list of objects into [`Record`](record::Record)s.
-pub fn view_records<'py, T: PyTypeCheck>(
-    py: Python<'py>,
-    v: &View,
-) -> PyResult<Vec<Bound<'py, T>>> {
-    view::to_py(py, v, PyShape::Records)?
-        .cast_into::<PyList>()
-        .map_err(|e| raise(e.to_string()))?
-        .iter()
-        .map(|item| item.cast_into::<T>().map_err(|e| raise(e.to_string())))
-        .collect()
 }
 
 /// Attach to a guest and return a `Debugger`.
@@ -246,8 +225,8 @@ fn attach(
 /// Decode an NTSTATUS, Win32, or HRESULT code to its name and description
 /// (`!error`). Needs no target.
 #[pyfunction]
-fn decode_error(py: Python<'_>, code: u64) -> PyResult<Bound<'_, view::meta::py::ErrorCode>> {
-    view_record(py, &view::meta::error_code(&decode_error_code(code)))
+fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, view::meta::ErrorCode>> {
+    Typed::new(py, view::meta::error_code(&decode_error_code(code)))
 }
 
 /// Run the `ntoseye` command line on `sys.argv` and return its exit status:
@@ -263,8 +242,10 @@ fn cli_main(py: Python<'_>) -> PyResult<i32> {
 
 // The one list of what the SDK exports: the wheel's `PyInit__ntoseye`, the
 // REPL's embedded interpreter, and PyO3's introspection (the generated
-// `_ntoseye.pyi`) all read it. Exceptions and the package re-exports live in
+// `_ntoseye.pyi`) all read it. `with_shape_classes!` adds every result class
+// the views declare. Exceptions and the package re-exports live in
 // `ntoseye/__init__.py`.
+crate::view::with_shape_classes! {
 /// The ntoseye SDK's native module. Import from `ntoseye`, which re-exports
 /// all of it.
 #[pymodule]
@@ -303,124 +284,6 @@ pub mod _ntoseye {
     use super::types::{Struct, Type, Types};
     #[pymodule_export]
     use super::{attach, decode_error};
-    #[pymodule_export]
-    use crate::view::backend::py::{BackendCapability, DebugLog, DebugLogLine};
-    #[pymodule_export]
-    use crate::view::bugcheck::py::{
-        Amd64TrapFrame, Arm64TrapFrame, Bugcheck, BugcheckArgument, BugcheckFault,
-        BugcheckTrapFrame, ExceptionRecord, TrapFrame,
-    };
-    #[pymodule_export]
-    use crate::view::cpu::py::{
-        CpuFeatureBits, CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt,
-        IdtGate, Irql, Pcr, Prcb, ProcessorStateArea, SpecialRegistersArea,
-    };
-    #[pymodule_export]
-    use crate::view::etw::py::{
-        EtwBuffer, EtwEvent, EtwEventClass, EtwEventDescriptor, EtwEventDump, EtwEventIssue,
-        EtwEventMessage, EtwExtendedData, EtwLogger, EtwLoggerBuffers, EtwLoggerTable,
-    };
-    #[pymodule_export]
-    use crate::view::execution::py::{
-        Amd64UnwindCode, Amd64UnwindInfo, Arm64EpilogScope, Arm64PackedUnwind, Arm64UnwindCode,
-        Arm64XdataUnwind, BreakpointStatus, CallTrace, CallTraceFrame, DisassembledInstruction,
-        ExceptionPolicy, ExpressionValue, FunctionEntry, RegisterValue, RunStatus, RuntimeFunction,
-        StackFrame, UnwindHandler, VcpuStatus,
-    };
-    #[pymodule_export]
-    use crate::view::fs::py::{
-        CachedFile, ControlArea, ControlAreaSegment, FileCache, FltFilter, FltFilterFrame,
-        FltFilters, FltInstance, FltInstanceFrame, FltInstances, FltVolume, FltVolumeFrame,
-        FltVolumes, Subsection, Vpb,
-    };
-    #[pymodule_export]
-    use crate::view::hardware::py::{
-        IpiProcessor, IpiRequest, IpiState, PciBar, PciBus, PciBuses, PciCapability,
-        PciConfigBytes, PciFunction, PciScan, PciSegment, PciTree, PciTreeDevice, ProcessorError,
-        QueuedLock, QueuedLockHolder, QueuedLocks,
-    };
-    #[pymodule_export]
-    use crate::view::heap::py::{
-        HeapBlock, HeapBlockSearch, HeapDetail, HeapIdentity, HeapLargeAllocation, HeapMatchLarge,
-        HeapMatchLfhBlock, HeapMatchNtEntry, HeapMatchNtLfhBlock, HeapMatchNtSegment,
-        HeapMatchNtVirtual, HeapMatchPage, HeapMatchRange, HeapMatchVsChunk, HeapOverview,
-        HeapPageRange, HeapStats, HeapSummary, HeapWalkStop, LfhSubsegment, NtHeap, NtHeapEntry,
-        NtHeapSegment, NtLfhUserBlocks, NtUncommittedRange, NtVirtualBlock, SegmentHeap,
-        SegmentHeapContext, SegmentHeapKeys, SegmentHeapPageSegment, VsChunk, VsSubsegment,
-    };
-    #[pymodule_export]
-    use crate::view::meta::py::{
-        ErrorCode, TargetDump, TargetKernel, TargetTime, TargetVersion, Verifier, VerifierDriver,
-        VerifierDriverSummary, VerifierStatistics, VerifierSuspectDriver,
-    };
-    #[pymodule_export]
-    use crate::view::mm::py::{
-        AddressDescription, AddressModule, AddressTranslation, BigPoolAllocation, CacheAttribute,
-        LookasideList, LookasideLists, Mdl, MemoryBasicInformation, MemoryRegion,
-        MemorySearchMatch, PageLocation, PageTableEntry, Pfn, PfnSelector, PhysicalMapping,
-        PoolBlock, PoolMatch, PoolPage, PoolProblem, PoolRangeScan, PoolRegion, PoolSearch,
-        PoolTag, PoolTagUsage, PoolUsage, PoolValidation, ProcessMemoryUsage, PteWalk,
-        ReverseTranslation, SystemMemoryUsage, SystemPteRun, SystemPteType, SystemPtes, VmCounter,
-        VmPool, VmPte, VmStatistics,
-    };
-    #[pymodule_export]
-    use crate::view::module::py::{
-        CodeViewRecord, Export, ImageDataDirectory, ImageDebugEntry, ImageExport,
-        ImageExportDirectory, ImageExports, ImageFileHeader, ImageHeaders, ImageImport,
-        ImageImportDescriptor, ImageOptionalHeader, ImageSectionHeader, LoadedModule,
-        ModuleImageInfo, ModuleSymbols, Section, SymbolLoadDiagnostic, SymbolReloadReport,
-    };
-    #[pymodule_export]
-    use crate::view::object::py::{
-        AlpcClientPort, AlpcConnection, AlpcMessage, AlpcOwnedPort, AlpcPort, AlpcProcessPorts,
-        AlpcQueue, AttachedDevice, DeviceObject, DriverDeviceLink, DriverObject,
-        DriverObjectSummary, ExecutiveObject, ExecutiveResource, FileObject, HandleEntry,
-        HandleTable, HandleTrace, HandleTraceFrame, HandleTraces, InFlightIrp, IoStackLocation,
-        Irp, IrpDispatchRoutine, IrpFindCriteria, IrpFindResult, NotifyCallback,
-        ObjectDirectoryEntry, PoolIrp, ResourceList, ResourceOwner, SsdtEntry, SsdtTable,
-    };
-    #[pymodule_export]
-    use crate::view::pnp::py::{
-        DevNode, DevNodeHistoryState, DevNodeSummary, DeviceStack, DeviceStackLayer, PnpTriage,
-    };
-    #[pymodule_export]
-    use crate::view::process::py::{
-        GlobalFlag, GlobalFlags, Job, JobAccounting, JobLimits, ProcessGlobalFlags,
-        ProcessIdentity, ThreadOverview, ZombieProcess, ZombieThread, Zombies,
-    };
-    #[pymodule_export]
-    use crate::view::py::ListEnd;
-    #[pymodule_export]
-    use crate::view::sched::py::{
-        Apc, ApcQueues, ApcSelection, ApcThread, Dpc, DpcQueue, DpcQueues, FindStack,
-        FindStackThread, IoWorkItem, KernelTimer, ReadyQueue, ReadyQueues, ReadyThread,
-        RunningProcessor, RunningProcessors, SchedulerError, ThreadStack, ThreadStacks,
-        ThreadSummary, TimerBucketEnd, TimerTable, TimerTableEntry, UniqStackGroup, UniqStackScope,
-        UniqStacks, UnwalkedThread, WorkItem, WorkQueue, WorkQueuePriority, WorkQueues,
-        WorkerThread,
-    };
-    #[pymodule_export]
-    use crate::view::security::py::{
-        Ace, Acl, ObjectSecurity, SecurityDescriptor, Session, SessionProcess, SessionProcesses,
-        Sessions, Sid, SidAndAttributes, Token, TokenPrivilege,
-    };
-    #[pymodule_export]
-    use crate::view::symbols::py::{
-        Field, LocalVariableLocation, NearestSymbol, ProcedureLocal, SourceLocation, Symbol,
-        SymbolCandidate, SymbolSearchMatch, TypeLayout,
-    };
-    #[pymodule_export]
-    use crate::view::triage::py::{
-        BlackboxStream, CrashContext, Culprit, CulpritEvidence, DumpException, DumpSystemInfo,
-        FailureSignature, TriagePrcb, TriageReport, UnloadedDriver, VerifierFinding,
-        VerifierFindingAddress, VerifierFindingArgument, WheaRecord, WheaSection,
-    };
-    #[pymodule_export]
-    use crate::view::usermode::py::{
-        ImageByteDiff, ImageCheck, ImageMismatchRange, ImageSectionCheck, ImageSelfPatchCounts,
-        ImageSelfPatchRange, LastError, LastError32, LoaderListHead, LoaderLists, LoaderModule,
-        LoaderModules, LoaderTerminations, Peb, Peb32, ProcessParameters, Teb, Teb32,
-    };
 
     /// The ntoseye release this extension was built as.
     #[pymodule_export]
@@ -433,4 +296,5 @@ pub mod _ntoseye {
     #[pymodule_export]
     #[allow(non_upper_case_globals)]
     const build: &str = env!("NTOSEYE_BUILD");
+}
 }

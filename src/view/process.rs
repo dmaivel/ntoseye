@@ -1,7 +1,7 @@
 //! Process, thread, job, global-flag, and zombie [`View`] builders.
 
 use super::shape::{Diag, Hex, Omit, shapes};
-use super::{ListEnd, View, list_termination};
+use super::list::{ListEnd, list_termination};
 use crate::guest::ProcessInfo;
 use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
 use crate::target::job::{JobDetail, JobField, job_limit_flag_names};
@@ -288,7 +288,7 @@ fn job_limits(fields: &[JobField]) -> JobLimits {
     }
 }
 
-pub fn job(job: &JobDetail) -> View {
+pub fn job(job: &JobDetail) -> Job {
     let limit_flags = job
         .limits
         .iter()
@@ -318,7 +318,6 @@ pub fn job(job: &JobDetail) -> View {
             .collect(),
         process_list_termination: list_termination(&job.process_termination),
     }
-    .into_view()
 }
 
 fn global_flag_names(value: u32) -> Vec<GlobalFlag> {
@@ -331,7 +330,7 @@ fn global_flag_names(value: u32) -> Vec<GlobalFlag> {
         .collect()
 }
 
-pub fn global_flags(detail: &GlobalFlagsDetail) -> View {
+pub fn global_flags(detail: &GlobalFlagsDetail) -> GlobalFlags {
     GlobalFlags {
         kernel_address: Hex(detail.kernel_address.0),
         kernel: Hex(detail.kernel.into()),
@@ -342,10 +341,9 @@ pub fn global_flags(detail: &GlobalFlagsDetail) -> View {
             flags: global_flag_names(flags),
         }),
     }
-    .into_view()
 }
 
-pub fn zombies(detail: &ZombiesDetail) -> View {
+pub fn zombies(detail: &ZombiesDetail) -> Zombies {
     let processes = detail.processes.iter().map(|process| ZombieProcess {
         eprocess: Hex(process.eprocess.0),
         pid: process.pid,
@@ -376,5 +374,4 @@ pub fn zombies(detail: &ZombiesDetail) -> View {
         interrupted: detail.interrupted,
         truncated: detail.truncated,
     }
-    .into_view()
 }

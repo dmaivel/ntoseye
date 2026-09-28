@@ -9,6 +9,7 @@
 
 use super::{DiagnosticView, View};
 use crate::target::{DiagnosticMetric, DiagnosticValue};
+use crate::types::VirtAddr;
 
 /// A value a declared shape's field can hold, and how each surface shows it.
 pub trait ViewValue: Sized {
@@ -41,6 +42,13 @@ pub struct Diag<T> {
     value: Option<T>,
     error: Option<String>,
     source: Option<Option<String>>,
+}
+
+impl<T: Clone> Diag<T> {
+    /// A field read as `value`, as it is.
+    pub fn new(value: &DiagnosticValue<T>) -> Self {
+        Self::of(value, T::clone)
+    }
 }
 
 impl<T> Diag<T> {
@@ -87,19 +95,29 @@ scalars! {
     usize => |v| View::Num(v as u64), "int";
     i64 => |v| View::Int(v), "int";
     Hex => |v| View::Hex(v.0), "int";
+    VirtAddr => |v| View::Hex(v.0), "int";
     bool => |v| View::Bool(v), "bool";
     String => |v| View::Str(v), "str";
     &'static str => |v| View::Str(v.to_string()), "str";
 }
 
-/// An object not (yet) declared as a shape, or one whose keys are data
-/// (register names, ...): passed through as is, typed `Any`.
-impl ViewValue for View {
+/// An object whose keys are data, not a schema (fields a Windows build may
+/// or may not have): a JSON object, and in the SDK a `Record`, whose
+/// attributes are its keys.
+pub struct Keyed<T>(pub Vec<(&'static str, T)>);
+
+impl<T: ViewValue> ViewValue for Keyed<T> {
     fn into_view(self) -> View {
-        self
+        View::Object(
+            self.0
+                .into_iter()
+                .map(|(key, value)| (key, value.into_view()))
+                .collect(),
+        )
     }
     #[cfg(feature = "python-stubs")]
-    const HINT: pyo3::inspect::PyStaticExpr = pyo3::type_hint_identifier!("typing", "Any");
+    const HINT: pyo3::inspect::PyStaticExpr =
+        <crate::python::record::Record as pyo3::PyTypeInfo>::TYPE_HINT;
 }
 
 impl<T: ViewValue> ViewValue for Option<T> {
@@ -167,16 +185,31 @@ pub struct Shaped {
     ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>>,
 }
 
-/// A field's value as its SDK property returns it: the object the record
-/// holds, typed for the stub as the field's [`ViewValue::HINT`].
+/// A value as the SDK returns it (records for its objects), typed for the
+/// stub as `T` declares ([`ViewValue::HINT`]): what an SDK method or a
+/// shape's property returns.
 #[cfg(feature = "python")]
-pub struct Field<'py, T>(
-    pub pyo3::Bound<'py, pyo3::PyAny>,
-    pub std::marker::PhantomData<T>,
-);
+pub struct Typed<'py, T>(pyo3::Bound<'py, pyo3::PyAny>, std::marker::PhantomData<T>);
 
 #[cfg(feature = "python")]
-impl<'py, T: ViewValue> pyo3::IntoPyObject<'py> for Field<'py, T> {
+impl<'py, T: ViewValue> Typed<'py, T> {
+    pub fn new(py: pyo3::Python<'py>, value: T) -> pyo3::PyResult<Self> {
+        let object = super::to_py(py, &value.into_view(), super::PyShape::Records)?;
+        Ok(Self(object, std::marker::PhantomData))
+    }
+
+    /// A value already converted, such as a record's field.
+    pub(crate) fn converted(object: pyo3::Bound<'py, pyo3::PyAny>) -> Self {
+        Self(object, std::marker::PhantomData)
+    }
+
+    pub fn into_bound(self) -> pyo3::Bound<'py, pyo3::PyAny> {
+        self.0
+    }
+}
+
+#[cfg(feature = "python")]
+impl<'py, T: ViewValue> pyo3::IntoPyObject<'py> for Typed<'py, T> {
     type Target = pyo3::PyAny;
     type Output = pyo3::Bound<'py, pyo3::PyAny>;
     type Error = std::convert::Infallible;
@@ -251,6 +284,8 @@ macro_rules! shapes {
             $(; $($method:tt)*)?
         }
     )*) => {
+        $crate::view::shape::shapes!(@classes [$] $($name)*);
+
         $(
             $(#[doc = $doc])*
             pub struct $name {
@@ -280,6 +315,16 @@ macro_rules! shapes {
                 /// [`ViewValue`]: $crate::view::shape::ViewValue
                 pub fn into_view(self) -> $crate::view::View {
                     $crate::view::shape::ViewValue::into_view(self)
+                }
+
+                /// This shape as its SDK class, for a handle Rust keeps.
+                #[cfg(feature = "python")]
+                #[allow(dead_code)] // most shapes only reach Python as `Typed`
+                pub fn into_class<'py>(
+                    self,
+                    py: pyo3::Python<'py>,
+                ) -> pyo3::PyResult<pyo3::Bound<'py, py::$name>> {
+                    Ok($crate::view::shape::Typed::new(py, self)?.into_bound().cast_into::<py::$name>()?)
                 }
             }
 
@@ -335,17 +380,29 @@ macro_rules! shapes {
                     #[getter]
                     fn $field<'py>(
                         slf: &pyo3::Bound<'py, Self>,
-                    ) -> pyo3::PyResult<$crate::view::shape::Field<'py, $ty>> {
+                    ) -> pyo3::PyResult<$crate::view::shape::Typed<'py, $ty>> {
                         let key = $crate::view::shape::key!($field $(, $key)?);
-                        Ok($crate::view::shape::Field(
+                        Ok($crate::view::shape::Typed::converted(
                             slf.as_super().get().field(slf.py(), key)?,
-                            std::marker::PhantomData,
                         ))
                     }
                 )*
                 $($($method)*)?
             }
         )*
+    };
+    // Every module that declares shapes names its classes through
+    // `shape_classes!`, which `view::with_shape_classes!` collects into the
+    // SDK module's exports. `$d` is a `$` for the macro it defines.
+    (@classes [$d:tt] $($name:ident)*) => {
+        #[cfg(feature = "python")]
+        #[allow(unused_macros)] // a test module's shapes join no SDK module
+        macro_rules! shape_classes {
+            ($d callback:path; $d($d args:tt)*) => { $d callback! { $d($d args)* [$($name)*] } };
+        }
+        #[cfg(feature = "python")]
+        #[allow(unused_imports)]
+        pub(crate) use shape_classes;
     };
 }
 pub(crate) use shapes;

@@ -1,10 +1,9 @@
 //! Crash-triage [`View`] builders: the triage report and the
 //! dump metadata, failure signature, and findings it aggregates.
 
-use super::View;
 use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::{run_status, stack_frame};
-use super::module::loaded_module;
+use super::module::module;
 use super::shape::{Hex, Omit, shapes};
 use crate::dmp::{self, DmpException, DmpSystemInfo, TriageCrashInfo};
 use crate::triage::TriagePrcbInfo;
@@ -480,7 +479,7 @@ fn unloaded_driver(driver: &dmp::UnloadedDriver) -> UnloadedDriver {
 /// Canonical structured crash-triage shape used by MCP and Python. The caller
 /// chooses its module cap; all other collections are already bounded by the
 /// presentation-free report builder.
-pub fn triage_report(report: &ReportDetail, module_limit: usize) -> View {
+pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport {
     TriageReport {
         status: run_status(&report.status),
         bugcheck: report.bugcheck.as_ref().map(bugcheck),
@@ -494,7 +493,7 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> View {
             .modules
             .iter()
             .take(module_limit)
-            .map(loaded_module)
+            .map(module)
             .collect(),
         modules_total: report.modules.len(),
         unloaded_drivers: report
@@ -513,5 +512,4 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> View {
         blackboxes: report.blackboxes.iter().map(blackbox).collect(),
         warnings: report.warnings.clone(),
     }
-    .into_view()
 }

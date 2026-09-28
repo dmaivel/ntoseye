@@ -1,8 +1,7 @@
 //! Loaded-module [`View`] builders: module identity and symbol
 //! load status.
 
-use super::View;
-use super::shape::{Diag, Hex, Omit, shapes};
+use super::shape::{Diag, Hex, Omit, shapes, unions};
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::pe::headers::{
     CodeView, DebugRecord, FileHeader, ImportDescriptor, ImportName, OptionalHeader, SectionHeader,
@@ -323,7 +322,7 @@ shapes! {
 }
 
 /// A loaded image's identity, without its symbol status.
-pub fn loaded_module(module: &ModuleInfo) -> LoadedModule {
+pub fn module(module: &ModuleInfo) -> LoadedModule {
     LoadedModule {
         name: module.name.clone(),
         short_name: module.short_name.clone(),
@@ -339,12 +338,8 @@ pub fn loaded_module(module: &ModuleInfo) -> LoadedModule {
     }
 }
 
-pub fn module(module: &ModuleInfo) -> View {
-    loaded_module(module).into_view()
-}
-
 /// The outcome of a symbol reload.
-pub fn module_symbol_report(report: &ModuleSymbolLoadReport) -> View {
+pub fn module_symbol_report(report: &ModuleSymbolLoadReport) -> SymbolReloadReport {
     SymbolReloadReport {
         total: report.total,
         loaded: report.loaded,
@@ -364,7 +359,6 @@ pub fn module_symbol_report(report: &ModuleSymbolLoadReport) -> View {
             })
             .collect(),
     }
-    .into_view()
 }
 
 /// A module's symbol status and PDB identity (`lmv`).
@@ -392,14 +386,22 @@ pub fn module_symbols(target: &Target, info: &ModuleInfo, dtb: Dtb) -> ModuleSym
     }
 }
 
+unions! {
+    /// A module as `Module.inspect()` decodes it: a kernel module from the
+    /// loaded-module list, or a process module from its loader list.
+    ModuleDetail {
+        Kernel(LoadedModule),
+        Process(super::usermode::LoaderModule),
+    }
+}
+
 /// A module's identity with its symbol status (a kernel module's
 /// `inspect()`).
-pub fn module_with_symbols(target: &Target, info: &ModuleInfo, dtb: Dtb) -> View {
+pub fn module_with_symbols(target: &Target, info: &ModuleInfo, dtb: Dtb) -> LoadedModule {
     LoadedModule {
         symbols: Omit(Some(module_symbols(target, info, dtb))),
-        ..loaded_module(info)
+        ..module(info)
     }
-    .into_view()
 }
 
 fn version((major, minor): (u16, u16)) -> String {
@@ -593,7 +595,7 @@ fn import_descriptor(descriptor: &ImportDescriptor) -> ImageImportDescriptor {
 
 /// `!dh`: a mapped image's headers, with the debug directory, exports, and
 /// imports when asked for.
-pub fn image_headers(detail: &ImageHeadersDetail) -> View {
+pub fn image_headers(detail: &ImageHeadersDetail) -> ImageHeaders {
     let headers = &detail.headers;
     let base = detail.base.0;
     ImageHeaders {
@@ -630,16 +632,15 @@ pub fn image_headers(detail: &ImageHeadersDetail) -> View {
             })
         })),
     }
-    .into_view()
 }
 
 /// `!lmi`: the module, its file-header identity, debug directory (with the
 /// CodeView PDB name, GUID, and age), and symbol state.
-pub fn module_image_info(target: &Target, detail: &image::ModuleImageInfo) -> View {
+pub fn module_image_info(target: &Target, detail: &image::ModuleImageInfo) -> ModuleImageInfo {
     let file = &detail.headers.file;
     let optional = &detail.headers.optional;
     ModuleImageInfo {
-        module: loaded_module(&detail.module),
+        module: module(&detail.module),
         machine: Hex(file.machine.into()),
         machine_name: machine_name(file.machine),
         time_date_stamp: Hex(file.time_date_stamp.into()),
@@ -654,5 +655,4 @@ pub fn module_image_info(target: &Target, detail: &image::ModuleImageInfo) -> Vi
             .module_pdb_path(detail.dtb, detail.module.base_address)
             .map(|path| path.display().to_string()),
     }
-    .into_view()
 }

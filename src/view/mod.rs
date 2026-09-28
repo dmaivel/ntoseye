@@ -1,25 +1,62 @@
-pub mod backend;
-pub mod bugcheck;
-pub mod cpu;
-pub mod etw;
-pub mod execution;
-pub mod fs;
-pub mod hardware;
-pub mod heap;
-pub mod meta;
-pub mod mm;
-pub mod module;
-pub mod object;
-pub mod pnp;
-pub mod process;
-pub mod sched;
-pub mod security;
 pub mod shape;
-pub mod symbols;
-pub mod triage;
-pub mod usermode;
 
-use crate::target::{DiagnosticValue, ListTermination};
+/// Declares the view modules, and `with_shape_classes!`, which adds every
+/// class their shapes declare to the SDK's `#[pymodule]` as exports, so a
+/// class is named only where its shape is. `$d` is a `$` for the macros it
+/// defines.
+macro_rules! view_modules {
+    ([$d:tt] $($module:ident),* $(,)?) => {
+        $(pub mod $module;)*
+
+        /// `with_shape_classes! { #[pymodule] pub mod m { ... } }`: the module,
+        /// exporting every shape class besides its own items.
+        #[cfg(feature = "python")]
+        macro_rules! with_shape_classes {
+            ($d($d item:tt)*) => {
+                $crate::view::collect_shape_classes!([$($module)*] [] { $d($d item)* });
+            };
+        }
+        #[cfg(feature = "python")]
+        pub(crate) use with_shape_classes;
+    };
+}
+
+view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, list, meta, mm, module, object, pnp, process, sched, security, symbols, triage, usermode);
+
+/// One step of [`with_shape_classes!`]: asks the next module for its classes
+/// (its `shape_classes!`), then emits the module once none are left.
+#[cfg(feature = "python")]
+macro_rules! collect_shape_classes {
+    ([$next:ident $($rest:ident)*] [$($done:tt)*] $module:tt) => {
+        $crate::view::$next::shape_classes!(
+            $crate::view::collected_shape_classes; $next [$($rest)*] [$($done)*] $module
+        );
+    };
+    ([] [$(($from:ident $($class:ident)*))*] {
+        $(#[$attr:meta])* $vis:vis mod $name:ident { $($body:tt)* }
+    }) => {
+        $(#[$attr])*
+        $vis mod $name {
+            $($body)*
+            $(
+                #[pymodule_export]
+                use $crate::view::$from::py::{$($class),*};
+            )*
+        }
+    };
+}
+#[cfg(feature = "python")]
+pub(crate) use collect_shape_classes;
+
+/// A module's classes, back from its `shape_classes!`.
+#[cfg(feature = "python")]
+macro_rules! collected_shape_classes {
+    ($from:ident [$($rest:ident)*] [$($done:tt)*] $module:tt [$($class:ident)*]) => {
+        $crate::view::collect_shape_classes!([$($rest)*] [$($done)* ($from $($class)*)] $module);
+    };
+}
+#[cfg(feature = "python")]
+pub(crate) use collected_shape_classes;
 
 // Shared shape for SDK/MCP structure rendering; surfaces disagree only on how
 // address-like values are encoded.
@@ -44,6 +81,13 @@ pub enum View {
     /// for MCP, an [`ntoseye.Diagnostic`](crate::python::record::Diagnostic)
     /// for Python.
     Diagnostic(Box<DiagnosticView>),
+}
+
+impl View {
+    /// A list of rendered values: `View::list(frames.iter().map(stack_frame))`.
+    pub fn list<T: shape::ViewValue>(items: impl IntoIterator<Item = T>) -> View {
+        View::List(items.into_iter().map(T::into_view).collect())
+    }
 }
 
 pub struct DiagnosticView {
@@ -177,45 +221,4 @@ pub fn to_py<'py>(
             }
         }
     })
-}
-
-pub fn diagnostic<T>(value: &DiagnosticValue<T>, encode: impl FnOnce(&T) -> View) -> View {
-    let (value, error) = match value {
-        DiagnosticValue::Available(value) => (Some(encode(value)), None),
-        DiagnosticValue::Unavailable(error) => (None, Some(error.clone())),
-    };
-    View::Diagnostic(Box::new(DiagnosticView {
-        value,
-        error,
-        source: None,
-    }))
-}
-
-shape::shapes! {
-    /// How a guest linked-list walk ended.
-    ListEnd {
-        /// `head` (back at the list head), `null`, `cycle` (a loop not
-        /// through the head), `bound` (the walk's limit), or `corrupt`.
-        kind: &'static str,
-        /// Where a cycle closed.
-        address: Option<shape::Hex>,
-        /// What was wrong, for a corrupt (or, in some walks, null) link.
-        error: Option<String>,
-    }
-}
-
-/// How a guest linked-list walk ended.
-pub fn list_termination(termination: &ListTermination) -> ListEnd {
-    let (kind, address, error) = match termination {
-        ListTermination::Head => ("head", None, None),
-        ListTermination::Null => ("null", None, None),
-        ListTermination::Cycle(address) => ("cycle", Some(shape::Hex(address.0)), None),
-        ListTermination::Bound => ("bound", None, None),
-        ListTermination::Corrupt(error) => ("corrupt", None, Some(error.clone())),
-    };
-    ListEnd {
-        kind,
-        address,
-        error,
-    }
 }

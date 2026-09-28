@@ -14,7 +14,7 @@ use super::iter::{CpuIterator, NameIterator, ThreadIterator};
 use super::process::Process;
 use super::record::PlainDict;
 use super::types::{Struct, enum_value};
-use super::{err, view_dict, view_record};
+use super::{err, view_dict};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::guest::ProcessInfo;
 use crate::session::{Session, VcpuInfo};
@@ -24,7 +24,7 @@ use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::types::VirtAddr;
 use crate::unwind::{RecoveredFrame, StackFrame};
 use crate::view;
-use crate::view::cpu::py::{CpuInfo, Gdt, Idt, Irql, Pcr, Prcb};
+use crate::view::shape::Typed;
 
 /// A thread collection: `dbg.threads` (all) or `proc.threads`.
 #[pyclass(module = "ntoseye")]
@@ -287,60 +287,45 @@ impl Thread {
     }
 
     /// Decode this thread's APC lists (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::sched::py::ApcQueues>> {
+    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::sched::ApcQueues>> {
         let context = self.context(self.process_info(py)?);
         let detail = self.owner.with_in(py, &context, |session| {
             session
                 .inspect_apcs(ApcSelector::Thread(self.info.ethread))
                 .map_err(err)
         })?;
-        view_record(py, &view::sched::apcs(&detail))
+        Typed::new(py, view::sched::apcs(&detail))
     }
 
     /// Decode the saved `_KTRAP_FRAME` (`!trap`).
-    fn trap_frame<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::bugcheck::py::TrapFrame>> {
+    fn trap_frame<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::bugcheck::TrapFrame>> {
         let context = self.context(self.process_info(py)?);
         let view = self.owner.with_in(py, &context, |session| {
             trap_frame_view(&session.target, self.info.trap_frame)
         })?;
-        view_record(py, &view)
+        Typed::new(py, view)
     }
 
     /// Decode the thread's Win32 last-error and NTSTATUS values (`!gle`).
-    fn last_error<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::usermode::py::LastError>> {
+    fn last_error<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::usermode::LastError>> {
         let context = self.context(self.process_info(py)?);
         let view = self.owner.with_in(py, &context, |session| {
             let detail = session.target.last_error().map_err(err)?;
             Ok(view::usermode::last_error(&detail))
         })?;
-        view_record(py, &view)
+        Typed::new(py, view)
     }
 
     /// Thread summary and saved scheduling details (`!thread`).
-    fn inspect<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::process::py::ThreadOverview>> {
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::process::ThreadOverview>> {
         let active = self.cpu_id(py)?;
-        view_record(
-            py,
-            &view::process::thread(&self.info, active.as_deref()).into_view(),
-        )
+        Typed::new(py, view::process::thread(&self.info, active.as_deref()))
     }
 
     /// The thread as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let active = self.cpu_id(py)?;
-        view_dict(
-            py,
-            &view::process::thread(&self.info, active.as_deref()).into_view(),
-        )
+        view_dict(py, view::process::thread(&self.info, active.as_deref()))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -900,69 +885,73 @@ impl Cpu {
     }
 
     /// Decode this processor's KPCR and KPRCB essentials (`!pcr`).
-    fn pcr<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Pcr>> {
+    fn pcr<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::cpu::Pcr>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.inspect_pcr(processor).map_err(err)
         })?;
-        view_record(py, &view::cpu::pcr(&detail))
+        Typed::new(py, view::cpu::pcr(&detail))
     }
 
     /// Decode this processor's `_KPRCB` (`!prcb`).
-    fn prcb<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Prcb>> {
+    fn prcb<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::cpu::Prcb>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.inspect_prcb(processor).map_err(err)
         })?;
-        view_record(py, &view::cpu::prcb(&detail))
+        Typed::new(py, view::cpu::prcb(&detail))
     }
 
     /// Read this processor's current IRQL (`!irql`).
-    fn irql<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Irql>> {
+    fn irql<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::cpu::Irql>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.inspect_irql(processor).map_err(err)
         })?;
-        view_record(py, &view::cpu::irql(&detail))
+        Typed::new(py, view::cpu::irql(&detail))
     }
 
     /// Decode one IDT vector, or the bounded full table (`!idt`).
     #[pyo3(signature = (vector=None))]
-    fn idt<'py>(&self, py: Python<'py>, vector: Option<u16>) -> PyResult<Bound<'py, Idt>> {
+    fn idt<'py>(
+        &self,
+        py: Python<'py>,
+        vector: Option<u16>,
+    ) -> PyResult<Typed<'py, view::cpu::Idt>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.inspect_idt(processor, vector).map_err(err)
         })?;
-        view_record(py, &view::cpu::idt(&detail))
+        Typed::new(py, view::cpu::idt(&detail))
     }
 
     /// Decode this processor's GDT (`!gdt`).
-    fn gdt<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Gdt>> {
+    fn gdt<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::cpu::Gdt>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.inspect_gdt(processor).map_err(err)
         })?;
-        view_record(py, &view::cpu::gdt(&detail))
+        Typed::new(py, view::cpu::gdt(&detail))
     }
 
     /// Read processor vendor, family, model, speed, and feature bits (`!cpuinfo`).
-    fn info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, CpuInfo>> {
+    fn info<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::cpu::CpuInfo>> {
         let processor = self.processor()?;
         let context = self.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.inspect_cpuinfo(processor).map_err(err)
         })?;
-        view_record(py, &view::cpu::cpuinfo(&detail))
+        Typed::new(py, view::cpu::cpuinfo(&detail))
     }
 
     /// The processor as a plain `dict`, the shape MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, &view::execution::vcpu(&self.current_info(py)?))
+        view_dict(py, view::execution::vcpu(&self.current_info(py)?))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -1040,7 +1029,10 @@ pub fn process_for_thread(session: &Session, thread: &ThreadInfo) -> PyResult<Op
         .find(|process| process.pid == pid))
 }
 
-pub fn trap_frame_view(target: &Target, address: Option<VirtAddr>) -> PyResult<view::View> {
+pub fn trap_frame_view(
+    target: &Target,
+    address: Option<VirtAddr>,
+) -> PyResult<view::bugcheck::TrapFrame> {
     let frame = read_ktrap_frame_at_or_current(target, address).map_err(err)?;
     Ok(view::bugcheck::trap_frame(
         &frame,

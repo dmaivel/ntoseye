@@ -13,22 +13,22 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
     Some(match name {
         "!irp" | "irp" => args.addr(0).and_then(|address| {
             let irp = args.target().inspect_irp(address)?;
-            Ok(view::object::irp(&irp))
+            Ok(view::object::irp(&irp).into_view())
         }),
         "!drvobj" | "drvobj" => args.driver_object().and_then(|address| {
             let detail = args.target().inspect_driver_object(address)?;
-            Ok(view::object::driver_object(args.target(), &detail))
+            Ok(view::object::driver_object(args.target(), &detail).into_view())
         }),
         "!devobj" | "devobj" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_device_object(address)?;
-            Ok(view::object::device_object(&detail))
+            Ok(view::object::device_object(&detail).into_view())
         }),
         "!object" | "object" => match argv.first() {
             Some(text) => args
                 .target()
                 .object_argument(text, args.state.radix)
                 .and_then(|address| args.target().inspect_object(address))
-                .map(|detail| view::object::object(&detail)),
+                .map(|detail| view::object::object(&detail).into_view()),
             None => Err(Error::DebugInfo(
                 "missing argument 1 (an object path or address expression)".into(),
             )),
@@ -37,26 +37,26 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             Ok(Some(handle)) => args
                 .target()
                 .inspect_handle(handle)
-                .map(|detail| view::object::handle_entry(&detail)),
+                .map(|detail| view::object::handle_entry(&detail).into_view()),
             Ok(None) => args
                 .target()
                 .enumerate_handles(256)
-                .map(|summary| view::object::handle_table(&summary)),
+                .map(|summary| view::object::handle_table(&summary).into_view()),
             Err(error) => Err(error),
         },
         "!fileobj" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_file_object(address)?;
-            Ok(view::object::file_object(&detail))
+            Ok(view::object::file_object(&detail).into_view())
         }),
         "!locks" => match args.opt_addr(0) {
             Ok(Some(address)) => args
                 .target()
                 .inspect_resource(address)
-                .map(|resource| view::object::resource(&resource)),
+                .map(|resource| view::object::resource(&resource).into_view()),
             Ok(None) => args
                 .target()
                 .enumerate_resources(256)
-                .map(|list| view::object::resource_list(&list)),
+                .map(|list| view::object::resource_list(&list).into_view()),
             Err(error) => Err(error),
         },
         "callbacks" => args
@@ -65,29 +65,24 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             .and_then(|callbacks| {
                 let target = args.target();
                 let dtb = target.guest()?.ntoskrnl.dtb();
-                Ok(View::List(
-                    callbacks
-                        .iter()
-                        .map(|callback| {
-                            let symbol = target
-                                .symbols
-                                .format_closest_symbol_for_address(dtb, callback.function);
-                            view::object::notify_callback(callback, symbol)
-                        })
-                        .collect(),
-                ))
+                Ok(View::list(callbacks.iter().map(|callback| {
+                    let symbol = target
+                        .symbols
+                        .format_closest_symbol_for_address(dtb, callback.function);
+                    view::object::notify_callback(callback, symbol)
+                })))
             }),
         "ssdt" => args
             .target()
             .dump_ssdt()
-            .map(|tables| View::List(tables.iter().map(view::object::ssdt_table).collect())),
+            .map(|tables| View::list(tables.iter().map(view::object::ssdt_table))),
         "!irpfind" | "irpfind" => {
             IrpFindArgs::parse(argv, |text| args.eval(text).map(|value| value.0)).and_then(
                 |parsed| {
                     let detail =
                         args.target()
                             .irp_find(parsed.pool, parsed.restart, parsed.criteria)?;
-                    Ok(view::object::irp_find(&detail))
+                    Ok(view::object::irp_find(&detail).into_view())
                 },
             )
         }
@@ -96,15 +91,11 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
         "irps" => args
             .target()
             .discover_irps(argv.first().copied())
-            .map(|hits| View::List(hits.iter().map(view::object::irp_hit).collect())),
-        "drivers" => args.target().enumerate_driver_objects().map(|drivers| {
-            View::List(
-                drivers
-                    .iter()
-                    .map(view::object::driver_object_info)
-                    .collect(),
-            )
-        }),
+            .map(|hits| View::list(hits.iter().map(view::object::irp_hit))),
+        "drivers" => args
+            .target()
+            .enumerate_driver_objects()
+            .map(|drivers| View::list(drivers.iter().map(view::object::driver_object_info))),
         _ => return None,
     })
 }
@@ -119,15 +110,18 @@ impl Args<'_, '_> {
             .map(|switch| switch.to_ascii_lowercase())
             .as_deref()
         {
-            Some("/p") => Ok(view::object::alpc_port(&target.alpc_port(self.addr(1)?)?)),
-            Some("/m") => Ok(view::object::alpc_message(
-                &target.alpc_message(self.addr(1)?)?,
-            )),
+            Some("/p") => {
+                Ok(view::object::alpc_port(&target.alpc_port(self.addr(1)?)?).into_view())
+            }
+            Some("/m") => {
+                Ok(view::object::alpc_message(&target.alpc_message(self.addr(1)?)?).into_view())
+            }
             Some("/lpp") => {
                 let process = self.state.process_or_current(self.argv.get(1).copied())?;
-                Ok(view::object::alpc_process_ports(
-                    &target.alpc_process_ports(process)?,
-                ))
+                Ok(
+                    view::object::alpc_process_ports(&target.alpc_process_ports(process)?)
+                        .into_view(),
+                )
             }
             _ => Err(Error::InvalidArgument(
                 "usage: !alpc /p <port> | /m <message> | /lpp [process]".into(),
@@ -146,7 +140,7 @@ impl Args<'_, '_> {
         let detail =
             self.target()
                 .handle_traces(&process, handle, max_traces.map(|max| max as usize))?;
-        Ok(view::object::handle_traces(&detail))
+        Ok(view::object::handle_traces(&detail).into_view())
     }
 
     /// `!drvobj` takes an address expression or a driver name (`\\Driver\\Foo`

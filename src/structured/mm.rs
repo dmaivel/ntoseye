@@ -13,27 +13,27 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             let summary = args
                 .target()
                 .memory_use_summary(limit.map_or(64, |limit| limit as usize))?;
-            Ok(view::mm::memory_usage(&summary))
+            Ok(view::mm::memory_usage(&summary).into_view())
         }),
         "!pte" | "pte" => args.addr(0).and_then(|address| {
             let walk = args.target().pte_traverse(address)?;
-            Ok(view::mm::pte_walk(&walk))
+            Ok(view::mm::pte_walk(&walk).into_view())
         }),
         "!mdl" | "mdl" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_mdl(address, args.opt_value(1)?)?;
-            Ok(view::mm::mdl(&detail))
+            Ok(view::mm::mdl(&detail).into_view())
         }),
         "!sysptes" | "sysptes" => args.opt_value(0).and_then(|flags| {
             let detail = args.target().system_ptes(flags.unwrap_or(0))?;
-            Ok(view::mm::system_ptes(&detail))
+            Ok(view::mm::system_ptes(&detail).into_view())
         }),
         "address" => args.addr(0).and_then(|address| {
             let description = args.target().describe_address(address)?;
-            Ok(view::mm::address_description(&description))
+            Ok(view::mm::address_description(&description).into_view())
         }),
         "!vm" | "vm" => args.opt_value(0).and_then(|flags| {
             let detail = args.target().inspect_vm(flags.unwrap_or(0) & 1 == 0)?;
-            Ok(view::mm::vm(&detail))
+            Ok(view::mm::vm(&detail).into_view())
         }),
         "!pfn" | "pfn" => {
             let physical = argv.first().is_some_and(|arg| *arg == "-a" || *arg == "/a");
@@ -44,17 +44,17 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                     PfnSelector::Pfn(value)
                 };
                 let detail = args.target().inspect_pfn(selector)?;
-                Ok(view::mm::pfn(&detail))
+                Ok(view::mm::pfn(&detail).into_view())
             })
         }
         "!vtop" | "vtop" => args.value(0).and_then(|dtb| {
             let address = args.addr(1)?;
             let detail = args.target().vtop(dtb, address)?;
-            Ok(view::mm::vtop(&detail))
+            Ok(view::mm::vtop(&detail).into_view())
         }),
         "!ptov" | "ptov" => args.value(0).and_then(|physical| {
             let detail = args.target().ptov(physical)?;
-            Ok(view::mm::ptov(&detail))
+            Ok(view::mm::ptov(&detail).into_view())
         }),
         "!vprot" | "vprot" => args.addr(0).and_then(|address| {
             let processes = args.target().matching_processes(None)?;
@@ -63,15 +63,15 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .current_process_context(&processes)
                 .ok_or_else(|| Error::DebugInfo("!vprot needs a process context".into()))?;
             let detail = args.target().virtual_query(&process, address)?;
-            Ok(view::mm::vprot(&detail))
+            Ok(view::mm::vprot(&detail).into_view())
         }),
         "!pool" | "pool" => args.addr(0).and_then(|address| {
             let detail = args.target().inspect_pool(address)?;
-            Ok(view::mm::pool_page(&detail))
+            Ok(view::mm::pool_page(&detail).into_view())
         }),
         "!poolval" | "poolval" => args.addr(0).and_then(|address| {
             let detail = args.target().validate_pool(address)?;
-            Ok(view::mm::pool_validation(&detail))
+            Ok(view::mm::pool_validation(&detail).into_view())
         }),
         "!poolused" | "poolused" => {
             let (flags, tag) = match argv.first() {
@@ -90,7 +90,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             };
             args.target()
                 .pool_usage(sort, tag, flags & 1 != 0)
-                .map(|detail| view::mm::pool_usage(&detail))
+                .map(|detail| view::mm::pool_usage(&detail).into_view())
         }
         "!poolfind" | "poolfind" => match argv.first() {
             Some(tag) => {
@@ -101,7 +101,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 };
                 args.target()
                     .pool_find(tag, pool_type)
-                    .map(|detail| view::mm::pool_find(&detail))
+                    .map(|detail| view::mm::pool_find(&detail).into_view())
             }
             None => Err(Error::DebugInfo("missing pool tag".into())),
         },
@@ -109,11 +109,11 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             Ok(Some(address)) => args
                 .target()
                 .inspect_lookaside(address)
-                .map(|detail| view::mm::lookaside(&detail)),
+                .map(|detail| view::mm::lookaside(&detail).into_view()),
             Ok(None) => args
                 .target()
                 .lookaside_lists()
-                .map(|detail| view::mm::lookaside_lists(&detail)),
+                .map(|detail| view::mm::lookaside_lists(&detail).into_view()),
             Err(error) => Err(error),
         },
         _ => return None,

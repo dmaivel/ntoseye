@@ -1,7 +1,6 @@
 //! Neutral value-tree views for the file-system inspectors: control areas,
 //! VPBs, the file cache, and the filter manager.
 
-use super::View;
 use super::shape::{Diag, Hex, shapes};
 use crate::target::fltmgr::{
     FltFilterDetail, FltFrame, FltFrames, FltInstanceDetail, FltVolumeDetail,
@@ -228,7 +227,7 @@ fn subsection(subsection: &SubsectionDetail) -> Subsection {
 }
 
 /// Render `!ca`.
-pub fn control_area(detail: &ControlAreaDetail) -> View {
+pub fn control_area(detail: &ControlAreaDetail) -> ControlArea {
     ControlArea {
         address: Hex(detail.address.0),
         segment: Hex(detail.segment.0),
@@ -244,11 +243,10 @@ pub fn control_area(detail: &ControlAreaDetail) -> View {
         subsections: detail.subsections.iter().map(subsection).collect(),
         subsections_stopped: detail.subsections_stopped.clone(),
     }
-    .into_view()
 }
 
 /// Render `!vpb`.
-pub fn vpb(detail: &VpbDetail) -> View {
+pub fn vpb(detail: &VpbDetail) -> Vpb {
     Vpb {
         address: Hex(detail.address.0),
         flags: Hex(detail.flags),
@@ -261,7 +259,6 @@ pub fn vpb(detail: &VpbDetail) -> View {
         reference_count: detail.reference_count,
         volume_label: detail.volume_label.clone(),
     }
-    .into_view()
 }
 
 fn cached_file(file: &CachedFileDetail) -> CachedFile {
@@ -280,7 +277,7 @@ fn cached_file(file: &CachedFileDetail) -> CachedFile {
 
 /// Render `!filecache`: the VACB summary and the cached files, most valid
 /// bytes first.
-pub fn file_cache(detail: &FileCacheDetail) -> View {
+pub fn file_cache(detail: &FileCacheDetail) -> FileCache {
     FileCache {
         vacb_arrays: detail.vacb_arrays,
         free_vacbs: Diag::of(&detail.free_vacbs, |value| *value),
@@ -291,7 +288,6 @@ pub fn file_cache(detail: &FileCacheDetail) -> View {
         file_count: detail.file_count,
         interrupted: detail.interrupted,
     }
-    .into_view()
 }
 
 fn flt_instance(instance: &FltInstanceDetail) -> FltInstance {
@@ -340,7 +336,7 @@ fn flt_frame<T, U>(frame: &FltFrame<T>, item: fn(&T) -> U) -> (Hex, u64, Vec<U>,
 
 /// Render `!fltkd.filters`: frames, each with its filters and their
 /// instances.
-pub fn flt_filters(detail: &FltFrames<FltFilterDetail>) -> View {
+pub fn flt_filters(detail: &FltFrames<FltFilterDetail>) -> FltFilters {
     FltFilters {
         frames: detail
             .frames
@@ -357,11 +353,10 @@ pub fn flt_filters(detail: &FltFrames<FltFilterDetail>) -> View {
             .collect(),
         stopped: detail.stopped.clone(),
     }
-    .into_view()
 }
 
 /// Render `!fltkd.instances`: frames, each with its instances.
-pub fn flt_instances(detail: &FltFrames<FltInstanceDetail>) -> View {
+pub fn flt_instances(detail: &FltFrames<FltInstanceDetail>) -> FltInstances {
     FltInstances {
         frames: detail
             .frames
@@ -378,12 +373,11 @@ pub fn flt_instances(detail: &FltFrames<FltInstanceDetail>) -> View {
             .collect(),
         stopped: detail.stopped.clone(),
     }
-    .into_view()
 }
 
 /// Render `!fltkd.volumes`: frames, each with its volumes and the instances
 /// on them.
-pub fn flt_volumes(detail: &FltFrames<FltVolumeDetail>) -> View {
+pub fn flt_volumes(detail: &FltFrames<FltVolumeDetail>) -> FltVolumes {
     FltVolumes {
         frames: detail
             .frames
@@ -400,5 +394,4 @@ pub fn flt_volumes(detail: &FltFrames<FltVolumeDetail>) -> View {
             .collect(),
         stopped: detail.stopped.clone(),
     }
-    .into_view()
 }

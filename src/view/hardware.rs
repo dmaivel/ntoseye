@@ -1,7 +1,6 @@
 //! hardware: [`View`] builders for hang diagnosis (`!qlocks`, `!ipi`) and PCI.
 
-use super::shape::{Diag, Hex, Omit, shapes};
-use super::{View, diagnostic};
+use super::shape::{Diag, Hex, Keyed, Omit, shapes};
 use crate::target::hang::{
     self, IpiDetail, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
 };
@@ -45,13 +44,12 @@ fn queued_lock(lock: &hang::QueuedLock) -> QueuedLock {
 }
 
 /// Numbered queued spinlocks and the processors owning or waiting for them.
-pub fn queued_locks(detail: &QueuedLocksDetail) -> View {
+pub fn queued_locks(detail: &QueuedLocksDetail) -> QueuedLocks {
     QueuedLocks {
         processors: detail.processors.clone(),
         locks: detail.locks.iter().map(queued_lock).collect(),
         errors: detail.errors.iter().map(processor_error).collect(),
     }
-    .into_view()
 }
 
 fn ipi_request(request: &hang::IpiRequest) -> IpiRequest {
@@ -79,16 +77,11 @@ fn ipi_processor(processor: &hang::IpiProcessor) -> IpiProcessor {
     IpiProcessor {
         processor: processor.processor,
         kprcb: Hex(processor.kprcb.0),
-        fields: View::Object(
+        fields: Keyed(
             processor
                 .fields
                 .iter()
-                .map(|field| {
-                    (
-                        field.name,
-                        diagnostic(&field.value, |value| View::Hex(*value)),
-                    )
-                })
+                .map(|field| (field.name, Diag::of(&field.value, |value| Hex(*value))))
                 .collect(),
         ),
         frozen_state: frozen,
@@ -101,12 +94,11 @@ fn ipi_processor(processor: &hang::IpiProcessor) -> IpiProcessor {
 }
 
 /// Per-processor IPI state.
-pub fn ipi(detail: &IpiDetail) -> View {
+pub fn ipi(detail: &IpiDetail) -> IpiState {
     IpiState {
         processors: detail.processors.iter().map(ipi_processor).collect(),
         errors: detail.errors.iter().map(processor_error).collect(),
     }
-    .into_view()
 }
 
 shapes! {
@@ -172,7 +164,7 @@ shapes! {
         kprcb: Hex,
         /// The `_KPRCB` IPI fields this build has, by name, each a
         /// `Diagnostic` of its value.
-        fields: View,
+        fields: Keyed<Diag<Hex>>,
         /// `IpiFrozen` decoded (`Running`, `Frozen`, ...); `None` when the
         /// build lacks the field.
         frozen_state: Option<Diag<&'static str>>,
@@ -370,7 +362,7 @@ fn pci_bus(bus: &pci::PciTreeBus) -> PciBus {
 }
 
 /// pci.sys's hierarchy.
-pub fn pci_tree(tree: &pci::PciTree) -> View {
+pub fn pci_tree(tree: &pci::PciTree) -> PciTree {
     PciTree {
         segments: tree
             .segments
@@ -384,7 +376,6 @@ pub fn pci_tree(tree: &pci::PciTree) -> View {
         truncated: tree.truncated,
         errors: tree.errors.clone(),
     }
-    .into_view()
 }
 
 fn pci_capabilities(
@@ -470,7 +461,7 @@ fn pci_function(function: &PciFunctionConfig, raw: Option<PciRawRange>) -> PciFu
 
 /// Configuration space of the functions a `!pci` scan found, each with the
 /// requested raw range.
-pub fn pci(scan: &pci::PciScan, raw: Option<PciRawRange>) -> View {
+pub fn pci(scan: &pci::PciScan, raw: Option<PciRawRange>) -> PciScan {
     PciScan {
         functions: scan
             .functions
@@ -479,5 +470,4 @@ pub fn pci(scan: &pci::PciScan, raw: Option<PciRawRange>) -> View {
             .collect(),
         interrupted: scan.interrupted,
     }
-    .into_view()
 }

@@ -10,32 +10,32 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
     Some(match name {
         "!pcr" | "pcr" => args.processor(0).and_then(|processor| {
             let detail = args.state.ctx.inspect_pcr(processor)?;
-            Ok(view::cpu::pcr(&detail))
+            Ok(view::cpu::pcr(&detail).into_view())
         }),
         "!prcb" | "prcb" => args.processor(0).and_then(|processor| {
             let detail = args.target().inspect_prcb(processor)?;
-            Ok(view::cpu::prcb(&detail))
+            Ok(view::cpu::prcb(&detail).into_view())
         }),
         "!irql" | "irql" => args.processor(0).and_then(|processor| {
             let detail = args.target().inspect_irql(processor)?;
-            Ok(view::cpu::irql(&detail))
+            Ok(view::cpu::irql(&detail).into_view())
         }),
         "!idt" | "idt" => args.opt_u16_value(0, "IDT vector").and_then(|vector| {
             let processor = args.current_processor();
             let detail = args.state.ctx.inspect_idt(processor, vector)?;
-            Ok(view::cpu::idt(&detail))
+            Ok(view::cpu::idt(&detail).into_view())
         }),
         "!gdt" | "gdt" => {
             let processor = args.current_processor();
             args.state
                 .ctx
                 .inspect_gdt(processor)
-                .map(|detail| view::cpu::gdt(&detail))
+                .map(|detail| view::cpu::gdt(&detail).into_view())
         }
         "!cpuinfo" | "cpuinfo" => args
             .target()
             .inspect_cpuinfo(args.current_processor())
-            .map(|detail| view::cpu::cpuinfo(&detail)),
+            .map(|detail| view::cpu::cpuinfo(&detail).into_view()),
         _ => return None,
     })
 }

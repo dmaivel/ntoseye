@@ -21,7 +21,7 @@ impl Args<'_, '_> {
         if argv.is_empty() || argv == ["-s"] {
             return target
                 .heap_summary()
-                .map(|detail| view::heap::heap_summary(&detail));
+                .map(|detail| view::heap::heap_summary(&detail).into_view());
         }
         if argv.first().is_some_and(|arg| *arg == "-x")
             || (argv.first().is_some_and(|arg| *arg == "-p")
@@ -34,7 +34,7 @@ impl Args<'_, '_> {
             let address = self.eval(text)?;
             return target
                 .find_heap_block(address)
-                .map(|detail| view::heap::heap_block_search(&detail));
+                .map(|detail| view::heap::heap_block_search(&detail).into_view());
         }
         let list_entries = argv.first().is_some_and(|arg| *arg == "-a");
         let text = argv
@@ -50,6 +50,6 @@ impl Args<'_, '_> {
         };
         target
             .inspect_heap(selector, list_entries)
-            .map(|detail| view::heap::heap(&detail))
+            .map(|detail| view::heap::heap(&detail).into_view())
     }
 }

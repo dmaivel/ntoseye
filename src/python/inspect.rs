@@ -1,4 +1,3 @@
-use pyo3::PyTypeCheck;
 use pyo3::prelude::*;
 
 use super::args::{ApcTarget, DeviceArg, FltFilterArg, LoggerArg, ObjectArg};
@@ -7,7 +6,7 @@ use super::handle::Owner;
 use super::module::Device;
 use super::process::Process;
 use super::thread::{Frame, Thread, process_for_thread, trap_frame_view};
-use super::{err, raise, view_record, view_records};
+use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::error::Error;
 use crate::expr::NumberRadix;
@@ -22,7 +21,8 @@ use crate::types::VirtAddr;
 use crate::view::hardware;
 use crate::view::mm;
 use crate::view::sched;
-use crate::view::{self, View};
+use crate::view::shape::{Typed, ViewValue};
+use crate::view::{self};
 
 /// System-wide reports and decode-by-address helpers (`dbg.inspect`); the
 /// results are `Record`s shaped like the MCP JSON output.
@@ -36,22 +36,14 @@ impl Inspect {
         Inspect { owner }
     }
 
-    fn record<'py, T: PyTypeCheck>(
+    /// Run `build` in the session and return its result as the SDK does.
+    fn typed<'py, T: ViewValue + Send>(
         &self,
         py: Python<'py>,
-        build: impl FnOnce(&mut Session) -> PyResult<View> + Send,
-    ) -> PyResult<Bound<'py, T>> {
-        let view = self.owner.with_in(py, &Context::default(), build)?;
-        view_record(py, &view)
-    }
-
-    fn list<'py, T: PyTypeCheck>(
-        &self,
-        py: Python<'py>,
-        build: impl FnOnce(&mut Session) -> PyResult<View> + Send,
-    ) -> PyResult<Vec<Bound<'py, T>>> {
-        let view = self.owner.with_in(py, &Context::default(), build)?;
-        view_records(py, &view)
+        build: impl FnOnce(&mut Session) -> PyResult<T> + Send,
+    ) -> PyResult<Typed<'py, T>> {
+        let value = self.owner.with_in(py, &Context::default(), build)?;
+        Typed::new(py, value)
     }
 }
 
@@ -62,12 +54,8 @@ impl Inspect {
     }
 
     /// Decode an in-flight `_IRP` and its current I/O stack location (`!irp`).
-    fn irp<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Bound<'py, view::object::py::Irp>> {
-        self.record(py, |session| {
+    fn irp<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::object::Irp>> {
+        self.typed(py, |session| {
             let detail = session.target.inspect_irp(VirtAddr(address)).map_err(err)?;
             Ok(view::object::irp(&detail))
         })
@@ -79,10 +67,10 @@ impl Inspect {
         &self,
         py: Python<'py>,
         filter: Option<&str>,
-    ) -> PyResult<Vec<Bound<'py, view::object::py::InFlightIrp>>> {
-        self.list(py, |session| {
+    ) -> PyResult<Typed<'py, Vec<view::object::InFlightIrp>>> {
+        self.typed(py, |session| {
             let hits = session.target.discover_irps(filter).map_err(err)?;
-            Ok(View::List(hits.iter().map(view::object::irp_hit).collect()))
+            Ok(hits.iter().map(view::object::irp_hit).collect::<Vec<_>>())
         })
     }
 
@@ -99,7 +87,7 @@ impl Inspect {
         restart: Option<u64>,
         criteria: Option<&str>,
         value: u64,
-    ) -> PyResult<Bound<'py, view::object::py::IrpFindResult>> {
+    ) -> PyResult<Typed<'py, view::object::IrpFindResult>> {
         let pool = match pool_type {
             "nonpaged" => IrpPool::NonPaged,
             "paged" => IrpPool::Paged,
@@ -113,7 +101,7 @@ impl Inspect {
             .map(|name| IrpCriteria::parse(name, value))
             .transpose()
             .map_err(err)?;
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .irp_find(pool, restart.map(VirtAddr), criteria)
@@ -129,8 +117,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, view::object::py::AlpcPort>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::object::AlpcPort>> {
+        self.typed(py, |session| {
             let port = session.target.alpc_port(VirtAddr(address)).map_err(err)?;
             Ok(view::object::alpc_port(&port))
         })
@@ -141,8 +129,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, view::object::py::AlpcMessage>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::object::AlpcMessage>> {
+        self.typed(py, |session| {
             let message = session
                 .target
                 .alpc_message(VirtAddr(address))
@@ -159,7 +147,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process: Option<PyRef<'py, Process>>,
-    ) -> PyResult<Bound<'py, view::object::py::AlpcProcessPorts>> {
+    ) -> PyResult<Typed<'py, view::object::AlpcProcessPorts>> {
         let process = match process {
             Some(process) => {
                 process
@@ -169,7 +157,7 @@ impl Inspect {
             }
             None => None,
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let target = &session.target;
             let process = match process {
                 Some(process) => process,
@@ -185,8 +173,8 @@ impl Inspect {
     fn global_flags<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::process::py::GlobalFlags>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::process::GlobalFlags>> {
+        self.typed(py, |session| {
             let detail = session.target.global_flags().map_err(err)?;
             Ok(view::process::global_flags(&detail))
         })
@@ -200,8 +188,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, view::process::py::Job>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::process::Job>> {
+        self.typed(py, |session| {
             let target = &session.target;
             let job = target.job_address(address.map(VirtAddr)).map_err(err)?;
             let detail = target.inspect_job(job).map_err(err)?;
@@ -217,9 +205,9 @@ impl Inspect {
         &self,
         py: Python<'py>,
         flags: u64,
-    ) -> PyResult<Bound<'py, view::process::py::Zombies>> {
+    ) -> PyResult<Typed<'py, view::process::Zombies>> {
         let kinds = ZombieKinds::from_flags(flags).map_err(err)?;
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session.target.zombies(kinds).map_err(err)?;
             Ok(view::process::zombies(&detail))
         })
@@ -232,8 +220,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         object: ObjectArg,
-    ) -> PyResult<Bound<'py, view::object::py::ExecutiveObject>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::object::ExecutiveObject>> {
+        self.typed(py, |session| {
             let address = match object {
                 ObjectArg::Address(address) => VirtAddr(address),
                 ObjectArg::Path(path) => session.target.object_at_path(&path).map_err(err)?,
@@ -248,8 +236,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, view::object::py::FileObject>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::object::FileObject>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_file_object(VirtAddr(address))
@@ -263,8 +251,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, view::object::py::ExecutiveResource>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::object::ExecutiveResource>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_resource(VirtAddr(address))
@@ -279,8 +267,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         limit: usize,
-    ) -> PyResult<Bound<'py, view::object::py::ResourceList>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::object::ResourceList>> {
+        self.typed(py, |session| {
             let detail = session.target.enumerate_resources(limit).map_err(err)?;
             Ok(view::object::resource_list(&detail))
         })
@@ -292,8 +280,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process_limit: usize,
-    ) -> PyResult<Bound<'py, mm::py::SystemMemoryUsage>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, mm::SystemMemoryUsage>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .memory_use_summary(process_limit)
@@ -306,32 +294,31 @@ impl Inspect {
     fn callbacks<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Vec<Bound<'py, view::object::py::NotifyCallback>>> {
-        self.list(py, |session| {
+    ) -> PyResult<Typed<'py, Vec<view::object::NotifyCallback>>> {
+        self.typed(py, |session| {
             let callbacks = session.target.enumerate_notify_callbacks().map_err(err)?;
             let dtb = session.target.guest().map_err(err)?.ntoskrnl.dtb();
-            Ok(View::List(
-                callbacks
-                    .iter()
-                    .map(|callback| {
-                        let symbol = session
-                            .target
-                            .symbols
-                            .format_closest_symbol_for_address(dtb, callback.function);
-                        view::object::notify_callback(callback, symbol)
-                    })
-                    .collect(),
-            ))
+            Ok(callbacks
+                .iter()
+                .map(|callback| {
+                    let symbol = session
+                        .target
+                        .symbols
+                        .format_closest_symbol_for_address(dtb, callback.function);
+                    view::object::notify_callback(callback, symbol)
+                })
+                .collect::<Vec<_>>())
         })
     }
 
     /// Dump the kernel SSDT and initialized win32k shadow table (`!ssdt`).
-    fn ssdt<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, view::object::py::SsdtTable>>> {
-        self.list(py, |session| {
+    fn ssdt<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::object::SsdtTable>>> {
+        self.typed(py, |session| {
             let tables = session.target.dump_ssdt().map_err(err)?;
-            Ok(View::List(
-                tables.iter().map(view::object::ssdt_table).collect(),
-            ))
+            Ok(tables
+                .iter()
+                .map(view::object::ssdt_table)
+                .collect::<Vec<_>>())
         })
     }
 
@@ -342,8 +329,8 @@ impl Inspect {
         py: Python<'py>,
         include_idle: bool,
         include_stacks: bool,
-    ) -> PyResult<Bound<'py, sched::py::RunningProcessors>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, sched::RunningProcessors>> {
+        self.typed(py, |session| {
             let detail = session
                 .inspect_running(include_idle, include_stacks)
                 .map_err(err)?;
@@ -357,8 +344,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, sched::py::ReadyQueues>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, sched::ReadyQueues>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_ready_queues(processor)
@@ -368,8 +355,8 @@ impl Inspect {
     }
 
     /// Report DPCs queued on each processor (`!dpcs`).
-    fn dpcs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, sched::py::DpcQueues>> {
-        self.record(py, |session| {
+    fn dpcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, sched::DpcQueues>> {
+        self.typed(py, |session| {
             let detail = session.target.inspect_dpc_queues().map_err(err)?;
             Ok(view::sched::dpc_queues(&detail))
         })
@@ -377,11 +364,8 @@ impl Inspect {
 
     /// Report which processors own or wait for each numbered queued spinlock
     /// (`!qlocks`).
-    fn queued_locks<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, hardware::py::QueuedLocks>> {
-        self.record(py, |session| {
+    fn queued_locks<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, hardware::QueuedLocks>> {
+        self.typed(py, |session| {
             let detail = session.target.queued_locks().map_err(err)?;
             Ok(view::hardware::queued_locks(&detail))
         })
@@ -394,16 +378,16 @@ impl Inspect {
         &self,
         py: Python<'py>,
         processor: Option<u16>,
-    ) -> PyResult<Bound<'py, hardware::py::IpiState>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, hardware::IpiState>> {
+        self.typed(py, |session| {
             let detail = session.target.ipi_state(processor).map_err(err)?;
             Ok(view::hardware::ipi(&detail))
         })
     }
 
     /// Report the PCI bus hierarchy pci.sys tracks (`!pcitree`).
-    fn pci_tree<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, hardware::py::PciTree>> {
-        self.record(py, |session| {
+    fn pci_tree<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, hardware::PciTree>> {
+        self.typed(py, |session| {
             let tree = session.target.pci_tree().map_err(err)?;
             Ok(view::hardware::pci_tree(&tree))
         })
@@ -423,8 +407,8 @@ impl Inspect {
         function: Option<u8>,
         last_bus: Option<u8>,
         raw: bool,
-    ) -> PyResult<Bound<'py, hardware::py::PciScan>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, hardware::PciScan>> {
+        self.typed(py, |session| {
             let query = PciQuery {
                 segment: 0,
                 first_bus: bus,
@@ -453,7 +437,7 @@ impl Inspect {
         py: Python<'py>,
         include_stacks: bool,
         queue_types: Option<Vec<String>>,
-    ) -> PyResult<Bound<'py, sched::py::WorkQueues>> {
+    ) -> PyResult<Typed<'py, sched::WorkQueues>> {
         let mut flags = if include_stacks { 0x4 } else { 0 };
         for name in queue_types.unwrap_or_default() {
             flags |= match name.as_str() {
@@ -467,15 +451,15 @@ impl Inspect {
                 }
             };
         }
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session.inspect_work_queues(flags).map_err(err)?;
             Ok(view::sched::work_queues(&detail))
         })
     }
 
     /// Read bounded kernel timer-table entries and their DPCs (`!timer`).
-    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, sched::py::TimerTable>> {
-        self.record(py, |session| {
+    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, sched::TimerTable>> {
+        self.typed(py, |session| {
             let detail = session.target.timer_list().map_err(err)?;
             Ok(view::sched::timer_list(&detail))
         })
@@ -486,8 +470,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, sched::py::KernelTimer>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, sched::KernelTimer>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_timer(VirtAddr(address))
@@ -502,7 +486,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         target: Option<ApcTarget<'_>>,
-    ) -> PyResult<Bound<'py, sched::py::ApcQueues>> {
+    ) -> PyResult<Typed<'py, sched::ApcQueues>> {
         let selector = match target {
             None => ApcSelector::All,
             Some(ApcTarget::Process(process)) => {
@@ -519,7 +503,7 @@ impl Inspect {
             }
             Some(ApcTarget::Ethread(address)) => ApcSelector::Thread(VirtAddr(address)),
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session.inspect_apcs(selector).map_err(err)?;
             Ok(view::sched::apcs(&detail))
         })
@@ -532,8 +516,8 @@ impl Inspect {
         py: Python<'py>,
         level: u8,
         filter: Option<&str>,
-    ) -> PyResult<Bound<'py, sched::py::ThreadStacks>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, sched::ThreadStacks>> {
+        self.typed(py, |session| {
             let detail = session.inspect_stacks(level, filter).map_err(err)?;
             Ok(view::sched::stacks(&detail))
         })
@@ -549,8 +533,8 @@ impl Inspect {
         py: Python<'py>,
         symbol: &str,
         level: u8,
-    ) -> PyResult<Bound<'py, sched::py::FindStack>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, sched::FindStack>> {
+        self.typed(py, |session| {
             let detail = session.inspect_findstack(symbol, level).map_err(err)?;
             Ok(view::sched::findstack(&detail))
         })
@@ -563,7 +547,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process: Option<PyRef<'_, Process>>,
-    ) -> PyResult<Bound<'py, sched::py::UniqStacks>> {
+    ) -> PyResult<Typed<'py, sched::UniqStacks>> {
         let scope = match process {
             None => UniqStackScope::AllThreads,
             Some(process) => {
@@ -576,7 +560,7 @@ impl Inspect {
                 }
             }
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session.inspect_uniqstack(scope).map_err(err)?;
             Ok(view::sched::uniqstack(&detail))
         })
@@ -589,7 +573,7 @@ impl Inspect {
         py: Python<'py>,
         process: PyRef<'_, Process>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, view::usermode::py::Peb>> {
+    ) -> PyResult<Typed<'py, view::usermode::Peb>> {
         process
             .owner
             .require_argument_of(py, &self.owner, "process")?;
@@ -601,7 +585,7 @@ impl Inspect {
                 .map(|detail| view::usermode::peb(&detail))
                 .map_err(err)
         })?;
-        view_record(py, &detail)
+        Typed::new(py, detail)
     }
 
     /// Decode a thread TEB and its WOW64 companion (`!teb`).
@@ -611,7 +595,7 @@ impl Inspect {
         py: Python<'py>,
         thread: PyRef<'_, Thread>,
         address: Option<u64>,
-    ) -> PyResult<Bound<'py, view::usermode::py::Teb>> {
+    ) -> PyResult<Typed<'py, view::usermode::Teb>> {
         thread
             .owner
             .require_argument_of(py, &self.owner, "thread")?;
@@ -632,7 +616,7 @@ impl Inspect {
                     .map_err(err)
             })
         })?;
-        view_record(py, &detail)
+        Typed::new(py, detail)
     }
 
     /// Decode a `_KTRAP_FRAME` at `address` (`.trap`).
@@ -640,8 +624,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, view::bugcheck::py::TrapFrame>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::bugcheck::TrapFrame>> {
+        self.typed(py, |session| {
             trap_frame_view(&session.target, Some(VirtAddr(address)))
         })
     }
@@ -657,7 +641,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         device_or_node: DeviceArg<'_>,
-    ) -> PyResult<Bound<'py, view::pnp::py::DeviceStack>> {
+    ) -> PyResult<Typed<'py, view::pnp::DeviceStack>> {
         let address = match device_or_node {
             DeviceArg::Device(device) => {
                 device
@@ -667,7 +651,7 @@ impl Inspect {
             }
             DeviceArg::Address(address) => address,
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_device_stack(VirtAddr(address))
@@ -709,8 +693,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, view::bugcheck::py::ExceptionRecord>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::bugcheck::ExceptionRecord>> {
+        self.typed(py, |session| {
             let record = session
                 .read_exception_record(VirtAddr(address))
                 .map_err(err)?;
@@ -724,8 +708,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, view::fs::py::ControlArea>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::fs::ControlArea>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_control_area(VirtAddr(address))
@@ -735,8 +719,8 @@ impl Inspect {
     }
 
     /// Decode a volume parameter block (`!vpb`).
-    fn vpb<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, view::fs::py::Vpb>> {
-        self.record(py, |session| {
+    fn vpb<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::fs::Vpb>> {
+        self.typed(py, |session| {
             let detail = session.target.inspect_vpb(VirtAddr(address)).map_err(err)?;
             Ok(view::fs::vpb(&detail))
         })
@@ -744,8 +728,8 @@ impl Inspect {
 
     /// The cache manager's mapped views per file, from its VACB arrays
     /// (`!filecache`).
-    fn file_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::fs::py::FileCache>> {
-        self.record(py, |session| {
+    fn file_cache<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FileCache>> {
+        self.typed(py, |session| {
             let detail = session.target.file_cache().map_err(err)?;
             Ok(view::fs::file_cache(&detail))
         })
@@ -753,8 +737,8 @@ impl Inspect {
 
     /// The registered minifilters of each filter manager frame, with their
     /// instances (`!fltkd.filters`).
-    fn flt_filters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::fs::py::FltFilters>> {
-        self.record(py, |session| {
+    fn flt_filters<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FltFilters>> {
+        self.typed(py, |session| {
             let detail = session.target.flt_filters().map_err(err)?;
             Ok(view::fs::flt_filters(&detail))
         })
@@ -768,13 +752,13 @@ impl Inspect {
         &self,
         py: Python<'py>,
         filter: Option<FltFilterArg>,
-    ) -> PyResult<Bound<'py, view::fs::py::FltInstances>> {
+    ) -> PyResult<Typed<'py, view::fs::FltInstances>> {
         let (text, address) = match filter {
             Some(FltFilterArg::Address(address)) => (Some(format!("{address:#x}")), Some(address)),
             Some(FltFilterArg::Name(name)) => (Some(name), None),
             None => (None, None),
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .flt_instances(text.as_deref(), |_| {
@@ -789,8 +773,8 @@ impl Inspect {
 
     /// The volumes of each filter manager frame, with the instances on them
     /// (`!fltkd.volumes`).
-    fn flt_volumes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::fs::py::FltVolumes>> {
-        self.record(py, |session| {
+    fn flt_volumes<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FltVolumes>> {
+        self.typed(py, |session| {
             let detail = session.target.flt_volumes().map_err(err)?;
             Ok(view::fs::flt_volumes(&detail))
         })
@@ -802,8 +786,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         include_processes: bool,
-    ) -> PyResult<Bound<'py, mm::py::VmStatistics>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, mm::VmStatistics>> {
+        self.typed(py, |session| {
             let detail = session.target.inspect_vm(include_processes).map_err(err)?;
             Ok(view::mm::vm(&detail))
         })
@@ -816,21 +800,21 @@ impl Inspect {
         py: Python<'py>,
         value: u64,
         physical_address: bool,
-    ) -> PyResult<Bound<'py, mm::py::Pfn>> {
+    ) -> PyResult<Typed<'py, mm::Pfn>> {
         let selector = if physical_address {
             PfnSelector::PhysicalAddress(value)
         } else {
             PfnSelector::Pfn(value)
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session.target.inspect_pfn(selector).map_err(err)?;
             Ok(view::mm::pfn(&detail))
         })
     }
 
     /// Decode the pool page or big-pool allocation containing `address` (`!pool`).
-    fn pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Bound<'py, mm::py::PoolPage>> {
-        self.record(py, |session| {
+    fn pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, mm::PoolPage>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_pool(VirtAddr(address))
@@ -845,8 +829,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, mm::py::PoolValidation>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, mm::PoolValidation>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .validate_pool(VirtAddr(address))
@@ -863,7 +847,7 @@ impl Inspect {
         tag: Option<&str>,
         sort: &str,
         include_counts: bool,
-    ) -> PyResult<Bound<'py, mm::py::PoolUsage>> {
+    ) -> PyResult<Typed<'py, mm::PoolUsage>> {
         let sort = match sort {
             "tag" => PoolUsageSort::Tag,
             "nonpaged" => PoolUsageSort::NonPagedBytes,
@@ -874,7 +858,7 @@ impl Inspect {
                 )));
             }
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .pool_usage(sort, tag, include_counts)
@@ -890,7 +874,7 @@ impl Inspect {
         py: Python<'py>,
         tag: &str,
         pool_type: Option<&str>,
-    ) -> PyResult<Bound<'py, mm::py::PoolSearch>> {
+    ) -> PyResult<Typed<'py, mm::PoolSearch>> {
         let pool_type = match pool_type {
             None => None,
             Some("nonpaged") => Some(PoolType::NonPaged),
@@ -901,15 +885,15 @@ impl Inspect {
                 )));
             }
         };
-        self.record(py, |session| {
+        self.typed(py, |session| {
             let detail = session.target.pool_find(tag, pool_type).map_err(err)?;
             Ok(view::mm::pool_find(&detail))
         })
     }
 
     /// List exported nonpaged and paged `GENERAL_LOOKASIDE` lists (`!lookaside`).
-    fn lookasides<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, mm::py::LookasideLists>> {
-        self.record(py, |session| {
+    fn lookasides<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, mm::LookasideLists>> {
+        self.typed(py, |session| {
             let detail = session.target.lookaside_lists().map_err(err)?;
             Ok(view::mm::lookaside_lists(&detail))
         })
@@ -920,8 +904,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Bound<'py, mm::py::LookasideList>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, mm::LookasideList>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_lookaside(VirtAddr(address))
@@ -938,8 +922,8 @@ impl Inspect {
         py: Python<'py>,
         address: u64,
         pfn_count: Option<u64>,
-    ) -> PyResult<Bound<'py, mm::py::Mdl>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, mm::Mdl>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_mdl(VirtAddr(address), pfn_count)
@@ -955,8 +939,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         free_runs: bool,
-    ) -> PyResult<Bound<'py, mm::py::SystemPtes>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, mm::SystemPtes>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .system_ptes(u64::from(free_runs))
@@ -972,8 +956,8 @@ impl Inspect {
         py: Python<'py>,
         address: u64,
         annotate_well_known: bool,
-    ) -> PyResult<Bound<'py, view::security::py::SecurityDescriptor>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::security::SecurityDescriptor>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_security_descriptor(VirtAddr(address), annotate_well_known)
@@ -983,24 +967,16 @@ impl Inspect {
     }
 
     /// Decode an ACL and its ACEs (`!acl`).
-    fn acl<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Bound<'py, view::security::py::Acl>> {
-        self.record(py, |session| {
+    fn acl<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::security::Acl>> {
+        self.typed(py, |session| {
             let detail = session.target.inspect_acl(VirtAddr(address)).map_err(err)?;
             Ok(view::security::acl(&detail))
         })
     }
 
     /// Decode a SID to its string form, authority, and well-known name (`!sid`).
-    fn sid<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Bound<'py, view::security::py::Sid>> {
-        self.record(py, |session| {
+    fn sid<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::security::Sid>> {
+        self.typed(py, |session| {
             let detail = session.target.inspect_sid(VirtAddr(address)).map_err(err)?;
             Ok(view::security::sid(&detail))
         })
@@ -1011,8 +987,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         object: u64,
-    ) -> PyResult<Bound<'py, view::security::py::ObjectSecurity>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::security::ObjectSecurity>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_object_security(VirtAddr(object))
@@ -1027,19 +1003,16 @@ impl Inspect {
         &self,
         py: Python<'py>,
         session: Option<i64>,
-    ) -> PyResult<Bound<'py, view::security::py::Sessions>> {
-        self.record(py, |session_state| {
+    ) -> PyResult<Typed<'py, view::security::Sessions>> {
+        self.typed(py, |session_state| {
             let detail = session_state.target.sessions(session).map_err(err)?;
             Ok(view::security::sessions(&detail))
         })
     }
 
     /// List the active ETW trace sessions (`!wmitrace.strdump`).
-    fn etw_loggers<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, view::etw::py::EtwLoggerTable>> {
-        self.record(py, |session| {
+    fn etw_loggers<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::etw::EtwLoggerTable>> {
+        self.typed(py, |session| {
             let table = session.target.etw_loggers().map_err(err)?;
             Ok(view::etw::logger_table(&table))
         })
@@ -1052,8 +1025,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         logger: LoggerArg,
-    ) -> PyResult<Bound<'py, view::etw::py::EtwLogger>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::etw::EtwLogger>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .etw_logger(&logger.text(), NumberRadix::Hexadecimal)
@@ -1068,8 +1041,8 @@ impl Inspect {
         &self,
         py: Python<'py>,
         logger: LoggerArg,
-    ) -> PyResult<Bound<'py, view::etw::py::EtwLoggerBuffers>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::etw::EtwLoggerBuffers>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .etw_logger_buffers(&logger.text(), NumberRadix::Hexadecimal)
@@ -1086,8 +1059,8 @@ impl Inspect {
         py: Python<'py>,
         logger: LoggerArg,
         count: Option<usize>,
-    ) -> PyResult<Bound<'py, view::etw::py::EtwEventDump>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::etw::EtwEventDump>> {
+        self.typed(py, |session| {
             let dump = session
                 .target
                 .etw_log_dump(&logger.text(), NumberRadix::Hexadecimal, count)
@@ -1103,8 +1076,8 @@ impl Inspect {
         py: Python<'py>,
         node: Option<u64>,
         recurse: bool,
-    ) -> PyResult<Bound<'py, view::pnp::py::DevNode>> {
-        self.record(py, |session| {
+    ) -> PyResult<Typed<'py, view::pnp::DevNode>> {
+        self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_devnode(node.map(VirtAddr), recurse)
@@ -1114,32 +1087,32 @@ impl Inspect {
     }
 
     /// Report device nodes with PnP problems (`!pnptriage`).
-    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::pnp::py::PnpTriage>> {
-        self.record(py, |session| {
+    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::pnp::PnpTriage>> {
+        self.typed(py, |session| {
             let detail = session.target.pnp_triage().map_err(err)?;
             Ok(view::pnp::pnp_triage(&detail))
         })
     }
 
     /// Report Driver Verifier configuration and statistics (`!verifier`).
-    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::meta::py::Verifier>> {
-        self.record(py, |session| {
+    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::Verifier>> {
+        self.typed(py, |session| {
             let detail = session.target.verifier_status().map_err(err)?;
             Ok(view::meta::verifier(&detail))
         })
     }
 
     /// Target, kernel, symbol, processor, and debugger version information (`vertarget`).
-    fn version<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::meta::py::TargetVersion>> {
-        self.record(py, |session| {
+    fn version<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetVersion>> {
+        self.typed(py, |session| {
             let detail = session.target_version().map_err(err)?;
             Ok(view::meta::target_version(&detail))
         })
     }
 
     /// Report target system time and uptime (`.time`).
-    fn time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::meta::py::TargetTime>> {
-        self.record(py, |session| {
+    fn time<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetTime>> {
+        self.typed(py, |session| {
             let detail = session.target.target_time().map_err(err)?;
             Ok(view::meta::target_time(&detail))
         })
@@ -1149,21 +1122,18 @@ impl Inspect {
     fn bugcheck<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Option<Bound<'py, view::bugcheck::py::Bugcheck>>> {
+    ) -> PyResult<Typed<'py, Option<view::bugcheck::Bugcheck>>> {
         let detail = self.owner.with_in(py, &Context::default(), |session| {
             Ok(current_bugcheck(&session.target)
                 .or_else(|| bugcheck_from_dump_info(&session.target))
-                .map(|analysis| view::bugcheck::bugcheck(&analysis).into_view()))
+                .map(|analysis| view::bugcheck::bugcheck(&analysis)))
         })?;
-        detail
-            .as_ref()
-            .map(|view| view_record(py, view))
-            .transpose()
+        Typed::new(py, detail)
     }
 
     /// Build the structured one-shot crash/debug report (`!analyze`).
-    fn triage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, view::triage::py::TriageReport>> {
-        self.record(py, |session| {
+    fn triage<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::triage::TriageReport>> {
+        self.typed(py, |session| {
             let report = TriageReport::build(session);
             Ok(view::triage::triage_report(&report, usize::MAX))
         })

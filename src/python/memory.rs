@@ -6,7 +6,7 @@ use pyo3::types::PyBytes;
 use super::context::Space;
 use super::handle::{Owner, require_halted};
 use super::symbols::load_scope_symbols;
-use super::{MAX_READ_LEN, err, raise, view_record, view_records};
+use super::{MAX_READ_LEN, err, raise};
 use crate::backend::MemoryOps;
 use crate::layout::utf16le_lossy;
 use crate::memory::pattern_offsets;
@@ -14,11 +14,7 @@ use crate::target::MAX_SEARCH_BYTES;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::execution::py::{DisassembledInstruction, FunctionEntry};
-use crate::view::mm::py::{
-    AddressDescription, AddressTranslation, MemorySearchMatch, ReverseTranslation,
-};
-use crate::view::shape::ViewValue;
+use crate::view::shape::Typed;
 
 /// A guest address space: `dbg.memory` (kernel), `proc.memory`, `dbg.physical`.
 #[pyclass(module = "ntoseye")]
@@ -246,10 +242,10 @@ impl Memory {
         pattern: &[u8],
         start: u64,
         length: usize,
-    ) -> PyResult<Vec<Bound<'py, MemorySearchMatch>>> {
+    ) -> PyResult<Typed<'py, Vec<view::mm::MemorySearchMatch>>> {
         check_search_len(length)?;
         if pattern.is_empty() || pattern.len() > length {
-            return Ok(Vec::new());
+            return Typed::new(py, Vec::new());
         }
         let context = self.space.context();
         let physical = matches!(self.space, Space::Physical);
@@ -270,7 +266,7 @@ impl Memory {
                             "physical",
                         )
                     })
-                    .collect())
+                    .collect::<Vec<_>>())
             } else {
                 let hits = session
                     .search(VirtAddr(start), pattern, length)
@@ -290,7 +286,7 @@ impl Memory {
                                 "vtl1",
                             )
                         })
-                        .collect());
+                        .collect::<Vec<_>>());
                 }
                 session
                     .target
@@ -299,12 +295,12 @@ impl Memory {
                         matches
                             .into_iter()
                             .map(|hit| view::mm::memory_search_match(&hit))
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
                     .map_err(err)
             }
         })?;
-        view_records(py, &view::View::List(matches))
+        Typed::new(py, matches)
     }
 
     /// Translate a virtual address through this space's page tables (`!vtop`).
@@ -324,13 +320,13 @@ impl Memory {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Bound<'py, AddressTranslation>> {
+    ) -> PyResult<Typed<'py, view::mm::AddressTranslation>> {
         self.space.require_virtual()?;
         let detail = self.owner.with_in(py, &self.space.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
             session.target.vtop(dtb, VirtAddr(addr)).map_err(err)
         })?;
-        view_record(py, &view::mm::vtop(&detail))
+        Typed::new(py, view::mm::vtop(&detail))
     }
 
     /// Reverse-map a physical address through this space's page tables (`!ptov`).
@@ -338,14 +334,14 @@ impl Memory {
         &self,
         py: Python<'py>,
         physical: u64,
-    ) -> PyResult<Bound<'py, ReverseTranslation>> {
+    ) -> PyResult<Typed<'py, view::mm::ReverseTranslation>> {
         self.space.require_virtual()?;
         self.space.require_nt("ptov")?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.ptov(physical).map_err(err)
         })?;
-        view_record(py, &view::mm::ptov(&detail))
+        Typed::new(py, view::mm::ptov(&detail))
     }
 
     /// The directory-table base used by this space.
@@ -385,14 +381,14 @@ impl Memory {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Bound<'py, AddressDescription>> {
+    ) -> PyResult<Typed<'py, view::mm::AddressDescription>> {
         self.space.require_virtual()?;
         self.space.require_nt("describe")?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.target.describe_address(VirtAddr(addr)).map_err(err)
         })?;
-        view_record(py, &view::mm::address_description(&detail))
+        Typed::new(py, view::mm::address_description(&detail))
     }
 
     /// Disassemble `count` instructions at `addr` (`u`).
@@ -401,20 +397,18 @@ impl Memory {
         py: Python<'py>,
         addr: u64,
         count: usize,
-    ) -> PyResult<Vec<Bound<'py, DisassembledInstruction>>> {
+    ) -> PyResult<Typed<'py, Vec<view::execution::DisassembledInstruction>>> {
         self.space.require_virtual()?;
         check_disassembly_count(count)?;
         let context = self.space.context();
         let rows = self.owner.with_in(py, &context, |session| {
             session.disassemble(VirtAddr(addr), count).map_err(err)
         })?;
-        view_records(
+        Typed::new(
             py,
-            &rows
-                .iter()
+            rows.iter()
                 .map(view::execution::disasm_row)
-                .collect::<Vec<_>>()
-                .into_view(),
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -423,19 +417,17 @@ impl Memory {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Vec<Bound<'py, DisassembledInstruction>>> {
+    ) -> PyResult<Typed<'py, Vec<view::execution::DisassembledInstruction>>> {
         self.space.require_virtual()?;
         let context = self.space.context();
         let (_, _, rows) = self.owner.with_in(py, &context, |session| {
             session.disassemble_function(VirtAddr(addr)).map_err(err)
         })?;
-        view_records(
+        Typed::new(
             py,
-            &rows
-                .iter()
+            rows.iter()
                 .map(view::execution::disasm_row)
-                .collect::<Vec<_>>()
-                .into_view(),
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -445,13 +437,13 @@ impl Memory {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Bound<'py, FunctionEntry>> {
+    ) -> PyResult<Typed<'py, view::execution::FunctionEntry>> {
         self.space.require_virtual()?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
             session.function_entry(VirtAddr(addr)).map_err(err)
         })?;
-        view_record(py, &view::execution::function_entry(&detail))
+        Typed::new(py, view::execution::function_entry(&detail))
     }
 
     /// Disassemble the `count` instructions ending at `addr` (`ub`).
@@ -460,20 +452,18 @@ impl Memory {
         py: Python<'py>,
         addr: u64,
         count: usize,
-    ) -> PyResult<Vec<Bound<'py, DisassembledInstruction>>> {
+    ) -> PyResult<Typed<'py, Vec<view::execution::DisassembledInstruction>>> {
         self.space.require_virtual()?;
         check_disassembly_count(count)?;
         let context = self.space.context();
         let rows = self.owner.with_in(py, &context, |session| {
             session.disassemble_back(VirtAddr(addr), count).map_err(err)
         })?;
-        view_records(
+        Typed::new(
             py,
-            &rows
-                .iter()
+            rows.iter()
                 .map(view::execution::disasm_row)
-                .collect::<Vec<_>>()
-                .into_view(),
+                .collect::<Vec<_>>(),
         )
     }
 }
