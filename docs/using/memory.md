@@ -18,6 +18,8 @@ The host mapping's identity is re-checked after a guest reboot rebuilds debugger
 
 The `kd` source needs no hypervisor or VM-process access, so AMD64 and ARM64 Windows VMs or physical machines can be debugged across any routable network. Memory-backed commands require the target to be halted; remote latency also makes large scans slower than direct host memory. Prefer `--memory-source host` (the `auto` default) whenever the VM is local; [reading memory over KD](../internals/kd-reads.md) explains what each read costs.
 
+The source also decides when a driver's PDB is [rebuilt from guest memory](symbols.md): automatically when reads come from the host, only on an explicit `.reload <module>` when they go through KD.
+
 ## Paged-out memory
 
 A page the guest has trimmed out of a working set is usually still in RAM on the standby or modified list, with its PTE left in the *transition* state. Both the host page walk and the target read those, so trimmed memory keeps reading normally. Writes to such a page are refused: the kernel is free to repurpose the frame or re-read it from disk, so the edit would be lost or land somewhere unrelated.

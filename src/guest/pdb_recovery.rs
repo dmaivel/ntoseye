@@ -172,9 +172,6 @@ struct Walker<'a> {
 
 impl<'a> Walker<'a> {
     fn new(phys: &'a PhysMem, symbols: &SymbolStore, arch: Arch) -> Result<Self, String> {
-        if arch != Arch::Amd64 {
-            return Err("rebuilding files from guest memory is AMD64-only".into());
-        }
         let guid = symbols.kernel_guid().ok_or("no kernel symbols")?;
         let dtb = symbols.kernel_dtb().ok_or("no kernel address space")?;
         let layout = |name: &str| -> Result<Arc<TypeInfo>, String> {

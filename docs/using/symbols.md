@@ -6,7 +6,14 @@ Symbol and source paths are configured independently. The host needs the private
 
 A driver built inside the guest often needs no symbol path at all. When no symbol directory or server has its PDB, ntoseye rebuilds it from guest memory: the linker has just written the file, so Windows usually still holds its pages in the file cache, open or on the standby list. The file is found by the path the driver's CodeView record gives it (a temporary name `lld-link` wrote it under counts), read page by page through its section's prototype PTEs, sized by its MSF header, and used only if its GUID and age are the driver's; it is then installed in the symbol cache, so later sessions and reboots have it. `lm` reports `rebuilt <path> for <driver> from guest memory`. A PDB some of whose pages Windows has since reused (after heavy memory use, or a reboot) is not rebuilt, and the module's error says how many pages are missing.
 
-This is tried only for PDBs the image records with a full path (Microsoft's binaries record a bare file name), only on AMD64 guests, and automatically only while guest memory is read from the host; with `--memory-source kd` it runs for an explicit `.reload <module>` (or `ld`), since walking the kernel's file lists through KD takes seconds. `--no-pdb-from-memory` or `NTOSEYE_NO_PDB_FROM_MEMORY=1` turns it off.
+It is tried only for PDBs the image records with a full path (Microsoft's binaries record a bare file name). When it runs depends on where guest memory is read from ([memory sources](memory.md#where-reads-come-from)):
+
+| Memory read from | Rebuilt |
+| --- | --- |
+| The host: the `gdb` and `memory` backends, and `kd`/`kdnet` with `--memory-source host` or `auto` once the host mapping matched | Automatically, whenever a module's symbols load (attach, a stop, a process attach) and by {command}`.reload` |
+| The target: `kd`/`kdnet` with `--memory-source kd`, or `auto` that fell back to KD | Only by an explicit `.reload <module>` or {command}`ld`: finding the file there walks the kernel's file lists one KD request at a time, several seconds |
+
+A module skipped for that reason says so in its error ({command}`lmv`): `guest memory: not tried automatically while guest memory is read through the target; .reload <module> rebuilds it`. `--no-pdb-from-memory` or `NTOSEYE_NO_PDB_FROM_MEMORY=1` turns rebuilding off entirely. It has been tested on AMD64 guests only.
 
 Append the directory containing the PDB with {command}`.sympath+`. The `+` preserves the managed cache and Microsoft's public symbol server; bare {command}`.sympath` replaces the entire active list:
 
