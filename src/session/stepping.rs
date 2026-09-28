@@ -280,6 +280,49 @@ impl Session {
         timeout: Option<Duration>,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
+        self.pending_step_run = None;
+        self.walk_until(mode, limit, timeout, stop)
+    }
+
+    /// Go on with a [`Self::step_until`] walk another stop ended, after the
+    /// host passed over that stop (the SDK's declined `when=` hit). A walk
+    /// ended while running over a call first finishes that run, bound to the
+    /// thread and stack it was, rather than walking on from wherever the
+    /// processor is now.
+    pub fn resume_step_until(
+        &mut self,
+        mode: StepMode,
+        limit: usize,
+        timeout: Option<Duration>,
+        stop: impl Fn(u64, ControlFlow) -> bool,
+    ) -> Result<ContinueOutcome> {
+        if let Some((address, frame)) = self.pending_step_run.take() {
+            let cancel = Arc::clone(&self.target.interrupt);
+            match self.run_to(address, frame.clone(), timeout, &cancel)? {
+                ContinueOutcome::Step { .. } => {}
+                ContinueOutcome::Running => {
+                    let outcome = ContinueOutcome::Step {
+                        rip: self.current_rip(),
+                    };
+                    self.note_stop(&outcome);
+                    return Ok(outcome);
+                }
+                other => {
+                    self.pending_step_run = Some((address, frame));
+                    return Ok(other);
+                }
+            }
+        }
+        self.walk_until(mode, limit, timeout, stop)
+    }
+
+    fn walk_until(
+        &mut self,
+        mode: StepMode,
+        limit: usize,
+        timeout: Option<Duration>,
+        stop: impl Fn(u64, ControlFlow) -> bool,
+    ) -> Result<ContinueOutcome> {
         self.require_steppable_vcpu()?;
         self.clear_selected_frame();
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
@@ -305,7 +348,14 @@ impl Session {
                     let remaining =
                         deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
                     let frame = self.step_frame(StepStack::CallReturn)?;
-                    self.run_to(next, frame, remaining, &cancel)?
+                    let outcome = self.run_to(next, frame.clone(), remaining, &cancel)?;
+                    if !matches!(
+                        outcome,
+                        ContinueOutcome::Step { .. } | ContinueOutcome::Running
+                    ) {
+                        self.pending_step_run = Some((next, frame));
+                    }
+                    outcome
                 }
                 _ => {
                     let (rip, stepped) = self.step_once()?;

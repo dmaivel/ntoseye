@@ -1374,6 +1374,36 @@ fn a_declined_hit_on_another_vcpu_hands_the_step_back() {
     assert_eq!(rip(&mut session), 0x1001);
 }
 
+/// A walk another stop ended while it ran over a call goes on by finishing
+/// that run, not by walking from wherever the processor is now (another
+/// thread's code after a context switch); a fresh walk forgets it.
+#[test]
+fn a_resumed_walk_finishes_the_run_it_was_waiting_on() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        released_to: Some(0x1010),
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1020);
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    session.current_thread = "p01.01".into();
+    session.pending_step_run = Some((VirtAddr(0x1010), None));
+
+    let outcome = session
+        .resume_step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1010)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1010 }));
+    assert!(session.pending_step_run.is_none());
+
+    session.pending_step_run = Some((VirtAddr(0x1030), None));
+    let outcome = session
+        .step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1010)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1010 }));
+    assert!(session.pending_step_run.is_none());
+}
+
 /// A step's run-to (`gu`, `p` over a call) stops only for its own frame: the
 /// same return site reached by a deeper call (a lower stack pointer) runs
 /// on, and the return to the stepping frame stops.

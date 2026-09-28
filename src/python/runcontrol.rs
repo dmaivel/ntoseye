@@ -243,6 +243,8 @@ pub fn run_to(
         ),
         None => None,
     };
+    // A retry after a declined hit goes on with the walk it ended.
+    let mut resumed = false;
     settle(
         dbg,
         timeout,
@@ -250,7 +252,12 @@ pub fn run_to(
         move |session, remaining| match step {
             None => run_to_address(session, VirtAddr(address), None, remaining),
             Some(mode) => {
-                session.step_until(mode, STEP_UNTIL_LIMIT, remaining, |ip, _| ip == address)
+                let stop = |ip, _| ip == address;
+                if std::mem::replace(&mut resumed, true) {
+                    session.resume_step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+                } else {
+                    session.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+                }
             }
         },
     )
@@ -333,10 +340,15 @@ fn step_to_flow(
     kind: UntilFlow,
     timeout: Option<Duration>,
 ) -> PyResult<Py<Stop>> {
+    // A retry after a declined hit goes on with the walk it ended.
+    let mut resumed = false;
     settle_stop(dbg, timeout, move |session, remaining| {
-        session.step_until(mode, STEP_UNTIL_LIMIT, remaining, |_, flow| {
-            kind.matches(flow)
-        })
+        let stop = |_, flow| kind.matches(flow);
+        if std::mem::replace(&mut resumed, true) {
+            session.resume_step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+        } else {
+            session.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+        }
     })
 }
 

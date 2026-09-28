@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::TargetSpec;
-use crate::breakpoints::{Breakpoint, BreakpointManager};
+use crate::breakpoints::{Breakpoint, BreakpointManager, StepFrame};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugOutputPage, LastEvent, StopEvent,
 };
@@ -490,6 +490,10 @@ pub struct Session {
     /// `wait_for_stop` returns this as the proper event instead of a bare
     /// "halted", and `resume` clears it. `None` whenever the host is up to date.
     parked_stop: Option<ContinueOutcome>,
+    /// The run over a call a step walk was waiting on when another stop
+    /// ended it: its return address and binding (see
+    /// [`Self::resume_step_until`]).
+    pending_step_run: Option<(VirtAddr, Option<StepFrame>)>,
     /// The stop the target is halted at, as it was surfaced: set by every
     /// visible classification and every host-facing run/step result, cleared
     /// when the target moves. Unlike `parked_stop` it is not consumed by
