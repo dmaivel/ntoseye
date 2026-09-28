@@ -5,6 +5,7 @@
 use super::{CodeFrame, FrameLocals, LocalVariableLocation, ProcedureLocal, SymbolStore};
 use crate::{error::Result, layout::ParsedType, types::Dtb};
 use pdb2::{FallibleIterator, TypeFinder, TypeIndex};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -74,6 +75,47 @@ const MAX_LOCALS_CACHE_ENTRIES: usize = 4096;
 
 /// A scope open in a procedure's symbols: a block or an inline site, until
 /// the record `end`.
+/// Whether `data` is one of the definition-range records that follow an
+/// S_LOCAL and say where it lives.
+fn is_definition_range(data: &pdb2::SymbolData<'_>) -> bool {
+    matches!(
+        data,
+        pdb2::SymbolData::DefRange(_)
+            | pdb2::SymbolData::DefRangeSubField(_)
+            | pdb2::SymbolData::DefRangeRegister(_)
+            | pdb2::SymbolData::DefRangeFramePointerRelative(_)
+            | pdb2::SymbolData::DefRangeFramePointerRelativeFullScope(_)
+            | pdb2::SymbolData::DefRangeSubFieldRegister(_)
+            | pdb2::SymbolData::DefRangeRegisterRelative(_)
+    )
+}
+
+/// Say that `local`, an S_LOCAL no definition range follows, was optimized
+/// out, unless a range already located it.
+fn mark_optimized_out(local: &mut ProcedureLocal) {
+    if matches!(local.location, LocalVariableLocation::Unavailable { .. }) {
+        local.location = LocalVariableLocation::Unavailable {
+            reason: "optimized out".to_string(),
+        };
+    }
+}
+
+/// Whether a classic record (S_REGREL32, S_BPREL32, S_REGISTER) of `name` is
+/// listed: not when an S_LOCAL in the frame describes the name. One that is
+/// listed is remembered in `classic`, so a later S_LOCAL replaces it.
+fn classic_record_wanted(
+    described: &HashSet<String>,
+    classic: &mut HashSet<String>,
+    name: &pdb2::RawString<'_>,
+) -> bool {
+    let name = name.to_string().into_owned();
+    if described.contains(&name) {
+        return false;
+    }
+    classic.insert(name);
+    true
+}
+
 struct OpenScope {
     end: pdb2::SymbolIndex,
     /// Whether the scope's code runs at the target address: a block's range
@@ -202,9 +244,15 @@ impl SymbolStore {
 
         let mut frames: Vec<Vec<ProcedureLocal>> = vec![Vec::new(); physical + 1];
         let mut scopes: Vec<OpenScope> = Vec::new();
-        // The frame and index of the local the next definition ranges are for.
+        // The frame and index of the local the next definition ranges are for,
+        // and whether any followed it yet.
         let mut current_local: Option<(usize, usize)> = None;
+        let mut current_ranged = false;
         let mut current_optimized_out = false;
+        // Per frame: names an S_LOCAL describes, and names only a classic
+        // record (S_REGREL32, S_BPREL32, S_REGISTER) does so far.
+        let mut described: Vec<HashSet<String>> = vec![HashSet::new(); physical + 1];
+        let mut classic: Vec<HashSet<String>> = vec![HashSet::new(); physical + 1];
 
         while let Some(symbol) = symbols.next()? {
             if symbol.index() == record.end {
@@ -221,6 +269,15 @@ impl SymbolStore {
                 continue;
             }
             let data = symbol.parse()?;
+            // An S_LOCAL no definition range follows has no location at
+            // any address: the compiler dropped it.
+            if is_definition_range(&data) {
+                current_ranged |= current_local.is_some();
+            } else if let Some((frame, index)) = current_local.take()
+                && !current_ranged
+            {
+                mark_optimized_out(&mut frames[frame][index]);
+            }
             let visible = scopes.iter().all(|scope| scope.contains);
             let frame = scopes.last().map_or(physical, |scope| scope.frame);
             let live = |range: &pdb2::AddressRange, gaps: &[pdb2::AddressGap]| {
@@ -259,6 +316,15 @@ impl SymbolStore {
                     } else {
                         "not live at this address"
                     };
+                    // The S_LOCAL supersedes a classic record of the name:
+                    // optimized MSVC code keeps one for a parameter's home
+                    // slot, which the code never writes.
+                    let name = local.name.to_string().into_owned();
+                    if classic[frame].remove(&name) {
+                        frames[frame].retain(|existing| existing.name != name);
+                    }
+                    described[frame].insert(name);
+                    current_ranged = false;
                     frames[frame].push(self.procedure_local(
                         guid,
                         &finder,
@@ -336,7 +402,14 @@ impl SymbolStore {
                         reason: "split subfield register location".to_string(),
                     });
                 }
-                pdb2::SymbolData::RegisterVariable(variable) if visible => {
+                pdb2::SymbolData::RegisterVariable(variable)
+                    if visible
+                        && classic_record_wanted(
+                            &described[frame],
+                            &mut classic[frame],
+                            &variable.name,
+                        ) =>
+                {
                     frames[frame].push(self.procedure_local(
                         guid,
                         &finder,
@@ -349,7 +422,14 @@ impl SymbolStore {
                     ));
                     current_local = None;
                 }
-                pdb2::SymbolData::RegisterRelative(variable) if visible => {
+                pdb2::SymbolData::RegisterRelative(variable)
+                    if visible
+                        && classic_record_wanted(
+                            &described[frame],
+                            &mut classic[frame],
+                            &variable.name,
+                        ) =>
+                {
                     frames[frame].push(self.procedure_local(
                         guid,
                         &finder,
@@ -363,7 +443,14 @@ impl SymbolStore {
                     ));
                     current_local = None;
                 }
-                pdb2::SymbolData::BasePointerRelative(variable) if visible => {
+                pdb2::SymbolData::BasePointerRelative(variable)
+                    if visible
+                        && classic_record_wanted(
+                            &described[frame],
+                            &mut classic[frame],
+                            &variable.name,
+                        ) =>
+                {
                     frames[frame].push(self.procedure_local(
                         guid,
                         &finder,
@@ -396,6 +483,11 @@ impl SymbolStore {
             if let (Some(location), Some((frame, index))) = (located, current_local) {
                 frames[frame][index].location = location;
             }
+        }
+        if let Some((frame, index)) = current_local
+            && !current_ranged
+        {
+            mark_optimized_out(&mut frames[frame][index]);
         }
         Ok(Some(frames.into_iter().map(Arc::new).collect()))
     }

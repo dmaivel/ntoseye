@@ -1060,18 +1060,24 @@ fn a_bare_module_qualifier_lists_that_module() {
 const INLINE_FIXTURE_BASE: u64 = 0x1_4000_0000;
 
 fn inline_fixture() -> (SymbolStore, Dtb) {
+    load_fixture(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/inline_frames.pdb"
+    ))
+}
+
+/// Load the fixture PDB at `path` as module `fixture` at
+/// [`INLINE_FIXTURE_BASE`].
+fn load_fixture(path: &str) -> (SymbolStore, Dtb) {
     let store = SymbolStore::new();
     let dtb: Dtb = 0x1000;
     store
         .load_pdb_for_test(
-            Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/inline_frames.pdb"
-            )),
+            Path::new(path),
             "fixture",
             dtb,
             VirtAddr(INLINE_FIXTURE_BASE),
-            0x5000,
+            0x8000,
         )
         .unwrap();
     (store, dtb)
@@ -1204,14 +1210,15 @@ fn each_frame_has_its_own_locals() {
     };
 
     // In the first `atomic_add`, five frames deep: every inline site's
-    // variables are its frame's, live where their ranges say.
+    // variables are its frame's, live where their ranges say. `dst` and
+    // `self` have no range at all: the compiler dropped them.
     assert_eq!(
         locals(0x101d, 0).unwrap(),
-        ["dst <not live at this address>", "val [frame+0x0]"]
+        ["dst <optimized out>", "val [frame+0x0]"]
     );
     assert_eq!(
         locals(0x101d, 1).unwrap(),
-        ["self <not live at this address>", "val [frame+0x0]"]
+        ["self <optimized out>", "val [frame+0x0]"]
     );
     assert_eq!(
         locals(0x101d, 2).unwrap(),
@@ -1245,4 +1252,60 @@ fn each_frame_has_its_own_locals() {
         ]
     );
     assert_eq!(locals(0x1053, 0).unwrap(), ["self [frame+0xc]", "rhs edx"]);
+}
+
+/// MSVC's layout (`tests/fixtures/msvc_inline.pdb`, see its README): the
+/// same nesting as the Rust fixture's, with MSVC's annotations, and each
+/// parameter both as an S_LOCAL with its register and as a classic
+/// S_REGREL32 home slot the optimized code never writes.
+#[test]
+fn msvc_inline_sites_become_frames_with_their_own_locals() {
+    let (store, dtb) = load_fixture(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/msvc_inline.pdb"
+    ));
+    let chain = |accumulate_line| {
+        [
+            frame("fixture!_InlineInterlockedAdd", "wdm.h", 1975),
+            frame("fixture!InlineProbeScale", "PdbProbe.c", 13),
+            frame(
+                "fixture!InlineProbeAccumulate",
+                "PdbProbe.c",
+                accumulate_line,
+            ),
+            frame("physical", "PdbProbe.c", 39),
+        ]
+    };
+    // The `lock add` of the first and the second `InlineProbeScale`.
+    assert_eq!(frames_at(&store, dtb, 0x1008), chain(20));
+    assert_eq!(frames_at(&store, dtb, 0x1015), chain(21));
+    assert_eq!(
+        frames_at(&store, dtb, 0x1000),
+        [frame("physical", "PdbProbe.c", 38)]
+    );
+
+    let locals = |inline_depth| {
+        store
+            .frame_locals(
+                dtb,
+                CodeFrame {
+                    address: fixture_address(0x1008),
+                    inline_depth,
+                },
+            )
+            .unwrap()
+            .map(|locals| {
+                locals
+                    .iter()
+                    .map(|local| format!("{} {}", local.name, local.location.describe()))
+                    .collect::<Vec<_>>()
+            })
+    };
+    assert_eq!(locals(1).unwrap(), ["scaled eax"]);
+    assert_eq!(locals(2).unwrap(), Vec::<String>::new());
+    // Each parameter once, where the S_LOCAL says, not also at its home slot.
+    assert_eq!(
+        locals(3).unwrap(),
+        ["DriverObject rcx", "RegistryPath rdx", "seed r8d"]
+    );
 }
