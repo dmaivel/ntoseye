@@ -48,19 +48,39 @@ Then `sc stop mydriver` (the driver needs a `DriverUnload`) and `sc start mydriv
 
 ## Symbols
 
-A PDB built on the host is found by adding its directory to the symbol path: `.sympath+ /home/me/mydriver/target/x86_64-pc-windows-msvc/release`.
+`ntoseye` needs the driver's private PDB, the one the linker wrote next to the `.sys`. Where it looks depends on where you built.
 
-A PDB built in the guest needs no copy to the host. When the driver loads and no symbol directory or server has its PDB, `ntoseye` reads the file out of guest memory:
+### PDB on the host
 
-1. The driver's image records where the linker wrote its PDB (`C:\Users\me\source\repos\mydriver\x64\Debug\mydriver.pdb`) and the PDB's GUID and age.
-2. The linker has just written that file, so Windows still holds its pages in the file cache: in use while the file is open, on the standby list once it is closed. `ntoseye` finds the file among the cached files by that path and reads its pages.
-3. The result is used only if its GUID and age are the driver's. It is then saved to the symbol cache, so later sessions and reboots find it there; `lm` reports `rebuilt <path> for mydriver from guest memory`.
+Add the build directory to the symbol path, once per session:
 
-With the `gdb` backend, or KD with memory read from the host (the default when the host mapping is found), this happens by itself when the driver's symbols load. With memory read through KD (`--memory-source kd`, or `auto` that fell back to it), finding the file takes several seconds of KD requests, so it runs only on {command}`.reload` `mydriver`.
+```text
+.sympath+ /home/me/mydriver/target/x86_64-pc-windows-msvc/release
+```
 
-The pages have to still be there. Heavy memory use in the guest can reuse them, and a reboot empties the cache: after one, rebuild the driver, or read the PDB once in the guest (open it, or `Get-FileHash mydriver.pdb`), before loading it. A PDB with pages missing is not rebuilt, and {command}`lmv` says how many were missing. It is tried only for a PDB recorded with a full path, which a local build always has, and `--no-pdb-from-memory` turns it off. [Symbols and source](symbols.md) has the details.
+The PDB loads when the driver does, and {command}`lmv` `mydriver` shows it.
 
-Source files map to a host checkout with `.srcpath`, by path suffix.
+### PDB in the guest
+
+Usually nothing to do. When no symbol directory or server has the PDB, `ntoseye` reads it out of the guest's memory: the linker has just written it, so Windows still holds the file in its cache. The driver's image records where the PDB was written, so `ntoseye` finds it by that path, uses it only if it matches the driver, and saves it to the host's symbol cache for later sessions. The load says so:
+
+```text
+rebuilt C:\Users\me\source\repos\mydriver\x64\Debug\mydriver.pdb for mydriver.sys from guest memory
+```
+
+This happens by itself with the `gdb` backend and with KD reading memory from the host (the default). With KD reading memory through the target (`--memory-source kd`), it runs only when asked: {command}`.reload` `mydriver`.
+
+It needs the file still in the guest's cache. A reboot empties it: rebuild the driver, or read the PDB once in the guest (`Get-FileHash mydriver.pdb`), before loading. If it is still missing, {command}`lmv` `mydriver` says why; copy the PDB to the host and use `.sympath+` as above. [Symbols and source](symbols.md) has the details, and `--no-pdb-from-memory` turns this off.
+
+### Source files
+
+A PDB records source paths as they were at build time. {command}`.srcpath` maps them to a checkout on the host by path suffix, so a guest path like `C:\Users\me\source\repos\mydriver\mydriver.c` finds `/home/me/mydriver/mydriver.c`:
+
+```text
+.srcpath /home/me/mydriver
+```
+
+A file edited since the build is reported as not the source compiled, rather than shown against the wrong lines.
 
 ## Stop in the driver
 
