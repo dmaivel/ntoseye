@@ -3957,6 +3957,12 @@ class Frame:
         The frame's position, 0 being the innermost.
         """
     @property
+    def inline(self, /) -> bool:
+        """
+        Whether the frame is a call the compiler inlined into the physical
+        frame after it, whose `ip`, `sp` and registers it shares.
+        """
+    @property
     def ip(self, /) -> int:
         """
         The frame's instruction pointer.
@@ -3985,7 +3991,8 @@ class Frame:
     @property
     def symbol(self, /) -> str |None:
         """
-        The symbol at `ip`, if one resolved.
+        The symbol at `ip`, if one resolved; for an inline frame, the
+        function the compiler inlined.
         """
     @property
     def thread(self, /) -> Thread |None:
@@ -10256,6 +10263,13 @@ class StackFrame(BaseRecord):
         The frame's position in the walked stack, innermost 0.
         """
     @property
+    def inline(self, /) -> bool:
+        """
+        A call the compiler inlined into the physical frame after it,
+        with no stack frame of its own: `symbol` is the function
+        inlined, and `ip` and `sp` are the physical frame's.
+        """
+    @property
     def ip(self, /) -> int:
         """
         The instruction pointer.
@@ -10268,7 +10282,9 @@ class StackFrame(BaseRecord):
     @property
     def source_location(self, /) -> SourceLocation |None:
         """
-        The source line at `ip`, when line information resolves it.
+        The frame's source line, when line information resolves it: an
+        inline frame's in the function inlined, a caller's where it made
+        the call.
         """
     @property
     def sp(self, /) -> int:
@@ -10659,7 +10675,9 @@ class Symbols:
         """
     def locals_at(self, /, addr: int) -> list[ProcedureLocal]:
         """
-        List PDB local/parameter layouts covering `addr`, without evaluating values.
+        List the PDB local/parameter layouts of the innermost frame at `addr`
+        (an inlined call's own where the compiler inlined one), without
+        evaluating values.
         """
     def nearest(self, /, addr: int) -> Symbol |None:
         """

@@ -31,7 +31,7 @@ repl_command! {
     names: [".frame", "frame"],
     usage: ".frame [/r] [N]",
     summary: "Select or display a stack frame.",
-    details: "N is a zero-based frame number; /r also displays its recovered registers.",
+    details: "N is a zero-based frame number, counting inline frames as k does; /r also displays its recovered registers. Selecting an inline frame scopes dv, ls, lsa, and local names in expressions to the function inlined there; its registers are those of the frame it was inlined into.",
     completion: Expression,
     run_state: HaltedOrParkedThread,
 }
@@ -94,7 +94,7 @@ repl_command! {
     names: ["kn", "k", "kb", "kp", "kv", "kf"],
     usage: "kn|k|kb|kp|kv|kf [count]",
     summary: "Display a stack; kp adds PDB parameter locations, kv provenance, and kf frame sizes.",
-    details: "kf's column after the frame number is the stack memory between the frame and the one before it, in hex; it is blank for the first frame and where the walk moves to another stack.",
+    details: "A call the compiler inlined is a frame of its own, tagged [inline], above the frame it was inlined into, whose addresses it shows: it is named for the function inlined and is at that function's source line, and its caller is at the line of the call. Frame numbers count inline frames. kf's column after the frame number is the stack memory between the frame and the physical frame before it, in hex; it is blank for the first frame, for inline frames, and where the walk moves to another stack.",
     run_state: HaltedOrParkedThread,
 }
 
@@ -142,17 +142,29 @@ impl ReplState<'_> {
     }
 
     pub fn print_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
-        let symbol = self
-            .ctx
-            .target
-            .closest_symbol_current_context(VirtAddr(frame.ip))
-            .unwrap_or_else(|| format!("{:#x}", frame.ip));
+        let target = &self.ctx.target;
+        let (symbol, location, tag) = match target.inline_frame(frame.code) {
+            Some(inline) => (
+                Some(inline.symbol),
+                inline.location,
+                format!("  {}", inline_tag()),
+            ),
+            None => (
+                target.closest_symbol_current_context(VirtAddr(frame.ip)),
+                target.frame_source_location(frame.code),
+                String::new(),
+            ),
+        };
+        let symbol = symbol.unwrap_or_else(|| format!("{:#x}", frame.ip));
+        let location = location
+            .map(|location| format!("  [{}:{}]", location.file, location.line))
+            .unwrap_or_default();
         outln!(
-            "{} {} {}  {}",
+            "{} {} {}  {}{tag}{location}",
             ui::muted(&format!("#{:02}", frame.index)),
             ui::addr(frame.sp),
             ui::addr(frame.ip),
-            ui::symbol(&symbol)
+            ui::symbol(&symbol),
         );
         if let Some(base) = frame.frame_base {
             outln!("  frame base {}", ui::addr(base));
@@ -647,8 +659,7 @@ impl ReplState<'_> {
     fn print_stack_parameters(&self, trace: &StackTrace, frame_offset: usize) -> Result<()> {
         let mut printed_header = false;
         for (index, frame) in trace.frames.iter().enumerate() {
-            let address = VirtAddr(frame.ip);
-            let Some(locals) = self.ctx.target.procedure_locals(address)? else {
+            let Some(locals) = self.ctx.target.frame_locals(frame.code)? else {
                 continue;
             };
             let parameters: Vec<_> = locals.iter().filter(|local| local.is_parameter).collect();
@@ -965,6 +976,7 @@ pub fn print_indexed_stacktrace(
     columns: StackColumns,
     selected_index: Option<usize>,
 ) {
+    let mut previous_sp = None;
     for (index, recovered) in trace.frames.iter().take(display_limit).enumerate() {
         let frame = &recovered.frame;
         let global_index = frame_offset + index;
@@ -975,6 +987,8 @@ pub fn print_indexed_stacktrace(
         };
         let symbol = if frame.symbol.starts_with("0x") {
             frame.symbol.clone()
+        } else if frame.inline {
+            format!("{} {}", ui::symbol(&frame.symbol), inline_tag())
         } else {
             ui::symbol(&frame.symbol)
         };
@@ -984,8 +998,12 @@ pub fn print_indexed_stacktrace(
             String::new()
         };
         let frame_size = if columns.frame_size {
-            let previous_sp = trace.frames.get(index.wrapping_sub(1)).map(|p| p.frame.sp);
-            format!("{} ", frame_size_cell(previous_sp, frame.sp))
+            let size = if frame.inline {
+                frame_size_cell(None, frame.sp)
+            } else {
+                frame_size_cell(previous_sp.replace(frame.sp), frame.sp)
+            };
+            format!("{size} ")
         } else {
             String::new()
         };

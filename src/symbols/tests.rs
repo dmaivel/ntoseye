@@ -1050,3 +1050,199 @@ fn a_bare_module_qualifier_lists_that_module() {
         ["nt!KeBugCheckEx".to_string(), "nt!memcpy".to_string()]
     );
 }
+
+/// Where `tests/fixtures/inline_frames.pdb` is loaded: the PDB of a Rust
+/// driver (`tests/fixtures/inline_frames`) whose `DriverEntry` (RVA 0x1000,
+/// 0x59 bytes) inlines `accumulate`, which inlines `scale` twice, each of
+/// which inlines `wrapping_mul` and `fetch_add` (itself inlining
+/// `atomic_add`); `black_box` and `wrapping_add` are inlined too. The
+/// expected ranges, lines and locals are llvm-pdbutil's reading of it.
+const INLINE_FIXTURE_BASE: u64 = 0x1_4000_0000;
+
+fn inline_fixture() -> (SymbolStore, Dtb) {
+    let store = SymbolStore::new();
+    let dtb: Dtb = 0x1000;
+    store
+        .load_pdb_for_test(
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/inline_frames.pdb"
+            )),
+            "fixture",
+            dtb,
+            VirtAddr(INLINE_FIXTURE_BASE),
+            0x5000,
+        )
+        .unwrap();
+    (store, dtb)
+}
+
+fn fixture_address(rva: u32) -> VirtAddr {
+    VirtAddr(INLINE_FIXTURE_BASE + u64::from(rva))
+}
+
+/// The frames at `rva`, innermost first, as `(symbol, file, line)`: the
+/// inline frames, then the physical frame's line-table line.
+fn frames_at(store: &SymbolStore, dtb: Dtb, rva: u32) -> Vec<(String, String, u32)> {
+    let address = fixture_address(rva);
+    let file = |path: &str| path.rsplit('\\').next().unwrap().to_string();
+    let mut frames: Vec<_> = store
+        .inline_frames(dtb, address)
+        .into_iter()
+        .map(|frame| {
+            let location = frame.location.unwrap();
+            (frame.symbol, file(&location.file), location.line)
+        })
+        .collect();
+    let physical = store.source_location(dtb, address).unwrap();
+    frames.push(("physical".to_string(), file(&physical.file), physical.line));
+    frames
+}
+
+fn frame(symbol: &str, file: &str, line: u32) -> (String, String, u32) {
+    (symbol.to_string(), file.to_string(), line)
+}
+
+#[test]
+fn inline_sites_become_frames_innermost_first_at_their_lines() {
+    let (store, dtb) = inline_fixture();
+
+    // Outside every inline site: the procedure alone.
+    assert_eq!(
+        frames_at(&store, dtb, 0x1000),
+        [frame("physical", "lib.rs", 23)]
+    );
+    assert_eq!(
+        frames_at(&store, dtb, 0x1054),
+        [frame("physical", "lib.rs", 27)]
+    );
+
+    // `black_box` covers [0x1004, 0x100d).
+    let black_box = [
+        frame("fixture!core::hint::black_box", "hint.rs", 491),
+        frame("physical", "lib.rs", 24),
+    ];
+    assert_eq!(frames_at(&store, dtb, 0x1004), black_box);
+    assert_eq!(frames_at(&store, dtb, 0x100c), black_box);
+
+    // Four sites deep in the first `scale`: each caller is at the line of
+    // its call, the procedure at the line inlining `accumulate`.
+    let first_fetch_add = [
+        frame("fixture!core::sync::atomic::atomic_add", "atomic.rs", 3927),
+        frame(
+            "fixture!core::sync::atomic::Atomic<u32>::fetch_add",
+            "atomic.rs",
+            3148,
+        ),
+        frame("fixture!inline_frames::scale", "lib.rs", 11),
+        frame("fixture!inline_frames::accumulate", "lib.rs", 17),
+        frame("physical", "lib.rs", 25),
+    ];
+    assert_eq!(frames_at(&store, dtb, 0x1019), first_fetch_add);
+    assert_eq!(frames_at(&store, dtb, 0x1025), first_fetch_add);
+
+    // The second `scale` starts at 0x1026 with its `wrapping_mul`, whose
+    // second range changes file.
+    assert_eq!(
+        frames_at(&store, dtb, 0x1026),
+        [
+            frame(
+                "fixture!core::num::impl$8::wrapping_mul",
+                "uint_macros.rs",
+                2688
+            ),
+            frame("fixture!inline_frames::scale", "lib.rs", 10),
+            frame("fixture!inline_frames::accumulate", "lib.rs", 18),
+            frame("physical", "lib.rs", 25),
+        ]
+    );
+    assert_eq!(
+        frames_at(&store, dtb, 0x102c)[0],
+        frame("fixture!core::num::impl$8::wrapping_mul", "hint.rs", 491)
+    );
+
+    // `accumulate`'s last range, then `wrapping_add` in the procedure's code.
+    assert_eq!(
+        frames_at(&store, dtb, 0x1040),
+        [
+            frame("fixture!inline_frames::accumulate", "lib.rs", 19),
+            frame("physical", "lib.rs", 25),
+        ]
+    );
+    assert_eq!(
+        frames_at(&store, dtb, 0x1053),
+        [
+            frame(
+                "fixture!core::num::impl$8::wrapping_add",
+                "uint_macros.rs",
+                2612
+            ),
+            frame("physical", "lib.rs", 26),
+        ]
+    );
+}
+
+#[test]
+fn each_frame_has_its_own_locals() {
+    let (store, dtb) = inline_fixture();
+    let locals = |rva: u32, inline_depth: usize| {
+        store
+            .frame_locals(
+                dtb,
+                CodeFrame {
+                    address: fixture_address(rva),
+                    inline_depth,
+                },
+            )
+            .unwrap()
+            .map(|locals| {
+                locals
+                    .iter()
+                    .map(|local| format!("{} {}", local.name, local.location.describe()))
+                    .collect::<Vec<_>>()
+            })
+    };
+
+    // In the first `atomic_add`, five frames deep: every inline site's
+    // variables are its frame's, live where their ranges say.
+    assert_eq!(
+        locals(0x101d, 0).unwrap(),
+        ["dst <not live at this address>", "val [frame+0x0]"]
+    );
+    assert_eq!(
+        locals(0x101d, 1).unwrap(),
+        ["self <not live at this address>", "val [frame+0x0]"]
+    );
+    assert_eq!(
+        locals(0x101d, 2).unwrap(),
+        ["value [frame+0x8]", "scaled [frame+0x0]"]
+    );
+    assert_eq!(
+        locals(0x101d, 3).unwrap(),
+        [
+            "value [frame+0x8]",
+            "doubled <not live at this address>",
+            "tripled <not live at this address>"
+        ]
+    );
+    // The procedure's own: its parameters and its block's `seed`, none of
+    // the inlined calls', and not `total`, whose block starts at 0x1050.
+    assert_eq!(
+        locals(0x101d, 4).unwrap(),
+        ["driver rcx", "registry rdx", "seed [frame+0x8]"]
+    );
+    assert_eq!(locals(0x101d, 5), None);
+
+    // Outside the inline sites the innermost frame is the procedure.
+    assert_eq!(locals(0x1000, 0).unwrap(), ["driver rcx", "registry rdx"]);
+    assert_eq!(
+        locals(0x1053, 1).unwrap(),
+        [
+            "driver <not live at this address>",
+            "registry rdx",
+            "seed [frame+0x8]",
+            "total [frame+0xc]"
+        ]
+    );
+    assert_eq!(locals(0x1053, 0).unwrap(), ["self [frame+0xc]", "rhs edx"]);
+}

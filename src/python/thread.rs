@@ -19,6 +19,7 @@ use super::{err, view_dict};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::guest::ProcessInfo;
 use crate::session::{Session, VcpuInfo};
+use crate::symbols::CodeFrame;
 use crate::target::sched::ApcSelector;
 use crate::target::{SelectedFrame, Target, ThreadInfo, cpu};
 use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
@@ -365,6 +366,8 @@ pub struct Frame {
     index: usize,
     ip: u64,
     sp: u64,
+    code: CodeFrame,
+    inline: bool,
     symbol: Option<String>,
     source: Option<String>,
     registers: HashMap<String, u64>,
@@ -394,6 +397,8 @@ impl Frame {
             index,
             ip,
             sp,
+            code: CodeFrame::at(VirtAddr(ip)),
+            inline: false,
             symbol,
             source,
             registers,
@@ -419,12 +424,14 @@ impl Frame {
             index,
             ip: frame.ip,
             sp: frame.sp,
+            code: frame.code,
+            inline: frame.inline,
             symbol: (!frame.symbol.is_empty()).then_some(frame.symbol),
             source: Some(frame.source.as_str().to_string()),
             registers: recovered.registers,
             frame_base: recovered.frame_base,
             live_thread,
-            writable: live_thread && index == 0,
+            writable: live_thread && frame.code.in_first_frame(index),
         }
     }
 
@@ -448,6 +455,7 @@ impl Frame {
             index: self.index,
             ip: self.ip,
             sp: self.sp,
+            code: self.code,
             frame_base: self.frame_base,
             registers: self.registers.clone(),
             seed_registers: self.registers.clone(),
@@ -481,11 +489,20 @@ impl Frame {
         Ok(self.sp)
     }
 
-    /// The symbol at `ip`, if one resolved.
+    /// The symbol at `ip`, if one resolved; for an inline frame, the
+    /// function the compiler inlined.
     #[getter]
     fn symbol(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.owner.check(py)?;
         Ok(self.symbol.clone())
+    }
+
+    /// Whether the frame is a call the compiler inlined into the physical
+    /// frame after it, whose `ip`, `sp` and registers it shares.
+    #[getter]
+    fn inline(&self, py: Python<'_>) -> PyResult<bool> {
+        self.owner.check(py)?;
+        Ok(self.inline)
     }
 
     /// How the frame was recovered (unwind data, frame pointer, ...).
@@ -531,10 +548,7 @@ impl Frame {
             if !self.live_thread {
                 session.select_frame(self.selected_frame());
             }
-            let locals = session
-                .target
-                .procedure_locals(VirtAddr(self.ip))
-                .map_err(err)?;
+            let locals = session.target.frame_locals(self.code).map_err(err)?;
             Ok(locals
                 .iter()
                 .flat_map(|locals| locals.iter())
@@ -562,6 +576,7 @@ impl Frame {
         dict.set_item("ip", self.ip)?;
         dict.set_item("sp", self.sp)?;
         dict.set_item("symbol", self.symbol.as_deref())?;
+        dict.set_item("inline", self.inline)?;
         dict.set_item("source", self.source.as_deref())?;
         dict.set_item(
             "thread",

@@ -13,8 +13,8 @@ use crate::{
     memory::AddressSpace,
     pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
-        LocalVariableLocation, ProcedureLocal, SourceLineExtent, SourceLocation, SymbolCandidate,
-        SymbolIndex, SymbolStore, format_symbol_with_offset,
+        CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,
+        SourceLocation, SymbolCandidate, SymbolIndex, SymbolStore, format_symbol_with_offset,
     },
     types::{Dtb, VirtAddr},
     unwind::frame_base_for_register_values,
@@ -356,9 +356,35 @@ impl Target {
             .source_addresses(self.current_dtb(), file, line)
     }
 
-    /// Return private procedure locals in scope at `address`.
-    pub fn procedure_locals(&self, address: VirtAddr) -> Result<Option<Arc<Vec<ProcedureLocal>>>> {
-        self.symbols.procedure_locals(self.current_dtb(), address)
+    /// The frame locals, the source listing and expressions are scoped to:
+    /// the selected frame, else the innermost frame at the instruction
+    /// pointer. `None` without registers.
+    pub fn scope_frame(&self) -> Option<CodeFrame> {
+        match self.selected_frame.as_ref() {
+            Some(frame) => Some(frame.code),
+            None => self
+                .register_value(self.instruction_pointer_register())
+                .map(|ip| CodeFrame::at(VirtAddr(ip))),
+        }
+    }
+
+    /// The source line of `frame` in the current inspection context (see
+    /// [`SymbolStore::frame_source_location`]).
+    pub fn frame_source_location(&self, frame: CodeFrame) -> Option<SourceLocation> {
+        self.symbols
+            .frame_source_location(self.current_dtb(), frame)
+    }
+
+    /// The inline frame `frame` is in the current inspection context, `None`
+    /// for a physical frame.
+    pub fn inline_frame(&self, frame: CodeFrame) -> Option<InlineFrame> {
+        self.symbols.inline_frame(self.current_dtb(), frame)
+    }
+
+    /// The private locals and parameters of `frame` (see
+    /// [`SymbolStore::frame_locals`]).
+    pub fn frame_locals(&self, frame: CodeFrame) -> Result<Option<Arc<Vec<ProcedureLocal>>>> {
+        self.symbols.frame_locals(self.current_dtb(), frame)
     }
 
     /// Address of a memory-resident local in the current inspection context

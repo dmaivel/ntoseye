@@ -1653,6 +1653,7 @@ impl Target {
 mod tests {
     use super::*;
     use crate::session::session_over_memory;
+    use crate::symbols::CodeFrame;
     use crate::target::sample_thread;
     use crate::unwind::FrameSource;
 
@@ -1700,6 +1701,8 @@ mod tests {
                     source: FrameSource::Unwind,
                     source_location: None,
                     machine_frame: None,
+                    code: CodeFrame::at(VirtAddr(*ip)),
+                    inline: false,
                 })
                 .collect(),
             truncated,

@@ -31,7 +31,7 @@ use crate::kd::KdMemorySource;
 use crate::layout::ParsedType;
 use crate::repl::ReplStore;
 use crate::session::{ContinueOutcome, Session, StepMode};
-use crate::symbols::{SourceLocation, parse_source_paths, parse_symbol_sources};
+use crate::symbols::{CodeFrame, SourceLocation, parse_source_paths, parse_symbol_sources};
 use crate::termination;
 use crate::types::{Dtb, VirtAddr};
 use crate::typeview::Expand;
@@ -64,6 +64,10 @@ struct FrameRef {
     index: usize,
     ip: u64,
     sp: u64,
+    /// Which of the frames at `ip` it is ([`crate::unwind::StackFrame::code`]).
+    code: CodeFrame,
+    /// A call the compiler inlined ([`crate::unwind::StackFrame::inline`]).
+    inline: bool,
     symbol: String,
     source_location: Option<SourceLocation>,
     frame_base: Option<u64>,

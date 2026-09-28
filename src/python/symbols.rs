@@ -8,7 +8,7 @@ use super::{err, raise, symbol_not_found};
 use crate::breakpoints::BreakpointSpec;
 use crate::expr::Expr;
 use crate::session::Session;
-use crate::symbols::{parse_source_paths, parse_symbol_sources};
+use crate::symbols::{CodeFrame, parse_source_paths, parse_symbol_sources};
 use crate::types::{Dtb, VirtAddr};
 use crate::view::shape::Typed;
 use crate::view::{self};
@@ -162,7 +162,9 @@ impl Symbols {
         })
     }
 
-    /// List PDB local/parameter layouts covering `addr`, without evaluating values.
+    /// List the PDB local/parameter layouts of the innermost frame at `addr`
+    /// (an inlined call's own where the compiler inlined one), without
+    /// evaluating values.
     fn locals_at<'py>(
         &self,
         py: Python<'py>,
@@ -171,7 +173,7 @@ impl Symbols {
         let rows = scoped(py, &self.owner, &self.space, |session| {
             let locals = session
                 .target
-                .procedure_locals(VirtAddr(addr))
+                .frame_locals(CodeFrame::at(VirtAddr(addr)))
                 .map_err(err)?
                 .unwrap_or_default();
             Ok(locals

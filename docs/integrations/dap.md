@@ -174,11 +174,11 @@ The call stack uses {command}`k`, with source lines from private PDBs. Frame nam
 
 ### Locals, registers, and watches
 
-Locals and parameters use PDB locations, as in {command}`dv`. Caller frames contain only registers recovered by unwinding; other values are unavailable. A frame's locals, their values, and what they expand into come from the address space its stack was recovered in, so a parked thread's frames show its own process's locals whatever {command}`.process` selects.
+A call the compiler inlined is a frame named `[Inline Frame] module!function`, as Visual Studio names one, at the inlined function's source line; the frame it was inlined into is at the line of the call. Locals and parameters use PDB locations, as in {command}`dv`: an inline frame's are the inlined function's, and the frame it was inlined into shows its procedure's own. Caller frames contain only registers recovered by unwinding; other values are unavailable. A frame's locals, their values, and what they expand into come from the address space its stack was recovered in, so a parked thread's frames show its own process's locals whatever {command}`.process` selects.
 
 Structs, unions, arrays, and pointers expand through {command}`dt` decoding. Null pointers and unresolved or zero-sized types cannot expand. Use console {command}`dt` to inspect the raw layout.
 
-The Registers scope is {command}`r`. Frame 0 is the live register file and is writable, while caller frames show the sparse recovered context. A stack walked from a saved context (a parked thread, {command}`.cxr`, the hypervisor's saved VTL0 state) is recovered in every frame, so none is writable.
+The Registers scope is {command}`r`. Frame 0 (and the inline frames at its address, which share its registers) is the live register file and is writable, while caller frames show the sparse recovered context. A stack walked from a saved context (a parked thread, {command}`.cxr`, the hypervisor's saved VTL0 state) is recovered in every frame, so none is writable.
 
 Watch and hover use [core expressions](../reference/expressions.md), including locals (`index`, `Irp->IoStatus.Status`), addresses (`poi(nt!PsInitialSystemProcess)`), registers (`@rip`), and casts (`(_IRP*)@rcx`). The console radix (`n 10`) applies. Expressions see the selected frame's registers and read the address space its stack was recovered in, as its locals do. The Debug Console evaluates in the console's inspection context instead, so a {command}`.process` scope applies there. Locals require private PDBs and a recoverable location in the selected frame. Use `$!name` to require a local and `&` for its storage address. Typed structs, arrays, and pointers expand into children.
 

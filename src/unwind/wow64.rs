@@ -8,10 +8,7 @@
 
 use std::collections::HashMap;
 
-use super::{
-    FrameSource, RecoveredFrame, RecoveredStackTrace, StackFrame, ThreadTraceContext,
-    format_symbol, frame_source_location,
-};
+use super::{FrameSource, RecoveredFrame, RecoveredStackTrace, ThreadTraceContext, expand_frame};
 use crate::backend::MemoryOps;
 use crate::target::{Target, ThreadInfo};
 use crate::types::VirtAddr;
@@ -177,17 +174,18 @@ fn x86_frames(
 
     Some(
         raw.into_iter()
-            .map(|(ip, sp, source)| RecoveredFrame {
-                frame: StackFrame {
-                    sp,
-                    ip,
-                    symbol: format_symbol(debugger, trace, ip),
-                    source,
-                    source_location: frame_source_location(debugger, trace, ip),
-                    machine_frame: None,
-                },
-                registers: HashMap::from([("eip".to_string(), ip), ("esp".to_string(), sp)]),
-                frame_base: None,
+            .flat_map(|(ip, sp, source)| {
+                let returned = source == FrameSource::Unwind;
+                expand_frame(debugger, trace, ip, sp, source, None, returned)
+                    .into_iter()
+                    .map(move |frame| RecoveredFrame {
+                        frame,
+                        registers: HashMap::from([
+                            ("eip".to_string(), ip),
+                            ("esp".to_string(), sp),
+                        ]),
+                        frame_base: None,
+                    })
             })
             .collect(),
     )

@@ -10,8 +10,8 @@ use crate::expr::{Expr, ExprValue};
 use crate::guest::ModuleInfo;
 use crate::layout::{FieldInfo, nested_layout_name};
 use crate::symbols::{
-    LocalSourceState, ModuleSymbolStatus, SourceLocation, format_symbol_with_offset, glob_matches,
-    parse_source_paths, parse_symbol_sources,
+    CodeFrame, LocalSourceState, ModuleSymbolStatus, SourceLocation, format_symbol_with_offset,
+    glob_matches, parse_source_paths, parse_symbol_sources,
 };
 use crate::target::UserVar;
 use crate::types::VirtAddr;
@@ -111,7 +111,7 @@ repl_command! {
     names: ["ls"],
     usage: "ls [.] [first][,count]",
     summary: "List source lines of the current scope's file.",
-    details: "With no arguments, continues after the lines the previous ls or lsa listed; `.` restarts at the current line. `first` is a line number; `count` defaults to 10. The file is the one the current scope IP (`$scopeip`) maps to, found through .srcpath.",
+    details: "With no arguments, continues after the lines the previous ls or lsa listed; `.` restarts at the current line. `first` is a line number; `count` defaults to 10. The file is that of the selected frame's source line (an inline frame's is in the function inlined), found through .srcpath.",
 }
 
 repl_command! {
@@ -119,7 +119,7 @@ repl_command! {
     names: ["lsa"],
     usage: "lsa [address][,first][,count]",
     summary: "List source lines around an address.",
-    details: "Defaults to the current scope IP (`$scopeip`), five lines before it, and twelve lines in all. `first` is an offset from the address's line (negative for lines before it). The line at the address is marked `>`.",
+    details: "Defaults to the selected frame's source line, five lines before it, and twelve lines in all; an address lists the line of the innermost frame there (a function inlined at it, if any). `first` is an offset from that line (negative for lines before it). The line is marked `>`.",
     completion: Expression,
 }
 
@@ -127,7 +127,8 @@ repl_command! {
     cmd_dv;
     names: ["dv"],
     usage: "dv [address]",
-    summary: "Display procedure locals and parameters at an address.",
+    summary: "Display the selected frame's locals and parameters.",
+    details: "A frame's variables are its own: an inline frame's are the inlined function's, and the frame it was inlined into lists its procedure's without those of the calls inlined into it. Without an address, the frame is the one .frame selected, else the innermost at the stop; with one, the innermost frame at that address.",
     completion: Expression,
 }
 
@@ -551,13 +552,14 @@ impl ReplState<'_> {
             .map(VirtAddr)
     }
 
-    /// The source line `address` maps to, with its local file: the error
-    /// names what is missing (line info, or the file `.srcpath` should map).
+    /// The source line of `frame`, with its local file: the error names what
+    /// is missing (line info, or the file `.srcpath` should map).
     fn source_file_at(
         &self,
-        address: VirtAddr,
+        frame: CodeFrame,
     ) -> std::result::Result<(PathBuf, SourceLocation), String> {
-        let Some(location) = self.ctx.target.source_location(address) else {
+        let address = frame.address;
+        let Some(location) = self.ctx.target.frame_source_location(frame) else {
             return Err(format!(
                 "no source line information for {}",
                 ui::addr(address.0)
@@ -627,11 +629,11 @@ impl ReplState<'_> {
         let (path, first, current) = match (spec.first, spec.restart, &self.source_cursor) {
             (None, false, Some((path, next))) => (path.clone(), *next, None),
             _ => {
-                let Some(ip) = self.scope_ip() else {
+                let Some(frame) = self.ctx.target.scope_frame() else {
                     error!("ls requires a halted register context");
                     return Ok(());
                 };
-                let (path, location) = match self.source_file_at(ip) {
+                let (path, location) = match self.source_file_at(frame) {
                     Ok(found) => found,
                     Err(message) => {
                         error!("{message}");
@@ -656,20 +658,20 @@ impl ReplState<'_> {
             outln!("{}\n", command_help("lsa"));
             return Ok(());
         };
-        let address = match spec.address {
+        let frame = match spec.address {
             Some(text) => match self.eval_or_report(&text) {
-                Some(address) => address,
+                Some(address) => CodeFrame::at(address),
                 None => return Ok(()),
             },
-            None => match self.scope_ip() {
-                Some(ip) => ip,
+            None => match self.ctx.target.scope_frame() {
+                Some(frame) => frame,
                 None => {
                     error!("lsa requires an address or a halted register context");
                     return Ok(());
                 }
             },
         };
-        let (path, location) = match self.source_file_at(address) {
+        let (path, location) = match self.source_file_at(frame) {
             Ok(found) => found,
             Err(message) => {
                 error!("{message}");
@@ -687,20 +689,20 @@ impl ReplState<'_> {
     }
 
     fn cmd_dv(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let address = if let Some(arg) = invocation.arg(0) {
+        let (address, frame) = if let Some(arg) = invocation.arg(0) {
             match self.eval_or_report(arg) {
-                Some(address) => address,
+                Some(address) => (address, CodeFrame::at(address)),
                 None => return Ok(()),
             }
         } else {
-            let Some(rip) = self.scope_ip() else {
+            let (Some(rip), Some(frame)) = (self.scope_ip(), self.ctx.target.scope_frame()) else {
                 error!("dv requires a halted register context or an explicit address");
                 return Ok(());
             };
-            rip
+            (rip, frame)
         };
 
-        let Some(locals) = self.ctx.target.procedure_locals(address)? else {
+        let Some(locals) = self.ctx.target.frame_locals(frame)? else {
             outln!("no procedure locals found at {}\n", ui::addr(address.0));
             return Ok(());
         };

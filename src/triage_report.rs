@@ -392,6 +392,7 @@ mod tests {
     use crate::guest::ProcessInfo;
     use crate::kd::context::REGISTER_BUFFER_SIZE;
     use crate::session::RunStatus;
+    use crate::symbols::CodeFrame;
     use crate::triage::TriageDriver;
     use crate::types::VirtAddr;
     use crate::unwind::{FrameSource, StackFrame};
@@ -516,6 +517,8 @@ mod tests {
                 source: FrameSource::Current,
                 source_location: None,
                 machine_frame: None,
+                code: CodeFrame::at(VirtAddr(0x1040)),
+                inline: false,
             }],
             truncated: 0,
         };
@@ -613,6 +616,8 @@ mod tests {
                 source: FrameSource::Current,
                 source_location: None,
                 machine_frame: None,
+                code: CodeFrame::at(VirtAddr(0xffff_f800_0010_dfb0)),
+                inline: false,
             }],
             truncated: 0,
         };
@@ -655,6 +660,8 @@ mod tests {
                     source: FrameSource::Current,
                     source_location: None,
                     machine_frame: None,
+                    code: CodeFrame::at(VirtAddr(0x1040)),
+                    inline: false,
                 },
                 StackFrame {
                     sp: 0x8100,
@@ -663,6 +670,8 @@ mod tests {
                     source: FrameSource::Unwind,
                     source_location: None,
                     machine_frame: None,
+                    code: CodeFrame::at(VirtAddr(0x3040)),
+                    inline: false,
                 },
             ],
             truncated: 0,
@@ -716,6 +725,8 @@ mod tests {
                 source: FrameSource::Current,
                 source_location: None,
                 machine_frame: None,
+                code: CodeFrame::at(VirtAddr(0x1040)),
+                inline: false,
             }],
             truncated: 0,
         };

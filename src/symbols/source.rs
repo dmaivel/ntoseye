@@ -245,7 +245,7 @@ impl SymbolStore {
 
     /// The local file recorded source `file` of PDB `guid` maps to, checked
     /// against the checksum the PDB records for it.
-    fn local_source(
+    pub fn local_source(
         &self,
         guid: u128,
         file: &str,

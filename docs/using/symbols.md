@@ -56,7 +56,9 @@ k
 dv
 ```
 
-The stack and disassembly include mapped source locations. {command}`dv` displays the current procedure's private parameters and locals, including register- or stack-relative locations and live values when the current register context matches the procedure. Variables of calls inlined into the procedure are not listed: stacks show no frame for an inlined call.
+The stack and disassembly include mapped source locations. {command}`dv` displays the selected frame's private parameters and locals, including register- or stack-relative locations and live values when the current register context matches the frame.
+
+A call the compiler inlined is a frame of its own, as in WinDbg: {command}`k` lists it above the frame it was inlined into, tagged `[inline]`, with that frame's addresses, the inlined function's name, and its source line; the caller shows the line of the call. Frame numbers count inline frames, so `.frame N` selects one like any other frame, and {command}`dv`, {command}`ls`, and local names in expressions then use the inlined function's variables and source. The frame it was inlined into lists its own variables only. An inline frame has no registers of its own: it shares its physical frame's. Stop headers and {command}`ln` name the physical procedure.
 
 A private PDB also carries the driver's WPP trace message formats (TMF): `tracewpp` stores each message's format string and argument types as an annotation in it. With the PDB loaded, {command}`!wmitrace.logdump` prints the driver's WPP messages formatted (provider, function, and text), and `message.text` holds the same in MCP results and `dbg.inspect.etw_events()`. Without it, a message shows only its GUID, number, and payload bytes, and the dump says how many stayed raw. Public PDBs strip the annotations, except Microsoft's `Wdf01000.pdb`, which keeps KMDF's own.
 

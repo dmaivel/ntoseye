@@ -156,6 +156,8 @@ impl Server {
                 index,
                 ip: frame.frame.ip,
                 sp: frame.frame.sp,
+                code: frame.frame.code,
+                inline: frame.frame.inline,
                 symbol: frame.frame.symbol.clone(),
                 source_location: frame.frame.source_location.clone(),
                 frame_base: frame.frame_base,
@@ -172,9 +174,15 @@ impl Server {
     pub(super) fn frame_value(&mut self, handle: usize) -> Value {
         let frame = &self.frames[handle];
         let ip = frame.ip;
+        // Visual Studio's label for a call the compiler inlined.
+        let name = if frame.inline {
+            format!("[Inline Frame] {}", frame.symbol)
+        } else {
+            frame.symbol.clone()
+        };
         let mut value = json!({
             "id": handle as i64 + 1,
-            "name": frame.symbol,
+            "name": name,
             "line": 0,
             "column": 0,
             "instructionPointerReference": format!("{ip:#x}"),
@@ -215,13 +223,16 @@ impl Server {
         self.select_frame(handle)
     }
 
-    /// Re-read the live register file into a frame-0 handle, so the frame
-    /// context this adapter installs for locals and expressions matches the
-    /// target after a write (`setVariable`, or `r rax=...` in the console).
-    /// Caller frames keep their recovered snapshot, and so does a walk not
-    /// seeded from the vCPU (a parked thread, a console-selected context).
+    /// Re-read the live register file into a handle of the stopped frame
+    /// (frame 0, or any frame at its address: the inline frames there share
+    /// its registers), so the frame context this adapter installs for locals
+    /// and expressions matches the target after a write (`setVariable`, or
+    /// `r rax=...` in the console). Caller frames keep their recovered
+    /// snapshot, and so does a walk not seeded from the vCPU (a parked
+    /// thread, a console-selected context).
     pub(super) fn refresh_live_frame(&mut self, handle: usize) {
-        if self.frames[handle].index != 0 || !self.frames[handle].seed_live {
+        let frame = &self.frames[handle];
+        if !frame.code.in_first_frame(frame.index) || !frame.seed_live {
             return;
         }
         let Some(session) = self.session.as_mut() else {
@@ -247,6 +258,7 @@ impl Server {
             index: frame.index,
             ip: frame.ip,
             sp: frame.sp,
+            code: frame.code,
             frame_base: frame.frame_base,
             registers: frame.registers.clone(),
             seed_registers: frame.seed_registers.clone(),

@@ -320,16 +320,10 @@ impl Expr {
     }
 
     fn active_locals(context: &Target) -> Result<Option<Arc<Vec<ProcedureLocal>>>> {
-        let address = context
-            .selected_frame
-            .as_ref()
-            .map(|frame| frame.ip)
-            .or_else(|| context.register_value("rip"))
-            .or_else(|| context.register_value("pc"));
-        let Some(address) = address else {
+        let Some(frame) = context.scope_frame() else {
             return Ok(None);
         };
-        context.procedure_locals(VirtAddr(address))
+        context.frame_locals(frame)
     }
 
     /// Locals of the selected frame, for resolving a bare identifier. A frame

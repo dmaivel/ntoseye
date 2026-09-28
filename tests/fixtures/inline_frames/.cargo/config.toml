@@ -1,0 +1,13 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=lld-link",
+    "-C", "link-arg=/DRIVER",
+    "-C", "link-arg=/SUBSYSTEM:NATIVE",
+    "-C", "link-arg=/ENTRY:DriverEntry",
+    "-C", "link-arg=/NODEFAULTLIB",
+    "-C", "link-arg=/DEBUG:FULL",
+]

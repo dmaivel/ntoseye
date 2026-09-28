@@ -50,7 +50,7 @@ use crate::{
     guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo},
     memory::DTB_IDENTITY,
     phys::PhysMem,
-    symbols::SymbolStore,
+    symbols::{CodeFrame, SymbolStore},
     types::{Arch, CodeMachine, Dtb, VirtAddr},
     unwind::RecoveredStackTrace,
 };
@@ -185,6 +185,10 @@ pub struct SelectedFrame {
     pub index: usize,
     pub ip: u64,
     pub sp: u64,
+    /// Where the frame is in code: which of the frames at `ip` its locals
+    /// and source line are, the innermost for a context with no walk behind
+    /// it.
+    pub code: CodeFrame,
     pub frame_base: Option<u64>,
     pub registers: HashMap<String, u64>,
     /// Sparse register context from which this selection's stack walk started.
@@ -203,12 +207,14 @@ pub struct SelectedFrame {
 }
 
 impl SelectedFrame {
-    /// Frame 0 of a walk seeded from the live vCPU register file: the context
-    /// the target is halted in, so its registers are the target's and can be
-    /// written. Caller frames and `.cxr`/`.trap` contexts are recovered from
-    /// memory or unwind metadata and are read-only.
+    /// A frame at the stopped address of a walk seeded from the live vCPU
+    /// register file (frame 0, or the inline frames and physical frame
+    /// there): the context the target is halted in, so its registers are
+    /// the target's and can be written. Caller frames and `.cxr`/`.trap`
+    /// contexts are recovered from memory or unwind metadata and are
+    /// read-only.
     pub fn is_live(&self) -> bool {
-        self.seed_live && self.index == 0
+        self.seed_live && self.code.in_first_frame(self.index)
     }
 
     /// Select frame `index` of a recovered trace, keeping the walk's seed
@@ -226,6 +232,7 @@ impl SelectedFrame {
             index,
             ip: frame.frame.ip,
             sp: frame.frame.sp,
+            code: frame.frame.code,
             frame_base: frame.frame_base,
             registers: frame.registers.clone(),
             seed_registers: seed_registers
@@ -256,6 +263,7 @@ impl SelectedFrame {
             index,
             ip,
             sp,
+            code: CodeFrame::at(VirtAddr(ip)),
             frame_base: None,
             registers,
             seed_registers,

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::error::Result;
 use crate::{
     guest::ModuleInfo,
     layout::{EnumDef, ParsedType, TypeInfo},
@@ -139,6 +141,10 @@ pub struct SymbolStore {
     /// GUID -> the same records sorted by RVA, for address-to-symbol lookups.
     symbol_addresses: DashMap<u128, Vec<AddressEntry>>,
     source_lines: DashMap<u128, Vec<SourceLineEntry>>,
+    /// GUID -> the private procedures of its module streams, sorted by RVA:
+    /// where [`Self::frame_locals`] and [`Self::inline_frames`] find the
+    /// procedure an address is in without scanning every module stream.
+    procedures: DashMap<u128, Vec<ProcedureSpan>>,
     /// GUID -> recorded source file -> the checksum the compiler recorded for
     /// its contents. Files without one have no entry.
     source_checksums: DashMap<u128, HashMap<String, SourceChecksum>>,
@@ -161,13 +167,16 @@ pub struct SymbolStore {
     /// [`Self::enum_def`].
     enum_cache: DashMap<(u128, String), Option<Arc<EnumDef>>>,
 
-    /// (guid, procedure-relative RVA) -> locals in scope there. A single
-    /// lookup walks the whole type stream and every compiland's symbols, and
-    /// expression evaluation now consults locals for every bare identifier,
-    /// so a conditional breakpoint would otherwise rescan the PDB on each hit.
-    /// Locations are static PDB recipes (registers are applied at use time),
-    /// so an entry stays valid for the lifetime of the guid.
-    locals_cache: DashMap<(u128, u32), Option<Arc<Vec<ProcedureLocal>>>>,
+    /// (guid, RVA) -> the locals of each frame there, innermost first (see
+    /// [`CodeFrame::inline_depth`]); `None` outside any private procedure. A
+    /// single lookup walks the whole type stream, and expression evaluation
+    /// consults locals for every bare identifier, so a conditional
+    /// breakpoint would otherwise rescan the PDB on each hit. Locations are
+    /// static PDB recipes (registers are applied at use time), so an entry
+    /// stays valid for the lifetime of the guid.
+    locals_cache: DashMap<(u128, u32), Option<FrameLocals>>,
+    /// (guid, procedure RVA) -> the procedure's inline sites, decoded once.
+    inline_cache: DashMap<(u128, u32), Arc<ProcedureInlines>>,
     /// Complete on-disk images by cache path. A stack walk builds its module
     /// cache anew, and expanding a kernel image is 13 MiB of copying it
     /// should not repeat per thread.
@@ -469,6 +478,59 @@ struct SourceLineEntry {
     location: SourceLocation,
 }
 
+/// Where a frame is in code: the address its inline frames, source line and
+/// locals are looked up at, and which of the frames there it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CodeFrame {
+    /// The frame's instruction pointer, or for a frame a call returns to,
+    /// the call's last byte (`ip - 1`), so the frame is the call's.
+    pub address: VirtAddr,
+    /// How many inlined calls at `address` run above this frame: 0 for the
+    /// innermost frame there, the number of inline frames there for the
+    /// physical frame.
+    pub inline_depth: usize,
+}
+
+impl CodeFrame {
+    /// The innermost frame at `address`.
+    pub fn at(address: VirtAddr) -> Self {
+        Self {
+            address,
+            inline_depth: 0,
+        }
+    }
+
+    /// Whether this frame, frame `index` of a walk, is in the walk's first
+    /// physical frame: the frames at the stopped address, which share its
+    /// registers.
+    pub fn in_first_frame(&self, index: usize) -> bool {
+        index == self.inline_depth
+    }
+}
+
+/// The locals of each frame at an address, by [`CodeFrame::inline_depth`].
+pub type FrameLocals = Vec<Arc<Vec<ProcedureLocal>>>;
+
+/// A call the compiler inlined, shown as a frame of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineFrame {
+    /// The inlined function, as `module!name`.
+    pub symbol: String,
+    /// The inlined function's source line at the address.
+    pub location: Option<SourceLocation>,
+}
+
+/// A private procedure's place in its PDB.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcedureSpan {
+    pub rva: u32,
+    pub len: u32,
+    /// Index of the module stream holding it, in DBI module order.
+    pub module: usize,
+    /// Its `S_*PROC32` record in that stream.
+    pub record: pdb2::SymbolIndex,
+}
+
 pub fn format_symbol_with_offset(module: &str, name: &str, offset: u32) -> String {
     if offset == 0 {
         format!("{module}!{name}")
@@ -683,6 +745,7 @@ impl SymbolStore {
             symbol_rvas: DashMap::new(),
             symbol_addresses: DashMap::new(),
             source_lines: DashMap::new(),
+            procedures: DashMap::new(),
             source_checksums: DashMap::new(),
             local_source_digests: Mutex::new(HashMap::new()),
             index_diagnostics: DashMap::new(),
@@ -690,6 +753,7 @@ impl SymbolStore {
             type_cache: DashMap::new(),
             enum_cache: DashMap::new(),
             locals_cache: DashMap::new(),
+            inline_cache: DashMap::new(),
             on_disk_images: DashMap::new(),
             modules: DashMap::new(),
             module_status: DashMap::new(),
@@ -923,7 +987,7 @@ impl SymbolStore {
         locals: Vec<ProcedureLocal>,
     ) {
         self.locals_cache
-            .insert((guid, rva), Some(Arc::new(locals)));
+            .insert((guid, rva), Some(vec![Arc::new(locals)]));
     }
 
     /// Register a loaded module and its C13 source-line records without a PDB,
@@ -967,6 +1031,39 @@ impl SymbolStore {
                 })
                 .collect(),
         );
+    }
+
+    /// Load the PDB at `path` and register it as module `short_name` at
+    /// `base` in `dtb`, for tests that read a real PDB. Returns its guid.
+    #[cfg(test)]
+    pub fn load_pdb_for_test(
+        &self,
+        path: &Path,
+        short_name: &str,
+        dtb: Dtb,
+        base: VirtAddr,
+        size: u32,
+    ) -> Result<u128> {
+        let bytes = std::fs::read(path)?;
+        let info = pdb2::PDB::open(Cursor::new(bytes.as_slice()))?.pdb_information()?;
+        let identity = PdbIdentity {
+            guid: info.guid.as_u128(),
+            age: info.age,
+        };
+        self.ensure_pdb_loaded(identity, path)?;
+        self.modules.insert(
+            Self::module_key(dtb, base),
+            LoadedModule {
+                name: format!("{short_name}.sys"),
+                short_name: short_name.to_string(),
+                guid: identity.guid,
+                base_address: base,
+                size,
+                dtb,
+            },
+        );
+        self.set_module_symbol_status(dtb, base, ModuleSymbolStatus::Loaded);
+        Ok(identity.guid)
     }
 
     pub fn clear_modules_for_dtb(&self, dtb: Dtb) {
@@ -1032,6 +1129,7 @@ impl SymbolStore {
             self.symbol_rvas.remove(&guid);
             self.symbol_addresses.remove(&guid);
             self.source_lines.remove(&guid);
+            self.procedures.remove(&guid);
             self.source_checksums.remove(&guid);
             self.index_diagnostics.remove(&guid);
             self.wpp_messages.remove(&guid);
@@ -1040,6 +1138,8 @@ impl SymbolStore {
             self.enum_cache
                 .retain(|(cached_guid, _), _| *cached_guid != guid);
             self.locals_cache
+                .retain(|(cached_guid, _), _| *cached_guid != guid);
+            self.inline_cache
                 .retain(|(cached_guid, _), _| *cached_guid != guid);
         }
     }
@@ -1200,6 +1300,7 @@ mod discovery;
 pub mod download;
 mod index;
 mod index_build;
+mod inline;
 mod locals;
 mod lookup;
 mod source;
@@ -1207,6 +1308,7 @@ mod types;
 
 use cache::{ModuleIdentities, symbols_directory};
 pub use index::SymbolIndex;
+pub use inline::ProcedureInlines;
 
 #[cfg(test)]
 mod tests;

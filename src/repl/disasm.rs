@@ -446,9 +446,10 @@ pub struct StackColumns {
     pub frame_size: bool,
 }
 
-/// `kf`'s memory column: how many stack bytes separate a frame from the one
-/// before it. Blank for the first frame and where the stack pointer drops,
-/// which is a switch to another stack rather than a frame size.
+/// `kf`'s memory column: how many stack bytes separate a frame from the
+/// physical frame before it. Blank for the first physical frame, for an
+/// inline frame (which has no stack of its own), and where the stack pointer
+/// drops, which is a switch to another stack rather than a frame size.
 pub fn frame_size_cell(previous_sp: Option<u64>, sp: u64) -> String {
     match previous_sp.and_then(|previous| sp.checked_sub(previous)) {
         Some(size) => format!("{size:>8x}"),
@@ -487,13 +488,18 @@ pub fn print_stacktrace_data_with(
 
     let shown = stacktrace.frames.len().min(display_limit);
 
+    let mut previous_sp = None;
     for (num, frame) in stacktrace.frames.iter().take(shown).enumerate() {
         if columns.frame_size {
-            let previous_sp = stacktrace.frames.get(num.wrapping_sub(1)).map(|p| p.sp);
+            let size = if frame.inline {
+                frame_size_cell(None, frame.sp)
+            } else {
+                frame_size_cell(previous_sp.replace(frame.sp), frame.sp)
+            };
             outln!(
                 "{indent}{} {} {}",
                 ui::muted(&format!("#{num:<2}")),
-                frame_size_cell(previous_sp, frame.sp),
+                size,
                 format_stack_frame(None, frame, !embedded, columns.provenance)
             );
         } else {
@@ -510,10 +516,17 @@ pub fn print_stacktrace_data_with(
     }
 }
 
+/// The tag after the symbol of a call the compiler inlined, in the `k`
+/// family and `.frame`.
+pub fn inline_tag() -> String {
+    "[inline]".bright_black().to_string()
+}
+
 /// One frame line in `k`'s layout: the frame `number` when given, the child
-/// SP when `with_sp`, the return address, then the symbol, how the frame
-/// was recovered (always with `show_provenance`, as `kv` shows it, else only
-/// a stack scan's guess), and its source line.
+/// SP when `with_sp`, the return address, then the symbol, whether it is an
+/// inline frame, how the frame was recovered (always with
+/// `show_provenance`, as `kv` shows it, else only a stack scan's guess), and
+/// its source line.
 pub fn format_stack_frame(
     number: Option<usize>,
     frame: &StackFrame,
@@ -533,6 +546,9 @@ pub fn format_stack_frame(
     let mut annotations = Vec::new();
     if !frame.symbol.starts_with("0x") {
         annotations.push(ui::symbol(&frame.symbol));
+    }
+    if frame.inline {
+        annotations.push(inline_tag());
     }
     if show_provenance {
         annotations.push(

@@ -15,7 +15,7 @@ use crate::{
     memory::{AddressSpace, DTB_IDENTITY},
     pe::{CodeLayout, PeImage},
     phys::PhysMem,
-    symbols::{SourceLocation, SymbolStore},
+    symbols::{CodeFrame, SourceLocation, SymbolStore},
     target::{
         ForeignModules, HYPERVISOR_CONTEXT, KTHREAD_STATE_RUNNING, KTHREAD_STATE_TERMINATED,
         SavedThreadRegisters, SavedVtlContext, Target, ThreadInfo, lookup_register,
@@ -118,14 +118,23 @@ impl FrameSource {
 pub struct StackFrame {
     pub sp: u64,
     pub ip: u64,
+    /// `module!procedure+offset` at `ip`; for an inline frame,
+    /// `module!function`, the function inlined.
     pub symbol: String,
     pub source: FrameSource,
+    /// The frame's source line (see [`SymbolStore::frame_source_location`]).
     pub source_location: Option<SourceLocation>,
     /// The hardware-pushed machine frame the walk crossed to reach this
     /// frame: the trap or interrupt that stopped it here. On Windows it is the
     /// tail of the handler's `_KTRAP_FRAME` (see
     /// [`crate::trapframe::ktrap_frame_at_machine_frame`]).
     pub machine_frame: Option<u64>,
+    /// Where the frame is in code, and which of the frames there it is.
+    pub code: CodeFrame,
+    /// The frame is a call the compiler inlined into the code of the
+    /// physical frame after it: it has no stack frame of its own, and shares
+    /// that frame's `ip`, `sp`, registers and `machine_frame`.
+    pub inline: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -551,15 +560,58 @@ pub fn preferred_code_dtb(trace: &ThreadTraceContext, addr: u64) -> Dtb {
         .unwrap_or(trace.active_dtb)
 }
 
-fn frame_source_location(
+/// The frames the physical frame at `ip` shows as, innermost first: the
+/// calls the compiler inlined into its code, then the frame itself.
+/// `returned` says `ip` is where a call returns to, so the frame's code is
+/// the call's (`ip - 1`) rather than the next instruction's.
+fn expand_frame(
     debugger: &Target,
     trace: &ThreadTraceContext,
-    address: u64,
-) -> Option<SourceLocation> {
-    let module = trace.module_for_address(address)?;
-    debugger
-        .symbols
-        .source_location(module.dtb, VirtAddr(address))
+    ip: u64,
+    sp: u64,
+    source: FrameSource,
+    machine_frame: Option<u64>,
+    returned: bool,
+) -> Vec<StackFrame> {
+    let address = VirtAddr(if returned { ip.wrapping_sub(1) } else { ip });
+    let module = trace.module_for_address(address.0);
+    let inline = module
+        .as_ref()
+        .map(|module| debugger.symbols.inline_frames(module.dtb, address))
+        .unwrap_or_default();
+    let physical = CodeFrame {
+        address,
+        inline_depth: inline.len(),
+    };
+    let mut frames: Vec<StackFrame> = inline
+        .into_iter()
+        .enumerate()
+        .map(|(inline_depth, frame)| StackFrame {
+            sp,
+            ip,
+            symbol: frame.symbol,
+            source,
+            source_location: frame.location,
+            machine_frame,
+            code: CodeFrame {
+                address,
+                inline_depth,
+            },
+            inline: true,
+        })
+        .collect();
+    frames.push(StackFrame {
+        sp,
+        ip,
+        symbol: format_symbol(debugger, trace, ip),
+        source,
+        source_location: module
+            .and_then(|module| debugger.symbols.source_location(module.dtb, address)),
+        machine_frame,
+        code: physical,
+        inline: false,
+    });
+    frames
 }
 
 fn image_u32(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -1213,7 +1265,10 @@ impl StackTracer<'_> {
         match self.target.arch() {
             Arch::Amd64 => {
                 let unwound = self.unwind_once_amd64(context);
-                if matches!(unwound, Unwound::Frame { .. }) {
+                if let Unwound::Frame { stack_switch } = unwound {
+                    // Crossing a machine frame lands where an interrupt or
+                    // trap stopped the code, not after a call.
+                    context.after_call = !stack_switch;
                     for index in AMD64_VOLATILE {
                         context.regs[index] = None;
                     }
@@ -1245,8 +1300,9 @@ mod tests {
     use crate::guest::ModuleInfo;
     use crate::kd::context::build_register_map;
     use crate::session::{Session, session_over_memory};
-    use crate::target::SavedThreadRegisters;
+    use crate::target::{SavedThreadRegisters, SelectedFrame};
     use crate::types::VirtAddr;
+    use std::path::Path;
 
     /// Where the fixture image is loaded, and the stack page after it.
     const IMAGE: u64 = 0x1_4000_0000;
@@ -1437,6 +1493,121 @@ mod tests {
                 (RETURN_ADDRESS, FrameSource::Scan)
             ]
         );
+    }
+
+    /// The fixture image with `DriverEntry` of the inline-frames fixture PDB
+    /// (`tests/fixtures/inline_frames.pdb`) at RVA 0x1000..0x1059 instead of
+    /// `FRAMED`, unwound as its prolog `sub rsp, 0x10` says, and that PDB
+    /// loaded for the image. `returns` are `(offset from FRAMED_RSP, value)`
+    /// stack slots.
+    fn inline_frames_session(returns: &[(usize, u64)]) -> Session {
+        let mut memory = frame_pointer_image();
+        memory[0x2000..0x2004].copy_from_slice(&0x1000u32.to_le_bytes());
+        memory[0x2004..0x2008].copy_from_slice(&0x1059u32.to_le_bytes());
+        memory[0x2008..0x200c].copy_from_slice(&0x2120u32.to_le_bytes());
+        // Version 1, a 4-byte prolog, one code: UWOP_ALLOC_SMALL of 16 at 4.
+        memory[0x2120..0x2128].copy_from_slice(&[0x01, 0x04, 0x01, 0x00, 0x04, 0x12, 0, 0]);
+        memory.resize(IMAGE_SIZE + 0x2000, 0);
+        for &(offset, value) in returns {
+            let at = (FRAMED_RSP - IMAGE) as usize + offset;
+            memory[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut session = session_over_memory(IMAGE, &memory);
+        session
+            .target
+            .set_kernel_modules_for_test(vec![ModuleInfo::new(
+                "fixture.sys".to_string(),
+                VirtAddr(IMAGE),
+                IMAGE_SIZE as u32,
+            )]);
+        session.register_map = build_register_map();
+        let dtb = session.target.kernel_dtb();
+        session
+            .target
+            .symbols
+            .load_pdb_for_test(
+                Path::new(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/inline_frames.pdb"
+                )),
+                "fixture",
+                dtb,
+                VirtAddr(IMAGE),
+                IMAGE_SIZE as u32,
+            )
+            .unwrap();
+        session
+    }
+
+    /// A physical frame in inlined code shows as the inline frames there,
+    /// innermost first, then itself; a caller's frames are those of its call
+    /// (the byte before the return address), which here is still in the
+    /// inlined `fetch_add` although the return address is past it.
+    #[test]
+    fn inlined_calls_expand_into_frames_and_a_caller_is_at_its_call() {
+        let stopped = IMAGE + 0x101d;
+        let returned = IMAGE + 0x1026;
+        let session = inline_frames_session(&[(0x10, returned)]);
+        let seed = registers(&[("rip", stopped), ("rsp", FRAMED_RSP)]);
+
+        let trace = build_stacktrace_with_register_values(
+            &session.target,
+            &session.register_map,
+            &seed,
+            16,
+        );
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| {
+                let frame = &frame.frame;
+                let line = frame.source_location.as_ref().map(|location| location.line);
+                (frame.ip, frame.inline, frame.symbol.as_str(), line)
+            })
+            .collect();
+        let in_fetch_add = |ip| {
+            [
+                (
+                    ip,
+                    true,
+                    "fixture!core::sync::atomic::atomic_add",
+                    Some(3927),
+                ),
+                (
+                    ip,
+                    true,
+                    "fixture!core::sync::atomic::Atomic<u32>::fetch_add",
+                    Some(3148),
+                ),
+                (ip, true, "fixture!inline_frames::scale", Some(11)),
+                (ip, true, "fixture!inline_frames::accumulate", Some(17)),
+            ]
+        };
+        let mut expected = in_fetch_add(stopped).to_vec();
+        expected.push((stopped, false, "fixture!DriverEntry+0x1d", Some(25)));
+        expected.extend(in_fetch_add(returned));
+        expected.push((returned, false, "fixture!DriverEntry+0x26", Some(25)));
+        assert_eq!(frames, expected);
+
+        let codes: Vec<_> = trace.frames.iter().map(|frame| frame.frame.code).collect();
+        for (index, code) in codes.iter().enumerate() {
+            let (address, depth) = if index < 5 {
+                (stopped, index)
+            } else {
+                (returned - 1, index - 5)
+            };
+            assert_eq!(code.address, VirtAddr(address));
+            assert_eq!(code.inline_depth, depth);
+        }
+        // The stopped frame's inline frames share its (live) registers; the
+        // caller's are recovered.
+        assert_eq!(trace.frames[0].registers, trace.frames[4].registers);
+        assert_eq!(trace.frames[5].registers, trace.frames[9].registers);
+        let selected = |index| SelectedFrame::from_recovered(&trace, index, Some(&seed), true);
+        assert!(selected(3).unwrap().is_live());
+        assert!(selected(4).unwrap().is_live());
+        assert!(!selected(5).unwrap().is_live());
     }
 
     #[test]

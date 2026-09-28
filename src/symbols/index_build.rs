@@ -2,8 +2,8 @@
 //! streams under the PDB lock, then publishing the derived indexes.
 
 use super::{
-    AddressEntry, IndexedSymbol, SourceChecksum, SourceLineEntry, SourceLocation, SymbolIndex,
-    SymbolIndexDiagnostic, SymbolStore, SymbolVisibility, source::recorded_checksum,
+    AddressEntry, IndexedSymbol, ProcedureSpan, SourceChecksum, SourceLineEntry, SourceLocation,
+    SymbolIndex, SymbolIndexDiagnostic, SymbolStore, SymbolVisibility, source::recorded_checksum,
 };
 use crate::error::{Error, Result};
 use crate::layout::aggregate_key;
@@ -22,6 +22,7 @@ struct ParsedIndexData {
     strings: Vec<String>,
     rvas: HashMap<String, Vec<IndexedSymbol>>,
     source_lines: Vec<SourceLineEntry>,
+    procedures: Vec<ProcedureSpan>,
     source_checksums: HashMap<String, SourceChecksum>,
     type_strings: Vec<String>,
     enum_strings: Vec<String>,
@@ -173,6 +174,7 @@ impl SymbolStore {
         let mut strings = Vec::new();
         let mut rvas: HashMap<String, Vec<IndexedSymbol>> = HashMap::new();
         let mut source_lines = Vec::new();
+        let mut procedures = Vec::new();
         let mut source_checksums = HashMap::new();
         let mut wpp_messages = HashMap::new();
 
@@ -186,6 +188,7 @@ impl SymbolStore {
             &mut strings,
             &mut rvas,
             &mut source_lines,
+            &mut procedures,
             &mut source_checksums,
             &mut wpp_messages,
             &mut diagnostics,
@@ -206,6 +209,7 @@ impl SymbolStore {
         strings.sort();
         strings.dedup();
         source_lines.sort_by_key(|line| line.rva);
+        procedures.sort_by_key(|procedure| procedure.rva);
 
         let mut type_strings: Vec<String> = Vec::new();
         let mut enum_strings: Vec<String> = Vec::new();
@@ -227,6 +231,7 @@ impl SymbolStore {
             strings,
             rvas,
             source_lines,
+            procedures,
             source_checksums,
             type_strings,
             enum_strings,
@@ -256,6 +261,7 @@ impl SymbolStore {
             .insert(guid, SymbolIndex::from_names(parsed.strings));
         self.publish_symbol_rvas(guid, parsed.rvas);
         self.source_lines.insert(guid, parsed.source_lines);
+        self.procedures.insert(guid, parsed.procedures);
         self.source_checksums.insert(guid, parsed.source_checksums);
         self.index_types
             .insert(guid, SymbolIndex::from_names(parsed.type_strings));
@@ -279,9 +285,10 @@ impl SymbolStore {
     }
 }
 
-/// Private procedures and addressable data from every module stream, the
-/// C13 source lines of each module with the checksums its source files were
-/// compiled from, and its WPP `TMF:` annotations.
+/// Private procedures and addressable data from every module stream, where
+/// each procedure's record is, the C13 source lines of each module with the
+/// checksums its source files were compiled from, and its WPP `TMF:`
+/// annotations.
 #[allow(clippy::too_many_arguments)]
 fn parse_module_streams(
     pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
@@ -290,14 +297,18 @@ fn parse_module_streams(
     strings: &mut Vec<String>,
     rvas: &mut HashMap<String, Vec<IndexedSymbol>>,
     source_lines: &mut Vec<SourceLineEntry>,
+    procedures: &mut Vec<ProcedureSpan>,
     source_checksums: &mut HashMap<String, SourceChecksum>,
     wpp_messages: &mut HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) {
     match pdb.debug_information() {
-        Ok(debug_information) => match debug_information.modules() {
+        Ok(debug_information) => match debug_information
+            .modules()
+            .map(|modules| modules.enumerate())
+        {
             Ok(mut modules) => loop {
-                let module = match modules.next() {
+                let (module_index, module) = match modules.next() {
                     Ok(Some(module)) => module,
                     Ok(None) => break,
                     Err(error) => {
@@ -373,6 +384,16 @@ fn parse_module_streams(
                         let is_procedure = matches!(data, pdb2::SymbolData::Procedure(_));
                         if is_procedure {
                             procedure = None;
+                        }
+                        if let pdb2::SymbolData::Procedure(record) = &data
+                            && let Some(rva) = record.offset.to_rva(address_map)
+                        {
+                            procedures.push(ProcedureSpan {
+                                rva: rva.0,
+                                len: record.len,
+                                module: module_index,
+                                record: symbol.index(),
+                            });
                         }
                         let named_offset: Option<(String, pdb2::PdbInternalSectionOffset)> =
                             match data {

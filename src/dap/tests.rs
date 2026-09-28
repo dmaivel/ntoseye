@@ -11,7 +11,9 @@ use crate::kd::context::{OFFSET_RIP, OFFSET_RSP};
 use crate::layout::{FieldInfo, TypeInfo};
 use crate::session::session_over_memory;
 use crate::session::tests::{MockBackend, session_with_mock};
-use crate::symbols::{LocalSource, LocalSourceState, LocalVariableLocation, ProcedureLocal};
+use crate::symbols::{
+    CodeFrame, LocalSource, LocalSourceState, LocalVariableLocation, ProcedureLocal,
+};
 use crate::target::SelectedFrame;
 
 #[test]
@@ -323,6 +325,8 @@ fn a_console_context_change_invalidates_the_clients_view() {
         index: 0,
         ip: 0x1000,
         sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(0x1000)),
+        inline: false,
         symbol: "0x1000".to_string(),
         source_location: None,
         frame_base: None,
@@ -419,6 +423,8 @@ fn stack_frames_use_recovered_symbol_and_source_metadata() {
         index: 0,
         ip: 0x1234,
         sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(0x1234)),
+        inline: false,
         symbol: "driver!RecoveredRoutine+0x4".to_string(),
         source_location: Some(SourceLocation {
             file: r"C:\build\driver.c".to_string(),
@@ -479,6 +485,8 @@ fn locals_come_from_the_address_space_the_frame_was_recovered_in() {
         index: 1,
         ip,
         sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(ip)),
+        inline: false,
         symbol: "driver!Routine+0x10".to_string(),
         source_location: None,
         frame_base: None,
@@ -538,6 +546,8 @@ fn watches_evaluate_in_the_address_space_the_frame_was_recovered_in() {
         index: 1,
         ip,
         sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(ip)),
+        inline: false,
         symbol: "driver!Routine+0x10".to_string(),
         source_location: None,
         frame_base: None,

@@ -151,9 +151,15 @@ shapes! {
         sp: Hex,
         /// The symbol at `ip`; empty when none resolved.
         symbol: String,
+        /// A call the compiler inlined into the physical frame after it,
+        /// with no stack frame of its own: `symbol` is the function
+        /// inlined, and `ip` and `sp` are the physical frame's.
+        inline: bool,
         /// How the frame was recovered: `current`, `seed`, `unwind`, or `scan`.
         source: &'static str,
-        /// The source line at `ip`, when line information resolves it.
+        /// The frame's source line, when line information resolves it: an
+        /// inline frame's in the function inlined, a caller's where it made
+        /// the call.
         source_location: Option<super::symbols::SourceLocation>,
     }
 
@@ -476,6 +482,7 @@ pub fn stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFrame {
         ip: frame.ip,
         sp: frame.sp,
         symbol: frame.symbol.clone(),
+        inline: frame.inline,
         source: frame.source.as_str(),
         source_location: frame.source_location.as_ref().map(source_location),
     }

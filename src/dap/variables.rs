@@ -131,13 +131,14 @@ impl Server {
         self.select_frame(handle)?;
         let frame = &self.frames[handle];
         let session = self.session.as_mut().ok_or(NO_TARGET)?;
-        // Frame 0 is the live register file, so read it rather than the
-        // snapshot taken when the stack was walked: a write (`setVariable`, or
+        // The stopped frame (frame 0, and the inline frames at its address)
+        // has the live register file, so read it rather than the snapshot
+        // taken when the stack was walked: a write (`setVariable`, or
         // `r rax=...` in the console) then shows up immediately. Caller frames
         // keep their recovered snapshot, which is all unwind metadata
         // justifies, and so does a walk not seeded from the vCPU (a parked
         // thread, `.cxr`, a thread's saved VTL0 state).
-        let live_context = frame.index == 0 && frame.seed_live;
+        let live_context = frame.code.in_first_frame(frame.index) && frame.seed_live;
         let live = live_context
             .then(|| session.read_registers().ok())
             .flatten();
@@ -168,6 +169,7 @@ impl Server {
 
     pub(super) fn local_variables(&mut self, handle: usize) -> Handled {
         let ip = self.frames[handle].ip;
+        let code = self.frames[handle].code;
         let dtb = self.frames[handle].dtb;
         self.select_frame(handle)?;
         let views = {
@@ -175,7 +177,7 @@ impl Server {
             let locals = session
                 .target
                 .symbols
-                .procedure_locals(dtb, VirtAddr(ip))
+                .frame_locals(dtb, code)
                 .map_err(|error| error.to_string())?;
             let Some(locals) = locals else {
                 return Ok(Some(json!({"variables": []})));
@@ -326,7 +328,10 @@ impl Server {
         let value = self.evaluate_expression(&expression)?;
         match target {
             VarRef::Registers(handle) => {
-                if self.frames[handle].index != 0 {
+                if !self.frames[handle]
+                    .code
+                    .in_first_frame(self.frames[handle].index)
+                {
                     return Err(
                         "caller-frame registers are recovered from unwind metadata and are not writable"
                             .to_string(),
@@ -348,14 +353,16 @@ impl Server {
                 Ok(Some(json!({"value": format!("{value:#018x}")})))
             }
             VarRef::Locals(handle) => {
+                let code = self.frames[handle].code;
                 let ip = self.frames[handle].ip;
                 let dtb = self.frames[handle].dtb;
-                let live_frame = self.frames[handle].index == 0 && self.frames[handle].seed_live;
+                let live_frame =
+                    code.in_first_frame(self.frames[handle].index) && self.frames[handle].seed_live;
                 let session = self.session()?;
                 let locals = session
                     .target
                     .symbols
-                    .procedure_locals(dtb, VirtAddr(ip))
+                    .frame_locals(dtb, code)
                     .map_err(|error| error.to_string())?
                     .unwrap_or_default();
                 let local = locals
@@ -403,7 +410,7 @@ impl Server {
                 let refreshed = session
                     .target
                     .symbols
-                    .procedure_locals(dtb, VirtAddr(ip))
+                    .frame_locals(dtb, code)
                     .ok()
                     .flatten()
                     .unwrap_or_default();

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     FrameSource, MAX_UNWIND_FRAMES, RecoveredFrame, RecoveredStackTrace, RegisterContext,
-    StackFrame, StackTracer, ThreadTraceContext, Unwound, format_symbol, frame_source_location,
+    StackTracer, ThreadTraceContext, Unwound, expand_frame,
 };
 use crate::{
     guest::{Guest, ModuleInfo},
@@ -117,23 +117,33 @@ pub(super) fn build_recovered_stacktrace_seeded(
             registers.insert(name.to_string(), value);
         }
 
-        let frame = StackFrame {
-            sp: context.rsp,
-            ip: context.rip,
-            symbol: format_symbol(debugger, trace, context.rip),
+        let frames = expand_frame(
+            debugger,
+            trace,
+            context.rip,
+            context.rsp,
             source,
-            source_location: frame_source_location(debugger, trace, context.rip),
-            machine_frame: context.machine_frame,
-        };
-        record_recovered_frame(
-            &mut stacktrace,
-            limit,
-            RecoveredFrame {
-                frame,
-                registers,
-                frame_base,
-            },
+            context.machine_frame,
+            context.after_call,
         );
+        let physical = frames.len() - 1;
+        for (position, frame) in frames.into_iter().enumerate() {
+            // Inline frames share the physical frame's registers.
+            let registers = if position == physical {
+                std::mem::take(&mut registers)
+            } else {
+                registers.clone()
+            };
+            record_recovered_frame(
+                &mut stacktrace,
+                limit,
+                RecoveredFrame {
+                    frame,
+                    registers,
+                    frame_base,
+                },
+            );
+        }
     }
     stacktrace
 }

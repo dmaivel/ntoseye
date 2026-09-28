@@ -12,7 +12,6 @@ use std::borrow::Cow;
 
 use crate::expr::Expr;
 use crate::layout::ParsedType;
-use crate::types::VirtAddr;
 use crate::ui;
 
 use crate::repl::*;
@@ -488,10 +487,10 @@ impl MyCompleter {
             let Some(target) = target else {
                 return Vec::new();
             };
-            let Some(ip) = target.register_value(target.instruction_pointer_register()) else {
+            let Some(frame) = target.scope_frame() else {
                 return Vec::new();
             };
-            let Ok(Some(locals)) = target.procedure_locals(VirtAddr(ip)) else {
+            let Ok(Some(locals)) = target.frame_locals(frame) else {
                 return Vec::new();
             };
             let mut names: Vec<_> = locals

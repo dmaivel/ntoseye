@@ -374,7 +374,7 @@ impl SymbolStore {
         Ok((view.file_header().TimeDateStamp, size_of_image(&view)))
     }
 
-    fn ensure_pdb_loaded(&self, expected: PdbIdentity, path: &Path) -> Result<()> {
+    pub fn ensure_pdb_loaded(&self, expected: PdbIdentity, path: &Path) -> Result<()> {
         if let Some(age) = self.pdb_ages.get(&expected.guid) {
             let validation = expected
                 .matches(PdbIdentity {
