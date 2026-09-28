@@ -30,6 +30,8 @@ Common problems, by symptom. Integration-specific problems are covered with each
 
 ## Breakpoints and stepping
 
+**A user-mode breakpoint over KD fails with `NTSTATUS 0xc0000001 for api 0x313e`.** With VBS enabled, Windows refuses the debugger's writes to user-mode code, and `ntoseye` writes breakpoints through KD whatever `--memory-source` reads from. A hardware execution breakpoint ({command}`ba` `e1`, or `hardware=True` in the SDK) writes nothing and fires; there are four slots.
+
 **A breakpoint scoped to one process slows the whole guest.** A user-mode breakpoint in a shared DLL traps every process that runs the code, and the hits outside its scope are resumed one by one. [Breakpoints in shared pages](../using/breakpoints.md#user-mode-breakpoints-in-shared-pages) measures the cost and lists ways around it.
 
 **Breakpoints fail at some addresses after a session was killed.** KD has a 32-entry breakpoint table, and a session killed with `SIGKILL` leaves its entries installed. The next attach reclaims entries no live session owns; see [Breakpoints](../using/breakpoints.md).

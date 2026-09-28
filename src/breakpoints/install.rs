@@ -11,6 +11,7 @@ use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::{DebugBackend, DebugCapability};
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
+use crate::kd::api::DBGKD_WRITE_PHYSICAL_MEMORY;
 use crate::memory::{AddressSpace, PAGE_SIZE};
 use crate::pe::read_pe_header_page;
 use crate::phys::PhysMem;
@@ -296,7 +297,9 @@ impl BreakpointManager {
             Err(error) => return Err(error),
         }
         journal_site(debugger, &memory, address, original.as_slice());
-        memory.write_bytes(address, opcode)?;
+        memory
+            .write_bytes(address, opcode)
+            .map_err(|error| user_patch_error(debugger, address, error))?;
         // The kernel does not know about a breakpoint patched through
         // host memory, so update the backend's stop bookkeeping.
         client.note_breakpoint_installed(address.0);
@@ -322,7 +325,9 @@ impl BreakpointManager {
             ) => {
                 let memory = debugger.address_space(*dtb);
                 journal_site(debugger, &memory, bp.address, original.as_slice());
-                memory.write_bytes(bp.address, breakpoint_opcode(debugger.arch()))?;
+                memory
+                    .write_bytes(bp.address, breakpoint_opcode(debugger.arch()))
+                    .map_err(|error| user_patch_error(debugger, bp.address, error))?;
                 client.note_breakpoint_installed(bp.address.0);
                 Ok(())
             }
@@ -591,6 +596,26 @@ impl BreakpointManager {
             (Some(patched), Some(viewed)) => patched == viewed,
             _ => bp.scope.matches_dtb(cr3, debugger.arch()),
         }
+    }
+}
+
+/// `error` from patching a breakpoint into the code at `address`, saying,
+/// when the target refused a user-mode site's write, the likely cause: with
+/// VBS enabled, Windows refuses KD writes to user-mode code (its status says
+/// nothing more). Writes go through KD whatever memory source reads use, and
+/// a hardware execution breakpoint there still fires.
+fn user_patch_error(debugger: &Target, address: VirtAddr, error: Error) -> Error {
+    match error {
+        Error::KdStatus { api, .. }
+            if api == DBGKD_WRITE_PHYSICAL_MEMORY
+                && !BreakpointManager::is_kernel_space(debugger.arch(), address) =>
+        {
+            Error::Breakpoint(format!(
+                "{error} (with VBS enabled, Windows refuses KD writes to user-mode code; use a \
+                 hardware execution breakpoint, ba e1, instead)"
+            ))
+        }
+        error => error,
     }
 }
 
