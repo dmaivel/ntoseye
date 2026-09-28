@@ -1376,7 +1376,9 @@ fn a_declined_hit_on_another_vcpu_hands_the_step_back() {
 
 /// A walk another stop ended while it ran over a call goes on by finishing
 /// that run, not by walking from wherever the processor is now (another
-/// thread's code after a context switch); a fresh walk forgets it.
+/// thread's code after a context switch); a fresh walk forgets it. One a
+/// hit on another vCPU ended goes on from the walk's vCPU, which the hit's
+/// is stepped off.
 #[test]
 fn a_resumed_walk_finishes_the_run_it_was_waiting_on() {
     let mut backend = MockBackend {
@@ -1388,20 +1390,37 @@ fn a_resumed_walk_finishes_the_run_it_was_waiting_on() {
     backend.set("rip", 0x1020);
     let mut session = stepping_session(&[0x90u8; 0x40], backend);
     session.current_thread = "p01.01".into();
-    session.pending_step_run = Some((VirtAddr(0x1010), None));
+    let pending = |sites| {
+        Some(PendingWalk {
+            vcpu: "p01.01".into(),
+            sites,
+        })
+    };
+    session.pending_walk = pending(vec![(VirtAddr(0x1010), None)]);
 
     let outcome = session
         .resume_step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1010)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1010 }));
-    assert!(session.pending_step_run.is_none());
+    assert!(session.pending_walk.is_none());
 
-    session.pending_step_run = Some((VirtAddr(0x1030), None));
+    session.pending_walk = pending(vec![(VirtAddr(0x1030), None)]);
     let outcome = session
         .step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1010)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1010 }));
-    assert!(session.pending_step_run.is_none());
+    assert!(session.pending_walk.is_none());
+
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1010), true, None);
+    session.current_thread = "p01.02".into();
+    session.pending_walk = pending(Vec::new());
+    let outcome = session
+        .resume_step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1011)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1011 }));
+    assert_eq!(session.current_thread, "p01.01");
 }
 
 /// A step's run-to (`gu`, `p` over a call) stops only for its own frame: the

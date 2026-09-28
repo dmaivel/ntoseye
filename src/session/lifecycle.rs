@@ -338,7 +338,7 @@ impl Session {
             bugcheck_trap_original: Vec::new(),
             reload_surface_pending: false,
             parked_stop: None,
-            pending_step_run: None,
+            pending_walk: None,
             current_stop: None,
             module_refresh_report: None,
             notices: Vec::new(),

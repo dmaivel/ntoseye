@@ -164,10 +164,11 @@ pub fn wait(dbg: &Bound<'_, Debugger>, timeout: Option<f64>) -> PyResult<Option<
 /// Run `attempt` on the session until its stop surfaces, the one loop every
 /// run and step goes through. A breakpoint hit whose `when=` callback
 /// declines it is passed by attempting again: a run resumes from the hit, a
-/// run-to re-arms the same target, a step walk keeps stepping. A step names
-/// its vCPU (`stepping`), which a hit on another vCPU is stepped past and
-/// handed back to (see [`Session::pass_declined_hit`]). `None`: the target
-/// is still running when `timeout` ran out.
+/// run-to re-arms the same target with the hit's vCPU stepped past it, a
+/// step walk goes on (see [`Session::resume_step_until`]). A single step
+/// names its vCPU (`stepping`), which a hit on another vCPU is stepped past
+/// and handed back to (see [`Session::pass_declined_hit`]). `None`: the
+/// target is still running when `timeout` ran out.
 fn settle(
     dbg: &Bound<'_, Debugger>,
     timeout: Option<Duration>,
@@ -201,10 +202,15 @@ fn settle_stop(
     timeout: Option<Duration>,
     attempt: impl FnMut(&mut Session, Option<Duration>) -> CoreResult<ContinueOutcome> + Send,
 ) -> PyResult<Py<Stop>> {
+    settle(dbg, timeout, None, attempt)?.ok_or_else(no_stop)
+}
+
+/// One instruction's step, settled on its vCPU.
+fn settle_single_step(dbg: &Bound<'_, Debugger>) -> PyResult<Py<Stop>> {
     let stepping = dbg
         .get()
         .with_session(|session| Ok(session.current_thread.clone()))?;
-    settle(dbg, timeout, Some(stepping), attempt)?.ok_or_else(no_stop)
+    settle(dbg, None, Some(stepping), single_step)?.ok_or_else(no_stop)
 }
 
 /// Drop `when=` callbacks of breakpoints that no longer exist (a one-shot
@@ -236,31 +242,19 @@ pub fn run_to(
         require_halted(session, "run_to")?;
         location.resolve(session, session.target.current_dtb())
     })?;
-    let stepping = match step {
-        Some(_) => Some(
-            dbg.get()
-                .with_session(|session| Ok(session.current_thread.clone()))?,
-        ),
-        None => None,
-    };
     // A retry after a declined hit goes on with the walk it ended.
     let mut resumed = false;
-    settle(
-        dbg,
-        timeout,
-        stepping,
-        move |session, remaining| match step {
-            None => run_to_address(session, VirtAddr(address), None, remaining),
-            Some(mode) => {
-                let stop = |ip, _| ip == address;
-                if std::mem::replace(&mut resumed, true) {
-                    session.resume_step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
-                } else {
-                    session.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
-                }
+    settle(dbg, timeout, None, move |session, remaining| match step {
+        None => run_to_address(session, VirtAddr(address), None, remaining),
+        Some(mode) => {
+            let stop = |ip, _| ip == address;
+            if std::mem::replace(&mut resumed, true) {
+                session.resume_step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+            } else {
+                session.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
             }
-        },
-    )
+        }
+    })
 }
 
 /// [`Session::run_to`], reporting a timeout or cancel that halted the target
@@ -290,7 +284,7 @@ pub fn step(
     dbg.get()
         .with_session(|session| require_halted(session, "step"))?;
     match until {
-        None => settle_stop(dbg, None, single_step),
+        None => settle_single_step(dbg),
         Some(kind) => step_to_flow(dbg, StepMode::Into, kind, timeout),
     }
 }
@@ -323,7 +317,7 @@ pub fn step_over(
                 run_to_address(session, next, frame.clone(), remaining)
             })
         }
-        (None, _) => settle_stop(dbg, None, single_step),
+        (None, _) => settle_single_step(dbg),
     }
 }
 

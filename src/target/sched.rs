@@ -1600,6 +1600,12 @@ impl Target {
     }
 
     pub fn current_windows_thread_for_processor(&self, processor: u16) -> Result<ThreadInfo> {
+        self.thread_info_from_ethread(self.current_ethread_for_processor(processor)?)
+    }
+
+    /// The `_ETHREAD` `processor`'s KPRCB says it runs, without reading the
+    /// thread.
+    pub fn current_ethread_for_processor(&self, processor: u16) -> Result<VirtAddr> {
         let prcb = kprcb_for_processor(self, processor)?;
         let guest = self.guest()?;
         let memory = guest.ntoskrnl.memory();
@@ -1621,8 +1627,7 @@ impl Target {
                 processor
             )));
         }
-
-        self.thread_info_from_ethread(kthread - ethread_tcb_offset)
+        Ok(kthread - ethread_tcb_offset)
     }
 }
 

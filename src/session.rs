@@ -248,6 +248,19 @@ pub enum StepMode {
     Over,
 }
 
+/// Where a step walk another stop ended goes on from (see
+/// [`Session::resume_step_until`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWalk {
+    /// The backend thread (vCPU) the walk was stepping.
+    pub vcpu: String,
+    /// Where the walk's execution continues, each site bound to its thread
+    /// (and stack): the return site of the call it was running over, or the
+    /// successors of the instruction it was stepping when the step was
+    /// diverted off them. Empty: the walk goes on from where `vcpu` is.
+    pub sites: Vec<(VirtAddr, Option<StepFrame>)>,
+}
+
 /// Where a step's run-to must find the stepping thread's stack pointer (see
 /// [`Session::step_frame`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,10 +503,8 @@ pub struct Session {
     /// `wait_for_stop` returns this as the proper event instead of a bare
     /// "halted", and `resume` clears it. `None` whenever the host is up to date.
     parked_stop: Option<ContinueOutcome>,
-    /// The run over a call a step walk was waiting on when another stop
-    /// ended it: its return address and binding (see
-    /// [`Self::resume_step_until`]).
-    pending_step_run: Option<(VirtAddr, Option<StepFrame>)>,
+    /// Where the step walk another stop ended goes on from.
+    pending_walk: Option<PendingWalk>,
     /// The stop the target is halted at, as it was surfaced: set by every
     /// visible classification and every host-facing run/step result, cleared
     /// when the target moves. Unlike `parked_stop` it is not consumed by
