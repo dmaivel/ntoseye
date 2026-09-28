@@ -22,7 +22,9 @@
 //! `Box`), declared shapes and [`unions!`] enums are the only `ViewValue`s,
 //! all implemented in this file (the last two by its macros). Each impl's `HINT`
 //! must name the Python type `view::to_py` makes of its `view`;
-//! `python/tests/test_stub_types.py` checks that on a live guest.
+//! the `hints` test below checks each one with no guest (a new wrapper
+//! needs a field there), and `python/tests/test_stub_types.py` checks real
+//! results on a live one.
 //!
 //! **What [`shapes!`] generates.** For each shape: the struct its builder
 //! fills (`pub fn pci_capability(..) -> PciCapability`, beside the
@@ -557,5 +559,102 @@ mod tests {
                 "items": 1,
             })
         );
+    }
+}
+
+/// Every [`ViewValue`] against its `HINT`, with no guest: one shape holds a
+/// field of each kind, and the SDK must hand back for each field a value of
+/// the type its hint (which the stub prints) declares. Needs `python-stubs`,
+/// which compiles the hints.
+#[cfg(all(test, feature = "python-stubs", feature = "python-embed"))]
+#[allow(dead_code)] // `into_view` goes unused: these shapes only reach Python
+mod hints {
+    use pyo3::prelude::*;
+    use pyo3::types::PyDict;
+
+    use super::*;
+    use crate::debugger_data::MetadataSource;
+
+    unions! {
+        Either {
+            Number(u8),
+            Nested(Inner),
+        }
+    }
+
+    /// Declares `Every` with the fields given, `every()` building it from
+    /// their values, and `hints()` naming each field's hint.
+    macro_rules! every {
+        ($($field:ident: $ty:ty = $value:expr),* $(,)?) => {
+            shapes! {
+                Inner {
+                    id: u8,
+                }
+                Every {
+                    $($field: $ty),*
+                }
+            }
+
+            fn every() -> Every {
+                Every { $($field: $value),* }
+            }
+
+            fn hints() -> Vec<(&'static str, String)> {
+                vec![$((stringify!($field), <$ty as ViewValue>::HINT.to_string())),*]
+            }
+        };
+    }
+
+    every! {
+        unsigned: u64 = 1,
+        signed: i32 = -1,
+        address: VirtAddr = VirtAddr(0x1000),
+        hex: Hex<u16> = 0x1f,
+        flag: bool = true,
+        text: String = "text".into(),
+        name: &'static str = "name",
+        absent: Option<u8> = None,
+        present: Option<u8> = Some(1),
+        list: Vec<Inner> = vec![Inner { id: 1 }],
+        boxed: Box<Inner> = Box::new(Inner { id: 2 }),
+        nested: Inner = Inner { id: 3 },
+        read: Diag<VirtAddr> = DiagnosticValue::Available(VirtAddr(0x20)),
+        read_none: Diag<Option<String>> = DiagnosticValue::Available(None),
+        failed: Diag<Vec<Inner>> = DiagnosticValue::unavailable("paged out"),
+        sourced: Metric<u64> = DiagnosticMetric {
+            value: DiagnosticValue::Available(5),
+            source: Some(MetadataSource::KernelSymbol),
+        },
+        unsourced: Metric<u64> = DiagnosticMetric {
+            value: DiagnosticValue::Available(6),
+            source: None,
+        },
+        keyed: Keyed<Diag<Hex>> = vec![("a", DiagnosticValue::Available(7))],
+        number: Either = Either::Number(8),
+        either_nested: Either = Either::Nested(Inner { id: 9 }),
+    }
+
+    #[test]
+    fn every_field_holds_the_type_its_hint_declares() {
+        Python::attach(|py| -> PyResult<()> {
+            let globals = PyDict::new(py);
+            globals.set_item("value", Typed::<Every>::new(py, every())?.into_bound())?;
+            globals.set_item("HINTS", hints())?;
+            let source = format!(
+                "{}\n{}",
+                include_str!("../../python/tests/stubcheck.py"),
+                r#"
+checker = Checker({})
+for name, hint in HINTS:
+    checker.value(getattr(value, name), ast.parse(hint, mode="eval").body, name)
+assert checker.errors == [], checker.errors
+assert len(value) == len(HINTS), value.keys()
+assert checker.forms >= {"class", "Record", "available", "unavailable", "source"}, checker.forms
+"#
+            );
+            let code = std::ffi::CString::new(source).unwrap();
+            py.run(&code, Some(&globals), None)
+        })
+        .unwrap();
     }
 }

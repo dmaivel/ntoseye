@@ -67,6 +67,11 @@ jobs:
         run: cargo clippy --locked -p ntoseye ${{ matrix.features }} --all-targets
       - name: Test
         run: cargo test --locked -p ntoseye ${{ matrix.features }}
+      # The SDK's type hints compile only with `python-stubs`; this checks each
+      # field wrapper's hint against the value it renders, with no guest.
+      - name: Test the SDK type hints
+        if: matrix.label == 'default'
+        run: cargo test --locked -p ntoseye --features python-stubs --lib view::shape::hints
       # What `cargo install ntoseye` builds: the packaged crate alone, which
       # the release publishes only after the GitHub release and wheels.
       - name: Package
