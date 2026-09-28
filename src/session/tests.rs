@@ -1848,8 +1848,10 @@ fn session_at_load_trap() -> (Session, u32, SiteWrites, Arc<AtomicUsize>) {
 
 /// Without a break filter for the image (none, one for another module, or
 /// `sxi ld:driver` over `sxe ld`), a load-trap hit is a module change: the
-/// deferred breakpoint arms, the thread is stepped past the trap (lifted,
-/// stepped, planted again), and the target resumes without a stop.
+/// deferred breakpoint arms, the thread is stepped past the trap, and the
+/// target resumes without a stop. The trap is planted again only while a
+/// filter still waits on loads; with none, the breakpoint that waited was
+/// the last reason for it.
 #[test]
 fn a_load_trap_hit_no_filter_names_arms_deferred_breakpoints_and_resumes() {
     let configurations: [&[(Option<&str>, ExceptionPolicyMode)]; 3] = [
@@ -1882,15 +1884,58 @@ fn a_load_trap_hit_no_filter_names_arms_deferred_breakpoints_and_resumes() {
             .iter()
             .position(|&write| write == (LOAD_TRAP, false))
             .expect("the trap is lifted to step past it");
-        assert_eq!(
-            writes[lifted + 1..]
-                .iter()
-                .filter(|write| write.0 == LOAD_TRAP)
-                .collect::<Vec<_>>(),
-            [&(LOAD_TRAP, true)],
-            "planted again after the step"
-        );
+        let last = writes[lifted..]
+            .iter()
+            .rev()
+            .find(|write| write.0 == LOAD_TRAP)
+            .copied();
+        assert_eq!(last, Some((LOAD_TRAP, !filters.is_empty())), "{filters:?}");
+        assert_eq!(session.load_trap.is_some(), !filters.is_empty());
     }
+}
+
+/// A resume keeps the load trap only while something waits on a load: an
+/// `sxn`/`sxe ld` filter or an unresolved breakpoint. With neither it is
+/// lifted before the guest runs.
+#[test]
+fn a_resume_keeps_the_load_trap_only_while_a_load_is_awaited() {
+    let resumed = |filter: Option<ExceptionPolicyMode>, deferred: bool| {
+        let mut backend = MockBackend {
+            allow_breakpoints: true,
+            ..MockBackend::default()
+        }
+        .one_vcpu();
+        backend.set("rip", 0x1000);
+        let sites = Arc::clone(&backend.site_writes);
+        let mut session = session_with_mock(backend);
+        session.load_trap = Some(TrapSite {
+            address: VirtAddr(LOAD_TRAP),
+            original: vec![0x48],
+        });
+        if let Some(mode) = filter {
+            session.exception_policies.set_module_load(None, mode, None);
+        }
+        if deferred {
+            deferred_symbol_breakpoint(&mut session);
+        }
+        session.resume().unwrap();
+        let lifted = sites.lock().contains(&(LOAD_TRAP, false));
+        (session.load_trap.is_some(), lifted)
+    };
+    assert_eq!(resumed(None, false), (false, true));
+    assert_eq!(
+        resumed(Some(ExceptionPolicyMode::Ignore), false),
+        (false, true)
+    );
+    assert_eq!(
+        resumed(Some(ExceptionPolicyMode::Notify), false),
+        (true, false)
+    );
+    assert_eq!(
+        resumed(Some(ExceptionPolicyMode::Break), false),
+        (true, false)
+    );
+    assert_eq!(resumed(None, true), (true, false));
 }
 
 /// A `sxe ld:<module>` filter naming the image stops at the load with the

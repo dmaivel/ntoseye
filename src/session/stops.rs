@@ -577,6 +577,8 @@ impl Session {
         }
         self.backend.set_current_thread(&self.current_thread)?;
         self.step_over_site_at_pc()?;
+        // The load may have resolved the last breakpoint waiting on one.
+        self.arm_traps();
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)?;

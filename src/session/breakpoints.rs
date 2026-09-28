@@ -9,6 +9,7 @@ use crate::breakpoints::{
 };
 use crate::dbg_backend::{BugcheckInfo, DebugCapability, WatchpointAccess};
 use crate::error::{Error, Result};
+use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::ModuleSymbolLoadReport;
 use crate::session::{Session, TrapSite};
@@ -128,13 +129,15 @@ impl Session {
     }
 
     /// Arm the debugger's own kernel traps the backend needs: the bugcheck
-    /// trap ([`Self::arm_bugcheck_trap`]) and the module-load trap
-    /// ([`Self::arm_load_trap`]). Armed at attach, where the operator can see
-    /// them reported, and retried on every resume: the sites need kernel
-    /// symbols, which can arrive late and move across a reboot.
+    /// trap ([`Self::arm_bugcheck_trap`]), and the module-load trap while
+    /// something waits on a load ([`Self::sync_load_trap`]). Called at
+    /// attach, where the operator can see them reported, and on every
+    /// resume: the sites need kernel symbols, which can arrive late and move
+    /// across a reboot, and the guest runs only after a resume, so that is
+    /// where whether the load trap is wanted is decided.
     pub fn arm_traps(&mut self) {
         self.arm_bugcheck_trap();
-        self.arm_load_trap();
+        self.sync_load_trap();
     }
 
     /// Whether the backend reports `capability` as supported.
@@ -164,24 +167,57 @@ impl Session {
         );
     }
 
-    /// Arm an automatic breakpoint on `nt!DbgLoadImageSymbols` when the
-    /// backend reports no module loads on its own.
+    /// Keep an automatic breakpoint on `nt!DbgLoadImageSymbols` exactly
+    /// while a load is waited on, when the backend reports no module loads
+    /// on its own: an `sxe`/`sxn ld` filter, or a breakpoint not resolved
+    /// yet (a `bu` on a driver that has not loaded).
     ///
     /// The kernel calls it for every kernel image it maps, with the image
     /// listed in `PsLoadedModuleList` and before its entry point runs, whether
     /// or not kernel debugging is enabled; it is where KD's load notification
     /// comes from. A hit refreshes the module list, arms deferred breakpoints
     /// in the new image, and applies the `sx* ld` filters (see
-    /// [`Self::classify_stop_event`]).
-    fn arm_load_trap(&mut self) {
-        if self.load_trap.is_some() || self.backend_supports(DebugCapability::ModuleLoadEvents) {
+    /// [`Self::classify_stop_event`]). It is not left in place otherwise:
+    /// every driver load runs it, and a trap a killed session leaves behind
+    /// stops the next load with no debugger to take it.
+    fn sync_load_trap(&mut self) {
+        if self.backend_supports(DebugCapability::ModuleLoadEvents) {
             return;
         }
-        self.load_trap = self.plant_trap(
-            "nt!DbgLoadImageSymbols",
-            "a module-load trap",
-            "reports no module loads by itself",
-        );
+        match (&self.load_trap, self.load_awaited()) {
+            (None, true) => {
+                self.load_trap = self.plant_trap(
+                    "nt!DbgLoadImageSymbols",
+                    "a module-load trap",
+                    "reports no module loads by itself; it stays while a breakpoint waits \
+                     for its module or an sx ld filter is set",
+                );
+            }
+            (Some(trap), false) => {
+                let address = trap.address;
+                match lift_target_site(self.backend.as_mut(), &self.target, address) {
+                    Ok(()) => {
+                        self.load_trap = None;
+                        self.load_trap_interrupted = None;
+                    }
+                    Err(error) => self
+                        .notices
+                        .push(format!("failed to lift the module-load trap: {error}")),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether something waits on a module load: an `sxe`/`sxn ld` filter,
+    /// or a breakpoint not resolved yet.
+    fn load_awaited(&self) -> bool {
+        self.exception_policies.module_load_entries().any(|filter| {
+            matches!(
+                filter.mode,
+                ExceptionPolicyMode::Break | ExceptionPolicyMode::Notify
+            )
+        }) || self.breakpoints.list().iter().any(|bp| !bp.resolved)
     }
 
     /// Plant a debugger-owned breakpoint at the kernel `symbol`, reporting
