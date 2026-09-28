@@ -402,7 +402,7 @@ fn whea(whea: &WheaFindingDetail) -> WheaFinding {
     WheaFinding {
         record_address: whea.record_address,
         record: match &whea.state {
-            WheaRecordState::Unavailable { reason } => DiagnosticValue::Unavailable(reason.clone()),
+            WheaRecordState::Unavailable { reason } => DiagnosticValue::unavailable(reason.clone()),
             WheaRecordState::Decoded(record) => DiagnosticValue::Available(WheaRecord {
                 revision: record.revision,
                 severity: record.severity,

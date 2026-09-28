@@ -504,7 +504,7 @@ fn debug_entry(record: &DebugRecord) -> ImageDebugEntry {
         pointer_to_raw_data: entry.pointer_to_raw_data,
         codeview: record.codeview.as_ref().map(|record| {
             record.as_ref().map_or_else(
-                    |error| DiagnosticValue::Unavailable(error.clone()),
+                    |error| DiagnosticValue::unavailable(error.clone()),
                     DiagnosticValue::Available,
                 ).map(|record| codeview(record))
         }),

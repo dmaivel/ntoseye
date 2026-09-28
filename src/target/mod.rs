@@ -681,7 +681,7 @@ impl<T> DiagnosticValue<T> {
     pub fn map<U>(&self, f: impl FnOnce(&T) -> U) -> DiagnosticValue<U> {
         match self {
             Self::Available(value) => DiagnosticValue::Available(f(value)),
-            Self::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            Self::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         }
     }
 
@@ -690,7 +690,8 @@ impl<T> DiagnosticValue<T> {
         Self::Unavailable(error.into())
     }
 
-    fn from_result(result: Result<T>) -> Self {
+    /// The value of `result`, or its error's text.
+    pub fn from_result(result: Result<T>) -> Self {
         match result {
             Ok(value) => Self::Available(value),
             Err(error) => Self::Unavailable(error.to_string()),
@@ -722,7 +723,7 @@ impl<T> DiagnosticMetric<T> {
 
     fn unavailable(errors: Vec<String>) -> Self {
         Self {
-            value: DiagnosticValue::Unavailable(errors.join("; ")),
+            value: DiagnosticValue::unavailable(errors.join("; ")),
             source: None,
         }
     }

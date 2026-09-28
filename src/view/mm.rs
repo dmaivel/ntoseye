@@ -1154,7 +1154,7 @@ mod tests {
             source: Some(MetadataSource::KernelSymbol),
         };
         let unavailable = DiagnosticMetric {
-            value: DiagnosticValue::Unavailable("missing MmAvailablePages".into()),
+            value: DiagnosticValue::unavailable("missing MmAvailablePages"),
             source: None,
         };
         let summary = SystemMemorySummary {

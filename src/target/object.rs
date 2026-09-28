@@ -894,11 +894,11 @@ impl Target {
             });
         let type_name = match &header {
             Ok(header) => DiagnosticValue::Available(header.type_name.clone()),
-            Err(error) => DiagnosticValue::Unavailable(error.to_string()),
+            Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
         let name = match &header {
             Ok(header) => DiagnosticValue::Available(header.name.clone()),
-            Err(error) => DiagnosticValue::Unavailable(error.to_string()),
+            Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
         HandleEntryDetail {
@@ -1032,16 +1032,16 @@ impl Target {
                 self.inspect_device_object(*device)
                     .map(|detail| detail.device_type),
             ),
-            Ok(_) => DiagnosticValue::Unavailable("_FILE_OBJECT.DeviceObject is null".to_string()),
-            Err(error) => DiagnosticValue::Unavailable(error.to_string()),
+            Ok(_) => DiagnosticValue::unavailable("_FILE_OBJECT.DeviceObject is null"),
+            Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
         let device_name = match &device_object {
             Ok(device) if !device.is_zero() => DiagnosticValue::from_result(
                 self.inspect_object_header(*device)
                     .map(|detail| detail.name),
             ),
-            Ok(_) => DiagnosticValue::Unavailable("_FILE_OBJECT.DeviceObject is null".to_string()),
-            Err(error) => DiagnosticValue::Unavailable(error.to_string()),
+            Ok(_) => DiagnosticValue::unavailable("_FILE_OBJECT.DeviceObject is null"),
+            Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
         Ok(FileObjectDetail {

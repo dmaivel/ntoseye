@@ -29,7 +29,7 @@ impl Target {
         };
         let tag = match field("Tag") {
             DiagnosticValue::Available(value) => DiagnosticValue::Available(value as u32),
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error),
         };
         Ok(LookasideDetail {
             address,

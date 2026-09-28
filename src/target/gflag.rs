@@ -154,7 +154,7 @@ impl Target {
         let kernel: u32 = guest.ntoskrnl.memory().read(kernel_address)?;
         let process = self.selected_process_info().ok();
         let process_flags = match &process {
-            None => DiagnosticValue::Unavailable("no current process".to_string()),
+            None => DiagnosticValue::unavailable("no current process"),
             Some(process) => DiagnosticValue::from_result((|| {
                 let types = guest.ntoskrnl.types_in(process.dtb);
                 let peb = types

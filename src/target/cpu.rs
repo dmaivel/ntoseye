@@ -493,10 +493,10 @@ impl Target {
                 DiagnosticValue::Unavailable(error) => error.clone(),
             };
             (
-                DiagnosticValue::Unavailable(error.clone()),
-                DiagnosticValue::Unavailable(error.clone()),
-                DiagnosticValue::Unavailable(error.clone()),
-                DiagnosticValue::Unavailable(error),
+                DiagnosticValue::unavailable(error.clone()),
+                DiagnosticValue::unavailable(error.clone()),
+                DiagnosticValue::unavailable(error.clone()),
+                DiagnosticValue::unavailable(error),
             )
         });
         let prcb_fields = layout(self, "_KPRCB").ok().map(|prcb_layout| {
@@ -524,9 +524,9 @@ impl Target {
         let (current_thread, next_thread, idle_thread) = prcb_fields.unwrap_or_else(|| {
             let error = "_KPRCB layout unavailable".to_string();
             (
-                DiagnosticValue::Unavailable(error.clone()),
-                DiagnosticValue::Unavailable(error.clone()),
-                DiagnosticValue::Unavailable(error),
+                DiagnosticValue::unavailable(error.clone()),
+                DiagnosticValue::unavailable(error.clone()),
+                DiagnosticValue::unavailable(error),
             )
         });
         Ok(PcrDetail {
@@ -564,31 +564,32 @@ impl Target {
     pub fn inspect_prcb(&self, processor: u16) -> Result<PrcbDetail> {
         let location = cpu_location(self, processor)?;
         let prcb_layout = layout(self, "_KPRCB")?;
-        let processor_state = match nested_field(
-            self,
-            &prcb_layout,
-            location.kprcb,
-            &["ProcessorState"],
-            "_KPROCESSOR_STATE",
-        ) {
-            Ok((state_layout, state_base)) => {
-                let special_registers = match nested_field(
-                    self,
-                    &state_layout,
-                    state_base,
-                    &["SpecialRegisters"],
-                    "_KSPECIAL_REGISTERS",
-                ) {
-                    Ok((special_layout, special_base)) => {
-                        DiagnosticValue::Available(SpecialRegistersDetail {
+        let processor_state = DiagnosticValue::from_result(
+            nested_field(
+                self,
+                &prcb_layout,
+                location.kprcb,
+                &["ProcessorState"],
+                "_KPROCESSOR_STATE",
+            )
+            .map(|(state_layout, state_base)| {
+                let special_registers = DiagnosticValue::from_result(
+                    nested_field(
+                        self,
+                        &state_layout,
+                        state_base,
+                        &["SpecialRegisters"],
+                        "_KSPECIAL_REGISTERS",
+                    )
+                    .map(|(special_layout, special_base)| {
+                        SpecialRegistersDetail {
                             address: special_base,
                             size: special_layout.size as u64,
                             name: special_layout.name.clone(),
-                        })
-                    }
-                    Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-                };
-                DiagnosticValue::Available(ProcessorStateDetail {
+                        }
+                    }),
+                );
+                ProcessorStateDetail {
                     address: state_base,
                     size: state_layout.size as u64,
                     name: state_layout.name.clone(),
@@ -598,10 +599,9 @@ impl Target {
                             .map(|offset| state_base + offset),
                     ),
                     special_registers,
-                })
-            }
-            Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-        };
+                }
+            }),
+        );
         Ok(PrcbDetail {
             processor: location.processor,
             kprcb: location.kprcb,
@@ -669,7 +669,7 @@ impl Target {
             DiagnosticValue::Available(value) => {
                 DiagnosticValue::Available(irql_name(self.arch(), *value).to_string())
             }
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
         Ok(IrqlDetail {
             processor: location.processor,
@@ -735,9 +735,9 @@ impl Target {
                     .and_then(|dump| dump.triage_prcb_info.as_ref())
                 {
                     let unavailable_addr =
-                        |message: &str| DiagnosticValue::Unavailable(message.to_string());
+                        |message: &str| DiagnosticValue::unavailable(message.to_string());
                     let unavailable_num =
-                        |message: &str| DiagnosticValue::Unavailable(message.to_string());
+                        |message: &str| DiagnosticValue::unavailable(message.to_string());
                     return Ok(CpuInfoDetail {
                         processor: info.processor_number,
                         kprcb: unavailable_addr("KPRCB address unavailable in triage metadata"),
@@ -799,8 +799,8 @@ impl Target {
             Err(error) => {
                 let error = error.to_string();
                 (
-                    DiagnosticValue::Unavailable(error.clone()),
-                    DiagnosticValue::Unavailable(error),
+                    DiagnosticValue::unavailable(error.clone()),
+                    DiagnosticValue::unavailable(error),
                 )
             }
         };
@@ -919,16 +919,16 @@ fn unavailable_idt_entry(vector: u16, address: VirtAddr, error: String) -> IdtEn
     IdtEntryDetail {
         vector,
         address,
-        handler: DiagnosticValue::Unavailable(error.clone()),
-        symbol: DiagnosticValue::Unavailable(error.clone()),
-        selector: DiagnosticValue::Unavailable(error.clone()),
-        ist: DiagnosticValue::Unavailable(error.clone()),
-        gate_type: DiagnosticValue::Unavailable(error.clone()),
-        gate_name: DiagnosticValue::Unavailable(error.clone()),
-        dpl: DiagnosticValue::Unavailable(error.clone()),
-        present: DiagnosticValue::Unavailable(error.clone()),
-        non_nt_hook: DiagnosticValue::Unavailable(error.clone()),
-        ki_isr_thunk: DiagnosticValue::Unavailable(error),
+        handler: DiagnosticValue::unavailable(error.clone()),
+        symbol: DiagnosticValue::unavailable(error.clone()),
+        selector: DiagnosticValue::unavailable(error.clone()),
+        ist: DiagnosticValue::unavailable(error.clone()),
+        gate_type: DiagnosticValue::unavailable(error.clone()),
+        gate_name: DiagnosticValue::unavailable(error.clone()),
+        dpl: DiagnosticValue::unavailable(error.clone()),
+        present: DiagnosticValue::unavailable(error.clone()),
+        non_nt_hook: DiagnosticValue::unavailable(error.clone()),
+        ki_isr_thunk: DiagnosticValue::unavailable(error),
     }
 }
 
@@ -1023,24 +1023,24 @@ fn is_system_descriptor(raw: u64) -> bool {
 fn unavailable_gdt_entry(index: usize, error: String) -> GdtEntryDetail {
     GdtEntryDetail {
         index: index as u64,
-        raw: DiagnosticValue::Unavailable(error.clone()),
-        high_raw: DiagnosticValue::Unavailable(error.clone()),
-        base: DiagnosticValue::Unavailable(error.clone()),
-        limit: DiagnosticValue::Unavailable(error.clone()),
-        type_code: DiagnosticValue::Unavailable(error.clone()),
-        descriptor_kind: DiagnosticValue::Unavailable(error.clone()),
-        dpl: DiagnosticValue::Unavailable(error.clone()),
-        present: DiagnosticValue::Unavailable(error.clone()),
-        long_mode: DiagnosticValue::Unavailable(error.clone()),
-        default_size: DiagnosticValue::Unavailable(error.clone()),
-        granularity: DiagnosticValue::Unavailable(error),
+        raw: DiagnosticValue::unavailable(error.clone()),
+        high_raw: DiagnosticValue::unavailable(error.clone()),
+        base: DiagnosticValue::unavailable(error.clone()),
+        limit: DiagnosticValue::unavailable(error.clone()),
+        type_code: DiagnosticValue::unavailable(error.clone()),
+        descriptor_kind: DiagnosticValue::unavailable(error.clone()),
+        dpl: DiagnosticValue::unavailable(error.clone()),
+        present: DiagnosticValue::unavailable(error.clone()),
+        long_mode: DiagnosticValue::unavailable(error.clone()),
+        default_size: DiagnosticValue::unavailable(error.clone()),
+        granularity: DiagnosticValue::unavailable(error),
     }
 }
 
 fn decode_gdt_entry(index: usize, raw: u64, high_raw: Result<Option<u64>>) -> GdtEntryDetail {
     let high_value = match high_raw.as_ref() {
         Ok(value) => DiagnosticValue::Available(*value),
-        Err(error) => DiagnosticValue::Unavailable(error.to_string()),
+        Err(error) => DiagnosticValue::unavailable(error.to_string()),
     };
     let limit = (raw & 0xffff) | (((raw >> 48) & 0xf) << 16);
     let granularity = raw & (1 << 55) != 0;
@@ -1056,7 +1056,7 @@ fn decode_gdt_entry(index: usize, raw: u64, high_raw: Result<Option<u64>>) -> Gd
     }
     let base_value = if let Err(error) = &high_raw {
         if is_system_descriptor(raw) {
-            DiagnosticValue::Unavailable(error.to_string())
+            DiagnosticValue::unavailable(error.to_string())
         } else {
             DiagnosticValue::Available(VirtAddr(descriptor_base))
         }

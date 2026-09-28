@@ -536,7 +536,7 @@ mod tests {
             id: 0x1f,
             null: None,
             read: DiagnosticValue::Available(VirtAddr(0x20)),
-            failed: DiagnosticValue::Unavailable("paged out".into()),
+            failed: DiagnosticValue::unavailable("paged out"),
             work_items: 1,
         };
         let View::Shaped(shaped) = sample.into_view() else {

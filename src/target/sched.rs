@@ -640,10 +640,11 @@ fn decode_running_thread(
     if pointer.is_zero() {
         return DiagnosticValue::Available(None);
     }
-    match target.thread_info_from_ethread(pointer - ethread_tcb_offset) {
-        Ok(thread) => DiagnosticValue::Available(Some(thread)),
-        Err(error) => DiagnosticValue::unavailable(error.to_string()),
-    }
+    DiagnosticValue::from_result(
+        target
+            .thread_info_from_ethread(pointer - ethread_tcb_offset)
+            .map(Some),
+    )
 }
 
 impl Target {
@@ -659,9 +660,7 @@ impl Target {
             .unwrap_or(0);
         let mut rows = Vec::with_capacity(processors.len());
         for index in processors {
-            let kpcr = kpcr_for_processor(self, index)
-                .map(DiagnosticValue::Available)
-                .unwrap_or_else(|error| DiagnosticValue::unavailable(error.to_string()));
+            let kpcr = DiagnosticValue::from_result(kpcr_for_processor(self, index));
             let prcb_address = match kprcb_for_processor(self, index) {
                 Ok(prcb) => prcb,
                 Err(error) => {
@@ -768,12 +767,9 @@ impl Target {
                         .map(|offset| node - offset)
                         .unwrap_or(node);
                     let thread = match thread_link_offset {
-                        Some(_) => {
-                            match self.thread_info_from_ethread(kthread - ethread_tcb_offset) {
-                                Ok(thread) => DiagnosticValue::Available(thread),
-                                Err(error) => DiagnosticValue::unavailable(error.to_string()),
-                            }
-                        }
+                        Some(_) => DiagnosticValue::from_result(
+                            self.thread_info_from_ethread(kthread - ethread_tcb_offset),
+                        ),
                         None => DiagnosticValue::unavailable("_KTHREAD link field not present"),
                     };
                     entries.push(ReadyQueueEntry { kthread, thread });
@@ -1013,10 +1009,7 @@ impl Target {
             DiagnosticValue::unavailable("DueTime field not present")
         } else {
             match cursor.as_ref() {
-                Ok(cursor) => cursor
-                    .read_field::<u64>("DueTime")
-                    .map_err(|error| error.to_string())
-                    .map_or_else(DiagnosticValue::Unavailable, DiagnosticValue::Available),
+                Ok(cursor) => DiagnosticValue::from_result(cursor.read_field::<u64>("DueTime")),
                 Err(error) => DiagnosticValue::unavailable(error.to_string()),
             }
         };
@@ -1024,10 +1017,7 @@ impl Target {
             DiagnosticValue::unavailable("Period field not present")
         } else {
             match cursor.as_ref() {
-                Ok(cursor) => cursor
-                    .read_field::<u32>("Period")
-                    .map_err(|error| error.to_string())
-                    .map_or_else(DiagnosticValue::Unavailable, DiagnosticValue::Available),
+                Ok(cursor) => DiagnosticValue::from_result(cursor.read_field::<u32>("Period")),
                 Err(error) => DiagnosticValue::unavailable(error.to_string()),
             }
         };
@@ -1035,11 +1025,11 @@ impl Target {
             DiagnosticValue::unavailable("Dpc field not present")
         } else {
             match cursor.as_ref() {
-                Ok(cursor) => cursor
-                    .read_field::<VirtAddr>("Dpc")
-                    .map(|address| (!address.is_zero()).then_some(address))
-                    .map_err(|error| error.to_string())
-                    .map_or_else(DiagnosticValue::Unavailable, DiagnosticValue::Available),
+                Ok(cursor) => DiagnosticValue::from_result(
+                    cursor
+                        .read_field::<VirtAddr>("Dpc")
+                        .map(|address| (!address.is_zero()).then_some(address)),
+                ),
                 Err(error) => DiagnosticValue::unavailable(error.to_string()),
             }
         };

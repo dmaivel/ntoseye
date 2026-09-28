@@ -15,6 +15,8 @@ use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::StackFrame;
 
+use super::diagnostics::{diagnostic_addr, diagnostic_cell};
+
 repl_command! {
     cmd_running;
     names: ["!running", "running"],
@@ -94,20 +96,6 @@ repl_command! {
     summary: "Group threads by identical call stacks, showing each distinct stack once.",
     details: "WinDbg's !uniqstack groups the user-mode stacks of the current process's threads; this one groups the threads the kernel schedules, by their stacks as !stacks 2 walks them (up to 64 frames: the kernel frames, then the user-mode frames below a system call): the threads of the .process selection, or of every process when none is selected (the default in a kernel session), * for every thread, or one process by PID, EPROCESS address, or name. Threads whose frames have the same instruction pointers (and the same truncation) share a group. Each distinct stack is shown once, from its first thread, with the number of threads sharing it and their thread IDs by process; totals follow. -n numbers the frames; -v shows how each frame was recovered (current, seed, unwind, or scan), as kv does, in place of WinDbg's x86 FPO data. WinDbg's -b and -p are refused: x64 passes the first arguments in registers, which a saved stack does not keep, and -p needs private-symbol parameters per frame (use .thread and kp on one thread). A thread whose stack does not walk (one running on a processor while the target runs) is listed apart.",
     completion: Process,
-}
-
-fn diagnostic_cell<T: std::fmt::Display>(value: &DiagnosticValue<T>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => value.to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-fn diagnostic_address_cell(value: &DiagnosticValue<VirtAddr>) -> String {
-    match value {
-        DiagnosticValue::Available(address) => ui::addr(address.0).to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
 }
 
 fn diagnostic_option_cell<T>(
@@ -241,8 +229,8 @@ impl ReplState<'_> {
                 _ => {
                     builder.push_record([
                         processor.index.to_string(),
-                        diagnostic_address_cell(&processor.kpcr),
-                        diagnostic_address_cell(&processor.prcb),
+                        diagnostic_addr(&processor.kpcr),
+                        diagnostic_addr(&processor.prcb),
                         running_thread_kthread(&processor.current_thread),
                         "-".to_string(),
                         "<unavailable>".to_string(),
@@ -256,8 +244,8 @@ impl ReplState<'_> {
             };
             builder.push_record([
                 processor.index.to_string(),
-                diagnostic_address_cell(&processor.kpcr),
-                diagnostic_address_cell(&processor.prcb),
+                diagnostic_addr(&processor.kpcr),
+                diagnostic_addr(&processor.prcb),
                 ui::addr(current.kthread.0).to_string(),
                 thread_tid(current),
                 thread_process(current),

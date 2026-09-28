@@ -402,7 +402,7 @@ impl Target {
             kprcbs.insert(index, kprcb);
             let pending = match &mailboxes {
                 Ok(layout) => self.pending_ipi_requests(layout, kprcb, all.len()),
-                Err(error) => (DiagnosticValue::Unavailable(error.clone()), false),
+                Err(error) => (DiagnosticValue::unavailable(error.clone()), false),
             };
             pending_by_receiver.insert(index, pending);
         }
@@ -431,7 +431,7 @@ impl Target {
                 .collect();
             awaiting.sort_unstable();
             let (pending, pending_truncated) = pending_by_receiver.remove(&index).unwrap_or((
-                DiagnosticValue::Unavailable("processor block unreadable".into()),
+                DiagnosticValue::unavailable("processor block unreadable"),
                 false,
             ));
             detail.processors.push(IpiProcessor {
@@ -471,12 +471,12 @@ impl Target {
     ) -> (DiagnosticValue<Vec<IpiRequest>>, bool) {
         let guest = match self.guest() {
             Ok(guest) => guest,
-            Err(error) => return (DiagnosticValue::Unavailable(error.to_string()), false),
+            Err(error) => return (DiagnosticValue::unavailable(error.to_string()), false),
         };
         let types = guest.ntoskrnl.types();
         let mut next: VirtAddr = match guest.ntoskrnl.memory().read(kprcb + layout.mailbox) {
             Ok(head) => head,
-            Err(error) => return (DiagnosticValue::Unavailable(error.to_string()), false),
+            Err(error) => return (DiagnosticValue::unavailable(error.to_string()), false),
         };
         let array = kprcb.0 + layout.array;
         let mut requests: Vec<IpiRequest> = Vec::new();
@@ -514,8 +514,8 @@ impl Target {
                     DiagnosticValue::from_result(parameters),
                 ),
                 Err(error) => (
-                    DiagnosticValue::Unavailable(error.to_string()),
-                    DiagnosticValue::Unavailable(error.to_string()),
+                    DiagnosticValue::unavailable(error.to_string()),
+                    DiagnosticValue::unavailable(error.to_string()),
                 ),
             };
             let worker_symbol = match &worker_routine {

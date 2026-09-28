@@ -18,6 +18,8 @@ use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, VirtAddr};
 use crate::ui;
 
+use super::diagnostics::{diagnostic_addr, diagnostic_cell, diagnostic_hex};
+
 const IDT_VECTOR_COUNT: u16 = 256;
 const MSR_SWITCH: &str = "/p";
 const MAX_PROCESSOR_SELECTION: usize = 256;
@@ -191,10 +193,6 @@ fn render_diagnostic<T>(value: &DiagnosticValue<T>, render: impl FnOnce(&T) -> S
     }
 }
 
-fn render_address(value: &DiagnosticValue<VirtAddr>) -> String {
-    render_diagnostic(value, |value| ui::addr(value.0).to_string())
-}
-
 fn render_decimal(value: &DiagnosticValue<u64>) -> String {
     render_diagnostic(value, |value| format!("{value} ({value:#x})"))
 }
@@ -209,40 +207,40 @@ fn print_pcr(detail: &PcrDetail) {
     outln!(
         "KPCR for processor {} at {} (KPRCB {})",
         detail.processor,
-        render_address(&detail.kpcr),
+        diagnostic_addr(&detail.kpcr),
         ui::addr(detail.kprcb.0)
     );
     outln!(
         "  {:<20}: {}",
         "KdVersionBlock",
-        render_address(&detail.kd_version_block)
+        diagnostic_addr(&detail.kd_version_block)
     );
     outln!(
         "  {:<20}: {}",
         "CurrentPrcb",
-        render_address(&detail.current_prcb)
+        diagnostic_addr(&detail.current_prcb)
     );
     outln!("  {:<20}: {}", "Irql", render_decimal(&detail.irql));
-    outln!("  {:<20}: {}", "Self", render_address(&detail.self_pcr));
+    outln!("  {:<20}: {}", "Self", diagnostic_addr(&detail.self_pcr));
     outln!("  KPRCB fields:");
     outln!(
         "  {:<20}: {}",
         "CurrentThread",
-        render_address(&detail.current_thread)
+        diagnostic_addr(&detail.current_thread)
     );
     outln!(
         "  {:<20}: {}",
         "NextThread",
-        render_address(&detail.next_thread)
+        diagnostic_addr(&detail.next_thread)
     );
     outln!(
         "  {:<20}: {}",
         "IdleThread",
-        render_address(&detail.idle_thread)
+        diagnostic_addr(&detail.idle_thread)
     );
     outln!("  {:<20}: {}", "IDTR", render_descriptor(&detail.idtr));
     outln!("  {:<20}: {}", "GDTR", render_descriptor(&detail.gdtr));
-    outln!("  {:<20}: {}", "TssBase", render_address(&detail.tss_base));
+    outln!("  {:<20}: {}", "TssBase", diagnostic_addr(&detail.tss_base));
 }
 
 fn print_special_registers(value: &SpecialRegistersDetail) {
@@ -264,7 +262,7 @@ fn print_processor_state(value: &ProcessorStateDetail) {
     outln!(
         "  {:<20}: {}",
         "ContextFrame",
-        render_address(&value.context_frame)
+        diagnostic_addr(&value.context_frame)
     );
     match &value.special_registers {
         DiagnosticValue::Available(value) => print_special_registers(value),
@@ -284,17 +282,17 @@ fn print_prcb(detail: &PrcbDetail) {
     outln!(
         "  {:<20}: {}",
         "CurrentThread",
-        render_address(&detail.current_thread)
+        diagnostic_addr(&detail.current_thread)
     );
     outln!(
         "  {:<20}: {}",
         "NextThread",
-        render_address(&detail.next_thread)
+        diagnostic_addr(&detail.next_thread)
     );
     outln!(
         "  {:<20}: {}",
         "IdleThread",
-        render_address(&detail.idle_thread)
+        diagnostic_addr(&detail.idle_thread)
     );
     outln!(
         "  {:<20}: {}",
@@ -342,9 +340,9 @@ fn print_idt_entry(detail: &IdtEntryDetail) {
         DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
     };
     let selector = render_diagnostic(&detail.selector, |selector| format!("{selector:#06x}"));
-    let ist = render_diagnostic(&detail.ist, |ist| ist.to_string());
-    let gate_name = render_diagnostic(&detail.gate_name, |name| name.clone());
-    let dpl = render_diagnostic(&detail.dpl, |dpl| dpl.to_string());
+    let ist = diagnostic_cell(&detail.ist);
+    let gate_name = diagnostic_cell(&detail.gate_name);
+    let dpl = diagnostic_cell(&detail.dpl);
     let present = render_diagnostic(&detail.present, |present| {
         if *present {
             "present".to_string()
@@ -389,11 +387,11 @@ fn print_gdt_entry(detail: &GdtEntryDetail) {
             return;
         }
     };
-    let base = render_diagnostic(&detail.base, |base| ui::addr(base.0).to_string());
-    let limit = render_diagnostic(&detail.limit, |limit| format!("{limit:#x}"));
-    let type_code = render_diagnostic(&detail.type_code, |type_code| format!("{type_code:#x}"));
-    let kind = render_diagnostic(&detail.descriptor_kind, |kind| kind.clone());
-    let dpl = render_diagnostic(&detail.dpl, |dpl| dpl.to_string());
+    let base = diagnostic_addr(&detail.base);
+    let limit = diagnostic_hex(&detail.limit);
+    let type_code = diagnostic_hex(&detail.type_code);
+    let kind = diagnostic_cell(&detail.descriptor_kind);
+    let dpl = diagnostic_cell(&detail.dpl);
     let present = render_diagnostic(&detail.present, |present| {
         if *present {
             "present".to_string()
@@ -541,7 +539,7 @@ fn print_cpuinfo(detail: &CpuInfoDetail) {
         outln!("  processor number    : {}", detail.processor);
         outln!(
             "  vendor              : {}",
-            render_diagnostic(&detail.vendor, |value| value.clone())
+            diagnostic_cell(&detail.vendor)
         );
         outln!("  family              : {}", render_decimal(&detail.family));
         outln!("  model/stepping      : <unavailable>");
@@ -552,11 +550,11 @@ fn print_cpuinfo(detail: &CpuInfoDetail) {
     outln!(
         "CPU information for processor {} (KPRCB {})",
         detail.processor,
-        render_address(&detail.kprcb)
+        diagnostic_addr(&detail.kprcb)
     );
     outln!(
         "  vendor              : {}",
-        render_diagnostic(&detail.vendor, |value| value.clone())
+        diagnostic_cell(&detail.vendor)
     );
     outln!(
         "  vendor id           : {}",

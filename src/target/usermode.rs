@@ -389,14 +389,11 @@ fn decode_process_parameters(
 }
 
 fn read_loader_list_head(ldr: &StructRef<'_>, field: &str) -> DiagnosticValue<LoaderListHead> {
-    match ldr.embedded(field) {
-        Ok(head) => DiagnosticValue::Available(LoaderListHead {
-            address: head.addr(),
-            flink: DiagnosticValue::from_result(head.read_pointer("Flink")),
-            blink: DiagnosticValue::from_result(head.read_pointer("Blink")),
-        }),
-        Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-    }
+    DiagnosticValue::from_result(ldr.embedded(field).map(|head| LoaderListHead {
+        address: head.addr(),
+        flink: DiagnosticValue::from_result(head.read_pointer("Flink")),
+        blink: DiagnosticValue::from_result(head.read_pointer("Blink")),
+    }))
 }
 
 fn read_loader_list_heads(ldr: &StructRef<'_>) -> LoaderListHeads {
@@ -405,10 +402,6 @@ fn read_loader_list_heads(ldr: &StructRef<'_>) -> LoaderListHeads {
         in_memory_order: read_loader_list_head(ldr, "InMemoryOrderModuleList"),
         in_initialization_order: read_loader_list_head(ldr, "InInitializationOrderModuleList"),
     }
-}
-
-fn unavailable_loader_lists(error: impl ToString) -> DiagnosticValue<LoaderListHeads> {
-    DiagnosticValue::Unavailable(error.to_string())
 }
 
 fn loader_module_detail(module: ModuleInfo) -> LoaderModuleDetail {
@@ -482,32 +475,29 @@ impl Target {
             DiagnosticValue::from_result(peb_ref.read_pointer("ProcessParameters"));
         let process_parameters_detail = match &process_parameters {
             DiagnosticValue::Available(address) if !address.is_zero() => {
-                match types.struct_at("_RTL_USER_PROCESS_PARAMETERS", *address) {
-                    Ok(record) => {
-                        let record = record.prefetch();
-                        let environment_size = record.read_field::<u64>("EnvironmentSize");
-                        DiagnosticValue::Available(decode_process_parameters(
-                            &record,
-                            environment_size,
-                        ))
-                    }
-                    Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-                }
+                DiagnosticValue::from_result(
+                    types
+                        .struct_at("_RTL_USER_PROCESS_PARAMETERS", *address)
+                        .map(|record| {
+                            let record = record.prefetch();
+                            let environment_size = record.read_field::<u64>("EnvironmentSize");
+                            decode_process_parameters(&record, environment_size)
+                        }),
+                )
             }
-            DiagnosticValue::Available(_) => {
-                DiagnosticValue::Unavailable("pointer is null".to_string())
-            }
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Available(_) => DiagnosticValue::unavailable("pointer is null"),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
         let loader_lists = match &ldr {
             DiagnosticValue::Available(address) if !address.is_zero() => {
-                match types.struct_at("_PEB_LDR_DATA", *address) {
-                    Ok(ldr_ref) => DiagnosticValue::Available(read_loader_list_heads(&ldr_ref)),
-                    Err(error) => unavailable_loader_lists(error),
-                }
+                DiagnosticValue::from_result(
+                    types
+                        .struct_at("_PEB_LDR_DATA", *address)
+                        .map(|ldr_ref| read_loader_list_heads(&ldr_ref)),
+                )
             }
-            DiagnosticValue::Available(_) => DiagnosticValue::Unavailable("pointer is null".into()),
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Available(_) => DiagnosticValue::unavailable("pointer is null"),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
 
         let peb32 = if address.is_none() {
@@ -589,30 +579,26 @@ impl Target {
         );
         let process_parameters_detail = match &process_parameters {
             DiagnosticValue::Available(address) if !address.is_zero() => {
-                match types.struct_at("ntdll32!_RTL_USER_PROCESS_PARAMETERS", *address) {
-                    Ok(record) => {
-                        let record = record.prefetch();
-                        let environment_size =
-                            record.read_field::<u32>("EnvironmentSize").map(u64::from);
-                        DiagnosticValue::Available(decode_process_parameters(
-                            &record,
-                            environment_size,
-                        ))
-                    }
-                    Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-                }
+                DiagnosticValue::from_result(
+                    types
+                        .struct_at("ntdll32!_RTL_USER_PROCESS_PARAMETERS", *address)
+                        .map(|record| {
+                            let record = record.prefetch();
+                            let environment_size =
+                                record.read_field::<u32>("EnvironmentSize").map(u64::from);
+                            decode_process_parameters(&record, environment_size)
+                        }),
+                )
             }
-            DiagnosticValue::Available(_) => {
-                DiagnosticValue::Unavailable("pointer is null".to_string())
-            }
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Available(_) => DiagnosticValue::unavailable("pointer is null"),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
         let loader_lists = match &ldr {
             DiagnosticValue::Available(address) if !address.is_zero() => {
                 self.decode_loader_heads32(*address)
             }
-            DiagnosticValue::Available(_) => DiagnosticValue::Unavailable("pointer is null".into()),
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Available(_) => DiagnosticValue::unavailable("pointer is null"),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
         Peb32Detail {
             address,
@@ -1225,7 +1211,7 @@ fn error_name(
         DiagnosticValue::Available(value) => {
             DiagnosticValue::Available(lookup(*value).map(str::to_string))
         }
-        DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+        DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
     }
 }
 

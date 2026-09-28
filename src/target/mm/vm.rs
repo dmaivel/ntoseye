@@ -31,7 +31,7 @@ fn available_metric(value: u64) -> DiagnosticMetric<u64> {
 
 fn unavailable_metric(error: impl std::fmt::Display) -> DiagnosticMetric<u64> {
     DiagnosticMetric {
-        value: DiagnosticValue::Unavailable(error.to_string()),
+        value: DiagnosticValue::unavailable(error.to_string()),
         source: None,
     }
 }

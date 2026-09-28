@@ -126,7 +126,7 @@ pub fn print_memory_use_summary(summary: &SystemMemorySummary, include_process_s
     }
 }
 
-fn diagnostic_hex<T>(value: &DiagnosticValue<T>) -> String
+pub fn diagnostic_hex<T>(value: &DiagnosticValue<T>) -> String
 where
     T: Copy + Into<u64>,
 {
@@ -143,7 +143,7 @@ fn diagnostic_status(value: &DiagnosticValue<i32>) -> String {
     }
 }
 
-fn diagnostic_addr(value: &DiagnosticValue<VirtAddr>) -> String {
+pub fn diagnostic_addr(value: &DiagnosticValue<VirtAddr>) -> String {
     match value {
         DiagnosticValue::Available(value) => ui::addr(value.0).to_string(),
         DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),

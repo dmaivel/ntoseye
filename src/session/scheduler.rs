@@ -50,10 +50,9 @@ impl Session {
             .collect();
         let mut stacks = Vec::with_capacity(threads.len());
         self.walk_thread_stacks(threads, &active, MAX_STACK_FRAMES_LEVEL_1, |_, stack| {
-            stacks.push(match stack {
-                Ok(trace) => DiagnosticValue::Available(trace.stacktrace.frames),
-                Err(error) => DiagnosticValue::unavailable(error.to_string()),
-            });
+            stacks.push(DiagnosticValue::from_result(
+                stack.map(|trace| trace.stacktrace.frames),
+            ));
         });
         let mut stacks = stacks.into_iter();
         for worker in detail
@@ -88,19 +87,14 @@ impl Session {
             for processor in &mut detail.processors {
                 let vcpu = vcpus.get(&processor.index).map(String::as_str);
                 let stack = match &processor.current_thread {
-                    DiagnosticValue::Available(Some(thread)) => {
-                        match self.target.thread_info_from_ethread(thread.ethread) {
-                            Ok(thread_info) => match self.backtrace_thread(
-                                &thread_info,
-                                vcpu,
-                                MAX_RUNNING_STACK_FRAMES,
-                            ) {
-                                Ok(trace) => DiagnosticValue::Available(trace.stacktrace.frames),
-                                Err(error) => DiagnosticValue::unavailable(error.to_string()),
-                            },
-                            Err(error) => DiagnosticValue::unavailable(error.to_string()),
-                        }
-                    }
+                    DiagnosticValue::Available(Some(thread)) => DiagnosticValue::from_result(
+                        self.target
+                            .thread_info_from_ethread(thread.ethread)
+                            .and_then(|thread_info| {
+                                self.backtrace_thread(&thread_info, vcpu, MAX_RUNNING_STACK_FRAMES)
+                            })
+                            .map(|trace| trace.stacktrace.frames),
+                    ),
                     DiagnosticValue::Available(None) => {
                         DiagnosticValue::unavailable("current thread is null")
                     }

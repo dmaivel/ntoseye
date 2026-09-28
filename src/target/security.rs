@@ -131,13 +131,6 @@ pub struct SessionProcessesDetail {
     pub truncated: bool,
 }
 
-fn diagnostic<T>(result: Result<T>) -> DiagnosticValue<T> {
-    match result {
-        Ok(value) => DiagnosticValue::Available(value),
-        Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-    }
-}
-
 fn sid_name(text: &str) -> Option<&'static str> {
     const NAMES: &[(&str, &str)] = &[
         ("S-1-0-0", "SECURITY_NULL_SID"),
@@ -341,8 +334,8 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
                 type_name: ace_type_name(0xff).to_string(),
                 flags: 0,
                 flag_names: ace_flags(0),
-                access_mask: DiagnosticValue::Unavailable(error.clone()),
-                sid: DiagnosticValue::Unavailable(error),
+                access_mask: DiagnosticValue::unavailable(error.clone()),
+                sid: DiagnosticValue::unavailable(error),
             });
             break;
         }
@@ -359,7 +352,7 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
                 "invalid ACE size {ace_size:#x} at ACL offset {offset:#x} (minimum {minimum_size:#x})"
             )));
         }
-        let access_mask = diagnostic(memory.read::<u32>(ace_address + 4u64));
+        let access_mask = DiagnosticValue::from_result(memory.read::<u32>(ace_address + 4u64));
         let sid_offset = if kind == 4 {
             12usize
         } else if object_ace(kind) {
@@ -373,7 +366,7 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
                         flags,
                         flag_names: ace_flags(flags),
                         access_mask,
-                        sid: DiagnosticValue::Unavailable(error.to_string()),
+                        sid: DiagnosticValue::unavailable(error.to_string()),
                     });
                     offset += ace_size;
                     continue;
@@ -386,14 +379,14 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
             8usize
         };
         let sid = if sid_offset <= ace_size {
-            diagnostic(read_sid_bounded(
+            DiagnosticValue::from_result(read_sid_bounded(
                 memory,
                 ace_address + sid_offset as u64,
                 ace_size - sid_offset,
                 annotate_well_known,
             ))
         } else {
-            DiagnosticValue::Unavailable(format!(
+            DiagnosticValue::unavailable(format!(
                 "ACE SID offset {sid_offset:#x} exceeds ACE size {ace_size:#x}"
             ))
         };
@@ -487,14 +480,14 @@ fn sid_component<M: MemoryOps<VirtAddr>>(
     annotate_well_known: bool,
 ) -> DiagnosticValue<Option<SidDetail>> {
     match raw {
-        Err(error) => DiagnosticValue::Unavailable(error.to_string()),
+        Err(error) => DiagnosticValue::unavailable(error.to_string()),
         Ok(raw) => match descriptor_component(raw, base, self_relative) {
             None => DiagnosticValue::Available(None),
             Some(address) => {
                 match read_sid_bounded(memory, address, usize::MAX, annotate_well_known) {
                     Ok(sid) => DiagnosticValue::Available(Some(sid)),
                     Err(error) => {
-                        DiagnosticValue::Unavailable(format!("{:#x}: {error}", address.0))
+                        DiagnosticValue::unavailable(format!("{:#x}: {error}", address.0))
                     }
                 }
             }
@@ -510,12 +503,12 @@ fn acl_component<M: MemoryOps<VirtAddr>>(
     annotate_well_known: bool,
 ) -> DiagnosticValue<Option<AclDetail>> {
     match raw {
-        Err(error) => DiagnosticValue::Unavailable(error.to_string()),
+        Err(error) => DiagnosticValue::unavailable(error.to_string()),
         Ok(raw) => match descriptor_component(raw, base, self_relative) {
             None => DiagnosticValue::Available(None),
             Some(address) => match decode_acl(memory, address, annotate_well_known) {
                 Ok(acl) => DiagnosticValue::Available(Some(acl)),
-                Err(error) => DiagnosticValue::Unavailable(format!("{:#x}: {error}", address.0)),
+                Err(error) => DiagnosticValue::unavailable(format!("{:#x}: {error}", address.0)),
             },
         },
     }
@@ -530,17 +523,17 @@ impl Target {
     ) -> Result<SecurityDescriptorDetail> {
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let descriptor = types.struct_at("_SECURITY_DESCRIPTOR", address)?;
-        let revision = diagnostic(descriptor.read_field::<u8>("Revision"));
-        let control = diagnostic(descriptor.read_field::<u16>("Control"));
+        let revision = DiagnosticValue::from_result(descriptor.read_field::<u8>("Revision"));
+        let control = DiagnosticValue::from_result(descriptor.read_field::<u16>("Control"));
         let control_names = match &control {
             DiagnosticValue::Available(value) => DiagnosticValue::Available(control_flags(*value)),
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
         let self_relative = match &control {
             DiagnosticValue::Available(value) => {
                 DiagnosticValue::Available(*value & SE_SELF_RELATIVE != 0)
             }
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
         let (relative, relative_error) = match &self_relative {
             DiagnosticValue::Available(true) => {
@@ -593,7 +586,7 @@ impl Target {
                 annotate_well_known,
             ),
             DiagnosticValue::Unavailable(error) => {
-                DiagnosticValue::Unavailable(format!("Control could not be read: {error}"))
+                DiagnosticValue::unavailable(format!("Control could not be read: {error}"))
             }
         };
         let sacl = match &control {
@@ -613,7 +606,7 @@ impl Target {
                 annotate_well_known,
             ),
             DiagnosticValue::Unavailable(error) => {
-                DiagnosticValue::Unavailable(format!("Control could not be read: {error}"))
+                DiagnosticValue::unavailable(format!("Control could not be read: {error}"))
             }
         };
         let unsupported_revision =
@@ -1072,8 +1065,8 @@ impl Target {
                 DiagnosticValue::Available(items.into_iter().skip(1).collect()),
             ),
             Err(error) => (
-                DiagnosticValue::Unavailable(error.to_string()),
-                DiagnosticValue::Unavailable(error.to_string()),
+                DiagnosticValue::unavailable(error.to_string()),
+                DiagnosticValue::unavailable(error.to_string()),
             ),
         };
 

@@ -7,13 +7,13 @@ use crate::error::Result;
 use crate::expr::Expr;
 use crate::memory::{DTB_IDENTITY, PAGE_SIZE};
 use crate::repl::*;
+use crate::target::DiagnosticValue;
 use crate::target::mm::{
     LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolBlockDetail,
     PoolFindDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail, PteLevel,
     PtovDetail, SystemPtesDetail, VmDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::tag_string;
-use crate::target::{DiagnosticMetric, DiagnosticValue};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -343,27 +343,23 @@ fn print_system_ptes(detail: &SystemPtesDetail) {
     outln!();
 }
 
-fn metric_cell(metric: &DiagnosticMetric<u64>) -> String {
-    diagnostic_metric_cell(metric)
-}
-
 fn print_vm(detail: &VmDetail) {
     print_memory_use_summary(&detail.system, detail.include_processes);
     outln!("pool counters:");
     outln!(
         "  {:<24}: {} bytes",
         "nonpaged pool bytes",
-        metric_cell(&detail.pool.nonpaged_pool_bytes)
+        diagnostic_metric_cell(&detail.pool.nonpaged_pool_bytes)
     );
     outln!(
         "  {:<24}: {} bytes",
         "nonpaged pool maximum",
-        metric_cell(&detail.pool.nonpaged_pool_maximum)
+        diagnostic_metric_cell(&detail.pool.nonpaged_pool_maximum)
     );
     outln!(
         "  {:<24}: {} pages",
         "paged pool pages",
-        metric_cell(&detail.pool.paged_pool_pages)
+        diagnostic_metric_cell(&detail.pool.paged_pool_pages)
     );
     if detail.pool.fields.is_empty() {
         outln!("  MiState pool fields   : <unavailable>");
@@ -373,7 +369,7 @@ fn print_vm(detail: &VmDetail) {
             outln!(
                 "    {:<32}: {} {}",
                 field.name,
-                metric_cell(&field.value),
+                diagnostic_metric_cell(&field.value),
                 field.unit
             );
         }
@@ -389,7 +385,11 @@ fn print_vm(detail: &VmDetail) {
         outln!("  counters               : <unavailable>");
     } else {
         for counter in &detail.pte.counters {
-            outln!("  {:<24}: {}", counter.name, metric_cell(&counter.value));
+            outln!(
+                "  {:<24}: {}",
+                counter.name,
+                diagnostic_metric_cell(&counter.value)
+            );
         }
     }
 
@@ -406,7 +406,7 @@ fn print_vm(detail: &VmDetail) {
             outln!(
                 "  {:<24}: {}{}",
                 counter.name,
-                metric_cell(&counter.value),
+                diagnostic_metric_cell(&counter.value),
                 if counter.unit.is_empty() {
                     "".to_string()
                 } else {

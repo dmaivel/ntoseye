@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use tabled::builder::Builder;
 
 use crate::error::Result;
@@ -11,6 +9,8 @@ use crate::target::security::{
 };
 use crate::types::VirtAddr;
 use crate::ui;
+
+use super::diagnostics::{diagnostic_cell, diagnostic_hex};
 
 const MAX_SESSION_DISPLAY: usize = 64;
 
@@ -64,23 +64,6 @@ repl_command! {
     summary: "List processes in a session.",
     details: "The session is signed decimal: -1 and -2 select the current session, and -4 all sessions. Without a session, the attached process's session is selected when known. Flags default to 0 (brief); any non-zero value selects detailed output. The optional image argument is a case-insensitive glob.",
     completion: [Expression, Expression, None],
-}
-
-fn diagnostic_cell<T: Display>(value: &DiagnosticValue<T>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => value.to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-fn diagnostic_hex<T>(value: &DiagnosticValue<T>) -> String
-where
-    T: Copy + Into<u64>,
-{
-    match value {
-        DiagnosticValue::Available(value) => format!("{:#x}", (*value).into()),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
 }
 
 fn sid_text(sid: &SidDetail, annotate_well_known: bool) -> String {

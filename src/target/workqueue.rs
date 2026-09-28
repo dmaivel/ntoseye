@@ -332,10 +332,9 @@ impl Target {
                             let kthread = link - queue_link;
                             WorkerThread {
                                 kthread,
-                                thread: match self.thread_info_from_ethread(kthread - tcb) {
-                                    Ok(info) => DiagnosticValue::Available(info),
-                                    Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-                                },
+                                thread: DiagnosticValue::from_result(
+                                    self.thread_info_from_ethread(kthread - tcb),
+                                ),
                                 stack: None,
                             }
                         })

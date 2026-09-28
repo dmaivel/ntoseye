@@ -1412,40 +1412,37 @@ fn heap_summary_stats(
     heap: &ProcessHeap,
 ) -> DiagnosticValue<HeapSummaryStats> {
     if let Some(error) = heap.classification_error.as_ref() {
-        return DiagnosticValue::Unavailable(error.clone());
+        return DiagnosticValue::unavailable(error.clone());
     }
     match heap.kind {
-        HeapKind::Nt => match reader.nt_heap(heap.address) {
-            Ok(nt) => {
-                let reserved: u64 = nt
-                    .segments
-                    .iter()
-                    .map(|segment| u64::from(segment.pages) * PAGE)
-                    .sum();
-                let uncommitted: u64 = nt
-                    .segments
-                    .iter()
-                    .map(|segment| u64::from(segment.uncommitted_pages) * PAGE)
-                    .sum();
-                DiagnosticValue::Available(HeapSummaryStats {
-                    flags: nt.flags,
-                    reserved,
-                    committed: reserved.saturating_sub(uncommitted),
-                    free: nt.total_free_units.saturating_mul(16),
-                    segments: nt.segments.len() as u64,
-                    virtual_blocks: nt.virtual_blocks.len() as u64,
-                    front_end: nt.front_end,
-                    front_end_type: nt.front_end_type,
-                    vs_subsegments: 0,
-                    lfh_subsegments: 0,
-                    page_allocations: 0,
-                    large_allocations: 0,
-                })
+        HeapKind::Nt => DiagnosticValue::from_result(reader.nt_heap(heap.address).map(|nt| {
+            let reserved: u64 = nt
+                .segments
+                .iter()
+                .map(|segment| u64::from(segment.pages) * PAGE)
+                .sum();
+            let uncommitted: u64 = nt
+                .segments
+                .iter()
+                .map(|segment| u64::from(segment.uncommitted_pages) * PAGE)
+                .sum();
+            HeapSummaryStats {
+                flags: nt.flags,
+                reserved,
+                committed: reserved.saturating_sub(uncommitted),
+                free: nt.total_free_units.saturating_mul(16),
+                segments: nt.segments.len() as u64,
+                virtual_blocks: nt.virtual_blocks.len() as u64,
+                front_end: nt.front_end,
+                front_end_type: nt.front_end_type,
+                vs_subsegments: 0,
+                lfh_subsegments: 0,
+                page_allocations: 0,
+                large_allocations: 0,
             }
-            Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-        },
-        HeapKind::Segment => match reader.segment_heap(heap.address) {
-            Ok(segment) => {
+        })),
+        HeapKind::Segment => {
+            DiagnosticValue::from_result(reader.segment_heap(heap.address).map(|segment| {
                 let count = |kind: RangeKind| {
                     segment
                         .contexts
@@ -1455,7 +1452,7 @@ fn heap_summary_stats(
                         .filter(|range| range.kind == kind)
                         .count() as u64
                 };
-                DiagnosticValue::Available(HeapSummaryStats {
+                HeapSummaryStats {
                     flags: segment.global_flags,
                     reserved: segment.reserved_pages.saturating_mul(PAGE),
                     committed: segment.committed_pages.saturating_mul(PAGE),
@@ -1472,11 +1469,10 @@ fn heap_summary_stats(
                     lfh_subsegments: count(RangeKind::Lfh),
                     page_allocations: count(RangeKind::Direct),
                     large_allocations: segment.large_allocations.len() as u64,
-                })
-            }
-            Err(error) => DiagnosticValue::Unavailable(error.to_string()),
-        },
-        HeapKind::Unknown(signature) => DiagnosticValue::Unavailable(format!(
+                }
+            }))
+        }
+        HeapKind::Unknown(signature) => DiagnosticValue::unavailable(format!(
             "heap carries neither heap signature (found {signature:#x})"
         )),
     }

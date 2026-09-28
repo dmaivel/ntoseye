@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use crate::error::Result;
 use crate::repl::*;
 use crate::target::usermode::{
@@ -12,6 +10,8 @@ use crate::target::{DiagnosticValue, ListTermination};
 use crate::types::VirtAddr;
 use crate::ui;
 use tabled::builder::Builder;
+
+use super::diagnostics::{diagnostic_addr, diagnostic_cell};
 
 repl_command! {
     cmd_peb;
@@ -57,68 +57,46 @@ repl_command! {
     completion: [None, None, None, Symbol],
 }
 
-fn display_diagnostic<T: Display>(value: &DiagnosticValue<T>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => value.to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-fn display_pointer(value: &DiagnosticValue<VirtAddr>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => ui::addr(value.0),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-fn display_u8(value: &DiagnosticValue<u8>) -> String {
-    display_diagnostic(value)
-}
-
-fn display_parameter_string(value: &DiagnosticValue<String>) -> String {
-    display_diagnostic(value)
-}
-
 fn print_process_parameters(parameters: &ProcessParametersDetail) {
     outln!(
         "    CommandLine       : {}",
-        display_parameter_string(&parameters.command_line)
+        diagnostic_cell(&parameters.command_line)
     );
     outln!(
         "    ImagePathName     : {}",
-        display_parameter_string(&parameters.image_path_name)
+        diagnostic_cell(&parameters.image_path_name)
     );
     outln!(
         "    CurrentDirectory  : {}",
-        display_parameter_string(&parameters.current_directory)
+        diagnostic_cell(&parameters.current_directory)
     );
     outln!(
         "    DllPath           : {}",
-        display_parameter_string(&parameters.dll_path)
+        diagnostic_cell(&parameters.dll_path)
     );
     outln!(
         "    WindowTitle       : {}",
-        display_parameter_string(&parameters.window_title)
+        diagnostic_cell(&parameters.window_title)
     );
     outln!(
         "    Environment       : {}",
-        display_pointer(&parameters.environment)
+        diagnostic_addr(&parameters.environment)
     );
     outln!(
         "    EnvironmentSize   : {}",
-        display_diagnostic(&parameters.environment_size)
+        diagnostic_cell(&parameters.environment_size)
     );
     outln!(
         "    DesktopInfo       : {}",
-        display_parameter_string(&parameters.desktop_info)
+        diagnostic_cell(&parameters.desktop_info)
     );
     outln!(
         "    ShellInfo         : {}",
-        display_parameter_string(&parameters.shell_info)
+        diagnostic_cell(&parameters.shell_info)
     );
     outln!(
         "    RuntimeData       : {}",
-        display_parameter_string(&parameters.runtime_data)
+        diagnostic_cell(&parameters.runtime_data)
     );
 }
 
@@ -150,8 +128,8 @@ fn print_loader_list_head(label: &str, value: &DiagnosticValue<LoaderListHead>) 
         DiagnosticValue::Available(head) => outln!(
             "  {label:22}: {} (Flink {}, Blink {})",
             ui::addr(head.address.0),
-            display_pointer(&head.flink),
-            display_pointer(&head.blink)
+            diagnostic_addr(&head.flink),
+            diagnostic_addr(&head.blink)
         ),
         DiagnosticValue::Unavailable(error) => {
             outln!("  {label:22}: <unavailable: {error}>");
@@ -179,28 +157,28 @@ fn print_peb32(detail: &Peb32Detail) {
     outln!("PEB32 {}", ui::addr(detail.address.0));
     outln!(
         "  ImageBaseAddress : {}",
-        display_pointer(&detail.image_base_address)
+        diagnostic_addr(&detail.image_base_address)
     );
-    outln!("  Ldr              : {}", display_pointer(&detail.ldr));
+    outln!("  Ldr              : {}", diagnostic_addr(&detail.ldr));
     outln!(
         "  ProcessParameters : {}",
-        display_pointer(&detail.process_parameters)
+        diagnostic_addr(&detail.process_parameters)
     );
     outln!(
         "  ProcessHeap      : {}",
-        display_pointer(&detail.process_heap)
+        diagnostic_addr(&detail.process_heap)
     );
     outln!(
         "  NumberOfHeaps    : {}",
-        display_diagnostic(&detail.number_of_heaps)
+        diagnostic_cell(&detail.number_of_heaps)
     );
     outln!(
         "  ProcessHeaps     : {}",
-        display_pointer(&detail.process_heaps)
+        diagnostic_addr(&detail.process_heaps)
     );
     outln!(
         "  BeingDebugged    : {}",
-        display_u8(&detail.being_debugged)
+        diagnostic_cell(&detail.being_debugged)
     );
     for (label, value) in [
         ("OSMajorVersion", &detail.os_major_version),
@@ -209,7 +187,7 @@ fn print_peb32(detail: &Peb32Detail) {
         ("SessionId", &detail.session_id),
         ("NumberOfProcessors", &detail.number_of_processors),
     ] {
-        outln!("  {label:17}: {}", display_diagnostic(value));
+        outln!("  {label:17}: {}", diagnostic_cell(value));
     }
     print_parameters_field(
         &detail.process_parameters,
@@ -222,28 +200,28 @@ fn print_peb(detail: &PebDetail) {
     outln!("PEB {}", ui::addr(detail.address.0));
     outln!(
         "  ImageBaseAddress : {}",
-        display_pointer(&detail.image_base_address)
+        diagnostic_addr(&detail.image_base_address)
     );
-    outln!("  Ldr              : {}", display_pointer(&detail.ldr));
+    outln!("  Ldr              : {}", diagnostic_addr(&detail.ldr));
     outln!(
         "  ProcessParameters : {}",
-        display_pointer(&detail.process_parameters)
+        diagnostic_addr(&detail.process_parameters)
     );
     outln!(
         "  ProcessHeap      : {}",
-        display_pointer(&detail.process_heap)
+        diagnostic_addr(&detail.process_heap)
     );
     outln!(
         "  NumberOfHeaps    : {}",
-        display_diagnostic(&detail.number_of_heaps)
+        diagnostic_cell(&detail.number_of_heaps)
     );
     outln!(
         "  ProcessHeaps     : {}",
-        display_pointer(&detail.process_heaps)
+        diagnostic_addr(&detail.process_heaps)
     );
     outln!(
         "  BeingDebugged    : {}",
-        display_u8(&detail.being_debugged)
+        diagnostic_cell(&detail.being_debugged)
     );
     for (label, value) in [
         ("OSMajorVersion", &detail.os_major_version),
@@ -252,7 +230,7 @@ fn print_peb(detail: &PebDetail) {
         ("SessionId", &detail.session_id),
         ("NumberOfProcessors", &detail.number_of_processors),
     ] {
-        outln!("  {label:17}: {}", display_diagnostic(value));
+        outln!("  {label:17}: {}", diagnostic_cell(value));
     }
     print_parameters_field(
         &detail.process_parameters,
@@ -261,7 +239,7 @@ fn print_peb(detail: &PebDetail) {
     print_loader_lists(&detail.loader_lists);
     outln!(
         "  ApiSetMap          : {}",
-        display_pointer(&detail.api_set_map)
+        diagnostic_addr(&detail.api_set_map)
     );
     if let Some(peb32) = &detail.peb32 {
         print_peb32(peb32);
@@ -283,41 +261,41 @@ fn print_teb32(detail: &Teb32Detail) {
     outln!(
         "  {:30}: {}",
         "StackBase",
-        display_pointer(&detail.stack_base)
+        diagnostic_addr(&detail.stack_base)
     );
     outln!(
         "  {:30}: {}",
         "StackLimit",
-        display_pointer(&detail.stack_limit)
+        diagnostic_addr(&detail.stack_limit)
     );
     outln!(
         "  {:30}: {}",
         "TlsPointer",
-        display_pointer(&detail.tls_pointer)
+        diagnostic_addr(&detail.tls_pointer)
     );
     outln!(
         "  {:30}: {}",
         "LastErrorValue",
-        display_diagnostic(&detail.last_error_value)
+        diagnostic_cell(&detail.last_error_value)
     );
     outln!(
         "  {:30}: {}",
         "LastStatusValue",
-        display_diagnostic(&detail.last_status_value)
+        diagnostic_cell(&detail.last_status_value)
     );
     outln!(
         "  {:30}: {}",
         "CountOfOwnedCriticalSections",
-        display_diagnostic(&detail.count_of_owned_critical_sections)
+        diagnostic_cell(&detail.count_of_owned_critical_sections)
     );
-    outln!("  {:30}: {}", "PEB", display_pointer(&detail.peb));
+    outln!("  {:30}: {}", "PEB", diagnostic_addr(&detail.peb));
     outln!(
         "  ClientId.UniqueProcess          : {}",
-        display_pointer(&detail.client_id_unique_process)
+        diagnostic_addr(&detail.client_id_unique_process)
     );
     outln!(
         "  ClientId.UniqueThread           : {}",
-        display_pointer(&detail.client_id_unique_thread)
+        diagnostic_addr(&detail.client_id_unique_thread)
     );
 }
 
@@ -326,34 +304,34 @@ fn print_teb(detail: &TebDetail) {
     outln!(
         "  {:30}: {}",
         "StackBase",
-        display_pointer(&detail.stack_base)
+        diagnostic_addr(&detail.stack_base)
     );
     outln!(
         "  {:30}: {}",
         "StackLimit",
-        display_pointer(&detail.stack_limit)
+        diagnostic_addr(&detail.stack_limit)
     );
     outln!(
         "  {:30}: {}",
         "TlsPointer",
-        display_pointer(&detail.tls_pointer)
+        diagnostic_addr(&detail.tls_pointer)
     );
     outln!(
         "  {:30}: {}",
         "LastErrorValue",
-        display_diagnostic(&detail.last_error_value)
+        diagnostic_cell(&detail.last_error_value)
     );
     outln!(
         "  {:30}: {}",
         "LastStatusValue",
-        display_diagnostic(&detail.last_status_value)
+        diagnostic_cell(&detail.last_status_value)
     );
     outln!(
         "  {:30}: {}",
         "CountOfOwnedCriticalSections",
-        display_diagnostic(&detail.count_of_owned_critical_sections)
+        diagnostic_cell(&detail.count_of_owned_critical_sections)
     );
-    outln!("  {:30}: {}", "PEB", display_pointer(&detail.peb));
+    outln!("  {:30}: {}", "PEB", diagnostic_addr(&detail.peb));
     match &detail.wow_teb_offset {
         DiagnosticValue::Available(value) => {
             outln!("  {:30}: {value} ({value:#x})", "WOW64");
@@ -362,7 +340,7 @@ fn print_teb(detail: &TebDetail) {
             outln!(
                 "  {:30}: {}",
                 "WOW64",
-                display_pointer(&detail.wow64_reserved)
+                diagnostic_addr(&detail.wow64_reserved)
             );
         }
     }
@@ -372,11 +350,11 @@ fn print_teb(detail: &TebDetail) {
     );
     outln!(
         "  ClientId.UniqueProcess          : {}",
-        display_pointer(&detail.client_id_unique_process)
+        diagnostic_addr(&detail.client_id_unique_process)
     );
     outln!(
         "  ClientId.UniqueThread           : {}",
-        display_pointer(&detail.client_id_unique_thread)
+        diagnostic_addr(&detail.client_id_unique_thread)
     );
     if let Some(teb32) = &detail.teb32 {
         print_teb32(teb32);

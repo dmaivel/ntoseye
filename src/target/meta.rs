@@ -216,10 +216,12 @@ fn read_verifier_state(guest: &Guest) -> VerifierStateRead {
         Ok(verifier) => DiagnosticValue::from_result(verifier.read_uint(name)),
         Err(error) => DiagnosticValue::unavailable(error.to_string()),
     };
-    let option_flags = match guest.ntoskrnl.symbol("VfOptionFlags") {
-        Ok(symbol) => DiagnosticValue::from_result(symbol.read::<u32>().map(u64::from)),
-        Err(error) => DiagnosticValue::unavailable(error.to_string()),
-    };
+    let option_flags = DiagnosticValue::from_result(
+        guest
+            .ntoskrnl
+            .symbol("VfOptionFlags")
+            .and_then(|symbol| symbol.read::<u32>().map(u64::from)),
+    );
     VerifierStateRead {
         level: read("Level"),
         option_flags,
@@ -541,7 +543,7 @@ impl Target {
             DiagnosticValue::Available(level) => {
                 DiagnosticValue::Available(decode_verifier_level_flags(*level))
             }
-            DiagnosticValue::Unavailable(error) => DiagnosticValue::Unavailable(error.clone()),
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
 
         let modules = self.kernel_modules().unwrap_or_default();
