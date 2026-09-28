@@ -444,6 +444,32 @@ fn parse_module_streams(
                         continue;
                     }
                 };
+                // Every file the module records a checksum for, including
+                // those only its inlined code's lines name (headers).
+                let mut files = line_program.files();
+                loop {
+                    match files.next() {
+                        Ok(Some(file_info)) => {
+                            if let Ok(file) = strings_table.get(file_info.name)
+                                && let Some(checksum) = recorded_checksum(&file_info.checksum)
+                            {
+                                source_checksums
+                                    .entry(file.to_string().into())
+                                    .or_insert(checksum);
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            record_index_diagnostic(
+                                diagnostics,
+                                "source file checksums",
+                                Some(&compiland),
+                                error.to_string(),
+                            );
+                            break;
+                        }
+                    }
+                }
                 let mut lines = line_program.lines();
                 loop {
                     // pdb2 0.10.1 asserts while bounding some valid
@@ -507,11 +533,6 @@ fn parse_module_streams(
                         }
                     };
                     let file: String = file.to_string().into();
-                    if !source_checksums.contains_key(&file)
-                        && let Some(checksum) = recorded_checksum(&file_info.checksum)
-                    {
-                        source_checksums.insert(file.clone(), checksum);
-                    }
                     source_lines.push(SourceLineEntry {
                         rva: rva.0,
                         length: line.length,

@@ -1309,3 +1309,23 @@ fn msvc_inline_sites_become_frames_with_their_own_locals() {
         ["DriverObject rcx", "RegistryPath rdx", "seed r8d"]
     );
 }
+
+/// A header reached only through inlined code (`wdm.h`, holding
+/// `_InlineInterlockedAdd`) has its checksum recorded, so a local copy of it
+/// is checked like any source file.
+#[test]
+fn a_header_only_inlined_code_names_has_its_checksum() {
+    let (store, _) = load_fixture(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/msvc_inline.pdb"
+    ));
+    let recorded: Vec<String> = store
+        .source_checksums
+        .iter()
+        .flat_map(|entry| entry.value().keys().cloned().collect::<Vec<_>>())
+        .collect();
+    assert!(
+        recorded.iter().any(|file| file.ends_with(r"\km\wdm.h")),
+        "{recorded:?}"
+    );
+}
