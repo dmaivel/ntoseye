@@ -356,3 +356,24 @@ fn a_switch_answered_by_another_processor_leaves_that_processor_holding_the_targ
         vec![(api::DBGKD_SWITCH_PROCESSOR, 2, 0, 0)]
     );
 }
+
+/// An ARM64 target never delivers the step of a processor it switched to, so
+/// a step there would wait forever on a running target.
+#[test]
+fn an_arm64_step_on_another_processor_fails_without_resuming() {
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let worker = serve_state_changes(kernel, Vec::new());
+    let mut backend = kd_backend_with_framing(host);
+    backend.arch = Arch::Arm64;
+    backend.register_map = context_arm64::build_register_map();
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.processor_count = 4;
+    backend.set_current_thread("p1.3").unwrap();
+
+    assert!(backend.single_step().is_err());
+    assert!(!backend.link.is_running());
+    drop(backend);
+
+    assert!(worker.join().unwrap().is_empty());
+}

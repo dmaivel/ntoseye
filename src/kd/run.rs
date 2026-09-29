@@ -360,6 +360,16 @@ impl KdBackend {
         // reads it synchronously; no pump needed
         let processor = self.current_processor;
         let owner = self.last_stop_processor;
+        // An ARM64 target accepts the switch and the trace flag, but the
+        // processor it switched to never takes the step: the target runs on
+        // and no stop arrives.
+        if processor != owner && self.arch == Arch::Arm64 {
+            return Err(Error::Kd(format!(
+                "{} stopped the target, and on ARM64 only that processor can step; select it \
+                 with ~{owner}s, or resume with g",
+                thread_id_for(owner)
+            )));
+        }
         // A raw int3 stop still points at the int3; resuming from there would
         // only execute it again and report the same stop.
         self.skip_hardcoded_breakpoint(owner)?;
