@@ -10235,7 +10235,7 @@ class SessionProcesses(BaseRecord):
     @property
     def detailed(self, /) -> bool:
         """
-        Whether you requested the detailed list (`-f`).
+        Whether a non-zero flags argument requested the detailed list.
         """
     @property
     def image_glob(self, /) -> str |None: ...

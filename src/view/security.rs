@@ -122,7 +122,7 @@ shapes! {
     SessionProcesses {
         /// `None` for all sessions.
         selected_session: Option<u64>,
-        /// Whether you requested the detailed list (`-f`).
+        /// Whether a non-zero flags argument requested the detailed list.
         detailed: bool,
         image_glob: Option<String>,
         processes: Vec<SessionProcess>,
