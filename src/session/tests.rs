@@ -1171,7 +1171,8 @@ fn stepping_session(code: &[u8], backend: MockBackend) -> Session {
 }
 
 /// A target that runs on after a step never reports it; Ctrl+C breaks in
-/// and the step ends at that stop.
+/// and the step ends at that stop. The Ctrl+C stays raised for a loop of
+/// steps around this one.
 #[test]
 fn ctrl_c_breaks_in_on_a_step_that_does_not_stop() {
     let mut backend = MockBackend {
@@ -1186,7 +1187,7 @@ fn ctrl_c_breaks_in_on_a_step_that_does_not_stop() {
 
     assert_eq!(session.step().unwrap(), 0x1001);
     assert_eq!(interrupts.load(Ordering::Relaxed), 1);
-    assert!(!session.target.interrupt.load(Ordering::SeqCst));
+    assert!(session.target.interrupt.load(Ordering::SeqCst));
 }
 
 /// Under the Windows hypervisor a step is this vCPU run alone to temporary

@@ -880,13 +880,13 @@ pub fn step_one_and_clear_tf(
 /// but a target can run on and never report it. `interrupt` (Ctrl+C) then
 /// breaks in, and the break-in's stop ends the wait. The flag is checked
 /// only after a poll finds no stop, so a step that stops is never broken in
-/// on, and a loop of steps sees a Ctrl+C that arrived during one of them.
+/// on. It stays raised, so a loop of steps around this one ends too.
 fn wait_for_step_stop(backend: &mut dyn DebugBackend, interrupt: &AtomicBool) -> Result<StopEvent> {
     loop {
         if let Some(event) = backend.try_wait_for_stop(STEP_POLL_INTERVAL)? {
             return Ok(event);
         }
-        if interrupt.swap(false, Ordering::SeqCst) {
+        if interrupt.load(Ordering::SeqCst) {
             return backend.interrupt();
         }
     }
