@@ -28,7 +28,7 @@ The host configuration depends on the hypervisor:
 
 ## Supported live environments
 
-You can debug any Windows 10/11 target on the network with `kdnet` (see the [KDNET guide](kdnet.md)), because the `kdnet` backend has no hypervisor-specific parts. For the combinations in the table below, `ntoseye` also reads VM memory directly, configures the VM with `ntoseye configure`, and supplies the `gdb` and `memory` backends.
+You can debug any Windows 10/11 target that is reachable over the network with `kdnet` (see the [KDNET guide](kdnet.md)), and the `kdnet` backend has no hypervisor-specific parts. For the combinations in the table below, `ntoseye` also reads VM memory directly, configures the VM with `ntoseye configure`, and supplies the `gdb` and `memory` backends.
 
 | Host OS | Hypervisor | Guest architecture | `kd` | `kdnet` | `gdb` | `memory` |
 | --- | --- | --- | --- | --- | --- | --- |

@@ -62,8 +62,8 @@ shapes! {
         stopped: Option<String>,
     }
 
-    /// The address, handle, and type of a KMDF object, when ntoseye can read
-    /// them.
+    /// The address, handle, and type of a KMDF object, as far as ntoseye can
+    /// read them.
     WdfObjectRef {
         address: VirtAddr,
         /// `None` for an object that has no handle or that ntoseye cannot read.

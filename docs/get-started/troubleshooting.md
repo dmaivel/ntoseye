@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This page lists common problems by symptom, each with its cause and fix. Problems that are specific to an integration are on the page of that integration: [driver replacement](../using/kdfiles.md#troubleshooting) and [disassembler integration](../integrations/gdbserver.md#troubleshooting).
+This page lists common problems by symptom. Problems that are specific to an integration are on the page of that integration: [driver replacement](../using/kdfiles.md#troubleshooting) and [disassembler integration](../integrations/gdbserver.md#troubleshooting).
 
 ## Attaching
 
@@ -41,7 +41,7 @@ See [KVM/QEMU](../setup/kvm-qemu.md#kdnet).
 
 See [UTM](../setup/utm.md#gdb-stub).
 
-**The guest's own hypervisor does not boot under nested virtualization** (VBS, Hyper-V, WSL2). On the tested host, the `host-passthrough` CPU model failed and a custom CPU model with `vmx` worked, so if `host-passthrough` fails, try a custom CPU model with `vmx`. See [KVM/QEMU](../setup/kvm-qemu.md#virtualization-based-security-vbs).
+**The guest's own hypervisor does not boot under nested virtualization** (VBS, Hyper-V, WSL2). On the tested host, the `host-passthrough` CPU model failed and a custom CPU model with `vmx` worked. See [KVM/QEMU](../setup/kvm-qemu.md#virtualization-based-security-vbs).
 
 ## Symbols
 

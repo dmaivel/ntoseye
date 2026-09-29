@@ -22,7 +22,7 @@ The trustlet ID must also be a field that `SkpsReadPolicyMetadata` checks agains
 
 QEMU writes kernel breakpoints through the page tables of the selected vCPU, which do not map NT while that vCPU is outside NT. Because QEMU software breakpoints apply to all vCPUs, `ntoseye` tries such a breakpoint again through a different vCPU that is halted in NT.
 
-If all vCPUs are outside NT, `ntoseye` uses the NT kernel's page tables on the selected vCPU for that one packet and then immediately restores the vCPU's CR3. With both methods, {command}`bp` and the bugcheck trap work in every address space where the vCPU can stop.
+Only if all vCPUs are outside NT does `ntoseye` use the NT kernel's page tables on the selected vCPU for that one packet, and it then immediately restores the vCPU's CR3. With both methods, {command}`bp` and the bugcheck trap work in every address space where the vCPU can stop.
 
 :::{warning}
 If `ntoseye` is killed during the packet with the borrowed CR3, the vCPU resumes with the wrong CR3 and the guest crashes.
@@ -66,7 +66,7 @@ Some instructions, for example `sysenter`, `xabort`, and `rsm`, have no successo
 
 In secure-kernel code, the temporary breakpoints are debug-register breakpoints in free slots, so `ntoseye` does not write VTL1 code. A VTL1 step needs one free slot for each successor, and if one more slot is free, the step also uses it to mark the instruction while the held vCPUs run.
 
-`ntoseye` does not step a `syscall`, `int`, `ud2`, or hypercall in VTL1 and gives an error, because the secure kernel enters these instructions through its own entry and IDT, and NT's entry and IDT do not describe them.
+`ntoseye` does not step a `syscall`, `int`, `ud2`, or hypercall in VTL1 and gives an error, because the secure kernel enters these instructions through its own entry and IDT, which NT's entry and IDT do not describe.
 
 ### When the vCPU waits on a held vCPU
 

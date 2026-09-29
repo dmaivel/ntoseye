@@ -132,7 +132,7 @@ shapes! {
         uncommitted: Vec<NtUncommittedRange>,
         first_entry: VirtAddr,
         last_valid_entry: VirtAddr,
-        /// The entry chain of the segment. Empty if `list_entries` is false.
+        /// The entry chain of the segment. Empty unless the entries were listed.
         entries: Vec<NtHeapEntry>,
         /// Where the chain walk stopped before `last_valid_entry`, and why. None
         /// if the walk did not stop before `last_valid_entry`.
@@ -205,7 +205,7 @@ shapes! {
         /// One bit for each block, set if the block is busy. Block `i` is byte
         /// `i / 8`, bit `i % 8`.
         busy_bitmap: Vec<u8>,
-        /// The blocks of the region. Empty if `list_entries` is false.
+        /// The blocks of the region. Empty unless the entries were listed.
         blocks: Vec<HeapBlock>,
     }
 
@@ -225,7 +225,7 @@ shapes! {
         /// `nt-lfh-block`, `vs-chunk`, or `lfh-block`.
         kind: &'static str,
         /// The number of unused bytes at the end of the block. None if the
-        /// heap does not record them.
+        /// block does not record them.
         unused_bytes: Option<u64>,
         /// Whether the header checksum is correct. None if the block kind has
         /// no checksum.
@@ -325,7 +325,7 @@ shapes! {
         address: VirtAddr,
         /// Whether the signature of the subsegment matches the expected value.
         signature_ok: bool,
-        /// The chunks of the subsegment. Empty if `list_entries` is false.
+        /// The chunks of the subsegment. Empty unless the entries were listed.
         chunks: Vec<HeapBlock>,
         /// The number of chunks that the walk found.
         chunk_count: usize,
@@ -347,7 +347,7 @@ shapes! {
         /// The `BlockBitmap` words: a qword on x64, a dword on x86. The low bit
         /// for a block is set while the block is busy.
         bitmap: Vec<Hex>,
-        /// The blocks of the subsegment. Empty if `list_entries` is false.
+        /// The blocks of the subsegment. Empty unless the entries were listed.
         blocks: Vec<HeapBlock>,
     }
 

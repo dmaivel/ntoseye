@@ -142,8 +142,7 @@ shapes! {
         /// False after a reboot until the kernel's loaded-module list exists,
         /// and process and module enumeration is not valid until then.
         coherent: bool,
-        /// The `nt` base, which ntoseye finds again after a reboot because the
-        /// base changes across a reboot.
+        /// The `nt` base that ntoseye found again. It changes across a reboot.
         kernel_base: Hex,
     }
 

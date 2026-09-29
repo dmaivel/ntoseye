@@ -2,7 +2,7 @@
 
 The `ntoseye` package gives standalone Python programs access to debugger inspection and run control. The native wheel is self-contained: it does not need a separate installation of `ntoseye`, and it installs the `ntoseye` command itself.
 
-The package includes type stubs that are generated from the extension itself, so editor completion, type checkers, and docstrings all describe the API.
+The package includes type stubs that are generated from the extension itself. Editor completion, type checkers, and docstrings describe the API.
 
 ## Install
 
@@ -150,7 +150,7 @@ Hardware execution breakpoints support these options:
 - One-shot operation
 - Processor filters
 
-They share the hardware slots and resolve only once, so you must make them again after a reboot.
+They share the hardware slots and resolve only once, and you must make them again after a reboot.
 
 `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops. In secure-kernel code, their temporary breakpoints are debug-register breakpoints in free slots, so these functions never patch the code.
 
@@ -298,11 +298,11 @@ All SDK exceptions derive from `ntoseye.NtoseyeError`:
 
 The SDK raises `ValueError` before it touches the target when an argument is not one of its fixed choices, for example `backend="windbg"` or `until="calls"`, or when a combination of arguments is not valid, for example `backend="kdnet"` without `key`.
 
-Decoded results, for example `dbg.inspect.pci()`, `thread.inspect()`, a `Field`, a `Symbol`, or a `MemoryRegion`, are records with one typed property for each field. [Results](../reference/sdk/index.md#results) lists each property, so an editor can complete the property names and a type checker finds a misspelled name.
+Decoded results, for example `dbg.inspect.pci()`, `thread.inspect()`, a `Field`, a `Symbol`, or a `MemoryRegion`, are records with one typed property for each field, so an editor can complete the property names and a type checker finds a misspelled name. [Results](../reference/sdk/index.md#results) lists each property.
 
 A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields that the MCP server reports, and you can call it on a record, a process, a thread, a module, a CPU, a driver, or a breakpoint.
 
-`ntoseye.build` is the commit stamp in the compiled extension: `<commit>`, `<commit>-dirty`, or `unknown`. A long-lived Python interpreter can still have an older native module loaded, so compare this value after you rebuild.
+`ntoseye.build` is the commit stamp in the compiled extension: `<commit>`, `<commit>-dirty`, or `unknown`. After you rebuild, compare this value if a long-lived Python interpreter might still have an older native module loaded.
 
 ## REPL custom commands
 

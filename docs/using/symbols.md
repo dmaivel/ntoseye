@@ -123,7 +123,7 @@ The stack and the disassembly show the mapped source locations. {command}`dv` sh
 
 ## Inline frames
 
-ntoseye shows a call that the compiler inlined as a separate frame, as WinDbg does. {command}`k` lists the inline frame, with the tag `[inline]`, above the frame that the call was inlined into. The inline frame shows the addresses of that frame, the name of the inlined function, and the source line in the inlined function. The caller frame shows the line of the call.
+ntoseye shows a call that the compiler inlined as a separate frame, as WinDbg does. {command}`k` lists the inline frame, with the tag `[inline]`, above the frame that the call was inlined into. The inline frame shows the addresses of the frame that the call was inlined into, the name of the inlined function, and the source line in the inlined function. The caller frame shows the line of the call.
 
 Frame numbers include inline frames, so `.frame N` selects an inline frame like any other frame. After that, {command}`dv`, {command}`ls`, and local names in expressions use the variables and source of the inlined function, and the frame that the call was inlined into lists only its own variables.
 
@@ -170,13 +170,13 @@ The unwind uses the unwind data of the image instead of the PDB, so the frames a
 
 A process-scoped breakpoint resolves in the process that it names. For example, `bu /p <pid> user32!PeekMessageW` reads the loader list of that process and loads the symbols of `user32` without a prior `.process /p <pid>`.
 
-A `file:line` specification loads all modules in the process, because the line can be in any of them, and the breakpoint stays deferred only if the symbol is really not in the process.
+A `file:line` specification loads all modules in the process, because the line can be in any of them. A process-scoped breakpoint stays deferred only if its symbol is really not in the process.
 
 `.process /p <pid>` still loads the symbols of the whole process at the start, so use it before you browse the process.
 
 ### Deferred breakpoints
 
-ntoseye resolves a deferred breakpoint again each time new symbols become available, from any of these sources:
+ntoseye resolves a deferred breakpoint again each time new symbols become available, whatever loaded them, for example:
 
 - A background download that completes.
 - A backtrace.

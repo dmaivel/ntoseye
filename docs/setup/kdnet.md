@@ -64,8 +64,8 @@ You do not need to attach again after a guest restart.
 
 The target sends a poke to the listener every three seconds, in every state. After the target accepts a session key, its pokes contain the host port of its data channel, and the listener does not answer them, because an answer would change the key of a working session.
 
-A rebooted target has no data channel, so the port field in its pokes is zero and the listener answers such a poke immediately. ntoseye and the target then negotiate a new session key, the KD packet stream starts again, and ntoseye reports the stop as a target reload. As a result, an attach waits up to three seconds for the next poke from the target.
+A rebooted target has no data channel, so the port field in its pokes is zero and the listener answers such a poke immediately. ntoseye and the target then negotiate a new session key, the KD packet stream starts again, and ntoseye reports the stop as a target reload.
 
-If the debugger was killed while the target was stopped, the target can still send data for the earlier session. The listener then sends a poke back to the target, and the target sends its offer immediately.
+Because the listener waits for pokes, an attach waits up to three seconds for the next poke from the target. If the debugger was killed while the target was stopped, the target can still send data for the earlier session. In that case, the listener sends a poke back to the target, and the target sends its offer immediately instead.
 
 ntoseye sends the break-in as soon as the session exists, and the attach usually completes a few milliseconds after the poke. If a stopped target receives the break-in but does not respond to it, ntoseye sends a KD reset packet half a second later.

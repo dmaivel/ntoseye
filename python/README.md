@@ -76,9 +76,9 @@ NTOSEYE_TEST_BACKEND=kd NTOSEYE_TEST_CONNECT=/tmp/ntoseye-kd.sock pytest tests
 The last command also runs `tests/test_live.py` on a guest, which breaks in,
 steps, sets breakpoints on hot kernel functions, and resumes the guest.
 
-By default, the tests read guest memory from the VM process. Add
-`NTOSEYE_TEST_MEMORY_SOURCE=kd` to read it over KD instead, which lets UTM on
-macOS run without root and is required for a remote target.
+By default (`auto`), the tests read guest memory from the VM process when they
+can. Add `NTOSEYE_TEST_MEMORY_SOURCE=kd` to read it over KD instead, which
+needs no root for UTM on macOS and is required for a remote target.
 
 ## Releasing portable wheels
 

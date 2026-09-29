@@ -17,7 +17,7 @@ With the `kd` source, `ntoseye` sends each read through the target like this:
 - User space of all other processes goes through `DbgKdReadPhysicalMemory`, after a page walk on the host. `ntoseye` keeps the translations in a cache until the target runs again.
 - Session space resolves in the session of the halted processor, as in WinDbg.
 
-The memory source controls only reads. All sources write memory in the same way: `ntoseye` uses `DbgKdWriteVirtualMemory` if the target can do a virtual write to the address, and for other addresses it does a page walk and uses `DbgKdWritePhysicalMemory`.
+The memory source controls only reads. All sources write memory in the same way: `ntoseye` uses `DbgKdWriteVirtualMemory` where the target can service virtual writes, and for other addresses it does a page walk and uses `DbgKdWritePhysicalMemory`.
 
 The two types of write have different results:
 

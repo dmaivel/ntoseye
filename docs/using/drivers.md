@@ -70,7 +70,7 @@ The PDB then loads when the driver loads, and {command}`lmv` `mydriver` shows it
 
 If you built the driver in the guest after its last boot, you usually do not have to do anything. It is best to build the driver immediately before you load it.
 
-If no symbol directory or symbol server has the PDB, `ntoseye` reads it from guest memory. Because the build wrote the PDB, Windows still keeps the file in its cache, and the driver image records where the build wrote it. `ntoseye` finds the PDB at that path, uses it only if it matches the driver, and saves it to the host symbol cache for later sessions. When the driver loads, `ntoseye` shows a message:
+If no symbol directory or symbol server has the PDB, `ntoseye` reads it from guest memory. Because the build wrote the PDB, Windows still keeps the file in its cache. The driver image records where the build wrote the PDB, so `ntoseye` finds the PDB at that path, uses it only if it matches the driver, and saves it to the host symbol cache for later sessions. When the driver loads, `ntoseye` shows a message:
 
 ```text
 rebuilt C:\Users\me\source\repos\mydriver\x64\Debug\mydriver.pdb for mydriver.sys from guest memory

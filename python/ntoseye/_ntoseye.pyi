@@ -172,14 +172,14 @@ class AddressTranslation(BaseRecord):
         """
         Whether nothing maps the page here. If true, `physical` is the frame
         that the page's section PTE holds, for a page of a shared image or
-        file view that the process has not touched yet.
+        file view that is not touched yet.
         """
     @property
     def transition(self, /) -> bool:
         """
         Whether the leaf is a transition PTE. If true, `physical` is a frame
-        that the guest still holds but nothing maps here, so you cannot
-        write to it.
+        that the guest still holds, but nothing maps it here and it cannot be
+        written.
         """
 
 @final
@@ -1159,8 +1159,8 @@ class Breakpoint:
     """
     A breakpoint handle. Because a breakpoint stays when ntoseye builds the
     target again, and a symbolic breakpoint resolves again after a reboot, the
-    handle has no generation stamp and becomes invalid only when you delete the
-    breakpoint.
+    handle has no generation stamp and becomes invalid only when the breakpoint
+    is deleted.
     """
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
@@ -1240,8 +1240,8 @@ class Breakpoint:
     @property
     def resolved(self, /) -> bool:
         """
-        True if the site is set at an address. A symbolic breakpoint stays
-        unresolved until its module loads.
+        True if the site is set at an address. A symbolic breakpoint whose
+        module is not loaded yet stays unresolved until the module loads.
         """
     @property
     def specification(self, /) -> str |None:
@@ -1931,7 +1931,7 @@ class CrashContext(BaseRecord):
     @property
     def create_time(self, /) -> str |None:
         """
-        The time when the process started (ISO 8601 UTC). Also `None` if
+        The time when the process was created (ISO 8601 UTC). Also `None` if
         ntoseye cannot convert the recorded time.
         """
     @property
@@ -2526,7 +2526,7 @@ class DeviceStackLayer(BaseRecord):
     @property
     def is_argument(self, /) -> bool:
         """
-        Whether this is the device given as the argument.
+        Whether this is the device that the stack was requested for.
         """
     @property
     def object_name(self, /) -> str: ...
@@ -2850,8 +2850,8 @@ class DumpSystemInfo(BaseRecord):
     @property
     def system_time(self, /) -> str |None:
         """
-        The time when the system made the dump (ISO 8601 UTC). `None` if
-        the dump does not record it.
+        The time when the dump was taken (ISO 8601 UTC). `None` if the dump
+        does not record it.
         """
     @property
     def system_up_time_secs(self, /) -> int |None:
@@ -4458,7 +4458,7 @@ class HeapBlock(BaseRecord):
     def unused_bytes(self, /) -> int |None:
         """
         The number of unused bytes at the end of the block. None if the
-        heap does not record them.
+        block does not record them.
         """
     @property
     def user(self, /) -> int |None:
@@ -6112,8 +6112,8 @@ class Inspect:
         """
     def zombies(self, /, flags: int = 1) -> Zombies:
         """
-        Scan nonpaged pool for exited processes and terminated threads that
-        still have references to their objects (`!zombies`). `flags` is 1 for
+        Scan nonpaged pool for exited processes and terminated threads whose
+        objects still have references (`!zombies`). `flags` is 1 for
         processes, 2 for threads, or 3 for both.
         """
 
@@ -6736,7 +6736,7 @@ class LfhSubsegment(BaseRecord):
     @property
     def blocks(self, /) -> list[HeapBlock]:
         """
-        The blocks of the subsegment. Empty if `list_entries` is false.
+        The blocks of the subsegment. Empty unless the entries were listed.
         """
     @property
     def blocks_per_word(self, /) -> int:
@@ -7201,8 +7201,8 @@ class Memory:
     def search(self, /, pattern: bytes, start: int, length: int) -> list[MemorySearchMatch]:
         """
         Find matches, including overlapping ones, with symbol/module/VAD
-        context. In a virtual space, the search skips pages that it cannot read.
-        The breakpoints of this session read as the code that they replaced, and
+        context. In a virtual space, the search skips pages that it cannot read,
+        the breakpoints of this session read as the code that they replaced, and
         the search returns a maximum of 4096 matches.
         """
     def translate(self, /, addr: int) -> int |None:
@@ -7839,7 +7839,7 @@ class NtHeapSegment(BaseRecord):
     @property
     def entries(self, /) -> list[NtHeapEntry]:
         """
-        The entry chain of the segment. Empty if `list_entries` is false.
+        The entry chain of the segment. Empty unless the entries were listed.
         """
     @property
     def first_entry(self, /) -> int: ...
@@ -7876,7 +7876,7 @@ class NtLfhUserBlocks(BaseRecord):
     @property
     def blocks(self, /) -> list[HeapBlock]:
         """
-        The blocks of the region. Empty if `list_entries` is false.
+        The blocks of the region. Empty unless the entries were listed.
         """
     @property
     def busy_bitmap(self, /) -> list[int]:
@@ -9737,8 +9737,7 @@ class RunStatus(BaseRecord):
     @property
     def kernel_base(self, /) -> int:
         """
-        The `nt` base, which ntoseye finds again after a reboot because the
-        base changes across a reboot.
+        The `nt` base that ntoseye found again. It changes across a reboot.
         """
     @property
     def rip(self, /) -> int |None:
@@ -11078,7 +11077,7 @@ class TargetDump(BaseRecord):
     @property
     def system_time(self, /) -> int |None:
         """
-        The time when the system made the dump (FILETIME).
+        The time when the dump was taken (FILETIME).
         """
     @property
     def triage_overflowed(self, /) -> bool:
@@ -12560,7 +12559,7 @@ class VsSubsegment(BaseRecord):
     @property
     def chunks(self, /) -> list[HeapBlock]:
         """
-        The chunks of the subsegment. Empty if `list_entries` is false.
+        The chunks of the subsegment. Empty unless the entries were listed.
         """
     @property
     def signature_ok(self, /) -> bool:
@@ -13076,8 +13075,8 @@ class WdfLogRecord(BaseRecord):
 @final
 class WdfObjectRef(BaseRecord):
     """
-    The address, handle, and type of a KMDF object, when ntoseye can read
-    them.
+    The address, handle, and type of a KMDF object, as far as ntoseye can
+    read them.
     """
     @property
     def address(self, /) -> int: ...

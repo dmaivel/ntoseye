@@ -23,7 +23,7 @@ ntoseye gdbserver --backend kdnet --kdnet-key 1.2.3.4 --listen 127.0.0.1:2345
 ntoseye gdbserver --dump crash.dmp
 ```
 
-By default, the server listens on `127.0.0.1:2345`. QEMU's own stub usually uses `:1234`, and the `gdb` backend can connect to that stub.
+By default, the server listens on `127.0.0.1:2345`. QEMU's own stub usually uses `:1234`, and the `gdb` backend might already be connected to that stub.
 
 ### IDA
 
@@ -33,7 +33,7 @@ The fastest way to start is to let IDA load the running kernel through the serve
 ida -rgdb@127.0.0.1:2345 ntoskrnl.exe
 ```
 
-IDA opens `ntoskrnl.exe` through the server's [remote file access](#remote-file-access), which gives the same build that runs on the target, analyzes it as a normal database, and then attaches. To open a driver, give its name the same way, for example `mydriver.sys`.
+IDA opens `ntoskrnl.exe` through the server's [remote file access](#remote-file-access), which gives the same build that runs on the target. IDA then analyzes the file as a normal database and attaches. To open a driver, give its name the same way, for example `mydriver.sys`.
 
 To attach from a database that you already have:
 

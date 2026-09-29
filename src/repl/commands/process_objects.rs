@@ -40,7 +40,7 @@ repl_command! {
     names: ["!zombies", "zombies"],
     usage: "!zombies [flags]",
     summary: "List exited processes and threads that still have references.",
-    details: "Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects, and finds the header of each object by its decoded type. The command lists the processes that have ExitTime set and the threads in the Terminated state. For each object, it shows the handle count and the pointer count, which show what keeps the object in memory. Flag 1 (the default) lists processes, 2 lists threads, and 3 lists both. The scan stops after 4096 processes or 4096 threads, or when you press Ctrl+C.",
+    details: "Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects, and finds the header of each object by its decoded type. The command lists the processes that have ExitTime set and the threads in the Terminated state. For each object, it shows the handle count and the pointer count: whatever still holds these references keeps the object in memory. Flag 1 (the default) lists processes, 2 lists threads, and 3 lists both. The scan stops after 4096 processes or 4096 threads, or when you press Ctrl+C.",
     completion: Expression,
 }
 
@@ -49,7 +49,7 @@ repl_command! {
     names: ["!htrace", "htrace"],
     usage: "!htrace [handle [process [max-traces]]]",
     summary: "Show the stacks that handle tracing recorded for the handles of a process.",
-    details: "Reads the ring of traces (open, close, bad reference) in the DebugInfo of the process handle table and shows the newest trace first. If handle is 0 or not given, the command shows the traces of all handles, and if max-traces is 0 or not given, it shows all traces. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. Handle tracing must be on for the process before you use the command. Tracing is on after the Handles check of Application Verifier, or after NtSetInformationProcess(ProcessHandleTracing), and if it is off, !htrace shows a message. User-mode frames resolve after the modules of the process are loaded (.process /p). The command does not have the user-mode forms that change tracing (-enable, -disable, -snapshot, -diff).",
+    details: "Reads the ring of traces (open, close, bad reference) in the DebugInfo of the process handle table and shows the newest trace first. If handle is 0 or not given, the command shows the traces of all handles, and if max-traces is 0 or not given, it shows all traces. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. Handle tracing must be on for the process before you use the command. The Handles check of Application Verifier or NtSetInformationProcess(ProcessHandleTracing) turns tracing on, and if it is off, !htrace shows a message. User-mode frames resolve after the modules of the process are loaded (.process /p). The command does not have the user-mode forms that change tracing (-enable, -disable, -snapshot, -diff).",
     completion: Expression,
 }
 

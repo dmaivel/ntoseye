@@ -87,5 +87,5 @@ Restart-Computer
 ```
 
 :::{note}
-Windows first writes a BSOD crash dump to the page file, so if paging is disabled, Windows does not write `MEMORY.DMP`. To get the dump, set a dedicated dump file (see [Dump from a BSOD](#dump-from-a-bsod)).
+Windows first writes a BSOD crash dump to the page file, so if paging is disabled, Windows does not write `MEMORY.DMP` unless you set a dedicated dump file (see [Dump from a BSOD](#dump-from-a-bsod)).
 :::

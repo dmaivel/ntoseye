@@ -46,7 +46,7 @@ shapes! {
         driver_name: String,
         device_extension: VirtAddr,
         object_name: String,
-        /// Whether this is the device given as the argument.
+        /// Whether this is the device that the stack was requested for.
         is_argument: bool,
     }
 

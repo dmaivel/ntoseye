@@ -204,8 +204,8 @@ impl Inspect {
         })
     }
 
-    /// Scan nonpaged pool for exited processes and terminated threads that
-    /// still have references to their objects (`!zombies`). `flags` is 1 for
+    /// Scan nonpaged pool for exited processes and terminated threads whose
+    /// objects still have references (`!zombies`). `flags` is 1 for
     /// processes, 2 for threads, or 3 for both.
     #[pyo3(signature = (flags=1))]
     fn zombies<'py>(

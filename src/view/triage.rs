@@ -45,8 +45,8 @@ shapes! {
         machine_image_type: Hex<u32>,
         /// `I386`, `AMD64`, `ARM64`, or `Unknown`.
         machine: &'static str,
-        /// The time when the system made the dump (ISO 8601 UTC). `None` if
-        /// the dump does not record it.
+        /// The time when the dump was taken (ISO 8601 UTC). `None` if the dump
+        /// does not record it.
         system_time: Option<String>,
         /// The system uptime in seconds. `None` if the dump does not record
         /// it.
@@ -66,7 +66,7 @@ shapes! {
         parent_process_id: Option<u64>,
         /// The process's exit status (NTSTATUS).
         exit_status: Option<Hex>,
-        /// The time when the process started (ISO 8601 UTC). Also `None` if
+        /// The time when the process was created (ISO 8601 UTC). Also `None` if
         /// ntoseye cannot convert the recorded time.
         create_time: Option<String>,
         /// The thread's exit status (NTSTATUS).

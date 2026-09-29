@@ -161,7 +161,7 @@ shapes! {
         /// The machine type (`IMAGE_FILE_MACHINE_*`).
         machine_image_type: u32,
         service_pack_build: u32,
-        /// The time when the system made the dump (FILETIME).
+        /// The time when the dump was taken (FILETIME).
         system_time: Option<Hex>,
         /// The system uptime in seconds.
         uptime_seconds: Option<u64>,

@@ -236,8 +236,8 @@ impl Memory {
     }
 
     /// Find matches, including overlapping ones, with symbol/module/VAD
-    /// context. In a virtual space, the search skips pages that it cannot read.
-    /// The breakpoints of this session read as the code that they replaced, and
+    /// context. In a virtual space, the search skips pages that it cannot read,
+    /// the breakpoints of this session read as the code that they replaced, and
     /// the search returns a maximum of 4096 matches.
     fn search<'py>(
         &self,

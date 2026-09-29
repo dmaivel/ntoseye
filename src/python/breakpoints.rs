@@ -58,8 +58,8 @@ impl Exceptions {
 
 /// A breakpoint handle. Because a breakpoint stays when ntoseye builds the
 /// target again, and a symbolic breakpoint resolves again after a reboot, the
-/// handle has no generation stamp and becomes invalid only when you delete the
-/// breakpoint.
+/// handle has no generation stamp and becomes invalid only when the breakpoint
+/// is deleted.
 #[pyclass(subclass, module = "ntoseye")]
 pub struct Breakpoint {
     owner: Owner,
@@ -531,8 +531,8 @@ impl Breakpoint {
             .map(str::to_string))
     }
 
-    /// True if the site is set at an address. A symbolic breakpoint stays
-    /// unresolved until its module loads.
+    /// True if the site is set at an address. A symbolic breakpoint whose
+    /// module is not loaded yet stays unresolved until the module loads.
     #[getter]
     fn resolved(&self, py: Python<'_>) -> PyResult<bool> {
         Ok(self.require_snapshot(py)?.resolved)

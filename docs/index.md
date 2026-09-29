@@ -25,7 +25,7 @@ The [command reference](reference/commands/index.md) documents every REPL comman
 | `gdb` | The hypervisor's GDB stub | Nothing | Yes |
 | `memory` | The VM's memory | Nothing | No |
 
-KDNET can connect to any physical or virtual machine that Windows can debug. With `gdb` and `memory`, the Windows debugger stays disabled, so Windows cannot tell that it is being debugged. When the VM runs on the same host, `ntoseye` reads guest memory directly from the VM process where it can, instead of through the debugger transport. [Choosing a backend](setup/backends.md) compares the backends in full.
+KDNET can connect to any physical or virtual machine that Windows can debug. With `gdb` and `memory`, Windows runs with its debugger disabled and does not know that it is being debugged. When the VM runs on the same host, `ntoseye` reads guest memory directly from the VM process where it can, instead of through the debugger transport. [Choosing a backend](setup/backends.md) compares the backends in full.
 
 Because `ntoseye` reads memory itself, it can show things that the Windows debugger cannot:
 

@@ -104,7 +104,7 @@ repl_command! {
     names: ["j"],
     usage: "j Expression Command1 ; Command2 | j Expression 'Commands1' ; 'Commands2'",
     summary: "Run one of two commands, based on the value of an expression.",
-    details: "If Expression is nonzero, Command1 runs, and otherwise Command2 runs. To put several commands in a branch, separate them with `;` and put them in single quotes. Each branch can be empty (`''`, or nothing before the `;`). j uses the rest of the line, so it ignores text after Command2. In a breakpoint action, `gc` in each branch resumes the target. For example: `bp nt!NtClose \"j (@rcx == 0) '.echo null handle' ; 'gc'\"`.",
+    details: "If Expression is nonzero, Command1 runs, and otherwise Command2 runs. To put several commands in a branch, separate them with `;` and put them in single quotes. Each branch can be empty (`''`, or nothing before the `;`). j uses the rest of the line, so it ignores text after Command2. In a breakpoint action, a `gc` in either branch resumes the target. For example: `bp nt!NtClose \"j (@rcx == 0) '.echo null handle' ; 'gc'\"`.",
     style: RawTail,
 }
 

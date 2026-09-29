@@ -32,7 +32,7 @@ To turn off VBS:
 This stops the Windows hypervisor, so Hyper-V, WSL2, and Windows Sandbox in the guest also stop. To turn the hypervisor on again, run `bcdedit /set hypervisorlaunchtype auto` and reboot the guest.
 
 :::{important}
-Everything on this page needs an **AMD64 guest**, because ntoseye does not support ARM64 guests. The host CPU also matters:
+The VTL1 features on this page need an **AMD64 guest** and are not available on ARM64 guests. Support also depends on the host CPU:
 
 | Feature | Backends | Intel host | AMD host |
 | --- | --- | --- | --- |
@@ -126,7 +126,7 @@ Hardware breakpoints do not write to integrity-sensitive code, but they can be v
 
 {command}`!trustlets` reads secure-kernel structures that the public symbols do not describe ([how](../internals/vbs.md#trustlet-enumeration)). It recognizes every build that we examined, from 10.0.19041 (Windows 10 20H1) to 10.0.28000. Older secure kernels do not have these routines with these names, so {command}`!trustlets` gives an error on them, but you can still inspect the secure kernel and its modules.
 
-{command}`!trustlets` does not list the modules that are loaded in a trustlet. The lists that it walks are live and are not atomic snapshots, so the walk can become incorrect if a process exits or a module unloads during it.
+ntoseye does not list the modules that are loaded in a trustlet. The lists that {command}`!trustlets` walks are live and are not atomic snapshots, so the walk can become incorrect if a process exits or a module unloads during it.
 
 ## Stops in the Windows hypervisor
 

@@ -138,12 +138,12 @@ shapes! {
         /// Whether a large page maps it.
         large: bool,
         /// Whether the leaf is a transition PTE. If true, `physical` is a frame
-        /// that the guest still holds but nothing maps here, so you cannot
-        /// write to it.
+        /// that the guest still holds, but nothing maps it here and it cannot be
+        /// written.
         transition: bool,
         /// Whether nothing maps the page here. If true, `physical` is the frame
         /// that the page's section PTE holds, for a page of a shared image or
-        /// file view that the process has not touched yet.
+        /// file view that is not touched yet.
         section: bool,
     }
 

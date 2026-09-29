@@ -212,8 +212,8 @@ If your hypervisor connects the KD serial port as COM2 (see the
 libvirt note below), use 'debugport:2'.
 
 QEMU (command line): connect COM1 to a Unix socket on the host. This
-path is the ntoseye default, so if you use a different path, change it
-on both sides:
+path is the ntoseye default. If you use a different path, change it on
+both sides:
 
 -chardev socket,id=kd,path=/tmp/ntoseye-kd.sock,server=on,wait=off -serial chardev:kd
 
