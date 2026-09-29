@@ -10,7 +10,7 @@ All breakpoint commands use one grammar, and this grammar follows WinDbg. A code
 
 After the options, the command takes a target, an optional pass count, `if <expr>`, and `do "<commands>"`. The {command}`ba` command takes the same options. It also adds `<access><size>`.
 
-Conditions use the normal expression grammar. You can combine comparisons, bitwise operations, and the short-circuit operators `!`, `&&`, and `||` with parentheses. Write a range explicitly, for example `0 < @rax && @rax < 0n10`. Do not write a range as a chained comparison. For the same reason, `ntoseye` gives an error for chained equality (`a == b == c`). The error message tells you to use `&&`.
+Conditions use the normal expression grammar. You can combine comparisons, bitwise operations, and the short-circuit operators `!`, `&&`, and `||` with parentheses. Write a range explicitly, for example `0 < @rax && @rax < 0n10`. `ntoseye` gives an error for a chained comparison such as `0 < @rax < 0n10`, because it is ambiguous. In C, this expression compares the result of `0 < @rax` (0 or 1) with `0n10`, and does not test a range. For the same reason, `ntoseye` gives an error for chained equality (`a == b == c`). The error message tells you to use `&&`.
 
 If a breakpoint action has more than one command, put quotes around it, as in WinDbg. `gc` or a plain `g` continues from the breakpoint at any position in the action. This includes a `j` or `.if` branch, for example `bp nt!NtClose "j (@rcx == 0) 'kb; g' ; 'g'"`. The commands after `gc` or `g` do not run.
 
@@ -187,5 +187,6 @@ Use KDNET for work with many breakpoints. Each absorb is a small number of KD re
 You can also decrease the cost in these ways:
 
 - Scope the breakpoint to a symbol that the rest of the system does not call. A breakpoint in the image of the target traps only the processes of that image.
-- Use `ba e1`. It does not need a byte in the page, so it writes nothing to a shared frame. But here, AMD64 debug registers are per processor. So `ba e1` still traps for each process. Also, there are only four slots.
-- Use a cheap condition in place of a pass count. Both absorb hits. But a false condition stops sooner.
+- Use `ba e1`. It does not need a byte in the page, so it writes nothing to a shared frame. But `ntoseye` sets the debug registers on every processor, not for one thread. So `ba e1` still traps in each process that runs the code. Also, there are only four slots.
+
+A pass count or a condition does not decrease the number of absorbs. `ntoseye` absorbs each hit that a pass count or a false condition skips. `ntoseye` evaluates the condition at each hit, before it resumes the target. So a condition that reads guest memory through KD adds KD requests to each hit.

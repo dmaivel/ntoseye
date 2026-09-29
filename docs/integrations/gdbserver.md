@@ -118,7 +118,7 @@ Binary Ninja can exit if it disconnects while it reads memory. At that time, the
 | Watchpoints (`Z2`-`Z4`) | `ba w` and `ba r`. A read watch also traps writes, because x86 has no read-only watch |
 | Step and continue | Step does a single-step of the selected vCPU. Continue resumes all vCPUs |
 | Interrupt | Break-in. The server reports it as `SIGINT` |
-| `monitor` | Any ntoseye command that does not move the target |
+| `monitor` | Any ntoseye command that does not resume, step, reboot, or crash the target. `q` and `.shell` are not available |
 | Library list | Kernel modules. After {command}`.process`, also the modules of the current process. The name of each library is `/` followed by its file name |
 | Program | `/ntoskrnl.exe`, with the relocation of the kernel from the preferred base of its file (`qOffsets`) |
 | Memory map | The user half and the kernel half of the address space. Each library image is a separate region |
@@ -172,7 +172,7 @@ If the client reads the registers of a different thread, ntoseye's current vCPU 
 
 ## Resume and step from the client
 
-If a `monitor` command resumes or steps the target, ntoseye gives an error and does not run the command. Examples are {command}`g`, {command}`p`, {command}`t`, and {command}`gu`. The reason is that the client caches registers and memory for the last stop that it saw.
+If a `monitor` command resumes, steps, reboots, or crashes the target, ntoseye gives an error and does not run the command. Examples are {command}`g`, {command}`p`, {command}`t`, {command}`gu`, {command}`.reboot`, and {command}`.crash`. The reason is that the client caches registers and memory for the last stop that it saw.
 
 Breakpoints that you set with `monitor bp ... do "..."` still run their actions. If the action ends with `gc`, the target continues, and the server does not report a stop.
 

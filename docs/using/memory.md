@@ -7,7 +7,7 @@ This page tells how `ntoseye` reads and writes guest memory. It also tells what 
 The KD and KDNET backends accept `--memory-source auto|host|kd`. The option has three values:
 
 - `auto` is the default. `ntoseye` reads memory directly from the VM process, but only after the kernel PE header and the live module-list links in that memory match the KD target. If they do not match, `ntoseye` reads through KD.
-- `host` reads memory directly from the VM process. This memory must match the KD target. If it does not match, `host` fails.
+- `host` reads memory directly from the VM process. This memory must match the KD target. If it does not match, the attach fails with an error.
 - `kd` makes the target do all reads.
 
 With the `kd` source, `ntoseye` sends each read through the target as follows:
@@ -31,7 +31,7 @@ Neither type of write keeps write protection or copy-on-write. The kernel does a
 
 So if you write a breakpoint into a shared image page, every process that maps that page sees the breakpoint. This is true for all types of write. See [breakpoints in shared pages](breakpoints.md#user-mode-breakpoints-in-shared-pages).
 
-`ntoseye` checks the identity of the host mapping when it attaches. It checks the identity again after a guest reboot, when it builds the debugger state again.
+`ntoseye` checks the identity of the host mapping when it attaches. It checks the identity again after a guest reboot, when it builds the debugger state again. If the host memory no longer matches, `ntoseye` shows a warning. Reads through the host mapping are then not reliable. Attach again with `--memory-source kd`.
 
 The `kd` source does not need access to the hypervisor or to the VM process. So you can debug AMD64 and ARM64 Windows VMs or physical machines across any routable network. This has two costs:
 
