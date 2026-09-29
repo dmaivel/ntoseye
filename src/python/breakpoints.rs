@@ -720,8 +720,9 @@ impl Exceptions {
         })
     }
 
-    /// Remove all configured policies and module-load filters, so ordinary
-    /// exceptions break by default and module loads do not stop.
+    /// Remove all configured policies and module load and unload filters, so
+    /// ordinary exceptions break by default and module loads and unloads do
+    /// not stop.
     fn reset(&self, py: Python<'_>) -> PyResult<()> {
         self.owner.with(py, |session| {
             session.exception_policies.reset();

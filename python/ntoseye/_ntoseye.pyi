@@ -3441,8 +3441,9 @@ class Exceptions:
         """
     def reset(self, /) -> None:
         """
-        Remove all configured policies and module-load filters, so ordinary
-        exceptions break by default and module loads do not stop.
+        Remove all configured policies and module load and unload filters, so
+        ordinary exceptions break by default and module loads and unloads do
+        not stop.
         """
     def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"], *, disposition: Literal["handled", "not_handled"] |None = None) -> None:
         """
