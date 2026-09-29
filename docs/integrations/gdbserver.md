@@ -110,7 +110,7 @@ Binary Ninja can exit if it disconnects while it reads memory. By then, the serv
 | Software breakpoints (`Z0`) | `bp <address>` |
 | Hardware breakpoints (`Z1`) | `ba e1 <address>` |
 | Watchpoints (`Z2`-`Z4`) | `ba w` and `ba r`. A read watch also traps writes because x86 has no read-only watch |
-| Step and continue | Step single-steps the selected vCPU, and continue resumes all vCPUs |
+| Step and continue | Step single-steps the selected vCPU, and continue resumes all vCPUs. Over `kd` and `kdnet`, the other vCPUs run during a step, and on an ARM64 target only the vCPU that stopped can step. A step or continue that cannot run is reported as `SIGINT`, with the reason on the console |
 | Interrupt | Break-in, reported as `SIGINT` |
 | `monitor` | Any ntoseye command that does not resume, step, reboot, or crash the target. `q` and `.shell` are not available |
 | Library list | Kernel modules, plus the modules of the current process after {command}`.process`. Each library is named `/` followed by its file name |

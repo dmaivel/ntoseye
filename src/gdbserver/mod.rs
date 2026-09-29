@@ -340,6 +340,10 @@ struct GdbTarget<'a> {
     /// A stop that already happened (a completed step, a refused resume),
     /// reported by the next wait.
     pending: Option<ContinueOutcome>,
+    /// The pending stop is a resume that failed: the target did not move, so
+    /// it is reported as `SIGINT`, which ends a client's stepping loop, not
+    /// as a trap the client would take for a step.
+    resume_refused: bool,
     /// Console lines for the client, sent before the next stop report.
     notes: Vec<String>,
     debug_seq: u64,
@@ -375,6 +379,7 @@ impl<'a> GdbTarget<'a> {
             planted: Vec::new(),
             step_thread: None,
             pending: None,
+            resume_refused: false,
             notes: Vec::new(),
             debug_seq,
             libraries: RefCell::new(Vec::new()),

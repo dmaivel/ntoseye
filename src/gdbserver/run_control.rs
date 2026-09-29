@@ -2,6 +2,7 @@
 //! stop into the reply a client expects.
 
 use std::io;
+use std::mem::take;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -80,8 +81,9 @@ impl GdbTarget<'_> {
     /// something, or for a termination signal.
     pub(super) fn wait(&mut self, client: &mut Client) -> io::Result<Wait> {
         loop {
+            let refused = take(&mut self.resume_refused);
             if let Some(outcome) = self.pending.take()
-                && let Some(reason) = self.stop_reason(outcome, false)
+                && let Some(reason) = self.stop_reason(outcome, refused)
             {
                 self.flush_console(client)?;
                 return Ok(Wait::Stopped(reason));
@@ -128,7 +130,8 @@ impl GdbTarget<'_> {
 
     /// Translate a session stop into a stop reply, or `None` when the target
     /// is still running (a breakpoint action resumed it). `interrupted` marks
-    /// the break-in the client asked for, which gdb expects as `SIGINT`.
+    /// the break-in the client asked for, which gdb expects as `SIGINT`, and
+    /// a resume that failed, which must not look like a finished step.
     fn stop_reason(
         &mut self,
         outcome: ContinueOutcome,
@@ -277,6 +280,7 @@ impl MultiThreadResume for GdbTarget<'_> {
             Ok(pending) => pending,
             Err(error) => {
                 self.note(format!("the target cannot run: {error}"));
+                self.resume_refused = true;
                 Some(ContinueOutcome::Halted { rip: 0 })
             }
         };
