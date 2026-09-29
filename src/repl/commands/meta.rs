@@ -40,7 +40,7 @@ repl_command! {
     names: [".effmach"],
     usage: ".effmach [x86|amd64|arm64|auto|.]",
     summary: "Show or set the effective code machine.",
-    details: "With no argument, shows the selected machine. x86, amd64, and arm64 (on an ARM64 target only) make u, ub, uf, and editor disassembly decode all code as that instruction set. auto or . goes back to selection by context and image. This selection covers the x86 images of a WOW64 program. On ARM64, it also covers an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
+    details: "With no argument, shows the selected machine. x86, amd64, and arm64 (on an ARM64 target only) make u, ub, uf, and editor disassembly decode all code as that instruction set, and auto or . goes back to selection by context and image. This selection covers the x86 images of a WOW64 program and, on ARM64, also an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
 }
 
 repl_command! {
@@ -61,7 +61,7 @@ repl_command! {
     cmd_echo;
     names: [".echo", "echo"],
     usage: ".echo <text>",
-    summary: "Print text and do not evaluate expressions in it.",
+    summary: "Print text without evaluating expressions in it.",
     style: ExpressionTail,
 }
 
@@ -129,7 +129,7 @@ repl_command! {
     names: ["q", "quit", "qd"],
     usage: "q",
     summary: "Exit, remove the breakpoints of this session, and leave the guest running.",
-    details: "This is the WinDbg qd command (quit and detach). ntoseye also accepts qd. If this session halted the guest, q resumes it. If q cannot remove a breakpoint from the guest, it leaves the guest halted. If q resumed that guest, the breakpoint could trap when there is no debugger.",
+    details: "This is the WinDbg qd command (quit and detach), and ntoseye also accepts qd. If this session halted the guest, q resumes it. If q cannot remove a breakpoint from the guest, it leaves the guest halted, because if q resumed that guest, the breakpoint could trap when there is no debugger.",
     flow: Quit,
 }
 

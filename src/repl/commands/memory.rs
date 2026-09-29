@@ -49,7 +49,7 @@ repl_command! {
     names: [".pagein"],
     usage: ".pagein [/p <pid|eprocess>] <address>",
     summary: "Make a paged-out address resident with the debugger worker in the guest.",
-    details: "The guest does the work. So ntoseye resumes the target, and the target halts again at nt!DbgBreakPointWithStatus. It does not halt again at its earlier location. `/p` attaches the worker to a process first. User-space addresses need this.",
+    details: "Because the guest does the work, ntoseye resumes the target, which halts again at nt!DbgBreakPointWithStatus and not at its earlier location. `/p` attaches the worker to a process first, which user-space addresses need.",
     completion: [None, Expression],
     run_state: Halted,
 }
@@ -140,7 +140,7 @@ repl_command! {
     names: ["dpp", "dqp", "ddp", "dqa", "dpa", "dda", "dqu", "dpu", "ddu"],
     usage: "dpp|ddp|dqa|dda|dqu|ddu <address> [L<count>|length|end]",
     summary: "Show pointers and the data that each pointer points to.",
-    details: "After each pointer, d*p shows the value, d*a shows the ASCII string, and d*u shows the UTF-16 string at that pointer. dd* reads doubleword pointers. dq* and its dp* aliases read quadwords. d*p also shows symbols.",
+    details: "After each pointer, d*p shows the value, d*a the ASCII string, and d*u the UTF-16 string at that pointer. dd* reads doubleword pointers, and dq* and its dp* aliases read quadwords. d*p also shows symbols.",
     completion: Expression,
 }
 
@@ -189,7 +189,7 @@ repl_command! {
     names: ["u", "disasm"],
     usage: "u <address> [L<count>|length|end]",
     summary: "Disassemble memory at a symbol or address.",
-    details: "`L<count>` sets the number of instructions. The default is 8. If you give an end address, the command shows all instructions that start at or before that address.",
+    details: "`L<count>` sets the number of instructions, 8 by default. If you give an end address, the command shows all instructions that start at or before that address.",
     completion: Expression,
 }
 
@@ -214,7 +214,7 @@ repl_command! {
     names: ["#"],
     usage: "# [pattern] [address [L<count>]]",
     summary: "Search the disassembly for the next instruction that matches a pattern.",
-    details: "The pattern can match any part of the address, bytes, or text of an instruction. The text is the mnemonic, the operands, and the resolved symbol. The match is not case-sensitive, and you can use `*` and `?` wildcards. To include spaces, put the pattern in quotes (`# \"mov*cr3\" nt!KiSwapContext`). The command shows the first match. If you do not give an address, the search continues after the last match. The first search starts at the instruction pointer. If you do not give a pattern, the command uses the last pattern again. So a bare `#` finds the next occurrence. `L<count>` sets the maximum number of instructions to search. Without it, the search continues until it finds a match, reaches an unreadable page, or searches 1,048,576 instructions. You can also stop it with Ctrl+C.",
+    details: "The pattern can match any part of the address, bytes, or text of an instruction, where the text is the mnemonic, the operands, and the resolved symbol. The match is not case-sensitive, and you can use `*` and `?` wildcards. To include spaces, put the pattern in quotes (`# \"mov*cr3\" nt!KiSwapContext`). The command shows the first match. If you do not give an address, the search continues after the last match, and the first search starts at the instruction pointer. If you do not give a pattern, the command uses the last pattern again, so a bare `#` finds the next occurrence. `L<count>` sets the maximum number of instructions to search. Without it, the search continues until it finds a match, reaches an unreadable page, or searches 1,048,576 instructions, and you can also stop it with Ctrl+C.",
     completion: [None, Expression],
 }
 
@@ -255,7 +255,7 @@ repl_command! {
     names: ["ef", "eD"],
     usage: "ef|eD <address> <number...>",
     summary: "Write single-precision (ef, 4-byte) or double-precision (eD, 8-byte) floating-point numbers to memory.",
-    details: "The numbers are decimal floating-point literals (`ef @rcx 1.5 -2 3e-4`). The radix setting does not change this.",
+    details: "The numbers are decimal floating-point literals (`ef @rcx 1.5 -2 3e-4`), whatever the radix setting.",
     completion: Expression,
 }
 
@@ -330,7 +330,7 @@ repl_command! {
     names: ["s"],
     usage: "s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>",
     summary: "Search memory for bytes, values, or a string.",
-    details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` sets the number of elements of the search type. The search skips unreadable pages and scans a maximum of 1 GiB. It stops after 4096 matches or when you press Ctrl+C.",
+    details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` sets the number of elements of the search type. The search skips unreadable pages, scans up to 1 GiB, and stops after 4096 matches or when you press Ctrl+C.",
     completion: [None, Expression, Expression],
 }
 
@@ -339,7 +339,7 @@ repl_command! {
     names: ["c"],
     usage: "c <address> <L<count>|end> <address2>",
     summary: "Compare two memory ranges byte by byte.",
-    details: "The command compares the range with the same number of bytes at <address2>. It lists each byte that is different, as `<address> <byte> - <address2> <byte>` (`c nt L1000 poi(@$t0)`). If an offset is unreadable in one of the ranges, the command skips it and counts it. The command compares a maximum of 1 GiB. It stops after 4096 differences or when you press Ctrl+C.",
+    details: "The command compares the range with the same number of bytes at <address2>. It lists each byte that is different, as `<address> <byte> - <address2> <byte>` (`c nt L1000 poi(@$t0)`). If an offset is unreadable in one of the ranges, the command skips and counts it. It compares up to 1 GiB and stops after 4096 differences or when you press Ctrl+C.",
     completion: [Expression, Expression, Expression],
 }
 
@@ -348,7 +348,7 @@ repl_command! {
     names: ["m"],
     usage: "m <address> <L<count>|end> <destination>",
     summary: "Copy a memory range to another address.",
-    details: "The command reads the full range before it writes. So overlapping ranges copy as if through a buffer (`m @rsp L20 @rsp+8`). If this session set a breakpoint in the range, the command copies the original byte that the breakpoint replaced. The command copies a maximum of 16 MiB. If a byte of the range is unreadable, the command writes nothing.",
+    details: "The command reads the full range before it writes, so overlapping ranges copy as if through a buffer (`m @rsp L20 @rsp+8`). If this session set a breakpoint in the range, the command copies the original byte that the breakpoint replaced. It copies up to 16 MiB, and if a byte of the range is unreadable, it writes nothing.",
     completion: [Expression, Expression, Expression],
 }
 

@@ -95,7 +95,7 @@ repl_command! {
     names: [".srcpath"],
     usage: ".srcpath [<local-root|recorded-prefix=local-root> ...]",
     summary: "Show or replace the ordered local source path mappings.",
-    details: "A local root contains the source tree. A recorded path such as C:\\Users\\me\\repos\\MyDriver\\src\\queue.c maps to a file under the root. ntoseye uses the longest trailing part of the recorded path that names a file under the root. So root/src/queue.c comes before root/queue.c. ntoseye tries an exact match first, and then a match that ignores case. A recorded-prefix=local-root mapping replaces the recorded prefix with the local root. If the PDB records the checksum of a source file, ntoseye shows only a file with that checksum. If a file has a different checksum, ntoseye reports that it is not the compiled source.",
+    details: "A local root contains the source tree, and a recorded path such as C:\\Users\\me\\repos\\MyDriver\\src\\queue.c maps to a file under the root. ntoseye uses the longest trailing part of the recorded path that names a file under the root, so root/src/queue.c comes before root/queue.c. It tries an exact match first, and then a match that ignores case. A recorded-prefix=local-root mapping replaces the recorded prefix with the local root. If the PDB records the checksum of a source file, ntoseye shows only a file with that checksum, and reports a file with a different checksum as not the compiled source.",
 }
 
 repl_command! {
@@ -111,7 +111,7 @@ repl_command! {
     names: ["ls"],
     usage: "ls [.] [first][,count]",
     summary: "List source lines of the file for the current scope.",
-    details: "With no arguments, the command continues after the lines that the previous ls or lsa showed. `.` starts again at the current line. `first` is a line number. `count` is 10 by default. The file is the file of the source line of the selected frame. For an inline frame, that line is in the inlined function. ntoseye finds the file through .srcpath.",
+    details: "With no arguments, the command continues after the lines that the previous ls or lsa showed, and `.` starts again at the current line. `first` is a line number, and `count` is 10 by default. The file is the file of the source line of the selected frame, which for an inline frame is in the inlined function. ntoseye finds the file through .srcpath.",
 }
 
 repl_command! {
@@ -119,7 +119,7 @@ repl_command! {
     names: ["lsa"],
     usage: "lsa [address][,first][,count]",
     summary: "List source lines around an address.",
-    details: "By default, the command uses the source line of the selected frame. It starts five lines before that line and shows twelve lines in total. If you give an address, the command uses the line of the innermost frame at that address. If a function is inlined at that address, the innermost frame is that function. `first` is an offset from that line. Use a negative value for lines before it. The command marks the line with `>`.",
+    details: "By default, the command uses the source line of the selected frame, and shows twelve lines in total, starting five lines before that line. If you give an address, the command uses the line of the innermost frame at that address, which is the inlined function if a function is inlined there. `first` is an offset from that line, with a negative value for lines before it. The command marks the line with `>`.",
     completion: Expression,
 }
 
@@ -128,7 +128,7 @@ repl_command! {
     names: ["dv"],
     usage: "dv [address]",
     summary: "Show the locals and parameters of the selected frame.",
-    details: "Each frame shows only its own variables. For an inline frame, these are the variables of the inlined function. The frame that contains the inlined call shows the variables of its procedure. It does not show the variables of the calls that are inlined into it. Without an address, the command uses the frame that .frame selected. If no frame is selected, it uses the innermost frame at the stop. With an address, it uses the innermost frame at that address.",
+    details: "Each frame shows only its own variables. For an inline frame, these are the variables of the inlined function, and the frame that contains the inlined call shows the variables of its procedure but not those of the calls that are inlined into it. Without an address, the command uses the frame that .frame selected or, if no frame is selected, the innermost frame at the stop. With an address, it uses the innermost frame at that address.",
     completion: Expression,
 }
 
@@ -151,7 +151,7 @@ repl_command! {
     names: [".fetchimage"],
     usage: ".fetchimage <module>",
     summary: "Download the PE file of a loaded module into the symbol cache and print its path.",
-    details: "The command finds the file by the TimeDateStamp and SizeOfImage values in the mapped PE header of the module. These values are the symbol-server key. So the file is the same build that is running. A disassembler database that you make from this file rebases onto the live module.",
+    details: "The command finds the file by the TimeDateStamp and SizeOfImage values in the mapped PE header of the module. These values are the symbol-server key, so the file is the same build that is running, and a disassembler database that you make from this file rebases onto the live module.",
     completion: Symbol,
 }
 
@@ -160,7 +160,7 @@ repl_command! {
     names: ["lm"],
     usage: "lm [m <pattern>] [v] [u|k] [t]",
     summary: "List loaded modules.",
-    details: "`m` applies a module-name glob. `v m` prints verbose symbol information. `u` selects user modules, and `k` selects kernel modules. `t` adds timestamps.",
+    details: "`m` applies a module-name glob, and `v m` prints verbose symbol information. `u` selects user modules, `k` selects kernel modules, and `t` adds timestamps.",
     completion: [None, Symbol, None, None],
 }
 

@@ -82,10 +82,9 @@ shapes! {
         /// applies.
         local_path: Option<String>,
         /// `found`, `missing`, or `differs`. `found` means that the file is
-        /// there. If the PDB records a checksum, `found` also means that the
-        /// file is the compiled file. `differs` means that the file is there,
-        /// but its checksum is not the checksum of the compiled file. `None` if
-        /// `local_path` is `None`.
+        /// there and, if the PDB records a checksum, that it is the compiled
+        /// file. `differs` means that the file is there but its checksum does
+        /// not match the compiled file. `None` if `local_path` is `None`.
         local_state: Option<&'static str>,
     }
 
@@ -110,7 +109,7 @@ shapes! {
         type_name: String,
         /// `None` if the size of the type is unknown.
         byte_size: Option<u64>,
-        /// True if it is a parameter. False if it is a local.
+        /// True for a parameter, False for a local.
         parameter: bool,
         location: LocalVariableLocation,
     }

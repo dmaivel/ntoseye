@@ -31,26 +31,26 @@ pub struct StopContext {
     record: Option<ExceptionRecord>,
 }
 
-/// The reason why the target stopped. Each stop is one of the nested kinds.
-/// Use `isinstance(stop, Stop.Breakpoint)` or `match` to test the kind. A stop
-/// is bound to the target generation in which it occurred.
+/// The reason why the target stopped. Each stop is one of the nested kinds,
+/// which you can test with `isinstance(stop, Stop.Breakpoint)` or `match`. A
+/// stop is bound to the target generation in which it occurred.
 #[pyclass(module = "ntoseye")]
 pub enum Stop {
     /// A code breakpoint or data-watchpoint hit. If the breakpoint condition
-    /// fails to evaluate, ntoseye sets `condition_error`. It then stops on the
-    /// hit and does not skip it.
+    /// fails to evaluate, ntoseye sets `condition_error` and stops on the hit
+    /// instead of skipping it.
     Breakpoint {
         /// The reason why the breakpoint condition failed to evaluate, if it failed.
         condition_error: Option<String>,
         _context: Py<StopContext>,
     },
-    /// A Windows exception. It has the `code` (NTSTATUS), the first-chance
-    /// flag, and the faulting address.
+    /// A Windows exception, with its `code` (NTSTATUS), the first-chance flag,
+    /// and the faulting address.
     Exception {
         /// The NTSTATUS code of the exception.
         code: u32,
-        /// True if this is the first chance. `None` if the backend does not give
-        /// this data.
+        /// True if this is the first chance, or `None` if the backend does not
+        /// give this data.
         first_chance: Option<bool>,
         /// The faulting address, if the exception has one.
         address: Option<u64>,
@@ -62,8 +62,8 @@ pub enum Stop {
     Step { _context: Py<StopContext> },
     /// A kernel image loaded, and an `"ld"` filter set to `"break"` matched it
     /// (`dbg.exceptions.set("ld:<module>", "break")`, `sxe ld`). The module is
-    /// in the module list, and its symbols are loaded. Its breakpoints are set,
-    /// and its entry point has not run.
+    /// in the module list with its symbols loaded and its breakpoints set, and
+    /// its entry point has not run.
     ModuleLoad {
         /// The loaded kernel module.
         module: Py<Module>,
@@ -76,9 +76,9 @@ pub enum Stop {
         info: Option<Py<view::bugcheck::py::Bugcheck>>,
         _context: Py<StopContext>,
     },
-    /// The guest rebooted. All earlier handles are now stale. While `coherent`
-    /// is false, the kernel module list does not exist yet. Kernel symbols and
-    /// breakpoints work, and `run()` lets the boot continue.
+    /// The guest rebooted, so all earlier handles are now stale. While
+    /// `coherent` is false, the kernel module list does not exist yet, but
+    /// kernel symbols and breakpoints work and `run()` lets the boot continue.
     Reboot {
         /// The base address of the new kernel (KASLR moves it).
         kernel_base: Option<u64>,
@@ -166,8 +166,7 @@ impl Stop {
     }
 
     /// The breakpoint or watchpoint handles for this stop. The list is empty
-    /// for other kinds of stop. So `bp in stop.breakpoints` works on all
-    /// stops.
+    /// for other kinds of stop, so `bp in stop.breakpoints` works on all stops.
     #[getter]
     fn breakpoints(&self, py: Python<'_>) -> PyResult<Vec<Py<Breakpoint>>> {
         let context = self.check_context(py)?;

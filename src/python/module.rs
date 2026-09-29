@@ -22,8 +22,8 @@ use crate::view::shape::Typed;
 use crate::view::{self};
 use pelite::PeView;
 
-/// A collection of modules. It is `dbg.modules` (kernel), `proc.modules`
-/// (loader lists), or `dbg.secure_kernel.modules` (secure kernel).
+/// A collection of modules: `dbg.modules` (kernel), `proc.modules` (loader
+/// lists), or `dbg.secure_kernel.modules` (secure kernel).
 #[pyclass(module = "ntoseye")]
 pub struct Modules {
     pub owner: Owner,
@@ -265,8 +265,8 @@ impl Module {
         Typed::new(py, view)
     }
 
-    /// The mapped image in memory layout, for pefile/LIEF. If a page is not
-    /// readable, this raises `MemoryAccessError`. If `zero_fill` is set, it
+    /// The mapped image in memory layout, for pefile/LIEF. A page that is not
+    /// readable raises `MemoryAccessError`, unless `zero_fill` is set, which
     /// fills such pages with zeros (for example, a kernel's discarded INIT
     /// section).
     #[pyo3(signature = (zero_fill=false))]
@@ -334,7 +334,7 @@ impl Module {
         Typed::new(py, view::module::module_symbol_report(&report))
     }
 
-    /// The PE headers of the mapped image (`!dh`). They include the file and
+    /// The PE headers of the mapped image (`!dh`), including the file and
     /// optional headers, data directories, sections, and the debug directory
     /// with its PDB identity. `exports` and `imports` add those directories.
     #[pyo3(signature = (exports=false, imports=false))]
@@ -361,10 +361,10 @@ impl Module {
         Typed::new(py, view)
     }
 
-    /// The image identity of the module (`!lmi`). From the headers, it has the
-    /// machine, time stamp, size, checksum, and characteristics. It also has
-    /// the debug directory with the CodeView PDB name, GUID, and age. Then it
-    /// has the symbol state and the local PDB file.
+    /// The image identity of the module (`!lmi`): the machine, time stamp,
+    /// size, checksum, and characteristics from the headers, and the debug
+    /// directory with the CodeView PDB name, GUID, and age. The symbol state
+    /// and the local PDB file follow.
     fn image_info<'py>(
         &self,
         py: Python<'py>,
@@ -441,7 +441,7 @@ impl Module {
 
 #[pymethods]
 impl Modules {
-    /// Find a module by its short name. The match ignores case (`"nt"` is ntoskrnl).
+    /// Find a module by its short name, ignoring case (`"nt"` is ntoskrnl).
     fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<Module>> {
         let found = self
             .infos(py)?
@@ -459,10 +459,10 @@ impl Modules {
         self.handle(py, found)
     }
 
-    /// How the loader lists of a process ended. Use it to find if a list is
+    /// How the loader lists of a process ended, which shows whether a list is
     /// complete, corrupt, or truncated. It has `termination` and
-    /// `wow64_termination`, each `{kind, address, error}`. `None` for kernel
-    /// modules.
+    /// `wow64_termination`, each `{kind, address, error}`, and is `None` for
+    /// kernel modules.
     #[getter]
     fn termination<'py>(
         &self,

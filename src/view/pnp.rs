@@ -27,7 +27,7 @@ shapes! {
         problem_status: Hex<u32>,
         /// The IRP that PnP waits on. 0 for none.
         pending_irp: VirtAddr,
-        /// `Level`. The depth of the node in the device tree.
+        /// `Level`, the depth of the node in the device tree.
         depth: u32,
     }
 
@@ -67,7 +67,7 @@ shapes! {
         previous_state: Hex<u32>,
         previous_state_name: String,
         state_history: Vec<DevNodeHistoryState>,
-        /// `StateHistoryEntry`. The next slot in the ring.
+        /// `StateHistoryEntry`, the next slot in the ring.
         state_history_entry: u32,
         flags: Hex<u32>,
         user_flags: Hex<u32>,
@@ -89,8 +89,8 @@ shapes! {
     /// A device stack from the top filter to the PDO, and the device node of
     /// the PDO (`!devstack`).
     DeviceStack {
-        /// The address that you gave. It is a device object, a pointer to a
-        /// device object, or a device node.
+        /// The address that you gave: a device object, a pointer to a device
+        /// object, or a device node.
         argument: VirtAddr,
         /// The device object where the stack walk started.
         requested_device: VirtAddr,

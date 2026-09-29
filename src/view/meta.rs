@@ -77,8 +77,8 @@ shapes! {
         /// The verified drivers.
         drivers: Diag<Vec<VerifierDriverSummary>>,
         /// Whether the driver table gives a smaller entry count than the
-        /// number of linked entries. In that case, the walk stopped before it
-        /// got to all drivers.
+        /// number of linked entries, which means that the walk stopped before
+        /// it reached all drivers.
         drivers_truncated: bool,
         /// The suspect drivers that are configured for verification but are
         /// not loaded.
@@ -140,7 +140,7 @@ shapes! {
         size: Option<u64>,
         file_version: Option<String>,
         product_version: Option<String>,
-        /// The GUID of the PDB. It identifies the symbols.
+        /// The GUID of the PDB, which identifies the symbols.
         pdb_guid: Option<String>,
         /// The age of the PDB.
         pdb_age: Option<u32>,
@@ -172,7 +172,7 @@ shapes! {
         kernel_base: Option<VirtAddr>,
     }
 
-    /// The version data of the target (`vertarget`). It contains the build,
+    /// The version data of the target (`vertarget`), with the build,
     /// architecture, kernel, symbols, debugger version, time, and dump
     /// metadata.
     TargetVersion {
@@ -230,8 +230,8 @@ shapes! {
         facility: Option<u32>,
         /// Whether the code is customer-defined (its C bit).
         customer: Option<bool>,
-        /// The Win32 error. This is the code itself, or the Win32 error that
-        /// a `HRESULT_FROM_WIN32` code wraps.
+        /// The Win32 error: the code itself, or the Win32 error that a
+        /// `HRESULT_FROM_WIN32` code wraps.
         win32_code: Option<Hex<u32>>,
         /// The name of that Win32 error.
         win32_name: Option<String>,

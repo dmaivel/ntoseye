@@ -31,7 +31,7 @@ repl_command! {
     names: [".frame", "frame"],
     usage: ".frame [/r] [N]",
     summary: "Select or show a stack frame.",
-    details: "N is a zero-based frame number. It counts inline frames, as k does. /r also shows the recovered registers of the frame. When you select an inline frame, dv, ls, lsa, and local names in expressions use the function that the compiler inlined there. The registers of an inline frame are those of the frame that contains it.",
+    details: "N is a zero-based frame number that counts inline frames, as k does. /r also shows the recovered registers of the frame. When you select an inline frame, dv, ls, lsa, and local names in expressions use the function that the compiler inlined there, and the registers are those of the frame that contains it.",
     completion: Expression,
     run_state: HaltedOrParkedThread,
 }
@@ -41,7 +41,7 @@ repl_command! {
     names: [".fnent"],
     usage: ".fnent <address>",
     summary: "Show the function table entry and unwind info of the function that contains an address.",
-    details: "Shows the RUNTIME_FUNCTION that covers the address (the begin, end, and unwind info RVAs), then its unwind data. On AMD64, the unwind data is the UNWIND_INFO version, flags, prolog size, frame register, and frame offset. It also includes each unwind code with its operands, and the exception or termination handler. After a chained entry, .fnent shows the entry of each parent. On ARM64, .fnent shows the fields of packed unwind data (flag, RegF, RegI, H, CR, frame size) and the prolog codes that they represent. For an .xdata record, it shows the header, the epilog scopes, each unwind code with the instruction that it undoes, and the exception handler. If a function table is paged out, .fnent reads it from the image file on disk.",
+    details: "Shows the RUNTIME_FUNCTION that covers the address (the begin, end, and unwind info RVAs), then its unwind data. On AMD64, the unwind data is the UNWIND_INFO version, flags, prolog size, frame register, and frame offset, each unwind code with its operands, and the exception or termination handler. After a chained entry, .fnent shows the entry of each parent. On ARM64, it shows the fields of packed unwind data (flag, RegF, RegI, H, CR, frame size) and the prolog codes that they represent. For an .xdata record, it shows the header, the epilog scopes, each unwind code with the instruction that it undoes, and the exception handler. If a function table is paged out, .fnent reads it from the image file on disk.",
     completion: Expression,
 }
 
@@ -50,7 +50,7 @@ repl_command! {
     names: [".cxr"],
     usage: ".cxr [address]",
     summary: "Select a CONTEXT record, or reset the selected context.",
-    details: "Without an address, .cxr goes back to the vCPU's own registers. At a stop in the Windows hypervisor, these are the registers of the hypervisor. They do not show where NT left off.",
+    details: "Without an address, .cxr goes back to the vCPU's own registers. At a stop in the Windows hypervisor, these are the registers of the hypervisor, which do not show where NT left off.",
     completion: Expression,
     run_state: Halted,
 }
@@ -68,7 +68,7 @@ repl_command! {
     names: [".vtlcxr"],
     usage: ".vtlcxr",
     summary: "Select the VTL0 context that the Windows hypervisor saved for a vCPU halted in the hypervisor.",
-    details: "Use this command for a vCPU that stopped in the Windows hypervisor (VBS). The command reads the saved state of each VTL of the virtual processor from the Enlightened VMCS page of that VTL. It lists these states and selects the VTL0 state. Then r, k, and u show where NT left off. The VM must expose hv-evmcs. At the first use in each boot, the command scans host RAM for the pages. The context has RIP, RSP, flags, control registers, and segment registers. It has no other general-purpose registers, because the hypervisor keeps them in undocumented state. The command lists the saved VTL1 state but does not select it. A stop in the hypervisor selects the VTL0 state automatically. .cxr goes back to the registers of the hypervisor, and .vtlcxr then selects the VTL0 state again. See 'Where NT left off under the hypervisor' in the VBS guide.",
+    details: "Use this command for a vCPU that stopped in the Windows hypervisor (VBS). It reads the saved state of each VTL of the virtual processor from the Enlightened VMCS page of that VTL, lists these states, and selects the VTL0 state, so that r, k, and u show where NT left off. The VM must expose hv-evmcs, and at the first use in each boot, the command scans host RAM for the pages. The context has RIP, RSP, flags, control registers, and segment registers, but no other general-purpose registers, because the hypervisor keeps them in undocumented state. The command lists the saved VTL1 state but does not select it. A stop in the hypervisor selects the VTL0 state automatically. .cxr goes back to the registers of the hypervisor, and .vtlcxr then selects the VTL0 state again. See 'Where NT left off under the hypervisor' in the VBS guide.",
     run_state: Halted,
 }
 
@@ -85,7 +85,7 @@ repl_command! {
     names: ["r", "registers"],
     usage: "r [register[=expression]]",
     summary: "Show the CPU registers, or set the value of one register.",
-    details: "r shows a 128-bit register (xmm0, ARM64 v0) at full width. To set it, set its 64-bit halves (xmm0l/xmm0h, v0l/v0h). For a vCPU stopped in VTL1, r shows the VTL1 registers as read-only. The .vtl 1 memory view has no registers.",
+    details: "r shows a 128-bit register (xmm0, ARM64 v0) at full width, and you set it through its 64-bit halves (xmm0l/xmm0h, v0l/v0h). For a vCPU stopped in VTL1, r shows the VTL1 registers as read-only. The .vtl 1 memory view has no registers.",
     run_state: HaltedOrParkedThread,
 }
 
@@ -94,7 +94,7 @@ repl_command! {
     names: ["kn", "k", "kb", "kp", "kv", "kf"],
     usage: "kn|k|kb|kp|kv|kf [count]",
     summary: "Show a stack.",
-    details: "kp adds the PDB parameter locations. kv adds the provenance of each frame. kf adds the frame sizes. A call that the compiler inlined is a separate frame with the tag [inline]. This frame is above the frame that contains it, and it shows the addresses of that frame. The inline frame has the name of the inlined function and shows the source line in that function. Its caller shows the line of the call. Frame numbers include inline frames. In kf output, the column after the frame number is the stack memory between the frame and the physical frame before it, in hex. This column is blank for the first frame, for inline frames, and where the walk moves to a different stack.",
+    details: "kp adds the PDB parameter locations, kv adds the provenance of each frame, and kf adds the frame sizes. A call that the compiler inlined is a separate frame with the tag [inline], which is above the frame that contains it and shows the addresses of that frame. The inline frame has the name of the inlined function and shows the source line in that function, and its caller shows the line of the call. Frame numbers include inline frames. In kf output, the column after the frame number is the stack memory between the frame and the physical frame before it, in hex. This column is blank for the first frame, for inline frames, and where the walk moves to a different stack.",
     run_state: HaltedOrParkedThread,
 }
 
@@ -103,7 +103,7 @@ repl_command! {
     names: ["kd"],
     usage: "kd [count]",
     summary: "Show raw stack words from the stack pointer, with the symbol of each value that resolves to one.",
-    details: "kd is the same as `dps @$csp L<count>`. It shows one pointer-sized word on each line, from the stack pointer of the selected frame. The default count is 20 words. Use kd to find return addresses when the unwinder cannot find them.",
+    details: "kd is the same as `dps @$csp L<count>` and shows one pointer-sized word on each line, starting at the stack pointer of the selected frame. The default count is 20 words. Use kd to find return addresses when the unwinder cannot find them.",
     completion: Expression,
     run_state: HaltedOrParkedThread,
 }
@@ -113,7 +113,7 @@ repl_command! {
     names: [".trap", "trap"],
     usage: ".trap [address-expression]",
     summary: "Decode and show a _KTRAP_FRAME.",
-    details: "Without an address, .trap uses the saved trap frame of the current thread. A trap frame does not identify a process. So ntoseye resolves a user-mode frame in the selected process. If the frame address is outside all modules of that process, .trap shows a warning. Before you use .trap, select the thread or process that owns the frame (`.thread`, `.process /p`).",
+    details: "Without an address, .trap uses the saved trap frame of the current thread. Because a trap frame does not identify a process, ntoseye resolves a user-mode frame in the selected process, and shows a warning if the frame address is outside all modules of that process. Before you use .trap, select the thread or process that owns the frame (`.thread`, `.process /p`).",
     completion: Expression,
 }
 

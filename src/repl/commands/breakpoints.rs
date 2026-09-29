@@ -42,7 +42,7 @@ repl_command! {
     names: ["bm"],
     usage: "bm [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set deferred symbolic breakpoints on the symbols that match a pattern.",
-    details: "Only code symbols match. If the pattern also matches data symbols, bm skips them.",
+    details: "Only code symbols match, so bm skips the data symbols that the pattern also matches.",
     completion: Expression,
     run_state: Halted,
 }
@@ -52,7 +52,7 @@ repl_command! {
     names: ["ba"],
     usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a hardware (debug-register) breakpoint.",
-    details: "The access is e=execute, r=read/write, or w=write. The size is 1, 2, 4, or 8 bytes. An execute breakpoint has size 1. The command is not available on a dump or on the `memory` backend. Example: ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye accepts only `ba e1`, and only on GDB backends. This breakpoint is global. You cannot use /p or /t, because they name NT processes and threads. Example: .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g",
+    details: "The access is e=execute, r=read/write, or w=write, and the size is 1, 2, 4, or 8 bytes. An execute breakpoint has size 1. The command is not available on a dump or on the `memory` backend. Example: ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye accepts only `ba e1`, and only on GDB backends. This breakpoint is global, so you cannot use /p or /t, which name NT processes and threads. Example: .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g",
     completion: [None, Expression],
     run_state: Halted,
 }
@@ -70,7 +70,7 @@ repl_command! {
     names: [".bpcmds"],
     usage: ".bpcmds",
     summary: "Print the commands that set the current breakpoints again.",
-    details: "The output has one line for each breakpoint, in ID order. An address breakpoint shows as `bp <address>`. A symbolic or source breakpoint shows as `bu <symbol>` (as `bm` creates it). A hardware breakpoint shows as `ba <access><size> <address>`. Each line also has the /1, /p, /t, and /c options of the breakpoint, its condition (as /w), its pass count, and its command string. To set the same breakpoints again, run the lines. You can paste them, or save them to a file for `$$<`. WinDbg puts a breakpoint ID in each line. These lines have no ID, because the ntoseye bp command does not take one. The new breakpoints get new IDs. A disabled breakpoint comes back enabled.",
+    details: "The output has one line for each breakpoint, in ID order. An address breakpoint shows as `bp <address>`, a symbolic or source breakpoint as `bu <symbol>` (as `bm` creates it), and a hardware breakpoint as `ba <access><size> <address>`. Each line also has the /1, /p, /t, and /c options of the breakpoint, its condition (as /w), its pass count, and its command string. To set the same breakpoints again, run the lines, either by pasting them or by saving them to a file for `$$<`. WinDbg puts a breakpoint ID in each line, but these lines have none because the ntoseye bp command does not take one, so the new breakpoints get new IDs. A disabled breakpoint comes back enabled.",
 }
 
 repl_command! {
@@ -78,7 +78,7 @@ repl_command! {
     names: ["gc"],
     usage: "gc",
     summary: "Resume from the breakpoint that runs the current command string.",
-    details: "Use this command only in the command string of a breakpoint. It stops the command string and resumes the target. You can put it at the end (`bp nt!NtClose \"r rcx; gc\"`) or in a branch (`bp nt!NtClose \"j (@rcx == 0) '' ; 'gc'\"`). The commands after it do not run. A plain `g` in the command string does the same, as in WinDbg scripts. ntoseye does not accept `g <address>` or other run control there.",
+    details: "Use this command only in the command string of a breakpoint, where it stops the command string and resumes the target. You can put it at the end (`bp nt!NtClose \"r rcx; gc\"`) or in a branch (`bp nt!NtClose \"j (@rcx == 0) '' ; 'gc'\"`), and the commands after it do not run. A plain `g` in the command string does the same, as in WinDbg scripts, but ntoseye does not accept `g <address>` or other run control there.",
 }
 
 repl_command! {
@@ -120,7 +120,7 @@ repl_command! {
     names: ["bsc"],
     usage: "bsc <id> <condition> [\"commands\"]",
     summary: "Set the condition and the commands of a breakpoint together.",
-    details: "This is the WinDbg update-conditional-breakpoint command. The breakpoint stops only when <condition> is nonzero. Then it runs the quoted commands. Use semicolons between the commands (`bsc 0 @rcx==4 \"k; g\"`). If you do not give commands, bsc removes the current commands of the breakpoint.",
+    details: "This is the WinDbg update-conditional-breakpoint command. The breakpoint stops only when <condition> is nonzero, and then runs the quoted commands. Use semicolons between the commands (`bsc 0 @rcx==4 \"k; g\"`). If you do not give commands, bsc removes the current commands of the breakpoint.",
     completion: [Breakpoint, Expression],
 }
 

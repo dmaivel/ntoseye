@@ -184,15 +184,14 @@ pub fn view_dict<'py, T: ViewValue<Source = T>>(
 /// Attach to a guest and return a `Debugger`.
 ///
 /// `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
-/// `"dmp"`. `connect` is the backend target. For kd/kdnet/gdb, it is a socket
-/// path or address. For dmp, it is the dump file path. If you do not give
-/// `connect`, the function uses the default of the backend. dmp has no default
-/// and needs a path. kdnet needs `key`. `memory_source` is `auto`, `host`, or
-/// `kd` for KD/KDNET.
+/// `"dmp"`. `connect` is the backend target: a socket path or address for
+/// kd/kdnet/gdb, or the dump file path for dmp. Without `connect`, the function
+/// uses the default of the backend, but dmp has no default and needs a path.
+/// kdnet needs `key`. `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
 ///
 /// For kd/kdnet/gdb, the function takes an instance lock for the target before
-/// it makes the backend. So a second live attach to the same target fails
-/// immediately. It does not interfere with the handshake that the first session
+/// it makes the backend, so a second live attach to the same target fails
+/// immediately without interfering with the handshake that the first session
 /// owns. The memory and dmp backends are passive.
 #[pyfunction]
 #[pyo3(signature = (
@@ -240,9 +239,9 @@ fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, view::meta::Err
     Typed::new(py, view::meta::error_code(&decode_error_code(code)))
 }
 
-/// Run the `ntoseye` command line on `sys.argv` and return its exit status. The
-/// `ntoseye` script of the wheel uses this function. The function releases the
-/// GIL for the full session. Custom commands get the GIL again while they run.
+/// Run the `ntoseye` command line on `sys.argv` and return its exit status, as
+/// the `ntoseye` script of the wheel does. The function releases the GIL for
+/// the full session, and custom commands get the GIL again while they run.
 #[cfg(all(feature = "cli", feature = "python-extension"))]
 #[pyfunction]
 #[pyo3(name = "_cli_main")]

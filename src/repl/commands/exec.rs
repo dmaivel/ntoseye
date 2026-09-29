@@ -23,7 +23,7 @@ repl_command! {
     names: ["g", "continue"],
     usage: "g [address]",
     summary: "Resume VM execution.",
-    details: "With an address, g runs to a temporary breakpoint at that address. In secure-kernel code, this breakpoint uses a debug register, and ntoseye never patches the code. The .vtl 1 memory view accepts only g without an address. g then leaves the view before it resumes the VM. To stop in VTL1, use `ba e1`.",
+    details: "With an address, g runs to a temporary breakpoint at that address. In secure-kernel code, this breakpoint uses a debug register, and ntoseye never patches the code. The .vtl 1 memory view accepts only g without an address, which leaves the view before it resumes the VM. To stop in VTL1, use `ba e1`.",
     completion: Expression,
     run: Run,
 }
@@ -68,7 +68,7 @@ repl_command! {
     names: ["p", "ni"],
     usage: "p or ni",
     summary: "Step over the current instruction.",
-    details: "If the instruction is a call, p runs to the instruction after the call. It stops there only when the thread that you step returns from that call. Other threads that get to the address continue to run. Deeper calls of the same code also continue to run.",
+    details: "If the instruction is a call, p runs to the instruction after the call and stops there only when the thread that you step returns from that call. Other threads that get to the address, and deeper calls of the same code, continue to run.",
     run_state: Halted,
     run: Run,
 }
@@ -78,7 +78,7 @@ repl_command! {
     names: ["gu", "finish"],
     usage: "gu or finish",
     summary: "Run until the current function returns.",
-    details: "gu stops at the return address only when the thread that you step returns from this call. Other threads that get to the address continue to run. Deeper calls of the same function also continue to run.",
+    details: "gu stops at the return address only when the thread that you step returns from this call. Other threads that get to the address, and deeper calls of the same function, continue to run.",
     run_state: Halted,
     run: Run,
 }

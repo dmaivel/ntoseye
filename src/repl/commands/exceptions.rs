@@ -8,7 +8,7 @@ repl_command! {
     names: ["sxe"],
     usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Break when an exception occurs or a kernel module loads.",
-    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxe ld` stops when a kernel image loads. `sxe ld:<module>` stops when that module loads. The module name is case-insensitive, the extension is optional, and you can use `*`/`?` globs. The stop occurs after ntoseye lists the module and arms its deferred breakpoints, and before its entry point runs. `-c` works with `sxe ld`. `-f` does not apply to ld. `sxn ld` prints a `ModLoad:` line and continues. `sxd ld` and `sxi ld` continue with no output. A named filter has precedence over bare `ld`. ntoseye does not support module unload (`ud`) filters.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxe ld` stops when a kernel image loads, and `sxe ld:<module>` stops when that module loads. The module name is case-insensitive, the extension is optional, and you can use `*`/`?` globs. The stop occurs after ntoseye lists the module and arms its deferred breakpoints, and before its entry point runs. `-c` works with `sxe ld`, but `-f` does not apply to ld. `sxn ld` prints a `ModLoad:` line and continues, and `sxd ld` and `sxi ld` continue with no output. A named filter has precedence over bare `ld`. ntoseye does not support module unload (`ud`) filters.",
 }
 
 repl_command! {
@@ -16,7 +16,7 @@ repl_command! {
     names: ["sxd"],
     usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Pass first-chance exceptions and break on second chance.",
-    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxd ld[:<module>]` lets the load continue with no output. See sxe.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxd ld[:<module>]` lets the load continue with no output. See sxe.",
 }
 
 repl_command! {
@@ -24,7 +24,7 @@ repl_command! {
     names: ["sxn"],
     usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Show a notification for exceptions and pass them without a break.",
-    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues. See sxe.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues. See sxe.",
 }
 
 repl_command! {
@@ -32,7 +32,7 @@ repl_command! {
     names: ["sxi"],
     usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Pass exceptions without a break or a notification.",
-    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxi ld[:<module>]` lets the load continue with no output. See sxe.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxi ld[:<module>]` lets the load continue with no output. See sxe.",
 }
 
 repl_command! {

@@ -8,8 +8,8 @@ use crate::trapframe::{KtrapFrame, KtrapFrameData};
 use crate::triage_report::exception_code_name;
 
 shapes! {
-    /// A decoded bugcheck (BSOD). It contains the code, the four parameters,
-    /// and the faulting instruction if ntoseye identified it.
+    /// A decoded bugcheck (BSOD) with the code, the four parameters, and the
+    /// faulting instruction if ntoseye identified it.
     Bugcheck {
         /// The bugcheck code.
         code: u32,
@@ -55,12 +55,12 @@ shapes! {
 
     /// The x64 registers that a `_KTRAP_FRAME` saved. A register is `None` if
     /// the entry that built the frame does not write it. The nonvolatile
-    /// registers r12-r15 are in the `_KEXCEPTION_FRAME`. This type does not
-    /// include them.
+    /// registers r12-r15 are in the `_KEXCEPTION_FRAME`, so this type does
+    /// not include them.
     Amd64TrapFrame {
         /// The entry that built the frame: `interrupt`, `exception`,
-        /// `system call`, or `Zw call`. `None` if the entry is unknown. In
-        /// that case, only the machine frame and rbp are reliable.
+        /// `system call`, or `Zw call`. `None` if the entry is unknown, and
+        /// then only the machine frame and rbp are reliable.
         kind: Option<&'static str>,
         rax: Option<Hex>,
         rbx: Option<Hex>,
@@ -78,17 +78,17 @@ shapes! {
         cs: Hex<u16>,
         ss: Option<Hex>,
         eflags: Hex<u32>,
-        /// The exception error code. The value is stale for a vector that has
-        /// no error code.
+        /// The exception error code, which is stale for a vector that has no
+        /// error code.
         error_code: Option<Hex>,
         /// The mode that the trap came from: 0 for kernel, 1 for user.
         previous_mode: u8,
-        /// The IRQL before the trap. Only interrupts record it.
+        /// The IRQL before the trap, which only interrupts record.
         previous_irql: Option<u8>,
     }
 
     /// The ARM64 registers that a `_KTRAP_FRAME` saved. The frame holds
-    /// x0-x18, fp (x29), and lr (x30). The registers x19-x28 are `None`.
+    /// x0-x18, fp (x29), and lr (x30), so x19-x28 are `None`.
     Arm64TrapFrame {
         x0: Option<Hex>,
         x1: Option<Hex>,
@@ -146,8 +146,8 @@ shapes! {
     /// A decoded `EXCEPTION_RECORD64` (`.exr`).
     ExceptionRecord {
         /// The address that ntoseye read the record from. `None` for the
-        /// record of the current event. ntoseye builds that record from the
-        /// stop and does not read it from memory.
+        /// record of the current event, which ntoseye builds from the stop
+        /// without reading it from memory.
         record_address: Option<Hex>,
         /// The exception code (NTSTATUS).
         code: Hex<u32>,
@@ -172,8 +172,8 @@ shapes! {
         frame: KtrapFrameRegisters,
     }
 
-    /// A trap frame that a bugcheck parameter points to. It contains the
-    /// decoded registers or the reason that decoding failed.
+    /// A trap frame that a bugcheck parameter points to, with its decoded
+    /// registers or the reason that decoding failed.
     BugcheckTrapFrame {
         /// The address that ntoseye read the frame from.
         address: Hex,

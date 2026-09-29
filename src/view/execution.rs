@@ -26,28 +26,26 @@ shapes! {
         context: String,
         /// The nearest symbol to `rip`, if one resolves.
         symbol: Option<String>,
-        /// For a vCPU halted in the Windows hypervisor, the VTL states that
-        /// the hypervisor saved for the virtual processor of the vCPU. The
-        /// VTL0 state is first.
+        /// For a vCPU halted in the Windows hypervisor, the VTL states that the
+        /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
         saved_vtl: Vec<SavedVtlState>,
         /// The reason that the register context is not available. None if it is
         /// available.
         error: Option<String>,
     }
 
-    /// One VTL of a virtual processor, as the Windows hypervisor last saved
-    /// it in the Enlightened VMCS of the VTL. A VMCS holds no general-purpose
-    /// register other than `rsp`.
+    /// One VTL of a virtual processor, as the Windows hypervisor last saved it
+    /// in the VTL's Enlightened VMCS. A VMCS holds no general-purpose register
+    /// other than `rsp`.
     SavedVtlState {
         /// 0 or 1.
         vtl: u8,
-        /// Whether the VP assist page names the eVMCS of this state as
-        /// current. The current VTL is the VTL that entered the hypervisor,
-        /// or the VTL that the hypervisor is about to enter.
+        /// Whether the VP assist page names this state's eVMCS as current. The
+        /// current VTL is the one that entered the hypervisor or that the
+        /// hypervisor is about to enter.
         current: bool,
         rip: VirtAddr,
-        /// The symbol at `rip` in the address space of the VTL, if one
-        /// resolves.
+        /// The symbol at `rip` in the VTL's address space, if one resolves.
         symbol: Option<String>,
         rsp: VirtAddr,
         rflags: Hex,
@@ -64,8 +62,8 @@ shapes! {
         gs: Hex<u16>,
         fs_base: VirtAddr,
         gs_base: VirtAddr,
-        /// The VM-exit reason of the last exit from the VTL. Bits 15:0 hold
-        /// the basic reason. Bit 31 is set for a failed VM entry.
+        /// The VM-exit reason of the last exit from the VTL. Bits 15:0 hold the
+        /// basic reason, and bit 31 is set for a failed VM entry.
         exit_reason: Hex<u32>,
         /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
         /// common reason.
@@ -86,8 +84,8 @@ shapes! {
         resolved: bool,
         /// Whether a symbolic or source specification waits for resolution.
         deferred: bool,
-        /// The symbolic or source specification (`bu`/`bm`). ntoseye keeps it
-        /// when it resolves the breakpoint again.
+        /// The symbolic or source specification (`bu`/`bm`), which ntoseye
+        /// keeps when it resolves the breakpoint again.
         specification: Option<String>,
         /// The display name of the current resolution.
         symbol: Option<String>,
@@ -129,23 +127,23 @@ shapes! {
         /// The nearest symbol to `rip` when halted. For code outside NT, the
         /// name identifies that code (`hvix64+0x3a6bde`).
         symbol: Option<String>,
-        /// For a vCPU halted in the Windows hypervisor, the VTL states that
-        /// the hypervisor saved for the virtual processor of the vCPU. The
-        /// VTL0 state is first.
+        /// For a vCPU halted in the Windows hypervisor, the VTL states that the
+        /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
         saved_vtl: Vec<SavedVtlState>,
-        /// The process that you selected with `.process`. `dt`, `dq`, ...
-        /// read its memory. The selection stays after the target resumes.
+        /// The process that you selected with `.process`. `dt`, `dq`, and
+        /// similar commands read its memory, and the selection stays after the
+        /// target resumes.
         attached_process: Option<ProcessIdentity>,
         /// The process whose page tables the stopped vCPU has loaded.
         stopped_process: Option<ProcessIdentity>,
         /// The Windows thread that the stopped vCPU runs. Its owner can be
         /// different from `stopped_process` (`KeStackAttachProcess`).
         stopped_thread: Option<ThreadSummary>,
-        /// False after a reboot until the loaded-module list of the kernel
-        /// exists. Until then, process and module enumeration is not valid.
+        /// False after a reboot until the kernel's loaded-module list exists,
+        /// and process and module enumeration is not valid until then.
         coherent: bool,
-        /// The `nt` base that ntoseye finds again after a reboot. The value
-        /// changes across a reboot.
+        /// The `nt` base, which ntoseye finds again after a reboot because the
+        /// base changes across a reboot.
         kernel_base: Hex,
     }
 
@@ -160,14 +158,14 @@ shapes! {
         /// The symbol at `ip`. Empty if no symbol resolves.
         symbol: String,
         /// True for a call that the compiler inlined into the physical frame
-        /// after it. This call has no stack frame of its own. `symbol` is the
+        /// after it, so the call has no stack frame of its own. `symbol` is the
         /// inlined function, and `ip` and `sp` are those of the physical frame.
         inline: bool,
         /// How ntoseye recovered the frame: `current`, `seed`, `unwind`, or `scan`.
         source: &'static str,
         /// The source line of the frame, if line information resolves it. For
-        /// an inline frame, this is the line in the inlined function. For a
-        /// caller, it is the line of the call.
+        /// an inline frame this is the line in the inlined function, and for a
+        /// caller it is the line of the call.
         source_location: Option<super::symbols::SourceLocation>,
     }
 
@@ -196,8 +194,8 @@ shapes! {
         incomplete: Option<String>,
     }
 
-    /// One function-table entry and its unwind data. Addresses are absolute.
-    /// The `*_rva` fields are the raw image-relative values.
+    /// One function-table entry and its unwind data. Addresses are absolute,
+    /// and the `*_rva` fields hold the raw image-relative values.
     RuntimeFunction {
         begin: Hex,
         end: Hex,
@@ -229,9 +227,9 @@ shapes! {
         frame_register: Option<&'static str>,
         /// The frame pointer's offset from the stack pointer, in bytes.
         frame_offset: u32,
-        /// The size of the structure in bytes: the header, the codes, and the
-        /// handler RVA or the chained entry. It does not include the data of
-        /// the handler.
+        /// The size of the structure in bytes, covering the header, the codes,
+        /// and the handler RVA or the chained entry, but not the handler's
+        /// data.
         size: usize,
         codes: Vec<Amd64UnwindCode>,
         /// The exception or termination handler, for `UNW_FLAG_EHANDLER` or
@@ -243,7 +241,7 @@ shapes! {
     Amd64UnwindCode {
         /// The index of the first slot of the code.
         slot: usize,
-        /// The offset in the prolog of the end of the instruction that the code
+        /// The prolog offset of the end of the instruction that the code
         /// undoes.
         code_offset: u8,
         /// The `UWOP_*` operation.
@@ -326,9 +324,9 @@ shapes! {
     /// and the call tree.
     CallTrace {
         /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
-        /// `failed`. `diverted` means that an interrupt diverted a step, and
-        /// the traced thread is not known. Any value other than `returned`
-        /// means that the tree is partial.
+        /// `failed`. `diverted` means that an interrupt diverted a step and the
+        /// traced thread is not known. Any value other than `returned` means
+        /// that the tree is partial.
         end: &'static str,
         /// A description of the failure, for `failed`.
         error: Option<String>,

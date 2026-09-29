@@ -25,7 +25,8 @@ use crate::view::mm::py::MemoryRegion;
 use crate::view::shape::Typed;
 
 /// The running processes, with their PIDs as keys (`dbg.processes`). Each
-/// iteration reads the process list again. `find(name)` matches image names.
+/// iteration reads the process list again, and `find(name)` matches image
+/// names.
 #[pyclass(module = "ntoseye")]
 pub struct Processes {
     pub owner: Owner,
@@ -48,7 +49,7 @@ impl Processes {
     }
 }
 
-/// One process. It has identity fields and views bound to its address space.
+/// One process, with identity fields and views bound to its address space.
 #[pyclass(module = "ntoseye")]
 pub struct Process {
     pub owner: Owner,
@@ -107,8 +108,7 @@ impl Processes {
             .find(|process| process.info.pid == pid))
     }
 
-    /// Find all processes whose image name is an exact match. The match is not
-    /// case-sensitive.
+    /// Find all processes whose image name is an exact match, ignoring case.
     fn find(&self, py: Python<'_>, name: &str) -> PyResult<Vec<Process>> {
         Ok(self
             .snapshot(py)?
@@ -325,9 +325,9 @@ impl Process {
     }
 
     /// Get the stacks that handle tracing recorded for the handles of this
-    /// process, newest first (`!htrace`). If you give `handle`, you get only
-    /// the stacks of that handle. You get a maximum of `max_traces` stacks.
-    /// `debug_info` is `None` if tracing is off for the process.
+    /// process, newest first and at most `max_traces` of them (`!htrace`). If
+    /// you give `handle`, you get only the stacks of that handle. `debug_info`
+    /// is `None` if tracing is off for the process.
     #[pyo3(signature = (handle=None, max_traces=None))]
     fn handle_traces<'py>(
         &self,
@@ -555,8 +555,8 @@ impl Heap {
         Ok(self.address.0)
     }
 
-    /// Decode this heap (`!heap -h`). If `list_entries` is true, the result
-    /// includes the entries.
+    /// Decode this heap (`!heap -h`), with its entries if `list_entries` is
+    /// true.
     #[pyo3(signature = (list_entries=false))]
     fn inspect<'py>(
         &self,

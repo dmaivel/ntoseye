@@ -10,7 +10,7 @@ repl_command! {
     names: [".vtl"],
     usage: ".vtl [0|1 [pid]]",
     summary: "Select NT (VTL0) or secure-kernel (VTL1) memory inspection, or show which one is active.",
-    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes the scope of reads and symbols. It does not change the VTL of the CPU. With no argument, `.vtl` shows the current scope. `.vtl 0` goes back to the NT kernel. At a stop in VTL1 or in the Windows hypervisor, `.vtl 0` goes back to the address space of the vCPU. There, use `.vtlcxr` or `.thread` to select NT. `.vtl 1` selects the system address space of the secure kernel. `.vtl 1 <pid>` selects the address space of a trustlet by its NT PID. This PID is always decimal. The VTL1 scope is a read-only memory view. Registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends). Then resume with a plain `g`. This `g` first goes back to the live context. A vCPU stopped in VTL1 shows its real registers, stack, and memory. With no argument, `.vtl` also shows if reads follow such a live stop or the manual view.",
+    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes the scope of reads and symbols, but does not change the VTL of the CPU. With no argument, `.vtl` shows the current scope. `.vtl 0` goes back to the NT kernel or, at a stop in VTL1 or in the Windows hypervisor, to the address space of the vCPU, where you use `.vtlcxr` or `.thread` to select NT. `.vtl 1` selects the system address space of the secure kernel, and `.vtl 1 <pid>` selects the address space of a trustlet by its NT PID, which is always decimal. The VTL1 scope is a read-only memory view, so registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends), and then resume with a plain `g`, which first goes back to the live context. A vCPU stopped in VTL1 shows its real registers, stack, and memory. With no argument, `.vtl` also shows whether reads follow such a live stop or the manual view.",
 }
 
 repl_command! {
@@ -18,7 +18,7 @@ repl_command! {
     names: ["!trustlets"],
     usage: "!trustlets",
     summary: "List the validated VTL1 processes with their NT identities and address-space roots.",
-    details: "Reads SkpsProcessList through the page tables of the secure kernel. Each row shows the secure-kernel process object, the NT PID and image name, the trustlet ID, and the address-space root. If the internal layout is not supported, the command gives an error. It does not guess offsets. The command does not change the scope.",
+    details: "Reads SkpsProcessList through the page tables of the secure kernel. Each row shows the secure-kernel process object, the NT PID and image name, the trustlet ID, and the address-space root. If the internal layout is not supported, the command gives an error and does not guess offsets. The command does not change the scope.",
 }
 
 /// Commands that only read memory through the current root or are

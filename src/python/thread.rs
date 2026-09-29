@@ -92,7 +92,8 @@ impl Threads {
 
 #[pymethods]
 impl Threads {
-    /// Get the thread with a TID. Raises `KeyError` if no thread has that TID.
+    /// Get the thread with a TID, or raise `KeyError` if no thread has that
+    /// TID.
     fn __getitem__(&self, py: Python<'_>, tid: u64) -> PyResult<Thread> {
         self.by_tid(py, tid)?
             .ok_or_else(|| PyKeyError::new_err(tid))
@@ -134,7 +135,7 @@ impl Threads {
     }
 }
 
-/// One Windows thread. Its ETHREAD address identifies it in a debugger.
+/// One Windows thread, identified in a debugger by its ETHREAD address.
 #[pyclass(module = "ntoseye")]
 pub struct Thread {
     pub owner: Owner,
@@ -523,9 +524,9 @@ impl Frame {
             .map(|info| Thread::from_owner(self.owner.derive(py), info)))
     }
 
-    /// The registers of the frame. For the innermost frame of a running thread,
-    /// this is the live register file (writable). For other frames, it is the
-    /// recovered subset (read-only).
+    /// The registers of the frame: the live register file (writable) for the
+    /// innermost frame of a running thread, and the recovered subset
+    /// (read-only) for other frames.
     #[getter]
     fn registers(&self, py: Python<'_>) -> PyResult<Registers> {
         self.owner.check(py)?;
@@ -726,8 +727,8 @@ impl Registers {
     }
 }
 
-/// The processors of the target, in backend vCPU order (`dbg.cpus`). To list
-/// them, the target must be halted.
+/// The processors of the target, in backend vCPU order (`dbg.cpus`). The target
+/// must be halted to list them.
 #[pyclass(module = "ntoseye")]
 pub struct Cpus {
     pub owner: Owner,
@@ -788,7 +789,7 @@ impl Cpus {
     }
 }
 
-/// One processor. Its backend vCPU ID (for example, `"p1.1"`) identifies it.
+/// One processor, identified by its backend vCPU ID (for example, `"p1.1"`).
 #[pyclass(module = "ntoseye")]
 pub struct Cpu {
     pub owner: Owner,
@@ -832,7 +833,7 @@ impl Cpu {
         Ok(self.id.clone())
     }
 
-    /// The instruction pointer. The target must be halted.
+    /// The instruction pointer, which needs a halted target.
     #[getter]
     fn rip(&self, py: Python<'_>) -> PyResult<Option<u64>> {
         Ok(self.current_info(py)?.rip)
@@ -845,10 +846,10 @@ impl Cpu {
     }
 
     /// The VTL states that the hypervisor saved for this virtual processor
-    /// (`.vtlcxr`). This applies to a vCPU halted in the Windows hypervisor
-    /// (VBS). VTL0 comes first. Each state has the point where the VTL stopped,
-    /// its control and segment registers, and the last exit that it took. This
-    /// needs `hv-evmcs` on the VM. The list is empty without it, or if the
+    /// (`.vtlcxr`), for a vCPU halted in the Windows hypervisor (VBS). VTL0
+    /// comes first, and each state has the point where the VTL stopped, its
+    /// control and segment registers, and the last exit that it took. This
+    /// needs `hv-evmcs` on the VM, and the list is empty without it or if the
     /// saved state does not pass validation.
     #[getter]
     fn saved_vtl<'py>(
@@ -866,9 +867,9 @@ impl Cpu {
     }
 
     /// Memory through the page tables that this processor has loaded (its CR3)
-    /// at the time of the read. These are the kernel's or a process's tables,
-    /// a VTL1 root (read-only), or a root outside NT (read-only). For example,
-    /// a vCPU halted in the Windows hypervisor uses the hypervisor's root.
+    /// at the time of the read. These are the kernel's or a process's tables, a
+    /// VTL1 root (read-only), or a root outside NT (read-only), such as the
+    /// hypervisor's root on a vCPU halted in the Windows hypervisor.
     #[getter]
     fn memory(&self, py: Python<'_>) -> PyResult<Memory> {
         let context = self.context();

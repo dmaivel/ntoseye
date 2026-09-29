@@ -197,7 +197,7 @@ shapes! {
     }
 
     /// The exited processes and terminated threads that still have references
-    /// (`!zombies`). ntoseye finds them with a scan of nonpaged pool.
+    /// (`!zombies`), which ntoseye finds with a scan of nonpaged pool.
     Zombies {
         /// `None` if the flags did not ask for processes.
         processes: Option<Vec<ZombieProcess>>,

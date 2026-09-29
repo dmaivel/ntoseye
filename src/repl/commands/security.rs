@@ -19,7 +19,7 @@ repl_command! {
     names: ["!sd", "sd"],
     usage: "!sd <address> [1]",
     summary: "Decode a SECURITY_DESCRIPTOR and its ACLs.",
-    details: "Decodes a self-relative or absolute security descriptor. The optional 1 adds the names of well-known SIDs. The command decodes each SID and each ACE separately.",
+    details: "Decodes a self-relative or absolute security descriptor, and decodes each SID and each ACE separately. The optional 1 adds the names of well-known SIDs.",
     completion: [Expression, None],
 }
 
@@ -53,7 +53,7 @@ repl_command! {
     names: ["!session", "session"],
     usage: "!session [-s <id>]",
     summary: "List the sessions and the processes in each session.",
-    details: "The command reads session IDs from _EPROCESS.Session and _MM_SESSION_SPACE. If session space is opaque, it gets the ID from the primary token. Use -s -1 for the current session. The process walk stops at 4096 entries.",
+    details: "The command reads session IDs from _EPROCESS.Session and _MM_SESSION_SPACE, or from the primary token if session space is opaque. Use -s -1 for the current session. The process walk stops at 4096 entries.",
     completion: [None, Expression],
 }
 
@@ -62,7 +62,7 @@ repl_command! {
     names: ["!sprocess", "sprocess"],
     usage: "!sprocess [session] [flags] [image]",
     summary: "List the processes in a session.",
-    details: "The session is a signed decimal number. -1 and -2 select the current session, and -4 selects all sessions. If you do not give a session, the command uses the session of the attached process, if it is known. Flags default to 0 (brief output). Any non-zero value selects detailed output. The optional image argument is a glob that ignores case.",
+    details: "The session is a signed decimal number. -1 and -2 select the current session, and -4 selects all sessions. If you do not give a session, the command uses the session of the attached process, if it is known. Flags default to 0 (brief output), and any non-zero value selects detailed output. The optional image argument is a glob that ignores case.",
     completion: [Expression, Expression, None],
 }
 

@@ -23,7 +23,7 @@ shapes! {
         well_known: Option<String>,
     }
 
-    /// An ACE in an ACL. ntoseye reads the mask and the SID separately. So a
+    /// An ACE in an ACL. ntoseye reads the mask and the SID separately, so a
     /// damaged body does not hide the type and flags of the header.
     Ace {
         /// The position of the ACE in the ACL.
@@ -44,11 +44,11 @@ shapes! {
         /// The size in bytes.
         size: u16,
         ace_count: u16,
-        /// Whether `ace_count` is more than the decoder limit. If true, `aces`
-        /// contains only the first ACEs.
+        /// Whether `ace_count` is more than the decoder limit, in which case
+        /// `aces` contains only the first ACEs.
         bounded: bool,
-        /// Whether the decoder does not recognize `revision`. If true, `aces` is
-        /// empty.
+        /// Whether the decoder does not recognize `revision`, in which case
+        /// `aces` is empty.
         unknown_revision: bool,
         aces: Vec<Ace>,
     }
@@ -80,8 +80,8 @@ shapes! {
         object: VirtAddr,
         /// The `_OBJECT_HEADER`.
         header: VirtAddr,
-        /// `SecurityDescriptor`, a fast reference. The low bits hold a reference
-        /// count.
+        /// `SecurityDescriptor`, a fast reference whose low bits hold a
+        /// reference count.
         fast_reference: Hex,
         /// `fast_reference` without its count bits.
         descriptor_address: VirtAddr,
@@ -152,7 +152,7 @@ shapes! {
         token_id: Diag<Hex>,
         /// The LUID of the logon session.
         authentication_id: Diag<Hex>,
-        /// `TOKEN_TYPE`. 1 is primary, 2 is impersonation.
+        /// `TOKEN_TYPE`: 1 is primary, 2 is impersonation.
         token_type: Diag<u32>,
         /// `SECURITY_IMPERSONATION_LEVEL`.
         impersonation_level: Diag<u32>,

@@ -46,8 +46,8 @@ shapes! {
         log_header: Option<VirtAddr>,
         /// `FxVerifierOn`.
         verifier_on: bool,
-        /// The parts of the globals that failed validation. The related fields
-        /// are `None`.
+        /// The parts of the globals that failed validation, whose related
+        /// fields are `None`.
         problems: Vec<String>,
     }
 
@@ -125,7 +125,7 @@ shapes! {
         type_value: Hex<u16>,
         /// Its `FX_OBJECT_TYPES` name.
         type_name: String,
-        /// `m_ObjectSize`. The size of the object and its extra bytes.
+        /// `m_ObjectSize`: the size of the object and its extra bytes.
         object_size: Hex<u16>,
         refcount: i32,
         /// `m_ObjectState` (`FxObjectState`).
@@ -323,8 +323,8 @@ shapes! {
         /// Whether the records have timestamps ('L2').
         use_timestamps: bool,
         records: Vec<WdfLogRecord>,
-        /// Why the walk ended. One of `empty`, `first_record`, `overwritten`,
-        /// or `corrupt`.
+        /// Why the walk ended: `empty`, `first_record`, `overwritten`, or
+        /// `corrupt`.
         end: &'static str,
         /// The item that failed validation, when `end` is `corrupt`.
         corruption: Option<String>,

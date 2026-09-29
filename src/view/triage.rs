@@ -34,8 +34,8 @@ shapes! {
         parameters: Vec<Hex>,
     }
 
-    /// The system that a crash dump comes from. The data comes from the
-    /// system-info stream of the dump.
+    /// The system that a crash dump comes from, as the system-info stream of
+    /// the dump records it.
     DumpSystemInfo {
         major_version: u32,
         /// The build number (the stream's minor version).
@@ -86,8 +86,8 @@ shapes! {
         vendor_string: String,
     }
 
-    /// A deterministic identity for a failure. It does not depend on
-    /// addresses. Use it to compare failures.
+    /// A deterministic identity for a failure that does not depend on
+    /// addresses, so you can use it to compare failures.
     FailureSignature {
         /// `bugcheck` or `exception`.
         code_kind: &'static str,
@@ -174,8 +174,7 @@ shapes! {
         severity: u32,
         /// The record's length in bytes.
         length: u32,
-        /// The number of sections in the record. `sections` holds a maximum
-        /// of 64.
+        /// The number of sections in the record. `sections` holds at most 64.
         sections_total: usize,
         sections: Vec<WheaSection>,
     }
@@ -195,8 +194,8 @@ shapes! {
         kind: &'static str,
     }
 
-    /// A blackbox stream (pnp, ntfs, bsd, winlogon) of a crash dump. ntoseye
-    /// does not parse its payload.
+    /// A blackbox stream (pnp, ntfs, bsd, winlogon) of a crash dump, whose
+    /// payload ntoseye does not parse.
     BlackboxStream {
         /// `pnp`, `ntfs`, `bsd`, or `winlogon`.
         kind: &'static str,
@@ -223,9 +222,9 @@ shapes! {
         end_address: Hex,
     }
 
-    /// The one-shot crash triage report (`!analyze`). It contains the run
-    /// status, the bugcheck or exception, the backtrace, the modules, the dump
-    /// records, and the findings.
+    /// The one-shot crash triage report (`!analyze`), with the run status, the
+    /// bugcheck or exception, the backtrace, the modules, the dump records,
+    /// and the findings.
     TriageReport {
         /// The target's run status.
         status: super::execution::RunStatus,
@@ -238,7 +237,7 @@ shapes! {
         /// The stack of the current thread. `None` while the target runs or
         /// if the unwind failed (see `warnings`).
         backtrace: Option<Vec<super::execution::StackFrame>>,
-        /// The loaded modules. The caller sets the maximum number (see
+        /// The loaded modules, up to a maximum that the caller sets (see
         /// `modules_total`).
         modules: Vec<super::module::LoadedModule>,
         /// The number of loaded modules.
@@ -262,8 +261,8 @@ shapes! {
         /// The hardware error record of a WHEA bugcheck.
         whea: Option<WheaFinding>,
         blackboxes: Vec<BlackboxStream>,
-        /// Failures in best-effort data collection. These failures did not
-        /// stop the report.
+        /// Failures in best-effort data collection that did not stop the
+        /// report.
         warnings: Vec<String>,
     }
 }

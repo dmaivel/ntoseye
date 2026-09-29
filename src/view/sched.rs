@@ -211,8 +211,7 @@ shapes! {
         /// The frames, innermost first. Level 0 has the top frame, level 1 has
         /// up to 32 frames, and level 2 has up to 64 frames.
         frames: Vec<execution::StackFrame>,
-        /// The number of frames after the walk limit. These frames are not
-        /// listed.
+        /// The number of frames past the walk limit, which are not listed.
         truncated: usize,
         /// The error, if the stack walk failed.
         error: Option<String>,
@@ -220,7 +219,8 @@ shapes! {
 
     /// Threads with their states and stacks (`!stacks`).
     ThreadStacks {
-        /// The detail level (0, 1, or 2). It sets the frame limit of the walk.
+        /// The detail level (0, 1, or 2), which sets the frame limit of the
+        /// walk.
         level: u8,
         /// The symbol or module filter, if you gave one.
         filter: Option<String>,
@@ -231,8 +231,8 @@ shapes! {
         threads: Vec<ThreadStack>,
     }
 
-    /// A thread whose stack walk failed. ntoseye could not search or group
-    /// this thread.
+    /// A thread whose stack walk failed, so ntoseye could not search or group
+    /// it.
     UnwalkedThread {
         thread: ThreadSummary,
         /// The reason the walk failed.
@@ -248,8 +248,8 @@ shapes! {
         matching_frames: Option<Vec<execution::StackFrame>>,
         /// The whole walked stack, innermost first. `None` below level 2.
         frames: Option<Vec<execution::StackFrame>>,
-        /// The number of frames after the walk limit. ntoseye did not search
-        /// these frames. `None` below level 2.
+        /// The number of frames past the walk limit, which ntoseye did not
+        /// search. `None` below level 2.
         truncated: Option<usize>,
     }
 
@@ -337,8 +337,8 @@ shapes! {
         /// The number of items on all 32 priority lists, including items that
         /// are not listed.
         pending: u64,
-        /// The priority lists that hold items or have running threads. Only the
-        /// requested priorities are included.
+        /// The priority lists that hold items or have running threads, limited
+        /// to the requested priorities.
         priorities: Vec<WorkQueuePriority>,
         threads: Vec<WorkerThread>,
         /// How the worker-thread list walk ended.
@@ -362,11 +362,11 @@ shapes! {
         thread_count: usize,
         threads: Vec<ThreadSummary>,
         /// The frames of the first thread, innermost first. The other threads
-        /// have the same instruction pointers. Their stack pointers can be
-        /// different.
+        /// have the same instruction pointers, but their stack pointers can
+        /// differ.
         frames: Vec<execution::StackFrame>,
-        /// The number of frames after the walk limit. ntoseye did not compare
-        /// these frames.
+        /// The number of frames past the walk limit, which ntoseye did not
+        /// compare.
         truncated: usize,
     }
 

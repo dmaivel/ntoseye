@@ -22,7 +22,7 @@ repl_command! {
     names: ["!job", "job"],
     usage: "!job [address [flags]]",
     summary: "Show a job object and the processes in it.",
-    details: "Shows a job object. The address can be a job, a process, or a thread. For a process or thread, the command shows its job. If you do not give an address, or give 0, the command shows the job of the current process. Flag 1 (the default) shows the accounting, limits, and flags of the job. Flag 1 also shows the child jobs, the parent and root job, and the silo state. Flag 2 lists the processes assigned to the job (from ProcessListHead).",
+    details: "Shows a job object. The address can be a job, or a process or thread, for which the command shows its job. If you do not give an address, or give 0, the command shows the job of the current process. Flag 1 (the default) shows the accounting, limits, and flags of the job, and also the child jobs, the parent and root job, and the silo state. Flag 2 lists the processes assigned to the job (from ProcessListHead).",
     completion: Expression,
 }
 
@@ -31,7 +31,7 @@ repl_command! {
     names: ["!gflag", "gflag"],
     usage: "!gflag [[+|-]value | {+|-}abbreviation | -?]",
     summary: "Show or change nt!NtGlobalFlag, and show the PEB flags of the current process.",
-    details: "Without an argument, the command decodes nt!NtGlobalFlag and the _PEB.NtGlobalFlag of the current process. It shows the bits by their GFlags names. `+` sets bits and `-` clears bits. The bits come from a value, or from one flag that you name by its three-letter abbreviation (`!gflag +ust`). A value without `+` or `-` replaces nt!NtGlobalFlag. Each change is one 4-byte write to nt!NtGlobalFlag, the same write that `ed` makes. The command does not change the PEB copy. `-?` lists the flags and their abbreviations.",
+    details: "Without an argument, the command decodes nt!NtGlobalFlag and the _PEB.NtGlobalFlag of the current process and shows the bits by their GFlags names. `+` sets bits and `-` clears bits, from a value or from one flag that you name by its three-letter abbreviation (`!gflag +ust`). A value without `+` or `-` replaces nt!NtGlobalFlag. Each change is one 4-byte write to nt!NtGlobalFlag, the same write that `ed` makes, and the command does not change the PEB copy. `-?` lists the flags and their abbreviations.",
     completion: Expression,
 }
 
@@ -40,7 +40,7 @@ repl_command! {
     names: ["!zombies", "zombies"],
     usage: "!zombies [flags]",
     summary: "List exited processes and threads that still have references.",
-    details: "Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects. The command finds the header of each object by its decoded type. It lists the processes that have ExitTime set and the threads in the Terminated state. For each object, it shows the handle count and the pointer count. These counts show what keeps the object in memory. Flag 1 (the default) lists processes, 2 lists threads, and 3 lists both. The scan stops after 4096 processes or 4096 threads, or when you push Ctrl+C.",
+    details: "Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects, and finds the header of each object by its decoded type. The command lists the processes that have ExitTime set and the threads in the Terminated state. For each object, it shows the handle count and the pointer count, which show what keeps the object in memory. Flag 1 (the default) lists processes, 2 lists threads, and 3 lists both. The scan stops after 4096 processes or 4096 threads, or when you press Ctrl+C.",
     completion: Expression,
 }
 
@@ -49,7 +49,7 @@ repl_command! {
     names: ["!htrace", "htrace"],
     usage: "!htrace [handle [process [max-traces]]]",
     summary: "Show the stacks that handle tracing recorded for the handles of a process.",
-    details: "Reads the ring of traces (open, close, bad reference) in the DebugInfo of the process handle table. The command shows the newest trace first. If handle is 0 or not given, the command shows the traces of all handles. If max-traces is 0 or not given, it shows all traces. The process can be an EPROCESS address, a PID, or a name. The default is the current process. Handle tracing must be on for the process before you use the command. Tracing is on after the Handles check of Application Verifier, or after NtSetInformationProcess(ProcessHandleTracing). If tracing is off, !htrace shows a message. User-mode frames resolve after the modules of the process are loaded (.process /p). The command does not have the user-mode forms that change tracing (-enable, -disable, -snapshot, -diff).",
+    details: "Reads the ring of traces (open, close, bad reference) in the DebugInfo of the process handle table and shows the newest trace first. If handle is 0 or not given, the command shows the traces of all handles, and if max-traces is 0 or not given, it shows all traces. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. Handle tracing must be on for the process before you use the command. Tracing is on after the Handles check of Application Verifier, or after NtSetInformationProcess(ProcessHandleTracing), and if it is off, !htrace shows a message. User-mode frames resolve after the modules of the process are loaded (.process /p). The command does not have the user-mode forms that change tracing (-enable, -disable, -snapshot, -diff).",
     completion: Expression,
 }
 
@@ -58,7 +58,7 @@ repl_command! {
     names: ["!alpc", "alpc"],
     usage: "!alpc /p <port> | /m <message> | /lpp [process]",
     summary: "Show an ALPC port, an ALPC message, or the ports that a process holds.",
-    details: "/p decodes an _ALPC_PORT from its object body or header. It shows the kind, owner, and state flags of the port. It also shows the connection, server, and client ports of its communication info. It shows the queues of the port and the messages on them. For the wait queue, it shows the threads. For a connection port, /p also lists the connections. /m decodes a _KALPC_MESSAGE. It shows the IDs, type, sizes, and state of the message, and its owner and queue ports. It also shows the waiting and server threads. /lpp walks the handle table of a process to find ALPC ports. The process can be an EPROCESS address, a PID, or a name. The default is the current process. /lpp first shows the connection ports that the process owns. For each connection, it shows the server and client ports and the client process. Then /lpp shows the ports that the process is connected to. The number after a port is the count of its queued messages in the main, large-message, and pending queues.",
+    details: "/p decodes an _ALPC_PORT from its object body or header. It shows the kind, owner, and state flags of the port, and the connection, server, and client ports of its communication info. It also shows the queues of the port with the messages on them, and the threads on the wait queue. For a connection port, /p also lists the connections. /m decodes a _KALPC_MESSAGE and shows the IDs, type, sizes, and state of the message, its owner and queue ports, and the waiting and server threads. /lpp walks the handle table of a process to find ALPC ports. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. /lpp first shows the connection ports that the process owns and, for each connection, the server and client ports and the client process. Then it shows the ports that the process is connected to. The number after a port is the count of its queued messages in the main, large-message, and pending queues.",
     completion: Expression,
 }
 

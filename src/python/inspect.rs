@@ -79,11 +79,11 @@ impl Inspect {
         })
     }
 
-    /// Scan pool for the allocations of `IoAllocateIrp` to find IRPs
-    /// (`!irpfind`). `pool_type` is `"nonpaged"` or `"paged"`. `restart`
+    /// Find IRPs by scanning pool for the allocations of `IoAllocateIrp`
+    /// (`!irpfind`). `pool_type` is `"nonpaged"` or `"paged"`, and `restart`
     /// continues the scan from an address. `criteria` is one of the WinDbg
     /// criteria (`"arg"`, `"device"`, `"fileobject"`, `"mdlprocess"`,
-    /// `"thread"`, `"userevent"`). The scan matches it against `value`.
+    /// `"thread"`, `"userevent"`), which the scan matches against `value`.
     #[pyo3(signature = (pool_type="nonpaged", restart=None, criteria=None, value=0))]
     fn irp_find<'py>(
         &self,
@@ -116,7 +116,7 @@ impl Inspect {
     }
 
     /// Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
-    /// connection, state, and queues. For a connection port, it also has the
+    /// connection, state, and queues, and for a connection port also its
     /// connections. `address` is the body or the header of the port object.
     fn alpc_port<'py>(
         &self,
@@ -146,7 +146,7 @@ impl Inspect {
 
     /// Get the ALPC ports to which a process has handles (`!alpc /lpp`). The
     /// result has the connection ports that the process owns, with their
-    /// connections. It also has the client ports through which the process is
+    /// connections, and the client ports through which the process is
     /// connected. `process` defaults to the current process.
     #[pyo3(signature = (process=None))]
     fn alpc_process_ports<'py>(
@@ -188,8 +188,8 @@ impl Inspect {
 
     /// Decode a job object (`!job`). The result has the accounting, limits,
     /// flags, nesting, and the processes that are assigned to the job.
-    /// `address` is the job, or a process or thread whose job to decode. `None`
-    /// selects the job of the current process.
+    /// `address` is the job or a process or thread whose job to decode, and
+    /// `None` selects the job of the current process.
     #[pyo3(signature = (address=None))]
     fn job<'py>(
         &self,
@@ -204,9 +204,9 @@ impl Inspect {
         })
     }
 
-    /// Find exited processes and terminated threads that still have references
-    /// to their objects (`!zombies`). The function scans nonpaged pool to find
-    /// them. `flags`: 1 for processes, 2 for threads, 3 for both.
+    /// Scan nonpaged pool for exited processes and terminated threads that
+    /// still have references to their objects (`!zombies`). `flags` is 1 for
+    /// processes, 2 for threads, or 3 for both.
     #[pyo3(signature = (flags=1))]
     fn zombies<'py>(
         &self,
@@ -220,8 +220,8 @@ impl Inspect {
         })
     }
 
-    /// Decode an executive object header, and resolve the type and name of the
-    /// object (`!object`). For a directory, also list its entries. `object` is
+    /// Decode an executive object header and resolve the type and name of the
+    /// object, also listing the entries of a directory (`!object`). `object` is
     /// the address of the object, or its path in the object namespace
     /// (`"\\Driver\\ACPI"`).
     fn object<'py>(
@@ -405,11 +405,11 @@ impl Inspect {
         })
     }
 
-    /// Read and decode PCI configuration space (`!pci`). The function reads the
-    /// functions on `bus` (through `last_bus`), or one `device` and `function`.
-    /// It reads all 4 KiB of each function, with the extended capabilities.
-    /// `raw` adds the data as hex. This function needs a halted target and a
-    /// backend that can get to configuration space (kd/kdnet, or gdb on QEMU).
+    /// Read and decode PCI configuration space (`!pci`) for the functions on
+    /// `bus` (through `last_bus`), or for one `device` and `function`. It reads
+    /// all 4 KiB of each function, with the extended capabilities, and `raw`
+    /// adds the data as hex. This needs a halted target and a backend that can
+    /// get to configuration space (kd/kdnet, or gdb on QEMU).
     #[pyo3(signature = (bus=0, device=None, function=None, *, last_bus=None, raw=false))]
     fn pci<'py>(
         &self,
@@ -441,7 +441,7 @@ impl Inspect {
 
     /// Get the executive worker queues, their pending work items, and their
     /// worker threads (`!exqueue`). `include_stacks` adds the stack of each
-    /// worker. `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`)
+    /// worker, and `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`)
     /// limits the listed items to the priorities of those types.
     #[pyo3(signature = (include_stacks=false, queue_types=None))]
     fn work_queues<'py>(
@@ -555,9 +555,8 @@ impl Inspect {
         })
     }
 
-    /// Group threads by identical call stacks (`!uniqstack`). By default, the
-    /// function uses all threads. `process` limits it to the threads of one
-    /// process.
+    /// Group threads by identical call stacks (`!uniqstack`), using all threads
+    /// unless `process` limits it to the threads of one process.
     #[pyo3(signature = (process=None))]
     fn uniqstack<'py>(
         &self,
@@ -763,8 +762,8 @@ impl Inspect {
     }
 
     /// Get minifilter instances with their filter and volume
-    /// (`!fltkd.instances`). The result has all instances, or the instances of
-    /// one filter. Specify the filter by name or by `_FLT_FILTER` address.
+    /// (`!fltkd.instances`): all instances, or the instances of one filter
+    /// given by name or by `_FLT_FILTER` address.
     #[pyo3(signature = (filter=None))]
     fn flt_instances<'py>(
         &self,
@@ -809,8 +808,7 @@ impl Inspect {
 
     /// Get a KMDF client driver and its device objects, with the WDFDEVICEs
     /// behind them (`!wdfkd.wdfdriverinfo`). Use the driver name that
-    /// `wdf_loader` shows. The name is not case-sensitive, and `.sys` is
-    /// optional.
+    /// `wdf_loader` shows, in any case and with or without `.sys`.
     fn wdf_driver_info<'py>(
         &self,
         py: Python<'py>,
@@ -823,8 +821,8 @@ impl Inspect {
     }
 
     /// Decode a WDF handle and the object that it identifies
-    /// (`!wdfkd.wdfhandle`). If the value is not the handle of a live KMDF
-    /// object, the function raises an exception.
+    /// (`!wdfkd.wdfhandle`), or raise an exception if the value is not the
+    /// handle of a live KMDF object.
     fn wdf_handle<'py>(
         &self,
         py: Python<'py>,
@@ -863,8 +861,8 @@ impl Inspect {
     }
 
     /// Get the In-Flight Recorder log of a KMDF client driver, oldest record
-    /// first (`!wdfkd.wdflogdump`). If a loaded PDB declares the TMF message of
-    /// a record, the function formats the record from that message.
+    /// first (`!wdfkd.wdflogdump`). A record whose TMF message a loaded PDB
+    /// declares is formatted from that message.
     fn wdf_log<'py>(
         &self,
         py: Python<'py>,
@@ -964,8 +962,8 @@ impl Inspect {
         })
     }
 
-    /// Find pool allocations by tag (`!poolfind`). You can limit the search to
-    /// one pool type.
+    /// Find pool allocations by tag (`!poolfind`), optionally in one pool type
+    /// only.
     #[pyo3(signature = (tag, pool_type=None))]
     fn pool_find<'py>(
         &self,
@@ -1100,8 +1098,8 @@ impl Inspect {
         })
     }
 
-    /// List sessions and their processes (`!session`). You can select one
-    /// session.
+    /// List sessions, or one selected session, and their processes
+    /// (`!session`).
     #[pyo3(signature = (session=None))]
     fn sessions<'py>(
         &self,
@@ -1158,7 +1156,8 @@ impl Inspect {
     /// Decode the events that are still in the buffers of an ETW trace session,
     /// oldest first (`!wmitrace.logdump`). `count` keeps only the most recent
     /// events. For a WPP message, `message.text` is the message rendered from
-    /// the TMF that a loaded PDB declares. The raw `payload` is always kept.
+    /// the TMF that a loaded PDB declares, and the raw `payload` is always
+    /// kept.
     #[pyo3(signature = (logger, count=None))]
     fn etw_events<'py>(
         &self,
@@ -1175,8 +1174,8 @@ impl Inspect {
         })
     }
 
-    /// Decode a PnP device node (`!devnode`). As an option, also decode its
-    /// subtree, up to a limit.
+    /// Decode a PnP device node (`!devnode`), and optionally its subtree up to
+    /// a limit.
     #[pyo3(signature = (node=None, recurse=false))]
     fn devnode<'py>(
         &self,
@@ -1226,7 +1225,7 @@ impl Inspect {
         })
     }
 
-    /// Analyze the current bugcheck. Return `None` if no bugcheck is in
+    /// Analyze the current bugcheck, or return `None` if no bugcheck is in
     /// progress on the target.
     fn bugcheck<'py>(
         &self,

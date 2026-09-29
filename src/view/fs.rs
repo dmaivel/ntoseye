@@ -18,8 +18,8 @@ shapes! {
         /// Bytes.
         size: Hex,
         committed_pages: u64,
-        /// `None` for the segment of a data file. The prototype PTEs of a data
-        /// file are in its subsections.
+        /// `None` for the segment of a data file, whose prototype PTEs are in
+        /// its subsections.
         prototype_ptes: Option<VirtAddr>,
     }
 
@@ -103,10 +103,10 @@ shapes! {
         /// The bytes in the mapped views that are present in memory.
         valid_bytes: u64,
         /// One entry for each shared cache map that has a mapped view, most
-        /// valid bytes first. A maximum of 1,024 entries.
+        /// valid bytes first, up to 1,024 entries.
         files: Vec<CachedFile>,
-        /// The number of shared cache maps that have a mapped view. This count
-        /// includes the maps that `files` does not list.
+        /// The number of shared cache maps that have a mapped view, including
+        /// the maps that `files` does not list.
         file_count: u64,
         /// Whether an interrupt request stopped the walk early.
         interrupted: bool,

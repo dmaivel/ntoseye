@@ -19,7 +19,7 @@ repl_command! {
     names: ["!ca", "ca"],
     usage: "!ca <control-area>",
     summary: "Decode the control area of a section, with its segment and subsections.",
-    details: "Shows the section, PFN, mapped-view, and user reference counts, the _MMSECTION_FLAGS that are set, and the backing file object and its name. It also shows the segment (PTE count, size, committed pages, and prototype PTEs). For each subsection, it shows the base PTE, the PTE count, the starting sector, the sector count, and the protection. The command reads the subsections along NextSubsection, from the subsection after the control area. It reads a maximum of 1,024 subsections. It stops at a subsection that points to a different control area. To find a control area, use the SectionObjectPointer of a file object or the Subsection of a VAD.",
+    details: "Shows the section, PFN, mapped-view, and user reference counts, the _MMSECTION_FLAGS that are set, and the backing file object and its name. It also shows the segment (PTE count, size, committed pages, and prototype PTEs) and, for each subsection, the base PTE, the PTE count, the starting sector, the sector count, and the protection. The command reads up to 1,024 subsections along NextSubsection, starting from the subsection after the control area, and stops at a subsection that points to a different control area. To find a control area, use the SectionObjectPointer of a file object or the Subsection of a VAD.",
     completion: Expression,
 }
 
@@ -37,7 +37,7 @@ repl_command! {
     names: ["!filecache", "filecache"],
     usage: "!filecache",
     summary: "Show the views that the cache manager has mapped, for each file.",
-    details: "Walks the VACB arrays (CcVacbArrays) to find the views in use, and groups the views by shared cache map. For each file, the command shows its name, the mapped 256 KB views, and the pages of these views that are present in memory. It also shows the dirty pages, the file size, and the open count. The file with the most present data is first. The summary shows the VACBs in use and free, and the bytes mapped and present. The command lists a maximum of 1,024 files. You can interrupt the walk.",
+    details: "Walks the VACB arrays (CcVacbArrays) to find the views in use, and groups the views by shared cache map. For each file, the command shows its name, the mapped 256 KB views, the pages of these views that are present in memory, the dirty pages, the file size, and the open count, with the file that has the most present data first. The summary shows the VACBs in use and free, and the bytes mapped and present. The command lists up to 1,024 files, and you can interrupt the walk.",
 }
 
 repl_command! {

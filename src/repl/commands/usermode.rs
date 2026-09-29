@@ -36,7 +36,7 @@ repl_command! {
     names: ["!dlls", "dlls"],
     usage: "!dlls [-c <address>]",
     summary: "List the modules in the loader lists of the attached process.",
-    details: "With -c <address>, the command shows only the module that contains that address. The module walk has a limit. The walk also stops if it finds a cycle in a list.",
+    details: "With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
     completion: [None, Expression],
 }
 
@@ -53,7 +53,7 @@ repl_command! {
     names: ["!chkimg", "chkimg"],
     usage: "!chkimg [-d] [-v] [-nospec] <module>",
     summary: "Compare the executable sections of a module with the cached on-disk image.",
-    details: "Compares the .text, PAGE*, and INIT executable sections. Before the comparison, the command applies the DIR64/HIGHLOW relocations. It skips discardable and paged-out sections. It counts known kernel self-patches separately. These are import optimization, retpoline, KiPatchSelf retargets, and the addresses of the kernel VA regions that the kernel moves at boot. With -nospec, the command does not show this breakdown and reports the self-patches as ordinary mismatches. -d prints byte diffs, up to a limit. -v prints the results for each section.",
+    details: "Compares the .text, PAGE*, and INIT executable sections after applying the DIR64/HIGHLOW relocations, and skips discardable and paged-out sections. The command counts known kernel self-patches separately: import optimization, retpoline, KiPatchSelf retargets, and the addresses of the kernel VA regions that the kernel moves at boot. With -nospec, the command does not show this breakdown and reports the self-patches as ordinary mismatches. -d prints byte diffs, up to a limit, and -v prints the results for each section.",
     completion: [None, None, None, Symbol],
 }
 

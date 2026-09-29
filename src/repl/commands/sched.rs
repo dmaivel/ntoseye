@@ -22,7 +22,7 @@ repl_command! {
     names: ["!running", "running"],
     usage: "!running [-i] [-t]",
     summary: "Show the thread that runs on each processor.",
-    details: "-i includes idle threads. -t adds a short kernel stack for each processor. This stack has a frame limit.",
+    details: "-i includes idle threads, and -t adds a short kernel stack, with a frame limit, for each processor.",
     completion: None,
 }
 
@@ -31,7 +31,7 @@ repl_command! {
     names: ["!ready", "ready"],
     usage: "!ready [processor]",
     summary: "List the dispatcher ready queues of all processors or of one processor.",
-    details: "The command reads DispatcherReadyListHead from each _KPRCB. On newer builds, it reads ReadyListHead. Each queue walk has an entry limit. Like `dt -l`, each walk reports null links, cycles, unreadable links, and when it reaches its entry limit.",
+    details: "The command reads DispatcherReadyListHead from each _KPRCB, or ReadyListHead on newer builds. Each queue walk has an entry limit and, like `dt -l`, reports null links, cycles, unreadable links, and when it reaches its entry limit.",
     completion: Expression,
 }
 
@@ -49,7 +49,7 @@ repl_command! {
     names: ["!exqueue", "exqueue"],
     usage: "!exqueue [flags]",
     summary: "Show the executive worker queues with their pending work items and worker threads.",
-    details: "Windows 10 and later keep one _EX_WORK_QUEUE for each partition, NUMA node, and queue index (_EXQUEUEINDEX: ExPoolUntrusted, IoPoolUntrusted, ...). The command finds the queues from the ExPartition of each _EPARTITION. For each queue, it shows the thread count and limits, the concurrency (_KPRIQUEUE.MaximumCount), and the number of work items processed. Then it shows each pending _WORK_QUEUE_ITEM by priority, with its routine as a symbol. For an IoQueueWorkItem item, it also shows the I/O routine, object, and context. After the items, it shows the threads that serve the queue, with their state and wait reason. Each priority shows the WORK_QUEUE_TYPEs that map to it, and its running threads against the concurrency. The command reads these priorities from nt!ExpBuiltinPriorities (CriticalWorkQueue is 13, DelayedWorkQueue is 12, HyperCriticalWorkQueue is 15). The flags are the same as in WinDbg. 0x4 adds the stack of each worker thread (32 frames). 0x10, 0x20, and 0x40 show only the items of the critical, delayed, and hypercritical priorities. The command accepts 0x1 and 0x2, but it always lists the threads. Each list walk detects cycles and has an entry limit: 1,024 items for each priority and 4,096 threads for each queue.",
+    details: "Windows 10 and later keep one _EX_WORK_QUEUE for each partition, NUMA node, and queue index (_EXQUEUEINDEX: ExPoolUntrusted, IoPoolUntrusted, ...). The command finds the queues from the ExPartition of each _EPARTITION. For each queue, it shows the thread count and limits, the concurrency (_KPRIQUEUE.MaximumCount), and the number of work items processed. Then it shows each pending _WORK_QUEUE_ITEM by priority, with its routine as a symbol and, for an IoQueueWorkItem item, the I/O routine, object, and context. After the items come the threads that serve the queue, with their state and wait reason. Each priority shows the WORK_QUEUE_TYPEs that map to it, and its running threads against the concurrency. The command reads these priorities from nt!ExpBuiltinPriorities (CriticalWorkQueue is 13, DelayedWorkQueue is 12, HyperCriticalWorkQueue is 15). The flags are the same as in WinDbg. 0x4 adds the stack of each worker thread (32 frames). 0x10, 0x20, and 0x40 show only the items of the critical, delayed, and hypercritical priorities. The command accepts 0x1 and 0x2, but it always lists the threads. Each list walk detects cycles and has an entry limit: 1,024 items for each priority and 4,096 threads for each queue.",
     completion: Expression,
 }
 
@@ -67,7 +67,7 @@ repl_command! {
     names: ["!apc", "apc"],
     usage: "!apc [process|thread]",
     summary: "List the kernel and user APCs of the selected thread, a process, or all threads.",
-    details: "With no argument, the command uses the current Windows thread. With *, it lists the APCs of all threads. This walk has a limit.",
+    details: "With no argument, the command uses the current Windows thread. With *, it lists the APCs of all threads, in a walk that has a limit.",
     completion: [Expression],
 }
 
@@ -85,7 +85,7 @@ repl_command! {
     names: ["!findstack", "findstack"],
     usage: "!findstack <symbol|module> [0|1|2]",
     summary: "List the threads with a stack frame that matches a symbol or module.",
-    details: "The command walks the stack of each Windows thread, up to 64 frames, as !stacks 2 does. Patterns match as in WinDbg. `module!name` matches frames in that module whose function starts with name. For example, `nt!KeWait` matches KeWaitForSingleObject and KeWaitForMultipleObjects, and `nt!` matches all frames in nt. A bare word matches a module by name or a function by prefix. With * or ?, the module and function are globs (`nt!*Wait*`). Matches ignore case. Display level 0 lists the matching threads and the number of frames that match. Level 1 (the default) adds the matching frames. Level 2 shows the whole stack and marks the matching frames with *. The command cannot search a thread whose stack does not walk, such as a thread that runs on a processor while the target runs. It lists these threads after the matches.",
+    details: "The command walks the stack of each Windows thread, up to 64 frames, as !stacks 2 does. Patterns match as in WinDbg. `module!name` matches frames in that module whose function starts with name, so `nt!KeWait` matches KeWaitForSingleObject and KeWaitForMultipleObjects, and `nt!` matches all frames in nt. A bare word matches a module by name or a function by prefix. With * or ?, the module and function are globs (`nt!*Wait*`). Matches ignore case. Display level 0 lists the matching threads and the number of frames that match, level 1 (the default) adds the matching frames, and level 2 shows the whole stack and marks the matching frames with *. The command cannot search a thread whose stack does not walk, such as a thread that runs on a processor while the target runs, and lists these threads after the matches.",
     completion: [Symbol, None],
 }
 
@@ -93,8 +93,8 @@ repl_command! {
     cmd_uniqstack;
     names: ["!uniqstack", "uniqstack"],
     usage: "!uniqstack [-v] [-n] [*|process]",
-    summary: "Group the threads by identical call stacks and show each unique stack one time.",
-    details: "WinDbg's !uniqstack groups the user-mode stacks of the threads of the current process. This command groups the threads that the kernel schedules. It uses their stacks as !stacks 2 walks them: up to 64 frames, with the kernel frames first and then the user-mode frames below a system call. With no argument, the command uses the threads of the .process selection. If no process is selected, it uses the threads of all processes. This is the default in a kernel session. * selects all threads. A PID, EPROCESS address, or name selects one process. Threads share a group when their frames have the same instruction pointers and the same truncation. The command shows each unique stack one time, from its first thread. It also shows the number of threads that share the stack, and their thread IDs by process. The totals come after the groups. -n numbers the frames. -v shows how ntoseye recovered each frame (current, seed, unwind, or scan), as kv does. This output replaces the x86 FPO data that WinDbg shows. The command does not accept the -b and -p options of WinDbg. On x64, the first arguments go in registers, and a saved stack does not keep them. Also, -p needs private-symbol parameters for each frame. For one thread, use .thread and kp. Some stacks do not walk, such as the stack of a thread that runs on a processor while the target runs. The command shows these threads in a separate list.",
+    summary: "Group the threads by identical call stacks and show each unique stack once.",
+    details: "WinDbg's !uniqstack groups the user-mode stacks of the threads of the current process. This command groups the threads that the kernel schedules, using their stacks as !stacks 2 walks them: up to 64 frames, with the kernel frames first and then the user-mode frames below a system call. With no argument, the command uses the threads of the .process selection or, if no process is selected, the threads of all processes, which is the default in a kernel session. * selects all threads, and a PID, EPROCESS address, or name selects one process. Threads share a group when their frames have the same instruction pointers and the same truncation. The command shows each unique stack once, from its first thread, with the number of threads that share it and their thread IDs by process. The totals come after the groups. -n numbers the frames. -v shows how ntoseye recovered each frame (current, seed, unwind, or scan), as kv does, and this output replaces the x86 FPO data that WinDbg shows. The command does not accept the -b and -p options of WinDbg, because on x64 the first arguments go in registers, which a saved stack does not keep, and -p also needs private-symbol parameters for each frame. For one thread, use .thread and kp. Some stacks do not walk, such as the stack of a thread that runs on a processor while the target runs, and the command shows these threads in a separate list.",
     completion: Process,
 }
 

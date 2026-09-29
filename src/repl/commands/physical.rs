@@ -71,7 +71,7 @@ repl_command! {
     names: ["!search"],
     usage: "!search <value> [delta [start-pfn [end-pfn]]]",
     summary: "Search guest-physical memory for a pointer-sized value.",
-    details: "The command compares each pointer-aligned quadword in the PFN range. The default range is all RAM. With no delta, the command lists a quadword if it equals the value or differs from it by one bit. With a delta, it lists a quadword if it is within delta of the value or differs from value - delta by one bit. WinDbg's !search uses the same rules. Each hit shows its PFN, its offset, and the value. From the PFN database, it also shows the PTE that maps the page and the virtual address that this PTE maps. The virtual address is blank when the PTE is not in the self-map. The command skips and counts the pages that it cannot read. The search stops after 4096 hits or when you press Ctrl+C.",
+    details: "The command compares each pointer-aligned quadword in the PFN range, which is all RAM by default. With no delta, it lists a quadword if it equals the value or differs from it by one bit. With a delta, it lists a quadword if it is within delta of the value or differs from value - delta by one bit. WinDbg's !search uses the same rules. Each hit shows its PFN, its offset, and the value, and from the PFN database, the PTE that maps the page and the virtual address that this PTE maps. The virtual address is blank when the PTE is not in the self-map. The command skips and counts the pages that it cannot read, and the search stops after 4096 hits or when you press Ctrl+C.",
     completion: Expression,
 }
 

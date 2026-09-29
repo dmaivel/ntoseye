@@ -11,7 +11,7 @@ use crate::types::VirtAddr;
 
 shapes! {
     /// A process's `_RTL_USER_PROCESS_PARAMETERS`. ntoseye reads each string
-    /// separately. A string is unavailable if it is paged out.
+    /// separately, and a string that is paged out is unavailable.
     ProcessParameters {
         address: VirtAddr,
         command_line: Diag<String>,
@@ -122,8 +122,8 @@ shapes! {
         wow_teb_offset: Diag<i32>,
         /// `WOW32Reserved`: the WOW64 transition thunk.
         wow64_reserved: Diag<VirtAddr>,
-        /// The active activation context. The value is `None` if there is no
-        /// active context.
+        /// The active activation context, or `None` if there is no active
+        /// context.
         activation_context: Diag<Option<VirtAddr>>,
         client_id_unique_process: Diag<VirtAddr>,
         client_id_unique_thread: Diag<VirtAddr>,
@@ -199,12 +199,10 @@ shapes! {
         /// The `_TEB` that ntoseye read.
         teb: VirtAddr,
         last_error_value: Diag<u32>,
-        /// The symbolic name of the error. The value is `None` if the name is
-        /// unknown.
+        /// The symbolic name of the error, or `None` if the name is unknown.
         last_error_name: Diag<Option<String>>,
         last_status_value: Diag<Hex<u32>>,
-        /// The symbolic name of the status. The value is `None` if the name is
-        /// unknown.
+        /// The symbolic name of the status, or `None` if the name is unknown.
         last_status_name: Diag<Option<String>>,
         /// The values from the WOW64 `_TEB32`. `None` for a native thread.
         teb32: Option<LastError32>,
@@ -215,12 +213,10 @@ shapes! {
         /// The `_TEB32` that ntoseye read.
         teb: VirtAddr,
         last_error_value: Diag<u32>,
-        /// The symbolic name of the error. The value is `None` if the name is
-        /// unknown.
+        /// The symbolic name of the error, or `None` if the name is unknown.
         last_error_name: Diag<Option<String>>,
         last_status_value: Diag<Hex<u32>>,
-        /// The symbolic name of the status. The value is `None` if the name is
-        /// unknown.
+        /// The symbolic name of the status, or `None` if the name is unknown.
         last_status_name: Diag<Option<String>>,
     }
 
@@ -291,8 +287,8 @@ shapes! {
     }
 
     /// A module's in-memory code, compared with its cached image (`!chkimg`).
-    /// Each range list has a limit. An `*_overflow` flag is true if more ranges
-    /// exist.
+    /// Each range list has a limit, and its `*_overflow` flag is true if more
+    /// ranges exist.
     ImageCheck {
         /// The full path.
         module: String,

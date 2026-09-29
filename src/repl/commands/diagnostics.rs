@@ -15,7 +15,7 @@ repl_command! {
     names: ["!handle"],
     usage: "!handle [handle-expression]",
     summary: "List a limited number of handles of the selected process, or show one handle.",
-    details: "Without an argument, the command scans a maximum of 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them.",
+    details: "Without an argument, the command scans up to 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them.",
     completion: Expression,
 }
 
@@ -24,7 +24,7 @@ repl_command! {
     names: ["!token"],
     usage: "!token",
     summary: "Show the primary token of the selected or current process.",
-    details: "The command shows the token IDs, user and groups, privileges, type, impersonation level, and flags. It gets each field independently. If the metadata or memory for a field is missing, the command shows this in that field.",
+    details: "The command shows the token IDs, user and groups, privileges, type, impersonation level, and flags. It gets each field independently, and if the metadata or memory for a field is missing, it shows this in that field.",
 }
 
 repl_command! {
@@ -40,7 +40,7 @@ repl_command! {
     names: ["!locks"],
     usage: "!locks [resource-address-expression]",
     summary: "Show one ERESOURCE, or list the resources in the system resource list.",
-    details: "Without an argument, the command uses ExpSystemResourcesList and shows a maximum of 256 entries. It does not scan memory. If the symbol or the list metadata is not available, the command cannot list the resources.",
+    details: "Without an argument, the command uses ExpSystemResourcesList and shows up to 256 entries without scanning memory. If the symbol or the list metadata is not available, it cannot list the resources.",
     completion: Expression,
 }
 

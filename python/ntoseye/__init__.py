@@ -34,25 +34,26 @@ class MemoryAccessError(NtoseyeError):
 
 
 class TargetRunningError(NtoseyeError):
-    """The operation needs a halted target. Call `interrupt()` first."""
+    """The operation needs a halted target, so call `interrupt()` first."""
 
 
 class StaleHandleError(NtoseyeError):
-    """The handle is from before the target was rebuilt (a reboot). Query it
-    again."""
+    """The handle is from before the target was rebuilt (a reboot), so query
+    it again."""
 
 
 class SymbolNotFoundError(NtoseyeError, LookupError):
-    """A symbol that does not resolve. This error is also a `LookupError`, as
-    for other failed mapping lookups."""
+    """A symbol that does not resolve. It is also a `LookupError`, like other
+    failed mapping lookups."""
 
 
 @final
 class Diagnostic(Generic[_T]):
     """One field that reads on its own and can fail. If the read succeeds,
-    `value` holds the data. If it fails, `error` holds the reason. The object
-    is true if the value is available, and false if not. The class is generic
-    over its value: a property typed `Diagnostic[int]` reads an `int`."""
+    `value` holds the data, and if it fails, `error` holds the reason. The
+    object is true when the value is available and false otherwise. The class
+    is generic over its value: a property typed `Diagnostic[int]` reads an
+    `int`."""
 
     __slots__ = ("_value", "_error", "_source", "_metric", "_hex")
 
@@ -67,13 +68,13 @@ class Diagnostic(Generic[_T]):
 
     @property
     def value(self) -> _T | None:
-        """The value that was read. `None` if the value is not available, or if
-        the value read was `None`."""
+        """The value that was read, or `None` if it is not available or the
+        value read was `None`."""
         return self._value
 
     @property
     def error(self) -> str | None:
-        """The reason that the read failed. `None` if the read succeeded."""
+        """The reason that the read failed, or `None` if it succeeded."""
         return self._error
 
     @property
@@ -83,8 +84,8 @@ class Diagnostic(Generic[_T]):
 
     @property
     def source(self) -> str | None:
-        """The source of the value of a metric (`"dump header"`, `"KDBG"`, ...).
-        `None` for a field that is not a metric, or if the source is unknown."""
+        """Where a metric's value came from (`"dump header"`, `"KDBG"`, ...), or
+        `None` for a field that is not a metric or when the source is unknown."""
         return self._source
 
     def __bool__(self) -> bool:
@@ -111,7 +112,7 @@ class Diagnostic(Generic[_T]):
 
     def to_dict(self) -> dict[str, Any]:
         """The `{available, value, error[, source]}` dict that the MCP surface
-        returns. `source` is present only for a metric."""
+        returns, with `source` present only for a metric."""
         out: dict[str, Any] = {
             "available": self._error is None,
             "value": _plain(self._value),

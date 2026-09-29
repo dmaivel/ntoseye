@@ -215,8 +215,8 @@ impl Memory {
     }
 
     /// Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits` sets
-    /// the layout. Use 32 for the x86 descriptors of a WOW64 process and 64
-    /// for native descriptors. By default, the `.effmach` setting selects the
+    /// the layout: 32 for the x86 descriptors of a WOW64 process and 64 for
+    /// native descriptors. By default, the `.effmach` setting selects the
     /// layout.
     #[pyo3(signature = (addr, bits = None))]
     fn read_unicode_string(
@@ -235,10 +235,10 @@ impl Memory {
         self.read_descriptor(py, addr, StringDescriptor::Ansi, bits)
     }
 
-    /// Find matches, overlapping matches included, with symbol/module/VAD
-    /// context. In a virtual space, the search skips pages that it cannot
-    /// read. The breakpoints of this session read as the code that they
-    /// replaced. The search returns a maximum of 4096 matches.
+    /// Find matches, including overlapping ones, with symbol/module/VAD
+    /// context. In a virtual space, the search skips pages that it cannot read.
+    /// The breakpoints of this session read as the code that they replaced, and
+    /// the search returns a maximum of 4096 matches.
     fn search<'py>(
         &self,
         py: Python<'py>,
@@ -360,9 +360,9 @@ impl Memory {
         })
     }
 
-    /// Make `addr` resident with the guest debugger worker (`.pagein`). The
-    /// worker resumes the guest. When the worker completes, the guest stops
-    /// and the method returns. `dbg.stop` shows that stop.
+    /// Make `addr` resident with the guest debugger worker (`.pagein`), which
+    /// resumes the guest. When the worker completes, the guest stops and the
+    /// method returns, and `dbg.stop` shows that stop.
     fn page_in(&self, py: Python<'_>, addr: u64) -> PyResult<bool> {
         self.space.require_virtual()?;
         let context = self.space.context();

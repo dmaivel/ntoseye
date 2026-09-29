@@ -14,8 +14,8 @@ shapes! {
         /// The `_WMI_LOGGER_CONTEXT`.
         address: VirtAddr,
         logger_id: u32,
-        /// `LoggerName`. `None` if ntoseye cannot read its buffer. For example,
-        /// the pool can be freed or paged out while a session stops.
+        /// `LoggerName`. `None` if ntoseye cannot read its buffer, which can
+        /// happen when the pool is freed or paged out while a session stops.
         name: Option<String>,
         /// `LogFileName`. `None` if ntoseye cannot read its buffer.
         log_file_name: Option<String>,
@@ -108,10 +108,10 @@ shapes! {
         keyword: Hex,
     }
 
-    /// The fields that follow a `MESSAGE_TRACE_HEADER`. The `TRACE_MESSAGE_*`
-    /// option flags of the header select these fields. A field is `None` if
-    /// the flags do not select it. The TMF fields are `None` if no loaded PDB
-    /// declares the trace message format (TMF) of the message.
+    /// The fields that follow a `MESSAGE_TRACE_HEADER`, as the
+    /// `TRACE_MESSAGE_*` option flags of the header select them. A field is
+    /// `None` if the flags do not select it, and the TMF fields are `None` if
+    /// no loaded PDB declares the trace message format (TMF) of the message.
     EtwEventMessage {
         /// The message number.
         number: u16,

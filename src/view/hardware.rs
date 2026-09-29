@@ -162,7 +162,7 @@ shapes! {
     IpiProcessor {
         processor: u16,
         kprcb: VirtAddr,
-        /// The `_KPRCB` IPI fields that this build has, by name. Each field is a
+        /// The `_KPRCB` IPI fields that this build has, by name, each as a
         /// `Diagnostic` of its value.
         fields: Keyed<Diag<Hex>>,
         /// The decoded `IpiFrozen` value (`Running`, `Frozen`, ...). `None` if the
@@ -236,8 +236,8 @@ shapes! {
         segments: Vec<PciSegment>,
         /// Whether the walk stopped at its limit before the end.
         truncated: bool,
-        /// Each bus or function that ntoseye could not read. The walk does not
-        /// continue in the list that holds it.
+        /// Each bus or function that ntoseye could not read, after which the
+        /// walk does not continue in the list that holds it.
         errors: Vec<String>,
     }
 

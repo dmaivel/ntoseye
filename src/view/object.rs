@@ -39,12 +39,13 @@ shapes! {
     /// An `_IRP` and its current I/O stack location (`!irp`).
     Irp {
         address: VirtAddr,
-        /// `Type`. For a valid IRP, this is `IO_TYPE_IRP` (6).
+        /// `Type`, which is `IO_TYPE_IRP` (6) for a valid IRP.
         r#type: u16,
-        /// `Size` in bytes. The size includes the stack locations.
+        /// `Size` in bytes, including the stack locations.
         size: u16,
         stack_count: u8,
-        /// `CurrentLocation`. After the IRP completes, it is more than `stack_count`.
+        /// `CurrentLocation`, which is more than `stack_count` after the IRP
+        /// completes.
         current_location: u8,
         pending_returned: bool,
         /// 0 for `KernelMode`, 1 for `UserMode`.
@@ -141,7 +142,7 @@ shapes! {
     ExecutiveObject {
         /// The address that you gave.
         input: VirtAddr,
-        /// `body` if the input pointed to the object body. `header` if the input
+        /// `body` if the input pointed to the object body, or `header` if it
         /// pointed to the object header.
         mode: &'static str,
         header: VirtAddr,
@@ -153,7 +154,8 @@ shapes! {
         /// The `_OBJECT_TYPE`. None if ntoseye cannot resolve it.
         type_object: Option<VirtAddr>,
         type_name: Option<String>,
-        /// The `InfoMask` of the header. It shows which optional headers come before the header.
+        /// The `InfoMask` of the header, which shows which optional headers
+        /// come before it.
         info_mask: Option<u8>,
         /// The `_OBJECT_HEADER_NAME_INFO`. None if the object has none.
         name_info: Option<VirtAddr>,
@@ -205,7 +207,7 @@ shapes! {
     /// `CurrentIrp` of a device (`irps`).
     InFlightIrp {
         irp: VirtAddr,
-        /// `thread` or `device`. It tells where ntoseye found the IRP.
+        /// Where ntoseye found the IRP: `thread` or `device`.
         source: &'static str,
         stack_count: u8,
         current_location: u8,
@@ -247,7 +249,7 @@ shapes! {
         /// The body of the object.
         object: Diag<VirtAddr>,
         type_name: Diag<Option<String>>,
-        /// The name of the object. The value is None for an unnamed object.
+        /// The name of the object, or None for an unnamed object.
         name: Diag<Option<String>>,
         granted_access: Diag<Hex<u32>>,
         /// The attribute bits of the entry (inherit, protect-from-close, audit).
@@ -260,8 +262,8 @@ shapes! {
         process: super::process::ProcessIdentity,
         /// The `_HANDLE_TABLE`.
         table: VirtAddr,
-        /// The level of the table (0-2). It is the number of pointer levels before the
-        /// entries.
+        /// The level of the table (0-2), which is the number of pointer levels
+        /// before the entries.
         table_level: u8,
         /// The handle count that the table reports.
         advertised_handles: usize,
@@ -276,12 +278,12 @@ shapes! {
     /// A `_FILE_OBJECT` (`!fileobj`).
     FileObject {
         address: VirtAddr,
-        /// `Type`. For a valid file object, this is `IO_TYPE_FILE` (5).
+        /// `Type`, which is `IO_TYPE_FILE` (5) for a valid file object.
         file_type: Diag<i16>,
         size: Diag<i16>,
         device_object: Diag<VirtAddr>,
         device_type: Diag<Hex<u32>>,
-        /// The object name of the device. The value is None for an unnamed device.
+        /// The object name of the device, or None for an unnamed device.
         device_name: Diag<Option<String>>,
         file_name: Diag<String>,
         related_file_object: Diag<VirtAddr>,
@@ -348,8 +350,8 @@ shapes! {
         /// The driver that owns the device of the current stack location. None if
         /// ntoseye cannot resolve it.
         driver: Option<String>,
-        /// Whether all stack locations are used. If true, completion of the IRP is
-        /// in progress or done.
+        /// Whether all stack locations are used, which means that completion of
+        /// the IRP is in progress or done.
         completed: bool,
     }
 
@@ -367,8 +369,8 @@ shapes! {
         pool: &'static str,
         region_start: VirtAddr,
         region_end: VirtAddr,
-        /// The address where the page scan started. This is the region start or
-        /// the restart address.
+        /// The address where the page scan started: the region start or the
+        /// restart address.
         scan_start: VirtAddr,
         /// None if the scan has no filter.
         criteria: Option<IrpFindCriteria>,
@@ -376,9 +378,9 @@ shapes! {
         /// The result of the big-pool table scan.
         big_pool_status: String,
         irps: Vec<PoolIrp>,
-        /// Whether the result limit caused ntoseye to leave out IRPs. This occurs
-        /// if the page scan stopped at `restart`, or if ntoseye did not check some
-        /// big-pool allocations.
+        /// Whether the result limit caused ntoseye to leave out IRPs, which
+        /// happens when the page scan stopped at `restart` or ntoseye did not
+        /// check some big-pool allocations.
         truncated: bool,
         interrupted: bool,
         /// The address where the page scan can continue. None if the scan finished.
@@ -415,8 +417,8 @@ shapes! {
         debug_info: Option<VirtAddr>,
         /// The capacity of the ring.
         table_size: u64,
-        /// The total number of recorded traces. The ring keeps the last `table_size`
-        /// traces.
+        /// The total number of recorded traces, of which the ring keeps the
+        /// last `table_size`.
         recorded: u64,
         /// The number of ring slots that ntoseye read.
         parsed: u64,
@@ -572,8 +574,8 @@ shapes! {
         created: Vec<AlpcOwnedPort>,
         /// The client ports that the process holds.
         connected: Vec<AlpcClientPort>,
-        /// The number of server communication ports that the process holds. These
-        /// are its ends of connections to its own ports.
+        /// The number of server communication ports that the process holds,
+        /// which are its ends of connections to its own ports.
         server_ports: usize,
         scanned_handles: usize,
         /// The handle count that the table reports.

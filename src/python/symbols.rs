@@ -52,7 +52,8 @@ impl Location {
 
 #[pymethods]
 impl Symbols {
-    /// Get the address of a symbol. If the symbol is not found, raise `SymbolNotFoundError`.
+    /// Get the address of a symbol, or raise `SymbolNotFoundError` if the symbol is not
+    /// found.
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
         self.resolve(py, name)?
             .ok_or_else(|| symbol_not_found(name))
@@ -163,8 +164,8 @@ impl Symbols {
     }
 
     /// List the PDB layouts of the locals and parameters of the innermost frame
-    /// at `addr`. If the compiler inlined a call there, these are the layouts of
-    /// the inlined call. This method does not evaluate the values.
+    /// at `addr`, which are those of the inlined call if the compiler inlined a
+    /// call there. This method does not evaluate the values.
     fn locals_at<'py>(
         &self,
         py: Python<'py>,

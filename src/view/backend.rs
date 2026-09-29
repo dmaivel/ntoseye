@@ -7,7 +7,7 @@ use crate::dbg_backend::{self, DebugLine, DebugOutputPage};
 shapes! {
     /// A captured line of guest debug output (DbgPrint, kernel printf).
     DebugLogLine {
-        /// A monotonic sequence number. It is the read cursor.
+        /// A monotonic sequence number that serves as the read cursor.
         seq: u64,
         /// The host wall-clock time when the line was complete, in milliseconds
         /// since the Unix epoch.

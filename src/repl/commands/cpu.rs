@@ -29,7 +29,7 @@ repl_command! {
     names: ["rdmsr"],
     usage: "rdmsr [/p <processor>] <msr>",
     summary: "Read a model-specific register from a halted processor.",
-    details: "Reads one model-specific register on the selected processor. Use /p to select a different processor. The dump and memory backends show that MSR access is unavailable.",
+    details: "Reads one model-specific register on the selected processor, or on another processor that you select with /p. The dump and memory backends show that MSR access is unavailable.",
     completion: [None, Expression, Expression],
     run_state: Halted,
 }
@@ -39,7 +39,7 @@ repl_command! {
     names: ["wrmsr"],
     usage: "wrmsr <msr> <value>",
     summary: "Write a model-specific register on the current processor.",
-    details: "Writes one model-specific register on the current processor. You can use a common IA32_* name in place of the numeric MSR.",
+    details: "Writes one model-specific register on the current processor. You can use a common IA32_* name instead of the numeric MSR.",
     completion: [Expression, Expression],
     run_state: Halted,
 }
@@ -49,7 +49,7 @@ repl_command! {
     names: ["!pcr", "pcr"],
     usage: "!pcr [processor]",
     summary: "Show the main KPCR data of the selected processor.",
-    details: "Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor registers, the TSS, and the available IRQL fields. On AMD64 Windows, kernel GS usually points to the KPCR. Backend GS-base registers are optional.",
+    details: "Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor registers, the TSS, and the available IRQL fields. On AMD64 Windows, kernel GS usually points to the KPCR, and backend GS-base registers are optional.",
     completion: Expression,
 }
 
@@ -67,7 +67,7 @@ repl_command! {
     names: ["!irql", "irql"],
     usage: "!irql [processor]",
     summary: "Show the current IRQL of a processor.",
-    details: "Shows the current IRQL and the Windows level name of the selected processor. At a KD break-in, this is the IRQL that the debugger sees. It can be different from the level before the break-in.",
+    details: "Shows the current IRQL and the Windows level name of the selected processor. At a KD break-in, this is the IRQL that the debugger sees, which can be different from the level before the break-in.",
     completion: Expression,
 }
 
@@ -76,7 +76,7 @@ repl_command! {
     names: ["!idt", "idt"],
     usage: "!idt [vector]",
     summary: "Decode one IDT entry or the bounded 256-entry IDT.",
-    details: "Shows one IDT vector or all 256 entries. For each entry, shows the handler, selector, gate type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints.",
+    details: "Shows one IDT vector or all 256 entries, with the handler, selector, gate type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each entry.",
     completion: Expression,
 }
 
@@ -85,7 +85,7 @@ repl_command! {
     names: ["!gdt", "gdt"],
     usage: "!gdt",
     summary: "Decode the bounded GDT of the current processor.",
-    details: "Shows the bounded GDT entries of the selected processor. For each entry, shows the base, limit, privilege, mode, and presence.",
+    details: "Shows the bounded GDT entries of the selected processor, with the base, limit, privilege, mode, and presence of each entry.",
 }
 
 repl_command! {
@@ -93,7 +93,7 @@ repl_command! {
     names: ["dg"],
     usage: "dg <first-selector> [last-selector]",
     summary: "Decode segment selectors from the GDT of the current processor.",
-    details: "Shows each selector from the first to the last, in steps of 8 as WinDbg does. For each selector, shows the descriptor base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. If a selector refers to an LDT (bit 2 set), dg reports this and does not decode the selector. 64-bit Windows has no LDT.",
+    details: "Shows each selector from the first to the last, in steps of 8 as WinDbg does. For each selector, it shows the descriptor base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. If a selector refers to an LDT (bit 2 set), dg reports this and does not decode the selector. 64-bit Windows has no LDT.",
     completion: [Expression, Expression],
 }
 
@@ -102,7 +102,7 @@ repl_command! {
     names: ["!cpuinfo", "cpuinfo"],
     usage: "!cpuinfo",
     summary: "Show processor identification, speed, and feature bits.",
-    details: "Shows the processor number, vendor, family, model, stepping, speed, and feature bits if they are available. If a field is not available, ntoseye uses the triage-dump metadata for it.",
+    details: "Shows the processor number, vendor, family, model, stepping, speed, and feature bits if they are available. For a field that is not available, ntoseye uses the triage-dump metadata.",
 }
 
 repl_command! {
@@ -110,7 +110,7 @@ repl_command! {
     names: ["~", "vcpus"],
     usage: "~",
     summary: "List vCPU contexts and their RIP values.",
-    details: "If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped. This data comes from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers.",
+    details: "If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped, from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers.",
     run_state: Halted,
 }
 

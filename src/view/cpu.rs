@@ -98,7 +98,7 @@ shapes! {
         /// The Windows name of the level (`DISPATCH_LEVEL`, ...).
         level_name: Diag<String>,
         /// A note about KD break-ins. At a KD break-in, `value` is the IRQL
-        /// that the debugger sees. It can be different from the level
+        /// that the debugger sees, which can differ from the level
         /// immediately before the break-in.
         note: String,
     }
@@ -133,8 +133,8 @@ shapes! {
         ki_isr_thunk: Diag<Option<String>>,
     }
 
-    /// The IDT of a processor (`!idt`). It contains one vector or the bounded
-    /// full table.
+    /// The IDT of a processor (`!idt`), with one vector or the bounded full
+    /// table.
     Idt {
         /// The processor number.
         processor: u16,
@@ -185,8 +185,8 @@ shapes! {
         base: VirtAddr,
         /// The table limit: the table size in bytes, minus one.
         limit: u64,
-        /// The number of slots that the limit describes. This number can be
-        /// larger than the number of decoded entries.
+        /// The number of slots that the limit describes, which can be larger
+        /// than the number of decoded entries.
         entry_count: u64,
         /// Whether the table has more than 256 slots.
         truncated: bool,
@@ -200,8 +200,8 @@ shapes! {
         value: Diag<Hex>,
     }
 
-    /// The triage PRCB metadata of the dump. ntoseye uses it if it cannot
-    /// read the KPRCB.
+    /// The triage PRCB metadata of the dump, which ntoseye uses when it
+    /// cannot read the KPRCB.
     CpuTriageFallback {
         processor_number: u16,
         vendor: String,
@@ -229,7 +229,7 @@ shapes! {
         /// The processor speed, in MHz.
         mhz: Diag<u64>,
         feature_bits: Vec<CpuFeatureBits>,
-        /// The triage metadata. Present if ntoseye could not find the KPRCB.
+        /// The triage metadata, present if ntoseye could not find the KPRCB.
         triage_fallback: Option<CpuTriageFallback>,
     }
 }

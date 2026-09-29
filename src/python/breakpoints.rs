@@ -56,10 +56,10 @@ impl Exceptions {
     }
 }
 
-/// A breakpoint handle. A breakpoint stays when ntoseye builds the target
-/// again, and a symbolic breakpoint resolves again after a reboot. So the
-/// handle has no generation stamp. It becomes invalid only when you delete
-/// the breakpoint.
+/// A breakpoint handle. Because a breakpoint stays when ntoseye builds the
+/// target again, and a symbolic breakpoint resolves again after a reboot, the
+/// handle has no generation stamp and becomes invalid only when you delete the
+/// breakpoint.
 #[pyclass(subclass, module = "ntoseye")]
 pub struct Breakpoint {
     owner: Owner,
@@ -133,12 +133,12 @@ impl Breakpoints {
         Ok(BreakpointIterator::new(items))
     }
 
-    /// Get a breakpoint by ID. Raise `KeyError` if the ID does not exist.
+    /// Get a breakpoint by ID, or raise `KeyError` if the ID does not exist.
     fn __getitem__(&self, py: Python<'_>, id: u32) -> PyResult<Py<Breakpoint>> {
         self.get(py, id)?.ok_or_else(|| PyKeyError::new_err(id))
     }
 
-    /// Get a breakpoint by ID. Return `None` if the ID does not exist.
+    /// Get a breakpoint by ID, or `None` if the ID does not exist.
     fn get(&self, py: Python<'_>, id: u32) -> PyResult<Option<Py<Breakpoint>>> {
         let Some(bp) = self
             .owner
@@ -156,12 +156,12 @@ impl Breakpoints {
 
     /// Add a code breakpoint at an address or a symbolic spec.
     ///
-    /// `hardware=True` sets a debug-register execute breakpoint and does not
-    /// patch code. The target resolves to an address one time, when you call
-    /// this method. The site does not resolve again after a module reload or a
-    /// reboot. The secure kernel (VTL1) accepts only this kind of breakpoint.
-    /// For example:
-    /// `add(dbg.secure_kernel.symbols["securekernel!Func"], hardware=True)`.
+    /// `hardware=True` sets a debug-register execute breakpoint instead of
+    /// patching code. The target resolves to an address once, when you call
+    /// this method, and does not resolve again after a module reload or a
+    /// reboot. The secure kernel (VTL1) accepts only this kind of breakpoint,
+    /// for example `add(dbg.secure_kernel.symbols["securekernel!Func"],
+    /// hardware=True)`.
     #[pyo3(signature = (target, condition=None, *, hardware=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn add(
         &self,
@@ -393,7 +393,7 @@ impl Breakpoints {
 
 #[pymethods]
 impl Breakpoint {
-    /// The breakpoint ID. It does not change.
+    /// The breakpoint ID, which does not change.
     #[getter]
     fn id(&self, py: Python<'_>) -> PyResult<u32> {
         self.require_snapshot(py)?;
@@ -448,8 +448,8 @@ impl Breakpoint {
         Ok(self.require_snapshot(py)?.condition)
     }
 
-    /// If a `when=` callback is attached, an expression assignment raises
-    /// `ValueError`. `add()` also raises it if you give both.
+    /// Assigning an expression raises `ValueError` while a `when=` callback is
+    /// attached, and `add()` also raises it if you give both.
     #[setter]
     fn set_condition(&self, py: Python<'_>, condition: Option<String>) -> PyResult<()> {
         if condition.is_some()
@@ -632,13 +632,13 @@ impl Breakpoint {
 
 #[pymethods]
 impl Exceptions {
-    /// Set the stop policy for an exception (`sxe`/`sxd`/`sxn`/`sxi`), or set
-    /// a module-load filter. Use `"ld"` for all kernel modules and
-    /// `"ld:<module>"` for one module. The module name is not case-sensitive,
-    /// and the extension is optional. You can use `*`/`?` globs. A `"break"`
-    /// filter stops as `Stop.ModuleLoad` before the module entry point runs.
-    /// A `"notify"` filter adds a `ModLoad:` line to the queue in
-    /// `dbg.notices()`. `disposition` does not apply to `ld`.
+    /// Set the stop policy for an exception (`sxe`/`sxd`/`sxn`/`sxi`), or set a
+    /// module-load filter with `"ld"` for all kernel modules or `"ld:<module>"`
+    /// for one module. The module name is not case-sensitive, the extension is
+    /// optional, and `*`/`?` globs work. A `"break"` filter stops as
+    /// `Stop.ModuleLoad` before the module entry point runs, and a `"notify"`
+    /// filter adds a `ModLoad:` line to the queue in `dbg.notices()`.
+    /// `disposition` does not apply to `ld`.
     #[pyo3(signature = (code, mode, *, disposition=None))]
     fn set(
         &self,
@@ -675,9 +675,8 @@ impl Exceptions {
         }
     }
 
-    /// The module-load filters (`sx* ld[:<module>]`), in the order that you
-    /// set them. Iteration over `dbg.exceptions` gives only the exception
-    /// policies.
+    /// The module-load filters (`sx* ld[:<module>]`), in the order that you set
+    /// them. Iterating over `dbg.exceptions` gives only the exception policies.
     #[getter]
     fn module_loads(
         &self,
@@ -718,8 +717,8 @@ impl Exceptions {
         })
     }
 
-    /// Remove all configured policies and module-load filters. After this,
-    /// ordinary exceptions break by default and module loads do not stop.
+    /// Remove all configured policies and module-load filters, so ordinary
+    /// exceptions break by default and module loads do not stop.
     fn reset(&self, py: Python<'_>) -> PyResult<()> {
         self.owner.with(py, |session| {
             session.exception_policies.reset();

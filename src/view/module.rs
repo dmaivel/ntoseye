@@ -56,8 +56,8 @@ shapes! {
     }
 
     /// The result of a symbol reload. It counts the modules that loaded, had
-    /// no PDB, were skipped, or failed. It also has the first diagnostics, up
-    /// to a limit.
+    /// no PDB, were skipped, or failed, and keeps the first diagnostics up to
+    /// a limit.
     SymbolReloadReport {
         total: usize,
         loaded: usize,
@@ -165,7 +165,7 @@ shapes! {
         characteristics_names: Vec<String>,
     }
 
-    /// A CodeView debug record. It identifies the PDB that the image was built with.
+    /// A CodeView debug record, which identifies the PDB that the image was built with.
     CodeViewRecord {
         /// `RSDS` (PDB 7.0) or `NB10` (PDB 2.0).
         format: &'static str,
@@ -218,8 +218,8 @@ shapes! {
         exports: Vec<Export>,
     }
 
-    /// One PE export (`Module.exports`, `!dh -e`). An export has a name, or
-    /// only an ordinal. A forwarder has no address.
+    /// One PE export (`Module.exports`, `!dh -e`). An export has a name or
+    /// only an ordinal, and a forwarder has no address.
     Export {
         ordinal: u32,
         /// `None` for an ordinal-only export.
@@ -232,7 +232,7 @@ shapes! {
         forwarder: Option<String>,
     }
 
-    /// One `IMAGE_IMPORT_DESCRIPTOR`. It identifies a DLL that the image imports from.
+    /// One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image imports from.
     ImageImportDescriptor {
         /// The DLL name. `None` if ntoseye could not read it.
         name: Option<String>,
@@ -281,9 +281,9 @@ shapes! {
         imports: Option<Diag<Vec<ImageImportDescriptor>>>,
     }
 
-    /// The image identity of a module (`!lmi`). It has the file-header identity,
-    /// the debug directory, and the symbol state. The debug directory includes
-    /// the CodeView PDB name, GUID, and age.
+    /// The image identity of a module (`!lmi`), with the file-header identity,
+    /// the symbol state, and the debug directory, which includes the CodeView
+    /// PDB name, GUID, and age.
     ModuleImageInfo {
         module: LoadedModule,
         machine: Hex<u16>,
@@ -309,7 +309,7 @@ shapes! {
         rva: Hex<u32>,
         /// The mapped size of the section.
         size: Hex<u32>,
-        /// The mapped permissions as `rwx`. A `-` marks a missing permission.
+        /// The mapped permissions as `rwx`, with `-` for a missing permission.
         permissions: String,
     }
 

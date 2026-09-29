@@ -18,8 +18,7 @@ use crate::guest::TrustletInfo;
 use crate::types::Dtb;
 
 /// The secure kernel (`securekernel.exe`) that runs in VTL1. Its views use its
-/// system address space. The views are read-only, and writes raise
-/// `NtoseyeError`.
+/// system address space and are read-only, so writes raise `NtoseyeError`.
 #[pyclass(module = "ntoseye")]
 pub struct SecureKernel {
     owner: Owner,
@@ -76,8 +75,8 @@ impl SecureKernel {
         Ok(Symbols::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// PDB types, read through VTL1 memory. The public secure-kernel PDB has
-    /// no types. Give NT types with their module name (`nt!_LIST_ENTRY`).
+    /// PDB types, read through VTL1 memory. The public secure-kernel PDB has no
+    /// types, so give NT types with their module name (`nt!_LIST_ENTRY`).
     #[getter]
     fn types(&self, py: Python<'_>) -> PyResult<Types> {
         self.owner.check(py)?;
@@ -131,10 +130,9 @@ impl SecureKernel {
     }
 }
 
-/// An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`.
-/// Its views read through the page tables of the trustlet. These page tables
-/// map the user half of the trustlet and the secure kernel. The views are
-/// read-only.
+/// An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`. Its
+/// read-only views go through the page tables of the trustlet, which map the
+/// user half of the trustlet and the secure kernel.
 #[pyclass(module = "ntoseye")]
 pub struct Trustlet {
     owner: Owner,
@@ -207,8 +205,7 @@ impl Trustlet {
     }
 
     /// The symbols of the secure kernel, resolved in the address space of this
-    /// trustlet. This view does not include the user-mode modules of the
-    /// trustlet.
+    /// trustlet. The user-mode modules of the trustlet are not included.
     #[getter]
     fn symbols(&self, py: Python<'_>) -> PyResult<Symbols> {
         self.owner.check(py)?;

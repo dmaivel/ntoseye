@@ -9,7 +9,7 @@ shapes! {
     HeapSummary {
         /// The process environment block that ntoseye read the list from.
         peb: VirtAddr,
-        /// Whether the list is longer than the walk limit. If so, the list is
+        /// Whether the list is longer than the walk limit, which leaves it
         /// incomplete.
         truncated: bool,
         heaps: Vec<HeapOverview>,
@@ -35,8 +35,8 @@ shapes! {
         reserved: u64,
         /// Committed bytes.
         committed: u64,
-        /// Free bytes. For an NT heap, the free blocks. For a segment heap, the
-        /// free committed pages.
+        /// Free bytes: the free blocks of an NT heap, or the free committed
+        /// pages of a segment heap.
         free: u64,
         /// The number of NT-heap segments or segment-heap page segments.
         segments: u64,
@@ -84,8 +84,8 @@ shapes! {
         flags: Hex<u32>,
         /// `_HEAP.ForceFlags`.
         force_flags: Hex<u32>,
-        /// The size of `_HEAP_ENTRY` in bytes: 16 on x64, 8 on x86. Each block
-        /// starts with a `_HEAP_ENTRY`.
+        /// The size in bytes of the `_HEAP_ENTRY` that starts each block: 16 on
+        /// x64, 8 on x86.
         granule: u64,
         /// The XOR mask on the metadata of each entry header. None if the
         /// headers are not encoded.
@@ -98,8 +98,8 @@ shapes! {
         front_end: Option<VirtAddr>,
         /// `_HEAP.FrontEndHeapType`.
         front_end_type: u8,
-        /// Blocks that are too large for a segment. The heap allocates each of
-        /// these blocks separately.
+        /// Blocks that are too large for a segment, which the heap allocates
+        /// separately.
         virtual_blocks: Vec<NtVirtualBlock>,
         segments: Vec<NtHeapSegment>,
     }
@@ -175,8 +175,8 @@ shapes! {
         granule: u64,
         /// First user byte.
         user: Hex,
-        /// The number of bytes that the caller requested. This is the block size
-        /// minus the header and the unused bytes.
+        /// The number of bytes that the caller requested: the block size minus
+        /// the header and the unused bytes.
         user_size: u64,
         /// The legacy-LFH user block region in this busy entry. `None` if the
         /// entry has no region or ntoseye cannot read it. Also `None` in a
@@ -202,8 +202,8 @@ shapes! {
         first_block: VirtAddr,
         /// The distance in bytes between consecutive blocks.
         stride: u64,
-        /// One bit for each block. The bit is set if the block is busy. Block
-        /// `i` is byte `i / 8`, bit `i % 8`.
+        /// One bit for each block, set if the block is busy. Block `i` is byte
+        /// `i / 8`, bit `i % 8`.
         busy_bitmap: Vec<u8>,
         /// The blocks of the region. Empty if `list_entries` is false.
         blocks: Vec<HeapBlock>,
@@ -252,8 +252,8 @@ shapes! {
         large_committed_pages: u64,
         /// The `ntdll!RtlpHpHeapGlobals` keys that encode chunk headers.
         encoding_keys: SegmentHeapKeys => "keys",
-        /// The size of `_HEAP_VS_CHUNK_HEADER` in bytes: 16 on x64, 8 on x86.
-        /// Each VS chunk starts with a `_HEAP_VS_CHUNK_HEADER`.
+        /// The size in bytes of the `_HEAP_VS_CHUNK_HEADER` that starts each VS
+        /// chunk: 16 on x64, 8 on x86.
         granule: u64,
         /// The segment contexts (`SegContexts`), one for each page-segment size
         /// class.
@@ -358,7 +358,7 @@ shapes! {
         size: u64,
         /// The size in bytes of the previous chunk.
         previous_size: u64,
-        /// Always None. VS chunk headers have no flags.
+        /// Always None, because VS chunk headers have no flags.
         flags: Option<Hex>,
         /// `busy` or `free`.
         state: &'static str,
@@ -397,8 +397,8 @@ shapes! {
         address: VirtAddr,
         /// Whether a heap contains the address.
         found: bool,
-        /// Whether a heap list or heap walk stopped at its limit. If true, the
-        /// search possibly did not find the block.
+        /// Whether a heap list or heap walk stopped at its limit, in which case
+        /// the search may have missed the block.
         truncated: bool,
         /// The heap that contains the address. None if no heap contains it.
         heap: Option<HeapIdentity>,
@@ -466,9 +466,9 @@ shapes! {
         user: VirtAddr,
     }
 
-    /// An address in an NT-heap segment that is not in an entry. The address is
-    /// in the heap header, in an uncommitted range, or after the point where the
-    /// walk stopped.
+    /// An address in an NT-heap segment that is not in an entry: in the heap
+    /// header, in an uncommitted range, or after the point where the walk
+    /// stopped.
     HeapMatchNtSegment {
         /// Always `nt-segment`.
         kind: &'static str,
@@ -515,8 +515,7 @@ shapes! {
     }
 
     /// An address in a segment-heap page range that is not in a block of its
-    /// subsegment. The address is in the header, the bitmap, or the unused bytes
-    /// at the end.
+    /// subsegment: in the header, the bitmap, or the unused bytes at the end.
     HeapMatchRange {
         /// Always `range`.
         kind: &'static str,
