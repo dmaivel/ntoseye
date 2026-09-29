@@ -1,6 +1,7 @@
 // The documentation site at ntoseye.com: static assets only, no Worker script.
-// The release workflow builds the site into _build/html and deploys it with
-// `wrangler deploy` from this directory.
+// The release workflow, and the manual Deploy docs workflow (docs.yml), build
+// the site into _build/html and deploy it with `wrangler deploy` from this
+// directory.
 {
   "name": "ntoseye-docs",
   "compatibility_date": "2026-09-26",

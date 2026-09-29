@@ -436,12 +436,16 @@ jobs:
   # released commit and deployed as a Cloudflare Worker serving static assets
   # (docs/wrangler.jsonc). The command reference comes from this commit's
   # registry; the dist feature set has every command and needs no Python.
+  # It shares its concurrency group with the manual deploy in docs.yml.
   deploy-docs:
     needs:
       - plan
       - host
     if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
     runs-on: ubuntu-22.04
+    concurrency:
+      group: deploy-docs
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:
