@@ -1,8 +1,15 @@
 # Your first session
 
-This walks through one session against a Windows 11 VM: attach, look around, stop on a kernel function, read its arguments, step, and leave.
+This tutorial shows one full session with a Windows 11 VM. In this session, you do these steps:
 
-The session uses the `kdnet` backend, Windows' own kernel debugging over the network, as WinDbg uses it; the [KDNET guide](../setup/kdnet.md) sets it up. The commands are the same over `kd` and `gdb`; what differs is where the first stop lands.
+1. Attach to the VM.
+2. Look at the target.
+3. Stop on a kernel function.
+4. Read the arguments of the function.
+5. Step through the code.
+6. Leave the session.
+
+The session uses the `kdnet` backend. This backend is the Windows kernel debugger over the network, as WinDbg uses it. To set it up, see the [KDNET guide](../setup/kdnet.md). The commands are the same with the `kd` and `gdb` backends. Only the location of the first stop is different.
 
 ## Attach
 
@@ -23,15 +30,17 @@ target
 kdnet:p1.2>
 ```
 
-Attaching halts the VM. `ntoseye` finds the kernel, loads its symbols from Microsoft's symbol server (cached under `~/.ntoseye/symbols` after the first time), and prints a *stop header*: the processor (`p1.2`), what it was running, and where. Below the header come the registers, a few instructions of disassembly, and the top of the stack; the breakpoint [below](#stop-on-a-kernel-function) shows a whole stop.
+When `ntoseye` attaches, it halts the VM. Then `ntoseye` finds the kernel and loads the kernel symbols from the Microsoft symbol server. After the first time, `ntoseye` keeps the symbols in a cache under `~/.ntoseye/symbols`.
 
-The first stop is Windows answering the break-in: its debugger code stops in `nt!DbgBreakPointWithStatus`, here on a `System` thread that was receiving KDNET's packets. With the `gdb` backend, which halts the vCPUs from outside, the first stop is wherever each one happened to be.
+Then `ntoseye` shows a *stop header*. The stop header shows the processor (`p1.2`), what the processor was running, and where. Below the header, `ntoseye` shows the registers, some instructions of disassembly, and the top of the stack. The breakpoint [below](#stop-on-a-kernel-function) shows a full stop.
 
-The prompt names the backend and the selected processor.
+The first stop is the Windows response to the break-in. The Windows debugger code stops in `nt!DbgBreakPointWithStatus`. In this example, it stops on a `System` thread that received KDNET packets. The `gdb` backend halts the vCPUs from outside the VM. So with the `gdb` backend, each vCPU stops at the location where it was at that time.
+
+The prompt shows the backend and the selected processor.
 
 ## Look around
 
-{command}`vertarget` describes the target:
+{command}`vertarget` shows information about the target:
 
 ```text
 kdnet:p1.2> vertarget
@@ -47,7 +56,7 @@ target version
   ...
 ```
 
-{command}`lm` lists loaded kernel modules and whether their symbols loaded. `kdcom` and `kdstub` are the KDNET transport this session talks to:
+{command}`lm` lists the loaded kernel modules. For each module, it shows if the symbols loaded. `kdcom` and `kdstub` are the KDNET transport that this session communicates with:
 
 ```text
 kdnet:p1.2> lm
@@ -59,7 +68,7 @@ fffff807286c0000  fffff80728726000  kdstub                 -                load
 ...
 ```
 
-{command}`ps` lists processes with the address of each `_EPROCESS` and its page-table root:
+{command}`ps` lists the processes. For each process, it shows the address of the `_EPROCESS` and the page-table root:
 
 ```text
 kdnet:p1.2> ps
@@ -75,7 +84,7 @@ services.exe    932   ffffe70fb2e1b1c0  000000010ec46000  -
 ...
 ```
 
-Symbols are searched with {command}`x`; `*` and `?` are wildcards:
+To find symbols, use {command}`x`. You can use `*` and `?` as wildcards:
 
 ```text
 kdnet:p1.2> x nt!NtCreateFi*
@@ -86,7 +95,7 @@ fffff80797ac7930  nt!NtCreateFile
 
 ## Stop on a kernel function
 
-Set a breakpoint with {command}`bp` and resume with {command}`g`. `NtCreateFile` runs whenever any process opens a file, so it hits almost at once:
+To set a breakpoint, use {command}`bp`. To resume the VM, use {command}`g`. `NtCreateFile` runs each time a process opens a file. So the breakpoint hits almost immediately:
 
 ```text
 kdnet:p1.2> bp nt!NtCreateFile
@@ -126,7 +135,7 @@ stack
   ... 4 more frames
 ```
 
-{command}`k` walks the whole stack and adds each frame's stack pointer. It crosses from the kernel into the calling process's user-mode code, and resolves that too:
+{command}`k` shows the full stack and adds the stack pointer of each frame. The stack goes from the kernel into the user-mode code of the calling process. {command}`k` also resolves the user-mode frames:
 
 ```text
 kdnet:p1.1> k
@@ -142,18 +151,18 @@ kdnet:p1.1> k
  09 000000ef8a37f7a0  00007ff8555acaec  ntdll!RtlUserThreadStart+0x2c
 ```
 
-A module seen for the first time shows `module+offset` for a moment while its symbols download in the background; {command}`lm` shows it as `fetching` meanwhile.
+When `ntoseye` sees a module for the first time, it downloads the module symbols in the background. During the download, the frames in that module show as `module+offset` for a short time. {command}`lm` shows the module as `fetching` during this time.
 
 ## Read the arguments
 
-`NtCreateFile`'s third argument, in `r8` on x64, is an `OBJECT_ATTRIBUTES` whose `ObjectName` is the path being opened. Expressions understand types from the PDB, so a cast reads it directly, and {command}`dS` prints a `UNICODE_STRING`:
+On x64, the third argument of `NtCreateFile` is in `r8`. This argument is an `OBJECT_ATTRIBUTES` structure. Its `ObjectName` field is the path of the file that the process opens. Expressions use types from the PDB. So a cast reads the path directly. {command}`dS` shows a `UNICODE_STRING`:
 
 ```text
 kdnet:p1.1> dS ((nt!_OBJECT_ATTRIBUTES*)@r8)->ObjectName
 000000ef8a37eea8  Length=36 MaximumLength=38 Buffer=000002276cb50ac0  "\\??\\PhysicalDrive0"
 ```
 
-{command}`dt` displays a structure, optionally only the named fields. `$proc` is the current process's `_EPROCESS`:
+{command}`dt` shows a structure. If you give field names, it shows only those fields. `$proc` is the `_EPROCESS` of the current process:
 
 ```text
 kdnet:p1.1> dt nt!_EPROCESS @$proc UniqueProcessId ImageFileName
@@ -162,11 +171,11 @@ _EPROCESS (2112 bytes) @ ffffe70fb2ed3080
   +0x338 ImageFileName : UCHAR[15] = "svchost.exe"
 ```
 
-[Expressions](../reference/expressions.md) covers registers, pseudo-registers, casts, and members.
+For more information about registers, pseudo-registers, casts, and members, see [Expressions](../reference/expressions.md).
 
 ## Step
 
-{command}`p` steps over one instruction, and {command}`gu` runs until the current function returns. Each stop prints a header again:
+{command}`p` steps over one instruction. {command}`gu` runs until the current function returns. At each stop, `ntoseye` shows a stop header again:
 
 ```text
 kdnet:p1.1> p
@@ -189,11 +198,11 @@ breakpoint #0 cleared
 kdnet:p1.1> q
 ```
 
-{command}`bc` clears breakpoints; {command}`q` detaches and lets the VM run on.
+{command}`bc` clears breakpoints. {command}`q` detaches from the VM and lets the VM continue to run.
 
 ## Where to go next
 
-- {command}`.hh` lists every command, and `.hh <command>` explains one; the same text is the [command reference](../reference/commands/index.md). Tab completes commands, symbols, and types.
-- [Coming from WinDbg](windbg.md) lists what carries over and what differs.
-- [Breakpoints](../using/breakpoints.md) covers conditions, scoping to one process or thread, and commands that run on a hit.
-- [Python SDK](../scripting/sdk.md) does all of the above from a script.
+- {command}`.hh` lists all commands. `.hh <command>` explains one command. The [command reference](../reference/commands/index.md) contains the same text. Press Tab to complete commands, symbols, and types.
+- [Coming from WinDbg](windbg.md) lists what is the same as in WinDbg and what is different.
+- [Breakpoints](../using/breakpoints.md) explains conditions, breakpoints for only one process or thread, and commands that run when a breakpoint hits.
+- [Python SDK](../scripting/sdk.md) shows how to do all of these tasks from a script.

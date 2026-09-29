@@ -1,3 +1,5 @@
 # Custom commands
 
-Example REPL command scripts. Copy a `*.py` file into `~/.ntoseye/commands/` to have it auto-loaded at startup. Commands use the SDK's namespaces (for example, `dbg.processes` and `dbg.memory`) and are typed with `ntoseye.repl.Debugger`.
+This directory contains example scripts for REPL commands. To load a command automatically at startup, copy its `*.py` file into `~/.ntoseye/commands/`.
+
+The commands use the SDK namespaces, for example `dbg.processes` and `dbg.memory`. The commands use `ntoseye.repl.Debugger` for their type annotations.

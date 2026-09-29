@@ -1,45 +1,81 @@
 # MCP integration
 
-`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server, which gives an agent WinDbg syntax with bounded run control.
+`ntoseye` can run as an [MCP](https://modelcontextprotocol.io) server. In this mode, an agent uses WinDbg syntax, and each call has a time limit for run control.
 
 :::{tip}
-If the agent's harness keeps a Python kernel alive between calls (oh-my-pi's `eval`, a Jupyter kernel), have it use the [Python SDK](../scripting/sdk.md) instead. The SDK runs the same WinDbg-style commands (`dbg.command("!process 0 0")`) and also returns structured values (`dbg.processes`, `dbg.types`, `dbg.memory`), so a script can filter or walk them and give the agent only the result. The SDK and this server each attach the target themselves, so use one at a time.
+If the harness of the agent keeps a Python kernel alive between calls, tell the agent to use the [Python SDK](../scripting/sdk.md). Examples of such kernels are the `eval` tool of oh-my-pi and a Jupyter kernel. The SDK runs the same WinDbg-style commands (`dbg.command("!process 0 0")`). It also returns structured values (`dbg.processes`, `dbg.types`, `dbg.memory`). So a script can filter or walk these values and give only the result to the agent. The SDK and this server each attach to the target themselves, so use only one of them at a time.
 :::
 
 | Tool | Purpose |
 | --- | --- |
-| `command` | Run one REPL line (`;` separates commands; {command}`help` lists them) and return its text and a `[target ...]` trailer. Arguments: `line`, `timeout_ms` (default 10 s, max 5 min), `format` (`text` or [`json`](#structured-results)). |
-| `open` / `close` | Attach to a target (`backend`, `connect`, and `key` for `kdnet`; a crash dump is `backend: dump` with its path as `connect`) or release it. One session at a time. |
+| `command` | Runs one REPL line and returns its text and a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists the commands. The arguments are `line`, `timeout_ms` (default 10 s, maximum 5 min), and `format` (`text` or [`json`](#structured-results)). |
+| `open` / `close` | `open` attaches to a target. Its arguments are `backend`, `connect`, and, for `kdnet`, `key`. For a crash dump, use `backend: dump` and give the dump path as `connect`. `close` releases the target. The server has one session at a time. |
 
 ## Run control
 
-The `command` tool behaves like a WinDbg prompt, with one difference: it never blocks longer than `timeout_ms`.
+The `command` tool works like a WinDbg prompt. There is one difference: a call never blocks for longer than `timeout_ms`.
 
-- A resuming command ({command}`g`, {command}`gh`, {command}`gn`, {command}`p`, {command}`t`, {command}`gu`, {command}`pa`, {command}`wt`, {command}`.reboot`, ...) resumes and waits up to `timeout_ms` for the next stop. A stop is rendered the way the REPL renders it (breakpoint banner, registers, stack). If nothing stops in time the result ends with `[target running]`; the target keeps running and nothing is lost.
-- A command that needs a halted target ({command}`k`, {command}`r`, {command}`bp`, {command}`t`, ...) sent while the target runs waits up to `timeout_ms` for the stop, renders it, then runs, the way WinDbg queues input typed at a running debuggee. If the target is still running when the budget ends, the result says so and the command was not run; re-issue it to keep waiting. Memory, process, module, and struct commands do not wait: they work live when memory comes from the host (the default `--memory-source auto` with a local VM, and the memory/gdb backends), and fail with a message saying why on a session that reads memory over KD.
-- A resuming command sent while the target runs also waits, but is then refused once so the stop is seen before it is continued past.
-- Each command on a `;` line is admitted against the target's state at that point, not the state when the line arrived. `break; bp nt!NtCreateFile; g` therefore works as one call: {command}`break` halts the guest, {command}`bp` runs on the halted target, {command}`g` resumes. A bare {command}`bp` on a guest that nothing will stop only waits out `timeout_ms` and reports that it was not run.
+### Commands and the target state
+
+- A resuming command ({command}`g`, {command}`gh`, {command}`gn`, {command}`p`, {command}`t`, {command}`gu`, {command}`pa`, {command}`wt`, {command}`.reboot`, ...) resumes the target. Then it waits up to `timeout_ms` for the next stop. The result shows the stop in the same way as the REPL: the breakpoint banner, the registers, and the stack. If the target does not stop in time, the result ends with `[target running]`. The target continues to run, and no data is lost.
+- Some commands need a halted target ({command}`k`, {command}`r`, {command}`bp`, {command}`t`, ...). If you send such a command while the target runs, the command waits up to `timeout_ms` for the stop. Then ntoseye shows the stop and runs the command. WinDbg queues input that you type at a running debuggee in the same way. If the target still runs at the end of the time limit, the result tells you this, and ntoseye does not run the command. To wait longer, send the command again.
+- Memory, process, module, and struct commands do not wait. They work on a running target if the memory comes from the host. This is the case for the default `--memory-source auto` with a local VM, and for the memory and gdb backends. If the session reads memory over KD, these commands fail with a message that gives the reason.
+- If you send a resuming command while the target runs, the command also waits for the stop. Then ntoseye shows the stop and does not run the command for this call. So the agent sees the stop before the target continues past it.
+- ntoseye checks each command on a `;` line against the target state at the time that command starts. It does not use the state at the time the line arrives. So `break; bp nt!NtCreateFile; g` works as one call. {command}`break` stops the guest, {command}`bp` runs on the halted target, and {command}`g` resumes the target.
+- If you send only {command}`bp` and nothing stops the guest, the command waits for the full `timeout_ms`. Then the result tells you that ntoseye did not run the command.
 - {command}`break` interrupts a running target.
-- A stop that arrived between calls (the guest hit a breakpoint while the agent was thinking) is rendered at the top of the next result. If that next call was itself a resuming command it is refused once, so the agent sees the stop before continuing past it.
-- A multi-step command ({command}`pa`, {command}`pt`, {command}`gu`, {command}`wt`) that overruns the budget leaves the target running toward its next stop; the next halted-only command collects it. An empty `line` runs nothing and only waits.
+- A stop can occur between calls. For example, the guest can hit a breakpoint while the agent thinks. The next result shows that stop at the top. If that next call is a resuming command, ntoseye does not run it for this call. So the agent sees the stop before the target continues past it.
+- A multi-step command ({command}`pa`, {command}`pt`, {command}`gu`, {command}`wt`) can take longer than the time limit. In this case, the target continues to run to its next stop. The next command that needs a halted target collects that stop.
+- An empty `line` runs no command and only waits.
 
-The trailer reads `[target running]` or `[target halted @ <vcpu> <rip> <symbol> | process <name> (<pid>) | scope <name> (<pid>)]`, where `process` is the process whose page tables the stopped vCPU has loaded and `scope` is the {command}`.process` inspection scope memory commands read through (it survives resumes, so the two can differ). A vCPU halted in the Windows hypervisor reads `hvix64+<offset>` and adds where Windows left off, `| saved VTL0 nt!HalProcessorIdle+0xf` ([VBS](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor)). After a reboot the target stops (over KD, at the new kernel's first boot notification), and the trailer adds `boot in progress` until the kernel's module list exists: kernel symbols and `bp nt!...` work there, so it is the place to set early-boot breakpoints, but process and module lists do not yet. {command}`g` lets boot continue; while running, wait rather than enumerating stale state.
+### The trailer
 
-Guest debug output (`DbgPrint`) captured since the previous call is appended as `[dbgprint] ...` lines.
+The trailer has one of these two forms:
 
-A typical breakpoint flow: `break; bp nt!NtCreateFile; g`, then {command}`k` (which waits for the breakpoint if {command}`g` returned with the target still running). For a user-mode breakpoint name the process and the symbol resolves in it: `break; bu /p <pid> user32!PeekMessageW; g`. No prior `.process /p` is needed, because the debugger loads that module's symbols itself (see [symbols](../using/symbols.md)).
+- `[target running]`
+- `[target halted @ <vcpu> <rip> <symbol> | process <name> (<pid>) | scope <name> (<pid>)]`
 
-A backtrace through a module whose PDB is not cached yet renders those frames as `module+offset` and fetches the PDB in the background rather than holding the call open; a later {command}`k` shows the names.
+In the halted form, `process` is the process whose page tables the stopped vCPU has loaded. `scope` is the {command}`.process` inspection scope, which memory commands read through. The scope stays after the target resumes, so `process` and `scope` can be different.
+
+If a vCPU halted in the Windows hypervisor, the trailer shows `hvix64+<offset>`. It also adds the location where Windows stopped, for example `| saved VTL0 nt!HalProcessorIdle+0xf`. For more information, refer to [VBS](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
+
+After a reboot, the target stops. Over KD, it stops at the first boot notification of the new kernel. Until the module list of the kernel exists, the trailer adds `boot in progress`. At this point, kernel symbols and `bp nt!...` work, but the process and module lists do not work yet. So this is the place to set early-boot breakpoints. {command}`g` lets the boot continue. While the target runs, wait for the next stop, and do not enumerate the state, because it is stale.
+
+### Debug output
+
+ntoseye adds the guest debug output (`DbgPrint`) that it captured since the previous call to the result. Each line starts with `[dbgprint] ...`.
+
+### Breakpoint example
+
+A typical breakpoint flow is:
+
+1. Send `break; bp nt!NtCreateFile; g`.
+2. Send {command}`k`. If {command}`g` returned while the target still ran, {command}`k` waits for the breakpoint.
+
+For a user-mode breakpoint, give the process. ntoseye then resolves the symbol in that process: `break; bu /p <pid> user32!PeekMessageW; g`. You do not need a `.process /p` before this command, because the debugger loads the symbols of that module itself. For more information, refer to [symbols](../using/symbols.md).
+
+A backtrace can go through a module whose PDB is not in the cache yet. In this case, ntoseye shows those frames as `module+offset` and gets the PDB in the background. The call does not wait for the PDB. A later {command}`k` shows the names.
 
 ## Structured results
 
-`format: "json"` returns `{ok, output, result, target, debug_output}` as structured content: `output` is the text the command printed, `target` is the run-state snapshot (`{running, current_thread, rip, symbol, saved_vtl, attached_process, stopped_process, stopped_thread, coherent, kernel_base}`), `debug_output` the captured `DbgPrint` lines, and `result` the typed decoding for commands that have one, else `null`. The decodings are the same ones the [Python SDK](../scripting/sdk.md) exposes as methods (the `!` inspectors, {command}`lm`, {command}`!process`, {command}`k`, {command}`bl`, {command}`dt`, {command}`?`, {command}`r`, {command}`!analyze`, ...); see the SDK surface table for the set.
+`format: "json"` returns `{ok, output, result, target, debug_output}` as structured content. The fields are:
 
-The server reads `--backend`/`--connect`/`--kdnet-key`/`--dump` to attach at launch, so the VM and its debug transport must be set up exactly as for the REPL (see [Choosing a backend](../setup/backends.md)). Without those flags it starts empty and the client attaches with `open`. The guest runs freely between calls; wrong-process hits on shared-page breakpoints are absorbed in the background so it is never left frozen.
+- `output`: the text that the command printed.
+- `target`: the run-state snapshot (`{running, current_thread, rip, symbol, saved_vtl, attached_process, stopped_process, stopped_thread, coherent, kernel_base}`).
+- `debug_output`: the captured `DbgPrint` lines.
+- `result`: the typed decoding, for commands that have one. For other commands, `result` is `null`.
+
+The decodings are the same as the methods of the [Python SDK](../scripting/sdk.md). Examples are the `!` inspectors, {command}`lm`, {command}`!process`, {command}`k`, {command}`bl`, {command}`dt`, {command}`?`, {command}`r`, and {command}`!analyze`. For the full set, refer to the SDK surface table.
+
+## Target at server start
+
+The server reads `--backend`, `--connect`, `--kdnet-key`, and `--dump` to attach at launch. So you must set up the VM and its debug transport in the same way as for the REPL. For more information, refer to [Choosing a backend](../setup/backends.md). Without these options, the server starts with no target, and the client attaches with `open`.
+
+The guest runs freely between calls. A breakpoint on a shared page can stop the wrong process. ntoseye absorbs these hits in the background and lets the guest continue. So the guest does not stay frozen.
 
 ## stdio (default)
 
-The MCP client launches `ntoseye mcp` as a subprocess and talks to it over stdin/stdout. Most desktop MCP clients are configured with a JSON file listing the command to spawn:
+The MCP client starts `ntoseye mcp` as a subprocess and communicates with it over stdin and stdout. Most desktop MCP clients use a JSON file that gives the command to start:
 
 ```json
 {
@@ -52,7 +88,7 @@ The MCP client launches `ntoseye mcp` as a subprocess and talks to it over stdin
 }
 ```
 
-Target options follow the subcommand, e.g. to pin the backend and socket:
+Put the target options after the subcommand. For example, this configuration sets the backend and the socket:
 
 ```json
 {
@@ -65,18 +101,36 @@ Target options follow the subcommand, e.g. to pin the backend and socket:
 }
 ```
 
-For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`; add `["--memory-source", "kd"]` to force target-mediated memory and add `--connect` only when changing the default `0.0.0.0:50000` listener. The `open` tool takes the same backend/connect/key choices; when the server starts without a target the agent is instructed to ask the user how the VM is exposed rather than guess.
+For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`. To force target-mediated memory, add `["--memory-source", "kd"]`. Add `--connect` only to change the default `0.0.0.0:50000` listener.
 
-Use an absolute path for `command` (e.g. `../target/release/ntoseye`) if `ntoseye` isn't within `PATH`.
+The `open` tool accepts the same backend, connect, and key values. If the server starts without a target, it tells the agent to ask the user how the VM is exposed, and not to guess.
 
-Closing stdin, `SIGINT`, `SIGTERM`, and `SIGHUP` detach like `close`: installed breakpoints are removed and the guest resumes before the server exits. `SIGKILL` prevents cleanup and leaves breakpoint entries installed; see [breakpoint recovery](../using/breakpoints.md).
+If `ntoseye` is not in `PATH`, use an absolute path for `command` (for example, `../target/release/ntoseye`).
+
+These events detach the target in the same way as `close`:
+
+- The stdin of the server closes.
+- The server gets `SIGINT`, `SIGTERM`, or `SIGHUP`.
+
+ntoseye then removes the installed breakpoints and resumes the guest before the server exits. `SIGKILL` stops this cleanup, and the breakpoint entries stay installed. For more information, refer to [breakpoint recovery](../using/breakpoints.md).
 
 ## Streamable HTTP
 
-For web MCP clients that connect over the network instead of spawning a subprocess, use `--http`:
+Some web MCP clients connect over the network and do not start a subprocess. For these clients, use `--http`:
 
 ```bash
 ntoseye mcp --http 127.0.0.1:8080
 ```
 
-The service is mounted at `http://127.0.0.1:8080/mcp`. HTTP binds are loopback-only by default. The `command` tool exposes the full REPL, including execution control, guest memory writes ({command}`eb`, {command}`!eb`), host filesystem writes ({command}`.dump`, {command}`.logopen`), and host files served to the guest ({command}`.kdfiles`). Use `--unsafe-http` to bind a non-loopback address only on trusted networks.
+The service is at `http://127.0.0.1:8080/mcp`. By default, HTTP binds only to loopback addresses.
+
+:::{warning}
+The `command` tool gives access to the full REPL. This includes:
+
+- execution control
+- guest memory writes ({command}`eb`, {command}`!eb`)
+- host filesystem writes ({command}`.dump`, {command}`.logopen`)
+- host files that the guest can get ({command}`.kdfiles`)
+
+So use `--unsafe-http` to bind to a non-loopback address only on trusted networks.
+:::

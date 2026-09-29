@@ -1,13 +1,16 @@
 # ntoseye
 
-Drive the [ntoseye](https://github.com/dmaivel/ntoseye) Windows kernel debugger
-from Python, and run it from the command line.
+This package lets you control the [ntoseye](https://github.com/dmaivel/ntoseye)
+Windows kernel debugger from Python. It also lets you run the debugger from the
+command line.
 
-See [`docs/scripting/sdk.md`](../docs/scripting/sdk.md) for address-space-bound
-views and run control. The
-package also installs the `ntoseye` command (the REPL, `ntoseye mcp`, `dap`,
-and `gdbserver`), which runs Python custom commands from
-`~/.ntoseye/commands/`: `uv tool install ntoseye` or `pipx install ntoseye`.
+For address-space-bound views and run control, see
+[`docs/scripting/sdk.md`](../docs/scripting/sdk.md).
+
+The package also installs the `ntoseye` command. This command gives you the
+REPL, `ntoseye mcp`, `dap`, and `gdbserver`. It runs Python custom commands from
+`~/.ntoseye/commands/`. To install the command in its own environment, run
+`uv tool install ntoseye` or `pipx install ntoseye`.
 
 ## Install
 
@@ -15,7 +18,7 @@ and `gdbserver`), which runs Python custom commands from
 pip install ntoseye
 ```
 
-Or build from source into a virtualenv with maturin:
+You can also use maturin to build from source into a virtualenv:
 
 ```sh
 cd python
@@ -25,7 +28,7 @@ pip install maturin
 maturin develop --release
 ```
 
-Or build a wheel and install it:
+You can also build a wheel and install it:
 
 ```sh
 cd python
@@ -44,16 +47,20 @@ with ntoseye.attach() as dbg:  # defaults to the kd backend
         print(proc.pid, proc.name)
 ```
 
-For read-only inspection of a paused VM, select `backend="memory"`. Processes
-are handles keyed by PID (`dbg.processes[pid]`); memory and modules for a
-specific process are available through `proc.memory` and `proc.modules`.
+For read-only inspection of a paused VM, select `backend="memory"`.
+
+`dbg.processes` contains process handles, with the PID as the key
+(`dbg.processes[pid]`). To get the memory and the modules of one process, use
+`proc.memory` and `proc.modules`.
 
 ## Type stubs
 
-`ntoseye/_ntoseye.pyi` is generated from the extension by PyO3's
-introspection: signatures come from the Rust types and docstrings from the
-doc comments. After changing the Rust surface, regenerate it and commit the
-result (CI fails when the checked-in stub differs from a fresh one):
+PyO3 introspection generates `ntoseye/_ntoseye.pyi` from the extension. The
+signatures come from the Rust types. The docstrings come from the doc comments.
+
+If you change the Rust surface, regenerate the stub and commit the result. CI
+fails if the stub in the repository is different from a newly generated stub.
+To regenerate the stub, run this command:
 
 ```sh
 maturin develop --release --generate-stubs
@@ -68,21 +75,28 @@ mypy --strict -p ntoseye            # the stub and package type-check
 NTOSEYE_TEST_BACKEND=kd NTOSEYE_TEST_CONNECT=/tmp/ntoseye-kd.sock pytest tests
 ```
 
-The last line also runs `tests/test_live.py` against a guest: it breaks in,
-steps, sets breakpoints on hot kernel functions, and resumes the guest.
-Add `NTOSEYE_TEST_MEMORY_SOURCE=kd` to read guest memory over KD instead of
-from the VM process: no root needed for UTM on macOS, and required for a
-remote target.
+The last command also runs `tests/test_live.py` on a guest. This test does
+these operations:
+
+- It breaks in.
+- It steps.
+- It sets breakpoints on hot kernel functions.
+- It resumes the guest.
+
+By default, the tests read guest memory from the VM process. To read guest
+memory over KD, add `NTOSEYE_TEST_MEMORY_SOURCE=kd`. With KD, UTM on macOS does
+not need root. A remote target needs this variable.
 
 ## Releasing portable wheels
-Release wheels are built by `.github/workflows/release.yml` with `PyO3/maturin-action` on native GitHub runners:
 
-- Linux x86-64 and ARM64 build on `ubuntu-22.04` and `ubuntu-24.04-arm` inside the `quay.io/pypa/manylinux_2_28_*` images, producing `manylinux_2_28` wheels.
-- Apple Silicon uses the native ARM64 `macos-14` runner.
+The workflow `.github/workflows/release.yml` builds the release wheels. It uses `PyO3/maturin-action` on native GitHub runners:
 
-Each wheel then passes `twine check` and the target-free tests (`tests/test_surface.py`) in a clean virtual environment before upload.
+- The Linux x86-64 and ARM64 wheels build on `ubuntu-22.04` and `ubuntu-24.04-arm`, in the `quay.io/pypa/manylinux_2_28_*` images. These builds make `manylinux_2_28` wheels.
+- The Apple Silicon wheel builds on the native ARM64 `macos-14` runner.
 
-To reproduce a Linux release wheel locally (from the repository root, Docker required):
+Before the upload, each wheel must pass `twine check` and the target-free tests (`tests/test_surface.py`). The workflow runs these checks in a clean virtual environment.
+
+To make a Linux release wheel locally, you need Docker. Run this command from the repository root:
 
 ```sh
 docker run --rm -e CARGO_TARGET_DIR=/tmp/target -e HOST_IDS="$(id -u):$(id -g)" \

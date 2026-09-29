@@ -1,8 +1,27 @@
 # Breakpoints and watchpoints
 
-The shared breakpoint grammar follows WinDbg. Code breakpoints use `/1` (one-shot), `/p <pid>` (process scope), `/t <ethread>` (thread scope), `/c <processor>` (processor scope), and `/w "<expr>"` (conditional shorthand), followed by a target, optional pass count, `if <expr>`, and `do "<commands>"`; {command}`ba` takes the same options and adds `<access><size>`. `/c` has no WinDbg equivalent.
+All breakpoint commands use one grammar, and this grammar follows WinDbg. A code breakpoint command starts with its options:
 
-Conditions use the normal expression grammar. Comparisons, bitwise operations, and short-circuiting `!`, `&&`, and `||` can be combined with parentheses. Write ranges explicitly (`0 < @rax && @rax < 0n10`) rather than as chained comparisons; chained equality (`a == b == c`) is refused for the same reason and names `&&` as the fix. Multi-command actions must be quoted, like WinDbg. `gc`, or a plain `g`, continues from the breakpoint wherever it runs in the action, including inside a `j` or `.if` branch (`bp nt!NtClose "j (@rcx == 0) 'kb; g' ; 'g'"`); commands after it do not run. Other run control (`g <address>`, `p`, `t`, `gu`, `gh`, `gn`) is refused inside an action.
+- `/1`: one-shot.
+- `/p <pid>`: process scope.
+- `/t <ethread>`: thread scope.
+- `/c <processor>`: processor scope. WinDbg does not have this option.
+- `/w "<expr>"`: conditional shorthand.
+
+After the options, the command takes a target, an optional pass count, `if <expr>`, and `do "<commands>"`. The {command}`ba` command takes the same options. It also adds `<access><size>`.
+
+Conditions use the normal expression grammar. You can combine comparisons, bitwise operations, and the short-circuit operators `!`, `&&`, and `||` with parentheses. Write a range explicitly, for example `0 < @rax && @rax < 0n10`. Do not write a range as a chained comparison. For the same reason, `ntoseye` gives an error for chained equality (`a == b == c`). The error message tells you to use `&&`.
+
+If a breakpoint action has more than one command, put quotes around it, as in WinDbg. `gc` or a plain `g` continues from the breakpoint at any position in the action. This includes a `j` or `.if` branch, for example `bp nt!NtClose "j (@rcx == 0) 'kb; g' ; 'g'"`. The commands after `gc` or `g` do not run.
+
+`ntoseye` does not accept other run-control commands in an action:
+
+- `g <address>`
+- `p`
+- `t`
+- `gu`
+- `gh`
+- `gn`
 
 ```text
 bp nt!KeBugCheckEx @rcx == 0x50 && (@rdx & 0xff) != 0
@@ -12,29 +31,83 @@ bm mydriver!Dispatch*
 ba w8 nt!KiBalanceSetManagerLastCheckTick
 ```
 
-A target names a symbol as its PDB records it, including C++ template and Rust generic arguments (`bp mydriver!mydriver::impl$0::tally<u32>`, `bp nt!ST_STORE<SM_TRAITS>::StStart`); a space is allowed only after a comma in the argument list. {command}`bm` sets breakpoints on code symbols only and skips data the pattern also matches, such as vtables.
+A target is a symbol name as the PDB records it. The name includes C++ template arguments and Rust generic arguments, for example `bp mydriver!mydriver::impl$0::tally<u32>` and `bp nt!ST_STORE<SM_TRAITS>::StStart`. In the argument list, you can use a space only after a comma.
 
-A kernel code breakpoint can target a non-resident page. KD records the site and writes the breakpoint when the page arrives. Until then, {command}`bl` shows `o` (owed).
+{command}`bm` sets breakpoints only on code symbols. If the pattern also matches data, such as vtables, `bm` skips the data.
 
-User-space code breakpoints require resident memory. If the page is absent, set the breakpoint after the code has run, or use `ba e1 <address>`, which requires no memory write.
+## Breakpoints on non-resident pages
 
-A `ba e1` stop can precede the instruction page fault, leaving no bytes to disassemble. Registers and the stack remain available. Use {command}`t` to execute the fetch and bring the page in; {command}`p` needs to decode the instruction first.
+You can set a kernel code breakpoint on a page that is not resident. KD records the site and writes the breakpoint when the page comes into memory. Until then, {command}`bl` shows `o` (owed).
 
-`/p` filters reported hits; it does not change how a breakpoint is installed. Kernel sites are always target-managed. User-space sites are patched through the selected process’s page tables. Shared physical pages can therefore trap other processes too; those hits are discarded but still incur debugger round trips.
+A user-space code breakpoint needs resident memory. If the page is not resident, do one of these steps:
 
-`/t` filters the same way, against the Windows thread the stop belongs to. It takes what {command}`!thread` takes: a thread id, an ETHREAD, or a KTHREAD. No target programs a breakpoint per thread. A software site is a byte in a page every thread shares, and a debug register belongs to a processor that any thread may be scheduled on, so every thread executing the site still traps and the debugger discards the hits belonging to other threads. Discarding costs a step-over and a resume per hit, so a filter on a site the whole system calls slows the session down. A hit whose thread cannot be resolved is reported rather than discarded, so a filter never loses a stop silently.
+- Set the breakpoint after the code has run.
+- Use `ba e1 <address>`. This breakpoint does not write to memory.
 
-`/c` filters by processor instead, taking the number {command}`~` lists. It is checked against the vCPU the stop was reported on, which costs nothing to know, so unlike `/t` it adds no walk. A processor the guest does not have is rejected when the breakpoint is set, because a filter that can never match is a breakpoint that silently never fires.
+A `ba e1` stop can occur before the instruction page fault. In this case, there are no bytes to disassemble. The registers and the stack are still available. Use {command}`t` to execute the fetch and bring the page into memory. {command}`p` must decode the instruction first, so it cannot do this step.
 
-KD has a fixed 32-entry software-breakpoint table. A session killed with `SIGKILL` leaves its entries installed and can prevent later breakpoints at those addresses.
+## Scope filters
 
-Attach reclaims entries that no live session owns, restores displaced instructions, and reports the count. A colliding install also reclaims stale entries and retries. `bc *` only clears the current session’s handles. Normal exit, `SIGTERM`, and `SIGHUP` release them.
+`/p` is a filter on the hits that `ntoseye` reports. It does not change how `ntoseye` installs the breakpoint:
+
+- The target always manages kernel sites.
+- `ntoseye` patches user-space sites through the page tables of the selected process.
+
+So a breakpoint in a shared physical page can also trap other processes. `ntoseye` discards those hits. But each of those hits still causes debugger round trips.
+
+`/t` is a filter of the same type. It compares the Windows thread of the stop with the thread that you specify. It takes the same values as {command}`!thread`:
+
+- A thread ID.
+- An ETHREAD.
+- A KTHREAD.
+
+No target sets a breakpoint for one thread. There are two reasons:
+
+- A software site is a byte in a page that all threads share.
+- A debug register belongs to a processor, and Windows can schedule any thread on that processor.
+
+So each thread that executes the site traps, and `ntoseye` discards the hits of the other threads. Each discarded hit costs a step-over and a resume. So a filter on a site that the whole system calls makes the session slower. If `ntoseye` cannot find the thread of a hit, it reports the hit and does not discard it. So a filter does not hide a stop from you.
+
+`/c` is a filter on the processor. It takes a processor number as {command}`~` shows it. `ntoseye` compares this number with the vCPU that reported the stop. `ntoseye` gets this vCPU at no cost. So unlike `/t`, `/c` does not add a walk.
+
+If the guest does not have the processor, `ntoseye` gives an error when you set the breakpoint. `ntoseye` gives this error because the filter can never match, so the breakpoint can never stop.
+
+## The KD breakpoint table
+
+KD has a software-breakpoint table with a fixed size of 32 entries. If you kill a session with `SIGKILL`, its entries stay installed. These entries can prevent later breakpoints at the same addresses.
+
+When `ntoseye` attaches, it does these steps:
+
+- It reclaims the entries that no live session owns.
+- It restores the displaced instructions.
+- It reports the number of reclaimed entries.
+
+If an install collides with an entry, `ntoseye` also reclaims stale entries and tries the install again. `bc *` clears only the handles of the current session. A normal exit, `SIGTERM`, and `SIGHUP` release these handles.
 
 ## Stopping at a driver load
 
-`sxe ld:<module>` stops the target when that kernel image loads; bare `sxe ld` stops at every kernel image load. The module name is matched case-insensitively, with or without its extension, and takes `*` and `?` (`sxe ld:mydriver`, `sxe ld:MyDriver.sys`, `sxe ld:my*`). At the stop the module is in the module list, its symbols are loaded, deferred {command}`bu` breakpoints in it are armed, and its `DriverEntry` has not run, so breakpoints set there catch the driver's initialization. The stop prints WinDbg's `ModLoad: <base> <end>   <image>` line above the usual stop context.
+`sxe ld:<module>` stops the target when that kernel image loads. `sxe ld` without a module name stops the target at each kernel image load.
 
-`sxn ld[:<module>]` prints the `ModLoad:` line and continues; `sxd` and `sxi` let the load continue silently. A filter naming a module takes precedence over bare `ld`, so `sxe ld` with `sxi ld:ksecdd` stops at every load but that one. `sxe -c "<commands>" ld:<module>` runs the commands at the stop; `-f` does not apply to `ld`. {command}`sx` lists the filters and {command}`sxr` clears them. Module unload (`ud`) filters are not supported.
+`ntoseye` matches the module name without case sensitivity. You can write the name with or without its extension. You can use the wildcards `*` and `?`. Examples are `sxe ld:mydriver`, `sxe ld:MyDriver.sys`, and `sxe ld:my*`.
+
+At the stop, these conditions are true:
+
+- The module is in the module list.
+- The symbols of the module are loaded.
+- The deferred {command}`bu` breakpoints in the module are armed.
+- The `DriverEntry` of the module has not run.
+
+So a breakpoint that you set at this stop catches the initialization of the driver. The stop shows the WinDbg line `ModLoad: <base> <end>   <image>` above the usual stop context.
+
+The other load filter commands do these actions:
+
+- `sxn ld[:<module>]` shows the `ModLoad:` line and continues.
+- `sxd` and `sxi` let the load continue and show nothing.
+- `sxe -c "<commands>" ld:<module>` runs the commands at the stop. The `-f` option does not apply to `ld`.
+- {command}`sx` lists the filters.
+- {command}`sxr` clears the filters.
+
+A filter with a module name has priority over `ld` without a module name. For example, `sxe ld` together with `sxi ld:ksecdd` stops at each load except the `ksecdd` load. `ntoseye` does not support module unload (`ud`) filters.
 
 ```text
 sxe ld:mydriver
@@ -43,23 +116,76 @@ bp mydriver!MyDispatchCreate
 g
 ```
 
-KD and KDNET learn of each load from the target's load notification. A GDB stub reports none, so on the `gdb` backend ntoseye plants its own breakpoint at `nt!DbgLoadImageSymbols`, which the kernel calls for every kernel image it maps, after listing it and before its entry point runs, with or without kernel debugging enabled. The trap is in place only while something waits on a load: an `sxe`/`sxn ld` filter, or a breakpoint whose module has not loaded (`bu mydriver!DriverEntry`). It is planted when the target resumes with one, reported when it is, and lifted at the first resume or load after which none is left, so a session killed with it in place (the site journal repairs it at the next attach) leaves it for as short a time as possible. It is masked out of memory reads and removed at exit. A GDB stub reports no reboot either, so the trap does not carry across one: the new kernel is found at the first stop after it runs, and the loads during boot before that are not stopped for (KD reports each of them). Each load while it is in place halts the target briefly to refresh the module list, then resumes it unless a filter stops there.
+### The load trap on the `gdb` backend
+
+KD and KDNET get a load notification from the target for each load. A GDB stub does not send load notifications. So on the `gdb` backend, `ntoseye` sets its own breakpoint at `nt!DbgLoadImageSymbols`. This breakpoint is the load trap.
+
+The kernel calls `nt!DbgLoadImageSymbols` for each kernel image that it maps. The call occurs after the kernel adds the image to its list and before the entry point of the image runs. The kernel makes this call also when kernel debugging is not enabled.
+
+The trap is in place only while an item waits for a load. These items wait for a load:
+
+- An `sxe`/`sxn ld` filter.
+- A breakpoint in a module that has not loaded, for example `bu mydriver!DriverEntry`.
+
+`ntoseye` controls the trap as follows:
+
+- `ntoseye` sets the trap when the target resumes and at least one item waits for a load. `ntoseye` tells you when it sets the trap.
+- `ntoseye` removes the trap at the first resume or load after which no item waits.
+- `ntoseye` removes the trap when it exits.
+- Memory reads do not show the trap.
+
+If a session is killed while the trap is in place, the trap stays in the guest. The rules above keep this time as short as possible. The [site journal](#the-site-journal) repairs the trap at the next attach.
+
+A GDB stub also does not report a reboot. So the trap does not stay in place across a reboot. `ntoseye` finds the new kernel at the first stop after the new kernel runs. `ntoseye` does not stop for the loads during boot before that stop. KD reports each of these loads.
+
+While the trap is in place, each load halts the target for a short time. `ntoseye` refreshes the module list and then resumes the target. If a filter stops at the load, `ntoseye` does not resume the target.
 
 ## User-mode breakpoints in shared pages
 
-A software breakpoint is an `int3` written into a physical frame, and an image page is shared by every process mapping it. `bu /p <pid> user32!PeekMessageW` puts the byte in the single frame backing `user32.dll` for the whole machine, so every process calling that function traps. Scoping is a host-side filter: `ntoseye` compares the trapping process against the breakpoint's scope and *absorbs* a hit belonging to anyone else, removing the byte, single-stepping the instruction, writing the byte back and resuming without reporting anything.
+A software breakpoint is an `int3` byte in a physical frame. All processes that map an image page share that page. For example, `bu /p <pid> user32!PeekMessageW` puts the byte in the single frame that backs `user32.dll` for the whole machine. So each process that calls that function traps.
 
-No view shows the injected byte. A site is masked out of any read reaching the frame it was written into, so the original instruction appears under every process mapping a shared page, while a process that merely has its own memory at the same address is left alone. Only the debugger's views hide the `int3`; the guest still executes it.
+The scope is a filter on the host. `ntoseye` compares the process that trapped with the scope of the breakpoint. If the hit belongs to a different process, `ntoseye` *absorbs* the hit. To absorb a hit, `ntoseye` does these steps:
 
-The target's own breakpoint table knows nothing of these bytes, so `ntoseye` records each one in `~/.ntoseye/sites/` before writing it: the frame, the kernel base of the boot, and the original bytes. Exiting, detaching, or a terminating signal removes the byte and the record. A session that dies without that cleanup (killed, crashed) leaves both behind, and the next attach to the same boot, through the same endpoint or another (a `kdnet` attach after a `gdb` session was killed), writes the original bytes back and says how many it restored. It restores a site only while the frame still holds the breakpoint followed by the recorded bytes; a frame the guest has since restored or reused is left alone. Kernel breakpoints go through the target's own breakpoint API instead, and Windows' KD breakpoint table outlives a dead session for the next one to release. A GDB stub's does not reliably: under VBS, an `int3` a dead session planted in kernel code survives the next connect. So over the `gdb` backend kernel sites, the [bugcheck trap](bugchecks.md#how-the-crash-is-caught) among them, are journaled the same way.
+1. It removes the byte.
+2. It single-steps the instruction.
+3. It writes the byte back.
+4. It resumes the target.
 
-An absorb halts every vCPU, so a breakpoint on a busy shared symbol costs the absorb rate times the absorb cost whether or not the scoped process ever runs. Measured on a 4-vCPU Windows 11 guest, breakpoint on `nt!NtCreateFile`, file-enumeration loop running:
+`ntoseye` does not report an absorbed hit.
+
+No view shows the injected byte. `ntoseye` hides a site in each read that reaches the frame that contains the site. So each process that maps a shared page shows the original instruction. If a process has its own memory at the same address, and not the shared frame, `ntoseye` does not change reads of that memory. Only the debugger views hide the `int3`. The guest still executes it.
+
+### The site journal
+
+The breakpoint table of the target does not contain these bytes. So before `ntoseye` writes a byte, it records the site in `~/.ntoseye/sites/`. The record contains these items:
+
+- The frame.
+- The kernel base of the boot.
+- The original bytes.
+
+When `ntoseye` exits, detaches, or gets a terminating signal, it removes the byte and the record. A session can end without this cleanup, for example if it is killed or if it crashes. Then the byte and the record stay.
+
+The next attach to the same boot writes the original bytes back. This attach can use the same endpoint or a different endpoint. An example is a `kdnet` attach after a `gdb` session was killed. `ntoseye` shows how many sites it restored.
+
+`ntoseye` restores a site only while the frame still contains the breakpoint followed by the recorded bytes. If the guest has restored or reused the frame after the session ended, `ntoseye` does not change the frame.
+
+`ntoseye` sets kernel breakpoints through the breakpoint API of the target. The Windows KD breakpoint table keeps its entries after a session ends without cleanup, and the next session releases them. The breakpoint table of a GDB stub does not always keep its entries. Under VBS, an `int3` that such a session set in kernel code stays after the next connect. So on the `gdb` backend, `ntoseye` also records kernel sites in the journal. These sites include the [bugcheck trap](bugchecks.md#how-the-crash-is-caught).
+
+### The cost of an absorb
+
+An absorb halts all vCPUs. So a breakpoint on a shared symbol that the system calls frequently has a cost. This cost is the absorb rate multiplied by the cost of one absorb. The cost applies also when the scoped process does not run.
+
+The table shows measurements on a Windows 11 guest with 4 vCPUs. The breakpoint was on `nt!NtCreateFile`, and a file-enumeration loop was running.
 
 | Transport | Host service per absorb | Absorbs/s sustained | Guest speed |
 | --- | --- | --- | --- |
 | KDCOM (emulated UART) | ~30 ms | 16 | ~5% |
 | KDNET | ~1 ms | 125 | ~50% |
 
-Use KDNET for breakpoint-heavy work. Each absorb is a handful of KD request/reply round trips, and KDCOM's ~2 ms per request over an emulated UART dominates everything else. Over KDNET what remains is the guest freezing and thawing its own processors, which no debugger-side change can remove.
+Use KDNET for work with many breakpoints. Each absorb is a small number of KD request/reply round trips. Over an emulated UART, KDCOM needs approximately 2 ms for each request. This time is the largest part of the cost. On KDNET, the remaining cost is the time that the guest needs to freeze and thaw its own processors. No change in the debugger can remove this cost.
 
-Three other ways to cut the cost: scope to a symbol the rest of the system does not call, since a breakpoint in the target's own image traps only that image's processes; use `ba e1`, which needs no byte in the page and so writes nothing to a shared frame, though AMD64 debug registers are per-processor here so it still traps for every process and there are only four slots; or prefer a cheap condition over a pass count, since both absorb but a false condition stops sooner.
+You can also decrease the cost in these ways:
+
+- Scope the breakpoint to a symbol that the rest of the system does not call. A breakpoint in the image of the target traps only the processes of that image.
+- Use `ba e1`. It does not need a byte in the page, so it writes nothing to a shared frame. But here, AMD64 debug registers are per processor. So `ba e1` still traps for each process. Also, there are only four slots.
+- Use a cheap condition in place of a pass count. Both absorb hits. But a false condition stops sooner.

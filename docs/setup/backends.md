@@ -1,6 +1,6 @@
 # Choosing a backend
 
-`ntoseye` can talk to a live target four ways. Pick with `--backend kd` (default), `--backend kdnet`, `--backend gdb`, or `--backend memory`. Crash-dump mode is a separate offline attach mode selected with `--dump <file>`.
+`ntoseye` can connect to a live target in four ways. To select a backend, use `--backend kd` (default), `--backend kdnet`, `--backend gdb`, or `--backend memory`. Crash-dump mode is a separate offline attach mode. To select it, use `--dump <file>`.
 
 | Capability | `kd` (default) | `kdnet` | `gdb` | `memory` | `--dump` |
 | --- | --- | --- | --- | --- | --- |
@@ -20,7 +20,7 @@
 
 ## Hypervisor setup
 
-Host-side configuration is specific to the hypervisor:
+The host configuration is different for each hypervisor:
 
 - [KVM/QEMU (including libvirt/virt-manager)](kvm-qemu.md)
 - [VMware Workstation](vmware.md)
@@ -28,7 +28,11 @@ Host-side configuration is specific to the hypervisor:
 
 ## Supported live environments
 
-Any Windows 10/11 target reachable over the network is debuggable with `kdnet` (see the [KDNET guide](kdnet.md)); that path has nothing hypervisor-specific in it. The combinations below are where `ntoseye` additionally reads VM memory directly, sets the VM up with `ntoseye configure`, and offers the `gdb` and `memory` backends:
+You can debug any Windows 10/11 target on the network with `kdnet` (see the [KDNET guide](kdnet.md)). The `kdnet` backend has no hypervisor-specific parts. For the combinations in the table below, `ntoseye` also does these things:
+
+- It reads VM memory directly.
+- It configures the VM with `ntoseye configure`.
+- It supplies the `gdb` and `memory` backends.
 
 | Host OS | Hypervisor | Guest architecture | `kd` | `kdnet` | `gdb` | `memory` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -36,32 +40,53 @@ Any Windows 10/11 target reachable over the network is debuggable with `kdnet` (
 | Linux | VMware Workstation | AMD64 | Yes | Yes | Yes | Yes |
 | macOS | UTM (QEMU/HVF) | ARM64 | Yes | Yes | Yes (see below) | Yes |
 
-Other hypervisors are untested with these integrations. Crash-dump analysis supports AMD64 and ARM64 dumps.
+We did not test these integrations with other hypervisors. Crash-dump analysis supports AMD64 and ARM64 dumps.
 
-Under UTM the `gdb` backend needs "Use Hypervisor" turned off, because QEMU before 10.1 aborts the VM when a debugger enables guest debugging on HVF (`ntoseye` refuses to connect then; `NTOSEYE_GDB_ON_HVF=1` overrides it for a fixed QEMU); the [UTM guide](utm.md) has the details. The other backends are unaffected, since none of them asks the hypervisor for debug traps.
+On UTM, the `gdb` backend needs "Use Hypervisor" turned off. The reason is that QEMU versions before 10.1 abort the VM when a debugger enables guest debugging on HVF. If "Use Hypervisor" is on, `ntoseye` does not connect. If your QEMU version has the fix, set `NTOSEYE_GDB_ON_HVF=1` to override this check. The [UTM guide](utm.md) has the details. This problem does not apply to the other backends, because they do not ask the hypervisor for debug traps.
 
-The initial KD handshake timeout is 8 seconds by default. For unusually slow guests, override it with `NTOSEYE_KD_TIMEOUT=<seconds>`.
+The default timeout for the initial KD handshake is 8 seconds. For very slow guests, set `NTOSEYE_KD_TIMEOUT=<seconds>` to change it.
 
 ## KDNET
 
-Guest, host, and per-hypervisor setup for the `kdnet` backend is in the [KDNET guide](kdnet.md). In the guest, `kdnet.exe <host-ip> 50000` does the whole configuration and prints the key; on the host, `ntoseye --backend kdnet --kdnet-key <key>`.
+The [KDNET guide](kdnet.md) has the guest, host, and hypervisor setup for the `kdnet` backend. In summary:
+
+1. In the guest, run `kdnet.exe <host-ip> 50000`. This command does all of the configuration and shows the key.
+2. On the host, run `ntoseye --backend kdnet --kdnet-key <key>`.
 
 ## Memory sources
 
-KD and KDNET read guest memory from the VM process on this host when they can, and through the target otherwise; `--memory-source auto|host|kd` chooses. The [memory guide](../using/memory.md#where-reads-come-from) explains each source, writes, and paged-out memory.
+When possible, KD and KDNET read guest memory from the VM process on this host. If this is not possible, they read guest memory through the target. To select the source, use `--memory-source auto|host|kd`. The [memory guide](../using/memory.md#where-reads-come-from) explains each source, writes, and paged-out memory.
 
 ## Memory introspection
 
-The `memory` backend requires no guest or VM debug transport configuration:
+The `memory` backend needs no debug transport configuration in the guest or in the VM:
 
 ```bash
 ntoseye --backend memory
 ```
 
-Execution control, registers, execution-context selection, breakpoints, debug output, bugcheck stops, and reload detection are unavailable in this mode. Run {command}`capabilities` in the REPL for the exact backend feature matrix.
+These functions are not available in this mode:
 
-Threads are still readable: {command}`!thread`, {command}`!stacks`, {command}`!findstack`, {command}`!uniqstack`, and {command}`!process` with flag 4 walk each thread's stack from what it saved on its kernel stack when it last stopped running. {command}`.thread` selects a thread the same way, and then {command}`k`, {command}`.frame`, and {command}`r` of a selected frame work on its stack, which each walk reads again as it is at that moment. A thread running on a processor at that moment has no stack to show, because its processor's registers are unavailable. The same holds on any backend while the target runs.
+- execution control
+- registers
+- execution-context selection
+- breakpoints
+- debug output
+- bugcheck stops
+- reload detection
+
+To see the full feature matrix of the backend, run {command}`capabilities` in the REPL.
+
+You can still read threads. {command}`!thread`, {command}`!stacks`, {command}`!findstack`, {command}`!uniqstack`, and {command}`!process` with flag 4 walk the stack of each thread. They use the data that the thread saved on its kernel stack when it last stopped running. {command}`.thread` selects a thread in the same way. Then {command}`k`, {command}`.frame`, and {command}`r` of a selected frame operate on the stack of that thread. Each walk reads the stack again, as it is at that time.
+
+A thread that runs on a processor at that time has no stack to show, because the registers of its processor are not available. This is also true on all backends while the target runs.
 
 ## Secure kernel (VTL1)
 
-`.vtl 1` and {command}`!trustlets` need direct host memory: the `memory` and `gdb` backends, or `kd`/`kdnet` while reads come from host memory. Only `gdb` stops, steps, and breaks in VTL1. See the [VBS guide](../platforms/vbs.md) for what each backend supports there.
+`.vtl 1` and {command}`!trustlets` need direct host memory. These backends supply it:
+
+- the `memory` backend
+- the `gdb` backend
+- the `kd` and `kdnet` backends, while reads come from host memory
+
+Only the `gdb` backend can stop, step, and break in VTL1. The [VBS guide](../platforms/vbs.md) shows what each backend supports in VTL1.

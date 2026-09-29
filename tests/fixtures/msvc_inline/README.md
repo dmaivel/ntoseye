@@ -1,7 +1,16 @@
-`../msvc_inline.pdb` is the PDB of `InlineProbe.c` built as a KMDF-less WDM
-driver by MSVC: Visual Studio 18 with the WDK 10.0.28000 kernel-mode driver
-toolset, `MSBuild <project>.vcxproj /p:Configuration=Release /p:Platform=x64`
-(`/O2`, `/Zi`, `/Zo`), the source compiled as `PdbProbe.c`. Its `DriverEntry`
-(RVA 0x1000, 0x2a bytes) inlines `InlineProbeAccumulate`, which inlines
-`InlineProbeScale` twice, each inlining the WDK's `_InlineInterlockedAdd`;
-the parameters also have MSVC's classic `S_REGREL32` home-slot records.
+`../msvc_inline.pdb` is the PDB of `InlineProbe.c`. MSVC built the source as a
+KMDF-less WDM driver, with this configuration:
+
+- Visual Studio 18 with the WDK 10.0.28000 kernel-mode driver toolset.
+- The command `MSBuild <project>.vcxproj /p:Configuration=Release /p:Platform=x64`.
+- The options `/O2`, `/Zi`, and `/Zo`.
+- MSVC compiled the source as `PdbProbe.c`.
+
+The `DriverEntry` function is at RVA 0x1000 and is 0x2a bytes long. It has
+these inlined functions:
+
+- `DriverEntry` inlines `InlineProbeAccumulate`.
+- `InlineProbeAccumulate` inlines `InlineProbeScale` two times.
+- Each `InlineProbeScale` inlines `_InlineInterlockedAdd` from the WDK.
+
+The parameters also have the classic MSVC `S_REGREL32` records for home slots.

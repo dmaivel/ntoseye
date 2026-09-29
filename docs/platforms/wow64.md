@@ -1,12 +1,73 @@
 # WOW64 processes
 
-A 32-bit process on an x64 kernel (`_EPROCESS.WoW64Process` set) is marked `WOW64` by {command}`.process`, in the `Wow64` column of {command}`!process`/{command}`ps`, and by its `Wow64Peb` in process detail. Attaching to one loads both loader lists: the native `ntdll` and `wow64*.dll`, and the 32-bit modules, whose symbols come from their x86 PDBs. The 32-bit ntdll is addressed as `ntdll32` (`x ntdll32!Rtl*`, `bu ntdll32!RtlAllocateHeap`); every other 32-bit module keeps its name. x86 public symbols are shown undecorated (`RtlAllocateHeap`, not `_RtlAllocateHeap@12`).
+A 32-bit process on an x64 kernel has `_EPROCESS.WoW64Process` set. ntoseye marks such a process in these places:
 
-Types follow the same rule: a bare name resolves the kernel's layout, `ntdll32!_PEB` the 32-bit one, and the nested types of a 32-bit layout stay 32-bit (`dt ntdll32!_LDR_DATA_TABLE_ENTRY <address>` reads 4-byte pointers and `_UNICODE_STRING`s). {command}`!peb` adds the `PEB32` block and its process parameters, {command}`!teb` the `TEB32` behind `WowTebOffset`, {command}`!gle` the 32-bit TEB's last error, and {command}`!heap` walks the 32-bit heaps.
+- {command}`.process` marks it `WOW64`.
+- The `Wow64` column of {command}`!process`/{command}`ps` marks it.
+- The process detail shows its `Wow64Peb`.
 
-Code in a 32-bit module disassembles as x86 ({command}`u`, {command}`ub`, {command}`uf`, DAP disassembly). On an ARM64 target, where Windows runs x86 and x64 code by emulation, the image's own machine decides as well: an x86 image disassembles as x86, an x64 image as AMD64, and a hybrid image by its code-range map: an ARM64X or ARM64EC image (the native system DLLs of ARM64 Windows 11) has x64 ranges, the rest ARM64, and a CHPE x86 image (its x86 system DLLs) has ranges compiled to ARM64, the rest x86. `.effmach x86|amd64|arm64|.` overrides the choice (`arm64` on an ARM64 target). `.effmach x86` also makes {command}`ds`/{command}`dS` decode 32-bit string descriptors with the `ntdll32` layout; the SDK's `read_unicode_string`/`read_ansi_string` take `bits=32` for the same. A WOW64 thread's stack goes on into its x86 frames where it left x86 code: after the WOW64 CPU layer's frames (`wow64cpu` on AMD64, the `xtajit` emulator on ARM64) come the 32-bit program's, walked by frame pointer from the x86 registers WOW64 saved at the transition, and then the native frames that started the thread. {command}`k`, the stop display, {command}`!thread`, {command}`!stacks`, and SDK and DAP stacks show them. A thread running x86 code at the stop has not saved its registers there, so its stack shows no x86 frames, and the walk follows `ebp`, so it ends at a function built without a frame pointer.
+When you attach to a WOW64 process, ntoseye loads both loader lists:
 
-An x64 program on an ARM64 target is not a WOW64 process: it runs as a 64-bit process in which its own x64 code and the ARM64EC code of the system DLLs call each other on one stack. A walk takes each frame by the unwind data of that frame's instruction set, so the program's x64 frames sit between the thunks that enter and leave ARM64EC code (`$ientry_thunk$…`, `$iexit_thunk$…`):
+- The native `ntdll` and `wow64*.dll`.
+- The 32-bit modules. Their symbols come from their x86 PDBs.
+
+Use the name `ntdll32` for the 32-bit ntdll, for example `x ntdll32!Rtl*` or `bu ntdll32!RtlAllocateHeap`. All other 32-bit modules keep their names. ntoseye shows x86 public symbols without decoration. For example, it shows `RtlAllocateHeap`, not `_RtlAllocateHeap@12`.
+
+Types follow the same rule:
+
+- A name without a module gives the kernel layout.
+- `ntdll32!_PEB` gives the 32-bit layout.
+- The nested types of a 32-bit layout are also 32-bit. For example, `dt ntdll32!_LDR_DATA_TABLE_ENTRY <address>` reads 4-byte pointers and `_UNICODE_STRING`s.
+
+For a WOW64 process, these commands also show 32-bit data:
+
+- {command}`!peb` shows the `PEB32` block and its process parameters.
+- {command}`!teb` shows the `TEB32` at `WowTebOffset`.
+- {command}`!gle` shows the last error of the 32-bit TEB.
+- {command}`!heap` walks the 32-bit heaps.
+
+## Disassembly
+
+ntoseye disassembles code in a 32-bit module as x86. This applies to {command}`u`, {command}`ub`, {command}`uf`, and the DAP disassembly.
+
+On an ARM64 target, Windows runs x86 and x64 code by emulation. On such a target, the machine type of the image also controls the disassembly:
+
+- ntoseye disassembles an x86 image as x86.
+- ntoseye disassembles an x64 image as AMD64.
+- ntoseye disassembles a hybrid image by its code-range map:
+  - An ARM64X or ARM64EC image has x64 ranges. The remaining code is ARM64. The native system DLLs of ARM64 Windows 11 are images of this type.
+  - A CHPE x86 image has ranges compiled to ARM64. The remaining code is x86. The x86 system DLLs of ARM64 Windows 11 are images of this type.
+
+`.effmach x86|amd64|arm64|.` overrides this choice. The `arm64` value is for an ARM64 target.
+
+`.effmach x86` also makes {command}`ds`/{command}`dS` decode 32-bit string descriptors with the `ntdll32` layout. In the SDK, `read_unicode_string`/`read_ansi_string` take `bits=32` for the same result.
+
+## Stacks
+
+The stack of a WOW64 thread continues into its x86 frames at the point where the thread left x86 code. The stack shows the frames in this sequence:
+
+1. The frames of the WOW64 CPU layer. This layer is `wow64cpu` on AMD64 and the `xtajit` emulator on ARM64.
+2. The frames of the 32-bit program. ntoseye walks these frames by frame pointer. It starts from the x86 registers that WOW64 saved at the transition.
+3. The native frames that started the thread.
+
+These commands and interfaces show the x86 frames:
+
+- {command}`k`
+- The stop display
+- {command}`!thread`
+- {command}`!stacks`
+- SDK stacks and DAP stacks
+
+The x86 walk has two limits:
+
+- If a thread runs x86 code at the stop, it has not saved its registers at the transition. So its stack shows no x86 frames.
+- The walk follows `ebp`. So the walk ends at a function that was built without a frame pointer.
+
+## x64 programs on an ARM64 target
+
+An x64 program on an ARM64 target is not a WOW64 process. It runs as a 64-bit process. In this process, the x64 code of the program and the ARM64EC code of the system DLLs call each other on one stack.
+
+The stack walk reads each frame with the unwind data of the instruction set of that frame. So the x64 frames of the program are between the thunks that enter and leave ARM64EC code (`$ientry_thunk$…`, `$iexit_thunk$…`):
 
 ```text
   #9  00007ffaae048534  kernelbase!#WaitForSingleObjectEx+0x84 [unwind]

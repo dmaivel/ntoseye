@@ -1,34 +1,44 @@
 # KVM/QEMU
 
-Run `ntoseye configure` to configure a libvirt/virt-manager guest automatically. It preserves existing serial devices, uses the next free guest COM port, backs up the domain XML, and can remove ntoseye-managed transports later. The command prints guest instructions with the assigned debug port. For plain QEMU or manual configuration, follow the sections below.
+To configure a libvirt/virt-manager guest automatically, run `ntoseye configure`. This command does these things:
+
+- It keeps the existing serial devices.
+- It uses the next free guest COM port.
+- It makes a backup of the domain XML.
+- It shows the guest instructions with the assigned debug port.
+
+Later, `ntoseye configure` can also remove the transports that ntoseye manages. For plain QEMU or for manual configuration, follow the sections below.
 
 ## KD over a serial socket
 
-Default backend. In the guest, enable kernel debugging (run as Administrator, then reboot):
+This is the default backend. In the guest, enable kernel debugging. Run these commands as Administrator, then restart the guest:
 
 ```
 bcdedit /debug on
 bcdedit /dbgsettings serial debugport:1 baudrate:115200
 ```
 
-Use `debugport:2` instead of `:1` if the KD chardev ends up as COM2 (see the virt-manager warning below).
+If the KD chardev becomes COM2, use `debugport:2`. See the virt-manager warning below.
 
-Plain QEMU: add a Unix-socket chardev and route a serial port to it:
+For plain QEMU, add a Unix-socket chardev and connect a serial port to it:
 
 ```
 -chardev socket,id=kd,path=/tmp/ntoseye-kd.sock,server=on,wait=off -serial chardev:kd
 ```
 
-Then connect: `ntoseye`.
+Then run `ntoseye` to connect.
 
 :::{warning}
-virt-manager auto-adds a `<serial>` console device on every VM, which
-claims COM1. Either replace that device with one pointing at the KD socket
-(KD becomes COM1, use `debugport:1`), or leave it and add the KD chardev
-via `qemu:commandline` (KD becomes COM2, use `debugport:2`).
+virt-manager automatically adds a `<serial>` console device to every VM.
+This device uses COM1. So you must use one of these options:
+
+- Replace that device with a device that points to the KD socket. KD is
+  then COM1. Use `debugport:1`.
+- Keep that device, and add the KD chardev through `qemu:commandline`. KD
+  is then COM2. Use `debugport:2`.
 :::
 
-**Option A (recommended):** replace the auto-added serial. KD is COM1, `debugport:1` is correct.
+**Option A (recommended):** Replace the automatically added serial device. KD is COM1. So `debugport:1` is correct.
 
 ```xml
 <serial type="unix">
@@ -37,7 +47,7 @@ via `qemu:commandline` (KD becomes COM2, use `debugport:2`).
 </serial>
 ```
 
-**Option B:** keep the auto-added serial and append the KD chardev via `qemu:commandline`. If KD is COM2, use `debugport:2`.
+**Option B:** Keep the automatically added serial device, and add the KD chardev through `qemu:commandline`. If KD is COM2, use `debugport:2`.
 
 ```xml
 <domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">
@@ -53,27 +63,42 @@ via `qemu:commandline` (KD becomes COM2, use `debugport:2`).
 
 ## KDNET
 
-KDNET uses the guest's virtual NIC instead of a serial device. For a libvirt/QEMU VM using `<interface type="user">`, QEMU normally exposes the host to the guest as `10.0.2.2`; use that as the host address. For bridged networking, use the host's address on the bridged network.
+KDNET uses the virtual NIC of the guest. It does not use a serial device.
 
-QEMU/KVM guests must not report the default `Microsoft Hv` hypervisor vendor. KDNET interprets that identity as real Hyper-V and selects Hyper-V's synthetic debug device, which QEMU does not provide. Keep the Hyper-V enlightenments but add this child to the libvirt `<hyperv>` block:
+Select the host address:
+
+- If the libvirt/QEMU VM uses `<interface type="user">`, QEMU usually shows the host to the guest as `10.0.2.2`. Use that address as the host address.
+- For bridged networking, use the address of the host on the bridged network.
+
+QEMU/KVM guests must not report the default `Microsoft Hv` hypervisor vendor. If KDNET sees this vendor, it identifies the hypervisor as real Hyper-V. Then it selects the Hyper-V synthetic debug device, but QEMU does not supply this device. Keep the Hyper-V enlightenments, and add this child element to the libvirt `<hyperv>` block:
 
 ```xml
 <vendor_id state="on" value="KVMKVMKVM"/>
 ```
 
-Power the VM completely off and start it again after changing the CPU identity; a Windows reboot does not recreate the QEMU CPU. See OSR's [QEMU/KVM KDNET analysis](https://www.osr.com/blog/2021/10/05/using-windbg-over-kdnet-on-qemu-kvm/). Then follow the [KDNET guide](kdnet.md) using the selected host address.
+After you change the CPU identity, power off the VM fully and start it again. A Windows restart does not make a new QEMU CPU. See the OSR [QEMU/KVM KDNET analysis](https://www.osr.com/blog/2021/10/05/using-windbg-over-kdnet-on-qemu-kvm/). Then follow the [KDNET guide](kdnet.md) with the host address that you selected.
 
 ## GDB stub
 
-Fallback backend for guests that are not configured for Windows KD. Expose QEMU's gdbstub on `127.0.0.1:1234`, then run with `--backend gdb`.
+This is the fallback backend for guests that do not have Windows KD configured. Make QEMU's gdbstub available on `127.0.0.1:1234`. Then run `ntoseye` with `--backend gdb`.
 
 :::{note}
-Do not enable kernel debug mode (`bcdedit /debug on`) in the guest when using the `gdb` backend. That setting is only for the `kd` backend, and the `gdb` backend's whole advantage is that the guest is unaware it is being debugged. With debug mode on, the kernel changes behavior (anti-debug code, PatchGuard) and expects a KD debugger to service breaks, while nothing on the GDB side answers the KD transport, so the guest can hang on `DbgBreakPoint` or exceptions. Leave debug mode off.
+If you use the `gdb` backend, do not enable kernel debug mode
+(`bcdedit /debug on`) in the guest. That setting is only for the `kd`
+backend. The advantage of the `gdb` backend is that the guest does not
+detect the debugger. If debug mode is on, these problems occur:
+
+- The kernel changes its behavior (anti-debug code, PatchGuard).
+- The kernel expects a KD debugger to process breaks. Nothing on the GDB
+  side replies on the KD transport. So the guest can hang on
+  `DbgBreakPoint` or on exceptions.
+
+Keep debug mode off.
 :::
 
-Plain QEMU: append `-s -S` to the qemu command.
+For plain QEMU, add `-s -S` to the qemu command.
 
-virt-manager: add the following to the XML configuration:
+For virt-manager, add these lines to the XML configuration:
 
 ```xml
 <domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">
@@ -87,13 +112,13 @@ virt-manager: add the following to the XML configuration:
 
 ## Memory introspection
 
-No host or guest configuration needed; see [Choosing a backend](backends.md) for what the `memory` backend can and cannot do.
+The `memory` backend needs no host or guest configuration. To see what the `memory` backend can do and cannot do, see [Choosing a backend](backends.md).
 
 ## Virtualization-based security (VBS)
 
-[Secure-kernel inspection](../platforms/vbs.md) needs VBS running in the guest, which needs nested virtualization (`vmx`) exposed to the VM. Other debugging goes better without it ([Should VBS be on?](../platforms/vbs.md#should-vbs-be-on)). `msinfo32` in the guest reports whether VBS is running. Memory integrity (HVCI) is not required.
+[Secure-kernel inspection](../platforms/vbs.md) needs VBS to run in the guest. VBS needs nested virtualization (`vmx`) in the VM. Other debugging works better with VBS off (see [Should VBS be on?](../platforms/vbs.md#should-vbs-be-on)). To see if VBS runs, use `msinfo32` in the guest. Memory integrity (HVCI) is not necessary.
 
-On the tested Core i9-14900F host with a Windows 11 guest, the guest's hypervisor failed to boot under `<cpu mode="host-passthrough"/>`. A custom Skylake model with `vmx` added works, keeping the existing Hyper-V enlightenments and CPU topology, with Secure Boot off:
+We tested a Core i9-14900F host with a Windows 11 guest. On this host, the hypervisor of the guest did not start with `<cpu mode="host-passthrough"/>`. A custom Skylake model with `vmx` added works. This configuration keeps the existing Hyper-V enlightenments and CPU topology. Secure Boot is off:
 
 ```xml
 <cpu mode="custom" match="exact">
@@ -103,8 +128,17 @@ On the tested Core i9-14900F host with a Windows 11 guest, the guest's hyperviso
 </cpu>
 ```
 
-Plain QEMU: `-cpu Skylake-Client-v4,+vmx` plus the existing `hv_*` flags. Power the VM completely off and start it again after changing the CPU model. Other hosts may boot VBS with `host-passthrough`; this is only the configuration that was tested here.
+For plain QEMU, use `-cpu Skylake-Client-v4,+vmx` and the existing `hv_*` flags. After you change the CPU model, power off the VM fully and start it again. On other hosts, VBS can possibly start with `host-passthrough`. The configuration above is only the configuration that we tested.
 
-To see [where NT left off](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor) on a vCPU halted in the Windows hypervisor, also expose the `hv-evmcs` enlightenment: `<evmcs state="on"/>` in the `<hyperv>` block, which also needs `<vapic state="on"/>` (plain QEMU: `hv-evmcs` and `hv-vapic` in `-cpu`). Power the VM off and on after adding it.
+A vCPU can halt in the Windows hypervisor. To see [where NT left off](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor) on such a vCPU, also enable the `hv-evmcs` enlightenment:
 
-How the `gdb` backend behaves once Windows runs its own hypervisor (stops inside it, stepping without the trap flag, breakpoints in VTL1) is in the [VBS guide](../platforms/vbs.md).
+- For libvirt, add `<evmcs state="on"/>` to the `<hyperv>` block. This element also needs `<vapic state="on"/>`.
+- For plain QEMU, add `hv-evmcs` and `hv-vapic` to `-cpu`.
+
+After you add the enlightenment, power off the VM and start it again.
+
+The [VBS guide](../platforms/vbs.md) explains how the `gdb` backend operates when Windows runs its own hypervisor. It describes these topics:
+
+- stops inside the hypervisor
+- steps without the trap flag
+- breakpoints in VTL1

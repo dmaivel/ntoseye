@@ -1,38 +1,98 @@
 # Symbols and source
 
-The symbol path starts as the managed cache (`~/.ntoseye/symbols`) followed by any `--pdb-server`/`NTOSEYE_PDB_SERVERS` servers and Microsoft's public server. The cache is a symbol store in the layout `symstore` writes and SymSrv, IDA's PDB loader, Ghidra, and rizin read: `<file>/<GUID><age>/<file>` for PDBs, `<file>/<TimeDateStamp><SizeOfImage>/<file>` for images, with the `pingme.txt`/`000admin` control files at the root. Point another tool's symbol path at it (`srv*~/.ntoseye/symbols` or a plain directory entry) and it serves that tool too; a store another tool populated serves ntoseye through {command}`.sympath+`. Flat `~/.ntoseye/symbols/*.pdb` files and `~/.ntoseye/images` are left by versions up to 0.30 and can be deleted.
+## The symbol path and cache
 
-Symbol and source paths are configured independently. The host needs the private PDB and, for source display, a copy of the source tree. Use the full linker PDB (`/DEBUG:FULL`, not a stripped/public PDB) when procedure locals are needed. ntoseye validates the selected PDB's GUID and age against the CodeView identity in the loaded guest image and rejects a mismatch.
+At the start, the symbol path has these entries, in this order:
 
-A driver built inside the guest often needs no symbol path at all. When no symbol directory or server has its PDB, ntoseye rebuilds it from guest memory: the linker has just written the file, so Windows usually still holds its pages in the file cache, open or on the standby list. The file is found by the path the driver's CodeView record gives it (a temporary name `lld-link` wrote it under counts), read page by page through its section's prototype PTEs, sized by its MSF header, and used only if its GUID and age are the driver's; it is then installed in the symbol cache, so later sessions and reboots have it. `lm` reports `rebuilt <path> for <driver> from guest memory`. A PDB some of whose pages Windows has since reused (after heavy memory use, or a reboot) is not rebuilt, and the module's error says how many pages are missing.
+1. The managed cache, `~/.ntoseye/symbols`.
+2. The servers that you give with `--pdb-server` or `NTOSEYE_PDB_SERVERS`, if any.
+3. Microsoft's public symbol server.
 
-It is tried only for PDBs the image records with a full path (Microsoft's binaries record a bare file name). When it runs depends on where guest memory is read from ([memory sources](memory.md#where-reads-come-from)):
+The cache is a symbol store. It uses the layout that `symstore` writes. SymSrv, IDA's PDB loader, Ghidra, and rizin read this layout:
 
-| Memory read from | Rebuilt |
-| --- | --- |
-| The host: the `gdb` and `memory` backends, and `kd`/`kdnet` with `--memory-source host` or `auto` once the host mapping matched | Automatically, whenever a module's symbols load (attach, a stop, a process attach) and by {command}`.reload` |
-| The target: `kd`/`kdnet` with `--memory-source kd`, or `auto` that fell back to KD | Only by an explicit `.reload <module>` or {command}`ld`: finding the file there walks the kernel's file lists one KD request at a time, several seconds |
+- PDBs are in `<file>/<GUID><age>/<file>`.
+- Images are in `<file>/<TimeDateStamp><SizeOfImage>/<file>`.
+- The root contains the control files `pingme.txt` and `000admin`.
 
-A module skipped for that reason says so in its error ({command}`lmv`): `guest memory: not tried automatically while guest memory is read through the target; .reload <module> rebuilds it`. `--no-pdb-from-memory` or `NTOSEYE_NO_PDB_FROM_MEMORY=1` turns rebuilding off entirely. It has been tested on AMD64 guests only.
+Other tools can use the cache. Set the symbol path of the tool to `srv*~/.ntoseye/symbols` or to a plain directory entry. ntoseye can also use a store that another tool filled. Add that store with {command}`.sympath+`.
 
-Append the directory containing the PDB with {command}`.sympath+`. The `+` preserves the managed cache and Microsoft's public symbol server; bare {command}`.sympath` replaces the entire active list:
+Versions of ntoseye up to 0.30 left flat `~/.ntoseye/symbols/*.pdb` files and a `~/.ntoseye/images` directory. You can delete them.
+
+## Private PDBs and local source
+
+You set the symbol path and the source path separately. The host needs the private PDB of the driver. To show source, the host also needs a copy of the source tree. If you need procedure locals, use the full linker PDB (`/DEBUG:FULL`). Do not use a stripped or public PDB for this.
+
+ntoseye compares the GUID and age of the selected PDB with the CodeView identity in the loaded guest image. If they are different, ntoseye does not accept the PDB.
+
+To add the directory that contains the PDB, use {command}`.sympath+`. The `+` keeps the managed cache and Microsoft's public symbol server in the list. {command}`.sympath` without the `+` replaces all of the active list.
 
 ```text
 .sympath+ <directory-containing-the-pdb>
 ```
 
-{command}`.srcpath` names the host directory holding the source tree:
+{command}`.srcpath` sets the host directory that contains the source tree:
 
 ```text
 .sympath+ /home/me/symbols/mydriver
 .srcpath /home/me/src/MyDriver
 ```
 
-A source path the PDB records, such as `C:\Users\me\source\repos\MyDriver\src\queue.c`, maps to the longest of its trailing parts that names a file under that directory: `/home/me/src/MyDriver/src/queue.c` before `/home/me/src/MyDriver/queue.c`. Case is matched exactly first, then ignored, for an `#include` spelled differently from the file. A mapping `<prefix-recorded-in-the-pdb>=<local-root>` (`C:\Users\me\source\repos\MyDriver=/home/me/src/MyDriver`) replaces the prefix instead.
+### How ntoseye finds a source file
 
-The compiler records each source file's checksum (MD5, SHA-1, or SHA-256) in the PDB. Where it did, a host file is shown only if it has that checksum, so a file edited since the build is not shown against the old line numbers: {command}`ls` reports it as not the source compiled, and the disassembly labels its location `differs`.
+The PDB records source paths such as `C:\Users\me\source\repos\MyDriver\src\queue.c`. ntoseye maps such a path to a file under the source directory. It uses the longest trailing part of the path that names a file in that directory. For example, it selects `/home/me/src/MyDriver/src/queue.c` before `/home/me/src/MyDriver/queue.c`.
 
-If the driver is already loaded, force source selection and indexing once after changing the path, inspect the accepted identity, and set the source breakpoint:
+ntoseye first compares the case of the names exactly. If no file matches, it ignores the case. This finds a file when an `#include` spells its name with a different case.
+
+You can also give a mapping `<prefix-recorded-in-the-pdb>=<local-root>`, for example `C:\Users\me\source\repos\MyDriver=/home/me/src/MyDriver`. ntoseye then replaces the recorded prefix with the local root. It does not use the longest trailing part in this case.
+
+### Source checksums
+
+The compiler records a checksum of each source file in the PDB. The checksum is MD5, SHA-1, or SHA-256. If the PDB has a checksum for a file, ntoseye shows the host file only if its checksum is the same. So ntoseye does not show a file that you changed after the build with the old line numbers. For such a file:
+
+- {command}`ls` reports that the file is not the source that was compiled.
+- The disassembly labels the location `differs`.
+
+## PDBs rebuilt from guest memory
+
+A driver that you build inside the guest often needs no symbol path. If no symbol directory or server has the PDB of the driver, ntoseye rebuilds the PDB from guest memory. This is possible because the linker wrote the file a short time before. Windows usually still has the pages of the file in its file cache. The file can be open, or its pages can be on the standby list.
+
+To rebuild the PDB, ntoseye does these steps:
+
+1. It finds the file by the path in the CodeView record of the driver. If `lld-link` wrote the file under a temporary name, ntoseye also finds the file under that name.
+2. It reads the file page by page through the prototype PTEs of its section.
+3. It gets the size of the file from its MSF header.
+4. It makes sure that the GUID and age of the file are those of the driver. If they are different, it does not use the file.
+5. It puts the file in the symbol cache. So later sessions, and sessions after a reboot, have the file.
+
+After a rebuild, `lm` shows `rebuilt <path> for <driver> from guest memory`.
+
+Windows can use some pages of the PDB again for other data, for example after heavy memory use or after a reboot. In that case, ntoseye does not rebuild the PDB. The error of the module shows how many pages are missing.
+
+ntoseye tries the rebuild only if the image records the PDB with a full path. Microsoft's binaries record only a file name.
+
+When ntoseye rebuilds a PDB depends on where it reads guest memory from. See [memory sources](memory.md#where-reads-come-from).
+
+| Memory read from | Rebuilt |
+| --- | --- |
+| The host: the `gdb` and `memory` backends. Also `kd`/`kdnet` with `--memory-source host`, or with `auto` after the host mapping matched. | Automatically, each time the symbols of a module load (at attach, at a stop, or at a process attach). Also by {command}`.reload`. |
+| The target: `kd`/`kdnet` with `--memory-source kd`, or with `auto` after it fell back to KD. | Only by an explicit `.reload <module>` or {command}`ld`. To find the file, ntoseye must walk the kernel's file lists one KD request at a time. This takes several seconds. |
+
+If ntoseye skips a module for this reason, the error of the module in {command}`lmv` shows `guest memory: not tried automatically while guest memory is read through the target; .reload <module> rebuilds it`.
+
+To turn off the rebuild completely, use `--no-pdb-from-memory` or set `NTOSEYE_NO_PDB_FROM_MEMORY=1`.
+
+:::{note}
+The rebuild from guest memory is tested only on AMD64 guests.
+:::
+
+## Source breakpoints in your driver
+
+If the driver is already loaded, do these steps after you change the path:
+
+1. Force source selection and indexing one time with `ld mydriver`.
+2. Examine the accepted PDB identity with `lmv mydriver`.
+3. Set the source breakpoint with `bu MyDriver.c:42`.
+4. List the breakpoints with {command}`bl`, and continue with {command}`g`.
 
 ```text
 ld mydriver
@@ -42,11 +102,32 @@ bl
 g
 ```
 
-{command}`lmv` reports the loaded image range, symbol status, where the image was read from (for example, guest memory), and the accepted PDB GUID and age. `.reload mydriver` is equivalent to `ld mydriver`; {command}`.reload` without a module reloads every module in the current inspection scope.
+{command}`lmv` shows these items:
 
-The paths and breakpoint can also be configured before loading the driver. In that case, omit {command}`ld`: `bu MyDriver.c:42` creates a deferred breakpoint, and {command}`bl` shows `deferred` with no address. Load and trigger the driver in Windows after {command}`g`. When the driver loads, ntoseye refreshes the module list, loads the matching PDB, and enables the same breakpoint ID with its existing settings, before `DriverEntry` runs, on every live backend (see [stopping at a driver load](breakpoints.md#stopping-at-a-driver-load)), so `bu mydriver!DriverEntry` stops at the driver's first instruction.
+- The loaded image range.
+- The symbol status.
+- Where ntoseye read the image from, for example guest memory.
+- The GUID and age of the accepted PDB.
 
-At the source hit, these commands verify the complete private-symbol workflow:
+`.reload mydriver` does the same as `ld mydriver`. {command}`.reload` without a module reloads all modules in the current inspection scope.
+
+The name {command}`.reload` is reserved for the symbol reload in the Rust code of ntoseye. To reload custom commands and aliases, use {command}`reload-scripts`.
+
+### Set the breakpoint before the driver loads
+
+You can also set the paths and the breakpoint before the driver loads. In that case, do not use {command}`ld`. `bu MyDriver.c:42` sets a deferred breakpoint, and {command}`bl` shows it as `deferred` with no address. After {command}`g`, load and trigger the driver in Windows.
+
+When the driver loads, ntoseye does these steps before `DriverEntry` runs:
+
+1. It refreshes the module list.
+2. It loads the matching PDB.
+3. It enables the breakpoint with the same ID and its existing settings.
+
+ntoseye does this on every live backend. See [stopping at a driver load](breakpoints.md#stopping-at-a-driver-load). So `bu mydriver!DriverEntry` stops at the first instruction of the driver.
+
+### Check the source hit
+
+When the target stops at the source breakpoint, these commands check the complete private-symbol workflow:
 
 ```text
 lmv mydriver
@@ -56,22 +137,74 @@ k
 dv
 ```
 
-The stack and disassembly include mapped source locations. {command}`dv` displays the selected frame's private parameters and locals, including register- or stack-relative locations and live values when the current register context matches the frame.
+The stack and the disassembly show the mapped source locations. {command}`dv` shows the private parameters and locals of the selected frame. It shows their register-relative or stack-relative locations. If the current register context matches the frame, it also shows their live values.
 
-A call the compiler inlined is a frame of its own, as in WinDbg: {command}`k` lists it above the frame it was inlined into, tagged `[inline]`, with that frame's addresses, the inlined function's name, and its source line; the caller shows the line of the call. Frame numbers count inline frames, so `.frame N` selects one like any other frame, and {command}`dv`, {command}`ls`, and local names in expressions then use the inlined function's variables and source. The frame it was inlined into lists its own variables only. An inline frame has no registers of its own: it shares its physical frame's. Stop headers and {command}`ln` name the physical procedure.
+## Inline frames
 
-A private PDB also carries the driver's WPP trace message formats (TMF): `tracewpp` stores each message's format string and argument types as an annotation in it. With the PDB loaded, {command}`!wmitrace.logdump` prints the driver's WPP messages formatted (provider, function, and text), and `message.text` holds the same in MCP results and `dbg.inspect.etw_events()`. Without it, a message shows only its GUID, number, and payload bytes, and the dump says how many stayed raw. Public PDBs strip the annotations, except Microsoft's `Wdf01000.pdb`, which keeps KMDF's own.
+ntoseye shows a call that the compiler inlined as a separate frame, as WinDbg does. {command}`k` lists the inline frame above the frame that the call was inlined into. The inline frame has the tag `[inline]` and shows these items:
 
-Keep a {command}`bu` breakpoint installed if the driver will be cycled. Once ntoseye observes the unload, {command}`bl` changes it from `enabled` to `deferred` without losing its ID, source specification, conditions, pass count, hit count, or action. After the module reload is observed at a later stop, the same breakpoint becomes `enabled` at the new address.
+- The addresses of the frame that the call was inlined into.
+- The name of the inlined function.
+- The source line in the inlined function.
 
-{command}`.reload` is reserved for Rust-owned symbol reload behavior; {command}`reload-scripts` reloads custom commands and aliases.
+The caller frame shows the line of the call.
+
+Frame numbers include inline frames. So `.frame N` selects an inline frame in the same way as any other frame. After that, {command}`dv`, {command}`ls`, and local names in expressions use the variables and source of the inlined function. The frame that the call was inlined into lists only its own variables.
+
+An inline frame has no registers of its own. It uses the registers of its physical frame. Stop headers and {command}`ln` show the name of the physical procedure.
+
+## WPP trace messages
+
+A private PDB also contains the WPP trace message formats (TMF) of the driver. `tracewpp` stores the format string and the argument types of each message as an annotation in the PDB.
+
+When the PDB is loaded, {command}`!wmitrace.logdump` shows the WPP messages of the driver as formatted text. Each message shows the provider, the function, and the text. In MCP results and in `dbg.inspect.etw_events()`, `message.text` contains the same data.
+
+If the PDB is not loaded, a message shows only its GUID, number, and payload bytes. The dump then shows how many messages stayed raw.
+
+Public PDBs do not contain these annotations. The exception is Microsoft's `Wdf01000.pdb`, which keeps the annotations of KMDF itself.
+
+## Drivers that unload and load again
+
+If you unload and load the driver again, keep a {command}`bu` breakpoint installed. When ntoseye detects the unload, {command}`bl` changes the breakpoint from `enabled` to `deferred`. The breakpoint keeps these items:
+
+- Its ID.
+- Its source specification.
+- Its conditions.
+- Its pass count.
+- Its hit count.
+- Its action.
+
+When ntoseye detects the module load again at a later stop, the same breakpoint becomes `enabled` at the new address.
 
 ## When symbols are loaded
 
-Kernel modules load at each stop. Everything else is on demand:
+ntoseye loads the symbols of kernel modules at each stop. It loads all other symbols on demand. The subsections below tell when this occurs.
 
-- **A backtrace** loads symbols for the modules its frames touch, once per session. PDBs already in the cache are indexed immediately; anything that must be downloaded is fetched on a background thread, because a stack walk runs inside a stop render that a client may be waiting on. Those frames read `module+offset` until the fetch lands, and {command}`lmv` shows `fetching`. The debugger says which modules it is fetching and says so again when it finishes; re-run {command}`k` for the named frames. Unwinding itself uses the image's unwind data, not the PDB, so the frames are correct either way.
-- **A process-scoped breakpoint** resolves in the process it names: `bu /p <pid> user32!PeekMessageW` reads that process's loader list and loads `user32`'s symbols itself, with no prior `.process /p <pid>`. A `file:line` specification loads every module in the process, since the line can be in any of them. Only a symbol that really is absent from the process stays deferred.
-- **`.process /p <pid>`** still loads the whole process up front, which is what you want before browsing it.
+### Backtraces
 
-A deferred breakpoint is re-resolved whenever symbols become available, whoever loaded them: a background fetch finishing, a backtrace, a process attach, or a kernel module load. Installing the site needs the target halted, so a breakpoint that becomes resolvable while the guest runs is installed at the next stop.
+A backtrace loads the symbols of the modules that its frames touch. It does this one time per session.
+
+If a PDB is already in the cache, ntoseye indexes it immediately. If ntoseye must download a PDB, it downloads it on a background thread. The reason is that a stack walk runs inside a stop render, and a client can wait for that render. Until the download completes, those frames show `module+offset`, and {command}`lmv` shows `fetching`.
+
+ntoseye shows which modules it downloads. It shows a message again when it finishes. Then run {command}`k` again to see the frames of these modules.
+
+The unwind uses the unwind data of the image and does not use the PDB. So the frames are correct before and after the download.
+
+### Process-scoped breakpoints
+
+A process-scoped breakpoint resolves in the process that it names. For example, `bu /p <pid> user32!PeekMessageW` reads the loader list of that process and loads the symbols of `user32`. You do not need to run `.process /p <pid>` first.
+
+A `file:line` specification loads all modules in the process, because the line can be in any of them. The breakpoint stays deferred only if the symbol is really not in the process.
+
+`.process /p <pid>` still loads the symbols of the whole process at the start. Use it before you browse the process.
+
+### Deferred breakpoints
+
+ntoseye resolves a deferred breakpoint again each time new symbols become available. It does this for all sources of symbols:
+
+- A background download that completes.
+- A backtrace.
+- A process attach.
+- A kernel module load.
+
+ntoseye can install the breakpoint site only when the target is halted. If a breakpoint becomes resolvable while the guest runs, ntoseye installs it at the next stop.

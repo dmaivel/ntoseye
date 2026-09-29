@@ -1,17 +1,21 @@
 # KMDF drivers (`!wdfkd`)
 
-The `!wdfkd.*` commands read the Kernel-Mode Driver Framework's own state out of `Wdf01000.sys`, with the types in Microsoft's public `Wdf01000.pdb`. They need that module loaded with its PDB, which the symbol server provides; a driver's private PDB is not needed. UMDF drivers are not covered.
+The `!wdfkd.*` commands read the state of the Kernel-Mode Driver Framework from `Wdf01000.sys`. They use the types in the public Microsoft `Wdf01000.pdb`. The commands need that module loaded with its PDB, and the symbol server supplies this PDB. You do not need the private PDB of a driver. The commands do not support UMDF drivers.
 
 | Command | Shows |
 | --- | --- |
-| {command}`!wdfkd.wdfldr` | Every KMDF client driver: name, the KMDF version it bound to, its `_FX_DRIVER_GLOBALS`, WDFDRIVER handle, and `DRIVER_OBJECT`, and whether it has an In-Flight Recorder (IFR) log. |
-| {command}`!wdfkd.wdfdriverinfo` `<driver>` | One client driver and each of its device objects with the WDFDEVICE behind it. |
-| {command}`!wdfkd.wdfhandle` `<handle>` | The object a handle names: type, size, reference count, state, owner, parent, and contexts. |
-| {command}`!wdfkd.wdfdevice` `<WDFDEVICE>` | A device's WDM device objects, its PnP, power, and power policy states, and its queues. |
-| {command}`!wdfkd.wdfqueue` `<WDFQUEUE>` | A queue's dispatch type, state, callbacks, and the requests waiting in it and owned by the driver. |
-| {command}`!wdfkd.wdflogdump` `<driver>` | A driver's IFR log, oldest record first. |
+| {command}`!wdfkd.wdfldr` | All KMDF client drivers. For each driver: its name, the KMDF version that it bound to, its `_FX_DRIVER_GLOBALS`, WDFDRIVER handle, and `DRIVER_OBJECT`, and if it has an In-Flight Recorder (IFR) log. |
+| {command}`!wdfkd.wdfdriverinfo` `<driver>` | One client driver, and each of its device objects with the WDFDEVICE for that device object. |
+| {command}`!wdfkd.wdfhandle` `<handle>` | The object of a handle: its type, size, reference count, state, owner, parent, and contexts. |
+| {command}`!wdfkd.wdfdevice` `<WDFDEVICE>` | The WDM device objects of a device, its PnP, power, and power policy states, and its queues. |
+| {command}`!wdfkd.wdfqueue` `<WDFQUEUE>` | The dispatch type, state, and callbacks of a queue, the requests that wait in it, and the requests that the driver owns. |
+| {command}`!wdfkd.wdflogdump` `<driver>` | The IFR log of a driver, with the oldest record first. |
 
-A driver is named as {command}`!wdfkd.wdfldr` lists it, without case; a trailing `.sys` is ignored. A client whose `DriverName` is empty (bound to KMDF with no `FxDriver` created) is listed and named by its `DRIVER_OBJECT`'s name, `kdnic` for `\Driver\kdnic`. A typical walk starts at the driver list and follows handles down:
+To name a driver, use the name that {command}`!wdfkd.wdfldr` shows. The name is not case-sensitive, and the commands ignore a trailing `.sys`.
+
+A client can have an empty `DriverName`. This occurs if the client bound to KMDF but did not create an `FxDriver`. The commands then list and name the client by the name of its `DRIVER_OBJECT`. For example, the name for `\Driver\kdnic` is `kdnic`.
+
+A typical walk starts at the driver list and follows the handles down:
 
 ```
 !wdfkd.wdfldr
@@ -22,19 +26,56 @@ A driver is named as {command}`!wdfkd.wdfldr` lists it, without case; a trailing
 
 ## Handles
 
-A WDF handle is its object's address XORed with `~7`. A handle with bit 0 set is an offset handle: it points at a `WDFOBJECT_OFFSET` inside a larger object (a request's buffer, for instance), which is subtracted to reach that object. Passing an object's address instead of its handle is refused with the handle it would have.
+A WDF handle is the address of its object XORed with `~7`.
 
-Before an object is shown, its `FxObject` header must check out: `m_Type` is an `FX_OBJECT_TYPES` value, `m_ObjectState` an `FxObjectState` value, `m_ObjectSize` is aligned and no smaller than the type's class, the context header after the object points back at it, and `m_Globals` is a registered client driver's. Anything else is refused with the reason, not shown. The same checks apply to each object the commands reach through a list or pointer; one that fails ends that list, and the output says where and why. The client driver list is the exception: its integrity comes from its links (each entry's Blink must point back at the one before), so a client whose name or `FxDriver` does not check out is still listed, with the problem.
+If bit 0 of a handle is set, the handle is an offset handle. An offset handle points to a `WDFOBJECT_OFFSET` inside a larger object, for example the buffer of a request. The commands subtract this offset to get the larger object.
+
+If you give the address of an object in place of its handle, the command does not accept it. The error shows the handle of that object.
+
+Before a command shows an object, it checks the `FxObject` header of the object. All of these conditions must be true:
+
+- `m_Type` is an `FX_OBJECT_TYPES` value.
+- `m_ObjectState` is an `FxObjectState` value.
+- `m_ObjectSize` is aligned, and it is not smaller than the class of the type.
+- The context header after the object points back to the object.
+- `m_Globals` belongs to a registered client driver.
+
+If a check fails, the command does not show the object and gives the reason. The same checks apply to each object that a command gets through a list or a pointer. If one of these objects fails, the list ends at that object. The output tells where and why.
+
+The client driver list is different. Its integrity comes from its links: the Blink of each entry must point back to the entry before it. So the list still includes a client whose name or `FxDriver` fails the checks, and it shows the problem.
 
 ## The In-Flight Recorder
 
-KMDF logs its own trace messages for each client driver into a small ring buffer, the IFR. {command}`!wdfkd.wdflogdump` walks it from the newest record back and prints each record's sequence number, UTC time (when the log keeps timestamps), function, and message. Messages are formatted from the trace message format (TMF) annotations in `Wdf01000.pdb`, so no `.tmf` files are needed. A record whose message no loaded PDB declares prints its message GUID, number, and argument bytes instead.
+For each client driver, KMDF writes its own trace messages to a small ring buffer. This buffer is the IFR.
 
-The walk ends at the first record written, or at the records newer ones have overwritten. The header and every record are checked as they are read (signature, length, position, and falling sequence numbers); at the first that fails the walk stops and reports the corruption, keeping the records it already read.
+{command}`!wdfkd.wdflogdump` reads the IFR backward, from the newest record. For each record, it shows:
+
+- the sequence number
+- the UTC time, if the log keeps timestamps
+- the function
+- the message
+
+The command formats the messages from the trace message format (TMF) annotations in `Wdf01000.pdb`. So you do not need `.tmf` files. If no loaded PDB declares the message of a record, the command shows the message GUID, number, and argument bytes of the record.
+
+The walk ends at the first record that KMDF wrote, or where newer records overwrote older records. The command checks the header and each record when it reads them:
+
+- the signature
+- the length
+- the position
+- the sequence numbers, which must decrease
+
+If a check fails, the walk stops and reports the corruption. The command keeps the records that it already read.
 
 ## From Python
 
-`dbg.inspect` has one method per command, returning the same fields as the MCP JSON: `wdf_loader()`, `wdf_driver_info(driver)`, `wdf_handle(handle)`, `wdf_device(handle)`, `wdf_queue(handle)`, and `wdf_log(driver)`.
+`dbg.inspect` has one method for each command. Each method returns the same fields as the MCP JSON:
+
+- `wdf_loader()` for {command}`!wdfkd.wdfldr`
+- `wdf_driver_info(driver)` for {command}`!wdfkd.wdfdriverinfo`
+- `wdf_handle(handle)` for {command}`!wdfkd.wdfhandle`
+- `wdf_device(handle)` for {command}`!wdfkd.wdfdevice`
+- `wdf_queue(handle)` for {command}`!wdfkd.wdfqueue`
+- `wdf_log(driver)` for {command}`!wdfkd.wdflogdump`
 
 ```python
 for client in dbg.inspect.wdf_loader().clients:

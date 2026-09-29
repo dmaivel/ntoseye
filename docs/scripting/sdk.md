@@ -1,6 +1,8 @@
 # Python SDK
 
-The `ntoseye` package exposes debugger introspection and run control to standalone Python programs. The native wheel is self-contained: it needs no separately installed `ntoseye`, and installs the `ntoseye` command itself. The type stubs ship with the package, generated from the extension itself; editor completion, type checkers, and docstrings describe the API.
+The `ntoseye` package gives standalone Python programs access to debugger inspection and run control. The native wheel is self-contained. It does not need a separate installation of `ntoseye`, and it installs the `ntoseye` command itself.
+
+The package includes type stubs. They are generated from the extension itself. So editor completion, type checkers, and docstrings describe the API.
 
 ## Install
 
@@ -8,7 +10,7 @@ The `ntoseye` package exposes debugger introspection and run control to standalo
 pip install ntoseye
 ```
 
-To build and install the extension from a checkout:
+To build and install the extension from a checkout, run these commands:
 
 ```sh
 cd python
@@ -20,7 +22,12 @@ maturin develop --release
 
 ## Attach and inspect
 
-`attach()` defaults to the `kd` backend. Choose `kdnet`, `gdb`, `memory`, or `dmp` as appropriate; `connect` supplies the transport endpoint (or dump path), and `key` is required for `kdnet`. `memory` is passive and cannot halt or resume the guest; use `kd` or `gdb` for run control. `dmp` reads an offline dump.
+By default, `attach()` uses the `kd` backend. To use a different backend, set `backend` to `kdnet`, `gdb`, `memory`, or `dmp`. Use the backend that applies to your target.
+
+- `connect` gives the transport endpoint, or the dump path.
+- The `kdnet` backend needs `key`.
+- The `memory` backend is passive. It cannot stop or resume the guest. For run control, use `kd` or `gdb`.
+- The `dmp` backend reads an offline dump.
 
 ```python
 import ntoseye
@@ -31,26 +38,50 @@ with ntoseye.attach(backend="kd") as dbg:
     print(proc.memory.read(proc.peb.addr, 16).hex() if proc.peb else "no PEB")
 ```
 
-Leaving the `with` block (or calling `dbg.close()`) removes the debugger's breakpoints, resumes the guest, and ends the session: the connection and the target's single-instance lock are released, so the target can be attached again, and the debugger and its handles raise `NtoseyeError` afterwards.
+When the `with` block ends, or when you call `dbg.close()`, the debugger does these steps:
 
-A `Debugger` exposes namespaces rather than flat `inspect_*` methods:
+- It removes its breakpoints.
+- It resumes the guest.
+- It ends the session. It releases the connection and the single-instance lock of the target.
+
+After this, you can attach to the target again. If you use the debugger or its handles after this, they raise `NtoseyeError`.
+
+A `Debugger` groups its API into namespaces. It does not have flat `inspect_*` methods.
 
 | Namespace | Contents |
 | --- | --- |
-| `dbg.memory`, `dbg.physical` | Kernel virtual and guest-physical memory |
+| `dbg.memory`, `dbg.physical` | Kernel virtual memory and guest-physical memory |
 | `dbg.symbols`, `dbg.types`, `dbg.modules` | Kernel symbols, PDB types, and loaded modules |
-| `dbg.processes`, `dbg.threads`, `dbg.cpus` | Keyed processes, threads, and processors |
+| `dbg.processes`, `dbg.threads`, `dbg.cpus` | Processes, threads, and processors, each with a key |
 | `dbg.breakpoints`, `dbg.exceptions` | Breakpoint handles and exception policies |
-| `dbg.inspect`, `dbg.drivers` | System-wide reports/decoders and driver objects |
-| `dbg.secure_kernel` | The VBS secure kernel and its trustlets (VTL1), read-only |
+| `dbg.inspect`, `dbg.drivers` | System-wide reports and decoders, and driver objects |
+| `dbg.secure_kernel` | The VBS secure kernel and its trustlets (VTL1). Read-only. |
 
-Processes are keyed by PID: `dbg.processes[pid]` raises `KeyError` if absent, while `.get(pid)` returns `None`. `dbg.processes.find(name)` returns exact, case-insensitive image-name matches as a list. A process owns address-space-bound views: `proc.memory`, `proc.symbols`, `proc.types`, `proc.modules`, `proc.threads`, `proc.regions`, and `proc.heaps`. Use these views directly instead of selecting or attaching a global process.
+The key of `dbg.processes` is the PID. If no process has that PID, `dbg.processes[pid]` raises `KeyError`, and `.get(pid)` returns `None`. `dbg.processes.find(name)` returns a list of the processes with a matching image name. The match is exact and not case-sensitive.
 
-Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (`Stop.Reboot`), discard and re-query old handles; accessing one raises `ntoseye.StaleHandleError` (they stay hashable and printable, so a set or dict holding them keeps working). `dbg.generation` lets code that caches raw addresses detect a rebuild. `Breakpoint` handles are not stamped: breakpoints survive a reboot, and symbolic ones re-resolve in the new kernel.
+A process has views that use its own address space:
+
+- `proc.memory`
+- `proc.symbols`
+- `proc.types`
+- `proc.modules`
+- `proc.threads`
+- `proc.regions`
+- `proc.heaps`
+
+Use these views directly. You do not select a global process or attach to it.
+
+Some handles have a stamp with the target generation. These handles include `Process`, `Module`, `Thread`, `Frame`, and struct cursors. After a reboot (`Stop.Reboot`), discard the old handles and query them again. If you use an old handle, it raises `ntoseye.StaleHandleError`. Old handles stay hashable and printable. So a set or dict that holds them continues to work.
+
+If your code caches raw addresses, use `dbg.generation` to detect a rebuild. `Breakpoint` handles do not have a stamp. Breakpoints stay after a reboot, and ntoseye resolves symbolic breakpoints again in the new kernel.
 
 ## Memory, symbols, and types
 
-Memory operations are explicit about address space: `dbg.memory` is kernel virtual memory, `proc.memory` is that process's virtual memory, and `dbg.physical` is untranslated physical memory.
+Each memory object uses one specific address space:
+
+- `dbg.memory` is kernel virtual memory.
+- `proc.memory` is the virtual memory of that process.
+- `dbg.physical` is physical memory, without translation.
 
 ```python
 kernel_fn = dbg.symbols["nt!KeBugCheckEx"]
@@ -59,7 +90,15 @@ print(hex(kernel_fn), proc_module.name, hex(proc_module.base))
 print(dbg.memory.read(kernel_fn, 16).hex())
 ```
 
-Types are looked up with `dbg.types[name]` (or `proc.types[name]`). `Type.fields` maps names to `Field` layouts in offset order, and an enum's `Type.values` maps member names to values; `.at(address)` creates a live cursor, and `.read()` returns a snapshot dictionary. Cursor fields support attribute access, while pointer fields remain integer addresses and `follow("Field")` explicitly dereferences a typed pointer. `address_of("Field")` is a field's address (C's `&cursor->Field`), for a watchpoint or a raw read. `Type.walk(head, "Links")` (or `cursor.walk("HeadField", "_RECORD", "Links")`) follows an intrusive `_LIST_ENTRY` list to cursors of its records.
+To find a type, use `dbg.types[name]` or `proc.types[name]`. `Type.fields` maps names to `Field` layouts, in offset order. For an enum, `Type.values` maps member names to values. `.at(address)` makes a live cursor, and `.read()` returns a snapshot dictionary.
+
+A cursor gives these operations:
+
+- You can get the fields of a cursor as attributes.
+- Pointer fields stay integer addresses. To dereference a typed pointer, use `follow("Field")`.
+- `address_of("Field")` gives the address of a field (C's `&cursor->Field`). Use it for a watchpoint or a raw read.
+
+`Type.walk(head, "Links")` follows an intrusive `_LIST_ENTRY` list and gives cursors to its records. `cursor.walk("HeadField", "_RECORD", "Links")` does the same from a cursor.
 
 ```python
 entry = proc.object                         # live _EPROCESS cursor
@@ -70,15 +109,19 @@ if params is not None:
     print(params.CommandLine)
 ```
 
-PDB enum fields return cached `IntEnum` members when the value is defined; other values remain plain `int`. Use `cursor["Field"]` for collision-proof field access (and assignment); ordinary `cursor.Field` can resolve a cursor member first. `Struct` cursors are live reads tied to their original address space.
+If the value of a PDB enum field is a defined member, the field returns a cached `IntEnum` member. Other values stay plain `int` values.
+
+To read or assign a field with no risk of a name collision, use `cursor["Field"]`. The usual `cursor.Field` form can find a cursor member first. A `Struct` cursor reads live data. It stays tied to its original address space.
 
 ## Secure kernel (VTL1)
 
 :::{important}
-VTL1 inspection is experimental; see [VBS and the Windows hypervisor](../platforms/vbs.md) for what it supports on which guests and hosts.
+VTL1 inspection is experimental. To see what it supports on which guests and hosts, read [VBS and the Windows hypervisor](../platforms/vbs.md).
 :::
 
-With VBS running, `dbg.secure_kernel` is the secure kernel, discovered from host memory on first use (the `memory` and `gdb` backends, or `kd`/`kdnet` reading host memory). It raises `NtoseyeError` when VBS is not running or the backend cannot reach VTL1 memory. Its `memory`, `symbols`, `types`, and `modules` are bound to the secure kernel's system address space, as `proc.memory` is to a process's; `trustlets` lists the secure kernel's processes, each with the same views bound to its own address space and `process` naming its NT side.
+When VBS runs, `dbg.secure_kernel` is the secure kernel. ntoseye finds it in host memory the first time you use it. This works with the `memory` and `gdb` backends, and with `kd` or `kdnet` when they read host memory. If VBS does not run, or if the backend cannot get to VTL1 memory, `dbg.secure_kernel` raises `NtoseyeError`.
+
+The `memory`, `symbols`, `types`, and `modules` views of the secure kernel use its system address space. This is the same as `proc.memory`, which uses the address space of a process. `trustlets` lists the processes of the secure kernel. Each trustlet has the same views, and they use the address space of that trustlet. The `process` attribute of a trustlet gives its NT side.
 
 ```python
 sk = dbg.secure_kernel
@@ -88,9 +131,18 @@ for trustlet in sk.trustlets:                # LsaIso.exe, trustlet_id 1, ...
     print(trustlet.pid, trustlet.name, trustlet.trustlet_id, hex(trustlet.dtb))
 ```
 
-These views are read-only: writes, and operations that read NT's own state about an address (`describe`, `page_in`, `ptov`), raise `NtoseyeError`. A memory view does not own CPU registers, so `sk.eval("@rip")` always raises, even at a VTL1 stop. Secure-kernel symbols resolve in these views and at live VTL1 stops, not in NT address spaces. The public `securekernel.pdb` has no types; name NT's explicitly (`sk.types["nt!_LIST_ENTRY"]`). A trustlet's own user-mode modules are not enumerated.
+These views are read-only. These operations raise `NtoseyeError`:
 
-With `backend="gdb"` on AMD64 QEMU/KVM, use a hardware execution breakpoint to stop inside a loaded secure-kernel module without modifying its code:
+- Writes.
+- Operations that read the NT state about an address: `describe`, `page_in`, and `ptov`.
+
+A memory view does not have CPU registers. So `sk.eval("@rip")` always raises an error, also at a VTL1 stop.
+
+Secure-kernel symbols resolve in these views and at live VTL1 stops. They do not resolve in NT address spaces. The public `securekernel.pdb` has no types. To use an NT type, write the `nt!` prefix, for example `sk.types["nt!_LIST_ENTRY"]`. ntoseye does not list the user-mode modules of a trustlet.
+
+### Breakpoints in secure-kernel code
+
+You can stop inside a loaded secure-kernel module with `backend="gdb"` on AMD64 QEMU/KVM. Use a hardware execution breakpoint. This type of breakpoint does not change the code of the module.
 
 ```python
 dbg.interrupt()
@@ -107,9 +159,41 @@ finally:
     bp.delete()
 ```
 
-`stop.cpu.registers` describes the real halted CPU; at VTL1 stops it is read-only, and `stop.thread`/`stop.process` are `None` rather than the suspended NT identities. `run()` continues normally. Hardware execution sites support conditions, `when=`, pass counts, one-shot operation, and processor filters; they share the hardware slots, resolve once, and must be recreated after reboot. `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops: their temporary sites in secure-kernel code are debug-register breakpoints in free slots, never code patches. NT process/thread filters, software breakpoints, and data watches in secure modules are refused. See the [VTL1 limits and tested configuration](../platforms/vbs.md).
+`stop.cpu.registers` shows the real stopped CPU. At a VTL1 stop, these rules apply:
 
-A vCPU halted in the Windows hypervisor itself, as idle vCPUs under VBS usually are, lists the VTL states the hypervisor saved for its virtual processor in `cpu.saved_vtl`, VTL0's first, as {command}`.vtlcxr` does. Each `SavedVtlState` holds where the VTL left off (`rip`, `symbol`, `rsp`), its control and segment registers, its last VM exit (`exit_reason`, `exit_reason_name`), whether it is the `current` one (the VTL the hypervisor was entered from or is about to enter), and the physical address of the Enlightened VMCS it was read from (`evmcs`). The list needs the VM's `hv-evmcs` enlightenment and is empty otherwise, or when the saved state fails validation; see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor). The NT thread on that vCPU unwinds from the saved VTL0 state, so `backtrace()` walks NT's stack while `cpu.symbol` still names the hypervisor:
+- `stop.cpu.registers` is read-only.
+- `stop.thread` and `stop.process` are `None`. They do not show the suspended NT thread and process.
+- `run()` continues normally.
+
+Hardware execution breakpoints support these options:
+
+- Conditions
+- `when=`
+- Pass counts
+- One-shot operation
+- Processor filters
+
+Hardware execution breakpoints share the hardware slots. They resolve one time only. After a reboot, you must make them again.
+
+`step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops. In secure-kernel code, their temporary breakpoints are debug-register breakpoints in free slots. These functions never patch the code.
+
+ntoseye does not accept NT process and thread filters, software breakpoints, and data watches in secure modules. For more information, see [VTL1 limits and tested configuration](../platforms/vbs.md).
+
+### Saved VTL state
+
+Under VBS, idle vCPUs usually stop in the Windows hypervisor itself. For a vCPU that stopped there, `cpu.saved_vtl` lists the VTL states that the hypervisor saved for its virtual processor. The VTL0 state is first. The {command}`.vtlcxr` command shows the same list.
+
+Each `SavedVtlState` holds this data:
+
+- The location where the VTL stopped: `rip`, `symbol`, and `rsp`.
+- The control registers and the segment registers of the VTL.
+- The last VM exit of the VTL: `exit_reason` and `exit_reason_name`.
+- `current`, which shows if this is the current VTL. The current VTL is the VTL that the hypervisor was entered from, or is about to enter.
+- `evmcs`, the physical address of the Enlightened VMCS that ntoseye read the state from.
+
+The list needs the `hv-evmcs` enlightenment on the VM. If the VM does not have this enlightenment, the list is empty. The list is also empty if the saved state fails validation. For more information, see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
+
+ntoseye unwinds the NT thread on that vCPU from the saved VTL0 state. So `backtrace()` walks the NT stack, but `cpu.symbol` still gives a location in the hypervisor:
 
 ```python
 for cpu in dbg.cpus:
@@ -121,7 +205,15 @@ for cpu in dbg.cpus:
             print("   ", frame.symbol)              # nt!HalProcessorIdle+0xf, nt!PpmIdleDefaultExecute+0x2b, ...
 ```
 
-`cpu.memory` reads through the page tables the vCPU has loaded, whatever owns them: the kernel's or a process's (as `dbg.memory` or `proc.memory`), a VTL1 root (as `sk.memory`), or, at a vCPU halted in the Windows hypervisor, the hypervisor's own address space, where `hvix64` is mapped. The root is the one loaded when `cpu.memory` is read. A root outside NT and VTL1 is read-only, as VTL1 is: writes, `describe`, `page_in`, and `ptov` raise `NtoseyeError`, and `search` reports its matches as `foreign`.
+### Memory of a vCPU
+
+`cpu.memory` reads through the page tables that the vCPU has loaded, whatever their owner. These page tables can be:
+
+- The page tables of the kernel or of a process, as for `dbg.memory` or `proc.memory`.
+- A VTL1 root, as for `sk.memory`.
+- The address space of the hypervisor, for a vCPU that stopped in the Windows hypervisor. `hvix64` is mapped in this address space.
+
+`cpu.memory` uses the root that is loaded when you read `cpu.memory`. A root outside NT and VTL1 is read-only, as VTL1 is. Writes, `describe`, `page_in`, and `ptov` raise `NtoseyeError`. `search` reports its matches as `foreign`.
 
 ```python
 cpu = next(cpu for cpu in dbg.cpus if cpu.saved_vtl)
@@ -132,11 +224,32 @@ print(hv.disassemble(cpu.rip, 4))
 
 ## Run control and breakpoints
 
-`run(timeout=None)` resumes and waits; `wait(timeout=None)` waits without resuming. Both return a `Stop` when one is observed, or `None` when the timeout expires; timeouts are in seconds, and `None` waits indefinitely. `cont()` resumes without waiting; `interrupt()` breaks in and returns a `Stop`. `step()`, `step_over()`, `step_out()`, and `run_to()` provide synchronous run control; `step(until="call")` (and `"ret"`, `"branch"`) steps to the next such instruction, and `run_to(addr, step="over")` single-steps to an address instead of running there. `step_over()` across a call and `step_out()` stop only when the stepping thread returns, which may take as long as that thread waits. A step-until walk (`until=`, `run_to(step=)`) follows the thread it started in the same way: an interrupt that switches that thread out mid-step leaves the walk waiting for it to execute that instruction, on whichever vCPU, at the same call depth. Their `timeout=` (seconds; also on `step(until=...)` and `step_over(until=...)`) interrupts the target where it is when it runs out and returns that stop. `trace_calls()` records the call tree up to the current function's return ({command}`wt`).
+`run(timeout=None)` resumes the target and waits. `wait(timeout=None)` waits and does not resume the target. Both functions return a `Stop` when ntoseye sees a stop. They return `None` when the timeout expires. Timeouts are in seconds. With `None`, the function waits with no time limit.
 
-While the target is halted, the stop it is halted at stays current until it moves again: `dbg.stop`, `wait()`, and `interrupt()` all return it, and reading it consumes nothing.
+`cont()` resumes the target and does not wait. `interrupt()` breaks in and returns a `Stop`.
 
-Stop kinds are `ntoseye.Stop.Breakpoint`, `.Exception`, `.Interrupt`, `.Step`, `.ModuleLoad`, `.Bugcheck`, and `.Reboot`. Inspect the specific stop with `isinstance` (available on Python 3.9+); shared fields include `rip`, `symbol`, `thread`, `process`, `cpu`, and `breakpoints`. `stop.breakpoints` is empty for other stop kinds, so `if bp in stop.breakpoints:` works without dispatching on the stop type. A crash dump opened with `backend="dmp"` is halted at its bugcheck, so its `dbg.stop` is a `Stop.Bugcheck`.
+### Steps
+
+`step()`, `step_over()`, `step_out()`, and `run_to()` give synchronous run control:
+
+- `step(until="call")` steps to the next call instruction. The values `"ret"` and `"branch"` step to the next instruction of that type.
+- `run_to(addr, step="over")` goes to an address with single steps. It does not run to the address.
+
+`step_over()` across a call and `step_out()` stop only when the stepping thread returns. If that thread waits, the step can wait for the same time.
+
+A step-until walk (`until=` or `run_to(step=)`) also follows the thread that it started in. An interrupt can switch that thread out during a step. Then the walk waits until the thread executes that instruction at the same call depth. The thread can execute it on any vCPU.
+
+These functions have a `timeout=` argument in seconds. `step(until=...)` and `step_over(until=...)` also have it. When the timeout expires, the function interrupts the target at its current location and returns that stop.
+
+`trace_calls()` records the call tree until the current function returns. It is the same as {command}`wt`.
+
+### Stops
+
+While the target is stopped, its stop stays current until the target moves again. `dbg.stop`, `wait()`, and `interrupt()` all return this stop. A read does not consume the stop.
+
+The stop kinds are `ntoseye.Stop.Breakpoint`, `.Exception`, `.Interrupt`, `.Step`, `.ModuleLoad`, `.Bugcheck`, and `.Reboot`. To examine the specific stop, use `isinstance`. This works on Python 3.9 and later. The shared fields include `rip`, `symbol`, `thread`, `process`, `cpu`, and `breakpoints`.
+
+For the other stop kinds, `stop.breakpoints` is empty. So `if bp in stop.breakpoints:` works, and you do not need to check the stop type first. A crash dump that you open with `backend="dmp"` is stopped at its bugcheck. So its `dbg.stop` is a `Stop.Bugcheck`.
 
 ```python
 bp = dbg.breakpoints.add("nt!NtCreateFile")
@@ -147,7 +260,16 @@ elif isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
     print("hit", stop.symbol, stop.thread)
 ```
 
-`dbg.exceptions.set(code, mode)` sets an exception policy (`"av"`, `0xC0000005`) or a module-load filter (`"ld"`, `"ld:<module>"`), as the REPL's {command}`sx` commands do; `dbg.exceptions.module_loads` lists the filters. With a `"break"` filter, the load of a matching kernel module stops as `Stop.ModuleLoad`, whose `module` is the loaded `Module`, before its `DriverEntry` runs and with deferred breakpoints in it already armed:
+### Exceptions and module loads
+
+`dbg.exceptions.set(code, mode)` sets one of these, as the {command}`sx` commands of the REPL do:
+
+- An exception policy, for example `"av"` or `0xC0000005`.
+- A module-load filter, for example `"ld"` or `"ld:<module>"`.
+
+`dbg.exceptions.module_loads` lists the filters.
+
+With a `"break"` filter, the load of a matching kernel module stops the target as `Stop.ModuleLoad`. The `module` field of this stop is the loaded `Module`. The stop occurs before the `DriverEntry` of the module runs. At this stop, the deferred breakpoints in the module are already armed.
 
 ```python
 dbg.exceptions.set("ld:mydriver", "break")
@@ -157,9 +279,11 @@ if isinstance(stop, ntoseye.Stop.ModuleLoad):
     dbg.breakpoints.add("mydriver!MyDispatchCreate")
 ```
 
-`dbg.breakpoints` is a live iterable/ID-keyed collection. A breakpoint handle owns its state: set `bp.enabled`, `bp.condition`, or `bp.pass_count`; remove it with `bp.delete()`.
+### Breakpoint handles and conditions
 
-`add()` accepts debugger-expression conditions with `condition=` or a Python predicate with `when=`:
+`dbg.breakpoints` is a live collection. You can iterate over it, and its keys are breakpoint IDs. A breakpoint handle owns its state. To change the state, set `bp.enabled`, `bp.condition`, or `bp.pass_count`. To remove the breakpoint, call `bp.delete()`.
+
+`add()` accepts a condition in one of two forms. Use `condition=` for a debugger expression. Use `when=` for a Python predicate:
 
 ```python
 bp = dbg.breakpoints.add(
@@ -168,20 +292,49 @@ bp = dbg.breakpoints.add(
 )
 ```
 
-A `when` callback runs on the thread waiting in `run()`, `wait()`, `run_to()`, `step()`, `step_over()`, or `step_out()` and receives the `Stop`; a false result resumes past the hit (or, for a step or `run_to(step=...)`, keeps going), and a callback that raises surfaces the hit with the error in `stop.condition_error`. It must not resume or step the target, or add/delete breakpoints; violating these restrictions raises an error. If the breakpoint hits when nobody is waiting, the target remains parked until a later wait. `command()` keeps the REPL's semantics and does not call `when` predicates: a hit during a resuming command stops there. The separate `condition=` argument is a debugger expression, not a Python callback; a breakpoint has one or the other, so assigning `bp.condition` while a `when` callback is attached raises `ValueError`.
+A `when` callback runs on the thread that waits in `run()`, `wait()`, `run_to()`, `step()`, `step_over()`, or `step_out()`. The callback receives the `Stop`.
 
-The session lives on its own thread. A `Debugger` can be used from any Python thread; calls are serialized there, and waiting calls (`run()`, `wait()`, a resuming `command()`) release the GIL, so other threads keep running. Ctrl+C (`KeyboardInterrupt`) ends a wait, step, or trace early and is raised; an interrupted `run()` or `wait()` leaves the target running, so call `interrupt()` to halt it. During a resuming `command()` Ctrl+C breaks in, as in the REPL, then raises with the target halted. Between calls that thread keeps servicing the guest: wrong-process and false-`condition=` hits are resumed right away instead of leaving the guest frozen until your next call.
+- If the callback returns false, ntoseye resumes past the hit. For a step or `run_to(step=...)`, the step continues.
+- If the callback raises an exception, ntoseye returns the hit and puts the error in `stop.condition_error`.
+
+The callback must not resume or step the target. It also must not add or delete breakpoints. If it does one of these operations, ntoseye raises an error. If the breakpoint hits when no call waits, the target stays stopped until a later wait.
+
+`command()` keeps the REPL behavior and does not call `when` predicates. If a hit occurs during a command that resumes the target, the target stops there.
+
+The `condition=` argument is a debugger expression. It is not a Python callback. A breakpoint can have a `condition=` or a `when` callback, but not both. So if a `when` callback is attached, an assignment to `bp.condition` raises `ValueError`.
+
+### Threads and Ctrl+C
+
+The session runs on its own thread. You can use a `Debugger` from any Python thread. The session thread runs the calls one at a time. Calls that wait release the GIL, so other threads continue to run. These calls are `run()`, `wait()`, and a `command()` that resumes the target.
+
+Ctrl+C (`KeyboardInterrupt`) stops a wait, a step, or a trace early, and the call raises `KeyboardInterrupt`. After an interrupted `run()` or `wait()`, the target continues to run. To stop the target, call `interrupt()`. During a `command()` that resumes the target, Ctrl+C breaks in, as in the REPL. Then the call raises `KeyboardInterrupt`, and the target stays stopped.
+
+Between calls, the session thread continues to service the guest. It immediately resumes hits in the wrong process and hits where the `condition=` is false. So the guest does not stay frozen until your next call.
 
 ## Commands, errors, and build identity
 
-`dbg.command(line, timeout=None)` runs a REPL command and returns text. REPL state (aliases, radix, and `$vars`) persists between calls. If a command resumes the target, `timeout` is its stop budget and the resulting stop is available as `dbg.stop`. Prefer typed SDK methods for structured results; for example, use `dbg.inspect.triage()` rather than parsing `dbg.command("!analyze -v")`.
+`dbg.command(line, timeout=None)` runs a REPL command and returns its text output. The REPL state stays between calls. This state includes aliases, the radix, and `$vars`. If a command resumes the target, `timeout` is the time limit for the stop. The stop is then available as `dbg.stop`.
 
-All SDK exceptions derive from `ntoseye.NtoseyeError`. `MemoryAccessError` reports an unreadable/partially readable guest range; `TargetRunningError` means an operation requires a halted target; `SymbolNotFoundError` also derives from `LookupError`; `StaleHandleError` identifies a handle from before a reboot. An argument outside its fixed choices (`backend="windbg"`, `until="calls"`) or an invalid combination (`backend="kdnet"` without `key`) raises `ValueError` before anything touches the target.
+For structured results, use the typed SDK methods. For example, use `dbg.inspect.triage()`, and do not parse the output of `dbg.command("!analyze -v")`.
 
-Decoded results (`dbg.inspect.pci()`, `thread.inspect()`, a `Field`, `Symbol`, `MemoryRegion`, ...) are records with one typed property per field, each listed under [Results](../reference/sdk/index.md#results), so an editor completes them and a type checker flags a misspelt one. A result always has every field of its class; one that does not apply is `None`, or empty or false where its docs say so. A record also reads like a mapping (`keys()`, `record["field"]`), and `to_dict()` on it, or on a process, thread, module, CPU, driver, or breakpoint, returns the same fields the MCP server reports.
+All SDK exceptions derive from `ntoseye.NtoseyeError`:
 
-`ntoseye.build` is the commit stamp compiled into the extension (`<commit>`, `<commit>-dirty`, or `unknown`). Compare it after rebuilding if a long-lived Python interpreter may still have an older native module loaded.
+- `MemoryAccessError` reports a guest range that is not readable, or only partly readable.
+- `TargetRunningError` means that the operation needs a stopped target.
+- `SymbolNotFoundError` also derives from `LookupError`.
+- `StaleHandleError` identifies a handle from before a reboot.
+
+In these cases, the SDK raises `ValueError` before it touches the target:
+
+- An argument is not one of its fixed choices, for example `backend="windbg"` or `until="calls"`.
+- A combination of arguments is not valid, for example `backend="kdnet"` without `key`.
+
+Decoded results are records, for example `dbg.inspect.pci()`, `thread.inspect()`, a `Field`, a `Symbol`, or a `MemoryRegion`. A record has one typed property for each field. [Results](../reference/sdk/index.md#results) lists each property. So an editor can complete the property names, and a type checker finds a misspelled name.
+
+A result always has every field of its class. If a field does not apply, its value is `None`. If the documentation of the field says so, the value is empty or false. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields that the MCP server reports. You can call it on a record, a process, a thread, a module, a CPU, a driver, or a breakpoint.
+
+`ntoseye.build` is the commit stamp in the compiled extension. Its value is `<commit>`, `<commit>-dirty`, or `unknown`. A long-lived Python interpreter can still have an older native module loaded. So after you rebuild, compare this value.
 
 ## REPL custom commands
 
-Scripts can also add commands to the REPL itself, using the same API through a borrowed `Debugger`; see [custom REPL commands](commands.md).
+Scripts can also add commands to the REPL. These commands use the same API through a borrowed `Debugger`. For more information, see [custom REPL commands](commands.md).
