@@ -16,7 +16,7 @@ use crate::breakpoints::{
 };
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
-    clear_trap_flag, processor_index_from_backend_thread_id,
+    StopEvent, clear_trap_flag, processor_index_from_backend_thread_id,
 };
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
@@ -73,7 +73,11 @@ impl Session {
                 &self.current_thread,
             )?,
             None => {
-                step_one_and_clear_tf(self.backend.as_mut(), &self.register_map)?;
+                step_one_and_clear_tf(
+                    self.backend.as_mut(),
+                    &self.register_map,
+                    &self.target.interrupt,
+                )?;
                 RunPast::Reached
             }
         };
@@ -847,12 +851,14 @@ impl Session {
 
 /// Single-step the current thread and clear `TF` afterward (KVM leaves it set).
 /// A fault or bugcheck instead of the step trap is returned as an error.
+/// `interrupt` (Ctrl+C) ends the wait with a break-in.
 pub fn step_one_and_clear_tf(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
+    interrupt: &AtomicBool,
 ) -> Result<()> {
     backend.step()?;
-    let event = backend.wait_for_stop()?;
+    let event = wait_for_step_stop(backend, interrupt)?;
     clear_trap_flag(backend, register_map)?;
     if event.is_bugcheck {
         return Err(Error::DebugInfo(
@@ -868,6 +874,22 @@ pub fn step_one_and_clear_tf(
         )));
     }
     Ok(())
+}
+
+/// Wait for the stop that ends a step. The stop normally arrives at once,
+/// but a target can run on and never report it. `interrupt` (Ctrl+C) then
+/// breaks in, and the break-in's stop ends the wait. The flag is checked
+/// only after a poll finds no stop, so a step that stops is never broken in
+/// on, and a loop of steps sees a Ctrl+C that arrived during one of them.
+fn wait_for_step_stop(backend: &mut dyn DebugBackend, interrupt: &AtomicBool) -> Result<StopEvent> {
+    loop {
+        if let Some(event) = backend.try_wait_for_stop(STEP_POLL_INTERVAL)? {
+            return Ok(event);
+        }
+        if interrupt.swap(false, Ordering::SeqCst) {
+            return backend.interrupt();
+        }
+    }
 }
 
 /// If RIP sits on one of our enabled breakpoints, disable it, step the
@@ -952,7 +974,7 @@ fn execute_lifted_site(
     if backend.single_step_unsafe() {
         run_past_site(backend, register_map, debugger, thread, regs, rip, cr3)
     } else {
-        step_one_and_clear_tf(backend, register_map).map(|()| RunPast::Reached)
+        step_one_and_clear_tf(backend, register_map, &debugger.interrupt).map(|()| RunPast::Reached)
     }
 }
 
@@ -1019,6 +1041,9 @@ enum WalkStep {
 /// so within 24 ms, and the rest (3-4%, waiting on a held vCPU) never
 /// finished alone.
 const RUN_PAST_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// How often a step's wait for its stop checks for Ctrl+C.
+const STEP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long every vCPU runs when the one executing an instruction waits on
 /// the others, so they can answer it.
