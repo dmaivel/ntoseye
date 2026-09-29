@@ -397,6 +397,13 @@ pub fn cause_bugcheck<T: Read + Write>(framing: &mut KdFraming<T>, processor: u1
     send_manipulate_no_reply(framing, &header)
 }
 
+/// `DbgKdSwitchProcessor`: hand the halted target to `processor`. The target
+/// answers with a state change from `processor`, not with a reply packet.
+pub fn switch_processor<T: Read + Write>(framing: &mut KdFraming<T>, processor: u16) -> Result<()> {
+    let header = make_header(DBGKD_SWITCH_PROCESSOR, processor);
+    send_manipulate_no_reply(framing, &header)
+}
+
 pub fn get_context<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor: u16,
@@ -861,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn reboot_and_cause_bugcheck_are_acknowledged_without_reply_packets() {
+    fn no_reply_requests_are_acknowledged_without_reply_packets() {
         for (api, send) in [
             (
                 DBGKD_REBOOT,
@@ -870,6 +877,10 @@ mod tests {
             (
                 DBGKD_CAUSE_BUGCHECK,
                 cause_bugcheck as fn(&mut KdFraming<Loopback>, u16) -> Result<()>,
+            ),
+            (
+                DBGKD_SWITCH_PROCESSOR,
+                switch_processor as fn(&mut KdFraming<Loopback>, u16) -> Result<()>,
             ),
         ] {
             let outbound_id = (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID;

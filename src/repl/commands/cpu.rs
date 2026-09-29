@@ -110,7 +110,7 @@ repl_command! {
     names: ["~", "vcpus"],
     usage: "~",
     summary: "List vCPU contexts and their RIP values.",
-    details: "If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped, from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers.",
+    details: "`~Ns` selects processor N (zero-based), and `t` and `p` then step that processor. Over `kd` and `kdnet`, the other processors run during the step, as in WinDbg. If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped, from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers.",
     run_state: Halted,
 }
 

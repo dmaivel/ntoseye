@@ -359,13 +359,72 @@ impl KdBackend {
         // single step stops almost immediately, so the caller's wait_for_stop
         // reads it synchronously; no pump needed
         let processor = self.current_processor;
-        // A raw int3 stop still points at the int3; stepping from there would
+        let owner = self.last_stop_processor;
+        // A raw int3 stop still points at the int3; resuming from there would
         // only execute it again and report the same stop.
-        if processor == self.last_stop_processor {
-            self.skip_hardcoded_breakpoint(processor)?;
+        self.skip_hardcoded_breakpoint(owner)?;
+        if processor == owner {
+            self.continue_preserving_dr7(processor, api::DBG_CONTINUE, true)?;
+        } else {
+            self.step_other_processor(processor, owner)?;
         }
-        self.continue_preserving_dr7(processor, api::DBG_CONTINUE, true)?;
         self.record_running();
+        Ok(())
+    }
+
+    /// Resume the target with `processor` single-stepping, while `owner`,
+    /// the processor that reported the stop, holds the target.
+    ///
+    /// A continue resumes the target only when it answers the stop that
+    /// `owner` reported. So the host first switches to `processor`, which
+    /// reports `STATUS_WAKE_SYSTEM_DEBUGGER`. Continuing that report with the
+    /// trace flag arms the step and hands the target back to `owner`, which
+    /// reports its stop again. Continuing that second report resumes every
+    /// processor, and `processor` stops after one instruction.
+    fn step_other_processor(&mut self, processor: u16, owner: u16) -> Result<()> {
+        kd_trace!(
+            "kd: step: switching from p{} to p{}",
+            owner + 1,
+            processor + 1
+        );
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::switch_processor(framing, processor)
+        })?;
+        self.adopt_report_from(processor)?;
+        self.continue_preserving_dr7(processor, api::DBG_CONTINUE, true)?;
+        self.adopt_report_from(owner)?;
+        self.continue_preserving_dr7(owner, api::DBG_CONTINUE, false)
+    }
+
+    /// Receive the state change `processor` reports while the target stays
+    /// halted, and adopt its register report. A report from any other
+    /// processor is recorded as the stop, and the step fails.
+    fn adopt_report_from(&mut self, processor: u16) -> Result<()> {
+        let arch = self.arch;
+        let debug_log = self.debug_log.clone();
+        let stop = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            await_state_change(
+                framing,
+                AwaitStateOptions {
+                    arch,
+                    saw_kd_refresh: None,
+                    filter: StateChangeFilter::Runtime,
+                    bugcheck: None,
+                    bugcheck_capture: None,
+                    deadline: Some(Instant::now() + KD_REQUEST_TIMEOUT),
+                    debug_log: Some(&debug_log),
+                },
+            )
+        })?;
+        if stop.processor != processor {
+            self.record_stop(&stop);
+            return Err(Error::Kd(format!(
+                "expected {} to report during the processor switch, but {} reported",
+                thread_id_for(processor),
+                thread_id_for(stop.processor)
+            )));
+        }
+        self.registers.stopped(processor, stop.control_report);
         Ok(())
     }
 

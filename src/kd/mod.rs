@@ -759,7 +759,8 @@ impl DebugBackend for KdBackend {
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
-        // Local-only; SwitchProcessor emits an unsolicited state-change
+        // Local-only: every request names its processor. A step on another
+        // processor switches to it on the wire (`single_step`).
         self.current_processor =
             parse_thread_id_for_processor_count(thread_id, self.processor_count)?;
         Ok(())

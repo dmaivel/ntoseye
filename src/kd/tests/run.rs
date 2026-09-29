@@ -6,9 +6,15 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::thread::spawn;
+use std::thread::{JoinHandle, spawn};
 
 use crate::kd::breakpoints::KD_BREAKPOINT_TABLE_SIZE;
+use crate::kd::framing::PACKET_TYPE_KD_STATE_CHANGE64;
+
+const STATUS_WAKE_SYSTEM_DEBUGGER: u32 = 0x8000_0007;
+/// `DBGKD_MANIPULATE_STATE64` union offset; `ContinueApi2` puts `TraceFlag`
+/// at +4 and `Dr7` at +8.
+const MANIPULATE_UNION: usize = 16;
 
 #[test]
 fn a_stop_report_answers_for_the_trap_state_until_the_target_runs() {
@@ -221,4 +227,132 @@ fn a_breakin_answered_by_another_stop_is_absorbed_when_it_arrives_late() {
         ..late
     };
     assert!(!backend.mark_known_breakin_stop(guest_int3).assisted_breakin);
+}
+
+/// An exception state change from `processor` of four at `pc`, whose
+/// control report carries `dr7`.
+fn processor_report(processor: u16, code: u32, pc: u64, dr7: u64) -> Vec<u8> {
+    let mut payload = vec![0u8; CONTROL_REPORT_OFFSET + AMD64_CONTROL_REPORT_SIZE];
+    bytes::write_u32(&mut payload, 0, DBG_KD_EXCEPTION_STATE_CHANGE);
+    bytes::write_u16(&mut payload, 6, processor);
+    bytes::write_u32(&mut payload, 8, 4);
+    bytes::write_u64(&mut payload, 24, pc);
+    bytes::write_u32(&mut payload, 32, code);
+    bytes::write_u64(
+        &mut payload,
+        CONTROL_REPORT_OFFSET + AMD64_CONTROL_DR7_OFFSET,
+        dr7,
+    );
+    payload
+}
+
+/// A halted fake kernel that answers each host request with the next state
+/// change in `reports`, and hands back every request it received once the
+/// host hangs up.
+fn serve_state_changes(mut kernel: UnixStream, reports: Vec<Vec<u8>>) -> JoinHandle<Vec<Vec<u8>>> {
+    spawn(move || {
+        let mut kernel_id = INITIAL_PACKET_ID;
+        let mut reports = reports.into_iter();
+        let mut requests = Vec::new();
+        while let Some(request) = recv_host_request(&mut kernel) {
+            requests.push(request);
+            if let Some(report) = reports.next() {
+                kernel
+                    .write_all(&data_packet(
+                        PACKET_TYPE_KD_STATE_CHANGE64,
+                        kernel_id,
+                        &report,
+                    ))
+                    .unwrap();
+                kernel_id ^= 1;
+            }
+        }
+        requests
+    })
+}
+
+/// Each request's API, processor, `TraceFlag` and `Dr7`.
+fn continue_fields(requests: &[Vec<u8>]) -> Vec<(u32, u16, u32, u64)> {
+    requests
+        .iter()
+        .map(|request| {
+            (
+                bytes::read_u32(request, 0),
+                bytes::read_u16(request, 6),
+                bytes::read_u32(request, MANIPULATE_UNION + 4),
+                bytes::read_u64(request, MANIPULATE_UNION + 8),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_step_on_another_processor_switches_to_it_and_resumes_through_the_one_that_stopped() {
+    const STEPPED_DR7: u64 = 0x0404;
+    const OWNER_DR7: u64 = 0x0401;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let worker = serve_state_changes(
+        kernel,
+        vec![
+            processor_report(
+                2,
+                STATUS_WAKE_SYSTEM_DEBUGGER,
+                0xffff_f800_0000_2000,
+                STEPPED_DR7,
+            ),
+            processor_report(0, STATUS_BREAKPOINT, 0xffff_f800_0000_1001, OWNER_DR7),
+        ],
+    );
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.processor_count = 4;
+    backend.set_current_thread("p1.3").unwrap();
+
+    backend.single_step().unwrap();
+    assert!(backend.link.is_running());
+    drop(backend);
+
+    // Each continue carries the DR7 of the processor it answers, so neither
+    // processor's hardware breakpoints move to the other.
+    assert_eq!(
+        continue_fields(&worker.join().unwrap()),
+        vec![
+            (api::DBGKD_SWITCH_PROCESSOR, 2, 0, 0),
+            (api::DBGKD_CONTINUE_API2, 2, 1, STEPPED_DR7),
+            (api::DBGKD_CONTINUE_API2, 0, 0, OWNER_DR7),
+        ]
+    );
+}
+
+#[test]
+fn a_switch_answered_by_another_processor_leaves_that_processor_holding_the_target() {
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let worker = serve_state_changes(
+        kernel,
+        vec![processor_report(
+            1,
+            STATUS_BREAKPOINT,
+            0xffff_f800_0000_3000,
+            0x0400,
+        )],
+    );
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.processor_count = 4;
+    backend.set_current_thread("p1.3").unwrap();
+
+    assert!(backend.single_step().is_err());
+    assert!(!backend.link.is_running());
+    // The next resume answers the processor that reported.
+    assert_eq!(backend.last_stop_processor, 1);
+    assert_eq!(backend.last_rip, 0xffff_f800_0000_3000);
+    drop(backend);
+
+    let requests = worker.join().unwrap();
+    assert_eq!(
+        continue_fields(&requests),
+        vec![(api::DBGKD_SWITCH_PROCESSOR, 2, 0, 0)]
+    );
 }
