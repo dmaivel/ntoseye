@@ -52,12 +52,14 @@ VS Code needs an extension to register the debug type. To set it up:
          "request": "attach",
          "backend": "kd",
          "connect": "/tmp/ntoseye-kd.sock",
-         "symbolPath": "/path/to/your/driver/symbols",
-         "sourcePath": "/home/you/src/MyDriver"
+         "symbolPath": ["${workspaceFolder}/x64/Debug", "${workspaceFolder}/x64/Release"],
+         "sourcePath": "${workspaceFolder}"
        }
      ]
    }
    ```
+
+   This configuration assumes the driver's source tree is the workspace; [Paths from the workspace](#paths-from-the-workspace) explains the two paths.
 
 To debug the adapter itself, run `ntoseye dap --port 4711` in a terminal and add `"debugServer": 4711` to the configuration:
 
@@ -143,6 +145,16 @@ Kernel debugging does not start a process, so `launch` and `attach` do the same 
 `sourcePath` accepts the local directory that contains the source tree, which ntoseye matches as {command}`.srcpath` describes, or a mapping `<prefix-recorded-in-the-pdb>=<local-root>`. It also accepts the same `;`-separated list and JSON array forms as `symbolPath`. If the driver was not built on this host, a source view needs `sourcePath`.
 
 If the command line already sets a target (`ntoseye dap --dump crash.dmp`), the attach request uses that session and ignores its own target arguments, but `symbolPath` and `sourcePath` still apply.
+
+### Paths from the workspace
+
+VS Code and nvim-dap replace `${workspaceFolder}` with the workspace directory before they send the configuration, so one configuration serves every checkout of a driver.
+
+- `sourcePath` can be the workspace itself. ntoseye matches the end of each recorded source path under it, so sources compiled as `C:\Users\you\src\MyDriver\queue.c` inside the guest are found at `${workspaceFolder}/queue.c`.
+- `symbolPath` must name the folders that contain the PDB. ntoseye looks for `<folder>/<name>.pdb` and for the symbol-store layout under each folder, and does not search subfolders.
+- You can list every output folder of the project, for example Debug and Release, or x64 and ARM64. ntoseye loads a PDB only when its GUID and age match the loaded driver, so a PDB from another build in a listed folder is passed over, and a stale PDB is never loaded.
+
+If the PDB exists only inside the guest, ntoseye can read it from guest memory instead, shortly after the build; see [Symbols](../using/drivers.md#symbols) in the driver guide.
 
 ## Feature mapping
 
