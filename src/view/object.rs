@@ -21,86 +21,86 @@ use crate::target::{Target, irp_major_function_name, kthread_state_name, wait_re
 use crate::types::VirtAddr;
 
 shapes! {
-    /// An `_IO_STACK_LOCATION`: one driver's part of an IRP.
+    /// An `_IO_STACK_LOCATION`, which is the part of an IRP for one driver.
     IoStackLocation {
         address: VirtAddr,
         /// The `IRP_MJ_*` code.
         major_function: u8,
-        /// The major function's name (`IRP_MJ_READ`, ...).
+        /// The name of the major function (`IRP_MJ_READ`, ...).
         major_function_name: String,
         minor_function: u8,
         device_object: VirtAddr,
         file_object: VirtAddr,
         completion_routine: VirtAddr,
-        /// The completion routine's context argument.
+        /// The context argument of the completion routine.
         context: VirtAddr,
     }
 
     /// An `_IRP` and its current I/O stack location (`!irp`).
     Irp {
         address: VirtAddr,
-        /// `Type` (`IO_TYPE_IRP`, 6, for a valid IRP).
+        /// `Type`. For a valid IRP, this is `IO_TYPE_IRP` (6).
         r#type: u16,
-        /// `Size` in bytes, stack locations included.
+        /// `Size` in bytes. The size includes the stack locations.
         size: u16,
         stack_count: u8,
-        /// `CurrentLocation`; above `stack_count` once the IRP completes.
+        /// `CurrentLocation`. After the IRP completes, it is more than `stack_count`.
         current_location: u8,
         pending_returned: bool,
         /// 0 for `KernelMode`, 1 for `UserMode`.
         requestor_mode: u8,
-        /// `IoStatus.Status`, as an NTSTATUS; None when unreadable.
+        /// `IoStatus.Status` as an NTSTATUS. None if ntoseye cannot read it.
         io_status: Option<Hex<u32>>,
         user_event: VirtAddr,
         user_buffer: VirtAddr,
         mdl_address: VirtAddr,
-        /// `Tail.Overlay.Thread`: the thread that issued it.
+        /// `Tail.Overlay.Thread`, the thread that issued the IRP.
         thread: VirtAddr,
-        /// None when the current location is out of range or unreadable.
+        /// None if the current location is out of range or ntoseye cannot read it.
         current_stack: Option<IoStackLocation>,
     }
 
-    /// A device on a driver's `DeviceObject`/`NextDevice` chain.
+    /// A device on the `DeviceObject`/`NextDevice` chain of a driver.
     DriverDeviceLink {
         device: VirtAddr,
         device_type: u32,
         flags: u32,
         characteristics: u32,
-        /// `AttachedDevice`: the device layered above it; 0 when none.
+        /// `AttachedDevice`, the device layered above this device. 0 if there is none.
         attached: VirtAddr,
-        /// `NextDevice`: the driver's next device; 0 at the end.
+        /// `NextDevice`, the next device of the driver. 0 at the end of the chain.
         next: VirtAddr,
     }
 
-    /// One `MajorFunction` dispatch-table slot.
+    /// One slot in the `MajorFunction` dispatch table.
     IrpDispatchRoutine {
         /// The `IRP_MJ_*` code.
         index: usize,
-        /// The major function's name (`IRP_MJ_CREATE`, ...).
+        /// The name of the major function (`IRP_MJ_CREATE`, ...).
         name: String,
         routine: VirtAddr,
-        /// The routine's nearest symbol; None when none resolves.
+        /// The nearest symbol to the routine. None if no symbol resolves.
         symbol: Option<String>,
     }
 
     /// A `_DRIVER_OBJECT` with its device chain and dispatch table (`!drvobj`).
     DriverObject {
         object: VirtAddr,
-        /// Whether the argument pointed at a pointer to the driver object.
+        /// Whether the argument pointed to a pointer to the driver object.
         via_pointer: bool,
-        /// `DriverName`; None when unreadable.
+        /// `DriverName`. None if ntoseye cannot read it.
         name: Option<String>,
         driver_start: VirtAddr,
-        /// The driver image's size in bytes.
+        /// The size of the driver image in bytes.
         driver_size: u64,
         driver_section: VirtAddr,
         driver_unload: VirtAddr,
         devices: Vec<DriverDeviceLink>,
-        /// The 28 `IRP_MJ_*` dispatch routines, by code.
+        /// The 28 `IRP_MJ_*` dispatch routines, in `IRP_MJ_*` code order.
         dispatch: Vec<IrpDispatchRoutine>,
     }
 
-    /// A device on a device's `AttachedDevice` stack.
+    /// A device on the `AttachedDevice` stack of a device.
     AttachedDevice {
         device: VirtAddr,
         driver_object: VirtAddr,
@@ -111,19 +111,19 @@ shapes! {
     /// A `_DEVICE_OBJECT` and the devices attached above it (`!devobj`).
     DeviceObject {
         object: VirtAddr,
-        /// Whether the argument pointed at a pointer to the device object.
+        /// Whether the argument pointed to a pointer to the device object.
         via_pointer: bool,
         device_type: u32,
         flags: u32,
         characteristics: u32,
         driver_object: VirtAddr,
-        /// The device layered directly above; 0 when none.
+        /// The device layered directly above this device. 0 if there is none.
         attached_device: VirtAddr,
-        /// The driver's next device; 0 at the end.
+        /// The next device of the driver. 0 at the end of the chain.
         next_device: VirtAddr,
         current_irp: VirtAddr,
         device_extension: VirtAddr,
-        /// The `AttachedDevice` chain, bottom up.
+        /// The `AttachedDevice` chain, from the bottom up.
         attached_stack: Vec<AttachedDevice>,
     }
 
@@ -131,35 +131,35 @@ shapes! {
     ObjectDirectoryEntry {
         name: String,
         object: VirtAddr,
-        /// The object's type (`Directory`, `Driver`, `SymbolicLink`, ...);
-        /// None when its header cannot be decoded.
+        /// The type of the object (`Directory`, `Driver`, `SymbolicLink`, ...).
+        /// None if ntoseye cannot decode its header.
         r#type: Option<String>,
     }
 
-    /// An executive object: its `_OBJECT_HEADER`, type, and name, and a
-    /// directory's entries (`!object`).
+    /// An executive object with its `_OBJECT_HEADER`, type, and name, and the
+    /// entries of a directory (`!object`).
     ExecutiveObject {
-        /// The address given.
+        /// The address that you gave.
         input: VirtAddr,
-        /// `body` when the input pointed at the object body, `header` when
-        /// at its header.
+        /// `body` if the input pointed to the object body. `header` if the input
+        /// pointed to the object header.
         mode: &'static str,
         header: VirtAddr,
         body: VirtAddr,
         pointer_count: i64,
         handle_count: i64,
-        /// The header's (decoded) `TypeIndex`; None when unreadable.
+        /// The decoded `TypeIndex` of the header. None if ntoseye cannot read it.
         type_index: Option<u64>,
-        /// The `_OBJECT_TYPE`; None when unresolved.
+        /// The `_OBJECT_TYPE`. None if ntoseye cannot resolve it.
         type_object: Option<VirtAddr>,
         type_name: Option<String>,
-        /// The header's `InfoMask` (which optional headers precede it).
+        /// The `InfoMask` of the header. It shows which optional headers come before the header.
         info_mask: Option<u8>,
-        /// The `_OBJECT_HEADER_NAME_INFO`; None when the object has none.
+        /// The `_OBJECT_HEADER_NAME_INFO`. None if the object has none.
         name_info: Option<VirtAddr>,
         /// None for an unnamed object.
         name: Option<String>,
-        /// A directory's entries; None for any other object.
+        /// The entries of a directory. None for all other objects.
         entries: Option<Vec<ObjectDirectoryEntry>>,
     }
 
@@ -167,33 +167,33 @@ shapes! {
     NotifyCallback {
         /// `process`, `thread`, or `image`.
         kind: &'static str,
-        /// Its slot in the kernel's callback array.
+        /// The slot of the callback in the kernel callback array.
         index: usize,
         function: VirtAddr,
-        /// The function's nearest symbol; None when none resolves.
+        /// The nearest symbol to the function. None if no symbol resolves.
         symbol: Option<String>,
         /// The `_EX_CALLBACK_ROUTINE_BLOCK`.
         block: VirtAddr,
-        /// The slot's raw `_EX_FAST_REF` value.
+        /// The raw `_EX_FAST_REF` value of the slot.
         raw: VirtAddr,
         context: VirtAddr,
     }
 
-    /// A system-service table slot.
+    /// A slot in a system-service table.
     SsdtEntry {
         /// The system-service number.
         index: u32,
-        /// The routine the slot resolves to.
+        /// The routine that the slot resolves to.
         target: VirtAddr,
-        /// The routine's symbol; None when none resolves.
+        /// The symbol of the routine. None if no symbol resolves.
         symbol: Option<String>,
-        /// The module containing the routine; None when none does.
+        /// The module that contains the routine. None if no module contains it.
         module: Option<String>,
     }
 
-    /// A system-service table: the kernel SSDT or the win32k shadow (`ssdt`).
+    /// A system-service table, either the kernel SSDT or the win32k shadow (`ssdt`).
     SsdtTable {
-        /// Which table.
+        /// The label of the table.
         label: String,
         base: VirtAddr,
         /// The number of services.
@@ -201,39 +201,40 @@ shapes! {
         entries: Vec<SsdtEntry>,
     }
 
-    /// An in-flight IRP found on a thread's `IrpList` or as a device's
-    /// `CurrentIrp` (`irps`).
+    /// An in-flight IRP that ntoseye found on the `IrpList` of a thread or in the
+    /// `CurrentIrp` of a device (`irps`).
     InFlightIrp {
         irp: VirtAddr,
-        /// `thread` or `device`: where it was found.
+        /// `thread` or `device`. It tells where ntoseye found the IRP.
         source: &'static str,
         stack_count: u8,
         current_location: u8,
-        /// The issuing process; None when found on a device.
+        /// The process that issued the IRP. None if ntoseye found the IRP on a device.
         pid: Option<u64>,
-        /// The issuing thread; None when found on a device.
+        /// The thread that issued the IRP. None if ntoseye found the IRP on a device.
         tid: Option<u64>,
         ethread: Option<VirtAddr>,
-        /// The thread's state name; None when found on a device.
+        /// The state name of the thread. None if ntoseye found the IRP on a device.
         state: Option<&'static str>,
-        /// The thread's wait-reason name; None when found on a device.
+        /// The wait-reason name of the thread. None if ntoseye found the IRP on a
+        /// device.
         wait_reason: Option<&'static str>,
-        /// The driver owning the current stack location's device; None when
-        /// unresolved.
+        /// The driver that owns the device of the current stack location. None if
+        /// ntoseye cannot resolve it.
         driver: Option<String>,
-        /// The current stack location's device; None when unresolved.
+        /// The device of the current stack location. None if ntoseye cannot resolve it.
         device: Option<VirtAddr>,
     }
 
-    /// A `_DRIVER_OBJECT` as listed in the object manager's Driver and
-    /// FileSystem directories (`drivers`).
+    /// A `_DRIVER_OBJECT` from the Driver and FileSystem directories of the
+    /// object manager (`drivers`).
     DriverObjectSummary {
         name: String,
         object: VirtAddr,
         driver_start: VirtAddr,
-        /// The driver image's size in bytes.
+        /// The size of the driver image in bytes.
         driver_size: u64,
-        /// The first device on its chain; 0 when none.
+        /// The first device on the chain of the driver. 0 if there is none.
         device_object: VirtAddr,
         driver_unload: VirtAddr,
     }
@@ -243,28 +244,29 @@ shapes! {
         handle: Hex,
         /// The `_HANDLE_TABLE_ENTRY`.
         entry: VirtAddr,
-        /// The object's body.
+        /// The body of the object.
         object: Diag<VirtAddr>,
         type_name: Diag<Option<String>>,
-        /// The object's name; the value is None for an unnamed object.
+        /// The name of the object. The value is None for an unnamed object.
         name: Diag<Option<String>>,
         granted_access: Diag<Hex<u32>>,
-        /// The entry's attribute bits (inherit, protect-from-close, audit).
+        /// The attribute bits of the entry (inherit, protect-from-close, audit).
         attributes: Diag<Hex<u32>>,
     }
 
-    /// A process's handle table (`!handle`).
+    /// The handle table of a process (`!handle`).
     HandleTable {
-        /// The process whose table it is.
+        /// The process that owns the table.
         process: super::process::ProcessIdentity,
         /// The `_HANDLE_TABLE`.
         table: VirtAddr,
-        /// The table's level (0-2: how many pointer levels lead to entries).
+        /// The level of the table (0-2). It is the number of pointer levels before the
+        /// entries.
         table_level: u8,
-        /// The handle count the table reports.
+        /// The handle count that the table reports.
         advertised_handles: usize,
         scanned_handles: usize,
-        /// Entries that could not be read.
+        /// The number of entries that ntoseye could not read.
         skipped_entries: usize,
         /// Whether the enumeration stopped at its limit.
         truncated: bool,
@@ -274,24 +276,24 @@ shapes! {
     /// A `_FILE_OBJECT` (`!fileobj`).
     FileObject {
         address: VirtAddr,
-        /// `Type` (`IO_TYPE_FILE`, 5, for a valid file object).
+        /// `Type`. For a valid file object, this is `IO_TYPE_FILE` (5).
         file_type: Diag<i16>,
         size: Diag<i16>,
         device_object: Diag<VirtAddr>,
         device_type: Diag<Hex<u32>>,
-        /// The device's object name; the value is None for an unnamed device.
+        /// The object name of the device. The value is None for an unnamed device.
         device_name: Diag<Option<String>>,
         file_name: Diag<String>,
         related_file_object: Diag<VirtAddr>,
         flags: Diag<Hex<u32>>,
         current_byte_offset: Diag<i64>,
-        /// The file system's `FsContext` (its FCB).
+        /// The `FsContext` of the file system (its FCB).
         fs_context: Diag<VirtAddr>,
-        /// The file system's `FsContext2` (its CCB).
+        /// The `FsContext2` of the file system (its CCB).
         fs_context2: Diag<VirtAddr>,
         section_object_pointer: Diag<VirtAddr>,
         private_cache_map: Diag<VirtAddr>,
-        /// The NTSTATUS the file object completed with.
+        /// The NTSTATUS that the file object completed with.
         final_status: Diag<Hex>,
         lock_operation: Diag<bool>,
         delete_pending: Diag<bool>,
@@ -303,10 +305,10 @@ shapes! {
         shared_delete: Diag<bool>,
     }
 
-    /// A thread owning an executive resource.
+    /// A thread that owns an executive resource.
     ResourceOwner {
         thread: VirtAddr,
-        /// How many times the thread acquired it.
+        /// The number of times that the thread acquired the resource.
         count: i32,
     }
 
@@ -316,15 +318,15 @@ shapes! {
         active_count: Diag<i16>,
         flags: Diag<Hex<u16>>,
         contention_count: Diag<u32>,
-        /// Threads waiting for shared access.
+        /// The number of threads that wait for shared access.
         shared_waiters: Diag<u32>,
-        /// Threads waiting for exclusive access.
+        /// The number of threads that wait for exclusive access.
         exclusive_waiters: Diag<u32>,
-        /// The owning threads.
+        /// The threads that own the resource.
         owners: Diag<Vec<ResourceOwner>>,
     }
 
-    /// The kernel's executive-resource list (`!locks`).
+    /// The executive-resource list of the kernel (`!locks`).
     ResourceList {
         /// `nt!ExpSystemResourcesList`.
         head: VirtAddr,
@@ -332,26 +334,26 @@ shapes! {
         termination: ListEnd,
     }
 
-    /// An IRP `!irpfind` found in pool.
+    /// An IRP that `!irpfind` found in pool.
     PoolIrp {
         irp: Irp,
-        /// The `_POOL_HEADER` before it; None for a big-pool allocation.
+        /// The `_POOL_HEADER` before the IRP. None for a big-pool allocation.
         pool_header: Option<VirtAddr>,
-        /// The allocation's pool tag.
+        /// The pool tag of the allocation.
         tag: String,
         /// `Tail.Overlay.OriginalFileObject`.
         original_file_object: VirtAddr,
-        /// `MdlAddress->Process`; None without an MDL.
+        /// `MdlAddress->Process`. None if the IRP has no MDL.
         mdl_process: Option<VirtAddr>,
-        /// The driver owning the current stack location's device; None when
-        /// unresolved.
+        /// The driver that owns the device of the current stack location. None if
+        /// ntoseye cannot resolve it.
         driver: Option<String>,
-        /// Whether every stack location is used up: the IRP is being (or
-        /// was) completed.
+        /// Whether all stack locations are used. If true, completion of the IRP is
+        /// in progress or done.
         completed: bool,
     }
 
-    /// The criteria an `!irpfind` search matched IRPs against.
+    /// The criteria that an `!irpfind` search used to match IRPs.
     IrpFindCriteria {
         /// `arg`, `device`, `fileobject`, `mdlprocess`, `thread`, or
         /// `userevent`.
@@ -365,28 +367,29 @@ shapes! {
         pool: &'static str,
         region_start: VirtAddr,
         region_end: VirtAddr,
-        /// Where the page scan began: the region start or the restart
-        /// address.
+        /// The address where the page scan started. This is the region start or
+        /// the restart address.
         scan_start: VirtAddr,
-        /// None when unfiltered.
+        /// None if the scan has no filter.
         criteria: Option<IrpFindCriteria>,
         scanned_pages: u64,
-        /// How the big-pool table scan went.
+        /// The result of the big-pool table scan.
         big_pool_status: String,
         irps: Vec<PoolIrp>,
-        /// Whether the result bound left IRPs out: the page scan stopped at
-        /// `restart`, or big-pool allocations went unchecked.
+        /// Whether the result limit caused ntoseye to leave out IRPs. This occurs
+        /// if the page scan stopped at `restart`, or if ntoseye did not check some
+        /// big-pool allocations.
         truncated: bool,
         interrupted: bool,
-        /// Where to resume the page scan; None when it finished.
+        /// The address where the page scan can continue. None if the scan finished.
         restart: Option<VirtAddr>,
     }
 
-    /// A return address on a handle trace's stack.
+    /// A return address on the stack of a handle trace.
     HandleTraceFrame {
         address: VirtAddr,
-        /// The symbol it resolves to in the traced process; None when none
-        /// does.
+        /// The symbol of the address in the traced process. None if no symbol
+        /// resolves.
         symbol: Option<String>,
     }
 
@@ -403,71 +406,74 @@ shapes! {
         stack: Vec<HandleTraceFrame>,
     }
 
-    /// A process's handle traces (`!htrace`).
+    /// The handle traces of a process (`!htrace`).
     HandleTraces {
         /// The traced process.
         process: super::process::ProcessIdentity,
         object_table: VirtAddr,
-        /// The `_HANDLE_TRACE_DEBUG_INFO`; None when handle tracing is off.
+        /// The `_HANDLE_TRACE_DEBUG_INFO`. None if handle tracing is off.
         debug_info: Option<VirtAddr>,
-        /// The ring's capacity.
+        /// The capacity of the ring.
         table_size: u64,
-        /// Traces ever recorded; the ring keeps the last `table_size`.
+        /// The total number of recorded traces. The ring keeps the last `table_size`
+        /// traces.
         recorded: u64,
-        /// Ring slots read.
+        /// The number of ring slots that ntoseye read.
         parsed: u64,
-        /// Ring slots that could not be read.
+        /// The number of ring slots that ntoseye could not read.
         unreadable: u64,
         /// The matching traces, newest first.
         traces: Vec<HandleTrace>,
     }
 
-    /// A connection to an ALPC connection port: its communication info and
-    /// the two ports it joins.
+    /// A connection to an ALPC connection port, with its communication info
+    /// and the two ports that it connects.
     AlpcConnection {
         communication_info: VirtAddr,
         server_port: VirtAddr,
-        /// Messages queued on the server port (main, large, and pending);
-        /// None when unreadable.
+        /// The number of messages queued on the server port (main, large, and
+        /// pending). None if ntoseye cannot read it.
         server_queued: Option<u64>,
         client_port: VirtAddr,
-        /// Messages queued on the client port; None when unreadable.
+        /// The number of messages queued on the client port. None if ntoseye cannot
+        /// read it.
         client_queued: Option<u64>,
-        /// The client's `_EPROCESS`.
+        /// The `_EPROCESS` of the client.
         client_owner: VirtAddr,
         client_owner_name: Option<String>,
     }
 
-    /// One of an ALPC port's message queues, or its wait queue.
+    /// One message queue of an ALPC port, or its wait queue.
     AlpcQueue {
-        /// The `_ALPC_PORT` list head, e.g. `PendingQueue`.
+        /// The `_ALPC_PORT` list head, for example `PendingQueue`.
         field: &'static str,
-        /// The queue's snake_case name.
+        /// The snake_case name of the queue.
         key: &'static str,
-        /// The port's count for the queue; None when it keeps none.
+        /// The count that the port keeps for the queue. None if the port keeps no
+        /// count.
         length: Option<u64>,
-        /// The queued `_KALPC_MESSAGE`s, or for the wait queue the waiting
+        /// The queued `_KALPC_MESSAGE`s. For the wait queue, the waiting
         /// `_ETHREAD`s.
         entries: Vec<VirtAddr>,
         termination: ListEnd,
     }
 
-    /// An `_ALPC_PORT` (`!alpc /p`). A field is None when this build lacks
-    /// it or it cannot be read.
+    /// An `_ALPC_PORT` (`!alpc /p`). A field is None if this Windows build does
+    /// not have it, or if ntoseye cannot read it.
     AlpcPort {
         address: VirtAddr,
         name: Option<String>,
         pointer_count: i64,
         handle_count: i64,
-        /// WinDbg's port type name (`ALPC_CONNECTION_PORT`, ...).
+        /// The WinDbg port type name (`ALPC_CONNECTION_PORT`, ...).
         kind: Option<&'static str>,
         /// `u1.State`.
         state: Option<Hex>,
-        /// `u1.State`'s `Type` bits.
+        /// The `Type` bits of `u1.State`.
         port_type: Option<u64>,
-        /// The one-bit `u1.s1` state flags set, by their PDB names.
+        /// The PDB names of the one-bit `u1.s1` state flags that are set.
         state_flags: Vec<String>,
-        /// The owning `_EPROCESS`.
+        /// The `_EPROCESS` that owns the port.
         owner: VirtAddr,
         owner_name: Option<String>,
         communication_info: VirtAddr,
@@ -484,14 +490,14 @@ shapes! {
         max_message_length: Option<u64>,
         queues: Vec<AlpcQueue>,
         direct_queue_length: Option<u64>,
-        /// A connection port's connections.
+        /// The connections of a connection port.
         connections: Vec<AlpcConnection>,
-        /// How the connection-list walk ended; None when there was none.
+        /// How the walk of the connection list ended. None if there was no walk.
         connection_termination: Option<ListEnd>,
     }
 
-    /// A `_KALPC_MESSAGE` (`!alpc /m`). A field is None when this build
-    /// lacks it or it cannot be read.
+    /// A `_KALPC_MESSAGE` (`!alpc /m`). A field is None if this Windows build
+    /// does not have it, or if ntoseye cannot read it.
     AlpcMessage {
         address: VirtAddr,
         message_id: Option<u64>,
@@ -499,40 +505,40 @@ shapes! {
         sequence_no: Option<u64>,
         /// `PortMessage.u2.s2.Type`.
         message_type: Option<Hex>,
-        /// The `LPC_*` name of the message type's low byte.
+        /// The `LPC_*` name of the low byte of the message type.
         message_type_name: Option<&'static str>,
         data_length: Option<u64>,
         total_length: Option<u64>,
-        /// `PortMessage.ClientId`: the sender.
+        /// `PortMessage.ClientId`, the sender.
         client_process_id: Option<u64>,
         client_thread_id: Option<u64>,
         /// `u1.State`.
         state: Option<Hex>,
-        /// `u1.State`'s `QueueType` bits.
+        /// The `QueueType` bits of `u1.State`.
         queue_type: Option<u64>,
-        /// `u1.State`'s `QueuePortType` bits.
+        /// The `QueuePortType` bits of `u1.State`.
         queue_port_type: Option<u64>,
-        /// The one-bit `u1.s1` state flags set, by their PDB names.
+        /// The PDB names of the one-bit `u1.s1` state flags that are set.
         state_flags: Vec<String>,
         owner_port: VirtAddr,
-        /// WinDbg's port type name of the owner port.
+        /// The WinDbg port type name of the owner port.
         owner_port_kind: Option<&'static str>,
         /// The port whose queue holds the message.
         port_queue: VirtAddr,
         port_queue_kind: Option<&'static str>,
-        /// The queue port's owning `_EPROCESS`.
+        /// The `_EPROCESS` that owns the queue port.
         port_queue_owner: Option<VirtAddr>,
         port_queue_owner_name: Option<String>,
         cancel_sequence_no: Option<u64>,
         extension_buffer_size: Option<u64>,
-        /// The message's pointer fields this build has, by snake_case name.
+        /// The pointer fields of the message in this build, by snake_case name.
         pointers: Keyed<VirtAddr>,
-        /// The `_KALPC_MESSAGE_ATTRIBUTES` fields this build has, by
-        /// snake_case name.
+        /// The `_KALPC_MESSAGE_ATTRIBUTES` fields in this build, by snake_case
+        /// name.
         attributes: Keyed<VirtAddr>,
     }
 
-    /// A connection port a process owns, and its connections.
+    /// A connection port that a process owns, and its connections.
     AlpcOwnedPort {
         handle: Hex,
         port: VirtAddr,
@@ -541,36 +547,38 @@ shapes! {
         termination: ListEnd,
     }
 
-    /// A client communication port a process holds: what it is connected to.
+    /// A client communication port that a process holds, and the ports that it
+    /// is connected to.
     AlpcClientPort {
         handle: Hex,
         port: VirtAddr,
-        /// Messages queued on the port; None when unreadable.
+        /// The number of messages queued on the port. None if ntoseye cannot read it.
         queued: Option<u64>,
         connection_port: VirtAddr,
         connection_name: Option<String>,
         server_port: VirtAddr,
-        /// Messages queued on the server port; None when unreadable.
+        /// The number of messages queued on the server port. None if ntoseye cannot
+        /// read it.
         server_queued: Option<u64>,
-        /// The server's `_EPROCESS`; None when unreadable.
+        /// The `_EPROCESS` of the server. None if ntoseye cannot read it.
         server_owner: Option<VirtAddr>,
         server_owner_name: Option<String>,
     }
 
-    /// The ALPC ports a process holds handles to (`!alpc /lpp`).
+    /// The ALPC ports that a process holds handles to (`!alpc /lpp`).
     AlpcProcessPorts {
         process: super::process::ProcessIdentity,
-        /// Connection ports the process owns.
+        /// The connection ports that the process owns.
         created: Vec<AlpcOwnedPort>,
-        /// Client ports the process holds.
+        /// The client ports that the process holds.
         connected: Vec<AlpcClientPort>,
-        /// Server communication ports it holds (its ends of connections to
-        /// its own ports).
+        /// The number of server communication ports that the process holds. These
+        /// are its ends of connections to its own ports.
         server_ports: usize,
         scanned_handles: usize,
-        /// The handle count the table reports.
+        /// The handle count that the table reports.
         advertised_handles: usize,
-        /// Handle-table entries that could not be read.
+        /// The number of handle-table entries that ntoseye could not read.
         skipped_entries: usize,
     }
 }

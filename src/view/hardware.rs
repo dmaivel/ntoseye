@@ -101,94 +101,95 @@ pub fn ipi(detail: &IpiDetail) -> IpiState {
 }
 
 shapes! {
-    /// A processor whose state could not be read.
+    /// A processor whose state ntoseye could not read.
     ProcessorError {
         processor: u16,
         message: String,
     }
 
-    /// A processor's entry in a queued spinlock it owns or waits for.
+    /// The entry of a processor in a queued spinlock that it owns or waits for.
     QueuedLockHolder {
         processor: u16,
-        /// `owner`, `waiting`, or `corrupt` (the entry's bits and the queue
-        /// links disagree).
+        /// `owner`, `waiting`, or `corrupt`. `corrupt` means that the bits of the
+        /// entry do not agree with the queue links.
         state: &'static str,
-        /// 1-based place in the wait queue behind the owner; `None` unless
-        /// waiting.
+        /// The 1-based position in the wait queue after the owner. `None` if the
+        /// processor does not wait.
         wait_order: Option<u32>,
-        /// How a corrupt entry disagrees; `None` otherwise.
+        /// How a corrupt entry does not agree with the queue links. `None` for
+        /// other entries.
         reason: Option<String>,
     }
 
-    /// A numbered queued spinlock and the processors owning or waiting for it.
+    /// A numbered queued spinlock and the processors that own it or wait for it.
     QueuedLock {
-        /// Its `_KSPIN_LOCK_QUEUE_NUMBER`.
+        /// The `_KSPIN_LOCK_QUEUE_NUMBER` of the lock.
         number: u32,
-        /// The queue number's name without its `LockQueue` prefix and `Lock`
-        /// suffix (`IoCancel`), or `LockQueue[n]` when unknown.
+        /// The name of the queue number without the `LockQueue` prefix and the
+        /// `Lock` suffix (`IoCancel`). `LockQueue[n]` if the name is not known.
         name: String,
-        /// The spinlock, from the first processor entry that names it.
+        /// The spinlock, from the first processor entry that identifies it.
         lock: Option<VirtAddr>,
         holders: Vec<QueuedLockHolder>,
     }
 
-    /// Every numbered queued spinlock across the processors (`!qlocks`).
+    /// All numbered queued spinlocks on all processors (`!qlocks`).
     QueuedLocks {
-        /// Processors whose `_KPRCB.LockQueue` was read.
+        /// The processors whose `_KPRCB.LockQueue` ntoseye read.
         processors: Vec<u16>,
         locks: Vec<QueuedLock>,
         errors: Vec<ProcessorError>,
     }
 
-    /// A request a sender posted in a processor's IPI mailbox list.
+    /// A request that a sender put in the IPI mailbox list of a processor.
     IpiRequest {
-        /// The sender's `_REQUEST_MAILBOX` slot in the receiver's array.
+        /// The `_REQUEST_MAILBOX` slot of the sender in the array of the receiver.
         mailbox: VirtAddr,
-        /// The sending processor; `None` when the mailbox lies outside the
-        /// receiver's array.
+        /// The processor that sent the request. `None` if the mailbox is outside
+        /// the array of the receiver.
         sender: Option<u16>,
         request_summary: Diag<Hex>,
-        /// The request summary's type, when it is a known one.
+        /// The type of the request summary, if the type is known.
         request_type: Diag<Option<&'static str>>,
         worker_routine: Diag<VirtAddr>,
-        /// The worker routine's symbol, when it resolves.
+        /// The symbol of the worker routine, if ntoseye can resolve it.
         worker_symbol: Option<String>,
-        /// `RequestPacket.CurrentPacket`: the worker's three parameters.
+        /// The three parameters of the worker (`RequestPacket.CurrentPacket`).
         parameters: Diag<Vec<Hex>>,
     }
 
-    /// One processor's IPI state.
+    /// The IPI state of one processor.
     IpiProcessor {
         processor: u16,
         kprcb: VirtAddr,
-        /// The `_KPRCB` IPI fields this build has, by name, each a
+        /// The `_KPRCB` IPI fields that this build has, by name. Each field is a
         /// `Diagnostic` of its value.
         fields: Keyed<Diag<Hex>>,
-        /// `IpiFrozen` decoded (`Running`, `Frozen`, ...); `None` when the
-        /// build lacks the field.
+        /// The decoded `IpiFrozen` value (`Running`, `Frozen`, ...). `None` if the
+        /// build does not have the field.
         frozen_state: Option<Diag<&'static str>>,
-        /// Requests queued to this processor and not yet taken, in list
-        /// order; unavailable on builds without per-sender mailboxes or when
-        /// the list cannot be read.
+        /// The requests in the queue of this processor that are not taken yet, in
+        /// list order. Unavailable on builds without a mailbox for each sender, or
+        /// if ntoseye cannot read the list.
         pending: Diag<Vec<IpiRequest>>,
-        /// Whether the pending walk stopped at its bound or a repeated
-        /// mailbox.
+        /// Whether the walk of the pending list stopped at its limit or at a
+        /// repeated mailbox.
         pending_truncated: bool,
-        /// Processors whose pending list holds a request from this one.
+        /// The processors whose pending list holds a request from this processor.
         awaiting: Vec<u16>,
     }
 
-    /// Interprocessor-interrupt state per processor (`!ipi`).
+    /// The interprocessor interrupt state of each processor (`!ipi`).
     IpiState {
         processors: Vec<IpiProcessor>,
         errors: Vec<ProcessorError>,
     }
 
-    /// A device pci.sys enumerated (`!pcitree`).
+    /// A device that pci.sys enumerated (`!pcitree`).
     PciTreeDevice {
-        /// pci.sys's device extension.
+        /// The pci.sys device extension.
         extension: VirtAddr,
-        /// The device's physical device object.
+        /// The physical device object of the device.
         pdo: VirtAddr,
         bus: u32,
         device: u8,
@@ -199,24 +200,24 @@ shapes! {
         base_class: Hex<u8>,
         sub_class: Hex<u8>,
         prog_if: Hex<u8>,
-        /// The class code's name, when it is a known one.
+        /// The name of the class code, if it is known.
         class_name: Option<String>,
         subsystem_vendor_id: Hex<u16>,
         subsystem_id: Hex<u16>,
         header_type: Hex<u8>,
-        /// The device's PnP instance path, when pci.sys recorded one.
+        /// The PnP instance path of the device, if pci.sys recorded one.
         instance_path: Option<String>,
     }
 
-    /// A bus pci.sys enumerated, with the devices on it and the buses behind
-    /// its bridges.
+    /// A bus that pci.sys enumerated, with the devices on it and the buses
+    /// behind its bridges.
     PciBus {
-        /// pci.sys's bus extension.
+        /// The pci.sys bus extension.
         extension: VirtAddr,
         number: u32,
-        /// The highest bus number behind this one.
+        /// The highest bus number behind this bus.
         subordinate: u32,
-        /// The bridge's physical device object; 0 for a root bus.
+        /// The physical device object of the bridge. 0 for a root bus.
         bridge_pdo: VirtAddr,
         devices: Vec<PciTreeDevice>,
         child_buses: Vec<PciBus>,
@@ -224,61 +225,62 @@ shapes! {
 
     /// A PCI segment and its root buses.
     PciSegment {
-        /// pci.sys's segment record.
+        /// The pci.sys segment record.
         address: VirtAddr,
         segment: u16,
         root_buses: Vec<PciBus>,
     }
 
-    /// The PCI hierarchy pci.sys tracks (`!pcitree`).
+    /// The PCI hierarchy that pci.sys tracks (`!pcitree`).
     PciTree {
         segments: Vec<PciSegment>,
-        /// Whether the walk stopped at its bound before the end.
+        /// Whether the walk stopped at its limit before the end.
         truncated: bool,
-        /// Each unreadable bus or function, whose list the walk left.
+        /// Each bus or function that ntoseye could not read. The walk does not
+        /// continue in the list that holds it.
         errors: Vec<String>,
     }
 
     /// A base address register.
     PciBar {
-        /// Which BAR (0-5).
+        /// The BAR number (0-5).
         index: u8,
         /// `io`, `memory32`, or `memory64`.
         kind: &'static str,
         /// The decoded base address.
         address: Hex,
         prefetchable: bool,
-        /// The register as read (both halves for a 64-bit BAR).
+        /// The raw register value (both halves for a 64-bit BAR).
         raw: Hex,
     }
 
-    /// A type 1 or 2 header's bus numbers.
+    /// The bus numbers of a type 1 or type 2 header.
     PciBuses {
         primary: u8,
         secondary: u8,
         subordinate: u8,
     }
 
-    /// A capability-list entry.
+    /// An entry in a capability list.
     PciCapability {
-        /// Its offset in configuration space.
+        /// The offset of the entry in configuration space.
         offset: Hex<u16>,
         id: Hex<u16>,
-        /// The capability's name, when it is a known one.
+        /// The name of the capability, if it is known.
         name: Option<&'static str>,
-        /// The version of an extended capability; `None` for a standard one.
+        /// The version of an extended capability. `None` for a standard capability.
         version: Option<u8>,
     }
 
-    /// Requested raw configuration bytes.
+    /// The raw configuration bytes that the caller requested.
     PciConfigBytes {
-        /// Offset of the first byte.
+        /// The offset of the first byte.
         offset: Hex,
         /// The bytes, as hex.
         bytes: String,
     }
 
-    /// One function's decoded configuration space.
+    /// The decoded configuration space of one function.
     PciFunction {
         segment: u16,
         bus: u8,
@@ -290,15 +292,15 @@ shapes! {
         base_class: Hex<u8>,
         sub_class: Hex<u8>,
         prog_if: Hex<u8>,
-        /// The class code's name, when it is a known one.
+        /// The name of the class code, if it is known.
         class_name: Option<String>,
         header_type: Hex<u8>,
         multifunction: bool,
         command: Hex<u16>,
-        /// The names of the command register's set bits.
+        /// The names of the bits that are set in the command register.
         command_flags: Vec<&'static str>,
         status: Hex<u16>,
-        /// The names of the status register's set bits.
+        /// The names of the bits that are set in the status register.
         status_flags: Vec<&'static str>,
         /// Type 0 and 2 headers only.
         subsystem_vendor_id: Option<Hex<u16>>,
@@ -313,14 +315,14 @@ shapes! {
         /// 0 for none, 1-4 for INTA#-INTD#.
         interrupt_pin: u8,
         capabilities: Vec<PciCapability>,
-        /// PCI Express extended capabilities; empty for a conventional
-        /// function, or when only 256 bytes were read.
+        /// The PCI Express extended capabilities. Empty for a conventional
+        /// function, or if ntoseye read only 256 bytes.
         extended_capabilities: Vec<PciCapability>,
-        /// The requested raw range (`raw=True`), else `None`.
+        /// The requested raw range (`raw=True`). Otherwise `None`.
         config: Option<PciConfigBytes>,
     }
 
-    /// The functions a `!pci` scan found.
+    /// The functions that a `!pci` scan found.
     PciScan {
         functions: Vec<PciFunction>,
         /// Whether an interrupt request stopped the scan early.

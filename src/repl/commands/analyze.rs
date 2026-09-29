@@ -16,8 +16,8 @@ repl_command! {
     cmd_analyze;
     names: ["!analyze", "analyze"],
     usage: "!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
-    summary: "Display a coherent first-pass crash triage report.",
-    details: "Without -v prints the short verdict: bugcheck line, failure signature, culprit, verifier/WHEA findings, relevant modules. -v adds the full bugcheck arguments, faulting context, stack, and every module. -show decodes a bugcheck code without a crash; -hang triages per-processor waits.",
+    summary: "Show a first-pass crash triage report.",
+    details: "Without -v, shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. -show decodes a bugcheck code when there is no crash. -hang triages the waits on each processor.",
     completion: Expression,
 }
 
@@ -25,8 +25,8 @@ repl_command! {
     cmd_bugcheck();
     names: [".bugcheck"],
     usage: ".bugcheck",
-    summary: "Display the bugcheck code and its four parameters.",
-    details: "Takes the bugcheck the stop reported, else nt!KiBugCheckData's (as $bug_code and $bug_param1-4 do), else a crash dump header's, as !analyze does.",
+    summary: "Show the bugcheck code and its four parameters.",
+    details: "Uses the bugcheck that the stop reported. If there is none, uses the bugcheck in nt!KiBugCheckData, as $bug_code and $bug_param1-4 do. If there is none there, uses the bugcheck in the crash dump header. !analyze uses the same order.",
 }
 
 const ANALYZE_STACK_LIMIT: usize = 16;

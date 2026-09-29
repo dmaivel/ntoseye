@@ -18,14 +18,14 @@ repl_command! {
     cmd_drivers;
     names: ["drivers"],
     usage: "drivers [filter]",
-    summary: "List driver objects from the \\Driver object directory.",
+    summary: "List the driver objects in the \\Driver object directory.",
 }
 
 repl_command! {
     cmd_drvobj;
     names: ["!drvobj", "drvobj"],
     usage: "!drvobj <driver-object-expression-or-name>",
-    summary: "Inspect a DRIVER_OBJECT, its device chain and dispatch table.",
+    summary: "Show a DRIVER_OBJECT with its device chain and dispatch table.",
     completion: Driver,
 }
 
@@ -33,7 +33,7 @@ repl_command! {
     cmd_devobj;
     names: ["!devobj", "devobj"],
     usage: "!devobj <device-object-expression>",
-    summary: "Inspect a DEVICE_OBJECT and its attached stack.",
+    summary: "Show a DEVICE_OBJECT and its attached stack.",
     completion: Expression,
 }
 
@@ -41,7 +41,7 @@ repl_command! {
     cmd_irp;
     names: ["!irp", "irp"],
     usage: "!irp <address-expression>",
-    summary: "Inspect an IRP and its current IO_STACK_LOCATION.",
+    summary: "Show an IRP and its current IO_STACK_LOCATION.",
     completion: Expression,
 }
 
@@ -49,7 +49,7 @@ repl_command! {
     cmd_irps;
     names: ["irps"],
     usage: "irps [process-filter|driver-filter]",
-    summary: "Discover in-flight IRPs from thread IrpLists and device CurrentIrp.",
+    summary: "Find the in-flight IRPs in thread IrpLists and device CurrentIrp fields.",
     completion: Process,
 }
 
@@ -57,8 +57,8 @@ repl_command! {
     cmd_irpfind;
     names: ["!irpfind", "irpfind"],
     usage: "!irpfind [-v] [pool-type [restart-address [criteria data]]]",
-    summary: "Find IRPs by scanning pool for IoAllocateIrp's allocations.",
-    details: "Scans the pool region (the one Windows 10 1803 and later assign in MiState.Vs.SystemVaRegions, else MmNonPagedPoolStart/End or MmPagedPoolStart/End), walking the page tables so only mapped pages are read, for 16-byte-aligned _POOL_HEADERs tagged Irp; big allocations come from PoolBigPageTable. A block counts when its body is a live _IRP: Type 6 (IoFreeIrp clears it), Size the header plus whole stack locations and at least IoSizeOfIrp(StackCount) (a lookaside IRP keeps its larger packet size), CurrentLocation at most StackCount + 1. Each IRP is listed with its thread (Tail.Overlay.Thread), the current stack location's major and minor function, device, and owning driver, and the process of its MDL; one whose CurrentLocation is past StackCount is listed as complete. -v adds the pool header, I/O status, PendingReturned, UserEvent, UserBuffer, the current location's file object and completion routine, and OriginalFileObject. pool-type is 0 (nonpaged, the default) or 1 (paged); 2 (special) and 4 (session) have no region of their own on these builds and are refused. restart-address resumes a scan from that page. Criteria follow WinDbg: arg (a stack location's Argument1-4), device (a stack location's DeviceObject), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess (MdlAddress->Process), thread (Tail.Overlay.Thread), userevent (UserEvent); use 0 as the restart address to scan the whole pool. The scan stops after 4,096 IRPs or on Ctrl-C and prints the command that resumes it, criteria included; when the bound is reached among the big-pool allocations, which are checked last, it says so, and no restart reaches the rest. IRPs a driver builds in its own allocations (IoInitializeIrp) carry that driver's tag and are not found; irps lists IRPs from thread IrpLists instead.",
+    summary: "Scan pool for the IRPs that IoAllocateIrp allocates.",
+    details: "Scans the pool region for 16-byte-aligned _POOL_HEADERs with the tag Irp. On Windows 10 1803 and later, the region comes from MiState.Vs.SystemVaRegions. Otherwise, the region is MmNonPagedPoolStart/End or MmPagedPoolStart/End. The scan walks the page tables and reads only mapped pages. Big allocations come from PoolBigPageTable. The command counts a block only if its body is a live _IRP. In a live _IRP, Type is 6 (IoFreeIrp clears it). Size is the header plus whole stack locations, and it is at least IoSizeOfIrp(StackCount). A lookaside IRP keeps its larger packet size. CurrentLocation is at most StackCount + 1. For each IRP, the command shows its thread (Tail.Overlay.Thread) and the process of its MDL. It also shows the major function, minor function, device, and owning driver of the current stack location. If CurrentLocation is more than StackCount, the IRP shows as complete. -v also shows the pool header, I/O status, PendingReturned, UserEvent, UserBuffer, and OriginalFileObject. It also shows the file object and completion routine of the current location. pool-type is 0 (nonpaged, the default) or 1 (paged). The command does not accept 2 (special) or 4 (session), because these pool types have no region of their own on these builds. restart-address continues a scan from that page. The criteria are the same as in WinDbg: arg (Argument1-4 of a stack location), device (DeviceObject of a stack location), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess (MdlAddress->Process), thread (Tail.Overlay.Thread), and userevent (UserEvent). Use 0 as the restart address to scan the whole pool. The scan stops after 4,096 IRPs, or when you push Ctrl-C. Then it shows the command that continues the scan, with the criteria. The scan checks the big-pool allocations last. If the scan gets to the limit in the big-pool allocations, the command shows a message. A restart cannot get to the remaining big-pool allocations. A driver can build IRPs in its own allocations (IoInitializeIrp). These IRPs have the tag of that driver, and the scan does not find them. Use irps to list the IRPs in thread IrpLists.",
     completion: Expression,
 }
 
@@ -66,8 +66,8 @@ repl_command! {
     cmd_object;
     names: ["!object", "object"],
     usage: "!object <path|object-expression>",
-    summary: "Inspect an executive object header and body, and list a directory.",
-    details: "A path starting with `\\` names an object in the object namespace (`!object \\`, `!object \\Driver\\ACPI`), looked up from the root directory without case; symbolic links along it are not followed. A directory lists its entries with their types.",
+    summary: "Show an executive object header and body, and list the entries of a directory.",
+    details: "A path that starts with `\\` is the name of an object in the object namespace (`!object \\`, `!object \\Driver\\ACPI`). The command looks up the path from the root directory and ignores case. It does not follow symbolic links in the path. For a directory, the command lists the entries and their types.",
     completion: Expression,
 }
 
@@ -75,7 +75,7 @@ repl_command! {
     cmd_callbacks;
     names: ["callbacks"],
     usage: "callbacks [symbol-filter]",
-    summary: "Enumerate process/thread/image notification callbacks.",
+    summary: "List the process, thread, and image notification callbacks.",
     completion: Symbol,
 }
 
@@ -83,7 +83,7 @@ repl_command! {
     cmd_ssdt();
     names: ["ssdt"],
     usage: "ssdt",
-    summary: "Dump the SSDT and shadow SSDT.",
+    summary: "Show the SSDT and the shadow SSDT.",
 }
 
 impl ReplState<'_> {

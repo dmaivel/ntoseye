@@ -8,8 +8,8 @@ use super::shape::{Hex, shapes};
 use crate::types::VirtAddr;
 
 shapes! {
-    /// A device node's identity and state, as subtree and triage listings
-    /// show it.
+    /// The identity and state of a device node, as the subtree and triage
+    /// lists show them.
     DevNodeSummary {
         /// The `_DEVICE_NODE`.
         address: VirtAddr,
@@ -20,18 +20,18 @@ shapes! {
         /// `PNP_DEVNODE_STATE`.
         state: Hex<u32>,
         state_name: String,
-        /// The `CM_PROB_*` problem code; 0 for none.
+        /// The `CM_PROB_*` problem code. 0 for none.
         problem: Hex<u32>,
         /// The problem code's name, when it is a known one.
         problem_name: Option<String>,
         problem_status: Hex<u32>,
-        /// The IRP PnP is waiting on; 0 for none.
+        /// The IRP that PnP waits on. 0 for none.
         pending_irp: VirtAddr,
-        /// `Level`: its depth in the device tree.
+        /// `Level`. The depth of the node in the device tree.
         depth: u32,
     }
 
-    /// A nonzero entry of a device node's `StateHistory` ring.
+    /// A nonzero entry in the `StateHistory` ring of a device node.
     DevNodeHistoryState {
         /// Its slot in the ring.
         index: u32,
@@ -46,11 +46,11 @@ shapes! {
         driver_name: String,
         device_extension: VirtAddr,
         object_name: String,
-        /// Whether this is the device the stack was requested for.
+        /// Whether this is the device given as the argument.
         is_argument: bool,
     }
 
-    /// A decoded `_DEVICE_NODE`, optionally with its flat subtree
+    /// A decoded `_DEVICE_NODE` and, if requested, its flat subtree
     /// (`!devnode`).
     DevNode {
         address: VirtAddr,
@@ -67,56 +67,56 @@ shapes! {
         previous_state: Hex<u32>,
         previous_state_name: String,
         state_history: Vec<DevNodeHistoryState>,
-        /// `StateHistoryEntry`: the ring's next slot.
+        /// `StateHistoryEntry`. The next slot in the ring.
         state_history_entry: u32,
         flags: Hex<u32>,
         user_flags: Hex<u32>,
         completion_status: Hex<u32>,
-        /// The `CM_PROB_*` problem code; 0 for none.
+        /// The `CM_PROB_*` problem code. 0 for none.
         problem: Hex<u32>,
         /// The problem code's name, when it is a known one.
         problem_name: Option<String>,
         problem_status: Hex<u32>,
-        /// The IRP PnP is waiting on; 0 for none.
+        /// The IRP that PnP waits on. 0 for none.
         pending_irp: VirtAddr,
-        /// The nodes below it, depth first; empty unless recursion was
-        /// requested.
+        /// The nodes below this node, in depth-first order. Empty if the
+        /// request was not recursive.
         subtree: Vec<DevNodeSummary>,
-        /// Whether the subtree walk stopped at its bound.
+        /// Whether the walk of the subtree stopped at its limit.
         subtree_truncated: bool,
     }
 
-    /// A device stack, top filter to PDO, and the PDO's device node
-    /// (`!devstack`).
+    /// A device stack from the top filter to the PDO, and the device node of
+    /// the PDO (`!devstack`).
     DeviceStack {
-        /// The address given: a device object (or a pointer to one) or a
-        /// device node.
+        /// The address that you gave. It is a device object, a pointer to a
+        /// device object, or a device node.
         argument: VirtAddr,
-        /// The device object the stack was walked from.
+        /// The device object where the stack walk started.
         requested_device: VirtAddr,
         /// The stack, top filter first.
         entries: Vec<DeviceStackLayer>,
-        /// `None` when the PDO has no device node or it could not be read
-        /// (`pdo_devnode_error` says why).
+        /// `None` if the PDO has no device node, or if ntoseye cannot read it.
+        /// `pdo_devnode_error` gives the reason.
         pdo_devnode: Option<DevNodeSummary>,
         pdo_devnode_error: Option<String>,
-        /// Whether the stack walk stopped at its bound.
+        /// Whether the stack walk stopped at its limit.
         truncated: bool,
     }
 
-    /// PnP triage buckets from one bounded walk of the device tree
+    /// PnP triage groups from one limited walk of the device tree
     /// (`!pnptriage`).
     PnpTriage {
         /// Nodes with a problem code.
         problems: Vec<DevNodeSummary>,
-        /// Nodes neither started nor removed or deleted.
+        /// Nodes that are not started, not removed, and not deleted.
         not_started: Vec<DevNodeSummary>,
         /// Nodes with a pending IRP.
         pending_irps: Vec<DevNodeSummary>,
-        /// Nodes walked.
+        /// The number of nodes walked.
         total: u64,
         started: u64,
-        /// Whether the walk stopped at its 4096-node bound.
+        /// Whether the walk stopped at its limit of 4096 nodes.
         truncated: bool,
     }
 }

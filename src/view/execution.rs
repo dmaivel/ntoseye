@@ -15,41 +15,44 @@ use crate::unwind::{
 };
 
 shapes! {
-    /// A vCPU (backend execution context) and the guest code it runs.
+    /// A vCPU (backend execution context) and the guest code that it runs.
     VcpuStatus {
-        /// The backend thread/vCPU id (`p1.1`).
+        /// The backend thread/vCPU ID (`p1.1`).
         id: String,
-        /// None when the register context was unreadable.
+        /// None if ntoseye cannot read the register context.
         rip: Option<Hex>,
-        /// The address space the vCPU executes in: `kernel`, a process name,
-        /// or `unknown`; empty when it could not be determined.
+        /// The address space in which the vCPU runs: `kernel`, a process name,
+        /// or `unknown`. Empty if ntoseye cannot find the address space.
         context: String,
-        /// The nearest symbol to `rip`, when one resolved.
+        /// The nearest symbol to `rip`, if one resolves.
         symbol: Option<String>,
-        /// For a vCPU halted in the Windows hypervisor, the VTL states it
-        /// saved for the vCPU's virtual processor, VTL0's first.
+        /// For a vCPU halted in the Windows hypervisor, the VTL states that
+        /// the hypervisor saved for the virtual processor of the vCPU. The
+        /// VTL0 state is first.
         saved_vtl: Vec<SavedVtlState>,
-        /// Why the register context was unavailable, when it was.
+        /// The reason that the register context is not available. None if it is
+        /// available.
         error: Option<String>,
     }
 
     /// One VTL of a virtual processor, as the Windows hypervisor last saved
-    /// it in the VTL's Enlightened VMCS. A VMCS holds no general-purpose
-    /// register but `rsp`.
+    /// it in the Enlightened VMCS of the VTL. A VMCS holds no general-purpose
+    /// register other than `rsp`.
     SavedVtlState {
         /// 0 or 1.
         vtl: u8,
-        /// Whether the VP's assist page names this state's eVMCS current:
-        /// the VTL the hypervisor was entered from, or is about to enter.
+        /// Whether the VP assist page names the eVMCS of this state as
+        /// current. The current VTL is the VTL that entered the hypervisor,
+        /// or the VTL that the hypervisor is about to enter.
         current: bool,
         rip: VirtAddr,
-        /// The symbol at `rip` in the VTL's own address space, when one
-        /// resolved.
+        /// The symbol at `rip` in the address space of the VTL, if one
+        /// resolves.
         symbol: Option<String>,
         rsp: VirtAddr,
         rflags: Hex,
         cr0: Hex,
-        /// The VTL's page-table root.
+        /// The page-table root of the VTL.
         cr3: Hex,
         cr4: Hex,
         dr7: Hex,
@@ -61,13 +64,14 @@ shapes! {
         gs: Hex<u16>,
         fs_base: VirtAddr,
         gs_base: VirtAddr,
-        /// The VM-exit reason the VTL last left with: the basic reason in
-        /// bits 15:0, bit 31 set for a failed VM entry.
+        /// The VM-exit reason of the last exit from the VTL. Bits 15:0 hold
+        /// the basic reason. Bit 31 is set for a failed VM entry.
         exit_reason: Hex<u32>,
-        /// The exit reason's name (`HLT`, `VMCALL`, ...), when it is a
-        /// common one.
+        /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
+        /// common reason.
         exit_reason_name: Option<&'static str>,
-        /// The physical address of the eVMCS page the state was read from.
+        /// The physical address of the eVMCS page that ntoseye read the state
+        /// from.
         evmcs: Hex,
     }
 
@@ -77,131 +81,136 @@ shapes! {
         /// None while a symbolic or source breakpoint is deferred.
         address: Option<VirtAddr>,
         enabled: bool,
-        /// Whether the breakpoint resolved to an address; tells a deferred
-        /// breakpoint from a disabled one.
+        /// Whether the breakpoint resolved to an address. Use it to tell a
+        /// deferred breakpoint from a disabled one.
         resolved: bool,
-        /// Whether a symbolic or source specification awaits resolution.
+        /// Whether a symbolic or source specification waits for resolution.
         deferred: bool,
-        /// The symbolic or source specification (`bu`/`bm`), kept across
-        /// re-resolution.
+        /// The symbolic or source specification (`bu`/`bm`). ntoseye keeps it
+        /// when it resolves the breakpoint again.
         specification: Option<String>,
         /// The display name of the current resolution.
         symbol: Option<String>,
-        /// `global`, or the process it is limited to (`name (pid)`).
+        /// `global`, or the process that the breakpoint is limited to
+        /// (`name (pid)`).
         scope: String,
-        /// The thread that may surface a hit (`/t`: `tid N` or `ethread
-        /// 0x...`), if restricted.
+        /// The only thread that can report a hit (`/t`: `tid N` or
+        /// `ethread 0x...`). None if there is no thread restriction.
         thread: Option<String>,
-        /// The processor that may surface a hit (`/c`), if restricted.
+        /// The only processor that can report a hit (`/c`). None if there is no
+        /// processor restriction.
         processor: Option<u16>,
-        /// The condition expression a hit must satisfy.
+        /// The condition expression that a hit must satisfy.
         condition: Option<String>,
-        /// The requested hit number; 0 and 1 both break on the first hit.
+        /// The requested hit number. Both 0 and 1 break on the first hit.
         pass_count: u64,
         hit_count: u64,
-        /// Hits left before the breakpoint breaks.
+        /// The number of hits that remain before the breakpoint breaks.
         remaining_pass_count: u64,
-        /// Whether the breakpoint is removed after its first break.
+        /// Whether ntoseye removes the breakpoint after its first break.
         one_shot: bool,
-        /// Commands run when it breaks.
+        /// The commands that run when the breakpoint breaks.
         action: Option<String>,
         temporary: bool,
-        /// `write` or `read_write` for a data watchpoint, None for a code
+        /// `write` or `read_write` for a data watchpoint. None for a code
         /// breakpoint.
         watch_access: Option<&'static str>,
-        /// The watched width in bytes, None for a code breakpoint.
+        /// The watched width in bytes. None for a code breakpoint.
         watch_length: Option<u8>,
     }
 
-    /// Whether the target runs and where it stopped.
+    /// Whether the target runs, and where it stopped.
     RunStatus {
         running: bool,
-        /// The backend thread/vCPU selected.
+        /// The selected backend thread/vCPU.
         current_thread: String,
-        /// The instruction pointer when halted, None while running.
+        /// The instruction pointer when halted. None while the target runs.
         rip: Option<Hex>,
-        /// The nearest symbol to `rip` when halted; code outside NT is named
-        /// for what it is (`hvix64+0x3a6bde`).
+        /// The nearest symbol to `rip` when halted. For code outside NT, the
+        /// name identifies that code (`hvix64+0x3a6bde`).
         symbol: Option<String>,
-        /// For a vCPU halted in the Windows hypervisor, the VTL states it
-        /// saved for the vCPU's virtual processor, VTL0's first.
+        /// For a vCPU halted in the Windows hypervisor, the VTL states that
+        /// the hypervisor saved for the virtual processor of the vCPU. The
+        /// VTL0 state is first.
         saved_vtl: Vec<SavedVtlState>,
-        /// The process chosen with `.process` whose memory `dt`, `dq`, ...
-        /// read; it survives resumes.
+        /// The process that you selected with `.process`. `dt`, `dq`, ...
+        /// read its memory. The selection stays after the target resumes.
         attached_process: Option<ProcessIdentity>,
         /// The process whose page tables the stopped vCPU has loaded.
         stopped_process: Option<ProcessIdentity>,
-        /// The Windows thread the stopped vCPU runs; its owner can differ
-        /// from `stopped_process` (`KeStackAttachProcess`).
+        /// The Windows thread that the stopped vCPU runs. Its owner can be
+        /// different from `stopped_process` (`KeStackAttachProcess`).
         stopped_thread: Option<ThreadSummary>,
-        /// False after a reboot until the kernel's loaded-module list exists:
-        /// process and module enumeration is not yet meaningful.
+        /// False after a reboot until the loaded-module list of the kernel
+        /// exists. Until then, process and module enumeration is not valid.
         coherent: bool,
-        /// The rediscovered `nt` base; it changes across a reboot.
+        /// The `nt` base that ntoseye finds again after a reboot. The value
+        /// changes across a reboot.
         kernel_base: Hex,
     }
 
-    /// One frame of a walked stack.
+    /// One frame of a stack walk.
     StackFrame {
-        /// The frame's position in the walked stack, innermost 0.
+        /// The position of the frame in the stack walk. The innermost frame is 0.
         index: usize,
         /// The instruction pointer.
         ip: Hex,
         /// The stack pointer.
         sp: Hex,
-        /// The symbol at `ip`; empty when none resolved.
+        /// The symbol at `ip`. Empty if no symbol resolves.
         symbol: String,
-        /// A call the compiler inlined into the physical frame after it,
-        /// with no stack frame of its own: `symbol` is the function
-        /// inlined, and `ip` and `sp` are the physical frame's.
+        /// True for a call that the compiler inlined into the physical frame
+        /// after it. This call has no stack frame of its own. `symbol` is the
+        /// inlined function, and `ip` and `sp` are those of the physical frame.
         inline: bool,
-        /// How the frame was recovered: `current`, `seed`, `unwind`, or `scan`.
+        /// How ntoseye recovered the frame: `current`, `seed`, `unwind`, or `scan`.
         source: &'static str,
-        /// The frame's source line, when line information resolves it: an
-        /// inline frame's in the function inlined, a caller's where it made
-        /// the call.
+        /// The source line of the frame, if line information resolves it. For
+        /// an inline frame, this is the line in the inlined function. For a
+        /// caller, it is the line of the call.
         source_location: Option<super::symbols::SourceLocation>,
     }
 
     /// One decoded instruction.
     DisassembledInstruction {
         ip: Hex,
-        /// The instruction's bytes, in hex.
+        /// The bytes of the instruction, in hex.
         hex: String,
         /// The instruction text.
         asm: String,
-        /// The resolved branch or rip-relative target, when there is one.
+        /// The resolved branch or rip-relative target, if there is one.
         comment: Option<String>,
     }
 
-    /// The function-table entry covering an address and each chained parent's
-    /// (`.fnent`).
+    /// The function-table entry that covers an address, and the entry of each
+    /// chained parent (`.fnent`).
     FunctionEntry {
-        /// The module containing the function.
+        /// The module that contains the function.
         module: String,
         image_base: Hex,
-        /// The entry covering the address, then each parent its chained unwind
-        /// info names, in order.
+        /// The entry that covers the address, then each parent that its chained
+        /// unwind info names, in order.
         entries: Vec<RuntimeFunction>,
-        /// Why the chain ends before its last parent, when it does.
+        /// The reason that the chain ends before its last parent. None if the
+        /// chain is complete.
         incomplete: Option<String>,
     }
 
-    /// One function-table entry and its unwind data. Addresses are absolute;
-    /// `*_rva` fields are the raw image-relative values.
+    /// One function-table entry and its unwind data. Addresses are absolute.
+    /// The `*_rva` fields are the raw image-relative values.
     RuntimeFunction {
         begin: Hex,
         end: Hex,
         begin_rva: Hex<u32>,
         end_rva: Hex<u32>,
-        /// The unwind info's address; None for ARM64 packed unwind data.
+        /// The address of the unwind info. None for ARM64 packed unwind data.
         unwind_info: Option<Hex>,
-        /// The entry's raw unwind word: the unwind info's RVA, or ARM64's
-        /// packed unwind data.
+        /// The raw unwind word of the entry: the RVA of the unwind info, or
+        /// the packed unwind data on ARM64.
         unwind_data: Hex<u32>,
         /// The symbol at `begin`.
         symbol: String,
-        /// The decoded unwind data, None when it is unreadable.
+        /// The decoded unwind data. None if ntoseye cannot read it.
         unwind: Option<Unwind>,
     }
 
@@ -212,16 +221,17 @@ shapes! {
         version: u8,
         /// `UNW_FLAG_*` bits.
         flags: u8,
-        /// Bytes of the prolog.
+        /// The size of the prolog, in bytes.
         prolog_size: u8,
-        /// Unwind-code slots.
+        /// The number of unwind-code slots.
         code_count: u8,
-        /// The frame pointer register, when the function establishes one.
+        /// The frame pointer register, if the function sets one up.
         frame_register: Option<&'static str>,
         /// The frame pointer's offset from the stack pointer, in bytes.
         frame_offset: u32,
-        /// Bytes of the structure: header, codes, and the handler RVA or the
-        /// chained entry, without the handler's own data.
+        /// The size of the structure in bytes: the header, the codes, and the
+        /// handler RVA or the chained entry. It does not include the data of
+        /// the handler.
         size: usize,
         codes: Vec<Amd64UnwindCode>,
         /// The exception or termination handler, for `UNW_FLAG_EHANDLER` or
@@ -231,43 +241,47 @@ shapes! {
 
     /// One AMD64 unwind code.
     Amd64UnwindCode {
-        /// Index of the code's first slot.
+        /// The index of the first slot of the code.
         slot: usize,
-        /// Offset in the prolog of the end of the instruction it undoes.
+        /// The offset in the prolog of the end of the instruction that the code
+        /// undoes.
         code_offset: u8,
         /// The `UWOP_*` operation.
         op: u8,
-        /// The operation's info nibble.
+        /// The info nibble of the operation.
         op_info: u8,
-        /// The operation and its operands, e.g. `UWOP_SAVE_NONVOL rbx at +0x30`.
+        /// The operation and its operands, for example
+        /// `UWOP_SAVE_NONVOL rbx at +0x30`.
         description: String,
     }
 
-    /// An unwind info's exception or termination handler.
+    /// The exception or termination handler of an unwind info.
     UnwindHandler {
         address: Hex,
         symbol: String,
-        /// Where the handler's language-specific data starts.
+        /// The start address of the language-specific data of the handler.
         data: Hex,
     }
 
-    /// ARM64 unwind data packed into the `.pdata` entry (flag 1 or 2): a
-    /// canonical prolog, listed as the codes it stands for.
+    /// ARM64 unwind data that is packed into the `.pdata` entry (flag 1 or 2).
+    /// It describes a canonical prolog, and ntoseye lists it as the codes that
+    /// it represents.
     Arm64PackedUnwind {
         /// `packed`.
         form: &'static str,
         /// 1, or 2 for a function fragment without a prolog.
         flag: u32,
-        /// The `RegF` field: saved non-volatile floating-point registers.
+        /// The `RegF` field: the saved non-volatile floating-point registers.
         reg_f: u32,
-        /// The `RegI` field: saved non-volatile integer registers.
+        /// The `RegI` field: the saved non-volatile integer registers.
         reg_i: u32,
-        /// Whether the prolog homes the argument registers.
+        /// Whether the prolog stores the argument registers in their home
+        /// locations.
         homes_arguments: bool,
-        /// The `CR` field: whether and how the frame chain and link register
-        /// are saved.
+        /// The `CR` field: whether and how the prolog saves the frame chain
+        /// and the link register.
         cr: u32,
-        /// The frame's size, in bytes.
+        /// The size of the frame, in bytes.
         frame_size: u32,
         codes: Vec<Arm64UnwindCode>,
     }
@@ -279,13 +293,13 @@ shapes! {
         version: u32,
         /// The `X` bit: exception data (a handler) follows.
         exception_data: bool,
-        /// The `E` bit: a single epilog described in the header.
+        /// The `E` bit: the header describes a single epilog.
         epilog_in_header: bool,
         epilog_count: u32,
-        /// 32-bit words of unwind codes.
+        /// The number of 32-bit words of unwind codes.
         code_words: u32,
         epilog_scopes: Vec<Arm64EpilogScope>,
-        /// Bytes of the record, the handler's RVA included.
+        /// The size of the record in bytes, including the RVA of the handler.
         size: usize,
         codes: Vec<Arm64UnwindCode>,
         handler: Option<UnwindHandler>,
@@ -293,31 +307,32 @@ shapes! {
 
     /// One ARM64 unwind code.
     Arm64UnwindCode {
-        /// Its first byte's index in the code bytes.
+        /// The index of its first byte in the code bytes.
         index: usize,
         bytes: Vec<Hex<u8>>,
-        /// Its name and the prolog instruction it stands for.
+        /// Its name and the prolog instruction that it represents.
         description: String,
     }
 
     /// One ARM64 epilog scope.
     Arm64EpilogScope {
-        /// The epilog's start, in bytes from the function's.
+        /// The start of the epilog, in bytes from the start of the function.
         start_offset: Hex<u32>,
-        /// The index of the epilog's first unwind code.
+        /// The index of the first unwind code of the epilog.
         first_code: u32,
     }
 
-    /// A `wt` call trace: why it stopped, the instructions it stepped, and
-    /// the call tree.
+    /// A `wt` call trace: why it stopped, the instructions that it stepped,
+    /// and the call tree.
     CallTrace {
-        /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted` (a
-        /// step an interrupt diverted, with the traced thread not known), or
-        /// `failed`; anything but `returned` leaves a partial tree.
+        /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
+        /// `failed`. `diverted` means that an interrupt diverted a step, and
+        /// the traced thread is not known. Any value other than `returned`
+        /// means that the tree is partial.
         end: &'static str,
-        /// What failed, for `failed`.
+        /// A description of the failure, for `failed`.
         error: Option<String>,
-        /// Instructions single-stepped.
+        /// The number of single-stepped instructions.
         instructions: usize,
         root: CallTraceFrame,
     }
@@ -326,9 +341,9 @@ shapes! {
     CallTraceFrame {
         /// The called function.
         name: String,
-        /// Instructions stepped in the function itself.
+        /// The number of instructions stepped in the function itself.
         instructions: usize,
-        /// The calls it made.
+        /// The calls that the function made.
         children: Vec<CallTraceFrame>,
     }
 
@@ -336,26 +351,26 @@ shapes! {
     ExceptionPolicy {
         /// The exception code.
         code: Hex<u32>,
-        /// The code's WinDbg alias (`av`, `bp`, ...), when it has one.
+        /// The WinDbg alias of the code (`av`, `bp`, ...), if it has one.
         alias: Option<&'static str>,
         /// `break`, `second_chance`, `notify`, or `ignore`.
         mode: &'static str,
         /// An explicit final action: `break`, or continue as `handled` or
-        /// `not_handled`; None for the mode's default.
+        /// `not_handled`. None for the default action of the mode.
         disposition: Option<&'static str>,
-        /// Commands run when the exception arrives.
+        /// The commands that run when the exception occurs.
         command: Option<String>,
     }
 
     /// One module-load filter (`sx* ld[:<module>]`).
     ModuleLoadPolicy {
-        /// The image-name glob it matches, with or without extension; None
-        /// for every module (bare `ld`).
+        /// The image-name glob that the filter matches, with or without
+        /// extension. None for all modules (bare `ld`).
         module: Option<String>,
-        /// `break` stops at the load, `notify` reports it; `second_chance`
-        /// and `ignore` let it continue silently.
+        /// `break` stops at the load, and `notify` reports it.
+        /// `second_chance` and `ignore` let the load continue with no output.
         mode: &'static str,
-        /// Commands run at a `break` stop.
+        /// The commands that run at a `break` stop.
         command: Option<String>,
     }
 
@@ -368,8 +383,8 @@ shapes! {
     /// One register of the current context (`r`).
     RegisterValue {
         name: String,
-        /// An int, or for a vector register a `0x`-prefixed 32-digit hex
-        /// string.
+        /// An int, or a `0x`-prefixed 32-digit hex string for a vector
+        /// register.
         value: RegisterContent,
     }
 }

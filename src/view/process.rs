@@ -10,12 +10,12 @@ use crate::target::zombies::ZombiesDetail;
 use crate::target::{ThreadInfo, kthread_state_name, wait_reason_name};
 
 shapes! {
-    /// A Windows thread, as `threads`, `!thread`, and every scheduler
-    /// listing report it. Fields the walk could not read are `None`.
+    /// A Windows thread, as `threads`, `!thread`, and all scheduler listings
+    /// show it. A field that the walk could not read is `None`.
     ThreadSummary {
         tid: Option<u64>,
         pid: Option<u64>,
-        /// The owning process's image name.
+        /// The image name of the owning process.
         process_name: Option<String>,
         ethread: VirtAddr,
         kthread: VirtAddr,
@@ -23,20 +23,20 @@ shapes! {
         eprocess: Option<VirtAddr>,
         /// `_KTHREAD.State`.
         state: Option<u8>,
-        /// The state's name (`Running`, `Waiting`, ...).
+        /// The name of the state (`Running`, `Waiting`, ...).
         state_name: Option<&'static str>,
         /// `_KTHREAD.WaitReason`.
         wait_reason: Option<u8>,
-        /// The wait reason's name (`Executive`, `UserRequest`, ...).
+        /// The name of the wait reason (`Executive`, `UserRequest`, ...).
         wait_reason_name: Option<&'static str>,
-        /// Current scheduling priority.
+        /// The current scheduling priority.
         priority: Option<u8>,
-        /// The vCPU running the thread, when the listing resolves it; `None`
-        /// when none runs it, and while the target runs.
+        /// The vCPU that runs the thread, if the listing resolves it. `None` if
+        /// no vCPU runs it, and while the target runs.
         active: Option<String>,
     }
 
-    /// A process's identity (`ps`, `!process 0 0`).
+    /// The identity of a process (`ps`, `!process 0 0`).
     ProcessIdentity {
         pid: u64,
         /// The image name.
@@ -44,11 +44,12 @@ shapes! {
         /// The directory table base (page-table root).
         dtb: Hex,
         eprocess: VirtAddr,
-        /// Whether it is a 32-bit process running under WOW64.
+        /// True if it is a 32-bit process that runs under WOW64.
         wow64: bool,
     }
 
-    /// A job's `_EJOB` accounting; a field this build lacks is `None`.
+    /// The `_EJOB` accounting of a job. A field that this build does not have is
+    /// `None`.
     JobAccounting {
         /// In 100 ns units.
         total_user_time: Option<u64>,
@@ -61,10 +62,10 @@ shapes! {
         /// In 100 ns units.
         this_period_total_kernel_time: Option<u64>,
         total_page_fault_count: Option<u64>,
-        /// Processes ever assigned.
+        /// The number of processes that were ever assigned to the job.
         total_processes: Option<u64>,
         active_processes: Option<u64>,
-        /// Processes terminated by a job limit violation.
+        /// The number of processes that a job limit violation terminated.
         total_terminated_processes: Option<u64>,
         /// In pages.
         peak_process_memory_used: Option<u64>,
@@ -74,11 +75,12 @@ shapes! {
         current_job_memory_used: Option<u64>,
     }
 
-    /// A job's `_EJOB` limit settings; a field this build lacks is `None`.
+    /// The `_EJOB` limit settings of a job. A field that this build does not
+    /// have is `None`.
     JobLimits {
-        /// `JOB_OBJECT_LIMIT_*` bits set.
+        /// The `JOB_OBJECT_LIMIT_*` bits that are set.
         limit_flags: Option<u64>,
-        /// Limit bits in effect, nesting included.
+        /// The limit bits in effect, with the bits from nesting.
         effective_limit_flags: Option<u64>,
         active_process_limit: Option<u64>,
         /// In 100 ns units.
@@ -95,12 +97,12 @@ shapes! {
         job_memory_limit: Option<u64>,
         priority_class: Option<u64>,
         scheduling_class: Option<u64>,
-        /// `JOB_OBJECT_UILIMIT_*` bits set.
+        /// The `JOB_OBJECT_UILIMIT_*` bits that are set.
         ui_restrictions_class: Option<u64>,
     }
 
-    /// A job object (`!job`): its accounting, limits, flags, nesting, and
-    /// the processes assigned to it. A field this build lacks is `None`.
+    /// A job object (`!job`), with its accounting, limits, flags, nesting, and
+    /// assigned processes. A field that this build does not have is `None`.
     Job {
         /// The `_EJOB`.
         address: VirtAddr,
@@ -108,12 +110,12 @@ shapes! {
         session_id: Option<u64>,
         accounting: JobAccounting,
         limits: JobLimits,
-        /// The `JOB_OBJECT_LIMIT_*` names of the limit flags set; an
-        /// unnamed bit is its hex value.
+        /// The `JOB_OBJECT_LIMIT_*` names of the limit flags that are set. A
+        /// bit that has no name shows as its hex value.
         limit_flag_names: Vec<String>,
         /// `_EJOB.JobFlags`.
         job_flags: Option<Hex>,
-        /// The `JobFlags` bits set, by their PDB names.
+        /// The `JobFlags` bits that are set, by their PDB names.
         job_flag_names: Vec<String>,
         nesting_depth: Option<u64>,
         /// `None` for a top-level job.
@@ -122,46 +124,46 @@ shapes! {
         root_job: Option<VirtAddr>,
         child_jobs: Vec<VirtAddr>,
         child_job_list_termination: ListEnd,
-        /// Whether the job is a silo.
+        /// True if the job is a silo.
         silo: bool,
         /// `None` for a job that is not a server silo.
         server_silo_globals: Option<VirtAddr>,
         processes: Vec<ProcessIdentity>,
-        /// `_EPROCESS` addresses on the job's list that could not be decoded.
+        /// The `_EPROCESS` addresses on the job list that ntoseye could not decode.
         unreadable_processes: Vec<VirtAddr>,
         process_list_termination: ListEnd,
     }
 
-    /// One GFlags flag set.
+    /// One GFlags flag that is set.
     GlobalFlag {
-        /// The flag's bit mask.
+        /// The bit mask of the flag.
         bit: Hex<u32>,
         /// The GFlags abbreviation (`hpa`, `ust`, ...).
         abbreviation: &'static str,
         description: &'static str,
     }
 
-    /// A process's `_PEB.NtGlobalFlag`.
+    /// The `_PEB.NtGlobalFlag` of a process.
     ProcessGlobalFlags {
         value: Hex<u32>,
         flags: Vec<GlobalFlag>,
     }
 
-    /// `nt!NtGlobalFlag` and the current process's `_PEB.NtGlobalFlag`
+    /// `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current process
     /// (`!gflag`).
     GlobalFlags {
-        /// `nt!NtGlobalFlag`'s address.
+        /// The address of `nt!NtGlobalFlag`.
         kernel_address: VirtAddr,
         /// `nt!NtGlobalFlag`.
         kernel: Hex<u32>,
         kernel_flags: Vec<GlobalFlag>,
-        /// The current process; `None` with no process selected.
+        /// The current process. `None` if no process is selected.
         process: Option<ProcessIdentity>,
-        /// The current process's flags, read from its PEB.
+        /// The flags of the current process, read from its PEB.
         process_flags: Diag<ProcessGlobalFlags>,
     }
 
-    /// An exited process whose object is still referenced.
+    /// An exited process whose object still has references.
     ZombieProcess {
         eprocess: VirtAddr,
         pid: u64,
@@ -177,14 +179,14 @@ shapes! {
         pointer_count: u64,
     }
 
-    /// A terminated thread whose object is still referenced.
+    /// A terminated thread whose object still has references.
     ZombieThread {
         ethread: VirtAddr,
         pid: u64,
         tid: u64,
         /// The owning `_EPROCESS`.
         process: VirtAddr,
-        /// The owning process's image name; `None` when unreadable.
+        /// The image name of the owning process. `None` if ntoseye cannot read it.
         image: Option<String>,
         /// The exit NTSTATUS.
         exit_status: Hex<u32>,
@@ -194,25 +196,25 @@ shapes! {
         pointer_count: u64,
     }
 
-    /// Exited processes and terminated threads still referenced, found by
-    /// scanning nonpaged pool (`!zombies`).
+    /// The exited processes and terminated threads that still have references
+    /// (`!zombies`). ntoseye finds them with a scan of nonpaged pool.
     Zombies {
-        /// `None` when the flags did not ask for processes.
+        /// `None` if the flags did not ask for processes.
         processes: Option<Vec<ZombieProcess>>,
-        /// `None` when the flags did not ask for threads.
+        /// `None` if the flags did not ask for threads.
         threads: Option<Vec<ZombieThread>>,
-        /// Live processes seen by the scan.
+        /// The number of live processes that the scan found.
         live_processes: u64,
-        /// Live threads seen by the scan.
+        /// The number of live threads that the scan found.
         live_threads: u64,
-        /// The scanned pool region's start.
+        /// The start of the scanned pool region.
         region_start: VirtAddr,
-        /// The scanned pool region's end.
+        /// The end of the scanned pool region.
         region_end: VirtAddr,
         scanned_pages: u64,
-        /// Whether the scan was interrupted before it finished.
+        /// True if the scan was interrupted before it finished.
         interrupted: bool,
-        /// Whether a result list hit its cap.
+        /// True if a result list reached its limit.
         truncated: bool,
     }
 }

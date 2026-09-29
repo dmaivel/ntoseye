@@ -16,8 +16,8 @@ repl_command! {
     cmd_heap;
     names: ["!heap", "heap"],
     usage: "!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]",
-    summary: "Summarize, walk, or search the attached process's user-mode heaps.",
-    details: "Without arguments (or with -s) lists every heap in the PEB with its kind and sizes. -h decodes one heap's segments; -a also lists every entry, chunk, and block. -x finds the block containing an address; -p -a is the same search. A heap is named by its index in the PEB list or its address. NT heaps (including legacy-LFH blocks) and segment heaps (VS, LFH, page, and large allocations) are decoded; ntdll symbols supply the encoding keys. NT heaps are decoded through _HEAP.Encoding, with legacy-LFH blocks resolved through their user block regions; segment heaps use the keys in ntdll!RtlpHpHeapGlobals. In a WOW64 process the heaps are the 32-bit ones, decoded with ntdll32's layouts and keys.",
+    summary: "Summarize, walk, or search the user-mode heaps of the attached process.",
+    details: "With no arguments or with -s, the command lists each heap in the PEB with its kind and sizes. -h decodes the segments of one heap. -a does the same and also lists each entry, chunk, and block. -x finds the block that contains an address. -p -a does the same search as -x. To identify a heap, use its index in the PEB list or its address. The command decodes NT heaps, including legacy-LFH blocks. It also decodes segment heaps, including VS, LFH, page, and large allocations. It gets the encoding keys from ntdll symbols. For NT heaps, it uses _HEAP.Encoding and finds legacy-LFH blocks through their user block regions. For segment heaps, it uses the keys in ntdll!RtlpHpHeapGlobals. In a WOW64 process, the command shows the 32-bit heaps. It decodes them with the layouts and keys of ntdll32.",
     completion: [None, Expression],
 }
 

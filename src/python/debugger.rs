@@ -34,21 +34,21 @@ fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
 
 #[pymethods]
 impl Debugger {
-    /// Kernel virtual memory: the kernel's own page tables. User addresses
-    /// are not mapped here; read them through `process.memory`.
+    /// Kernel virtual memory, through the page tables of the kernel. User
+    /// addresses are not mapped here. Read them through `process.memory`.
     #[getter]
     fn memory(slf: &Bound<'_, Self>) -> Memory {
         Memory::new(namespace_owner(slf), Space::Kernel)
     }
 
-    /// Guest-physical memory, untranslated.
+    /// Guest-physical memory, without address translation.
     #[getter]
     fn physical(slf: &Bound<'_, Self>) -> Memory {
         Memory::new(namespace_owner(slf), Space::Physical)
     }
 
     /// Kernel-scope symbols: `symbols["nt!KeBugCheckEx"]`, `nearest(addr)`,
-    /// `search(query)`, the symbol and source paths.
+    /// `search(query)`, and the symbol and source paths.
     #[getter]
     fn symbols(slf: &Bound<'_, Self>) -> Symbols {
         Symbols::new(namespace_owner(slf), Space::Kernel)
@@ -66,35 +66,35 @@ impl Debugger {
         Modules::kernel(namespace_owner(slf))
     }
 
-    /// The VBS secure kernel (VTL1): read-only `memory`, `symbols`, `types`,
-    /// `modules`, and `trustlets`. Discovered on first use from host memory;
-    /// raises `NtoseyeError` when VBS is not running or the backend cannot
-    /// read host memory. Experimental.
+    /// The VBS secure kernel (VTL1), with read-only `memory`, `symbols`,
+    /// `types`, `modules`, and `trustlets`. ntoseye finds it in host memory on
+    /// first use. If VBS is not running or the backend cannot read host memory,
+    /// this raises `NtoseyeError`. This feature is experimental.
     #[getter]
     fn secure_kernel(slf: &Bound<'_, Self>) -> PyResult<SecureKernel> {
         let py = slf.py();
         SecureKernel::discover(py, namespace_owner(slf).derive(py))
     }
 
-    /// Running processes keyed by PID: `processes[4]`, `.find(name)`.
+    /// Running processes, keyed by PID: `processes[4]`, `.find(name)`.
     #[getter]
     fn processes(slf: &Bound<'_, Self>) -> Processes {
         Processes::new(namespace_owner(slf))
     }
 
-    /// Every Windows thread keyed by TID: `threads[tid]`, `.at(ethread)`.
+    /// All Windows threads, keyed by TID: `threads[tid]`, `.at(ethread)`.
     #[getter]
     fn threads(slf: &Bound<'_, Self>) -> Threads {
         Threads::all(namespace_owner(slf))
     }
 
-    /// The target's processors (vCPUs): `cpus[0].registers.rip`.
+    /// The processors (vCPUs) of the target: `cpus[0].registers.rip`.
     #[getter]
     fn cpus(slf: &Bound<'_, Self>) -> Cpus {
         Cpus::new(namespace_owner(slf))
     }
 
-    /// Driver objects from the object manager's `Driver` directory:
+    /// Driver objects from the `Driver` directory of the object manager:
     /// `drivers["Disk"]`, `.at(addr)`.
     #[getter]
     fn drivers(slf: &Bound<'_, Self>) -> Drivers {
@@ -114,35 +114,38 @@ impl Debugger {
         Exceptions::new(namespace_owner(slf))
     }
 
-    /// System-wide reports and decode-by-address helpers (`!vm`, `!pool`, ...).
+    /// System-wide reports and helpers that decode an object at an address
+    /// (`!vm`, `!pool`, ...).
     #[getter]
     fn inspect(slf: &Bound<'_, Self>) -> Inspect {
         Inspect::new(namespace_owner(slf))
     }
 
-    /// The current stop while the target is halted, `None` while it runs.
+    /// The current stop when the target is halted. `None` when the target runs.
     #[getter]
     fn stop(slf: &Bound<'_, Self>) -> PyResult<Option<Py<Stop>>> {
         runcontrol::current_stop(slf)
     }
 
-    /// False after a reboot until the kernel's module list exists: kernel
-    /// symbols and breakpoints work, process/module enumeration does not yet.
+    /// False after a reboot until the module list of the kernel exists. In that
+    /// period, kernel symbols and breakpoints work. Process and module
+    /// enumeration do not work yet.
     #[getter]
     fn coherent(&self) -> PyResult<bool> {
         self.with_session(|session| Ok(session.kernel_coherent()))
     }
 
-    /// How many times the guest has been rebuilt (reboots). Handles from an
-    /// older generation raise `StaleHandleError`; cache this beside raw
-    /// addresses to know when they went stale.
+    /// The number of times ntoseye has rebuilt its view of the guest, for
+    /// example after a reboot. Handles from an older generation
+    /// raise `StaleHandleError`. Keep this value with raw addresses to know
+    /// when they become stale.
     #[getter(generation)]
     fn generation_attr(&self) -> u64 {
         self.generation()
     }
 
-    /// The backend's capability matrix: which operations the transport
-    /// supports.
+    /// The capability matrix of the backend. It shows the operations that the
+    /// transport supports.
     #[getter]
     fn capabilities<'py>(
         &self,
@@ -157,31 +160,32 @@ impl Debugger {
         )
     }
 
-    /// Evaluate a debugger (MASM) expression in kernel scope to an integer;
-    /// registers are the stopped vCPU's.
+    /// Evaluate a debugger (MASM) expression in kernel scope to an integer. The
+    /// registers are those of the stopped vCPU.
     fn eval(slf: &Bound<'_, Self>, expr: &str) -> PyResult<u64> {
         symbols::eval(slf.py(), &namespace_owner(slf), &Space::Kernel, expr)
     }
 
-    /// Run a REPL command line and return its text output (styling stripped).
-    /// Commands that resume the target wait for the next stop, up to
-    /// `timeout` seconds; the stop is then `dbg.stop`. Command loops and
-    /// `.sleep` end when `timeout` elapses too.
+    /// Run a REPL command line and return its text output without styling. If a
+    /// command resumes the target, the function waits for the next stop, up to
+    /// `timeout` seconds. That stop is then `dbg.stop`. Command loops and
+    /// `.sleep` also end when `timeout` elapses.
     #[pyo3(signature = (line, timeout=None))]
     fn command(slf: &Bound<'_, Self>, line: &str, timeout: Option<f64>) -> PyResult<String> {
         runner::command(slf, line, timeout)
     }
 
-    /// Resume without waiting, acknowledging the current exception as
-    /// `handled` or `not_handled` (KD only).
+    /// Resume the target without a wait, and acknowledge the current exception
+    /// as `handled` or `not_handled` (KD only).
     #[pyo3(signature = (disposition=Disposition(ContinueDisposition::Handled)))]
     fn cont(slf: &Bound<'_, Self>, disposition: Disposition) -> PyResult<()> {
         runcontrol::cont(slf, disposition.0)
     }
 
-    /// Resume and wait for the next stop, auto-resuming past wrong-process and
-    /// false-conditional hits. Returns the `Stop`, or `None` if the target is
-    /// still running after `timeout` seconds.
+    /// Resume and wait for the next stop. After a hit in the wrong process or a
+    /// hit with a false condition, the function resumes again automatically.
+    /// Returns the `Stop`, or `None` if the target still runs after `timeout`
+    /// seconds.
     #[pyo3(signature = (timeout=None, *, disposition=Disposition(ContinueDisposition::Handled)))]
     fn run(
         slf: &Bound<'_, Self>,
@@ -191,17 +195,19 @@ impl Debugger {
         runcontrol::run(slf, timeout, disposition.0)
     }
 
-    /// Wait for the next stop without resuming. Returns the current stop at
-    /// once when already halted, `None` if still running after `timeout`.
+    /// Wait for the next stop without a resume. If the target is already
+    /// halted, return the current stop immediately. Return `None` if the target
+    /// still runs after `timeout`.
     #[pyo3(signature = (timeout=None))]
     fn wait(slf: &Bound<'_, Self>, timeout: Option<f64>) -> PyResult<Option<Py<Stop>>> {
         runcontrol::wait(slf, timeout)
     }
 
-    /// Run until `target` (an address, or a symbolic `module!name[+off]`) is
-    /// reached (`g <addr>`), or with `step="over"`/`"into"` single-step there
-    /// (`pa`/`ta`). Other stops en route are returned as they are; with
-    /// `timeout`, an unreached target is interrupted where it is.
+    /// Run until execution reaches `target` (`g <addr>`). `target` is an
+    /// address or a symbolic `module!name[+off]`. With `step="over"`/`"into"`,
+    /// single-step to it (`pa`/`ta`). The function returns other stops on the
+    /// way as they are. With `timeout`, if execution does not reach `target`,
+    /// the function interrupts the target where it is.
     #[pyo3(signature = (target, timeout=None, *, step=None))]
     fn run_to(
         slf: &Bound<'_, Self>,
@@ -212,10 +218,10 @@ impl Debugger {
         runcontrol::run_to(slf, target, timeout, step.map(|Step(mode)| mode))
     }
 
-    /// Single-step one instruction, or with `until` ("call", "ret", "branch")
-    /// step into until the next such instruction (`tc`/`tt`/`th`). With
-    /// `timeout` (seconds), an `until` walk still going is interrupted where
-    /// it is.
+    /// Single-step one instruction. With `until` ("call", "ret", "branch"),
+    /// step into instructions until the next instruction of that kind
+    /// (`tc`/`tt`/`th`). With `timeout` (seconds), if an `until` walk does not
+    /// end, the function interrupts it where it is.
     #[pyo3(signature = (until=None, timeout=None))]
     fn step(
         slf: &Bound<'_, Self>,
@@ -225,10 +231,11 @@ impl Debugger {
         runcontrol::step(slf, until.map(|Until(flow)| flow), timeout)
     }
 
-    /// Step over the current instruction, or with `until` step over until the
-    /// next call/ret/branch (`pc`/`pt`/`ph`). A call runs until the stepping
-    /// thread returns from it; with `timeout` (seconds), a run or walk still
-    /// going is interrupted where it is.
+    /// Step over the current instruction. With `until`, step over instructions
+    /// until the next call, ret, or branch (`pc`/`pt`/`ph`). For a call, the
+    /// target runs until the stepping thread returns from it. With `timeout`
+    /// (seconds), if a run or walk does not end, the function interrupts it
+    /// where it is.
     #[pyo3(signature = (until=None, timeout=None))]
     fn step_over(
         slf: &Bound<'_, Self>,
@@ -238,17 +245,18 @@ impl Debugger {
         runcontrol::step_over(slf, until.map(|Until(flow)| flow), timeout)
     }
 
-    /// Run until the stepping thread returns from the current function
-    /// (`gu`). With `timeout` (seconds), a thread that has not returned is
-    /// interrupted where it is.
+    /// Run until the stepping thread returns from the current function (`gu`).
+    /// With `timeout` (seconds), if the thread does not return, the function
+    /// interrupts it where it is.
     #[pyo3(signature = (timeout=None))]
     fn step_out(slf: &Bound<'_, Self>, timeout: Option<f64>) -> PyResult<Py<Stop>> {
         runcontrol::step_out(slf, timeout)
     }
 
-    /// Trace calls until the current function returns (`wt`), single-stepping
-    /// at most `limit` instructions: `{end, error, instructions, root}`, where
-    /// `root` is the call tree and `end` says why tracing stopped.
+    /// Trace calls until the current function returns (`wt`). The function
+    /// single-steps a maximum of `limit` instructions. It returns
+    /// `{end, error, instructions, root}`. `root` is the call tree, and `end`
+    /// gives the reason that tracing stopped.
     #[pyo3(signature = (limit=10_000))]
     fn trace_calls<'py>(
         slf: &Bound<'py, Self>,
@@ -257,7 +265,7 @@ impl Debugger {
         runcontrol::trace_calls(slf, limit)
     }
 
-    /// Break into the running target and return the resulting stop.
+    /// Break into the running target and return the stop that results.
     fn interrupt(slf: &Bound<'_, Self>) -> PyResult<Py<Stop>> {
         runcontrol::interrupt(slf)
     }
@@ -267,19 +275,20 @@ impl Debugger {
         runcontrol::reboot(slf)
     }
 
-    /// Crash the target on purpose (`.crash`), producing a bugcheck stop.
+    /// Crash the target on purpose (`.crash`). This causes a bugcheck stop.
     fn crash(slf: &Bound<'_, Self>) -> PyResult<()> {
         runcontrol::crash(slf)
     }
 
-    /// Rebuild guest state now (rediscover the kernel). Stops already do this
-    /// when the backend reports a reload; this forces it.
+    /// Rebuild the guest state now (find the kernel again). Stops already do
+    /// this when the backend reports a reload. This function forces a rebuild.
     fn reload(&self) -> PyResult<()> {
         self.with_session(|session| session.reload().map_err(err))
     }
 
     /// Write a full `PAGEDU64` kernel dump of the halted target to `path`
-    /// (`.dump /f`). Returns the number of unreadable pages zero-filled.
+    /// (`.dump /f`). Returns the number of unreadable pages that the function
+    /// filled with zeros.
     fn write_dump(&self, path: &str) -> PyResult<u64> {
         self.with_session(|session| {
             require_halted(session, "write_dump")?;
@@ -299,8 +308,8 @@ impl Debugger {
         })
     }
 
-    /// Captured guest debug output (DbgPrint) since sequence `since`. Pass
-    /// the previous `next_seq` to poll only new lines.
+    /// Captured guest debug output (DbgPrint) since sequence `since`. To poll
+    /// only for new lines, pass the previous `next_seq`.
     #[pyo3(signature = (since=0))]
     fn debug_log<'py>(
         &self,
@@ -311,20 +320,21 @@ impl Debugger {
         Typed::new(py, view::backend::debug_log(&page))
     }
 
-    /// Drain the diagnostics the debugger raised since the last call (a
-    /// breakpoint that failed to re-arm, a reclaimed breakpoint slot, host
-    /// memory that stopped matching after a reload).
+    /// Remove and return the diagnostics that the debugger raised since the
+    /// last call. Examples are a breakpoint that failed to re-arm, a breakpoint
+    /// slot that was reclaimed, and host memory that no longer matched after a
+    /// reload.
     fn notices(&self) -> PyResult<Vec<String>> {
         self.with_session(|session| Ok(session.take_notices()))
     }
 
-    /// Remove every breakpoint, leave the target running, and end the
-    /// session: the connection and the target's single-instance lock are
-    /// released, so the target can be attached again, and this debugger and
-    /// its handles raise from then on. Closing again does nothing. On failure
-    /// the target is left halted, the session stays open, and the error is
-    /// raised. A borrowed (REPL command) debugger does not own the session
-    /// and leaves it alone.
+    /// Remove all breakpoints, let the target run, and end the session. The
+    /// function releases the connection and the single-instance lock of the
+    /// target. So you can attach to the target again. After this call, this
+    /// debugger and its handles raise an exception. A second call does nothing.
+    /// If the function fails, the target stays halted, the session stays open,
+    /// and the function raises the error. A borrowed debugger (from a REPL
+    /// command) does not own the session and does not change it.
     fn close(&self) -> PyResult<()> {
         if !self.is_owned() || self.is_closed() {
             return Ok(());

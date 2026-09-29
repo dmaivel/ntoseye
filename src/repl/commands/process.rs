@@ -25,7 +25,7 @@ repl_command! {
     names: ["!process"],
     usage: "!process [eprocess|pid|0] [flags] [image-name]",
     summary: "List or inspect Windows processes.",
-    details: "`!process 0 0` lists all processes; bit 1 adds process detail, bit 2 adds threads, and bit 4 adds each thread's stack. `ps` retains its concise legacy listing.",
+    details: "`!process 0 0` lists all processes. Bit 1 adds process details, bit 2 adds threads, and bit 4 adds the stack of each thread. `ps` keeps its short legacy list format.",
     completion: [Process, None, Process],
 }
 
@@ -49,8 +49,8 @@ repl_command! {
     cmd_process_context;
     names: [".process"],
     usage: ".process [/i] [/p] [/r] [eprocess|pid]",
-    summary: "Select a process address space for inspection.",
-    details: "For this debugger `/i` is equivalent to attach; `/p` and `/r` select the same non-invasive context. With no argument, print the current process context.",
+    summary: "Select a process address space to inspect.",
+    details: "In this debugger, `/i` is the same as attach. `/p` and `/r` select the same non-invasive context. With no argument, the command prints the current process context.",
     completion: Process,
 }
 
@@ -58,14 +58,14 @@ repl_command! {
     cmd_detach();
     names: ["detach"],
     usage: "detach",
-    summary: "Detach from current process.",
+    summary: "Detach from the current process.",
 }
 
 repl_command! {
     cmd_context;
     names: [".context"],
     usage: ".context <dtb>",
-    summary: "Set the translation base used for inspection.",
+    summary: "Set the translation base that inspection uses.",
     completion: Expression,
 }
 

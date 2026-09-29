@@ -23,7 +23,7 @@ repl_command! {
     names: ["g", "continue"],
     usage: "g [address]",
     summary: "Resume VM execution.",
-    details: "An address runs to a temporary breakpoint: a debug-register one in secure-kernel code, never a patch there. The .vtl 1 memory view accepts only plain g, which leaves the view before resuming; stop in VTL1 with `ba e1`.",
+    details: "With an address, g runs to a temporary breakpoint at that address. In secure-kernel code, this breakpoint uses a debug register, and ntoseye never patches the code. The .vtl 1 memory view accepts only g without an address. g then leaves the view before it resumes the VM. To stop in VTL1, use `ba e1`.",
     completion: Expression,
     run: Run,
 }
@@ -50,7 +50,7 @@ repl_command! {
     interrupt_running_vm();
     names: ["break"],
     usage: "break",
-    summary: "Break/pause VM execution.",
+    summary: "Break in and pause VM execution.",
     run_state: Running,
 }
 
@@ -58,7 +58,7 @@ repl_command! {
     single_step();
     names: ["t", "si"],
     usage: "t",
-    summary: "Single step (step into).",
+    summary: "Step one instruction (step into).",
     run_state: Halted,
     run: Step,
 }
@@ -68,7 +68,7 @@ repl_command! {
     names: ["p", "ni"],
     usage: "p or ni",
     summary: "Step over the current instruction.",
-    details: "Over a call, runs to the instruction after it and stops there only for the stepping thread returning from that call; other threads reaching the address, and deeper calls of the same code, run on.",
+    details: "If the instruction is a call, p runs to the instruction after the call. It stops there only when the thread that you step returns from that call. Other threads that get to the address continue to run. Deeper calls of the same code also continue to run.",
     run_state: Halted,
     run: Run,
 }
@@ -78,7 +78,7 @@ repl_command! {
     names: ["gu", "finish"],
     usage: "gu or finish",
     summary: "Run until the current function returns.",
-    details: "Stops at the return address only for the stepping thread returning from this call; other threads reaching the address, and deeper calls of the same function, run on.",
+    details: "gu stops at the return address only when the thread that you step returns from this call. Other threads that get to the address continue to run. Deeper calls of the same function also continue to run.",
     run_state: Halted,
     run: Run,
 }
@@ -87,7 +87,7 @@ repl_command! {
     cmd_pa;
     names: ["pa"],
     usage: "pa <address>",
-    summary: "Step over repeatedly until an address is reached.",
+    summary: "Step over repeatedly until execution gets to an address.",
     completion: Expression,
     run: Run,
 }
@@ -96,7 +96,7 @@ repl_command! {
     cmd_ta;
     names: ["ta"],
     usage: "ta <address>",
-    summary: "Step into repeatedly until an address is reached.",
+    summary: "Step into repeatedly until execution gets to an address.",
     completion: Expression,
     run_state: Halted,
     run: Run,

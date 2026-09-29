@@ -8,7 +8,7 @@ repl_command! {
     names: ["sxe"],
     usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Break when an exception occurs or a kernel module loads.",
-    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxe ld` stops when any kernel image loads, `sxe ld:<module>` when that one does (case-insensitive, with or without extension, `*`/`?` globs), after it is listed and its deferred breakpoints are armed and before its entry point runs. `-c` works with `sxe ld`; `-f` does not apply to ld. `sxn ld` prints a `ModLoad:` line and continues; `sxd ld` and `sxi ld` continue silently. A named filter takes precedence over bare `ld`. Module unload (`ud`) filters are not supported.",
+    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxe ld` stops when a kernel image loads. `sxe ld:<module>` stops when that module loads. The module name is case-insensitive, the extension is optional, and you can use `*`/`?` globs. The stop occurs after ntoseye lists the module and arms its deferred breakpoints, and before its entry point runs. `-c` works with `sxe ld`. `-f` does not apply to ld. `sxn ld` prints a `ModLoad:` line and continues. `sxd ld` and `sxi ld` continue with no output. A named filter has precedence over bare `ld`. ntoseye does not support module unload (`ud`) filters.",
 }
 
 repl_command! {
@@ -16,44 +16,44 @@ repl_command! {
     names: ["sxd"],
     usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
     summary: "Pass first-chance exceptions and break on second chance.",
-    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxd ld[:<module>]` lets the load continue silently; see sxe.",
+    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxd ld[:<module>]` lets the load continue with no output. See sxe.",
 }
 
 repl_command! {
     cmd_sxn;
     names: ["sxn"],
     usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
-    summary: "Notify and pass exceptions without breaking.",
-    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues; see sxe.",
+    summary: "Show a notification for exceptions and pass them without a break.",
+    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues. See sxe.",
 }
 
 repl_command! {
     cmd_sxi;
     names: ["sxi"],
     usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
-    summary: "Pass exceptions without breaking or notification.",
-    details: "-c runs commands at the stop; -f explicitly selects the final break/handled/not-handled action. `sxi ld[:<module>]` lets the load continue silently; see sxe.",
+    summary: "Pass exceptions without a break or a notification.",
+    details: "-c runs commands at the stop. -f sets an explicit final action: break, handled, or not handled. `sxi ld[:<module>]` lets the load continue with no output. See sxe.",
 }
 
 repl_command! {
     cmd_sx();
     names: ["sx", "sxl"],
     usage: "sx or sxl",
-    summary: "List configured exception policies and module-load filters.",
+    summary: "List the configured exception policies and module-load filters.",
 }
 
 repl_command! {
     cmd_sxr();
     names: ["sxr"],
     usage: "sxr",
-    summary: "Reset exception policies to default break behavior and clear module-load filters.",
+    summary: "Reset exception policies to the default break behavior, and clear module-load filters.",
 }
 
 repl_command! {
     cmd_lastevent();
     names: [".lastevent"],
     usage: ".lastevent",
-    summary: "Show the most recently observed target event.",
+    summary: "Show the most recent target event that ntoseye observed.",
 }
 
 /// Early feedback when a policy is set: refuse literal run-control commands

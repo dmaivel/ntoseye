@@ -11,7 +11,7 @@
         if stop is not None and bp in stop.breakpoints:
             print(stop.thread.backtrace())
 
-See `docs/scripting/sdk.md` and `examples/` for more.
+For more information, see `docs/scripting/sdk.md` and `examples/`.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ _T = TypeVar("_T")
 
 
 class NtoseyeError(Exception):
-    """Base class for every error the SDK raises."""
+    """Base class for all errors that the SDK raises."""
 
 
 class MemoryAccessError(NtoseyeError):
@@ -34,24 +34,25 @@ class MemoryAccessError(NtoseyeError):
 
 
 class TargetRunningError(NtoseyeError):
-    """The operation needs a halted target; `interrupt()` first."""
+    """The operation needs a halted target. Call `interrupt()` first."""
 
 
 class StaleHandleError(NtoseyeError):
-    """The handle is from before the target was rebuilt (a reboot); re-query
-    it."""
+    """The handle is from before the target was rebuilt (a reboot). Query it
+    again."""
 
 
 class SymbolNotFoundError(NtoseyeError, LookupError):
-    """A symbol that does not resolve; also a `LookupError`, like any mapping
-    miss."""
+    """A symbol that does not resolve. This error is also a `LookupError`, as
+    for other failed mapping lookups."""
 
 
 @final
 class Diagnostic(Generic[_T]):
-    """One field that reads on its own and can fail: `value` when it read,
-    `error` when it did not. Truthy exactly when available. Generic over its
-    value: a property typed `Diagnostic[int]` reads an `int`."""
+    """One field that reads on its own and can fail. If the read succeeds,
+    `value` holds the data. If it fails, `error` holds the reason. The object
+    is true if the value is available, and false if not. The class is generic
+    over its value: a property typed `Diagnostic[int]` reads an `int`."""
 
     __slots__ = ("_value", "_error", "_source", "_metric", "_hex")
 
@@ -66,12 +67,13 @@ class Diagnostic(Generic[_T]):
 
     @property
     def value(self) -> _T | None:
-        """The value read; `None` when unavailable (or when `None` was read)."""
+        """The value that was read. `None` if the value is not available, or if
+        the value read was `None`."""
         return self._value
 
     @property
     def error(self) -> str | None:
-        """Why the value could not be read; `None` when it was."""
+        """The reason that the read failed. `None` if the read succeeded."""
         return self._error
 
     @property
@@ -81,8 +83,8 @@ class Diagnostic(Generic[_T]):
 
     @property
     def source(self) -> str | None:
-        """Where a metric's value came from (`"dump header"`, `"KDBG"`, ...);
-        `None` for a field that is not a metric, or an unknown source."""
+        """The source of the value of a metric (`"dump header"`, `"KDBG"`, ...).
+        `None` for a field that is not a metric, or if the source is unknown."""
         return self._source
 
     def __bool__(self) -> bool:
@@ -108,8 +110,8 @@ class Diagnostic(Generic[_T]):
         return f"Diagnostic({_summary(self._value)})"
 
     def to_dict(self) -> dict[str, Any]:
-        """The `{available, value, error[, source]}` dict the MCP surface
-        returns (`source` only for a metric)."""
+        """The `{available, value, error[, source]}` dict that the MCP surface
+        returns. `source` is present only for a metric."""
         out: dict[str, Any] = {
             "available": self._error is None,
             "value": _plain(self._value),

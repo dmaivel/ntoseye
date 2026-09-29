@@ -11,34 +11,35 @@ use crate::target::meta::{
 };
 
 shapes! {
-    /// A driver Driver Verifier is verifying, from `!verifier`'s list.
+    /// A driver that Driver Verifier verifies, from the `!verifier` list.
     VerifierDriverSummary {
-        /// The driver's verifier entry.
+        /// The verifier entry of the driver.
         entry: VirtAddr,
-        /// The entry's state (`Loaded`).
+        /// The state of the entry (`Loaded`).
         state: String,
-        /// Nonpaged pool the driver holds, in bytes.
+        /// The nonpaged pool that the driver holds, in bytes.
         nonpaged_bytes: u64,
-        /// Paged pool the driver holds, in bytes.
+        /// The paged pool that the driver holds, in bytes.
         paged_bytes: u64,
-        /// The driver's module name.
+        /// The module name of the driver.
         module: String,
     }
 
-    /// A driver configured for verification, from the verifier's suspect list.
+    /// A driver that is configured for verification, from the verifier
+    /// suspect list.
     VerifierSuspectDriver {
         /// The suspect-list entry.
         address: VirtAddr,
         full_name: String,
         base_name: String,
-        /// How many times the driver has loaded.
+        /// The number of times that the driver loaded.
         loads: u64,
-        /// How many times the driver has unloaded.
+        /// The number of times that the driver unloaded.
         unloads: u64,
     }
 
-    /// Driver Verifier's aggregate counters; each reads on its own and can
-    /// fail.
+    /// The aggregate counters of Driver Verifier. ntoseye reads each counter
+    /// separately, and each read can fail.
     VerifierStatistics {
         raise_irqls: Diag<u64>,
         acquire_spin_locks: Diag<u64>,
@@ -61,45 +62,49 @@ shapes! {
         unloads: Diag<u64>,
     }
 
-    /// Driver Verifier's configuration, statistics, verified drivers, and
-    /// configured-but-unloaded suspect drivers (`!verifier`).
+    /// The Driver Verifier configuration, statistics, and drivers
+    /// (`!verifier`). The drivers are the verified drivers and the configured
+    /// suspect drivers that are not loaded.
     Verifier {
         /// The verification level (`MmVerifierData.Level`).
         level: Diag<Hex>,
         /// The option flags (`VerifierOptionFlags`).
         option_flags: Diag<Hex>,
         verify_mode: Diag<u64>,
-        /// The names of the checks `level` enables.
+        /// The names of the checks that `level` enables.
         level_options: Diag<Vec<String>>,
         statistics: VerifierStatistics,
         /// The verified drivers.
         drivers: Diag<Vec<VerifierDriverSummary>>,
-        /// Whether the driver table advertised fewer entries than it links,
-        /// so the walk stopped before visiting every driver.
+        /// Whether the driver table gives a smaller entry count than the
+        /// number of linked entries. In that case, the walk stopped before it
+        /// got to all drivers.
         drivers_truncated: bool,
-        /// Suspect drivers configured for verification that are not loaded.
+        /// The suspect drivers that are configured for verification but are
+        /// not loaded.
         configured_but_unloaded: Diag<Vec<VerifierSuspectDriver>>,
         /// How the suspect-list walk ended.
         suspect_list_termination: ListEnd,
     }
 
-    /// One verified driver's image, signing level, and counters
+    /// The image, signing level, and counters of one verified driver
     /// (`!verifier <module>`).
     VerifierDriver {
         module: String,
         image_base: VirtAddr,
         /// The image size in bytes.
         image_size: u64,
-        /// The driver's `_DRIVER_OBJECT`.
+        /// The `_DRIVER_OBJECT` of the driver.
         driver_object: VirtAddr,
-        /// The image's signing level (`SE_SIGNING_LEVEL`).
+        /// The signing level of the image (`SE_SIGNING_LEVEL`).
         se_signing_level: Hex,
         raise_irqls: u64,
         acquire_spin_locks: u64,
         synchronize_executions: u64,
         allocations_with_no_tag: u64,
         allocations_failed: u64,
-        /// Allocations the verifier failed on purpose (fault injection).
+        /// The number of allocations that the verifier failed on purpose
+        /// (fault injection).
         allocations_failed_deliberately: u64,
         current_paged_pool_allocations: u64,
         paged_bytes: u64,
@@ -119,14 +124,14 @@ shapes! {
         peak_pages_for_mdl_bytes: u64,
         contiguous_memory_bytes: u64,
         peak_contiguous_memory_bytes: u64,
-        /// The driver's suspect-list entry, with its load history; `None`
-        /// when it has none.
+        /// The suspect-list entry of the driver, with its load history.
+        /// `None` if the driver has no entry.
         suspect: Option<VerifierSuspectDriver>,
     }
 
-    /// The kernel image's identity.
+    /// The identity of the kernel image.
     TargetKernel {
-        /// The image's file name.
+        /// The file name of the image.
         name: String,
         /// The module name (`nt`).
         short_name: String,
@@ -135,17 +140,17 @@ shapes! {
         size: Option<u64>,
         file_version: Option<String>,
         product_version: Option<String>,
-        /// The PDB's GUID, identifying its symbols.
+        /// The GUID of the PDB. It identifies the symbols.
         pdb_guid: Option<String>,
-        /// The PDB's age.
+        /// The age of the PDB.
         pdb_age: Option<u32>,
     }
 
-    /// What a crash dump's header records.
+    /// The data that a crash dump header records.
     TargetDump {
         /// Whether the dump is a triage (minidump-style) dump.
         is_triage: bool,
-        /// The kernel page-table root the dump records.
+        /// The kernel page-table root that the dump records.
         directory_table_base: VirtAddr,
         bugcheck_code: Hex<u32>,
         bugcheck_parameters: Vec<Hex>,
@@ -156,19 +161,20 @@ shapes! {
         /// The machine type (`IMAGE_FILE_MACHINE_*`).
         machine_image_type: u32,
         service_pack_build: u32,
-        /// When the dump was taken (FILETIME).
+        /// The time when the system made the dump (FILETIME).
         system_time: Option<Hex>,
-        /// Seconds the system had been up.
+        /// The system uptime in seconds.
         uptime_seconds: Option<u64>,
-        /// The exception code the dump records.
+        /// The exception code that the dump records.
         exception_code: Option<Hex<u32>>,
-        /// Whether the dump's triage data overflowed.
+        /// Whether the triage data of the dump overflowed.
         triage_overflowed: bool,
         kernel_base: Option<VirtAddr>,
     }
 
-    /// The target's build, architecture, kernel, symbols, debugger version,
-    /// time, and dump metadata (`vertarget`).
+    /// The version data of the target (`vertarget`). It contains the build,
+    /// architecture, kernel, symbols, debugger version, time, and dump
+    /// metadata.
     TargetVersion {
         major_version: Option<u64>,
         minor_version: Option<u64>,
@@ -176,36 +182,36 @@ shapes! {
         /// The build lab string.
         build_lab: Option<String>,
         architecture: String,
-        /// How many processors the target has.
+        /// The number of processors in the target.
         processors: Option<u16>,
         /// The product name.
         product: String,
-        /// The kernel image; `None` when it was not found.
+        /// The kernel image. `None` if ntoseye did not find it.
         kernel: Option<TargetKernel>,
-        /// The kernel's symbol status label; `None` when the kernel was not
-        /// found.
+        /// The symbol status label of the kernel. `None` if ntoseye did not
+        /// find the kernel.
         symbol_status: Option<String>,
         debugger_version: String,
         symbol_path: String,
         time: TargetTime,
         /// The backend attached to the target.
         backend: Option<String>,
-        /// The crash dump's header; `None` for a live target.
+        /// The crash dump header. `None` for a live target.
         dump: Option<TargetDump>,
     }
 
-    /// The target's UTC time and uptime (`.time`).
+    /// The UTC time and uptime of the target (`.time`).
     TargetTime {
-        /// The target's UTC time (FILETIME).
+        /// The UTC time of the target (FILETIME).
         system_time: Option<Hex>,
         /// `system_time` as ISO 8601.
         system_time_iso: Option<String>,
-        /// `KUSER_SHARED_DATA.InterruptTime`: 100 ns units since boot, the
-        /// clock timers' `due_time` counts in.
+        /// `KUSER_SHARED_DATA.InterruptTime`: the time since boot, in 100 ns
+        /// units. The `due_time` of clock timers uses this clock.
         interrupt_time: Option<Hex>,
         /// Seconds since boot.
         uptime_seconds: Option<u64>,
-        /// The uptime, formatted.
+        /// The uptime as formatted text.
         uptime: Option<String>,
     }
 
@@ -214,20 +220,20 @@ shapes! {
         code: Hex,
         /// `NTSTATUS`, `HRESULT`, `Win32`, or `unknown`.
         kind: String,
-        /// The code's symbolic name.
+        /// The symbolic name of the code.
         name: String,
         description: String,
-        /// `success`, `informational`, `warning`, or `error`; `None` for a
+        /// `success`, `informational`, `warning`, or `error`. `None` for a
         /// Win32 code.
         severity: Option<String>,
-        /// The facility the code encodes.
+        /// The facility that the code encodes.
         facility: Option<u32>,
         /// Whether the code is customer-defined (its C bit).
         customer: Option<bool>,
-        /// The Win32 error: the code itself, or the one a
-        /// `HRESULT_FROM_WIN32` code wraps.
+        /// The Win32 error. This is the code itself, or the Win32 error that
+        /// a `HRESULT_FROM_WIN32` code wraps.
         win32_code: Option<Hex<u32>>,
-        /// That Win32 error's name.
+        /// The name of that Win32 error.
         win32_name: Option<String>,
     }
 }

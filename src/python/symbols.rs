@@ -13,7 +13,7 @@ use crate::types::{Dtb, VirtAddr};
 use crate::view::shape::Typed;
 use crate::view::{self};
 
-/// Symbol lookup scoped to an address space: `dbg.symbols`, `proc.symbols`.
+/// Symbol lookup in one address space (`dbg.symbols`, `proc.symbols`).
 #[pyclass(module = "ntoseye")]
 pub struct Symbols {
     pub owner: Owner,
@@ -52,18 +52,18 @@ impl Location {
 
 #[pymethods]
 impl Symbols {
-    /// Resolve a symbol to its address, raising `SymbolNotFoundError` when absent.
+    /// Get the address of a symbol. If the symbol is not found, raise `SymbolNotFoundError`.
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
         self.resolve(py, name)?
             .ok_or_else(|| symbol_not_found(name))
     }
 
-    /// Resolve a symbol to its address, or return `None` when absent.
+    /// Get the address of a symbol, or `None` if the symbol is not found.
     fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<u64>> {
         self.resolve(py, name)
     }
 
-    /// Whether at least one symbol candidate has this name.
+    /// True if one or more symbol candidates have this name.
     fn __contains__(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
         let space = &self.space;
         scoped(py, &self.owner, space, |session| {
@@ -76,7 +76,7 @@ impl Symbols {
         })
     }
 
-    /// Return every exact candidate, including module and private-compiland provenance.
+    /// Get all exact candidates, with the module and, for private symbols, the compiland.
     fn candidates<'py>(
         &self,
         py: Python<'py>,
@@ -96,7 +96,7 @@ impl Symbols {
         )
     }
 
-    /// Return the nearest symbol identity, or `None` if no symbol covers `addr`.
+    /// Get the nearest symbol, or `None` if no symbol covers `addr`.
     fn nearest<'py>(
         &self,
         py: Python<'py>,
@@ -115,7 +115,7 @@ impl Symbols {
         )
     }
 
-    /// Fuzzy-search symbol names; `module!query` scopes the search to a module.
+    /// Search symbol names by fuzzy match. Use `module!query` to search in one module.
     #[pyo3(signature = (query, limit=50))]
     fn search<'py>(
         &self,
@@ -138,7 +138,7 @@ impl Symbols {
         )
     }
 
-    /// Resolve an address to PDB source metadata and its remapped local path.
+    /// Get the PDB source metadata and the mapped local path for an address.
     fn source_location<'py>(
         &self,
         py: Python<'py>,
@@ -150,7 +150,7 @@ impl Symbols {
         Typed::new(py, location.as_ref().map(view::symbols::source_location))
     }
 
-    /// Resolve a source file and line to every matching loaded address.
+    /// Get all loaded addresses that match a source file and line.
     fn source_addresses(&self, py: Python<'_>, file: &str, line: u32) -> PyResult<Vec<u64>> {
         scoped(py, &self.owner, &self.space, |session| {
             Ok(session
@@ -162,9 +162,9 @@ impl Symbols {
         })
     }
 
-    /// List the PDB local/parameter layouts of the innermost frame at `addr`
-    /// (an inlined call's own where the compiler inlined one), without
-    /// evaluating values.
+    /// List the PDB layouts of the locals and parameters of the innermost frame
+    /// at `addr`. If the compiler inlined a call there, these are the layouts of
+    /// the inlined call. This method does not evaluate the values.
     fn locals_at<'py>(
         &self,
         py: Python<'py>,
@@ -184,7 +184,7 @@ impl Symbols {
         Typed::new(py, rows)
     }
 
-    /// Reload symbols in this space and re-resolve symbolic breakpoints.
+    /// Reload symbols in this space, and resolve symbolic breakpoints again.
     fn reload<'py>(
         &self,
         py: Python<'py>,
@@ -200,7 +200,7 @@ impl Symbols {
         Typed::new(py, report)
     }
 
-    /// Ordered symbol sources (`.sympath`); assignment replaces the full path.
+    /// The ordered symbol sources (`.sympath`). An assignment replaces the full path.
     #[getter(path)]
     fn path(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         scoped(py, &self.owner, &self.space, |session| {
@@ -231,7 +231,7 @@ impl Symbols {
         })
     }
 
-    /// Ordered source-path mappings (`.srcpath`); assignment replaces them.
+    /// The ordered source-path mappings (`.srcpath`). An assignment replaces all of them.
     #[getter(source_path)]
     fn source_path(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         scoped(py, &self.owner, &self.space, |session| {

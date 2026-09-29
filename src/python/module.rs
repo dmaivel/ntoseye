@@ -22,8 +22,8 @@ use crate::view::shape::Typed;
 use crate::view::{self};
 use pelite::PeView;
 
-/// A module collection: `dbg.modules` (kernel), `proc.modules` (loader
-/// lists), or `dbg.secure_kernel.modules` (the secure kernel's).
+/// A collection of modules. It is `dbg.modules` (kernel), `proc.modules`
+/// (loader lists), or `dbg.secure_kernel.modules` (secure kernel).
 #[pyclass(module = "ntoseye")]
 pub struct Modules {
     pub owner: Owner,
@@ -87,7 +87,7 @@ impl Modules {
     }
 }
 
-/// One loaded image in the kernel or a process address space.
+/// One loaded image in the kernel address space or in a process address space.
 #[pyclass(module = "ntoseye")]
 pub struct Module {
     pub owner: Owner,
@@ -182,62 +182,62 @@ impl Module {
 
 #[pymethods]
 impl Module {
-    /// Base address of the loaded image.
+    /// The base address of the loaded image.
     #[getter]
     fn base(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.check(py)?;
         Ok(self.info.base_address.0)
     }
 
-    /// Size of the mapped image.
+    /// The size of the mapped image.
     #[getter]
     fn size(&self, py: Python<'_>) -> PyResult<u32> {
         self.owner.check(py)?;
         Ok(self.info.size)
     }
 
-    /// Image name.
+    /// The image name.
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<String> {
         self.owner.check(py)?;
         Ok(self.info.name.clone())
     }
 
-    /// Full image path, when the loader recorded one.
+    /// The full image path, if the loader recorded one.
     #[getter]
     fn path(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.owner.check(py)?;
         Ok(self.info.path.clone())
     }
 
-    /// PE timestamp, when present in the loader record.
+    /// The PE timestamp, if the loader record contains one.
     #[getter]
     fn timestamp(&self, py: Python<'_>) -> PyResult<Option<u32>> {
         self.owner.check(py)?;
         Ok(self.info.time_date_stamp)
     }
 
-    /// File version from the image's version resource.
+    /// The file version from the version resource of the image.
     #[getter]
     fn file_version(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.owner.check(py)?;
         Ok(self.info.file_version.clone())
     }
 
-    /// Product version from the image's version resource.
+    /// The product version from the version resource of the image.
     #[getter]
     fn product_version(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.owner.check(py)?;
         Ok(self.info.product_version.clone())
     }
 
-    /// PE sections and their mapped permissions.
+    /// The PE sections and their mapped permissions.
     #[getter]
     fn sections<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::module::Section>>> {
         Typed::new(py, self.section_data(py)?)
     }
 
-    /// Exports from the mapped PE export directory.
+    /// The exports from the mapped PE export directory.
     #[getter]
     fn exports<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::module::Export>>> {
         let base = self.info.base_address;
@@ -254,7 +254,7 @@ impl Module {
         )
     }
 
-    /// Module symbol and PDB identity (`lmv`).
+    /// The symbol status and PDB identity of the module (`lmv`).
     #[getter]
     fn symbols<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::module::ModuleSymbols>> {
         let info = self.info.clone();
@@ -265,16 +265,17 @@ impl Module {
         Typed::new(py, view)
     }
 
-    /// The mapped image in memory layout, for pefile/LIEF. Raises
-    /// `MemoryAccessError` on an unreadable page unless `zero_fill` is set,
-    /// which zeroes such pages instead (a kernel's discarded INIT section).
+    /// The mapped image in memory layout, for pefile/LIEF. If a page is not
+    /// readable, this raises `MemoryAccessError`. If `zero_fill` is set, it
+    /// fills such pages with zeros (for example, a kernel's discarded INIT
+    /// section).
     #[pyo3(signature = (zero_fill=false))]
     fn image<'py>(&self, py: Python<'py>, zero_fill: bool) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = self.image_bytes(py, zero_fill)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Resolve a symbol from this module to its address.
+    /// Get the address of a symbol in this module.
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
         let query = format!("{}!{name}", self.info.short_name);
         let address = self.owner.with_in(py, &self.context(), |session| {
@@ -288,7 +289,7 @@ impl Module {
         address.ok_or_else(|| symbol_not_found(query))
     }
 
-    /// Symbol status, load diagnostics and PDB identity (`lmv`).
+    /// The symbol status, load diagnostics, and PDB identity (`lmv`).
     fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::module::ModuleDetail>> {
         let info = self.info.clone();
         let process = matches!(self.space, Space::Process(_));
@@ -333,9 +334,9 @@ impl Module {
         Typed::new(py, view::module::module_symbol_report(&report))
     }
 
-    /// The mapped image's PE headers (`!dh`): file and optional headers,
-    /// data directories, sections, and the debug directory with its PDB
-    /// identity; `exports` and `imports` add those directories.
+    /// The PE headers of the mapped image (`!dh`). They include the file and
+    /// optional headers, data directories, sections, and the debug directory
+    /// with its PDB identity. `exports` and `imports` add those directories.
     #[pyo3(signature = (exports=false, imports=false))]
     fn headers<'py>(
         &self,
@@ -360,10 +361,10 @@ impl Module {
         Typed::new(py, view)
     }
 
-    /// The module's image identity (`!lmi`): machine, time stamp, size,
-    /// checksum, and characteristics from its headers, the debug directory
-    /// with the CodeView PDB name, GUID, and age, and its symbol state and
-    /// local PDB file.
+    /// The image identity of the module (`!lmi`). From the headers, it has the
+    /// machine, time stamp, size, checksum, and characteristics. It also has
+    /// the debug directory with the CodeView PDB name, GUID, and age. Then it
+    /// has the symbol state and the local PDB file.
     fn image_info<'py>(
         &self,
         py: Python<'py>,
@@ -386,7 +387,7 @@ impl Module {
         Ok(path.to_string_lossy().into_owned())
     }
 
-    /// Compare executable sections against the cached image (`!chkimg`).
+    /// Compare the executable sections with the cached image (`!chkimg`).
     #[pyo3(signature = (include_diffs=false))]
     fn check_image<'py>(
         &self,
@@ -400,7 +401,7 @@ impl Module {
         Typed::new(py, view::usermode::image_check(&detail))
     }
 
-    /// Return verifier data for this driver module.
+    /// Get the verifier data for this driver module.
     fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::VerifierDriver>> {
         // Driver Verifier is NT's; it never tracks secure-kernel modules.
         self.space.require_nt("verifier")?;
@@ -411,7 +412,7 @@ impl Module {
         Typed::new(py, view::meta::verifier_driver(&detail))
     }
 
-    /// The module as a plain `dict`, the shape MCP renders.
+    /// The module as a plain `dict`, in the shape that MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         view_dict(py, view::module::module(&self.info))
@@ -440,7 +441,7 @@ impl Module {
 
 #[pymethods]
 impl Modules {
-    /// Look up a module by short name, case-insensitively (`"nt"` names ntoskrnl).
+    /// Find a module by its short name. The match ignores case (`"nt"` is ntoskrnl).
     fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<Module>> {
         let found = self
             .infos(py)?
@@ -449,7 +450,7 @@ impl Modules {
         self.handle(py, found)
     }
 
-    /// The module containing `addr`, or `None` when no module contains it.
+    /// The module that contains `addr`, or `None` if no module contains it.
     fn at(&self, py: Python<'_>, addr: u64) -> PyResult<Option<Module>> {
         let found = self
             .infos(py)?
@@ -458,9 +459,10 @@ impl Modules {
         self.handle(py, found)
     }
 
-    /// How a process's loader lists ended (`termination` and
-    /// `wow64_termination`, each `{kind, address, error}`), to tell a complete
-    /// list from a corrupt or truncated one; `None` for kernel modules.
+    /// How the loader lists of a process ended. Use it to find if a list is
+    /// complete, corrupt, or truncated. It has `termination` and
+    /// `wow64_termination`, each `{kind, address, error}`. `None` for kernel
+    /// modules.
     #[getter]
     fn termination<'py>(
         &self,
@@ -499,8 +501,8 @@ fn module_matches(module: &ModuleInfo, query: &str) -> bool {
     module.short_name.eq_ignore_ascii_case(query) || module.name.eq_ignore_ascii_case(query)
 }
 
-/// Driver objects from the object manager's `Driver` directory, keyed by
-/// name (`dbg.drivers`).
+/// The driver objects in the `Driver` directory of the object manager, keyed
+/// by name (`dbg.drivers`).
 #[pyclass(module = "ntoseye")]
 pub struct Drivers {
     pub owner: Owner,
@@ -536,7 +538,7 @@ impl Drivers {
             .find(|driver| driver_name_matches(&driver.info.name, name)))
     }
 
-    /// Find the driver object or image containing `addr`.
+    /// Find the driver object or image that contains `addr`.
     fn at(&self, py: Python<'_>, addr: u64) -> PyResult<Option<Driver>> {
         Ok(self.snapshot(py)?.into_iter().find(|driver| {
             driver.info.object.0 == addr
@@ -576,7 +578,7 @@ fn driver_name_matches(name: &str, query: &str) -> bool {
             .is_some_and(|driver| driver.eq_ignore_ascii_case(query))
 }
 
-/// One `_DRIVER_OBJECT`, with the device objects it created.
+/// One `_DRIVER_OBJECT` and the device objects that it created.
 #[pyclass(module = "ntoseye")]
 pub struct Driver {
     pub owner: Owner,
@@ -585,7 +587,7 @@ pub struct Driver {
 
 #[pymethods]
 impl Driver {
-    /// The driver object's name.
+    /// The name of the driver object.
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<String> {
         self.owner.check(py)?;
@@ -599,21 +601,21 @@ impl Driver {
         Ok(self.info.object.0)
     }
 
-    /// The driver image's base address.
+    /// The base address of the driver image.
     #[getter]
     fn start(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.check(py)?;
         Ok(self.info.driver_start.0)
     }
 
-    /// The driver image's size.
+    /// The size of the driver image.
     #[getter]
     fn size(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.check(py)?;
         Ok(self.info.driver_size)
     }
 
-    /// The device objects this driver created.
+    /// The device objects that this driver created.
     #[getter]
     fn devices(&self, py: Python<'_>) -> PyResult<Vec<Device>> {
         let owner = self.owner.derive(py);
@@ -636,7 +638,7 @@ impl Driver {
             .collect())
     }
 
-    /// Inspect the `_DRIVER_OBJECT`, its devices, and dispatch table.
+    /// Inspect the `_DRIVER_OBJECT`, its devices, and its dispatch table.
     fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::object::DriverObject>> {
         let view = self.owner.with(py, |session| {
             let detail = session
@@ -648,7 +650,7 @@ impl Driver {
         Typed::new(py, view)
     }
 
-    /// The driver object as a plain `dict`, the shape MCP renders.
+    /// The driver object as a plain `dict`, in the shape that MCP renders.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         view_dict(py, view::object::driver_object_info(&self.info))

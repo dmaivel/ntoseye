@@ -8,54 +8,54 @@ use crate::target;
 use crate::types::VirtAddr;
 
 shapes! {
-    /// A struct or union's field layout (`dt`).
+    /// The field layout of a struct or union (`dt`).
     TypeLayout {
         /// The PDB type name.
         name: String,
-        /// Size in bytes.
+        /// The size in bytes.
         size: usize,
         /// The fields, sorted by offset.
         fields: Vec<Field>,
     }
 
-    /// A PDB field layout: name, byte offset, byte size, and type spelling.
+    /// The PDB layout of a field, with its name, byte offset, byte size, and type spelling.
     Field {
         name: String,
-        /// Byte offset within the containing type.
+        /// The byte offset in the containing type.
         offset: u32,
-        /// Size in bytes.
+        /// The size in bytes.
         size: u64,
         /// The PDB type spelling.
         r#type: String,
     }
 
-    /// One definition a symbol name resolves to.
+    /// One definition that a symbol name resolves to.
     SymbolCandidate {
         module: String,
         address: VirtAddr,
         /// `public` or `private`.
         visibility: &'static str,
-        /// The defining compiland, for a private symbol.
+        /// The compiland that defines a private symbol.
         compiland: Option<String>,
     }
 
-    /// A symbol a name search matched.
+    /// A symbol that a name search matched.
     SymbolSearchMatch {
         name: String,
-        /// `None` when the match does not resolve to a unique address.
+        /// `None` if the match does not resolve to a unique address.
         address: Option<VirtAddr>,
         module: Option<String>,
     }
 
     /// The symbol nearest below an address (`ln`, `Symbols.nearest()`).
     Symbol {
-        /// The module the symbol belongs to.
+        /// The module that contains the symbol.
         module: String,
         /// The symbol name.
         name: String,
-        /// The symbol's address.
+        /// The address of the symbol.
         address: VirtAddr,
-        /// How far past the symbol the queried address is.
+        /// The distance in bytes from the symbol to the queried address.
         offset: u32;
 
         /// `module!name+0xoffset`.
@@ -76,18 +76,20 @@ shapes! {
         /// The source file as the PDB records it.
         file: String,
         line: u32,
-        /// `None` when the PDB records no column.
+        /// `None` if the PDB records no column.
         column: Option<u32>,
-        /// The local file the source path maps it to, `None` when no mapping
+        /// The local file that the source path maps it to. `None` if no mapping
         /// applies.
         local_path: Option<String>,
-        /// `found` (there, and the file compiled when the PDB records a
-        /// checksum), `missing`, or `differs` (there, but its checksum is
-        /// not the one compiled); `None` with `local_path`.
+        /// `found`, `missing`, or `differs`. `found` means that the file is
+        /// there. If the PDB records a checksum, `found` also means that the
+        /// file is the compiled file. `differs` means that the file is there,
+        /// but its checksum is not the checksum of the compiled file. `None` if
+        /// `local_path` is `None`.
         local_state: Option<&'static str>,
     }
 
-    /// Where a local variable lives.
+    /// The location of a local variable.
     LocalVariableLocation {
         /// `register`, `register_relative`, `frame_relative`, or
         /// `unavailable`.
@@ -97,7 +99,7 @@ shapes! {
         /// The signed displacement, for `register_relative` and
         /// `frame_relative`.
         offset: Option<i64>,
-        /// Why the location is unknown, for `unavailable`.
+        /// The reason that the location is unknown, for `unavailable`.
         reason: Option<String>,
     }
 
@@ -106,9 +108,9 @@ shapes! {
         name: String,
         /// The PDB type spelling.
         type_name: String,
-        /// `None` when the type's size is unknown.
+        /// `None` if the size of the type is unknown.
         byte_size: Option<u64>,
-        /// Whether it is a parameter rather than a local.
+        /// True if it is a parameter. False if it is a local.
         parameter: bool,
         location: LocalVariableLocation,
     }

@@ -7,10 +7,10 @@ use crate::dbg_backend::{self, DebugLine, DebugOutputPage};
 shapes! {
     /// A captured line of guest debug output (DbgPrint, kernel printf).
     DebugLogLine {
-        /// Monotonic sequence number, the read cursor.
+        /// A monotonic sequence number. It is the read cursor.
         seq: u64,
-        /// Host wall-clock time the line completed, in milliseconds since
-        /// the Unix epoch.
+        /// The host wall-clock time when the line was complete, in milliseconds
+        /// since the Unix epoch.
         timestamp_ms: u64,
         text: String,
     }
@@ -18,14 +18,13 @@ shapes! {
     /// A page of captured guest debug output.
     DebugLog {
         lines: Vec<DebugLogLine>,
-        /// The cursor to pass next time to resume after the last line.
+        /// The cursor to give on the next call to continue after the last line.
         next_seq: u64,
-        /// Whether lines the caller had not read were evicted from the
-        /// bounded ring.
+        /// Whether the bounded ring removed lines that the caller did not read.
         dropped: bool,
     }
 
-    /// A row of the backend's capability matrix.
+    /// A row of the capability matrix of the backend.
     BackendCapability {
         /// Stable identifier (`memory_introspection`, ...).
         capability: &'static str,

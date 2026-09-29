@@ -14,8 +14,8 @@ repl_command! {
     cmd_handle;
     names: ["!handle"],
     usage: "!handle [handle-expression]",
-    summary: "List bounded handles for the selected process, or inspect one handle.",
-    details: "Without an argument, scans at most 256 handle-table slots. The detail form reports the object, type, name, access mask, and attributes when decodable.",
+    summary: "List a limited number of handles of the selected process, or show one handle.",
+    details: "Without an argument, the command scans a maximum of 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them.",
     completion: Expression,
 }
 
@@ -23,15 +23,15 @@ repl_command! {
     cmd_token();
     names: ["!token"],
     usage: "!token",
-    summary: "Inspect the selected/current process primary token.",
-    details: "Reports independently available token IDs, user/groups, privileges, type, impersonation level, and flags. Missing metadata or memory is shown per field.",
+    summary: "Show the primary token of the selected or current process.",
+    details: "The command shows the token IDs, user and groups, privileges, type, impersonation level, and flags. It gets each field independently. If the metadata or memory for a field is missing, the command shows this in that field.",
 }
 
 repl_command! {
     cmd_fileobj;
     names: ["!fileobj"],
     usage: "!fileobj <address-expression>",
-    summary: "Decode a FILE_OBJECT and its device/name relationships.",
+    summary: "Decode a FILE_OBJECT and its relations to its device and name.",
     completion: Expression,
 }
 
@@ -39,8 +39,8 @@ repl_command! {
     cmd_locks;
     names: ["!locks"],
     usage: "!locks [resource-address-expression]",
-    summary: "Inspect one ERESOURCE, or enumerate the symbol-backed resource list.",
-    details: "The no-argument form uses ExpSystemResourcesList and is bounded to 256 entries. It never scans memory; if the symbol/list metadata is absent, enumeration is unavailable.",
+    summary: "Show one ERESOURCE, or list the resources in the system resource list.",
+    details: "Without an argument, the command uses ExpSystemResourcesList and shows a maximum of 256 entries. It does not scan memory. If the symbol or the list metadata is not available, the command cannot list the resources.",
     completion: Expression,
 }
 
@@ -48,8 +48,8 @@ repl_command! {
     cmd_memusage;
     names: ["!memusage"],
     usage: "!memusage [process-limit]",
-    summary: "Show bounded system and per-process memory-use counters.",
-    details: "Uses validated memory-manager globals, KDBG fields, or recognized public getter code plus EPROCESS.Vm counters. It does not scan physical memory or walk every VAD.",
+    summary: "Show the system memory-use counters and the counters of a limited number of processes.",
+    details: "The command uses validated memory-manager globals, KDBG fields, or recognized public getter code, and EPROCESS.Vm counters. It does not scan physical memory, and it does not walk all VADs.",
     completion: Expression,
 }
 

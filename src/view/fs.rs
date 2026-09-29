@@ -18,12 +18,12 @@ shapes! {
         /// Bytes.
         size: Hex,
         committed_pages: u64,
-        /// `None` for a data file's segment, whose prototype PTEs are in its
-        /// subsections.
+        /// `None` for the segment of a data file. The prototype PTEs of a data
+        /// file are in its subsections.
         prototype_ptes: Option<VirtAddr>,
     }
 
-    /// A `_SUBSECTION` following a control area.
+    /// A `_SUBSECTION` after a control area.
     Subsection {
         address: VirtAddr,
         /// Its first prototype PTE.
@@ -32,11 +32,12 @@ shapes! {
         unused_ptes: u64,
         starting_sector: Hex,
         sectors: Hex,
-        /// The MM protection of `SubsectionFlags`.
+        /// The MM protection in `SubsectionFlags`.
         protection: Hex,
     }
 
-    /// A section's `_CONTROL_AREA`, its segment, and its subsections (`!ca`).
+    /// The `_CONTROL_AREA` of a section, with its segment and subsections
+    /// (`!ca`).
     ControlArea {
         address: VirtAddr,
         segment: VirtAddr,
@@ -52,8 +53,8 @@ shapes! {
         file_name: Diag<String>,
         segment_detail: Diag<ControlAreaSegment>,
         subsections: Vec<Subsection>,
-        /// Why the subsection walk stopped before a null `NextSubsection`;
-        /// `None` when it reached it.
+        /// Why the subsection walk stopped before a null `NextSubsection`.
+        /// `None` if the walk got to a null `NextSubsection`.
         subsections_stopped: Option<String>,
     }
 
@@ -66,7 +67,7 @@ shapes! {
         /// The mounted file system's volume device object.
         device_object: VirtAddr,
         device_name: Option<String>,
-        /// The storage device the volume is on.
+        /// The storage device that holds the volume.
         real_device: VirtAddr,
         real_device_name: Option<String>,
         serial_number: Hex<u32>,
@@ -74,7 +75,7 @@ shapes! {
         volume_label: String,
     }
 
-    /// A file the cache manager maps a view of.
+    /// A file that the cache manager maps a view of.
     CachedFile {
         shared_cache_map: VirtAddr,
         file_object: VirtAddr,
@@ -86,24 +87,26 @@ shapes! {
         open_count: Diag<u64>,
         dirty_pages: Diag<u64>,
         mapped_vacbs: u64,
-        /// Present bytes in the mapped views.
+        /// The bytes in the mapped views that are present in memory.
         valid_bytes: u64,
     }
 
-    /// The cache manager's mapped views, from its VACB arrays (`!filecache`).
+    /// The mapped views of the cache manager, from its VACB arrays
+    /// (`!filecache`).
     FileCache {
         vacb_arrays: u64,
         /// `CcNumberOfFreeVacbs`.
         free_vacbs: Diag<u64>,
-        /// VACBs mapping a view.
+        /// The VACBs that map a view.
         active_vacbs: u64,
         mapped_bytes: u64,
-        /// Present bytes in the mapped views.
+        /// The bytes in the mapped views that are present in memory.
         valid_bytes: u64,
-        /// One per shared cache map with a mapped view, most valid bytes
-        /// first, up to 1,024.
+        /// One entry for each shared cache map that has a mapped view, most
+        /// valid bytes first. A maximum of 1,024 entries.
         files: Vec<CachedFile>,
-        /// The shared cache maps with a mapped view, listed or not.
+        /// The number of shared cache maps that have a mapped view. This count
+        /// includes the maps that `files` does not list.
         file_count: u64,
         /// Whether an interrupt request stopped the walk early.
         interrupted: bool,
@@ -129,12 +132,12 @@ shapes! {
         altitude: String,
         driver_object: VirtAddr,
         instances: Vec<FltInstance>,
-        /// Why the instance walk stopped short of its head; `None` when it
-        /// completed.
+        /// Why the instance walk stopped before the list head. `None` if the
+        /// walk completed.
         instances_stopped: Option<String>,
     }
 
-    /// A volume the filter manager attached to (`_FLT_VOLUME`) and the
+    /// A volume that the filter manager attached to (`_FLT_VOLUME`), and the
     /// instances on it.
     FltVolume {
         address: VirtAddr,
@@ -142,8 +145,8 @@ shapes! {
         /// The `_FLT_FILESYSTEM_TYPE` name without its `FLT_FSTYPE_` prefix.
         file_system: Option<String>,
         instances: Vec<FltInstance>,
-        /// Why the instance walk stopped short of its head; `None` when it
-        /// completed.
+        /// Why the instance walk stopped before the list head. `None` if the
+        /// walk completed.
         instances_stopped: Option<String>,
     }
 
@@ -153,8 +156,8 @@ shapes! {
         address: VirtAddr,
         frame_id: u64,
         filters: Vec<FltFilter>,
-        /// Why the frame's list walk stopped short of its head; `None` when it
-        /// completed.
+        /// Why the walk of the frame list stopped before the list head. `None`
+        /// if the walk completed.
         stopped: Option<String>,
     }
 
@@ -164,8 +167,8 @@ shapes! {
         address: VirtAddr,
         frame_id: u64,
         instances: Vec<FltInstance>,
-        /// Why the frame's list walk stopped short of its head; `None` when it
-        /// completed.
+        /// Why the walk of the frame list stopped before the list head. `None`
+        /// if the walk completed.
         stopped: Option<String>,
     }
 
@@ -175,8 +178,8 @@ shapes! {
         address: VirtAddr,
         frame_id: u64,
         volumes: Vec<FltVolume>,
-        /// Why the frame's list walk stopped short of its head; `None` when it
-        /// completed.
+        /// Why the walk of the frame list stopped before the list head. `None`
+        /// if the walk completed.
         stopped: Option<String>,
     }
 
@@ -184,15 +187,16 @@ shapes! {
     /// (`!fltkd.filters`).
     FltFilters {
         frames: Vec<FltFilterFrame>,
-        /// Why the frame walk stopped short of its head; `None` when it
+        /// Why the frame walk stopped before the list head. `None` if the walk
         /// completed.
         stopped: Option<String>,
     }
 
-    /// Minifilter instances per filter manager frame (`!fltkd.instances`).
+    /// The minifilter instances of each filter manager frame
+    /// (`!fltkd.instances`).
     FltInstances {
         frames: Vec<FltInstanceFrame>,
-        /// Why the frame walk stopped short of its head; `None` when it
+        /// Why the frame walk stopped before the list head. `None` if the walk
         /// completed.
         stopped: Option<String>,
     }
@@ -200,7 +204,7 @@ shapes! {
     /// The volumes of each filter manager frame (`!fltkd.volumes`).
     FltVolumes {
         frames: Vec<FltVolumeFrame>,
-        /// Why the frame walk stopped short of its head; `None` when it
+        /// Why the frame walk stopped before the list head. `None` if the walk
         /// completed.
         stopped: Option<String>,
     }

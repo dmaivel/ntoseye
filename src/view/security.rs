@@ -19,14 +19,14 @@ shapes! {
         /// The identifier authority.
         authority: u64,
         sub_authorities: Vec<u32>,
-        /// The built-in name, when it is a well-known SID.
+        /// The built-in name, if the SID is a well-known SID.
         well_known: Option<String>,
     }
 
-    /// An ACE in an ACL. The mask and SID read on their own, so a damaged
-    /// body does not hide the header's type and flags.
+    /// An ACE in an ACL. ntoseye reads the mask and the SID separately. So a
+    /// damaged body does not hide the type and flags of the header.
     Ace {
-        /// Its position in the ACL.
+        /// The position of the ACE in the ACL.
         index: usize,
         r#type: u8,
         type_name: String,
@@ -41,13 +41,13 @@ shapes! {
     Acl {
         address: VirtAddr,
         revision: u8,
-        /// Bytes.
+        /// The size in bytes.
         size: u16,
         ace_count: u16,
-        /// Whether `ace_count` exceeds the decoder's bound, so only the
-        /// first ACEs are listed.
+        /// Whether `ace_count` is more than the decoder limit. If true, `aces`
+        /// contains only the first ACEs.
         bounded: bool,
-        /// Whether `revision` is not one this decoder knows; `aces` is then
+        /// Whether the decoder does not recognize `revision`. If true, `aces` is
         /// empty.
         unknown_revision: bool,
         aces: Vec<Ace>,
@@ -59,33 +59,33 @@ shapes! {
         revision: Diag<u8>,
         /// `SECURITY_DESCRIPTOR.Control`.
         control: Diag<Hex<u16>>,
-        /// The names of the control bits set.
+        /// The names of the control bits that are set.
         control_names: Diag<String>,
         /// Whether `control` has `SE_SELF_RELATIVE`.
         self_relative: Diag<bool>,
-        /// The owner SID; its value is `None` for a null owner.
+        /// The owner SID. Its value is `None` for a null owner.
         owner: Diag<Option<Sid>>,
-        /// The group SID; its value is `None` for a null group.
+        /// The group SID. Its value is `None` for a null group.
         group: Diag<Option<Sid>>,
-        /// Its value is `None` when absent or a null (unrestricted) ACL.
+        /// Its value is `None` if the DACL is absent or is a null (unrestricted) ACL.
         dacl: Diag<Option<Acl>>,
-        /// Its value is `None` when absent or a null ACL.
+        /// Its value is `None` if the SACL is absent or is a null ACL.
         sacl: Diag<Option<Acl>>,
         /// Whether the revision is not 1.
         unsupported_revision: bool,
     }
 
-    /// An object's security descriptor, from its header (`!objsd`).
+    /// The security descriptor of an object, from its header (`!objsd`).
     ObjectSecurity {
         object: VirtAddr,
         /// The `_OBJECT_HEADER`.
         header: VirtAddr,
-        /// `SecurityDescriptor`, a fast reference (reference count in the
-        /// low bits).
+        /// `SecurityDescriptor`, a fast reference. The low bits hold a reference
+        /// count.
         fast_reference: Hex,
         /// `fast_reference` without its count bits.
         descriptor_address: VirtAddr,
-        /// `None` when the object has no descriptor.
+        /// `None` if the object has no descriptor.
         descriptor: Option<SecurityDescriptor>,
     }
 
@@ -93,40 +93,41 @@ shapes! {
     Session {
         /// `None` for processes whose session is unknown.
         id: Option<u64>,
-        /// The session's processes.
+        /// The processes in the session.
         processes: Vec<super::process::ProcessIdentity>,
     }
 
     /// Sessions and their processes (`!session`).
     Sessions {
-        /// The session requested; `None` when all were (or the selected
-        /// process has no known id).
+        /// The requested session. `None` if you requested all sessions, or if the
+        /// selected process has no known ID.
         selected_session: Option<u64>,
         sessions: Vec<Session>,
         process_count: usize,
-        /// Whether the process walk stopped at its bound.
+        /// Whether the process walk stopped at its limit.
         truncated: bool,
     }
 
-    /// A process and its session id.
+    /// A process and its session ID.
     SessionProcess {
         /// The process record.
         process: super::process::ProcessIdentity,
-        /// `None` when neither `_EPROCESS` nor the primary token yields one.
+        /// `None` if ntoseye cannot get the ID from `_EPROCESS` or from the primary
+        /// token.
         session: Option<u64>,
     }
 
-    /// The processes of a session, optionally matching an image glob
+    /// The processes of a session, with an optional image glob filter
     /// (`!sprocess`).
     SessionProcesses {
         /// `None` for all sessions.
         selected_session: Option<u64>,
-        /// Whether the detailed listing (`-f`) was requested.
+        /// Whether you requested the detailed list (`-f`).
         detailed: bool,
         image_glob: Option<String>,
         processes: Vec<SessionProcess>,
         process_count: usize,
-        /// Whether the process walk stopped at its bound.
+        /// Whether the process walk stopped at its limit.
         truncated: bool,
     }
 
@@ -142,22 +143,22 @@ shapes! {
         attributes: Hex<u32>,
     }
 
-    /// A process's primary token (`!token`).
+    /// The primary token of a process (`!token`).
     Token {
         /// The process record.
         process: super::process::ProcessIdentity,
         /// The `_TOKEN`.
         token: VirtAddr,
         token_id: Diag<Hex>,
-        /// The logon session's LUID.
+        /// The LUID of the logon session.
         authentication_id: Diag<Hex>,
-        /// `TOKEN_TYPE`: 1 primary, 2 impersonation.
+        /// `TOKEN_TYPE`. 1 is primary, 2 is impersonation.
         token_type: Diag<u32>,
         /// `SECURITY_IMPERSONATION_LEVEL`.
         impersonation_level: Diag<u32>,
         /// `TokenFlags`.
         flags: Diag<Hex<u32>>,
-        /// Its value is `None` when the token names no user.
+        /// Its value is `None` if the token does not name a user.
         user: Diag<Option<SidAndAttributes>>,
         groups: Diag<Vec<SidAndAttributes>>,
         privileges: Diag<Vec<TokenPrivilege>>,

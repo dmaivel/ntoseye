@@ -8,8 +8,8 @@ use crate::trapframe::{KtrapFrame, KtrapFrameData};
 use crate::triage_report::exception_code_name;
 
 shapes! {
-    /// A decoded bugcheck (BSOD): its code, the four parameters, and the
-    /// faulting instruction when one was identified.
+    /// A decoded bugcheck (BSOD). It contains the code, the four parameters,
+    /// and the faulting instruction if ntoseye identified it.
     Bugcheck {
         /// The bugcheck code.
         code: u32,
@@ -17,18 +17,18 @@ shapes! {
         code_hex: String,
         /// The symbolic name (`IRQL_NOT_LESS_OR_EQUAL`).
         name: String,
-        /// What the bugcheck means; `None` for a code without a description.
+        /// What the bugcheck means. `None` if the code has no description.
         description: Option<String>,
-        /// The driver responsible, from the dump's record or the fault site.
+        /// The responsible driver, from the dump record or from the fault site.
         driver: Option<String>,
-        /// Where the data was found instead of its usual place (a pointer in
-        /// `nt!KiBugCheckData` to the real slots); `None` normally.
+        /// Where ntoseye found the data if it was not in its usual place (a
+        /// pointer in `nt!KiBugCheckData` to the real slots). Usually `None`.
         source: Option<String>,
         /// The four bugcheck parameters, each with its meaning for this code.
         args: Vec<BugcheckArgument>,
-        /// The faulting instruction; `None` when none was identified.
+        /// The faulting instruction. `None` if ntoseye did not identify one.
         fault: Option<BugcheckFault>,
-        /// Trap frames the parameters point to.
+        /// The trap frames that the parameters point to.
         trap_frames: Vec<BugcheckTrapFrame>,
     }
 
@@ -37,8 +37,8 @@ shapes! {
         /// The parameter's position, 1 to 4.
         index: usize,
         value: Hex,
-        /// What this parameter holds for the bugcheck code; empty when the
-        /// code documents none.
+        /// What this parameter holds for the bugcheck code. Empty if the code
+        /// has no documented meaning for this parameter.
         description: String,
     }
 
@@ -48,17 +48,19 @@ shapes! {
         ip: Hex,
         /// The symbol at `ip`.
         symbol: String,
-        /// The driver containing `ip`; `None` outside every loaded driver.
+        /// The driver that contains `ip`. `None` if `ip` is not in a loaded
+        /// driver.
         driver: Option<String>,
     }
 
-    /// The x64 registers a `_KTRAP_FRAME` saved. A register the frame's entry
-    /// does not write is `None`; the nonvolatile r12-r15 live in the
-    /// `_KEXCEPTION_FRAME`, not here.
+    /// The x64 registers that a `_KTRAP_FRAME` saved. A register is `None` if
+    /// the entry that built the frame does not write it. The nonvolatile
+    /// registers r12-r15 are in the `_KEXCEPTION_FRAME`. This type does not
+    /// include them.
     Amd64TrapFrame {
         /// The entry that built the frame: `interrupt`, `exception`,
-        /// `system call` or `Zw call`; `None` when unknown, and then only
-        /// the machine frame and rbp are trusted.
+        /// `system call`, or `Zw call`. `None` if the entry is unknown. In
+        /// that case, only the machine frame and rbp are reliable.
         kind: Option<&'static str>,
         rax: Option<Hex>,
         rbx: Option<Hex>,
@@ -76,16 +78,17 @@ shapes! {
         cs: Hex<u16>,
         ss: Option<Hex>,
         eflags: Hex<u32>,
-        /// The exception's error code; stale for a vector that carries none.
+        /// The exception error code. The value is stale for a vector that has
+        /// no error code.
         error_code: Option<Hex>,
-        /// The mode the trap came from: 0 kernel, 1 user.
+        /// The mode that the trap came from: 0 for kernel, 1 for user.
         previous_mode: u8,
-        /// The IRQL before the trap; only interrupts record it.
+        /// The IRQL before the trap. Only interrupts record it.
         previous_irql: Option<u8>,
     }
 
-    /// The ARM64 registers a `_KTRAP_FRAME` saved. The frame holds x0-x18,
-    /// fp (x29) and lr (x30); x19-x28 are `None`.
+    /// The ARM64 registers that a `_KTRAP_FRAME` saved. The frame holds
+    /// x0-x18, fp (x29), and lr (x30). The registers x19-x28 are `None`.
     Arm64TrapFrame {
         x0: Option<Hex>,
         x1: Option<Hex>,
@@ -126,7 +129,7 @@ shapes! {
         esr: Option<Hex>,
         /// The faulting data address (FAR).
         fault_address: Option<Hex>,
-        /// The mode the trap came from: 0 kernel, 1 user.
+        /// The mode that the trap came from: 0 for kernel, 1 for user.
         previous_mode: Option<u8>,
         /// The IRQL before the trap.
         previous_irql: Option<u8>,
@@ -142,8 +145,9 @@ shapes! {
 
     /// A decoded `EXCEPTION_RECORD64` (`.exr`).
     ExceptionRecord {
-        /// Where the record was read from; `None` for the current event's
-        /// record, reconstructed from the stop rather than read from memory.
+        /// The address that ntoseye read the record from. `None` for the
+        /// record of the current event. ntoseye builds that record from the
+        /// stop and does not read it from memory.
         record_address: Option<Hex>,
         /// The exception code (NTSTATUS).
         code: Hex<u32>,
@@ -160,7 +164,7 @@ shapes! {
 
     /// A decoded `_KTRAP_FRAME` (`.trap`).
     TrapFrame {
-        /// Where the frame was read from.
+        /// The address that ntoseye read the frame from.
         address: Hex,
         /// The symbol at the interrupted instruction.
         rip_symbol: Option<String>,
@@ -168,16 +172,16 @@ shapes! {
         frame: KtrapFrameRegisters,
     }
 
-    /// A trap frame a bugcheck parameter points to: either its decoded
-    /// registers or why decoding failed.
+    /// A trap frame that a bugcheck parameter points to. It contains the
+    /// decoded registers or the reason that decoding failed.
     BugcheckTrapFrame {
-        /// Where the frame was read from.
+        /// The address that ntoseye read the frame from.
         address: Hex,
         /// The symbol at the interrupted instruction.
         rip_symbol: Option<String>,
-        /// The saved registers; `None` when decoding failed.
+        /// The saved registers. `None` if decoding failed.
         frame: Option<KtrapFrameRegisters>,
-        /// Why decoding failed; `None` when it succeeded.
+        /// The reason that decoding failed. `None` if decoding succeeded.
         error: Option<String>,
     }
 }

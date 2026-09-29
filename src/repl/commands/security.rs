@@ -19,7 +19,7 @@ repl_command! {
     names: ["!sd", "sd"],
     usage: "!sd <address> [1]",
     summary: "Decode a SECURITY_DESCRIPTOR and its ACLs.",
-    details: "The optional 1 annotates well-known SIDs. Self-relative descriptors and absolute descriptors are both supported; each SID/ACE is decoded independently.",
+    details: "Decodes a self-relative or absolute security descriptor. The optional 1 adds the names of well-known SIDs. The command decodes each SID and each ACE separately.",
     completion: [Expression, None],
 }
 
@@ -43,8 +43,8 @@ repl_command! {
     cmd_objsd;
     names: ["!objsd", "objsd"],
     usage: "!objsd <object>",
-    summary: "Decode the security descriptor referenced by an object header.",
-    details: "The OBJECT_HEADER.SecurityDescriptor fast-reference low four bits are masked before decoding.",
+    summary: "Decode the security descriptor that an object header references.",
+    details: "The command masks the low four bits of the OBJECT_HEADER.SecurityDescriptor fast reference before it decodes the descriptor.",
     completion: Expression,
 }
 
@@ -52,8 +52,8 @@ repl_command! {
     cmd_session;
     names: ["!session", "session"],
     usage: "!session [-s <id>]",
-    summary: "List sessions and the processes grouped into each session.",
-    details: "Session IDs are read from _EPROCESS.Session and _MM_SESSION_SPACE, with a primary-token fallback when session space is opaque. Use -s -1 for the current session; the process walk is bounded to 4096 entries.",
+    summary: "List the sessions and the processes in each session.",
+    details: "The command reads session IDs from _EPROCESS.Session and _MM_SESSION_SPACE. If session space is opaque, it gets the ID from the primary token. Use -s -1 for the current session. The process walk stops at 4096 entries.",
     completion: [None, Expression],
 }
 
@@ -61,8 +61,8 @@ repl_command! {
     cmd_sprocess;
     names: ["!sprocess", "sprocess"],
     usage: "!sprocess [session] [flags] [image]",
-    summary: "List processes in a session.",
-    details: "The session is signed decimal: -1 and -2 select the current session, and -4 all sessions. Without a session, the attached process's session is selected when known. Flags default to 0 (brief); any non-zero value selects detailed output. The optional image argument is a case-insensitive glob.",
+    summary: "List the processes in a session.",
+    details: "The session is a signed decimal number. -1 and -2 select the current session, and -4 selects all sessions. If you do not give a session, the command uses the session of the attached process, if it is known. Flags default to 0 (brief output). Any non-zero value selects detailed output. The optional image argument is a glob that ignores case.",
     completion: [Expression, Expression, None],
 }
 

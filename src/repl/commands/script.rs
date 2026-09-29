@@ -25,8 +25,8 @@ repl_command! {
     cmd_if -> Flow;
     names: [".if"],
     usage: ".if (Condition) { Commands } [.elsif (Condition) { Commands }]... [.else { Commands }]",
-    summary: "Run a block of commands if a condition holds, as C's if.",
-    details: "Each Condition is an expression; nonzero is true. The block of the first condition that holds runs, else the .else block if there is one. The parts may be separated by spaces, line breaks, or the `;` a script run with `$$><` puts at each line break, and commands after the statement run once it ends: `.if (@rcx == 0) { .echo null } .else { dq @rcx L1 }; k`.",
+    summary: "Run a block of commands if a condition is true, like the C if statement.",
+    details: "Each Condition is an expression. A nonzero value is true. The block of the first true condition runs. If no condition is true, the .else block runs, if there is one. Spaces and line breaks can separate the parts. The `;` that `$$><` puts at each line break of a script can also separate them. Commands after the statement run after the statement ends. For example: `.if (@rcx == 0) { .echo null } .else { dq @rcx L1 }; k`.",
     style: RawTail,
 }
 
@@ -35,7 +35,7 @@ repl_command! {
     names: [".elsif"],
     usage: ".if (Condition) { Commands } .elsif (Condition) { Commands }",
     summary: "Add a condition to an .if statement.",
-    details: "Only valid right after an .if or .elsif block; see .if.",
+    details: "Use this only immediately after an .if or .elsif block. See .if.",
     style: RawTail,
 }
 
@@ -43,8 +43,8 @@ repl_command! {
     cmd_orphan_else -> Flow;
     names: [".else"],
     usage: ".if (Condition) { Commands } .else { Commands }",
-    summary: "Run a block when no condition of an .if statement holds.",
-    details: "Only valid right after an .if or .elsif block; see .if.",
+    summary: "Run a block when no condition of an .if statement is true.",
+    details: "Use this only immediately after an .if or .elsif block. See .if.",
     style: RawTail,
 }
 
@@ -52,8 +52,8 @@ repl_command! {
     cmd_while -> Flow;
     names: [".while"],
     usage: ".while (Condition) { Commands }",
-    summary: "Run a block of commands while a condition holds.",
-    details: "Condition is an expression, evaluated before each pass; nonzero is true. .break leaves the loop and .continue starts the next pass. Ctrl+C, or a remote call's timeout or cancellation, stops the loop between passes. A command the session refuses ends the loop and the rest of the command line.",
+    summary: "Run a block of commands while a condition is true.",
+    details: "Condition is an expression. The loop evaluates it before each pass. A nonzero value is true. .break stops the loop, and .continue starts the next pass. Ctrl+C, or a timeout or cancellation of a remote call, stops the loop between passes. If the session does not permit a command, the loop stops and the rest of the command line does not run.",
     style: RawTail,
 }
 
@@ -61,8 +61,8 @@ repl_command! {
     cmd_for -> Flow;
     names: [".for"],
     usage: ".for (InitialCommand ; Condition ; IncrementCommand) { Commands }",
-    summary: "Run a block of commands in a loop, as C's for.",
-    details: "InitialCommand runs once; then, while the expression Condition is nonzero, the block runs followed by IncrementCommand. The two commands are typically pseudo-register assignments: `.for (r $t0 = 0; @$t0 < 4; r $t0 = @$t0 + 1) { ? @$t0 }`. .break leaves the loop and .continue skips to IncrementCommand. Ctrl+C, or a remote call's timeout or cancellation, stops the loop between passes.",
+    summary: "Run a block of commands in a loop, like the C for statement.",
+    details: "InitialCommand runs once. Then, while the expression Condition is nonzero, the block runs and then IncrementCommand runs. Usually, the two commands are pseudo-register assignments. For example: `.for (r $t0 = 0; @$t0 < 4; r $t0 = @$t0 + 1) { ? @$t0 }`. .break stops the loop, and .continue goes to IncrementCommand. Ctrl+C, or a timeout or cancellation of a remote call, stops the loop between passes.",
     style: RawTail,
 }
 
@@ -70,8 +70,8 @@ repl_command! {
     cmd_do -> Flow;
     names: [".do"],
     usage: ".do { Commands } (Condition)",
-    summary: "Run a block of commands, then again while a condition holds.",
-    details: "Condition is an expression, evaluated after each pass; nonzero is true. .break leaves the loop and .continue skips to the condition. Ctrl+C, or a remote call's timeout or cancellation, stops the loop between passes.",
+    summary: "Run a block of commands, then run it again while a condition is true.",
+    details: "Condition is an expression. The loop evaluates it after each pass. A nonzero value is true. .break stops the loop, and .continue goes to the condition. Ctrl+C, or a timeout or cancellation of a remote call, stops the loop between passes.",
     style: RawTail,
 }
 
@@ -79,8 +79,8 @@ repl_command! {
     cmd_break -> Flow;
     names: [".break"],
     usage: ".break",
-    summary: "Leave the innermost .for, .while, or .do loop.",
-    details: "As in WinDbg, .foreach and !for_each_* loops are not left by .break; usually it sits in an .if block: `.while (1) { r $t0 = @$t0 + 1; .if (@$t0 > 5) { .break } }`.",
+    summary: "Stop the innermost .for, .while, or .do loop.",
+    details: "As in WinDbg, .break does not stop .foreach and !for_each_* loops. Usually, you put .break in an .if block. For example: `.while (1) { r $t0 = @$t0 + 1; .if (@$t0 > 5) { .break } }`.",
 }
 
 repl_command! {
@@ -95,7 +95,7 @@ repl_command! {
     names: [".block"],
     usage: ".block { Commands }",
     summary: "Run a block of commands.",
-    details: "WinDbg uses a block to re-evaluate its `${alias}` aliases; ntoseye expands aliases as each command runs, so a block only groups commands.",
+    details: "WinDbg uses a block to evaluate its `${alias}` aliases again. ntoseye expands aliases when each command runs. So in ntoseye, a block only groups commands.",
     style: RawTail,
 }
 
@@ -103,23 +103,23 @@ repl_command! {
     cmd_j -> Flow;
     names: ["j"],
     usage: "j Expression Command1 ; Command2 | j Expression 'Commands1' ; 'Commands2'",
-    summary: "Run one command or another depending on an expression.",
-    details: "Command1 runs if Expression is nonzero, else Command2. Single quotes hold several commands separated by `;`, and either may be empty (`''`, or nothing before the `;`). j takes the rest of the line, so text after Command2 is ignored. In a breakpoint action, `gc` in either branch resumes: `bp nt!NtClose \"j (@rcx == 0) '.echo null handle' ; 'gc'\"`.",
+    summary: "Run one of two commands, based on the value of an expression.",
+    details: "If Expression is nonzero, Command1 runs. Otherwise, Command2 runs. To put several commands in a branch, separate them with `;` and put them in single quotes. Each branch can be empty (`''`, or nothing before the `;`). j uses the rest of the line, so it ignores text after Command2. In a breakpoint action, `gc` in each branch resumes the target. For example: `bp nt!NtClose \"j (@rcx == 0) '.echo null handle' ; 'gc'\"`.",
     style: RawTail,
 }
 
 repl_command! {
     names: ["$<", "$><", "$$<", "$$><", "$$>a<"],
     usage: "$<Filename | $><Filename | $$<Filename | $$><Filename | $$>a<Filename [arg1 arg2 ...]",
-    summary: "Run the commands in a script file on the machine ntoseye runs on.",
-    details: "`$<` and `$$<` run the file one line at a time. `$><`, `$$><`, and `$$>a<` join its lines with `;` into one command block, which a program whose .if or .while blocks span lines needs. `$<` and `$><` take the rest of the line as the file name, `;` included; the `$$` forms end at `;`, so other commands may follow. `$$>a<` takes a quoted file name when it has spaces, replaces `${$arg1}`...`${$argN}` in the file with its arguments as written, leaves an argument not given as written, and replaces `${/d:$argN}` with 1 when argument N was given, else 0. `$$>a<` shows only the commands' output; the others echo each command first. Scripts may run scripts, 16 deep. Ctrl+C stops a script between commands.",
+    summary: "Run the commands in a script file on the machine that ntoseye runs on.",
+    details: "`$<` and `$$<` run the file one line at a time. `$><`, `$$><`, and `$$>a<` join its lines with `;` into one command block. Use these forms if the .if or .while blocks of a script span lines. `$<` and `$><` use the rest of the line as the file name, `;` included. For the `$$` forms, the file name ends at `;`, so other commands can follow. `$$>a<` accepts a quoted file name if the name has spaces. It replaces `${$arg1}`...`${$argN}` in the file with its arguments as written. If argument N is not given, `${$argN}` stays as written. `$$>a<` replaces `${/d:$argN}` with 1 if argument N is given, else with 0. `$$>a<` shows only the output of the commands. The other forms show each command before it runs. Scripts can run scripts, to a maximum depth of 16. Ctrl+C stops a script between commands.",
     flow: Continue,
 }
 
 repl_command! {
     names: ["$$", "*"],
     usage: "$$ Text | * Text",
-    summary: "A comment: `$$` up to the next `;`, `*` to the end of the line.",
+    summary: "Add a comment that ends at the next `;` (`$$`) or at the end of the line (`*`).",
     flow: Continue,
 }
 
@@ -128,7 +128,7 @@ repl_command! {
     names: [".sleep"],
     usage: ".sleep Milliseconds",
     summary: "Pause the debugger for a number of milliseconds.",
-    details: "Milliseconds is an expression in the current radix (`.sleep 0n500`). Ctrl+C, or a remote call's timeout or cancellation, ends the pause early. The target is left as it is: a running target runs on.",
+    details: "Milliseconds is an expression in the current radix (`.sleep 0n500`). Ctrl+C, or a timeout or cancellation of a remote call, ends the pause early. The command does not change the target. A running target continues to run.",
     completion: Expression,
 }
 

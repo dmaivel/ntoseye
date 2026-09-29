@@ -24,8 +24,9 @@ use crate::view::sched;
 use crate::view::shape::{Typed, ViewValue};
 use crate::view::{self};
 
-/// System-wide reports and decode-by-address helpers (`dbg.inspect`); the
-/// results are `Record`s shaped like the MCP JSON output.
+/// System-wide reports and helpers that decode an object at an address
+/// (`dbg.inspect`). The results are `Record`s with the same shape as the MCP
+/// JSON output.
 #[pyclass(module = "ntoseye")]
 pub struct Inspect {
     pub owner: Owner,
@@ -64,7 +65,8 @@ impl Inspect {
         })
     }
 
-    /// Find in-flight IRPs, optionally filtered by process or driver (`irps`).
+    /// Find in-flight IRPs, with an optional filter by process or driver
+    /// (`irps`).
     #[pyo3(signature = (filter=None))]
     fn irps<'py>(
         &self,
@@ -77,11 +79,11 @@ impl Inspect {
         })
     }
 
-    /// Find IRPs by scanning pool for `IoAllocateIrp`'s allocations
-    /// (`!irpfind`). `pool_type` is `"nonpaged"` or `"paged"`; `restart`
-    /// resumes from an address; `criteria` is one of WinDbg's (`"arg"`,
-    /// `"device"`, `"fileobject"`, `"mdlprocess"`, `"thread"`, `"userevent"`)
-    /// matched against `value`.
+    /// Scan pool for the allocations of `IoAllocateIrp` to find IRPs
+    /// (`!irpfind`). `pool_type` is `"nonpaged"` or `"paged"`. `restart`
+    /// continues the scan from an address. `criteria` is one of the WinDbg
+    /// criteria (`"arg"`, `"device"`, `"fileobject"`, `"mdlprocess"`,
+    /// `"thread"`, `"userevent"`). The scan matches it against `value`.
     #[pyo3(signature = (pool_type="nonpaged", restart=None, criteria=None, value=0))]
     fn irp_find<'py>(
         &self,
@@ -113,9 +115,9 @@ impl Inspect {
         })
     }
 
-    /// Decode an ALPC port (`!alpc /p`): its kind, owner, connection, state,
-    /// queues, and a connection port's connections. `address` is the port
-    /// object's body or header.
+    /// Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
+    /// connection, state, and queues. For a connection port, it also has the
+    /// connections. `address` is the body or the header of the port object.
     fn alpc_port<'py>(
         &self,
         py: Python<'py>,
@@ -142,9 +144,10 @@ impl Inspect {
         })
     }
 
-    /// The ALPC ports a process holds handles to (`!alpc /lpp`): the
-    /// connection ports it owns with their connections, and the client ports
-    /// it is connected through. `process` defaults to the current process.
+    /// Get the ALPC ports to which a process has handles (`!alpc /lpp`). The
+    /// result has the connection ports that the process owns, with their
+    /// connections. It also has the client ports through which the process is
+    /// connected. `process` defaults to the current process.
     #[pyo3(signature = (process=None))]
     fn alpc_process_ports<'py>(
         &self,
@@ -171,8 +174,8 @@ impl Inspect {
         })
     }
 
-    /// Decode `nt!NtGlobalFlag` and the current process's
-    /// `_PEB.NtGlobalFlag` by the GFlags names (`!gflag`).
+    /// Decode `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current
+    /// process into GFlags names (`!gflag`).
     fn global_flags<'py>(
         &self,
         py: Python<'py>,
@@ -183,9 +186,10 @@ impl Inspect {
         })
     }
 
-    /// Decode a job object: its accounting, limits, flags, nesting, and the
-    /// processes assigned to it (`!job`). `address` is the job, or a process
-    /// or thread whose job to decode; `None` is the current process's job.
+    /// Decode a job object (`!job`). The result has the accounting, limits,
+    /// flags, nesting, and the processes that are assigned to the job.
+    /// `address` is the job, or a process or thread whose job to decode. `None`
+    /// selects the job of the current process.
     #[pyo3(signature = (address=None))]
     fn job<'py>(
         &self,
@@ -200,9 +204,9 @@ impl Inspect {
         })
     }
 
-    /// Exited processes and terminated threads whose objects are still
-    /// referenced, found by scanning nonpaged pool (`!zombies`). `flags`: 1
-    /// processes, 2 threads, 3 both.
+    /// Find exited processes and terminated threads that still have references
+    /// to their objects (`!zombies`). The function scans nonpaged pool to find
+    /// them. `flags`: 1 for processes, 2 for threads, 3 for both.
     #[pyo3(signature = (flags=1))]
     fn zombies<'py>(
         &self,
@@ -216,9 +220,10 @@ impl Inspect {
         })
     }
 
-    /// Decode an executive object header and resolve its type and name, and
-    /// list a directory's entries (`!object`). `object` is the object's
-    /// address, or its path in the object namespace (`"\\Driver\\ACPI"`).
+    /// Decode an executive object header, and resolve the type and name of the
+    /// object (`!object`). For a directory, also list its entries. `object` is
+    /// the address of the object, or its path in the object namespace
+    /// (`"\\Driver\\ACPI"`).
     fn object<'py>(
         &self,
         py: Python<'py>,
@@ -264,7 +269,8 @@ impl Inspect {
         })
     }
 
-    /// Enumerate the symbol-backed executive-resource list (`!locks`).
+    /// List the entries of the symbol-backed executive-resource list
+    /// (`!locks`).
     #[pyo3(signature = (limit=256))]
     fn resources<'py>(
         &self,
@@ -277,7 +283,8 @@ impl Inspect {
         })
     }
 
-    /// Return bounded system and per-process memory-use counters (`!memusage`).
+    /// Get the memory-use counters of the system and of each process, up to a
+    /// limit (`!memusage`).
     #[pyo3(signature = (process_limit=64))]
     fn memusage<'py>(
         &self,
@@ -293,7 +300,7 @@ impl Inspect {
         })
     }
 
-    /// Enumerate process, thread, and image notification callbacks.
+    /// List the process, thread, and image notification callbacks.
     fn callbacks<'py>(
         &self,
         py: Python<'py>,
@@ -314,7 +321,8 @@ impl Inspect {
         })
     }
 
-    /// Dump the kernel SSDT and initialized win32k shadow table (`!ssdt`).
+    /// Get the kernel SSDT, and the win32k shadow table if it is initialized
+    /// (`!ssdt`).
     fn ssdt<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::object::SsdtTable>>> {
         self.typed(py, |session| {
             let tables = session.target.dump_ssdt().map_err(err)?;
@@ -325,7 +333,7 @@ impl Inspect {
         })
     }
 
-    /// Report current, next, and idle threads on each processor (`!running`).
+    /// Get the current, next, and idle threads on each processor (`!running`).
     #[pyo3(signature = (include_idle=false, include_stacks=false))]
     fn running<'py>(
         &self,
@@ -341,7 +349,8 @@ impl Inspect {
         })
     }
 
-    /// Read bounded dispatcher-ready queues for every processor or one (`!ready`).
+    /// Read the dispatcher ready queues, up to a limit, for all processors or
+    /// for one processor (`!ready`).
     #[pyo3(signature = (processor=None))]
     fn ready<'py>(
         &self,
@@ -357,7 +366,7 @@ impl Inspect {
         })
     }
 
-    /// Report DPCs queued on each processor (`!dpcs`).
+    /// Get the DPCs that are queued on each processor (`!dpcs`).
     fn dpcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, sched::DpcQueues>> {
         self.typed(py, |session| {
             let detail = session.target.inspect_dpc_queues().map_err(err)?;
@@ -365,7 +374,7 @@ impl Inspect {
         })
     }
 
-    /// Report which processors own or wait for each numbered queued spinlock
+    /// Get the processors that own or wait for each numbered queued spinlock
     /// (`!qlocks`).
     fn queued_locks<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, hardware::QueuedLocks>> {
         self.typed(py, |session| {
@@ -374,8 +383,8 @@ impl Inspect {
         })
     }
 
-    /// Report interprocessor-interrupt state for every processor or one
-    /// (`!ipi`).
+    /// Get the interprocessor-interrupt state of all processors or of one
+    /// processor (`!ipi`).
     #[pyo3(signature = (processor=None))]
     fn ipi<'py>(
         &self,
@@ -388,7 +397,7 @@ impl Inspect {
         })
     }
 
-    /// Report the PCI bus hierarchy pci.sys tracks (`!pcitree`).
+    /// Get the PCI bus hierarchy that pci.sys tracks (`!pcitree`).
     fn pci_tree<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, hardware::PciTree>> {
         self.typed(py, |session| {
             let tree = session.target.pci_tree().map_err(err)?;
@@ -396,11 +405,11 @@ impl Inspect {
         })
     }
 
-    /// Read and decode PCI configuration space (`!pci`): the functions on
-    /// `bus` (through `last_bus`), or one `device` and `function`. Each
-    /// function's 4 KiB is read, extended capabilities included; `raw` adds
-    /// it as hex. Needs a backend that reaches configuration space (kd/kdnet,
-    /// or gdb on QEMU) and a halted target.
+    /// Read and decode PCI configuration space (`!pci`). The function reads the
+    /// functions on `bus` (through `last_bus`), or one `device` and `function`.
+    /// It reads all 4 KiB of each function, with the extended capabilities.
+    /// `raw` adds the data as hex. This function needs a halted target and a
+    /// backend that can get to configuration space (kd/kdnet, or gdb on QEMU).
     #[pyo3(signature = (bus=0, device=None, function=None, *, last_bus=None, raw=false))]
     fn pci<'py>(
         &self,
@@ -430,10 +439,10 @@ impl Inspect {
         })
     }
 
-    /// Report the executive worker queues, their pending work items, and
-    /// worker threads (`!exqueue`). `include_stacks` adds each worker's stack;
-    /// `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`) restricts
-    /// the listed items to those types' priorities.
+    /// Get the executive worker queues, their pending work items, and their
+    /// worker threads (`!exqueue`). `include_stacks` adds the stack of each
+    /// worker. `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`)
+    /// limits the listed items to the priorities of those types.
     #[pyo3(signature = (include_stacks=false, queue_types=None))]
     fn work_queues<'py>(
         &self,
@@ -460,7 +469,8 @@ impl Inspect {
         })
     }
 
-    /// Read bounded kernel timer-table entries and their DPCs (`!timer`).
+    /// Read the kernel timer-table entries, up to a limit, and their DPCs
+    /// (`!timer`).
     fn timers<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, sched::TimerTable>> {
         self.typed(py, |session| {
             let detail = session.target.timer_list().map_err(err)?;
@@ -483,7 +493,8 @@ impl Inspect {
         })
     }
 
-    /// Decode kernel and user APC queues for all threads, a process, or a thread (`!apc`).
+    /// Decode the kernel and user APC queues of all threads, of a process, or
+    /// of a thread (`!apc`).
     #[pyo3(signature = (target=None))]
     fn apcs<'py>(
         &self,
@@ -512,7 +523,8 @@ impl Inspect {
         })
     }
 
-    /// Report thread states, wait reasons, and bounded stacks (`!stacks`).
+    /// Get the thread states, wait reasons, and stacks, up to a limit
+    /// (`!stacks`).
     #[pyo3(signature = (level=0, filter=None))]
     fn stacks<'py>(
         &self,
@@ -526,10 +538,10 @@ impl Inspect {
         })
     }
 
-    /// List the threads whose stack has a frame matching a symbol or module
-    /// (`!findstack`): `module!prefix`, a bare module or function prefix, or
-    /// globs with `*`/`?`. `level` 0 counts the matching frames, 1 lists
-    /// them, 2 adds the whole stack.
+    /// List the threads that have a stack frame that matches a symbol or module
+    /// (`!findstack`). The pattern is `module!prefix`, a module or function
+    /// prefix alone, or a glob with `*`/`?`. `level` 0 counts the matching
+    /// frames, 1 lists them, and 2 adds the full stack.
     #[pyo3(signature = (symbol, level=1))]
     fn findstack<'py>(
         &self,
@@ -543,8 +555,9 @@ impl Inspect {
         })
     }
 
-    /// Group threads by identical call stacks, one process's or, by
-    /// default, every thread's (`!uniqstack`).
+    /// Group threads by identical call stacks (`!uniqstack`). By default, the
+    /// function uses all threads. `process` limits it to the threads of one
+    /// process.
     #[pyo3(signature = (process=None))]
     fn uniqstack<'py>(
         &self,
@@ -569,7 +582,8 @@ impl Inspect {
         })
     }
 
-    /// Decode a process PEB and its parameters and loader-list heads (`!peb`).
+    /// Decode the PEB of a process, with its parameters and loader-list heads
+    /// (`!peb`).
     #[pyo3(signature = (process, address=None))]
     fn peb<'py>(
         &self,
@@ -591,7 +605,7 @@ impl Inspect {
         Typed::new(py, detail)
     }
 
-    /// Decode a thread TEB and its WOW64 companion (`!teb`).
+    /// Decode the TEB of a thread and its WOW64 companion (`!teb`).
     #[pyo3(signature = (thread, address=None))]
     fn teb<'py>(
         &self,
@@ -639,7 +653,8 @@ impl Inspect {
         Ok(Device::new(owner, address))
     }
 
-    /// Decode the device stack containing a device object or devnode (`!devstack`).
+    /// Decode the device stack that contains a device object or devnode
+    /// (`!devstack`).
     fn device_stack<'py>(
         &self,
         py: Python<'py>,
@@ -705,8 +720,8 @@ impl Inspect {
         })
     }
 
-    /// Decode a section's `_CONTROL_AREA`, its segment, and its subsections
-    /// (`!ca`).
+    /// Decode the `_CONTROL_AREA` of a section, with its segment and its
+    /// subsections (`!ca`).
     fn control_area<'py>(
         &self,
         py: Python<'py>,
@@ -729,8 +744,8 @@ impl Inspect {
         })
     }
 
-    /// The cache manager's mapped views per file, from its VACB arrays
-    /// (`!filecache`).
+    /// Get the mapped views of the cache manager for each file, from its VACB
+    /// arrays (`!filecache`).
     fn file_cache<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FileCache>> {
         self.typed(py, |session| {
             let detail = session.target.file_cache().map_err(err)?;
@@ -738,7 +753,7 @@ impl Inspect {
         })
     }
 
-    /// The registered minifilters of each filter manager frame, with their
+    /// Get the registered minifilters of each filter manager frame, with their
     /// instances (`!fltkd.filters`).
     fn flt_filters<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FltFilters>> {
         self.typed(py, |session| {
@@ -747,9 +762,9 @@ impl Inspect {
         })
     }
 
-    /// Minifilter instances with their filter and volume, all or those of
-    /// one filter named by name or `_FLT_FILTER` address
-    /// (`!fltkd.instances`).
+    /// Get minifilter instances with their filter and volume
+    /// (`!fltkd.instances`). The result has all instances, or the instances of
+    /// one filter. Specify the filter by name or by `_FLT_FILTER` address.
     #[pyo3(signature = (filter=None))]
     fn flt_instances<'py>(
         &self,
@@ -774,7 +789,7 @@ impl Inspect {
         })
     }
 
-    /// The volumes of each filter manager frame, with the instances on them
+    /// Get the volumes of each filter manager frame, with the instances on them
     /// (`!fltkd.volumes`).
     fn flt_volumes<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FltVolumes>> {
         self.typed(py, |session| {
@@ -783,8 +798,8 @@ impl Inspect {
         })
     }
 
-    /// The KMDF client drivers on `Wdf01000!FxLibraryGlobals`'s driver
-    /// list (`!wdfkd.wdfldr`).
+    /// Get the KMDF client drivers on the driver list of
+    /// `Wdf01000!FxLibraryGlobals` (`!wdfkd.wdfldr`).
     fn wdf_loader<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::wdf::WdfLoader>> {
         self.typed(py, |session| {
             let detail = session.target.wdf_loader().map_err(err)?;
@@ -792,9 +807,10 @@ impl Inspect {
         })
     }
 
-    /// A KMDF client driver, named as `wdf_loader` lists it (without case,
-    /// `.sys` optional), and its device objects with the WDFDEVICEs behind
-    /// them (`!wdfkd.wdfdriverinfo`).
+    /// Get a KMDF client driver and its device objects, with the WDFDEVICEs
+    /// behind them (`!wdfkd.wdfdriverinfo`). Use the driver name that
+    /// `wdf_loader` shows. The name is not case-sensitive, and `.sys` is
+    /// optional.
     fn wdf_driver_info<'py>(
         &self,
         py: Python<'py>,
@@ -806,8 +822,9 @@ impl Inspect {
         })
     }
 
-    /// Decode a WDF handle and the object it names; a value that is not a
-    /// live KMDF object's handle raises (`!wdfkd.wdfhandle`).
+    /// Decode a WDF handle and the object that it identifies
+    /// (`!wdfkd.wdfhandle`). If the value is not the handle of a live KMDF
+    /// object, the function raises an exception.
     fn wdf_handle<'py>(
         &self,
         py: Python<'py>,
@@ -819,7 +836,7 @@ impl Inspect {
         })
     }
 
-    /// A WDFDEVICE's device objects, state machines, and queues
+    /// Get the device objects, state machines, and queues of a WDFDEVICE
     /// (`!wdfkd.wdfdevice`).
     fn wdf_device<'py>(
         &self,
@@ -832,7 +849,7 @@ impl Inspect {
         })
     }
 
-    /// A WDFQUEUE's configuration, state, callbacks, and requests
+    /// Get the configuration, state, callbacks, and requests of a WDFQUEUE
     /// (`!wdfkd.wdfqueue`).
     fn wdf_queue<'py>(
         &self,
@@ -845,9 +862,9 @@ impl Inspect {
         })
     }
 
-    /// A KMDF client driver's In-Flight Recorder log, oldest record first,
-    /// each record formatted from its TMF message when a loaded PDB declares
-    /// it (`!wdfkd.wdflogdump`).
+    /// Get the In-Flight Recorder log of a KMDF client driver, oldest record
+    /// first (`!wdfkd.wdflogdump`). If a loaded PDB declares the TMF message of
+    /// a record, the function formats the record from that message.
     fn wdf_log<'py>(
         &self,
         py: Python<'py>,
@@ -859,7 +876,7 @@ impl Inspect {
         })
     }
 
-    /// Report system memory, pool, PTE, and page-file counters (`!vm`).
+    /// Get the system memory, pool, PTE, and page-file counters (`!vm`).
     #[pyo3(signature = (include_processes=true))]
     fn vm<'py>(
         &self,
@@ -891,7 +908,8 @@ impl Inspect {
         })
     }
 
-    /// Decode the pool page or big-pool allocation containing `address` (`!pool`).
+    /// Decode the pool page or big-pool allocation that contains `address`
+    /// (`!pool`).
     fn pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, mm::PoolPage>> {
         self.typed(py, |session| {
             let detail = session
@@ -902,8 +920,8 @@ impl Inspect {
         })
     }
 
-    /// Check the block headers of the pool page containing `address` and
-    /// report the first inconsistency (`!poolval`).
+    /// Check the block headers of the pool page that contains `address`, and
+    /// return the first inconsistency (`!poolval`).
     fn pool_validate<'py>(
         &self,
         py: Python<'py>,
@@ -918,7 +936,7 @@ impl Inspect {
         })
     }
 
-    /// Aggregate pool tracker usage by tag (`!poolused`).
+    /// Add up pool tracker usage by tag (`!poolused`).
     #[pyo3(signature = (tag=None, *, sort="tag", include_counts=false))]
     fn pool_usage<'py>(
         &self,
@@ -946,7 +964,8 @@ impl Inspect {
         })
     }
 
-    /// Find pool allocations by tag, optionally restricted to a pool type (`!poolfind`).
+    /// Find pool allocations by tag (`!poolfind`). You can limit the search to
+    /// one pool type.
     #[pyo3(signature = (tag, pool_type=None))]
     fn pool_find<'py>(
         &self,
@@ -994,7 +1013,8 @@ impl Inspect {
     }
 
     /// Decode an `_MDL` and the page frames after its header (`!mdl`).
-    /// `pfn_count` overrides the count `ByteCount` spans from `ByteOffset`.
+    /// `pfn_count` replaces the page count that `ByteCount` spans from
+    /// `ByteOffset`.
     #[pyo3(signature = (address, pfn_count=None))]
     fn mdl<'py>(
         &self,
@@ -1011,8 +1031,9 @@ impl Inspect {
         })
     }
 
-    /// Report system PTE usage from each `_MI_SYSTEM_PTE_TYPE` bitmap
-    /// allocator (`!sysptes`); `free_runs` lists each allocator's free blocks.
+    /// Get the system PTE usage from each `_MI_SYSTEM_PTE_TYPE` bitmap
+    /// allocator (`!sysptes`). `free_runs` lists the free blocks of each
+    /// allocator.
     #[pyo3(signature = (free_runs=false))]
     fn system_ptes<'py>(
         &self,
@@ -1028,7 +1049,8 @@ impl Inspect {
         })
     }
 
-    /// Decode a security descriptor, including owner/group SIDs and ACLs (`!sd`).
+    /// Decode a security descriptor, with its owner and group SIDs and its ACLs
+    /// (`!sd`).
     #[pyo3(signature = (address, annotate_well_known=false))]
     fn security_descriptor<'py>(
         &self,
@@ -1053,7 +1075,8 @@ impl Inspect {
         })
     }
 
-    /// Decode a SID to its string form, authority, and well-known name (`!sid`).
+    /// Decode a SID into its string form, authority, and well-known name
+    /// (`!sid`).
     fn sid<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::security::Sid>> {
         self.typed(py, |session| {
             let detail = session.target.inspect_sid(VirtAddr(address)).map_err(err)?;
@@ -1061,7 +1084,8 @@ impl Inspect {
         })
     }
 
-    /// Decode the security descriptor referenced by an object's header (`!objsd`).
+    /// Decode the security descriptor that the header of an object references
+    /// (`!objsd`).
     fn object_security<'py>(
         &self,
         py: Python<'py>,
@@ -1076,7 +1100,8 @@ impl Inspect {
         })
     }
 
-    /// List sessions and their processes, optionally selecting one (`!session`).
+    /// List sessions and their processes (`!session`). You can select one
+    /// session.
     #[pyo3(signature = (session=None))]
     fn sessions<'py>(
         &self,
@@ -1097,9 +1122,9 @@ impl Inspect {
         })
     }
 
-    /// Decode one ETW trace session's `_WMI_LOGGER_CONTEXT`
-    /// (`!wmitrace.logger`). `logger` is its logger id or context address,
-    /// or its session name.
+    /// Decode the `_WMI_LOGGER_CONTEXT` of one ETW trace session
+    /// (`!wmitrace.logger`). `logger` is the logger ID, the context address, or
+    /// the session name.
     fn etw_logger<'py>(
         &self,
         py: Python<'py>,
@@ -1114,7 +1139,7 @@ impl Inspect {
         })
     }
 
-    /// List the trace buffers on an ETW trace session's GlobalList
+    /// List the trace buffers on the GlobalList of an ETW trace session
     /// (`!wmitrace.strdump logger`).
     fn etw_buffers<'py>(
         &self,
@@ -1130,10 +1155,10 @@ impl Inspect {
         })
     }
 
-    /// Decode the events still in an ETW trace session's buffers, oldest
-    /// first (`!wmitrace.logdump`); `count` keeps only the most recent.
-    /// A WPP message's `message.text` is its rendering from the TMF a loaded
-    /// PDB declares; the raw `payload` is kept either way.
+    /// Decode the events that are still in the buffers of an ETW trace session,
+    /// oldest first (`!wmitrace.logdump`). `count` keeps only the most recent
+    /// events. For a WPP message, `message.text` is the message rendered from
+    /// the TMF that a loaded PDB declares. The raw `payload` is always kept.
     #[pyo3(signature = (logger, count=None))]
     fn etw_events<'py>(
         &self,
@@ -1150,7 +1175,8 @@ impl Inspect {
         })
     }
 
-    /// Decode a PnP device node and optionally its bounded subtree (`!devnode`).
+    /// Decode a PnP device node (`!devnode`). As an option, also decode its
+    /// subtree, up to a limit.
     #[pyo3(signature = (node=None, recurse=false))]
     fn devnode<'py>(
         &self,
@@ -1167,7 +1193,7 @@ impl Inspect {
         })
     }
 
-    /// Report device nodes with PnP problems (`!pnptriage`).
+    /// Get the device nodes that have PnP problems (`!pnptriage`).
     fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::pnp::PnpTriage>> {
         self.typed(py, |session| {
             let detail = session.target.pnp_triage().map_err(err)?;
@@ -1175,7 +1201,7 @@ impl Inspect {
         })
     }
 
-    /// Report Driver Verifier configuration and statistics (`!verifier`).
+    /// Get the Driver Verifier configuration and statistics (`!verifier`).
     fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::Verifier>> {
         self.typed(py, |session| {
             let detail = session.target.verifier_status().map_err(err)?;
@@ -1183,7 +1209,8 @@ impl Inspect {
         })
     }
 
-    /// Target, kernel, symbol, processor, and debugger version information (`vertarget`).
+    /// Get the target, kernel, symbol, processor, and debugger version
+    /// information (`vertarget`).
     fn version<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetVersion>> {
         self.typed(py, |session| {
             let detail = session.target_version().map_err(err)?;
@@ -1191,7 +1218,7 @@ impl Inspect {
         })
     }
 
-    /// Report target system time and uptime (`.time`).
+    /// Get the target system time and uptime (`.time`).
     fn time<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetTime>> {
         self.typed(py, |session| {
             let detail = session.target.target_time().map_err(err)?;
@@ -1199,7 +1226,8 @@ impl Inspect {
         })
     }
 
-    /// Analyze the current bugcheck, or return `None` when the target is not bugchecking.
+    /// Analyze the current bugcheck. Return `None` if no bugcheck is in
+    /// progress on the target.
     fn bugcheck<'py>(
         &self,
         py: Python<'py>,
@@ -1212,7 +1240,7 @@ impl Inspect {
         Typed::new(py, detail)
     }
 
-    /// Build the structured one-shot crash/debug report (`!analyze`).
+    /// Make the structured one-shot crash and debug report (`!analyze`).
     fn triage<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::triage::TriageReport>> {
         self.typed(py, |session| {
             let report = TriageReport::build(session);

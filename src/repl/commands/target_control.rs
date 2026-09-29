@@ -14,7 +14,7 @@ repl_command! {
     names: [".reboot", "reboot", ".restart", "restart"],
     usage: ".reboot",
     summary: "Reboot the debug target and reload its kernel context.",
-    details: "The reboot is sent without confirmation. The next KD state-change is handled by the normal target-reload path.",
+    details: "ntoseye sends the reboot without confirmation. ntoseye handles the next KD state-change through the normal target-reload path.",
     run_state: Halted,
     run: Run,
 }
@@ -24,7 +24,7 @@ repl_command! {
     names: [".crash", "crash"],
     usage: ".crash",
     summary: "Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).",
-    details: "Windows writes its crash dump first (often a minute, during which the target ignores break-ins), then reboots or, with automatic restart disabled, breaks in. Ctrl+C stops waiting.",
+    details: "Windows first writes its crash dump. This often takes a minute, and the target ignores break-ins during this time. Then Windows reboots. If automatic restart is disabled, Windows breaks in. Ctrl+C stops the wait.",
     run_state: Halted,
     run: Run,
 }
@@ -34,7 +34,7 @@ repl_command! {
     names: [".dump", "dump"],
     usage: ".dump [/f] [/ma] <file>",
     summary: "Write a full PAGEDU64 kernel dump from the halted target.",
-    details: "Both /f and /ma are accepted as WinDbg-compatible full-dump switches. The dump is streamed page by page and can be canceled with Ctrl+C.",
+    details: ".dump accepts both /f and /ma as WinDbg-compatible full-dump switches. ntoseye writes the dump as a stream, page by page. You can cancel it with Ctrl+C.",
     completion: None,
     run_state: Halted,
 }
@@ -44,7 +44,7 @@ repl_command! {
     names: [".kdfiles"],
     usage: ".kdfiles [<map-file>] [-m <target> <host>] [-d <target>] [-c]",
     summary: "Serve driver images from host files using a driver replacement map.",
-    details: "With no arguments, show mappings and serving statistics. A path loads a WinDbg map file containing three-line records of `map`, target name, and host path. -m adds a mapping, -d removes one, -c clears the map. Target names match case-insensitively on path suffix boundaries; a bare filename matches any directory. Changes take effect on the next driver load. A rebuilt driver thus loads without being copied into the guest. See the driver replacement map guide.",
+    details: "Without arguments, .kdfiles shows the mappings and serving statistics. A path loads a WinDbg map file. The file contains three-line records: `map`, the target name, and the host path. -m adds a mapping, -d removes one, and -c clears the map. Target names match case-insensitively on path suffix boundaries. A bare filename matches any directory. Changes apply at the next driver load. So the guest loads a rebuilt driver, and you do not copy the driver into the guest. See the driver replacement map guide.",
     completion: None,
 }
 
@@ -52,14 +52,14 @@ repl_command! {
     cmd_status();
     names: ["status"],
     usage: "status",
-    summary: "Display current VM status.",
+    summary: "Show the current VM status.",
 }
 
 repl_command! {
     cmd_capabilities();
     names: ["capabilities"],
     usage: "capabilities",
-    summary: "Display backend capabilities.",
+    summary: "Show the backend capabilities.",
 }
 
 repl_command! {

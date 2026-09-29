@@ -18,8 +18,8 @@ repl_command! {
     cmd_ca;
     names: ["!ca", "ca"],
     usage: "!ca <control-area>",
-    summary: "Decode a section's control area, its segment, and its subsections.",
-    details: "Shows the section, PFN, mapped-view, and user reference counts, the _MMSECTION_FLAGS set, the backing file object and name, the segment (PTE count, size, committed pages, prototype PTEs), and each subsection (base PTE, PTE count, starting sector and sector count, protection). Subsections are read from the one after the control area along NextSubsection, bounded to 1,024 and stopping at one that names another control area. A file object's SectionObjectPointer, or a VAD's Subsection, leads to the control area.",
+    summary: "Decode the control area of a section, with its segment and subsections.",
+    details: "Shows the section, PFN, mapped-view, and user reference counts, the _MMSECTION_FLAGS that are set, and the backing file object and its name. It also shows the segment (PTE count, size, committed pages, and prototype PTEs). For each subsection, it shows the base PTE, the PTE count, the starting sector, the sector count, and the protection. The command reads the subsections along NextSubsection, from the subsection after the control area. It reads a maximum of 1,024 subsections. It stops at a subsection that points to a different control area. To find a control area, use the SectionObjectPointer of a file object or the Subsection of a VAD.",
     completion: Expression,
 }
 
@@ -28,7 +28,7 @@ repl_command! {
     names: ["!vpb", "vpb"],
     usage: "!vpb <vpb>",
     summary: "Decode a volume parameter block.",
-    details: "Shows the VPB_* flags, the mounted file system's volume device and the storage device under it (with their object names), the reference count, the serial number, and the volume label. A device object's Vpb field leads to it; an address whose Type is not IO_TYPE_VPB is refused.",
+    details: "Shows the VPB_* flags, the volume device of the mounted file system, and the storage device below it, with their object names. It also shows the reference count, the serial number, and the volume label. The Vpb field of a device object points to the VPB. If the Type at the address is not IO_TYPE_VPB, the command shows an error.",
     completion: Expression,
 }
 
@@ -36,8 +36,8 @@ repl_command! {
     cmd_filecache();
     names: ["!filecache", "filecache"],
     usage: "!filecache",
-    summary: "Show what the cache manager has mapped, per file.",
-    details: "Walks the VACB arrays (CcVacbArrays) for views in use and groups them by shared cache map: for each file its name, the 256 KB views mapped, the pages of them present in memory, the dirty pages, the file size, and the open count, most present first. The summary gives the VACBs in use and free and the bytes mapped and present. Up to 1,024 files are listed; the walk is interruptible.",
+    summary: "Show the views that the cache manager has mapped, for each file.",
+    details: "Walks the VACB arrays (CcVacbArrays) to find the views in use, and groups the views by shared cache map. For each file, the command shows its name, the mapped 256 KB views, and the pages of these views that are present in memory. It also shows the dirty pages, the file size, and the open count. The file with the most present data is first. The summary shows the VACBs in use and free, and the bytes mapped and present. The command lists a maximum of 1,024 files. You can interrupt the walk.",
 }
 
 repl_command! {
@@ -45,7 +45,7 @@ repl_command! {
     names: ["!fltkd.filters"],
     usage: "!fltkd.filters",
     summary: "List the registered minifilters and their instances.",
-    details: "Walks each filter manager frame in fltmgr!FltGlobals and its registered filters, with each filter's altitude and the instances it has attached (name and altitude), from fltmgr's own PDB types.",
+    details: "Walks each filter manager frame in fltmgr!FltGlobals and its registered filters. For each filter, the command shows its altitude and its attached instances, with their names and altitudes. The command uses the types from the PDB of fltmgr.",
 }
 
 repl_command! {
@@ -53,7 +53,7 @@ repl_command! {
     names: ["!fltkd.instances"],
     usage: "!fltkd.instances [filter]",
     summary: "List minifilter instances with their filter and volume.",
-    details: "Every instance of every registered filter, or of one filter named by its name (`WdFilter`) or its _FLT_FILTER address: its name, altitude, filter, and the volume it is attached to.",
+    details: "Lists each instance of each registered filter. To list the instances of one filter, give its name (`WdFilter`) or its _FLT_FILTER address. For each instance, the command shows its name, altitude, filter, and the volume that it is attached to.",
     completion: Expression,
 }
 
@@ -61,8 +61,8 @@ repl_command! {
     cmd_fltkd_volumes();
     names: ["!fltkd.volumes"],
     usage: "!fltkd.volumes",
-    summary: "List the volumes the filter manager is attached to and the instances on them.",
-    details: "Walks each filter manager frame's attached volumes: the volume's device name, file-system type, and the instances attached to it (name and altitude).",
+    summary: "List the volumes that the filter manager is attached to, with their instances.",
+    details: "Walks the attached volumes of each filter manager frame. For each volume, the command shows the device name, the file-system type, and the attached instances with their names and altitudes.",
 }
 
 fn print_control_area(detail: &ControlAreaDetail) {

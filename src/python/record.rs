@@ -43,9 +43,9 @@ impl<'py> IntoPyObject<'py> for PlainDict<'py> {
     }
 }
 
-/// An immutable, ordered set of named fields with dict access: the base of
-/// `Record` and of every typed result class (`PciFunction`, ...), whose
-/// properties type each field.
+/// An immutable, ordered set of named fields with dict access. It is the base
+/// of `Record` and of all typed result classes (`PciFunction`, ...). The
+/// properties of these classes give the type of each field.
 #[pyclass(module = "ntoseye", frozen, subclass)]
 pub struct BaseRecord {
     fields: Py<PyDict>,
@@ -158,7 +158,7 @@ impl BaseRecord {
             .collect()
     }
 
-    /// The field, or `default` when the record has no such field.
+    /// The field, or `default` if the record has no field with that name.
     #[pyo3(signature = (key, default=None))]
     fn get<'py>(
         &self,
@@ -174,8 +174,8 @@ impl BaseRecord {
             .unwrap_or_else(|| py.None().into_bound(py)))
     }
 
-    /// A plain nested `dict` (records and diagnostics converted throughout),
-    /// the shape the MCP `format=json` surface returns.
+    /// A plain nested `dict`, with all records and diagnostics converted. This
+    /// is the shape that the MCP `format=json` surface returns.
     pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let dict = PyDict::new(py);
         for (key, value) in self.fields.bind(py).iter() {

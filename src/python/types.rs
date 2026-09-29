@@ -49,7 +49,7 @@ fn pointer_width(name: &str, width: u64) -> PyResult<usize> {
     Ok(width)
 }
 
-/// PDB types scoped to an address space: `dbg.types`, `proc.types`.
+/// PDB types for one address space: `dbg.types`, `proc.types`.
 #[pyclass(module = "ntoseye")]
 pub struct Types {
     pub owner: Owner,
@@ -95,12 +95,13 @@ enum Definition {
 
 #[pymethods]
 impl Types {
-    /// Resolve a struct, union, or enum by PDB name; unknown names raise `KeyError`.
+    /// Resolve a struct, union, or enum by PDB name. An unknown name raises
+    /// `KeyError`.
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<Type> {
         self.lookup(py, name)?.map_err(PyKeyError::new_err)
     }
 
-    /// Return the named type, or `None` when it does not resolve.
+    /// Return the named type, or `None` if the name does not resolve.
     fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<Type>> {
         Ok(self.lookup(py, name)?.ok())
     }
@@ -124,7 +125,7 @@ impl Types {
     }
 }
 
-/// A named PDB struct/union layout or enum definition.
+/// A named PDB struct or union layout, or an enum definition.
 #[pyclass(module = "ntoseye")]
 pub struct Type {
     owner: Owner,
@@ -167,13 +168,14 @@ impl Type {
 
 #[pymethods]
 impl Type {
-    /// PDB type name (for example, `_EPROCESS`).
+    /// The PDB type name (for example, `_EPROCESS`).
     #[getter]
     fn name(&self) -> &str {
         &self.name
     }
 
-    /// Size in bytes, including the underlying storage width for enums.
+    /// The size in bytes. For an enum, this is the width of the underlying
+    /// storage.
     #[getter]
     fn size(&self) -> u64 {
         match &self.definition {
@@ -182,7 +184,7 @@ impl Type {
         }
     }
 
-    /// Field layouts by name, in offset order. Enums have no fields.
+    /// Field layouts by name, in offset order. An enum has no fields.
     #[getter]
     fn fields<'py>(
         &self,
@@ -194,8 +196,8 @@ impl Type {
             .collect()
     }
 
-    /// Enum members by name, in declaration order; raises for structs and
-    /// unions.
+    /// Enum members by name, in declaration order. For a struct or union, this
+    /// raises an exception.
     #[getter]
     fn values(&self) -> PyResult<IndexMap<String, i64>> {
         match &self.definition {
@@ -210,7 +212,8 @@ impl Type {
         Struct::new(py, &self.owner, self.space.clone(), &self.name, addr)
     }
 
-    /// Walk an intrusive list whose head is at `head` and whose links are `link_field`.
+    /// Walk an intrusive list. The list head is at `head`, and `link_field` is
+    /// the field that holds the links.
     fn walk(&self, py: Python<'_>, head: u64, link_field: &str) -> PyResult<Vec<Struct>> {
         self.struct_info()?;
         let addresses =
@@ -255,7 +258,8 @@ pub enum StructKey {
     Index(i64),
 }
 
-/// A PDB type bound to an address in an address space: a reflective cursor.
+/// A PDB type bound to an address in an address space. It is a reflective
+/// cursor.
 #[pyclass(module = "ntoseye")]
 pub struct Struct {
     owner: Owner,
@@ -576,7 +580,7 @@ impl Struct {
 
 #[pymethods]
 impl Struct {
-    /// Address this cursor refers to.
+    /// The address of this cursor.
     #[getter]
     fn addr(&self) -> u64 {
         self.addr
@@ -593,13 +597,14 @@ impl Struct {
         )
     }
 
-    /// Reinterpret this address as another PDB type.
+    /// Use this address as a different PDB type.
     fn cast(&self, py: Python<'_>, type_name: &str) -> PyResult<Struct> {
         Struct::new(py, &self.owner, self.space.clone(), type_name, self.addr)
     }
 
-    /// The address of field `name`, as C's `&cursor->name`: what a watchpoint
-    /// or a raw read needs. A bitfield's address is its storage unit's.
+    /// The address of field `name`, as `&cursor->name` in C. A watchpoint or a
+    /// raw read needs this address. For a bitfield, this is the address of its
+    /// storage unit.
     fn address_of(&self, name: &str) -> PyResult<u64> {
         Ok(self.field_address(lookup_field(&self.info, &self.name, name)?))
     }
@@ -648,12 +653,14 @@ impl Struct {
             .collect()
     }
 
-    /// Read one whole-struct snapshot into a dictionary; nested struct fields are omitted.
+    /// Read a snapshot of the full struct into a dictionary. Nested struct
+    /// fields are not included.
     fn read<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.read_dict(py).map(PlainDict)
     }
 
-    /// The field value, or an integer sibling cursor index (`((T*)p)[i]`).
+    /// The field value, or a sibling cursor for an integer index
+    /// (`((T*)p)[i]`).
     fn __getitem__(&self, py: Python<'_>, key: StructKey) -> PyResult<Py<PyAny>> {
         let name = match key {
             StructKey::Field(name) => name,
@@ -691,7 +698,7 @@ impl Struct {
         self.set_field(py, &name, value)
     }
 
-    /// PDB fields and the cursor's public members, for tab completion.
+    /// The PDB fields and the public members of the cursor, for tab completion.
     fn __dir__(&self) -> Vec<String> {
         let mut names: BTreeSet<String> = self.info.fields.keys().cloned().collect();
         names.extend(
@@ -732,7 +739,7 @@ impl Struct {
         self.owner.identity_hash((self.addr, &self.name, self.dtb))
     }
 
-    /// Reflective field access; missing fields raise `AttributeError`.
+    /// Reflective field access. A missing field raises `AttributeError`.
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         if name.starts_with("__") || !self.info.fields.contains_key(name) {
             return Err(PyAttributeError::new_err(format!(
@@ -743,7 +750,7 @@ impl Struct {
         self.get_field(py, name)
     }
 
-    /// `cursor.Field = value`; only actual PDB fields are assignable.
+    /// `cursor.Field = value`. You can assign only real PDB fields.
     fn __setattr__(&self, py: Python<'_>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         if !self.info.fields.contains_key(name) {
             return Err(PyAttributeError::new_err(format!(

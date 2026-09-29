@@ -77,6 +77,7 @@ typed_iterator! {
     ExceptionPolicyIterator(Py<ExceptionPolicy>)
 }
 typed_iterator! {
-    /// Iterator over names: a record's fields, a register file's registers.
+    /// Iterator over names, for example the fields of a record or the registers
+    /// of a register file.
     NameIterator(String)
 }

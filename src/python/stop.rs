@@ -31,55 +31,58 @@ pub struct StopContext {
     record: Option<ExceptionRecord>,
 }
 
-/// Why the target stopped. Every stop is one of the nested kinds; test with
-/// `isinstance(stop, Stop.Breakpoint)` or `match`. A stop is bound to the
-/// target generation it happened in.
+/// The reason why the target stopped. Each stop is one of the nested kinds.
+/// Use `isinstance(stop, Stop.Breakpoint)` or `match` to test the kind. A stop
+/// is bound to the target generation in which it occurred.
 #[pyclass(module = "ntoseye")]
 pub enum Stop {
-    /// A code breakpoint or data-watchpoint hit. `condition_error` is set when
-    /// its condition failed to evaluate; such a hit is surfaced, not skipped.
+    /// A code breakpoint or data-watchpoint hit. If the breakpoint condition
+    /// fails to evaluate, ntoseye sets `condition_error`. It then stops on the
+    /// hit and does not skip it.
     Breakpoint {
-        /// Why the breakpoint's condition failed to evaluate, if it did.
+        /// The reason why the breakpoint condition failed to evaluate, if it failed.
         condition_error: Option<String>,
         _context: Py<StopContext>,
     },
-    /// A Windows exception: `code` (NTSTATUS), whether it is the first chance,
-    /// and the faulting address.
+    /// A Windows exception. It has the `code` (NTSTATUS), the first-chance
+    /// flag, and the faulting address.
     Exception {
-        /// The exception's NTSTATUS code.
+        /// The NTSTATUS code of the exception.
         code: u32,
-        /// Whether this is the first chance (`None` when the backend does not say).
+        /// True if this is the first chance. `None` if the backend does not give
+        /// this data.
         first_chance: Option<bool>,
-        /// The faulting address, when the exception carries one.
+        /// The faulting address, if the exception has one.
         address: Option<u64>,
         _context: Py<StopContext>,
     },
-    /// A break-in (`interrupt()`), or another stop without an exception code.
+    /// A break-in (`interrupt()`), or a different stop that has no exception code.
     Interrupt { _context: Py<StopContext> },
     /// A completed step.
     Step { _context: Py<StopContext> },
-    /// A kernel image a `"ld"` filter set to `"break"` loaded
-    /// (`dbg.exceptions.set("ld:<module>", "break")`, `sxe ld`). The module
-    /// is listed, its symbols are loaded, breakpoints in it are armed, and its
-    /// entry point has not run.
+    /// A kernel image loaded, and an `"ld"` filter set to `"break"` matched it
+    /// (`dbg.exceptions.set("ld:<module>", "break")`, `sxe ld`). The module is
+    /// in the module list, and its symbols are loaded. Its breakpoints are set,
+    /// and its entry point has not run.
     ModuleLoad {
         /// The loaded kernel module.
         module: Py<Module>,
         _context: Py<StopContext>,
     },
-    /// The guest is bugchecking (BSOD); `info` is the bugcheck analysis.
+    /// The guest is in a bugcheck (BSOD). `info` is the bugcheck analysis.
     Bugcheck {
-        /// The bugcheck analysis (`!analyze`'s code, parameters, and culprit).
+        /// The bugcheck analysis: the code, the parameters, and the culprit from
+        /// `!analyze`.
         info: Option<Py<view::bugcheck::py::Bugcheck>>,
         _context: Py<StopContext>,
     },
-    /// The guest rebooted; every earlier handle is now stale. While `coherent`
-    /// is false the kernel's module list does not exist yet: kernel symbols
-    /// and breakpoints work, and `run()` lets boot continue.
+    /// The guest rebooted. All earlier handles are now stale. While `coherent`
+    /// is false, the kernel module list does not exist yet. Kernel symbols and
+    /// breakpoints work, and `run()` lets the boot continue.
     Reboot {
-        /// The new kernel's base address (moved by KASLR).
+        /// The base address of the new kernel (KASLR moves it).
         kernel_base: Option<u64>,
-        /// Whether the kernel's module list exists yet.
+        /// True if the kernel module list exists.
         coherent: bool,
         _context: Py<StopContext>,
     },
@@ -120,19 +123,19 @@ impl Stop {
 
 #[pymethods]
 impl Stop {
-    /// Instruction pointer captured at this stop.
+    /// The instruction pointer that ntoseye recorded at this stop.
     #[getter]
     fn rip(&self, py: Python<'_>) -> PyResult<Option<u64>> {
         Ok(self.check_context(py)?.rip)
     }
 
-    /// Nearest symbol captured at this stop, if one resolved.
+    /// The nearest symbol that ntoseye recorded at this stop, if one resolved.
     #[getter]
     fn symbol(&self, py: Python<'_>) -> PyResult<Option<String>> {
         Ok(self.check_context(py)?.symbol.clone())
     }
 
-    /// Windows thread executing on the stopped vCPU, if known.
+    /// The Windows thread that runs on the stopped vCPU, if known.
     #[getter]
     fn thread(&self, py: Python<'_>) -> PyResult<Option<Thread>> {
         let context = self.check_context(py)?;
@@ -142,7 +145,7 @@ impl Stop {
             .map(|info| Thread::from_owner(context.owner.clone_ref(py), info)))
     }
 
-    /// Process whose page tables were active at this stop, if known.
+    /// The process whose page tables were active at this stop, if known.
     #[getter]
     fn process(&self, py: Python<'_>) -> PyResult<Option<Process>> {
         let context = self.check_context(py)?;
@@ -152,7 +155,7 @@ impl Stop {
             .map(|info| Process::from_owner(context.owner.clone_ref(py), info)))
     }
 
-    /// Processor that stopped.
+    /// The processor that stopped.
     #[getter]
     fn cpu(&self, py: Python<'_>) -> PyResult<Cpu> {
         let context = self.check_context(py)?;
@@ -162,8 +165,9 @@ impl Stop {
         ))
     }
 
-    /// Breakpoint or watchpoint handles for this stop; empty on other kinds,
-    /// so `bp in stop.breakpoints` works on any stop.
+    /// The breakpoint or watchpoint handles for this stop. The list is empty
+    /// for other kinds of stop. So `bp in stop.breakpoints` works on all
+    /// stops.
     #[getter]
     fn breakpoints(&self, py: Python<'_>) -> PyResult<Vec<Py<Breakpoint>>> {
         let context = self.check_context(py)?;

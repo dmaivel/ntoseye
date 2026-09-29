@@ -12,8 +12,8 @@ repl_command! {
     cmd_verifier;
     names: ["!verifier", "verifier"],
     usage: "!verifier [module]",
-    summary: "Display Driver Verifier status, statistics, and verified drivers.",
-    details: "Without a module, display the verifier level with its decoded options, the aggregate (global) counters, and the configured driver list: verified drivers from ViTargetDriversAvl plus configured-but-unloaded drivers from VfSuspectDriversList. With a module, display that driver's verified-driver counters and image details: image, signing level, and load counts.",
+    summary: "Show the Driver Verifier status, statistics, and verified drivers.",
+    details: "Without a module, shows the verifier level and its decoded options, the aggregate (global) counters, and the configured driver list. The list contains the verified drivers from ViTargetDriversAvl and the configured drivers that are not loaded, from VfSuspectDriversList. With a module, shows the verified-driver counters and the image details of that driver: image, signing level, and load counts.",
 }
 
 fn diagnostic_error<T>(value: &DiagnosticValue<T>) -> Option<&str> {

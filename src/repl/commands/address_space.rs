@@ -26,8 +26,8 @@ repl_command! {
     cmd_vmmap;
     names: ["!vad", "vmmap"],
     usage: "!vad [pid|eprocess]",
-    summary: "Display a process's VAD tree (defaults to the selected process context).",
-    details: "Select a process by PID or EPROCESS expression; with no argument the current context is used (`.process /p <pid>` to select one). `vmmap [address|filter]` keeps the flat region view of the attached process, or the kernel modules when detached. VAD walks are bounded and skip unreadable entries rather than aborting the listing.",
+    summary: "Show the VAD tree of a process.",
+    details: "Select a process by PID or EPROCESS expression. With no argument, the command uses the current process context. Use `.process /p <pid>` to select a context. `vmmap [address|filter]` keeps the flat region view of the attached process. When no process is attached, `vmmap` shows the kernel modules. The VAD walk has a limit. It skips the entries that it cannot read and continues the listing.",
     completion: [Process, None],
 }
 
@@ -35,7 +35,7 @@ repl_command! {
     cmd_address;
     names: ["!address", "address"],
     usage: "!address <address-expression>",
-    summary: "Describe what an address belongs to (module+section, or VAD region).",
+    summary: "Show the module and section, or the VAD region, that an address belongs to.",
     completion: Expression,
 }
 
@@ -43,8 +43,8 @@ repl_command! {
     cmd_vprot;
     names: ["!vprot", "vprot"],
     usage: "!vprot <address>",
-    summary: "Show the region, state, protection, and type of a user address, as VirtualQuery reports them.",
-    details: "The address is looked up in the current process context (`.process /p <pid>` selects one). The VAD holding it gives AllocationBase, AllocationProtect, and Type; each page's state and protection come from its PTE, or for a page without one from the VAD (private memory) or its prototype PTE (a section view). RegionSize runs from the address's page to the first page that differs; an address in no VAD is MEM_FREE up to the next VAD. The scan is bounded to 262,144 page-table steps.",
+    summary: "Show the VirtualQuery data for a user address.",
+    details: "The command shows the region, state, protection, and type of a user address, as VirtualQuery reports them. The command looks up the address in the current process context. Use `.process /p <pid>` to select a context. The VAD that holds the address gives AllocationBase, AllocationProtect, and Type. The state and protection of each page come from its PTE. For a page without a PTE, they come from the VAD (private memory) or from its prototype PTE (a section view). RegionSize runs from the page of the address to the first page that differs. An address that is not in a VAD is MEM_FREE up to the next VAD. The scan stops after 262,144 page-table steps.",
     completion: Expression,
 }
 

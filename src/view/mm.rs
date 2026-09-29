@@ -19,7 +19,7 @@ shapes! {
     VmCounter {
         name: String,
         value: Metric<u64>,
-        /// What `value` counts: `pages`, `bytes`, or empty for a plain count.
+        /// The unit of `value`: `pages`, `bytes`, or empty for a plain count.
         unit: &'static str,
     }
 
@@ -48,31 +48,31 @@ shapes! {
         include_processes: bool,
     }
 
-    /// What `!pfn` was asked for.
+    /// The input to `!pfn`.
     PfnSelector {
         /// `pfn` or `physical_address`.
         kind: &'static str,
         value: Hex,
     }
 
-    /// A PFN's `PageLocation`: the list the page is on.
+    /// The `PageLocation` of a PFN. This is the list that holds the page.
     PageLocation {
         value: u8,
         /// The `_MMLISTS` name (`ActiveAndValid`, `StandbyPageList`, ...).
         name: &'static str,
     }
 
-    /// A PFN's `CacheAttribute`.
+    /// The `CacheAttribute` of a PFN.
     CacheAttribute {
         value: u8,
         /// The `_MI_PFN_CACHE_ATTRIBUTE` name (`MmCached`, ...).
         name: &'static str,
     }
 
-    /// A decoded `_MMPFN` record (`!pfn`). Union members the page's state
-    /// does not use are `None`: the list links unless the page is on a list,
-    /// `share_count` and `ws_index` unless it is active, `event` unless it
-    /// is in transition.
+    /// A decoded `_MMPFN` record (`!pfn`). Union members that the page state
+    /// does not use are `None`. The list links are `None` if the page is not on
+    /// a list. `share_count` and `ws_index` are `None` if the page is not
+    /// active. `event` is `None` if the page is not in transition.
     Pfn {
         selector: PfnSelector,
         /// The page frame number.
@@ -93,9 +93,9 @@ shapes! {
         ws_index: Option<Hex>,
         event: Option<Hex>,
         used_entry_count: u64,
-        /// Unavailable when this build's `_MMPFN` has no `PageColor`.
+        /// Not available if the `_MMPFN` of this build has no `PageColor`.
         page_color: Diag<u64>,
-        /// The PFN of the page table holding the page's PTE.
+        /// The PFN of the page table that holds the PTE of the page.
         pte_frame: Hex,
         page_location: PageLocation,
         modified: bool,
@@ -103,9 +103,9 @@ shapes! {
         priority: u8,
     }
 
-    /// One page-table level of a walk, its entry decoded with WinDbg-style
-    /// flags. For an entry pointing at a lower table, `writable`, `user`,
-    /// and `nx` are the restrictions it places on what lies below.
+    /// One page-table level of a walk. The entry is decoded with WinDbg-style
+    /// flags. For an entry that points to a lower table, `writable`, `user`,
+    /// and `nx` are the restrictions that the entry puts on everything below it.
     PageTableEntry {
         /// `PXE`, `PPE`, `PDE`, or `PTE`.
         level: &'static str,
@@ -116,7 +116,8 @@ shapes! {
         /// The frame the entry points at.
         pfn: Hex,
         present: bool,
-        /// Whether the entry maps a large page rather than a lower table.
+        /// Whether the entry maps a large page. Such an entry does not point to a
+        /// lower table.
         large_page: bool,
         writable: bool,
         user: bool,
@@ -125,7 +126,8 @@ shapes! {
         flags: String,
     }
 
-    /// A virtual address translated through a DTB's page tables (`!vtop`).
+    /// A virtual address that is translated through the page tables of a DTB
+    /// (`!vtop`).
     AddressTranslation {
         address: VirtAddr,
         dtb: Hex,
@@ -135,11 +137,13 @@ shapes! {
         physical: Option<Hex>,
         /// Whether a large page maps it.
         large: bool,
-        /// Whether the leaf is a transition PTE: `physical` is a frame the guest still
-        /// holds, but nothing maps it here and it cannot be written.
+        /// Whether the leaf is a transition PTE. If true, `physical` is a frame that
+        /// the guest still holds. Nothing maps the frame here, and you cannot write
+        /// to it.
         transition: bool,
-        /// Whether nothing maps the page here and `physical` is the frame its section
-        /// PTE holds (a page of a shared image or file view not yet touched).
+        /// Whether nothing maps the page here. If true, `physical` is the frame that
+        /// the section PTE of the page holds. This is a page of a shared image or
+        /// file view that the process did not touch yet.
         section: bool,
     }
 
@@ -155,9 +159,9 @@ shapes! {
         physical: Hex,
         dtb: Hex,
         mappings: Vec<PhysicalMapping>,
-        /// Page-table pages read.
+        /// The number of page-table pages that the walk read.
         table_pages: usize,
-        /// Whether the walk stopped at its bound before the end.
+        /// Whether the walk stopped at its limit before the end.
         bounded: bool,
         /// Whether an interrupt request stopped the walk.
         interrupted: bool,
@@ -167,7 +171,7 @@ shapes! {
     PoolRegion {
         name: String,
         start: VirtAddr,
-        /// End of the range (exclusive).
+        /// The end of the range (exclusive).
         end: VirtAddr,
     }
 
@@ -175,9 +179,9 @@ shapes! {
     PoolBlock {
         /// The pool header's address.
         header: VirtAddr,
-        /// The allocation's address, just past the header.
+        /// The address of the allocation, immediately after the header.
         body: VirtAddr,
-        /// Block size in bytes, header included.
+        /// The block size in bytes, with the header.
         size: u64,
         /// The previous block's size in bytes.
         previous_size: u64,
@@ -191,7 +195,7 @@ shapes! {
         marked: bool,
         /// `allocated`, `free`, or a description of what is wrong.
         state: String,
-        /// The requested address's offset into the block, when it holds it.
+        /// The offset of the requested address in the block, if the block holds it.
         target_offset: Option<Hex>,
     }
 
@@ -201,14 +205,14 @@ shapes! {
         address: VirtAddr,
         /// The requested address.
         target: VirtAddr,
-        /// Allocation size in bytes.
+        /// The allocation size in bytes.
         size: u64,
-        /// The requested address's offset into the allocation.
+        /// The offset of the requested address in the allocation.
         offset: Hex,
         tag: Hex<u32>,
         /// The tag as its four characters.
         tag_name: String,
-        /// The `PoolBigPageTable` entry's address.
+        /// The address of the `PoolBigPageTable` entry.
         entry: VirtAddr,
         /// The entry's index in `PoolBigPageTable`.
         index: u64,
@@ -224,35 +228,35 @@ shapes! {
         target: VirtAddr,
         /// The page's address.
         page: VirtAddr,
-        /// How the page is laid out: its pool kind, or why it could not be
-        /// decoded.
+        /// The layout of the page. This is its pool kind, or the reason that the
+        /// page could not be decoded.
         page_kind: String,
         /// The pool range holding the page, when known.
         region: Option<PoolRegion>,
         blocks: Vec<PoolBlock>,
-        /// Index in `blocks` of the block holding the requested address.
+        /// The index in `blocks` of the block that holds the requested address.
         target_index: Option<usize>,
-        /// The large allocation holding the address, when it is one.
+        /// The large allocation that holds the address, if the address is in one.
         big: Option<BigPoolAllocation>,
-        /// Set when the page belongs to the segment heap, whose blocks have no
+        /// Set if the page belongs to the segment heap. Segment-heap blocks have no
         /// pool headers.
         segment_heap_hint: Option<String>,
-        /// The symbol nearest the address, when one resolved.
+        /// The nearest symbol to the address, if one resolves.
         near_symbol: Option<String>,
-        /// Why no blocks were decoded, when none were.
+        /// The reason that no blocks were decoded, if none were.
         message: Option<String>,
     }
 
     /// A pool header inconsistency.
     PoolProblem {
-        /// The header it is found at.
+        /// The header where the problem is.
         header: VirtAddr,
         /// What is wrong.
         message: String,
     }
 
-    /// The blocks of the pool page holding an address, checked for header
-    /// consistency (`!poolval`).
+    /// The blocks of the pool page that holds an address, with a check of
+    /// header consistency (`!poolval`).
     PoolValidation {
         address: VirtAddr,
         /// The page's address.
@@ -268,8 +272,8 @@ shapes! {
         blocks: Vec<PoolBlock>,
     }
 
-    /// One tag's pool usage (`!poolused`), in bytes. `None` when the tracker
-    /// has no entry for that pool.
+    /// The pool usage of one tag, in bytes (`!poolused`). A value is `None` if
+    /// the tracker has no entry for that pool.
     PoolTagUsage {
         tag: Hex<u32>,
         /// The tag as its four characters.
@@ -291,21 +295,22 @@ shapes! {
         rows: Vec<PoolTagUsage>,
         /// Whether more tags matched than are listed.
         rows_truncated: bool,
-        /// How the pool tracker table read.
+        /// The read status of the pool tracker table.
         tracker_status: String,
-        /// How the big-pool table read.
+        /// The read status of the big-pool table.
         big_status: String,
         /// The sort order: `tag`, `nonpaged_bytes`, or `paged_bytes`.
         sort: &'static str,
-        /// The tag pattern rows were filtered by, if any.
+        /// The tag pattern that filters the rows, if any.
         tag_filter: Option<String>,
         /// Whether allocation and free counts were requested.
         include_counts: bool,
     }
 
-    /// A pool allocation carrying the searched tag (`!poolfind`).
+    /// A pool allocation with the search tag (`!poolfind`).
     PoolMatch {
-        /// Where it was found: a pool range scan or the big-pool table.
+        /// Where the search found the allocation: a pool range scan or the big-pool
+        /// table.
         source: String,
         address: VirtAddr,
         /// Size in bytes.
@@ -327,14 +332,14 @@ shapes! {
     PoolRangeScan {
         name: String,
         start: VirtAddr,
-        /// End of the range (exclusive).
+        /// The end of the range (exclusive).
         end: VirtAddr,
-        /// Pages the range spans, mapped or not.
+        /// The number of pages in the range, mapped or not.
         pages: u64,
-        /// Mapped pages read.
+        /// The number of mapped pages that the scan read.
         scanned_pages: u64,
-        /// The mapped page the scan stopped at, unread, when the match bound
-        /// or an interrupt ended it early.
+        /// The mapped page where the scan stopped, if the match limit or an
+        /// interrupt stopped the scan early. The scan did not read this page.
         stopped_at: Option<VirtAddr>,
     }
 
@@ -342,13 +347,13 @@ shapes! {
     PoolSearch {
         /// The searched tag.
         tag: String,
-        /// The pool the search was limited to, if any.
+        /// The pool that the search was limited to, if any.
         pool_type: Option<&'static str>,
         matches: Vec<PoolMatch>,
-        /// Matches found, including those past the listing bound.
+        /// The number of matches found, with the matches past the listing limit.
         found: usize,
         ranges: Vec<PoolRangeScan>,
-        /// How the big-pool table read, when it was searched.
+        /// The read status of the big-pool table, if the search included it.
         big_status: Option<String>,
         /// Whether more matches were found than are listed.
         truncated: bool,
@@ -366,10 +371,10 @@ shapes! {
     /// A decoded `_GENERAL_LOOKASIDE` list (`!lookaside`).
     LookasideList {
         address: VirtAddr,
-        /// Position in the list walk.
+        /// The position in the list walk.
         index: usize,
         tag: Diag<PoolTag>,
-        /// Allocation size in bytes.
+        /// The allocation size in bytes.
         size: Diag<u64>,
         depth: Diag<u64>,
         total_allocates: Diag<u64>,
@@ -388,7 +393,7 @@ shapes! {
         paged_termination: String,
         /// Whether an interrupt request stopped the walk.
         interrupted: bool,
-        /// Whether the walk stopped at its bound before the end.
+        /// Whether the walk stopped at its limit before the end.
         truncated: bool,
     }
 
@@ -397,35 +402,36 @@ shapes! {
     Mdl {
         address: VirtAddr,
         next: VirtAddr,
-        /// Bytes of header plus PFN array the allocation holds.
+        /// The size in bytes of the header and the PFN array in the allocation.
         size: u16,
         flags: Hex<u16>,
-        /// `MDL_*` names of the set `flags` bits, low bit first.
+        /// The `MDL_*` names of the set `flags` bits, low bit first.
         flag_names: Vec<&'static str>,
         process: VirtAddr,
         mapped_system_va: VirtAddr,
         start_va: VirtAddr,
         byte_count: u32,
         byte_offset: Hex<u32>,
-        /// Pages the described buffer spans.
+        /// The number of pages that the described buffer spans.
         spanned_pages: u64,
-        /// PFN slots `size` leaves after the header.
+        /// The number of PFN slots that `size` leaves after the header.
         capacity: u64,
-        /// Where the PFN array starts (just past the header).
+        /// The start of the PFN array, immediately after the header.
         pfn_array: VirtAddr,
         pfns: Vec<Hex>,
-        /// Whether fewer PFNs are listed than the buffer spans: a smaller count was
-        /// requested.
+        /// Whether the list has fewer PFNs than the buffer spans. This is true if a
+        /// smaller count was requested.
         truncated: bool,
     }
 
-    /// A run of free system PTEs: clear bits in an allocation bitmap.
+    /// A run of free system PTEs. The run is a sequence of clear bits in an
+    /// allocation bitmap.
     SystemPteRun {
-        /// Address of the run's first PTE.
+        /// The address of the first PTE in the run.
         pte: VirtAddr,
-        /// Virtual address that PTE maps, when `MmPteBase` is known.
+        /// The virtual address that this PTE maps, if `MmPteBase` is known.
         va: Option<VirtAddr>,
-        /// Length in PTEs.
+        /// The length in PTEs.
         ptes: u64,
     }
 
@@ -438,30 +444,30 @@ shapes! {
         /// The `_MI_SYSTEM_VA_TYPE` name, without the `MiVa` prefix.
         va_type: Option<String>,
         flags: Hex<u32>,
-        /// PTEs each bitmap bit covers.
+        /// The number of PTEs that each bitmap bit covers.
         ptes_per_bit: u64,
         base_pte: VirtAddr,
-        /// Virtual address `base_pte` maps; `None` without `MmPteBase`.
+        /// The virtual address that `base_pte` maps. `None` without `MmPteBase`.
         base_va: Option<VirtAddr>,
         bitmap: VirtAddr,
         bitmap_bits: u64,
-        /// `TotalSystemPtes`: PTEs made available so far.
+        /// `TotalSystemPtes`, the number of PTEs made available until now.
         total: u64,
         /// `TotalFreeSystemPtes`.
         free: u64,
         /// `total` minus `free`.
         used: u64,
         failures: u32,
-        /// Free PTEs counted from the bitmap's clear bits.
+        /// The free PTEs, counted from the clear bits of the bitmap.
         bitmap_free: u64,
-        /// Bitmap bytes that could not be read (counted as allocated).
+        /// The bitmap bytes that could not be read. These bytes count as allocated.
         unreadable_bitmap_bytes: u64,
-        /// Bits past the bound on how much of one bitmap is read; left out of
-        /// every count.
+        /// The bits past the read limit for one bitmap. No count includes these
+        /// bits.
         unscanned_bitmap_bits: u64,
         free_run_count: u64,
         largest_free_run: u64,
-        /// The free runs in address order, when listing was requested.
+        /// The free runs in address order, if the list was requested.
         free_runs: Vec<SystemPteRun>,
         free_runs_truncated: bool,
         /// Whether the kernel tracks which driver mapped each PTE (`TrackPtes`).
@@ -479,7 +485,7 @@ shapes! {
         used: u64,
     }
 
-    /// The loaded module an address lies in.
+    /// The loaded module that contains an address.
     AddressModule {
         /// The module's image name.
         name: String,
@@ -487,33 +493,33 @@ shapes! {
         base: VirtAddr,
         /// The module's image size.
         size: u32,
-        /// The address's offset from `base`.
+        /// The offset of the address from `base`.
         offset: Hex,
     }
 
     /// One VAD or kernel region (`proc.regions` items, address context).
     MemoryRegion {
-        /// First address of the region.
+        /// The first address of the region.
         start: VirtAddr,
-        /// End of the region (exclusive).
+        /// The end of the region (exclusive).
         end: VirtAddr,
         /// Size in bytes.
         size: u64,
-        /// The VAD protection value (an index into the memory manager's
-        /// protection table, not a `PAGE_*` mask), when known.
+        /// The VAD protection value, if known. The value is an index into the
+        /// protection table of the memory manager. It is not a `PAGE_*` mask.
         protection: Option<u64>,
         /// The VAD type (`_MI_VAD_TYPE`), when known.
         vad_type: Option<u64>,
         /// Whether the region is private (not shared or mapped).
         private_memory: Option<bool>,
-        /// Committed pages charged to the region.
+        /// The committed pages that are charged to the region.
         commit_charge: Option<u64>,
         /// A description: the mapped file, or the kernel region kind.
         details: Option<String>,
     }
 
-    /// What `VirtualQuery` reports for an address (`!vprot`), each
-    /// `MEM_*`/`PAGE_*` value beside its name.
+    /// The data that `VirtualQuery` reports for an address (`!vprot`). Each
+    /// `MEM_*`/`PAGE_*` value has its name next to it.
     MemoryBasicInformation {
         process: super::process::ProcessIdentity,
         address: VirtAddr,
@@ -522,8 +528,8 @@ shapes! {
         allocation_base: VirtAddr,
         allocation_protect: Hex<u32>,
         allocation_protect_name: String,
-        /// Bytes from `base_address` to the first page whose state or
-        /// protection differs, or the end of the VAD.
+        /// The number of bytes from `base_address` to the first page with a
+        /// different state or protection, or to the end of the VAD.
         region_size: Hex,
         state: Hex<u32>,
         state_name: &'static str,
@@ -533,16 +539,17 @@ shapes! {
         type_name: &'static str,
         /// The VAD node; `None` for free memory.
         vad: Option<VirtAddr>,
-        /// Whether the scan stopped at its bound or an unreadable page table before
-        /// the region ended, so `region_size` is a lower bound.
+        /// Whether the scan stopped before the end of the region. The scan stops at
+        /// its limit or at a page table that it cannot read. If true, `region_size`
+        /// is a lower bound.
         truncated: bool,
     }
 
-    /// What an address belongs to: a loaded module (and section), a process
-    /// VAD region, a kernel region, or nothing recognized.
+    /// What an address belongs to. This is a loaded module (and section), a
+    /// process VAD region, a kernel region, or nothing that ntoseye recognizes.
     AddressDescription {
         address: VirtAddr,
-        /// The address space it was looked up in.
+        /// The address space of the lookup.
         dtb: Hex,
         /// `kernel-module`, `user-image`, `kernel-region`, `private`,
         /// `mapped`, or `unknown`.
@@ -557,15 +564,15 @@ shapes! {
         region: Option<MemoryRegion>,
     }
 
-    /// A memory-search hit with symbol and location context.
+    /// A memory-search hit, with its symbol and location data.
     MemorySearchMatch {
-        /// Where the pattern matched.
+        /// The address of the match.
         address: VirtAddr,
-        /// The match's offset from the search start.
+        /// The offset of the match from the start of the search.
         offset: Hex,
-        /// The nearest symbol, if one resolved.
+        /// The nearest symbol, if one resolves.
         symbol: Option<String>,
-        /// What the address is: `kernel-module`, `user-image`,
+        /// The kind of address: `kernel-module`, `user-image`,
         /// `kernel-region`, `private`, `mapped`, `unknown`, `physical`,
         /// `vtl1`, or `foreign` (a root outside NT and VTL1).
         kind: &'static str,
@@ -579,8 +586,9 @@ shapes! {
         region: Option<MemoryRegion>,
     }
 
-    /// A full page-table walk (`!pte`): the levels reached, top down (a
-    /// large-page mapping short-circuits, so fewer levels).
+    /// A full page-table walk (`!pte`). It has the levels that the walk reached,
+    /// from the top down. A large-page mapping stops the walk early, so it has
+    /// fewer levels.
     PteWalk {
         address: VirtAddr,
         /// The address space walked.
@@ -609,7 +617,7 @@ shapes! {
         paged_pool_pages: Metric<u64>,
         nonpaged_pool_bytes: Metric<u64>,
         processes: Vec<ProcessMemoryUsage>,
-        /// Processes counted, including those past the listing bound.
+        /// The number of processes, with the processes past the listing limit.
         process_count: usize,
         /// Whether more processes exist than are listed.
         truncated: bool,

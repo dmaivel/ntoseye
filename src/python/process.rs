@@ -24,8 +24,8 @@ use crate::view;
 use crate::view::mm::py::MemoryRegion;
 use crate::view::shape::Typed;
 
-/// Running processes keyed by PID (`dbg.processes`). Iterating walks the
-/// process list afresh; `find(name)` matches image names.
+/// The running processes, with their PIDs as keys (`dbg.processes`). Each
+/// iteration reads the process list again. `find(name)` matches image names.
 #[pyclass(module = "ntoseye")]
 pub struct Processes {
     pub owner: Owner,
@@ -48,7 +48,7 @@ impl Processes {
     }
 }
 
-/// One process: identity fields plus views bound to its address space.
+/// One process. It has identity fields and views bound to its address space.
 #[pyclass(module = "ntoseye")]
 pub struct Process {
     pub owner: Owner,
@@ -99,7 +99,7 @@ struct ProcessDetails {
 
 #[pymethods]
 impl Processes {
-    /// Find a process by PID; a missing PID returns `None`.
+    /// Find a process by PID. Return `None` if the PID does not exist.
     fn get(&self, py: Python<'_>, pid: u64) -> PyResult<Option<Process>> {
         Ok(self
             .snapshot(py)?
@@ -107,7 +107,8 @@ impl Processes {
             .find(|process| process.info.pid == pid))
     }
 
-    /// Find every exact image-name match, case-insensitively.
+    /// Find all processes whose image name is an exact match. The match is not
+    /// case-sensitive.
     fn find(&self, py: Python<'_>, name: &str) -> PyResult<Vec<Process>> {
         Ok(self
             .snapshot(py)?
@@ -176,7 +177,7 @@ impl Process {
         Ok(self.info.dtb)
     }
 
-    /// The process `_PEB` cursor, or `None` when it has no PEB.
+    /// The process `_PEB` cursor, or `None` if the process has no PEB.
     #[getter]
     fn peb(&self, py: Python<'_>) -> PyResult<Option<Struct>> {
         let Some(address) = self.details(py)?.peb else {
@@ -191,7 +192,7 @@ impl Process {
         Ok(self.details(py)?.session)
     }
 
-    /// Whether this process has a WOW64 (32-bit) PEB.
+    /// True if this process has a WOW64 (32-bit) PEB.
     #[getter]
     fn wow64(&self, py: Python<'_>) -> PyResult<bool> {
         self.owner.check(py)?;
@@ -211,28 +212,28 @@ impl Process {
         )
     }
 
-    /// Virtual memory through this process's page tables.
+    /// The virtual memory, through the page tables of this process.
     #[getter]
     fn memory(&self, py: Python<'_>) -> PyResult<Memory> {
         self.owner.check(py)?;
         Ok(Memory::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// Symbols resolved in this process's address space.
+    /// The symbols, resolved in the address space of this process.
     #[getter]
     fn symbols(&self, py: Python<'_>) -> PyResult<Symbols> {
         self.owner.check(py)?;
         Ok(Symbols::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// PDB types and cursors bound to this process's address space.
+    /// The PDB types and cursors, bound to the address space of this process.
     #[getter]
     fn types(&self, py: Python<'_>) -> PyResult<Types> {
         self.owner.check(py)?;
         Ok(Types::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// Modules from this process's PEB loader lists.
+    /// The modules from the PEB loader lists of this process.
     #[getter]
     fn modules(&self, py: Python<'_>) -> PyResult<Modules> {
         self.owner.check(py)?;
@@ -242,7 +243,7 @@ impl Process {
         ))
     }
 
-    /// Windows threads owned by this process.
+    /// The Windows threads that this process owns.
     #[getter]
     fn threads(&self, py: Python<'_>) -> PyResult<Threads> {
         self.owner.check(py)?;
@@ -262,7 +263,7 @@ impl Process {
         })
     }
 
-    /// The heaps in this process's PEB.
+    /// The heaps in the PEB of this process.
     #[getter]
     fn heaps(&self, py: Python<'_>) -> PyResult<Heaps> {
         self.owner.check(py)?;
@@ -272,9 +273,9 @@ impl Process {
         })
     }
 
-    /// The region holding `address` as `VirtualQuery` reports it (`!vprot`):
-    /// base, allocation base and protection, region size, state, protection,
-    /// and type.
+    /// Get the region that contains `address`, as `VirtualQuery` reports it
+    /// (`!vprot`). The result has the base, the allocation base and
+    /// protection, the region size, the state, the protection, and the type.
     fn protection<'py>(
         &self,
         py: Python<'py>,
@@ -290,7 +291,7 @@ impl Process {
         Typed::new(py, view::mm::vprot(&detail))
     }
 
-    /// The process token and its security information.
+    /// Get the process token and its security information.
     fn token<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::security::Token>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_process_token().map_err(err)
@@ -298,7 +299,7 @@ impl Process {
         Typed::new(py, view::security::token(&detail))
     }
 
-    /// Decode a handle in this process's handle table.
+    /// Decode a handle in the handle table of this process.
     fn handle<'py>(
         &self,
         py: Python<'py>,
@@ -310,7 +311,7 @@ impl Process {
         Typed::new(py, view::object::handle_entry(&detail))
     }
 
-    /// Enumerate up to `limit` handles in this process's handle table.
+    /// List a maximum of `limit` handles in the handle table of this process.
     #[pyo3(signature = (limit=256))]
     fn handles<'py>(
         &self,
@@ -323,9 +324,10 @@ impl Process {
         Typed::new(py, view::object::handle_table(&summary))
     }
 
-    /// The stacks handle tracing recorded for this process's handles, newest
-    /// first (`!htrace`): those of `handle` when given, at most `max_traces`.
-    /// `debug_info` is `None` when tracing is off for the process.
+    /// Get the stacks that handle tracing recorded for the handles of this
+    /// process, newest first (`!htrace`). If you give `handle`, you get only
+    /// the stacks of that handle. You get a maximum of `max_traces` stacks.
+    /// `debug_info` is `None` if tracing is off for the process.
     #[pyo3(signature = (handle=None, max_traces=None))]
     fn handle_traces<'py>(
         &self,
@@ -342,7 +344,7 @@ impl Process {
         Typed::new(py, view::object::handle_traces(&detail))
     }
 
-    /// Decode kernel and user APC queues for this process (`!apc`).
+    /// Decode the kernel and user APC queues of this process (`!apc`).
     fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::sched::ApcQueues>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
@@ -352,13 +354,13 @@ impl Process {
         Typed::new(py, view::sched::apcs(&detail))
     }
 
-    /// Evaluate a debugger expression in this process's symbol scope.
+    /// Evaluate a debugger expression in the symbol scope of this process.
     fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
         symbols::eval(py, &self.owner, &self.space(), expr)
     }
 
-    /// The process's identity as a plain `dict` (`pid`, `name`, `dtb`,
-    /// `eprocess`, `wow64`), the shape MCP renders.
+    /// Get the process identity as a plain `dict` (`pid`, `name`, `dtb`,
+    /// `eprocess`, `wow64`), in the shape that MCP shows.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         view_dict(py, view::process::process(&self.info))
@@ -383,7 +385,7 @@ impl Process {
     }
 }
 
-/// A process's VAD region collection (`!vad`).
+/// The VAD regions of a process (`!vad`).
 #[pyclass(module = "ntoseye")]
 pub struct Regions {
     pub owner: Owner,
@@ -405,7 +407,7 @@ impl Regions {
 
 #[pymethods]
 impl Regions {
-    /// Find the VAD region containing `addr`, or return `None`.
+    /// Find the VAD region that contains `addr`, or return `None`.
     fn at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Option<Bound<'py, MemoryRegion>>> {
         self.snapshot(py)?
             .iter()
@@ -441,7 +443,7 @@ impl Regions {
     }
 }
 
-/// A process's PEB heap list.
+/// The PEB heap list of a process.
 #[pyclass(module = "ntoseye")]
 pub struct Heaps {
     pub owner: Owner,
@@ -473,7 +475,7 @@ struct HeapHandleInfo {
 
 #[pymethods]
 impl Heaps {
-    /// Find the heap block containing `addr` (`!heap -x`).
+    /// Find the heap block that contains `addr` (`!heap -x`).
     fn find_block<'py>(
         &self,
         py: Python<'py>,
@@ -539,7 +541,7 @@ pub struct Heap {
 
 #[pymethods]
 impl Heap {
-    /// The heap's index in the PEB list.
+    /// The index of the heap in the PEB list.
     #[getter]
     fn index(&self, py: Python<'_>) -> PyResult<usize> {
         self.owner.check(py)?;
@@ -553,7 +555,8 @@ impl Heap {
         Ok(self.address.0)
     }
 
-    /// Decode this heap (`!heap -h`); `list_entries` materializes entries.
+    /// Decode this heap (`!heap -h`). If `list_entries` is true, the result
+    /// includes the entries.
     #[pyo3(signature = (list_entries=false))]
     fn inspect<'py>(
         &self,

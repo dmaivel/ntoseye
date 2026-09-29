@@ -14,7 +14,7 @@ repl_command! {
     cmd_phys_db;
     names: ["!db"],
     usage: "!db <address> [L<count>|length|end]",
-    summary: "Display guest-physical memory as bytes.",
+    summary: "Show guest-physical memory as bytes.",
     completion: Expression,
 }
 
@@ -22,7 +22,7 @@ repl_command! {
     cmd_phys_dw;
     names: ["!dw"],
     usage: "!dw <address> [L<count>|length|end]",
-    summary: "Display guest-physical memory as words.",
+    summary: "Show guest-physical memory as words.",
     completion: Expression,
 }
 
@@ -30,7 +30,7 @@ repl_command! {
     cmd_phys_dd;
     names: ["!dd"],
     usage: "!dd <address> [L<count>|length|end]",
-    summary: "Display guest-physical memory as doublewords.",
+    summary: "Show guest-physical memory as doublewords.",
     completion: Expression,
 }
 
@@ -38,7 +38,7 @@ repl_command! {
     cmd_phys_dq;
     names: ["!dq"],
     usage: "!dq <address> [L<count>|length|end]",
-    summary: "Display guest-physical memory as quadwords.",
+    summary: "Show guest-physical memory as quadwords.",
     completion: Expression,
 }
 
@@ -71,7 +71,7 @@ repl_command! {
     names: ["!search"],
     usage: "!search <value> [delta [start-pfn [end-pfn]]]",
     summary: "Search guest-physical memory for a pointer-sized value.",
-    details: "Every pointer-aligned quadword in the PFN range (default: all RAM) is compared, and listed when it equals the value or, with no delta, is one bit off it; with a delta, when it lies within delta of the value or is one bit off value - delta, as WinDbg's !search does. Each hit shows its PFN, offset, the value, and, from the PFN database, the PTE mapping the page and the virtual address that PTE maps (blank when the PTE is not in the self-map). Unreadable pages are skipped and counted, and the search stops after 4096 hits or at Ctrl+C.",
+    details: "The command compares each pointer-aligned quadword in the PFN range. The default range is all RAM. With no delta, the command lists a quadword if it equals the value or differs from it by one bit. With a delta, it lists a quadword if it is within delta of the value or differs from value - delta by one bit. WinDbg's !search uses the same rules. Each hit shows its PFN, its offset, and the value. From the PFN database, it also shows the PTE that maps the page and the virtual address that this PTE maps. The virtual address is blank when the PTE is not in the self-map. The command skips and counts the pages that it cannot read. The search stops after 4096 hits or when you press Ctrl+C.",
     completion: Expression,
 }
 

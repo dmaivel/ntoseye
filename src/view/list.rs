@@ -6,14 +6,16 @@ use crate::target::ListTermination;
 use crate::types::VirtAddr;
 
 shapes! {
-    /// How a guest linked-list walk ended.
+    /// The end condition of a guest linked-list walk.
     ListEnd {
-        /// `head` (back at the list head), `null`, `cycle` (a loop not
-        /// through the head), `bound` (the walk's limit), or `corrupt`.
+        /// `head` (the walk came back to the list head), `null`, `cycle` (a
+        /// loop that does not go through the head), `bound` (the walk reached
+        /// its limit), or `corrupt`.
         kind: &'static str,
-        /// Where a cycle closed.
+        /// The address where a cycle closed.
         address: Option<VirtAddr>,
-        /// What was wrong, for a corrupt (or, in some walks, null) link.
+        /// The problem with a corrupt link. Some walks also set this for a null
+        /// link.
         error: Option<String>,
     }
 }

@@ -48,8 +48,8 @@ repl_command! {
     cmd_pagein;
     names: [".pagein"],
     usage: ".pagein [/p <pid|eprocess>] <address>",
-    summary: "Make a paged-out address resident, using the guest's debugger worker.",
-    details: "The guest does the work, so the target is resumed and comes back halted at nt!DbgBreakPointWithStatus rather than where it was. `/p` attaches the worker to a process first, which user-space addresses need.",
+    summary: "Make a paged-out address resident with the debugger worker in the guest.",
+    details: "The guest does the work. So ntoseye resumes the target, and the target halts again at nt!DbgBreakPointWithStatus. It does not halt again at its earlier location. `/p` attaches the worker to a process first. User-space addresses need this.",
     completion: [None, Expression],
     run_state: Halted,
 }
@@ -58,7 +58,7 @@ repl_command! {
     cmd_db;
     names: ["db"],
     usage: "db <address> [L<count>|length|end]",
-    summary: "Display memory as bytes.",
+    summary: "Show memory as bytes.",
     completion: Expression,
 }
 
@@ -66,7 +66,7 @@ repl_command! {
     cmd_dw;
     names: ["dw"],
     usage: "dw <address> [L<count>|length|end]",
-    summary: "Display memory as words (2 bytes).",
+    summary: "Show memory as words (2 bytes).",
     completion: Expression,
 }
 
@@ -74,7 +74,7 @@ repl_command! {
     cmd_dw_ascii;
     names: ["dW"],
     usage: "dW <address> [L<count>|length|end]",
-    summary: "Display memory as words with an ASCII column.",
+    summary: "Show memory as words with an ASCII column.",
     completion: Expression,
 }
 
@@ -82,7 +82,7 @@ repl_command! {
     cmd_dc;
     names: ["dc"],
     usage: "dc <address> [L<count>|length|end]",
-    summary: "Display memory as doublewords with an ASCII column.",
+    summary: "Show memory as doublewords with an ASCII column.",
     completion: Expression,
 }
 
@@ -90,7 +90,7 @@ repl_command! {
     cmd_dd;
     names: ["dd"],
     usage: "dd <address> [L<count>|length|end]",
-    summary: "Display memory as doublewords (4 bytes).",
+    summary: "Show memory as doublewords (4 bytes).",
     completion: Expression,
 }
 
@@ -98,7 +98,7 @@ repl_command! {
     cmd_dq;
     names: ["dq"],
     usage: "dq <address> [L<count>|length|end]",
-    summary: "Display memory as quadwords (8 bytes).",
+    summary: "Show memory as quadwords (8 bytes).",
     completion: Expression,
 }
 
@@ -106,7 +106,7 @@ repl_command! {
     cmd_dp;
     names: ["dp"],
     usage: "dp <address> [L<count>|length|end]",
-    summary: "Display memory as pointer-sized values.",
+    summary: "Show memory as pointer-sized values.",
     completion: Expression,
 }
 
@@ -114,7 +114,7 @@ repl_command! {
     cmd_dds;
     names: ["dds"],
     usage: "dds <address> [L<count>|length|end]",
-    summary: "Display memory as doublewords, annotating values that resolve to symbols.",
+    summary: "Show memory as doublewords, and the symbol of each value that resolves to one.",
     completion: Expression,
 }
 
@@ -122,8 +122,8 @@ repl_command! {
     cmd_dqs;
     names: ["dqs", "dps"],
     usage: "dqs <address> [L<count>|length|end]",
-    summary: "Display memory as quadwords, annotating values that resolve to symbols.",
-    details: "raw stack triage: dqs @rsp scrapes return addresses when the unwinder can't",
+    summary: "Show memory as quadwords, and the symbol of each value that resolves to one.",
+    details: "Use it for raw stack triage. If the unwinder cannot find the return addresses, dqs @rsp finds them in the raw stack.",
     completion: Expression,
 }
 
@@ -131,7 +131,7 @@ repl_command! {
     cmd_dyb;
     names: ["dyb"],
     usage: "dyb <address> [L<count>|length|end]",
-    summary: "Display memory as binary values with their bytes.",
+    summary: "Show memory as binary values with their bytes.",
     completion: Expression,
 }
 
@@ -139,8 +139,8 @@ repl_command! {
     cmd_dpp;
     names: ["dpp", "dqp", "ddp", "dqa", "dpa", "dda", "dqu", "dpu", "ddu"],
     usage: "dpp|ddp|dqa|dda|dqu|ddu <address> [L<count>|length|end]",
-    summary: "Display pointers, each followed by the value (d*p), ASCII string (d*a), or UTF-16 string (d*u) it points to.",
-    details: "dd* reads doubleword pointers; dq* and its dp* aliases read quadwords. d*p annotates symbols.",
+    summary: "Show pointers and the data that each pointer points to.",
+    details: "After each pointer, d*p shows the value, d*a shows the ASCII string, and d*u shows the UTF-16 string at that pointer. dd* reads doubleword pointers. dq* and its dp* aliases read quadwords. d*p also shows symbols.",
     completion: Expression,
 }
 
@@ -148,7 +148,7 @@ repl_command! {
     cmd_df;
     names: ["df", "dD"],
     usage: "df|dD <address> [L<count>|length|end]",
-    summary: "Display memory as single-precision (df, 4-byte) or double-precision (dD, 8-byte) floating-point numbers.",
+    summary: "Show memory as single-precision (df, 4-byte) or double-precision (dD, 8-byte) floating-point numbers.",
     completion: Expression,
 }
 
@@ -156,7 +156,7 @@ repl_command! {
     cmd_da;
     names: ["da"],
     usage: "da <address> [max-chars]",
-    summary: "Display a NUL-terminated ASCII string.",
+    summary: "Show a NUL-terminated ASCII string.",
     completion: Expression,
 }
 
@@ -164,7 +164,7 @@ repl_command! {
     cmd_du;
     names: ["du"],
     usage: "du <address> [max-chars]",
-    summary: "Display a NUL-terminated UTF-16 string (e.g. a UNICODE_STRING Buffer).",
+    summary: "Show a NUL-terminated UTF-16 string (for example, a UNICODE_STRING Buffer).",
     completion: Expression,
 }
 
@@ -172,7 +172,7 @@ repl_command! {
     cmd_ds;
     names: ["ds"],
     usage: "ds <address>",
-    summary: "Display an ANSI_STRING descriptor and its buffer.",
+    summary: "Show an ANSI_STRING descriptor and its buffer.",
     completion: [Expression, None],
 }
 
@@ -180,7 +180,7 @@ repl_command! {
     cmd_ds_unicode;
     names: ["dS"],
     usage: "dS <address>",
-    summary: "Display a UNICODE_STRING descriptor and its buffer.",
+    summary: "Show a UNICODE_STRING descriptor and its buffer.",
     completion: [Expression, None],
 }
 
@@ -189,7 +189,7 @@ repl_command! {
     names: ["u", "disasm"],
     usage: "u <address> [L<count>|length|end]",
     summary: "Disassemble memory at a symbol or address.",
-    details: "`L<count>` counts instructions (default 8); with an end address, every instruction starting at or before it is shown.",
+    details: "`L<count>` sets the number of instructions. The default is 8. If you give an end address, the command shows all instructions that start at or before that address.",
     completion: Expression,
 }
 
@@ -197,7 +197,7 @@ repl_command! {
     cmd_uf;
     names: ["uf"],
     usage: "uf [address]",
-    summary: "Disassemble the function containing an address.",
+    summary: "Disassemble the function that contains an address.",
     completion: Expression,
 }
 
@@ -205,7 +205,7 @@ repl_command! {
     cmd_ub;
     names: ["ub"],
     usage: "ub <address> [L<count>]",
-    summary: "Disassemble instructions ending at an address.",
+    summary: "Disassemble the instructions that end at an address.",
     completion: Expression,
 }
 
@@ -213,8 +213,8 @@ repl_command! {
     cmd_disasm_search;
     names: ["#"],
     usage: "# [pattern] [address [L<count>]]",
-    summary: "Search disassembly for the next instruction matching a pattern.",
-    details: "The pattern matches anywhere in an instruction's address, bytes, or text (mnemonic, operands, and resolved symbol), case-insensitively, with `*` and `?` wildcards; quote it to include spaces (`# \"mov*cr3\" nt!KiSwapContext`). The first match is shown. Without an address the search continues after the last match (the first search starts at the instruction pointer), and without a pattern the last one is reused, so a bare `#` finds the next occurrence. `L<count>` bounds the instructions searched; otherwise the search runs until a match, an unreadable page, 1,048,576 instructions, or Ctrl+C.",
+    summary: "Search the disassembly for the next instruction that matches a pattern.",
+    details: "The pattern can match any part of the address, bytes, or text of an instruction. The text is the mnemonic, the operands, and the resolved symbol. The match is not case-sensitive, and you can use `*` and `?` wildcards. To include spaces, put the pattern in quotes (`# \"mov*cr3\" nt!KiSwapContext`). The command shows the first match. If you do not give an address, the search continues after the last match. The first search starts at the instruction pointer. If you do not give a pattern, the command uses the last pattern again. So a bare `#` finds the next occurrence. `L<count>` sets the maximum number of instructions to search. Without it, the search continues until it finds a match, reaches an unreadable page, or searches 1,048,576 instructions. You can also stop it with Ctrl+C.",
     completion: [None, Expression],
 }
 
@@ -255,7 +255,7 @@ repl_command! {
     names: ["ef", "eD"],
     usage: "ef|eD <address> <number...>",
     summary: "Write single-precision (ef, 4-byte) or double-precision (eD, 8-byte) floating-point numbers to memory.",
-    details: "Numbers are decimal floating-point literals (`ef @rcx 1.5 -2 3e-4`), whatever the radix.",
+    details: "The numbers are decimal floating-point literals (`ef @rcx 1.5 -2 3e-4`). The radix setting does not change this.",
     completion: Expression,
 }
 
@@ -311,7 +311,7 @@ repl_command! {
     cmd_formats;
     names: [".formats"],
     usage: ".formats <expression>",
-    summary: "Display an expression in common numeric formats.",
+    summary: "Show an expression in common numeric formats.",
     completion: Expression,
     style: ExpressionTail,
 }
@@ -321,7 +321,7 @@ repl_command! {
     names: ["f"],
     usage: "f <address> <L<count>|end> <pattern>",
     summary: "Fill memory with a repeated byte pattern.",
-    details: "The pattern is bytes, as `s` takes them: `90`, `48 89 5c`, `48895c`, or `\\x48\\x89`, repeated to fill the range (`f @rsp L20 cc`).",
+    details: "The pattern is bytes, in the same format as for `s`: `90`, `48 89 5c`, `48895c`, or `\\x48\\x89`. The command repeats the pattern to fill the range (`f @rsp L20 cc`).",
     completion: [Expression, Expression, None],
 }
 
@@ -330,7 +330,7 @@ repl_command! {
     names: ["s"],
     usage: "s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>",
     summary: "Search memory for bytes, values, or a string.",
-    details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` counts elements of the searched type. Unreadable pages are skipped, at most 1 GiB is scanned, and the search stops after 4096 matches or at Ctrl+C.",
+    details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` sets the number of elements of the search type. The search skips unreadable pages and scans a maximum of 1 GiB. It stops after 4096 matches or when you press Ctrl+C.",
     completion: [None, Expression, Expression],
 }
 
@@ -339,7 +339,7 @@ repl_command! {
     names: ["c"],
     usage: "c <address> <L<count>|end> <address2>",
     summary: "Compare two memory ranges byte by byte.",
-    details: "Compares the range with as many bytes at <address2> and lists every byte that differs, as `<address> <byte> - <address2> <byte>` (`c nt L1000 poi(@$t0)`). Offsets unreadable in either range are skipped and counted, at most 1 GiB is compared, and the comparison stops after 4096 differences or at Ctrl+C.",
+    details: "The command compares the range with the same number of bytes at <address2>. It lists each byte that is different, as `<address> <byte> - <address2> <byte>` (`c nt L1000 poi(@$t0)`). If an offset is unreadable in one of the ranges, the command skips it and counts it. The command compares a maximum of 1 GiB. It stops after 4096 differences or when you press Ctrl+C.",
     completion: [Expression, Expression, Expression],
 }
 
@@ -348,7 +348,7 @@ repl_command! {
     names: ["m"],
     usage: "m <address> <L<count>|end> <destination>",
     summary: "Copy a memory range to another address.",
-    details: "The whole range is read before anything is written, so overlapping ranges copy as if through a buffer (`m @rsp L20 @rsp+8`). A breakpoint this session planted in the range is copied as the byte it displaced. At most 16 MiB is copied, and nothing is written when any byte of the range is unreadable.",
+    details: "The command reads the full range before it writes. So overlapping ranges copy as if through a buffer (`m @rsp L20 @rsp+8`). If this session set a breakpoint in the range, the command copies the original byte that the breakpoint replaced. The command copies a maximum of 16 MiB. If a byte of the range is unreadable, the command writes nothing.",
     completion: [Expression, Expression, Expression],
 }
 

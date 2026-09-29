@@ -32,36 +32,36 @@ repl_command! {
     cmd_radix;
     names: ["n"],
     usage: "n [8|10|16]",
-    summary: "Display or set the default numeric radix for REPL expressions.",
+    summary: "Show or set the default numeric radix for REPL expressions.",
 }
 
 repl_command! {
     cmd_effmach;
     names: [".effmach"],
     usage: ".effmach [x86|amd64|arm64|auto|.]",
-    summary: "Display or set the effective code machine.",
-    details: "With no argument, display the selected machine. x86, amd64, and (on an ARM64 target) arm64 make u, ub, uf, and editor disassembly decode as that instruction set wherever the code is; auto or . goes back to choosing by context and image: a WOW64 program's x86 images, and on ARM64 an emulated x64 image or the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
+    summary: "Show or set the effective code machine.",
+    details: "With no argument, shows the selected machine. x86, amd64, and arm64 (on an ARM64 target only) make u, ub, uf, and editor disassembly decode all code as that instruction set. auto or . goes back to selection by context and image. This selection covers the x86 images of a WOW64 program. On ARM64, it also covers an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
 }
 
 repl_command! {
     cmd_version();
     names: ["vertarget", "version"],
     usage: "vertarget",
-    summary: "Display target, kernel, symbol, processor, and debugger version information.",
+    summary: "Show version information for the target, kernel, symbols, processor, and debugger.",
 }
 
 repl_command! {
     cmd_time();
     names: [".time"],
     usage: ".time",
-    summary: "Display target UTC time and system uptime.",
+    summary: "Show the target UTC time and the system uptime.",
 }
 
 repl_command! {
     cmd_echo;
     names: [".echo", "echo"],
     usage: ".echo <text>",
-    summary: "Print text without expression interpretation.",
+    summary: "Print text and do not evaluate expressions in it.",
     style: ExpressionTail,
 }
 
@@ -69,15 +69,15 @@ repl_command! {
     cmd_echotime();
     names: [".echotime"],
     usage: ".echotime",
-    summary: "Print the host's current date and time, in UTC.",
+    summary: "Print the current date and time of the host in UTC.",
 }
 
 repl_command! {
     cmd_printf;
     names: [".printf"],
     usage: ".printf \"format\" [, argument]...",
-    summary: "Format debugger values using WinDbg-style printf specifiers.",
-    details: "Arguments follow the format separated by commas, as in WinDbg (`.printf \"%p %d\\n\", poi(@rcx + 8), @$t0`), or by spaces when each is one word.",
+    summary: "Format debugger values with WinDbg-style printf specifiers.",
+    details: "Put the arguments after the format and separate them with commas, as in WinDbg (`.printf \"%p %d\\n\", poi(@rcx + 8), @$t0`). If each argument is one word, you can separate them with spaces.",
     completion: Expression,
     style: ExpressionTail,
 }
@@ -86,21 +86,21 @@ repl_command! {
     cmd_cls();
     names: [".cls"],
     usage: ".cls",
-    summary: "Clear the terminal screen when stdout is a terminal.",
+    summary: "Clear the terminal screen if stdout is a terminal.",
 }
 
 repl_command! {
     cmd_logopen;
     names: [".logopen"],
     usage: ".logopen <file>",
-    summary: "Start a debugger transcript, replacing any existing file.",
+    summary: "Start a debugger transcript and replace any existing file.",
 }
 
 repl_command! {
     cmd_logappend;
     names: [".logappend"],
     usage: ".logappend <file>",
-    summary: "Start a debugger transcript, appending to the file.",
+    summary: "Start a debugger transcript and append it to the file.",
 }
 
 repl_command! {
@@ -114,7 +114,7 @@ repl_command! {
     cmd_help;
     names: [".hh", "help", ".help"],
     usage: ".hh [command]",
-    summary: "List commands or display detailed help for one command.",
+    summary: "List commands or show detailed help for one command.",
 }
 
 repl_command! {
@@ -128,8 +128,8 @@ repl_command! {
 repl_command! {
     names: ["q", "quit", "qd"],
     usage: "q",
-    summary: "Exit, removing this session's breakpoints and leaving the guest running.",
-    details: "This is WinDbg's qd (quit and detach), which is accepted too. A guest the session halted is resumed; one it cannot remove a breakpoint from is left halted instead, since resuming would leave the breakpoint to trap with no debugger.",
+    summary: "Exit, remove the breakpoints of this session, and leave the guest running.",
+    details: "This is the WinDbg qd command (quit and detach). ntoseye also accepts qd. If this session halted the guest, q resumes it. If q cannot remove a breakpoint from the guest, it leaves the guest halted. If q resumed that guest, the breakpoint could trap when there is no debugger.",
     flow: Quit,
 }
 

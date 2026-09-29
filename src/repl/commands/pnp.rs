@@ -12,8 +12,8 @@ repl_command! {
     cmd_devnode;
     names: ["!devnode", "devnode"],
     usage: "!devnode [node|0] [-r]",
-    summary: "Display a PnP device node and optionally its subtree.",
-    details: "Shows the instance path, service, state and state history, flags, problem code, and pending IRP. With no node (or 0), displays the root device node. -r and the trailing WinDbg-style 1 walk the node's subtree, one node per line.",
+    summary: "Show a PnP device node and, as an option, its subtree.",
+    details: "Shows the instance path, the service, the state and state history, the flags, the problem code, and the pending IRP of a device node. If you do not give a node, or if you give 0, the command shows the root device node. Use -r, or a trailing 1 as in WinDbg, to walk the subtree of the node. The command shows one node on each line.",
     completion: Expression,
 }
 
@@ -21,8 +21,8 @@ repl_command! {
     cmd_devstack;
     names: ["!devstack", "devstack"],
     usage: "!devstack <device-object|devnode>",
-    summary: "Display the device stack for a DEVICE_OBJECT or device node.",
-    details: "The argument may be any DEVICE_OBJECT in the stack or its DEVICE_NODE; the stack is shown from the top filter down to the PDO, each device with its !DevObj, !DrvObj, !DevExt, and object name, the argument marked `>`, followed by the PDO's device node.",
+    summary: "Show the device stack for a DEVICE_OBJECT or device node.",
+    details: "The argument can be any DEVICE_OBJECT in the stack, or the DEVICE_NODE of the stack. The command shows the stack from the top filter down to the PDO. For each device, it shows the !DevObj, !DrvObj, !DevExt, and object name. A `>` marks the argument. After the stack, the command shows the device node of the PDO.",
     completion: Expression,
 }
 
@@ -30,7 +30,7 @@ repl_command! {
     cmd_pnptriage;
     names: ["!pnptriage", "pnptriage"],
     usage: "!pnptriage",
-    summary: "Report PnP device nodes with problems, pending IRPs, or incomplete starts.",
+    summary: "Show the PnP device nodes that have problems, pending IRPs, or incomplete starts.",
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

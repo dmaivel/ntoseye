@@ -34,7 +34,7 @@ repl_command! {
     cmd_threads;
     names: ["threads"],
     usage: "threads [filter]",
-    summary: "List Windows threads, optionally filtered by process, PID, TID, or ETHREAD.",
+    summary: "List the Windows threads, with an optional filter by process, PID, TID, or ETHREAD.",
     completion: Process,
 }
 
@@ -42,8 +42,8 @@ repl_command! {
     cmd_thread;
     names: ["!thread", "thread"],
     usage: "!thread [ethread|tid] [flags] [count]",
-    summary: "Display a Windows thread and optionally its kernel stack.",
-    details: "The legacy `thread <tid> k|r [count]` forms remain available. A numeric flags value selects detail/stack output; count bounds the stack (32 frames by default, 16 for `k`); unavailable fields are shown as `-`. A running thread whose vCPU is halted in the Windows hypervisor (VBS) is shown from the VTL0 state the hypervisor saved, as `.thread` selects it. While the target runs, the thread is shown but not selected, and a thread running on a processor has no stack.",
+    summary: "Show a Windows thread and, as an option, its kernel stack.",
+    details: "You can also use the legacy `thread <tid> k|r [count]` forms. A numeric flags value selects the detail and stack output. count sets the maximum number of stack frames. The default is 32 frames, or 16 for `k`. The command shows `-` for a field that is not available. If the vCPU of a running thread is halted in the Windows hypervisor (VBS), the command shows the thread from the VTL0 state that the hypervisor saved. `.thread` selects the thread in the same way. While the target runs, the command shows the thread but does not select it. At that time, a thread that runs on a processor has no stack.",
     completion: [Thread, None, None],
 }
 
@@ -52,7 +52,7 @@ repl_command! {
     names: [".thread"],
     usage: ".thread [ethread|tid]",
     summary: "Switch the register and stack context to a Windows thread.",
-    details: "A running thread switches to its vCPU. When that vCPU is halted in the Windows hypervisor (VBS), the context is the VTL0 state the hypervisor saved, where NT left off, as `.vtlcxr` selects it; without it (no hv-evmcs) the vCPU's registers are the context. A thread not running is selected stack only, with its process's address space as the memory scope, so `k`, `.frame`, and `r` of a selected frame walk its saved stack, and `.trap` and `.cxr` on it read and walk that process. While the target runs (always, on the memory backend) every thread is selected stack only, and each walk reads the thread as it is then. With no argument, returns to the current vCPU's context: its registers, or where NT left off when it is halted in the Windows hypervisor.",
+    details: "For a running thread, the command switches to its vCPU. If that vCPU is halted in the Windows hypervisor (VBS), the context is the VTL0 state that the hypervisor saved, at the point where NT stopped. `.vtlcxr` selects the same state. If this state is not available (no hv-evmcs), the context is the registers of the vCPU. For a thread that is not running, the command selects the stack only. The memory scope is the address space of the thread's process. So `k`, `.frame`, and `r` of a selected frame walk the saved stack of the thread. `.trap` and `.cxr` on the thread read and walk that process. While the target runs, the command selects the stack only for all threads. On the memory backend, this is always the case. Each walk reads the thread as it is at that time. With no argument, the command goes back to the context of the current vCPU. This context is the vCPU registers or, if the vCPU is halted in the Windows hypervisor, the point where NT stopped.",
     completion: Thread,
 }
 

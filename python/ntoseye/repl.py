@@ -1,9 +1,10 @@
 """REPL command scripting helpers for ntoseye.
 
 Command scripts in `~/.ntoseye/commands/` import this module. Inside the
-REPL (the `ntoseye` command this package installs, or a build with embedded
-Python) `register_command` is the REPL's own; anywhere else it raises, so a
-command script run outside the REPL fails clearly.
+REPL (the `ntoseye` command that this package installs, or a build with
+embedded Python), `register_command` is the function of the REPL. In other
+places, it raises an exception. So a command script that runs outside the
+REPL fails with a clear error.
 """
 
 from __future__ import annotations
@@ -45,18 +46,19 @@ except ImportError:
         fn: Callable[..., Any],
         strategies: list[str] | None = None,
     ) -> None:
-        """Register a REPL command called as ``fn(dbg, *raw_args)``; ``dbg`` is
-        a borrowed ``Debugger``, valid only until the command returns."""
+        """Register a REPL command that the REPL calls as ``fn(dbg, *raw_args)``.
+        ``dbg`` is a borrowed ``Debugger``. It is valid only until the command
+        returns."""
         raise RuntimeError(
             "ntoseye.repl.register_command is only available inside the ntoseye REPL"
         )
 
 
 def command(name: str, help: str, **completions: _Completion) -> Callable[[_F], _F]:
-    """Decorator form of ``register_command``: keyword arguments bind completion
-    markers to the command's parameters by name. ``dbg`` (the first
-    parameter) is a borrowed ``Debugger``, valid only until the command
-    returns."""
+    """Decorator form of ``register_command``. Keyword arguments bind
+    completion markers to the parameters of the command by name. ``dbg`` (the
+    first parameter) is a borrowed ``Debugger``. It is valid only until the
+    command returns."""
     def deco(fn: _F) -> _F:
         params = list(inspect.signature(fn).parameters)[1:]
         strategies = []

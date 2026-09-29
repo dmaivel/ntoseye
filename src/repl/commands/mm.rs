@@ -23,8 +23,8 @@ repl_command! {
     cmd_vm;
     names: ["!vm", "vm"],
     usage: "!vm [flags]",
-    summary: "Display system memory, pool, PTE, page-file, and process usage.",
-    details: "Flags follow WinDbg: bit 0 omits per-process rows; bits 1, 2, and 3 are accepted but ignored. Counters degrade independently.",
+    summary: "Show virtual-memory statistics.",
+    details: "The command shows system memory, pool, PTE, page-file, and process usage. The flags follow WinDbg. Bit 0 omits the per-process rows. The command accepts bits 1, 2, and 3 but ignores them. If the command cannot read a counter, it still shows the other counters.",
     completion: Expression,
 }
 
@@ -33,7 +33,7 @@ repl_command! {
     names: ["!pfn", "pfn"],
     usage: "!pfn <pfn> | !pfn -a <physical-address>",
     summary: "Decode an _MMPFN entry.",
-    details: "A plain value is a page-frame number. Use -a to force physical-address mode.",
+    details: "A plain value is a page-frame number. Use -a to read the value as a physical address.",
     completion: Expression,
 }
 
@@ -42,7 +42,7 @@ repl_command! {
     names: ["!vtop", "vtop"],
     usage: "!vtop <directory-base> <virtual-address>",
     summary: "Translate a virtual address with an explicit directory base.",
-    details: "A zero directory base uses the current context. Each AMD64 page-table level and the final physical address are shown; large pages stop at their leaf level.",
+    details: "The command shows each AMD64 page-table level and the final physical address. A directory base of zero uses the current context. For a large page, the walk stops at its leaf level.",
     completion: Expression,
 }
 
@@ -50,8 +50,8 @@ repl_command! {
     cmd_ptov;
     names: ["!ptov", "ptov"],
     usage: "!ptov <physical-address>",
-    summary: "Find current-directory-base virtual mappings of a physical address.",
-    details: "The reverse page-table walk is bounded to 32 mappings and 65,536 table pages, with cycle detection.",
+    summary: "Find the virtual addresses in the current directory base that map a physical address.",
+    details: "The command walks the page tables in reverse. The walk stops after 32 mappings or 65,536 table pages. It detects cycles in the page tables.",
     completion: Expression,
 }
 
@@ -59,8 +59,8 @@ repl_command! {
     cmd_poolused;
     names: ["!poolused", "poolused"],
     usage: "!poolused [flags] [tag]",
-    summary: "Aggregate pool tracker usage by tag.",
-    details: "Aggregates across every processor's tag table. Flags follow WinDbg: bit 1 (2) sorts by nonpaged bytes, bit 2 (4) by paged bytes, and bit 0 (1) enables alloc/free columns. Tag matching is case-sensitive and supports * and ?.",
+    summary: "Show pool tracker usage by tag.",
+    details: "The command adds up the usage from the tag table of each processor. The flags follow WinDbg. Bit 1 (2) sorts by nonpaged bytes. Bit 2 (4) sorts by paged bytes. Bit 0 (1) shows the alloc/free columns. The tag match is case-sensitive and supports * and ?.",
     completion: Expression,
 }
 
@@ -69,7 +69,7 @@ repl_command! {
     names: ["!poolfind", "poolfind"],
     usage: "!poolfind <tag> [0|1]",
     summary: "Find pool blocks with a matching tag.",
-    details: "The optional type selects nonpaged (0) or paged (1). The mapped pages of the pool ranges (on Windows 10 1803 and later the fixed regions in MiState.Vs.SystemVaRegions, before that MmNonPagedPoolStart and friends) and the big-page table are read; the scan stops after 1,024 matches and is interruptible.",
+    details: "The command reads the mapped pages of the pool ranges and the big-page table. On Windows 10 1803 and later, the pool ranges are the fixed regions in MiState.Vs.SystemVaRegions. On earlier builds, they come from MmNonPagedPoolStart and related symbols. The optional type selects nonpaged (0) or paged (1) pool. The scan stops after 1,024 matches. You can interrupt the scan.",
     completion: Expression,
 }
 
@@ -78,7 +78,7 @@ repl_command! {
     names: ["!lookaside", "lookaside"],
     usage: "!lookaside [address]",
     summary: "List or decode GENERAL_LOOKASIDE caches.",
-    details: "The no-argument form walks both exported nonpaged and paged lookaside lists with cycle detection. An address decodes one entry directly.",
+    details: "With no argument, the command walks the exported nonpaged and paged lookaside lists. The walk detects cycles. With an address, the command decodes only that entry.",
     completion: Expression,
 }
 
@@ -86,7 +86,7 @@ repl_command! {
     cmd_pte;
     names: ["!pte", "pte"],
     usage: "!pte <address>",
-    summary: "Display page table entries for an address.",
+    summary: "Show the page table entries for an address.",
     completion: Expression,
 }
 
@@ -94,7 +94,7 @@ repl_command! {
     cmd_pool;
     names: ["!pool", "pool"],
     usage: "!pool <address-expression>",
-    summary: "Inspect the pool page containing an address.",
+    summary: "Show the pool page that contains an address.",
     completion: Expression,
 }
 
@@ -102,8 +102,8 @@ repl_command! {
     cmd_poolval;
     names: ["!poolval", "poolval"],
     usage: "!poolval <address> [level]",
-    summary: "Validate the block headers of the pool page containing an address.",
-    details: "Reports the page VALID or INVALID with the first inconsistency. A classic pool page must chain from its start to its end, each PreviousSize matching the BlockSize before it. Segment-heap pages (Windows 10 1903 and later) keep no PreviousSize chain, so there a block whose BlockSize runs over another block's header is the inconsistency. A classic block's PoolType must also name the pool (paged or nonpaged) the page lies in. A level of 1 or more also lists every block header. WinDbg's single-bit-error scan is not done.",
+    summary: "Check the block headers of the pool page that contains an address.",
+    details: "The command reports the page as VALID or INVALID, with the first inconsistency. The blocks of a classic pool page must make a chain from the start of the page to its end. The PreviousSize of each block must match the BlockSize of the block before it. Segment-heap pages (Windows 10 1903 and later) have no PreviousSize chain. On these pages, the inconsistency is a block whose BlockSize runs over the header of another block. The PoolType of a classic block must also identify the pool (paged or nonpaged) that holds the page. A level of 1 or more also lists all block headers. The command does not do the single-bit-error scan of WinDbg.",
     completion: Expression,
 }
 
@@ -112,7 +112,7 @@ repl_command! {
     names: ["!mdl", "mdl"],
     usage: "!mdl <address> [pfn-count]",
     summary: "Decode a memory descriptor list and the page frames it describes.",
-    details: "Shows the _MDL header (Next, Size, MdlFlags by MDL_* name, Process, MappedSystemVa, StartVa, ByteCount, ByteOffset) and the PFN array after it. The PFN count defaults to the pages ByteCount spans from ByteOffset; a pfn-count overrides it. Either is bounded by the slots Size leaves after the header. A header whose Size, ByteOffset, or span cannot describe an MDL is refused. Next is not followed; run !mdl on it for a chained MDL.",
+    details: "The command shows the _MDL header and the PFN array that follows it. The header fields are Next, Size, MdlFlags by MDL_* name, Process, MappedSystemVa, StartVa, ByteCount, and ByteOffset. By default, the PFN count is the number of pages that ByteCount spans from ByteOffset. A pfn-count overrides this value. In both cases, the count cannot be more than the slots that Size leaves after the header. If the Size, ByteOffset, or span of the header cannot describe an MDL, the command gives an error. The command does not follow Next. For a chained MDL, run !mdl on the Next address.",
     completion: Expression,
 }
 
@@ -121,7 +121,7 @@ repl_command! {
     names: ["!sysptes", "sysptes"],
     usage: "!sysptes [flags]",
     summary: "Show system PTE usage from the memory manager's bitmap allocators.",
-    details: "Windows 10 and later hand out system PTEs from _MI_SYSTEM_PTE_TYPE bitmap allocators in MiState: Vs.SystemPteInfo (the SystemPtes region) and SystemPtes' system-view, non-cached-mapping, and kernel-stack allocators. For each: the VA range it serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, PteFailures, and from its bitmap the number of free blocks and the largest; the bitmap is read whole (up to 2^27 bits, a bound only a corrupt SizeOfBitMap exceeds), and a free count that differs from the counter means the target allocated between the reads. Counts are in PTEs; the system-view bitmap covers 16 PTEs per bit. Flags follow WinDbg: 0x1 lists each free block (its first PTE, the address it maps, and its length; 256 per allocator). 0x4 (PTEs mapping locked pages) needs the kernel's TrackPtes tracking: it reports which allocators track, but the tracked mappings themselves are not listed. 0x2, 0x8, and 0x10 select Windows 2000/XP/Vista lists these allocators replaced and are ignored. A build without these allocators is refused.",
+    details: "Windows 10 and later allocate system PTEs from _MI_SYSTEM_PTE_TYPE bitmap allocators in MiState. These allocators are Vs.SystemPteInfo (the SystemPtes region) and the system-view, non-cached-mapping, and kernel-stack allocators of SystemPtes. For each allocator, the command shows the VA range that it serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, and PteFailures. From the bitmap, it also shows the number of free blocks and the largest free block. The command reads all of the bitmap, up to 2^27 bits. Only a corrupt SizeOfBitMap is larger than this limit. If the free count from the bitmap differs from the counter, the target made an allocation between the reads. All counts are in PTEs. Each bit of the system-view bitmap covers 16 PTEs. The flags follow WinDbg. 0x1 lists each free block with its first PTE, the address that it maps, and its length. It lists up to 256 free blocks for each allocator. 0x4 (PTEs that map locked pages) needs the TrackPtes tracking of the kernel. It shows which allocators track, but it does not list the tracked mappings. 0x2, 0x8, and 0x10 select Windows 2000/XP/Vista lists that these allocators replaced. The command ignores these flags. On a build without these allocators, the command gives an error.",
     completion: Expression,
 }
 

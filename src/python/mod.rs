@@ -184,14 +184,16 @@ pub fn view_dict<'py, T: ViewValue<Source = T>>(
 /// Attach to a guest and return a `Debugger`.
 ///
 /// `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
-/// `"dmp"`. `connect` is the backend target: socket path / address for
-/// kd/kdnet/gdb, or the dump file path for dmp; the per-backend default is used
-/// when omitted (except dmp, which requires a path). `key` is required for
-/// kdnet. `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
+/// `"dmp"`. `connect` is the backend target. For kd/kdnet/gdb, it is a socket
+/// path or address. For dmp, it is the dump file path. If you do not give
+/// `connect`, the function uses the default of the backend. dmp has no default
+/// and needs a path. kdnet needs `key`. `memory_source` is `auto`, `host`, or
+/// `kd` for KD/KDNET.
 ///
-/// kd/kdnet/gdb take a per-target instance lock before building the backend, so
-/// a second live attach against the same target fails fast rather than racing
-/// on the handshake the first session owns; memory/dmp are passive.
+/// For kd/kdnet/gdb, the function takes an instance lock for the target before
+/// it makes the backend. So a second live attach to the same target fails
+/// immediately. It does not interfere with the handshake that the first session
+/// owns. The memory and dmp backends are passive.
 #[pyfunction]
 #[pyo3(signature = (
     backend=AttachBackend(Some(Backend::Kd)),
@@ -231,16 +233,16 @@ fn attach(
     Ok(Debugger::owned(actor))
 }
 
-/// Decode an NTSTATUS, Win32, or HRESULT code to its name and description
-/// (`!error`). Needs no target.
+/// Decode an NTSTATUS, Win32, or HRESULT code into its name and description
+/// (`!error`). This function does not need a target.
 #[pyfunction]
 fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, view::meta::ErrorCode>> {
     Typed::new(py, view::meta::error_code(&decode_error_code(code)))
 }
 
-/// Run the `ntoseye` command line on `sys.argv` and return its exit status:
-/// the wheel's `ntoseye` script. The GIL is released for the whole session;
-/// custom commands take it back while they run.
+/// Run the `ntoseye` command line on `sys.argv` and return its exit status. The
+/// `ntoseye` script of the wheel uses this function. The function releases the
+/// GIL for the full session. Custom commands get the GIL again while they run.
 #[cfg(all(feature = "cli", feature = "python-extension"))]
 #[pyfunction]
 #[pyo3(name = "_cli_main")]
@@ -255,8 +257,8 @@ fn cli_main(py: Python<'_>) -> PyResult<i32> {
 // the views declare. Exceptions and the package re-exports live in
 // `ntoseye/__init__.py`.
 crate::view::with_shape_classes! {
-/// The ntoseye SDK's native module. Import from `ntoseye`, which re-exports
-/// all of it.
+/// The native module of the ntoseye SDK. Import from `ntoseye`, which
+/// re-exports all of it.
 #[pymodule]
 pub mod _ntoseye {
     #[pymodule_export]
@@ -294,14 +296,14 @@ pub mod _ntoseye {
     #[pymodule_export]
     use super::{attach, decode_error};
 
-    /// The ntoseye release this extension was built as.
+    /// The ntoseye release version of this extension.
     #[pymodule_export]
     #[allow(non_upper_case_globals)]
     const __version__: &str = env!("CARGO_PKG_VERSION");
 
-    /// The git commit this extension was built from (`<commit>`,
-    /// `<commit>-dirty`, or `unknown`), to detect a stale extension in a
-    /// long-lived interpreter.
+    /// The git commit of this extension build (`<commit>`, `<commit>-dirty`, or
+    /// `unknown`). Use it to find a stale extension in a long-lived
+    /// interpreter.
     #[pymodule_export]
     #[allow(non_upper_case_globals)]
     const build: &str = env!("NTOSEYE_BUILD");

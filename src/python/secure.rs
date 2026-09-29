@@ -17,8 +17,9 @@ use super::types::Types;
 use crate::guest::TrustletInfo;
 use crate::types::Dtb;
 
-/// The secure kernel (`securekernel.exe`) running in VTL1, with views bound to
-/// its system address space. Read-only: writes raise `NtoseyeError`.
+/// The secure kernel (`securekernel.exe`) that runs in VTL1. Its views use its
+/// system address space. The views are read-only, and writes raise
+/// `NtoseyeError`.
 #[pyclass(module = "ntoseye")]
 pub struct SecureKernel {
     owner: Owner,
@@ -45,7 +46,7 @@ impl SecureKernel {
 
 #[pymethods]
 impl SecureKernel {
-    /// Base address of `securekernel.exe`.
+    /// The base address of `securekernel.exe`.
     #[getter]
     fn base(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.check(py)?;
@@ -59,14 +60,15 @@ impl SecureKernel {
         Ok(self.root)
     }
 
-    /// Virtual memory through the secure kernel's system page tables.
+    /// Virtual memory, read through the system page tables of the secure
+    /// kernel.
     #[getter]
     fn memory(&self, py: Python<'_>) -> PyResult<Memory> {
         self.owner.check(py)?;
         Ok(Memory::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// Symbols of the secure kernel's modules (`securekernel!...`). NT's
+    /// The symbols of the secure kernel's modules (`securekernel!...`). NT
     /// symbols do not resolve here.
     #[getter]
     fn symbols(&self, py: Python<'_>) -> PyResult<Symbols> {
@@ -74,24 +76,26 @@ impl SecureKernel {
         Ok(Symbols::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// PDB types read through VTL1 memory. The public secure-kernel PDB
-    /// carries no types; name NT's explicitly (`nt!_LIST_ENTRY`).
+    /// PDB types, read through VTL1 memory. The public secure-kernel PDB has
+    /// no types. Give NT types with their module name (`nt!_LIST_ENTRY`).
     #[getter]
     fn types(&self, py: Python<'_>) -> PyResult<Types> {
         self.owner.check(py)?;
         Ok(Types::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// Modules the secure kernel loaded (`securekernel.exe`, `skci.dll`, ...).
+    /// The modules that the secure kernel loaded (`securekernel.exe`,
+    /// `skci.dll`, ...).
     #[getter]
     fn modules(&self, py: Python<'_>) -> PyResult<Modules> {
         self.owner.check(py)?;
         Ok(Modules::secure(self.owner.clone_ref(py), self.root))
     }
 
-    /// The secure kernel's processes (trustlets), walked afresh and validated
-    /// against the NT process list. Raises `NtoseyeError` when this build's
-    /// process layout is not recognized.
+    /// The processes (trustlets) of the secure kernel. Each access walks the
+    /// list again and validates it against the NT process list. Raises
+    /// `NtoseyeError` if ntoseye does not recognize the process layout of this
+    /// build.
     #[getter]
     fn trustlets(&self, py: Python<'_>) -> PyResult<Vec<Trustlet>> {
         let infos = self
@@ -106,8 +110,8 @@ impl SecureKernel {
             .collect())
     }
 
-    /// Evaluate a debugger expression in the secure kernel's symbol scope.
-    /// Registers are VTL0 state and are refused.
+    /// Evaluate a debugger expression in the symbol scope of the secure kernel.
+    /// Registers hold VTL0 state, and this method does not accept them.
     fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
         symbols::eval(py, &self.owner, &self.space(), expr)
     }
@@ -128,8 +132,9 @@ impl SecureKernel {
 }
 
 /// An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`.
-/// Its views read through the trustlet's own page tables, which map its user
-/// half and the secure kernel. Read-only.
+/// Its views read through the page tables of the trustlet. These page tables
+/// map the user half of the trustlet and the secure kernel. The views are
+/// read-only.
 #[pyclass(module = "ntoseye")]
 pub struct Trustlet {
     owner: Owner,
@@ -172,14 +177,14 @@ impl Trustlet {
         Ok(self.info.dtb)
     }
 
-    /// Address of the secure kernel's process object for this trustlet.
+    /// The address of the secure kernel's process object for this trustlet.
     #[getter]
     fn address(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.check(py)?;
         Ok(self.info.process.0)
     }
 
-    /// The NT process (VTL0 side), or `None` once it has exited.
+    /// The NT process (VTL0 side), or `None` after the process exits.
     #[getter]
     fn process(&self, py: Python<'_>) -> PyResult<Option<Process>> {
         let pid = self.info.pid;
@@ -194,22 +199,24 @@ impl Trustlet {
         Ok(found.map(|info| Process::from_owner(self.owner.clone_ref(py), info)))
     }
 
-    /// Virtual memory through the trustlet's page tables.
+    /// Virtual memory, read through the page tables of the trustlet.
     #[getter]
     fn memory(&self, py: Python<'_>) -> PyResult<Memory> {
         self.owner.check(py)?;
         Ok(Memory::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// The secure kernel's symbols, resolved in this trustlet's address space.
-    /// The trustlet's own user-mode modules are not enumerated.
+    /// The symbols of the secure kernel, resolved in the address space of this
+    /// trustlet. This view does not include the user-mode modules of the
+    /// trustlet.
     #[getter]
     fn symbols(&self, py: Python<'_>) -> PyResult<Symbols> {
         self.owner.check(py)?;
         Ok(Symbols::new(self.owner.clone_ref(py), self.space()))
     }
 
-    /// PDB types read through the trustlet's memory (`nt!` types by name).
+    /// PDB types, read through the memory of the trustlet (`nt!` types by
+    /// name).
     #[getter]
     fn types(&self, py: Python<'_>) -> PyResult<Types> {
         self.owner.check(py)?;
@@ -221,8 +228,8 @@ impl Trustlet {
         symbols::eval(py, &self.owner, &self.space(), expr)
     }
 
-    /// The trustlet's identity as a plain `dict` (`pid`, `name`,
-    /// `trustlet_id`, `dtb`, `address`), the shape `!trustlets` lists.
+    /// Return the identity of the trustlet as a plain `dict` (`pid`, `name`,
+    /// `trustlet_id`, `dtb`, `address`). `!trustlets` lists the same fields.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         let dict = PyDict::new(py);

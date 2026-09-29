@@ -12,22 +12,24 @@ use crate::types::VirtAddr;
 shapes! {
     /// A processor's running, next, and idle threads (`!running`).
     RunningProcessor {
-        /// Processor number.
+        /// The processor number.
         index: u16,
         kpcr: Diag<VirtAddr>,
         prcb: Diag<VirtAddr>,
-        /// The thread running on it; `None` inside when there is none.
+        /// The thread that runs on the processor. The value inside is `None` if
+        /// no thread runs.
         current_thread: Diag<Option<ThreadSummary>>,
-        /// The thread selected to run next; `None` inside when there is none.
+        /// The thread selected to run next. The value inside is `None` if there
+        /// is no next thread.
         next_thread: Diag<Option<ThreadSummary>>,
         /// The processor's idle thread.
         idle_thread: Diag<Option<ThreadSummary>>,
-        /// The running thread's first frames; `None` unless stacks were
+        /// The first frames of the running thread. `None` if stacks were not
         /// requested.
         short_stack: Option<Diag<Vec<execution::StackFrame>>>,
     }
 
-    /// Every processor's running threads (`!running`).
+    /// The running threads of all processors (`!running`).
     RunningProcessors {
         processors: Vec<RunningProcessor>,
     }
@@ -36,11 +38,11 @@ shapes! {
     ReadyThread {
         /// The `_KTHREAD` linked on the queue.
         kthread: VirtAddr,
-        /// The thread decoded.
+        /// The decoded thread.
         thread: Diag<ThreadSummary>,
     }
 
-    /// One processor's ready list for one priority.
+    /// The ready list of one processor for one priority.
     ReadyQueue {
         processor: u16,
         priority: u8,
@@ -49,22 +51,22 @@ shapes! {
         termination: ListEnd,
     }
 
-    /// A per-processor or per-queue read that failed during a scheduler walk.
+    /// A processor or queue read that failed during a scheduler walk.
     SchedulerError {
-        /// The processor it concerns, if any.
+        /// The processor of the error, if there is one.
         processor: Option<u16>,
-        /// The queue it concerns, if any.
+        /// The queue of the error, if there is one.
         queue: Option<u16>,
         message: String,
     }
 
     /// The dispatcher ready queues (`!ready`).
     ReadyQueues {
-        /// Non-empty queues.
+        /// The queues that are not empty.
         queues: Vec<ReadyQueue>,
-        /// Threads listed across `queues`.
+        /// The total number of threads in `queues`.
         total: usize,
-        /// Whether the walk stopped at its entry bound.
+        /// Whether the walk stopped at its entry limit.
         truncated: bool,
         errors: Vec<SchedulerError>,
     }
@@ -74,7 +76,7 @@ shapes! {
         address: VirtAddr,
         /// `DeferredRoutine`.
         deferred_routine: Diag<Option<VirtAddr>>,
-        /// `deferred_routine` as a symbol, when one resolves.
+        /// `deferred_routine` as a symbol, if it resolves to one.
         deferred_routine_symbol: Diag<Option<String>>,
         /// `DeferredContext`.
         context: Diag<Option<VirtAddr>>,
@@ -85,20 +87,20 @@ shapes! {
     /// One of a processor's DPC queues.
     DpcQueue {
         processor: u16,
-        /// 0 for the normal queue, 1 for the threaded one.
+        /// 0 for the normal queue, 1 for the threaded queue.
         queue: u8,
         entries: Vec<Dpc>,
         /// How the list walk ended.
         termination: ListEnd,
     }
 
-    /// Every processor's queued DPCs (`!dpcs`).
+    /// The queued DPCs of all processors (`!dpcs`).
     DpcQueues {
-        /// Non-empty queues.
+        /// The queues that are not empty.
         queues: Vec<DpcQueue>,
-        /// DPCs listed across `queues`.
+        /// The total number of DPCs in `queues`.
         total: usize,
-        /// Whether the walk stopped at its entry bound.
+        /// Whether the walk stopped at its entry limit.
         truncated: bool,
         errors: Vec<SchedulerError>,
     }
@@ -106,56 +108,58 @@ shapes! {
     /// A `_KTIMER` and its decoded DPC.
     KernelTimer {
         address: VirtAddr,
-        /// `DueTime`: the interrupt time it expires at (see
+        /// `DueTime`, the interrupt time when the timer expires (see
         /// `TargetTime.interrupt_time`).
         due_time: Diag<Hex>,
-        /// `Period` in milliseconds; 0 for a one-shot timer.
+        /// `Period` in milliseconds. 0 for a one-shot timer.
         period: Diag<u32>,
-        /// `Dpc` as stored, encoded by the kernel.
+        /// `Dpc` in the encoded form that the kernel stores.
         dpc_encoded: Diag<Option<VirtAddr>>,
-        /// The decoded `_KDPC` address; `None` inside when the timer has none.
+        /// The decoded `_KDPC` address. The value inside is `None` if the timer
+        /// has no DPC.
         dpc: Diag<Option<VirtAddr>>,
         /// The DPC's `DeferredRoutine`.
         dpc_routine: Diag<Option<VirtAddr>>,
-        /// `dpc_routine` as a symbol, when one resolves.
+        /// `dpc_routine` as a symbol, if it resolves to one.
         dpc_routine_symbol: Diag<Option<String>>,
     }
 
-    /// A timer found in a processor's timer table.
+    /// A timer in the timer table of a processor.
     TimerTableEntry {
         processor: u16,
-        /// Timer-table bucket index.
+        /// The index of the timer-table bucket.
         bucket: u16,
         timer: KernelTimer,
     }
 
-    /// A timer-table bucket whose list walk did not end back at its head.
+    /// A timer-table bucket whose list walk did not end at its head.
     TimerBucketEnd {
         processor: u16,
         bucket: u16,
         termination: ListEnd,
     }
 
-    /// Every processor's timer table (`!timer`).
+    /// The timer tables of all processors (`!timer`).
     TimerTable {
-        /// The interrupt time (`KUSER_SHARED_DATA.InterruptTime`) when the
-        /// tables were read, which the entries' `due_time` counts in.
+        /// The interrupt time (`KUSER_SHARED_DATA.InterruptTime`) when ntoseye
+        /// read the tables. The `due_time` of each entry uses this time scale.
         interrupt_time: Diag<Hex>,
         entries: Vec<TimerTableEntry>,
-        /// Buckets whose walk ended abnormally.
+        /// The buckets whose walk did not end normally.
         terminations: Vec<TimerBucketEnd>,
-        /// Timers listed in `entries`.
+        /// The number of timers in `entries`.
         total: usize,
-        /// Whether the walk stopped at its entry bound.
+        /// Whether the walk stopped at its entry limit.
         truncated: bool,
         errors: Vec<SchedulerError>,
     }
 
-    /// The thread or process `!apc` was pointed at.
+    /// The thread or process that `!apc` inspects.
     ApcSelection {
-        /// `thread`, `process`, or `number` (not yet resolved to either).
+        /// `thread`, `process`, or `number`. A `number` is not yet resolved to
+        /// a thread or a process.
         kind: &'static str,
-        /// The ETHREAD/KTHREAD/TID, or PID/EPROCESS, given.
+        /// The given value: an ETHREAD, KTHREAD, or TID, or a PID or EPROCESS.
         value: Hex,
     }
 
@@ -164,15 +168,15 @@ shapes! {
         address: VirtAddr,
         /// `KernelRoutine`.
         kernel_routine: Diag<Option<VirtAddr>>,
-        /// `kernel_routine` as a symbol, when one resolves.
+        /// `kernel_routine` as a symbol, if it resolves to one.
         kernel_routine_symbol: Diag<Option<String>>,
-        /// `NormalRoutine`; `None` inside for a special kernel APC.
+        /// `NormalRoutine`. The value inside is `None` for a special kernel APC.
         normal_routine: Diag<Option<VirtAddr>>,
-        /// `normal_routine` as a symbol, when one resolves.
+        /// `normal_routine` as a symbol, if it resolves to one.
         normal_routine_symbol: Diag<Option<String>>,
     }
 
-    /// A thread's kernel-mode and user-mode APC queues.
+    /// The kernel-mode and user-mode APC queues of a thread.
     ApcThread {
         thread: ThreadSummary,
         kernel: Vec<Apc>,
@@ -181,93 +185,97 @@ shapes! {
         kernel_termination: ListEnd,
         /// How the user-mode list walk ended.
         user_termination: ListEnd,
-        /// Why the thread's APC state could not be read, if it could not.
+        /// The error, if ntoseye could not read the APC state of the thread.
         state_error: Option<String>,
     }
 
-    /// APC queues of every thread, a process's, or one thread's (`!apc`).
+    /// The APC queues of all threads, of one process, or of one thread
+    /// (`!apc`).
     ApcQueues {
-        /// `all`, `current_thread`, or the thread or process selected.
+        /// `all`, `current_thread`, or the selected thread or process.
         selector: ApcSelectorValue,
         threads: Vec<ApcThread>,
-        /// APCs listed across `threads`.
+        /// The total number of APCs in `threads`.
         total: usize,
-        /// Whether the walk stopped at its entry bound.
+        /// Whether the walk stopped at its entry limit.
         truncated: bool,
-        /// Why the APC layout could not be resolved, if it could not.
+        /// The error, if ntoseye could not resolve the APC layout.
         layout_error: Option<String>,
     }
 
-    /// A thread's state and walked stack (`!stacks`).
+    /// The state and walked stack of a thread (`!stacks`).
     ThreadStack {
         thread: ThreadSummary,
-        /// The top frame's symbol.
+        /// The symbol of the top frame.
         top_symbol: Diag<Option<String>>,
-        /// Frames, innermost first: the top one at level 0, up to 32 at
-        /// level 1, up to 64 at level 2.
+        /// The frames, innermost first. Level 0 has the top frame, level 1 has
+        /// up to 32 frames, and level 2 has up to 64 frames.
         frames: Vec<execution::StackFrame>,
-        /// Frames past the walk bound, not listed.
+        /// The number of frames after the walk limit. These frames are not
+        /// listed.
         truncated: usize,
-        /// Why the stack could not be walked, if it could not.
+        /// The error, if the stack walk failed.
         error: Option<String>,
     }
 
     /// Threads with their states and stacks (`!stacks`).
     ThreadStacks {
-        /// Detail level (0, 1, or 2), which bounds the frames walked.
+        /// The detail level (0, 1, or 2). It sets the frame limit of the walk.
         level: u8,
-        /// The symbol or module filter, if one was given.
+        /// The symbol or module filter, if you gave one.
         filter: Option<String>,
         scanned_threads: usize,
         displayed_threads: usize,
-        /// Whether the walk was interrupted before it finished.
+        /// Whether an interrupt stopped the walk before it finished.
         interrupted: bool,
         threads: Vec<ThreadStack>,
     }
 
-    /// A thread whose stack could not be walked, so it could not be searched
-    /// or grouped.
+    /// A thread whose stack walk failed. ntoseye could not search or group
+    /// this thread.
     UnwalkedThread {
         thread: ThreadSummary,
-        /// Why the walk failed.
+        /// The reason the walk failed.
         error: String,
     }
 
-    /// A thread whose stack has a frame matching `!findstack`'s pattern.
+    /// A thread with a stack frame that matches the `!findstack` pattern.
     FindStackThread {
         thread: ThreadSummary,
-        /// Frames that matched.
+        /// The number of frames that matched.
         match_count: usize,
-        /// The frames that matched; `None` at level 0.
+        /// The frames that matched. `None` at level 0.
         matching_frames: Option<Vec<execution::StackFrame>>,
-        /// The whole walked stack, innermost first; `None` below level 2.
+        /// The whole walked stack, innermost first. `None` below level 2.
         frames: Option<Vec<execution::StackFrame>>,
-        /// Frames past the walk bound, not searched; `None` below level 2.
+        /// The number of frames after the walk limit. ntoseye did not search
+        /// these frames. `None` below level 2.
         truncated: Option<usize>,
     }
 
-    /// Threads whose stack has a frame matching a symbol or module
+    /// Threads with a stack frame that matches a symbol or module
     /// (`!findstack`).
     FindStack {
         pattern: String,
-        /// Detail level: 0 counts matches, 1 lists them, 2 adds whole stacks.
+        /// The detail level. 0 counts the matches, 1 lists them, and 2 adds the
+        /// whole stacks.
         level: u8,
         scanned_threads: usize,
-        /// Whether the walk was interrupted before it finished.
+        /// Whether an interrupt stopped the walk before it finished.
         interrupted: bool,
         threads: Vec<FindStackThread>,
         unwalked: Vec<UnwalkedThread>,
     }
 
-    /// An `_IO_WORKITEM` queued through `IoQueueWorkItem`, whose work item
-    /// runs `nt!IopProcessWorkItem` to call `routine`.
+    /// An `_IO_WORKITEM` that `IoQueueWorkItem` queued. Its work item runs
+    /// `nt!IopProcessWorkItem`, which calls `routine`.
     IoWorkItem {
-        /// The `_IO_WORKITEM` holding the queued `_WORK_QUEUE_ITEM`.
+        /// The `_IO_WORKITEM` that holds the queued `_WORK_QUEUE_ITEM`.
         address: VirtAddr,
         routine: VirtAddr,
         /// `routine` as a symbol, when one resolves.
         routine_symbol: Option<String>,
-        /// The device or driver object it was allocated for.
+        /// The device or driver object that the item was allocated for.
         io_object: VirtAddr,
         context: VirtAddr,
     }
@@ -280,16 +288,18 @@ shapes! {
         /// `routine` as a symbol, when one resolves.
         routine_symbol: Option<String>,
         parameter: VirtAddr,
-        /// The I/O work item it belongs to, when queued by `IoQueueWorkItem`.
+        /// The I/O work item that owns this item, if `IoQueueWorkItem` queued
+        /// it.
         io_work_item: Option<IoWorkItem>,
     }
 
-    /// One of a work queue's 32 priority lists.
+    /// One of the 32 priority lists of a work queue.
     WorkQueuePriority {
         priority: u8,
-        /// The `WORK_QUEUE_TYPE`s `ExQueueWorkItem` maps to this priority.
+        /// The `WORK_QUEUE_TYPE`s that `ExQueueWorkItem` maps to this priority.
         queue_types: Vec<&'static str>,
-        /// `CurrentCount[priority]`: threads running an item of this priority.
+        /// `CurrentCount[priority]`, the number of threads that run an item of
+        /// this priority.
         current_count: i32,
         /// The pending work items (key `items`).
         work_items: Vec<WorkItem> => "items",
@@ -297,12 +307,12 @@ shapes! {
         termination: ListEnd,
     }
 
-    /// A thread serving a work queue.
+    /// A thread that serves a work queue.
     WorkerThread {
         kthread: VirtAddr,
         thread: Diag<ThreadSummary>,
-        /// The thread's stack; `None` unless stacks were requested and the
-        /// thread decoded.
+        /// The stack of the thread. `None` if stacks were not requested or the
+        /// thread did not decode.
         stack: Option<Diag<Vec<execution::StackFrame>>>,
     }
 
@@ -311,36 +321,39 @@ shapes! {
         address: VirtAddr,
         /// The `_EPARTITION` it belongs to.
         partition: VirtAddr,
-        /// NUMA node.
+        /// The NUMA node.
         node: u16,
         queue_index: u32,
-        /// `queue_index` by name, when it is a known one.
+        /// The name of `queue_index`, if it is a known index.
         queue_index_name: Option<String>,
         items_processed: u32,
         items_processed_last_pass: u32,
         thread_count: i32,
         min_threads: u64,
         max_threads: i32,
-        /// `_KPRIQUEUE.MaximumCount`: how many threads may run items at once.
+        /// `_KPRIQUEUE.MaximumCount`, the maximum number of threads that can run
+        /// items at the same time.
         concurrency: u32,
-        /// Items on all 32 priority lists, listed or not.
+        /// The number of items on all 32 priority lists, including items that
+        /// are not listed.
         pending: u64,
-        /// The priority lists holding items or running threads, restricted to
-        /// the requested priorities.
+        /// The priority lists that hold items or have running threads. Only the
+        /// requested priorities are included.
         priorities: Vec<WorkQueuePriority>,
         threads: Vec<WorkerThread>,
         /// How the worker-thread list walk ended.
         threads_termination: ListEnd,
     }
 
-    /// Every executive worker queue (`!exqueue`).
+    /// All executive worker queues (`!exqueue`).
     WorkQueues {
         /// The `!exqueue` flags.
         flags: Hex,
-        /// The priorities flags 0x10/0x20/0x40 selected; `None` lists all.
+        /// The priorities that flags 0x10, 0x20, and 0x40 selected. `None` means
+        /// all priorities.
         priority_filter: Option<Vec<u8>>,
         queues: Vec<WorkQueue>,
-        /// Partitions or queues that could not be decoded.
+        /// The partitions or queues that ntoseye could not decode.
         errors: Vec<String>,
     }
 
@@ -348,20 +361,22 @@ shapes! {
     UniqStackGroup {
         thread_count: usize,
         threads: Vec<ThreadSummary>,
-        /// The first thread's frames, innermost first; the others share its
-        /// instruction pointers, not its stack pointers.
+        /// The frames of the first thread, innermost first. The other threads
+        /// have the same instruction pointers. Their stack pointers can be
+        /// different.
         frames: Vec<execution::StackFrame>,
-        /// Frames past the walk bound, not compared.
+        /// The number of frames after the walk limit. ntoseye did not compare
+        /// these frames.
         truncated: usize,
     }
 
-    /// Which threads `!uniqstack` grouped.
+    /// The threads that `!uniqstack` grouped.
     UniqStackScope {
         /// `all` or `process`.
         kind: &'static str,
-        /// The process's id; `None` for `all`.
+        /// The process ID. `None` for `all`.
         pid: Option<u64>,
-        /// The process's image name; `None` for `all`.
+        /// The image name of the process. `None` for `all`.
         name: Option<String>,
     }
 
@@ -369,11 +384,11 @@ shapes! {
     UniqStacks {
         scope: UniqStackScope,
         scanned_threads: usize,
-        /// Threads whose stacks were walked and grouped.
+        /// The number of threads whose stacks ntoseye walked and grouped.
         walked_threads: usize,
-        /// Whether the walk was interrupted before it finished.
+        /// Whether an interrupt stopped the walk before it finished.
         interrupted: bool,
-        /// In the order their first thread was walked.
+        /// The groups, in the order that ntoseye walked their first threads.
         groups: Vec<UniqStackGroup>,
         unwalked: Vec<UnwalkedThread>,
     }

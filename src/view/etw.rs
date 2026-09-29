@@ -14,13 +14,13 @@ shapes! {
         /// The `_WMI_LOGGER_CONTEXT`.
         address: VirtAddr,
         logger_id: u32,
-        /// `LoggerName`; `None` when its buffer is unreadable (pool freed or
-        /// paged out while a session stops).
+        /// `LoggerName`. `None` if ntoseye cannot read its buffer. For example,
+        /// the pool can be freed or paged out while a session stops.
         name: Option<String>,
-        /// `LogFileName`; `None` when its buffer is unreadable.
+        /// `LogFileName`. `None` if ntoseye cannot read its buffer.
         log_file_name: Option<String>,
         logger_mode: Hex<u32>,
-        /// The `EVENT_TRACE_*_MODE` bits set in `logger_mode`.
+        /// The `EVENT_TRACE_*_MODE` bits that are set in `logger_mode`.
         logger_mode_names: Vec<&'static str>,
         flags: Hex<u32>,
         /// The `Flags` bitfields that are set, from the PDB.
@@ -33,9 +33,9 @@ shapes! {
         maximum_buffers: u32,
         number_of_buffers: i32,
         buffers_available: i32,
-        /// Buffers taken from the free pool (`number_of_buffers -
-        /// buffers_available`): current on a processor, full, or being
-        /// flushed.
+        /// The buffers taken from the free pool (`number_of_buffers -
+        /// buffers_available`). Each of these buffers is current on a processor,
+        /// full, or in a flush.
         buffers_in_use: i64,
         peak_buffers: i32,
         buffers_written: u32,
@@ -46,11 +46,11 @@ shapes! {
         consumers: u32,
         /// `ClockType` (`EVENT_TRACE_CLOCK_*`).
         clock_type: u32,
-        /// What event timestamps count, named.
+        /// The name of what the event timestamps count.
         clock: &'static str,
         /// `StartTime`, a FILETIME.
         start_time: u64,
-        /// `start_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`); `None` when
+        /// `start_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`). `None` if it is
         /// out of range.
         start_time_utc: Option<String>,
         flush_timer: u32,
@@ -61,7 +61,7 @@ shapes! {
         instance_guid: String,
     }
 
-    /// Every active ETW logger of the host silo (`!wmitrace.strdump`).
+    /// All active ETW loggers of the host silo (`!wmitrace.strdump`).
     EtwLoggerTable {
         silo_state: VirtAddr,
         /// `EtwpLoggerContext`: the array of `max_loggers` context pointers.
@@ -70,18 +70,19 @@ shapes! {
         loggers: Vec<EtwLogger>,
     }
 
-    /// A logger's trace buffer (`_WMI_BUFFER_HEADER`).
+    /// A trace buffer of a logger (`_WMI_BUFFER_HEADER`).
     EtwBuffer {
         address: VirtAddr,
         state: u32,
         state_name: String,
         processor: u16,
         sequence_number: i64,
-        /// Raw timestamp in the logger's clock.
+        /// The raw timestamp in the clock of the logger.
         timestamp: u64,
         saved_offset: u32,
         current_offset: u32,
-        /// Bytes of the buffer holding the header and complete events.
+        /// The number of bytes in the buffer that hold the header and complete
+        /// events.
         data_end: u32,
         reference_count: i32,
     }
@@ -91,8 +92,8 @@ shapes! {
     EtwLoggerBuffers {
         logger: EtwLogger,
         buffers: Vec<EtwBuffer>,
-        /// Why the `GlobalList` walk ended before returning to its head;
-        /// `None` when it completed.
+        /// Why the walk of the `GlobalList` stopped before it came back to the
+        /// list head. `None` if the walk completed.
         list_stop: Option<String>,
     }
 
@@ -107,10 +108,10 @@ shapes! {
         keyword: Hex,
     }
 
-    /// The fields a `MESSAGE_TRACE_HEADER` carries after itself, as its
-    /// `TRACE_MESSAGE_*` option flags select; each `None` when not selected.
-    /// The TMF fields are `None` when no loaded PDB declares the message's
-    /// trace message format (TMF).
+    /// The fields that follow a `MESSAGE_TRACE_HEADER`. The `TRACE_MESSAGE_*`
+    /// option flags of the header select these fields. A field is `None` if
+    /// the flags do not select it. The TMF fields are `None` if no loaded PDB
+    /// declares the trace message format (TMF) of the message.
     EtwEventMessage {
         /// The message number.
         number: u16,
@@ -118,17 +119,17 @@ shapes! {
         sequence: Option<u32>,
         guid: Option<String>,
         component_id: Option<u32>,
-        /// The TMF's provider (component) name.
+        /// The provider (component) name from the TMF.
         provider: Option<String>,
-        /// The function that traced it.
+        /// The function that traced the message.
         function: Option<String>,
-        /// The TMF's trace level (`TRACE_LEVEL_ERROR`, or a number).
+        /// The trace level from the TMF (`TRACE_LEVEL_ERROR`, or a number).
         level: Option<String>,
-        /// The TMF's trace flag name.
+        /// The trace flag name from the TMF.
         flags: Option<String>,
-        /// The message rendered from its TMF and the payload.
+        /// The message text, rendered from its TMF and the payload.
         text: Option<String>,
-        /// Why the payload does not fit the TMF's argument types.
+        /// Why the payload does not fit the argument types of the TMF.
         format_error: Option<String>,
     }
 
@@ -143,77 +144,79 @@ shapes! {
     EtwExtendedData {
         /// `EVENT_HEADER_EXT_TYPE_*`.
         r#type: u16,
-        /// The type's name, when it is a known one.
+        /// The name of the type, if it is known.
         type_name: Option<&'static str>,
-        /// The item's bytes, as hex.
+        /// The bytes of the item, as hex.
         data: String,
     }
 
-    /// An event record decoded out of a trace buffer. Fields its header
-    /// kind lacks are `None`.
+    /// An event record that ntoseye decoded from a trace buffer. A field is
+    /// `None` if the header kind of the event does not have it.
     EtwEvent {
-        /// The buffer it came from.
+        /// The buffer that the event came from.
         buffer: VirtAddr,
-        /// Offset of the record in its buffer.
+        /// The offset of the record in its buffer.
         offset: u32,
         processor: u16,
-        /// The trace header it starts with (`EVENT_HEADER`, ...).
+        /// The trace header at the start of the record (`EVENT_HEADER`, ...).
         header: &'static str,
         header_type: u8,
-        /// Record size, header included (unaligned).
+        /// The record size, with the header included (unaligned).
         size: u16,
-        /// Raw timestamp in the logger's clock; a WPP message without
-        /// `TRACE_MESSAGE_TIMESTAMP` has none.
+        /// The raw timestamp in the clock of the logger. A WPP message without
+        /// `TRACE_MESSAGE_TIMESTAMP` has no timestamp.
         timestamp: Option<u64>,
-        /// FILETIME, when the logger's clock converts to one.
+        /// The FILETIME, if the clock of the logger converts to one.
         system_time: Option<u64>,
         /// `system_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
         system_time_utc: Option<String>,
         process_id: Option<u32>,
         thread_id: Option<u32>,
-        /// Provider (`EVENT_HEADER`), event class (`EVENT_TRACE_HEADER`) or
-        /// message (`MESSAGE_TRACE_HEADER`) GUID.
+        /// The provider GUID (`EVENT_HEADER`), event class GUID
+        /// (`EVENT_TRACE_HEADER`), or message GUID (`MESSAGE_TRACE_HEADER`).
         guid: Option<String>,
         descriptor: Option<EtwEventDescriptor>,
         /// `EVENT_HEADER.Flags`.
         event_flags: Option<Hex<u16>>,
         activity_id: Option<String>,
-        /// Kernel hook id (group << 8 | type) of system and perfinfo events.
+        /// The kernel hook id (group << 8 | type) of system and perfinfo events.
         hook_id: Option<Hex<u16>>,
-        /// The hook id's `EVENT_TRACE_GROUP_*` name, when it is a known one.
+        /// The `EVENT_TRACE_GROUP_*` name of the hook id, if it is known.
         group: Option<&'static str>,
-        /// A classic event's class; the JSON key is `class`.
+        /// The class of a classic event. The JSON key is `class`.
         event_class: Option<EtwEventClass> => "class",
         message: Option<EtwEventMessage>,
         extended: Vec<EtwExtendedData>,
-        /// The event's user data, as hex.
+        /// The user data of the event, as hex.
         payload: String,
     }
 
-    /// A buffer whose events could not all be decoded.
+    /// A buffer in which ntoseye could not decode all events.
     EtwEventIssue {
         buffer: VirtAddr,
-        /// Where in the buffer the walk stopped.
+        /// The position in the buffer where the walk stopped.
         offset: u32,
         reason: String,
     }
 
-    /// A logger's in-memory events, oldest first (`!wmitrace.logdump`).
+    /// The in-memory events of a logger, oldest first (`!wmitrace.logdump`).
     EtwEventDump {
         logger: EtwLogger,
         buffers_walked: usize,
-        /// Why the `GlobalList` walk ended before returning to its head;
-        /// `None` when it completed.
+        /// Why the walk of the `GlobalList` stopped before it came back to the
+        /// list head. `None` if the walk completed.
         list_stop: Option<String>,
-        /// Events found before a count kept the most recent.
+        /// The number of events found before a count kept the most recent.
         total_events: usize,
         /// QPC frequency used for PerfCounter timestamps.
         qpc_frequency: Option<u64>,
         /// Processor speed used for CpuCycle timestamps.
         cpu_mhz: Option<u64>,
-        /// Buffers skipped whole (compressed) and walks that stopped early.
+        /// The buffers that ntoseye skipped fully (compressed), and the walks that
+        /// stopped early.
         issues: Vec<EtwEventIssue>,
-        /// Why some WPP messages have no `text`; `None` when every one has.
+        /// Why some WPP messages have no `text`. `None` if all messages have
+        /// `text`.
         message_format_note: Option<String>,
         events: Vec<EtwEvent>,
     }

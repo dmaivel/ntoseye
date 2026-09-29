@@ -20,62 +20,63 @@ shapes! {
     LoadedModule {
         /// The image file name (`ntoskrnl.exe`).
         name: String,
-        /// The name `module!symbol` uses (`nt`).
+        /// The short name that `module!symbol` uses (`nt`).
         short_name: String,
-        /// Full image path, when the loader recorded one.
+        /// The full image path, if the loader recorded one.
         path: Option<String>,
         base: VirtAddr,
-        /// One past the image's last byte.
+        /// The address after the last byte of the image.
         end: Hex,
-        /// Mapped image size in bytes.
+        /// The mapped image size in bytes.
         size: u32,
-        /// PE timestamp; `None` when the loader record lacks one.
+        /// The PE timestamp. `None` if the loader record does not contain one.
         time_date_stamp: Option<Hex<u32>>,
-        /// PE checksum; `None` when the loader record lacks one.
+        /// The PE checksum. `None` if the loader record does not contain one.
         checksum: Option<Hex<u32>>,
-        /// File version from the version resource; `None` when unread.
+        /// The file version from the version resource. `None` if ntoseye did not read it.
         file_version: Option<String>,
-        /// Product version from the version resource; `None` when unread.
+        /// The product version from the version resource. `None` if ntoseye did not read it.
         product_version: Option<String>,
-        /// Symbol status; `None` except on a kernel module's `inspect()`.
+        /// The symbol status. `None` except in `inspect()` of a kernel module.
         symbols: Option<ModuleSymbols>,
     }
 
-    /// A module's symbol status and PDB identity (`lmv`).
+    /// The symbol status and PDB identity of a module (`lmv`).
     ModuleSymbols {
         /// `loaded`, `deferred`, `failed`, `unknown`, ...
         status: String,
-        /// Where the PDB came from, when known.
+        /// The source of the PDB, if known.
         source: Option<String>,
-        /// The loaded PDB's GUID as 32 hex digits, `None` without a PDB.
+        /// The GUID of the loaded PDB as 32 hex digits. `None` if there is no PDB.
         pdb_guid: Option<String>,
-        /// The loaded PDB's age, `None` without a PDB.
+        /// The age of the loaded PDB. `None` if there is no PDB.
         pdb_age: Option<u32>,
-        /// Why loading failed, for status `failed`.
+        /// The reason for the load failure, for status `failed`.
         error: Option<String>,
     }
 
-    /// The outcome of a symbol reload: how many modules loaded, lacked a
-    /// PDB, were skipped, or failed, plus the first diagnostics (bounded).
+    /// The result of a symbol reload. It counts the modules that loaded, had
+    /// no PDB, were skipped, or failed. It also has the first diagnostics, up
+    /// to a limit.
     SymbolReloadReport {
         total: usize,
         loaded: usize,
-        /// Symbol-bearing modules gone since the previous refresh.
+        /// The number of modules with symbols that unloaded after the previous refresh.
         unloaded: usize,
         no_pdb: usize,
         skipped: usize,
         failed: usize,
-        /// All diagnostics, including those past `diagnostics`' bound.
+        /// The number of all diagnostics, including those after the limit of `diagnostics`.
         diagnostic_count: usize,
         diagnostics: Vec<SymbolLoadDiagnostic>,
     }
 
-    /// One problem found while loading a module's symbols.
+    /// One problem that ntoseye found when it loaded the symbols of a module.
     SymbolLoadDiagnostic {
         module: String,
         /// The load step that reported it.
         phase: String,
-        /// The compiland it concerns, when it is compiland-specific.
+        /// The compiland of the problem, if the problem is specific to one compiland.
         compiland: Option<String>,
         message: String,
     }
@@ -91,7 +92,7 @@ shapes! {
         number_of_symbols: u32,
         size_of_optional_header: Hex<u16>,
         characteristics: Hex<u16>,
-        /// The `IMAGE_FILE_*` flags set in `characteristics`.
+        /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
         characteristics_names: Vec<String>,
     }
 
@@ -104,12 +105,12 @@ shapes! {
         size_of_initialized_data: Hex<u32>,
         size_of_uninitialized_data: Hex<u32>,
         entry_point_rva: Hex<u32>,
-        /// The mapped entry point, `None` when the image has none.
+        /// The mapped entry point. `None` if the image has no entry point.
         entry_point: Option<Hex>,
         base_of_code: Hex<u32>,
-        /// PE32 only; `None` for PE32+.
+        /// Only for PE32. `None` for PE32+.
         base_of_data: Option<Hex<u32>>,
-        /// The preferred base the image was linked for.
+        /// The preferred base address for which the image was linked.
         image_base: Hex,
         section_alignment: Hex<u32>,
         file_alignment: Hex<u32>,
@@ -127,7 +128,7 @@ shapes! {
         /// `Native`, `Windows GUI`, ...
         subsystem_name: &'static str,
         dll_characteristics: Hex<u16>,
-        /// The `IMAGE_DLLCHARACTERISTICS_*` flags set.
+        /// The `IMAGE_DLLCHARACTERISTICS_*` flags that are set.
         dll_characteristics_names: Vec<String>,
         size_of_stack_reserve: Hex,
         size_of_stack_commit: Hex,
@@ -139,7 +140,7 @@ shapes! {
 
     /// One `IMAGE_DATA_DIRECTORY` entry.
     ImageDataDirectory {
-        /// Its slot in the directory table.
+        /// The slot of the entry in the directory table.
         index: usize,
         /// `Export`, `Import`, `Debug`, ...
         name: &'static str,
@@ -151,7 +152,7 @@ shapes! {
     ImageSectionHeader {
         name: String,
         virtual_size: Hex<u32>,
-        /// The section's RVA.
+        /// The RVA of the section.
         virtual_address: Hex<u32>,
         size_of_raw_data: Hex<u32>,
         pointer_to_raw_data: Hex<u32>,
@@ -160,11 +161,11 @@ shapes! {
         number_of_relocations: u16,
         number_of_linenumbers: u16,
         characteristics: Hex<u32>,
-        /// The `IMAGE_SCN_*` flags set.
+        /// The `IMAGE_SCN_*` flags that are set.
         characteristics_names: Vec<String>,
     }
 
-    /// A CodeView debug record: the PDB an image was built with.
+    /// A CodeView debug record. It identifies the PDB that the image was built with.
     CodeViewRecord {
         /// `RSDS` (PDB 7.0) or `NB10` (PDB 2.0).
         format: &'static str,
@@ -173,13 +174,13 @@ shapes! {
         /// The PDB timestamp signature, for `NB10`.
         signature: Option<Hex<u32>>,
         age: u32,
-        /// The PDB path the linker recorded.
+        /// The PDB path that the linker recorded.
         pdb: String,
     }
 
     /// One `IMAGE_DEBUG_DIRECTORY` entry.
     ImageDebugEntry {
-        /// `IMAGE_DEBUG_TYPE_*` value.
+        /// The `IMAGE_DEBUG_TYPE_*` value.
         r#type: u32,
         /// `CODEVIEW`, `POGO`, ...
         type_name: &'static str,
@@ -190,13 +191,13 @@ shapes! {
         size_of_data: Hex<u32>,
         address_of_raw_data: Hex<u32>,
         pointer_to_raw_data: Hex<u32>,
-        /// The decoded CodeView record, `None` for other entry types.
+        /// The decoded CodeView record. `None` for other entry types.
         codeview: Option<Diag<CodeViewRecord>>,
     }
 
     /// `IMAGE_EXPORT_DIRECTORY`.
     ImageExportDirectory {
-        /// The DLL name the directory records.
+        /// The DLL name that the directory records.
         name: String,
         characteristics: Hex<u32>,
         time_date_stamp: Hex<u32>,
@@ -210,60 +211,61 @@ shapes! {
         address_of_name_ordinals: Hex<u32>,
     }
 
-    /// An image's export directory and its exports (`!dh -e`).
+    /// The export directory and the exports of an image (`!dh -e`).
     ImageExports {
-        /// `None` when the image exports nothing.
+        /// `None` if the image has no exports.
         directory: Option<ImageExportDirectory>,
         exports: Vec<Export>,
     }
 
-    /// One PE export (`Module.exports`, `!dh -e`), by name or ordinal only;
-    /// a forwarder has no address.
+    /// One PE export (`Module.exports`, `!dh -e`). An export has a name, or
+    /// only an ordinal. A forwarder has no address.
     Export {
         ordinal: u32,
         /// `None` for an ordinal-only export.
         name: Option<String>,
         /// `None` for a forwarder.
         rva: Option<Hex>,
-        /// The mapped address, `None` for a forwarder.
+        /// The mapped address. `None` for a forwarder.
         address: Option<VirtAddr>,
-        /// The forwarding target (`OTHER.Function`), for a forwarder.
+        /// The target of a forwarder (`OTHER.Function`).
         forwarder: Option<String>,
     }
 
-    /// One `IMAGE_IMPORT_DESCRIPTOR`: a DLL an image imports from.
+    /// One `IMAGE_IMPORT_DESCRIPTOR`. It identifies a DLL that the image imports from.
     ImageImportDescriptor {
-        /// The DLL name, `None` when it did not read.
+        /// The DLL name. `None` if ntoseye could not read it.
         name: Option<String>,
-        /// Why the DLL name did not read.
+        /// The reason that ntoseye could not read the DLL name.
         name_error: Option<String>,
         import_address_table: Hex<u32>,
         import_name_table: Hex<u32>,
         time_date_stamp: Hex<u32>,
         forwarder_chain: Hex<u32>,
         imports: Vec<ImageImport>,
-        /// Why the thunk walk stopped early, when it did.
+        /// The reason that the thunk walk stopped early, if it did.
         incomplete: Option<String>,
     }
 
     /// One imported function.
     ImageImport {
-        /// The imported name, `None` for an ordinal or unreadable import.
+        /// The imported name. `None` for an import by ordinal, or for an import
+        /// that ntoseye could not read.
         name: Option<String>,
         /// The export-name-table hint, for a named import.
         hint: Option<u16>,
         /// The ordinal, for an import by ordinal.
         ordinal: Option<u16>,
-        /// The bound address the import address table holds.
+        /// The bound address in the import address table.
         bound: Option<Hex>,
-        /// Why the import's name did not read.
+        /// The reason that ntoseye could not read the import name.
         error: Option<String>,
     }
 
-    /// A mapped image's headers (`!dh`).
+    /// The headers of a mapped image (`!dh`).
     ImageHeaders {
         base: Hex,
-        /// The loaded module at `base`, when there is one.
+        /// The loaded module at `base`, if there is one.
         module: Option<String>,
         /// `PE32` or `PE32+`.
         format: &'static str,
@@ -271,17 +273,17 @@ shapes! {
         optional_header: ImageOptionalHeader,
         data_directories: Vec<ImageDataDirectory>,
         sections: Vec<ImageSectionHeader>,
-        /// The debug directory; `None` unless asked for.
+        /// The debug directory. `None` if you did not ask for it.
         debug_directory: Option<Diag<Vec<ImageDebugEntry>>>,
-        /// The export directory; `None` unless asked for.
+        /// The export directory. `None` if you did not ask for it.
         exports: Option<Diag<ImageExports>>,
-        /// The import descriptors; `None` unless asked for.
+        /// The import descriptors. `None` if you did not ask for them.
         imports: Option<Diag<Vec<ImageImportDescriptor>>>,
     }
 
-    /// A module's image identity (`!lmi`): its file-header identity, debug
-    /// directory (with the CodeView PDB name, GUID, and age), and symbol
-    /// state.
+    /// The image identity of a module (`!lmi`). It has the file-header identity,
+    /// the debug directory, and the symbol state. The debug directory includes
+    /// the CodeView PDB name, GUID, and age.
     ModuleImageInfo {
         module: LoadedModule,
         machine: Hex<u16>,
@@ -291,23 +293,23 @@ shapes! {
         size_of_image: Hex<u32>,
         checksum: Hex<u32>,
         characteristics: Hex<u16>,
-        /// The `IMAGE_FILE_*` flags set in `characteristics`.
+        /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
         characteristics_names: Vec<String>,
         debug_directory: Diag<Vec<ImageDebugEntry>>,
         symbols: ModuleSymbols,
-        /// The local PDB file, when one is loaded.
+        /// The local PDB file, if a PDB is loaded.
         symbol_file: Option<String>,
     }
 
-    /// One PE section: its name, RVA, mapped size, and `rwx` permissions.
+    /// One PE section with its name, RVA, mapped size, and `rwx` permissions.
     Section {
         /// The section name (`.text`).
         name: String,
-        /// Its offset from the image base.
+        /// The offset of the section from the image base.
         rva: Hex<u32>,
-        /// Its mapped size.
+        /// The mapped size of the section.
         size: Hex<u32>,
-        /// Mapped permissions as `rwx`, `-` for a missing one.
+        /// The mapped permissions as `rwx`. A `-` marks a missing permission.
         permissions: String,
     }
 

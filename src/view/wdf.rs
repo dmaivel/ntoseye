@@ -25,9 +25,9 @@ shapes! {
     WdfClient {
         /// The `_FX_DRIVER_GLOBALS`.
         globals: VirtAddr,
-        /// `Public.DriverName`; `None` when it is empty or not printable.
+        /// `Public.DriverName`. `None` if it is empty or not printable.
         name: Option<String>,
-        /// The `FxDriver`; `None` before `WdfDriverCreate`.
+        /// The `FxDriver`. `None` before the driver calls `WdfDriverCreate`.
         driver: Option<VirtAddr>,
         /// The WDFDRIVER handle (`Public.Driver`).
         wdf_driver: Option<Hex>,
@@ -36,18 +36,18 @@ shapes! {
         driver_object_name: Option<String>,
         /// The `FxDriver`'s registry path.
         registry_path: Option<String>,
-        /// The KMDF version the driver bound to (`WdfBindInfo->Version`).
+        /// The KMDF version that the driver bound to (`WdfBindInfo->Version`).
         version: Option<WdfVersion>,
         image_base: VirtAddr,
         /// Bytes.
         image_size: Hex,
-        /// The IFR log's `_WDF_IFR_HEADER` (`WdfLogHeader`); `None` without
-        /// one.
+        /// The `_WDF_IFR_HEADER` of the IFR log (`WdfLogHeader`). `None` if the
+        /// driver has no IFR log.
         log_header: Option<VirtAddr>,
         /// `FxVerifierOn`.
         verifier_on: bool,
-        /// What in the globals failed validation; the fields it concerns are
-        /// `None`.
+        /// The parts of the globals that failed validation. The related fields
+        /// are `None`.
         problems: Vec<String>,
     }
 
@@ -57,25 +57,26 @@ shapes! {
         /// `Wdf01000!FxLibraryGlobals`.
         library_globals: VirtAddr,
         clients: Vec<WdfClient>,
-        /// Why the client list walk stopped short of its head; `None` when it
-        /// completed.
+        /// Why the walk of the client list stopped before the list head. `None`
+        /// if the walk completed.
         stopped: Option<String>,
     }
 
-    /// A KMDF object's address, handle, and type, as far as they read.
+    /// The address, handle, and type of a KMDF object, when ntoseye can read
+    /// them.
     WdfObjectRef {
         address: VirtAddr,
-        /// `None` for an object without a handle or one that does not read.
+        /// `None` for an object that has no handle or that ntoseye cannot read.
         handle: Option<Hex>,
         /// The `FX_OBJECT_TYPES` name of its `m_Type`.
         type_name: Option<String>,
     }
 
-    /// One of a driver's device objects and the WDFDEVICE behind it.
+    /// A device object of a driver, and its related WDFDEVICE.
     WdfDriverDevice {
         device_object: VirtAddr,
-        /// The `FxDevice`; `None` when the device object is not one of this
-        /// driver's WDFDEVICEs.
+        /// The `FxDevice`. `None` if the device object is not a WDFDEVICE of
+        /// this driver.
         device: Option<VirtAddr>,
         /// The WDFDEVICE handle.
         handle: Option<Hex>,
@@ -83,8 +84,7 @@ shapes! {
         kind: Option<&'static str>,
         /// `m_CurrentPnpState` (`_WDF_DEVICE_PNP_STATE`).
         pnp_state: Option<WdfState>,
-        /// Why the device object does not lead to one of this driver's
-        /// WDFDEVICEs.
+        /// Why the device object does not link to a WDFDEVICE of this driver.
         unlinked: Option<String>,
     }
 
@@ -93,8 +93,8 @@ shapes! {
         client: WdfClient,
         /// The driver object's `DeviceObject`/`NextDevice` chain.
         devices: Vec<WdfDriverDevice>,
-        /// Why the device chain walk stopped before a null link; `None` when
-        /// it reached one.
+        /// Why the walk of the device chain stopped before a null link. `None`
+        /// if the walk got to a null link.
         devices_stopped: Option<String>,
     }
 
@@ -104,7 +104,7 @@ shapes! {
         header: VirtAddr,
         /// The context itself.
         context: VirtAddr,
-        /// The `_WDF_OBJECT_CONTEXT_TYPE_INFO`; `None` for a header without a
+        /// The `_WDF_OBJECT_CONTEXT_TYPE_INFO`. `None` for a header that has no
         /// context type.
         type_info: Option<VirtAddr>,
         /// The context type's name.
@@ -118,14 +118,14 @@ shapes! {
         handle: Hex,
         /// The `FxObject`.
         address: VirtAddr,
-        /// The `WDFOBJECT_OFFSET` an offset handle subtracts from what it
-        /// points at.
+        /// For an offset handle, the `WDFOBJECT_OFFSET` value to subtract from
+        /// the address that the handle points to.
         offset: Option<Hex<u16>>,
         /// `m_Type`.
         type_value: Hex<u16>,
         /// Its `FX_OBJECT_TYPES` name.
         type_name: String,
-        /// `m_ObjectSize`: the object and its extra bytes.
+        /// `m_ObjectSize`. The size of the object and its extra bytes.
         object_size: Hex<u16>,
         refcount: i32,
         /// `m_ObjectState` (`FxObjectState`).
@@ -140,8 +140,8 @@ shapes! {
         driver: Option<String>,
         parent: Option<WdfObjectRef>,
         contexts: Vec<WdfContext>,
-        /// Why the context header chain stopped before a null `NextHeader`;
-        /// `None` when it reached one.
+        /// Why the walk of the context header chain stopped before a null
+        /// `NextHeader`. `None` if the walk got to a null `NextHeader`.
         contexts_stopped: Option<String>,
     }
 
@@ -158,11 +158,11 @@ shapes! {
         pending: i32,
         /// Requests the driver owns.
         driver_owned: i32,
-        /// Whether it is the device's default queue.
+        /// Whether it is the default queue of the device.
         is_default: bool,
     }
 
-    /// A WDFDEVICE: its device objects, state machines, and queues
+    /// A WDFDEVICE with its device objects, state machines, and queues
     /// (`!wdfkd.wdfdevice`).
     WdfDevice {
         handle: Hex,
@@ -188,7 +188,7 @@ shapes! {
         power_state: WdfState,
         /// `_WDF_DEVICE_POWER_POLICY_STATE`.
         power_policy_state: WdfState,
-        /// The `FxPkgPnp`; null for a control device.
+        /// The `FxPkgPnp`. Null for a control device.
         pkg_pnp: VirtAddr,
         /// `_DEVICE_POWER_STATE`.
         device_power_state: Option<WdfState>,
@@ -199,8 +199,8 @@ shapes! {
         /// The default queue's WDFQUEUE handle.
         default_queue: Option<Hex>,
         queues: Vec<WdfQueueSummary>,
-        /// Why the queue list walk stopped short of its head; `None` when it
-        /// completed.
+        /// Why the walk of the queue list stopped before the list head. `None`
+        /// if the walk completed.
         queues_stopped: Option<String>,
         /// An FDO's default child list (WDFCHILDLIST).
         default_child_list: Option<Hex>,
@@ -225,7 +225,8 @@ shapes! {
         symbol: Option<String>,
     }
 
-    /// A WDFQUEUE: its configuration, state, and requests (`!wdfkd.wdfqueue`).
+    /// A WDFQUEUE with its configuration, state, and requests
+    /// (`!wdfkd.wdfqueue`).
     WdfQueue {
         handle: Hex,
         /// The `FxIoQueue`.
@@ -261,15 +262,15 @@ shapes! {
         callbacks: Vec<WdfCallback>,
         /// Requests waiting in the queue.
         pending: Vec<WdfRequest>,
-        /// Why the walk stopped short; `None` when it completed.
+        /// Why the walk stopped early. `None` if the walk completed.
         pending_stopped: Option<String>,
         /// Requests the driver marked cancelable.
         driver_cancelable: Vec<WdfRequest>,
-        /// Why the walk stopped short; `None` when it completed.
+        /// Why the walk stopped early. `None` if the walk completed.
         driver_cancelable_stopped: Option<String>,
         /// Requests presented to the driver.
         driver_owned: Vec<WdfRequest>,
-        /// Why the walk stopped short; `None` when it completed.
+        /// Why the walk stopped early. `None` if the walk completed.
         driver_owned_stopped: Option<String>,
     }
 
@@ -278,7 +279,8 @@ shapes! {
         /// Its offset in the log.
         offset: Hex,
         sequence: i32,
-        /// FILETIME; `None` for an 'LR' record, which has none.
+        /// The FILETIME. `None` for an 'LR' record, because it has no
+        /// timestamp.
         timestamp: Option<u64>,
         /// `timestamp` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
         timestamp_utc: Option<String>,
@@ -300,7 +302,7 @@ shapes! {
         args: String,
     }
 
-    /// A client driver's In-Flight Recorder log, oldest record first
+    /// The In-Flight Recorder log of a client driver, oldest record first
     /// (`!wdfkd.wdflogdump`).
     WdfLog {
         driver: String,
@@ -310,21 +312,21 @@ shapes! {
         header: VirtAddr,
         /// The record area.
         base: VirtAddr,
-        /// The record area's size, bytes.
+        /// The size of the record area, in bytes.
         size: Hex,
-        /// Where the next record goes.
+        /// The offset where KMDF writes the next record.
         current: Hex<u16>,
         /// The newest record's offset.
         previous: Hex<u16>,
         /// The header's sequence number.
         sequence: i32,
-        /// Whether records carry timestamps ('L2').
+        /// Whether the records have timestamps ('L2').
         use_timestamps: bool,
         records: Vec<WdfLogRecord>,
-        /// Why the walk ended: `empty`, `first_record`, `overwritten`, or
-        /// `corrupt`.
+        /// Why the walk ended. One of `empty`, `first_record`, `overwritten`,
+        /// or `corrupt`.
         end: &'static str,
-        /// What failed validation, when `end` is `corrupt`.
+        /// The item that failed validation, when `end` is `corrupt`.
         corruption: Option<String>,
     }
 }

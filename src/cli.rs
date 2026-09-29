@@ -27,16 +27,16 @@ struct Cli {
     #[arg(short = 'v', long)]
     version: bool,
 
-    /// Print how to enable QEMU's gdbstub for the gdb backend
+    /// Print the steps to enable the QEMU gdbstub for the gdb backend
     #[arg(long)]
     gdbstub_instructions: bool,
 
-    /// Print how to enable KD over serial in QEMU and Windows
+    /// Print the steps to enable KD over serial in QEMU and Windows
     #[arg(long)]
     kd_instructions: bool,
 
-    /// Use a line-oriented REPL without terminal cursor queries, completion,
-    /// or history
+    /// Use a line-based REPL with no terminal cursor queries, no completion,
+    /// and no history
     #[arg(long)]
     plain_repl: bool,
 
@@ -57,74 +57,77 @@ struct Cli {
 /// `ntoseye --backend gdb gdbserver` are the same.
 #[derive(Args)]
 struct TargetOptions {
-    /// Debugger backend: 'kd' (Windows KD over serial, default), 'kdnet'
-    /// (Windows KD over UDP), 'gdb' (QEMU GDB stub), or 'memory' (passive
-    /// live-VM introspection)
+    /// The debugger backend: 'kd' (Windows KD over serial, the default),
+    /// 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub), or 'memory'
+    /// (passive inspection of a live VM)
     #[arg(short = 'b', long, global = true)]
     backend: Option<Backend>,
 
-    /// Backend target: GDB address, KD socket path, or KDNET listen address;
-    /// unused by memory
+    /// The backend target: a GDB address, a KD socket path, or a KDNET listen
+    /// address. The memory backend does not use it
     #[arg(long, global = true)]
     connect: Option<String>,
 
-    /// KDNET encryption key (four base-36 components); required by the kdnet
-    /// backend
+    /// The KDNET encryption key (four base-36 components). The kdnet backend
+    /// requires it
     #[arg(long, global = true)]
     kdnet_key: Option<String>,
 
-    /// KD/KDNET memory source: auto (validated host memory, then KD
-    /// fallback), host, or kd
+    /// The memory source for KD and KDNET: auto (validated host memory first,
+    /// then KD), host, or kd
     #[arg(long, global = true)]
     memory_source: Option<KdMemorySource>,
 
-    /// Open a Windows kernel crash dump (.dmp) for offline analysis instead of
-    /// attaching to a live VM
+    /// Open a Windows kernel crash dump (.dmp) for offline analysis. With this
+    /// option, ntoseye does not attach to a live VM
     #[arg(long, global = true)]
     dump: Option<PathBuf>,
 
-    /// Additional PDB symbol server URL (repeatable; tried before the
-    /// Microsoft default), using the standard symbol-server path convention:
+    /// An additional PDB symbol server URL. You can use this option more than
+    /// one time. ntoseye tries these servers before the default Microsoft
+    /// server. The URL uses the standard symbol-server path layout:
     /// {server}/{filename}/{guid}{age}/{filename}
     #[arg(long, global = true)]
     pdb_server: Vec<String>,
 
-    /// Force redownloading of symbols
+    /// Download the symbols again
     #[arg(long = "force-download-symbols", global = true)]
     redownload_symbols: bool,
 
-    /// Never rebuild a missing PDB from the file's pages in guest memory
-    /// (also NTOSEYE_NO_PDB_FROM_MEMORY)
+    /// Do not rebuild a missing PDB from the pages of the file in guest
+    /// memory. A non-empty NTOSEYE_NO_PDB_FROM_MEMORY environment variable
+    /// has the same effect
     #[arg(long, global = true)]
     no_pdb_from_memory: bool,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Interactively configure a supported hypervisor for ntoseye
+    /// Configure a supported hypervisor for ntoseye interactively
     Configure,
-    /// Inspect configured hypervisor transports and recover launch commands
+    /// Show the configured hypervisor transports and recover launch commands
     Status,
-    /// Run as an MCP server, exposing the debugger as tools
+    /// Run as an MCP server that makes the debugger available as tools
     ///
-    /// Attaches at launch when --backend/--connect/--dump name a target;
-    /// otherwise the client attaches with the 'open' tool. Defaults to the
-    /// stdio transport (the client launches this binary); pass --http to serve
-    /// over the network.
+    /// If --backend/--connect/--dump names a target, the server attaches to it
+    /// at launch. If not, the client attaches with the 'open' tool. The default
+    /// transport is stdio, and the client starts this binary. Use --http to
+    /// serve over the network.
     #[cfg(feature = "mcp")]
     Mcp(McpCommand),
-    /// Run as a Debug Adapter Protocol server for editor integration
+    /// Run as a Debug Adapter Protocol server for use with editors
     ///
-    /// Attaches at launch when --backend/--connect/--dump name a target;
-    /// otherwise the client's launch/attach arguments do. Defaults to stdio;
-    /// pass --port to serve one client over loopback TCP instead.
+    /// If --backend/--connect/--dump names a target, the server attaches to it
+    /// at launch. If not, the server attaches to the target that the launch or
+    /// attach arguments of the client name. The default transport is stdio.
+    /// Use --port to serve one client over loopback TCP.
     #[cfg(feature = "dap")]
     Dap(DapCommand),
-    /// Serve the session over the GDB remote protocol, for IDA, Binary Ninja,
+    /// Serve the session over the GDB remote protocol to IDA, Binary Ninja,
     /// Ghidra, gdb, and lldb
     ///
-    /// Attaches to the target --backend/--connect/--dump name, then serves one
-    /// client at a time until interrupted.
+    /// The server attaches to the target that --backend/--connect/--dump
+    /// names. Then it serves one client at a time until you interrupt it.
     #[cfg(feature = "gdbserver")]
     Gdbserver(GdbserverCommand),
 }
@@ -132,17 +135,17 @@ enum Command {
 #[cfg(feature = "mcp")]
 #[derive(Args)]
 struct McpCommand {
-    /// Serve the Streamable HTTP transport on this address (e.g.
-    /// 127.0.0.1:8080) instead of stdio, for web MCP clients that connect over
-    /// the network
+    /// Serve the Streamable HTTP transport on this address (for example
+    /// 127.0.0.1:8080). Use it for web MCP clients that connect over the
+    /// network. Without this option, the server uses stdio
     #[arg(long)]
     http: Option<String>,
 
-    /// Allow Streamable HTTP to bind to a non-loopback address and accept any
-    /// browser origin (CORS); exposes debugger control tools to the network,
-    /// so only use on trusted hosts/networks. Without it, HTTP is
-    /// loopback-only and cross-origin requests are restricted to loopback
-    /// origins.
+    /// Let Streamable HTTP bind to a non-loopback address and accept any
+    /// browser origin (CORS). This option makes the debugger control tools
+    /// available to the network. Use it only on trusted hosts and networks.
+    /// Without this option, HTTP binds only to loopback addresses, and the
+    /// server accepts cross-origin requests only from loopback origins.
     #[arg(long)]
     unsafe_http: bool,
 }
@@ -150,8 +153,8 @@ struct McpCommand {
 #[cfg(feature = "dap")]
 #[derive(Args)]
 struct DapCommand {
-    /// Serve one DAP client on 127.0.0.1:<port> instead of stdio, for clients
-    /// configured with a debugServer port
+    /// Serve one DAP client on 127.0.0.1:<port>. Without this option, the
+    /// server uses stdio. Use it for clients configured with a debugServer port
     #[arg(long)]
     port: Option<u16>,
 }
@@ -159,30 +162,31 @@ struct DapCommand {
 #[cfg(feature = "gdbserver")]
 #[derive(Args)]
 struct GdbserverCommand {
-    /// Address to listen on
+    /// The address to listen on
     #[arg(long, default_value = gdbserver::DEFAULT_LISTEN)]
     listen: String,
 }
 
-static GDBSTUB_INSTRUCTIONS: &str = "The gdb backend talks to QEMU's gdbstub instead of Windows KD.
-It does not require Windows debug mode, but it loses Windows-native
-KD behavior such as debug output and KD reboot signaling. A bugcheck is
-still caught: the debugger breaks on nt!KeBugCheckEx and reads the code
-from the call itself.
+static GDBSTUB_INSTRUCTIONS: &str =
+    "The gdb backend connects to the QEMU gdbstub. It does not use Windows KD.
+It does not need Windows debug mode. But it does not have the
+Windows-native KD features, such as debug output and KD reboot signals.
+The debugger still catches a bugcheck. It breaks on nt!KeBugCheckEx and
+reads the bugcheck code from the call.
 
-To enable it, pass the following arguments to QEMU:
+To enable the gdbstub, give these arguments to QEMU:
 
 -s -S
 
-Then run ntoseye with:
+Then start ntoseye with this command:
 
 ntoseye --backend gdb
 
-If you are running QEMU via commandline, simply append the arguments
-to your existing command.
+If you start QEMU from the command line, add the arguments to your
+command.
 
-If you are running QEMU via virt-manager, you must edit the libvirt
-XML file, which can be done through their GUI. Once there, add:
+If you start QEMU through virt-manager, edit the libvirt XML file.
+You can do this in the virt-manager GUI. Add this XML:
 
 <domain xmlns:qemu=\"http://libvirt.org/schemas/domain/qemu/1.0\" type=\"kvm\">
   ...
@@ -192,45 +196,46 @@ XML file, which can be done through their GUI. Once there, add:
   </qemu:commandline>
 </domain>";
 
-static KD_INSTRUCTIONS: &str = "The KD backend is ntoseye's default backend.
-It speaks the same wire protocol WinDbg uses, over a serial pipe
-between QEMU and ntoseye. It requires Windows to be booted in debug
-mode (which removes the 'stealth' property of the gdb backend:
-anti-debug code, PatchGuard, and even some Windows behaviors change
-when /debug is on).
+static KD_INSTRUCTIONS: &str = "The KD backend is the default backend of ntoseye.
+It uses the same wire protocol as WinDbg, over a serial pipe between
+QEMU and ntoseye. Windows must boot in debug mode. So the KD backend
+does not have the 'stealth' property of the gdb backend. When /debug
+is on, anti-debug code, PatchGuard, and some Windows behaviors change.
 
-GUEST: enable kernel debugging over a serial port (run as
-Administrator, then reboot):
+GUEST: enable kernel debugging over a serial port. Run these commands
+as Administrator, then restart Windows:
 
 bcdedit /debug on
 bcdedit /dbgsettings serial debugport:1 baudrate:115200
 
-If your hypervisor wires the KD serial as COM2 (see the libvirt
-note below), use 'debugport:2' instead.
+If your hypervisor connects the KD serial port as COM2 (see the
+libvirt note below), use 'debugport:2'.
 
-QEMU (commandline): route COM1 to a host-side Unix socket. The
-path here matches ntoseye's default; adjust both sides if you pick
-a different one:
+QEMU (command line): connect COM1 to a Unix socket on the host. This
+path is the default path of ntoseye. If you use a different path,
+change it on both sides:
 
 -chardev socket,id=kd,path=/tmp/ntoseye-kd.sock,server=on,wait=off -serial chardev:kd
 
-QEMU via virt-manager / libvirt: virt-manager auto-adds a <serial>
-console device on every VM, and it claims COM1. Either replace or
-remove that device so the KD chardev becomes COM1 (recommended), or
-leave it in place and the KD chardev will be COM2 (use 'debugport:2'
-in bcdedit instead of 'debugport:1').
+QEMU through virt-manager or libvirt: virt-manager automatically adds
+a <serial> console device to each VM. This device uses COM1. You can
+replace or remove that device. Then the KD chardev becomes COM1. This
+is the recommended option. Or you can keep that device. Then the KD
+chardev becomes COM2, and you must use 'debugport:2' in bcdedit, not
+'debugport:1'.
 
-OPTION A (recommended): replace the auto-added <serial> with one
-that points at our Unix socket. KD is COM1, 'debugport:1' is correct.
+OPTION A (recommended): replace the automatically added <serial> with
+one that points to the ntoseye Unix socket. KD is COM1, and
+'debugport:1' is correct.
 
 <serial type=\"unix\">
   <source mode=\"bind\" path=\"/tmp/ntoseye-kd.sock\"/>
   <target type=\"isa-serial\" port=\"0\"/>
 </serial>
 
-OPTION B: leave the auto-added serial alone and append the KD
-chardev via qemu:commandline. KD ends up as COM2, so use
-'debugport:2' in bcdedit.
+OPTION B: keep the automatically added serial device. Add the KD
+chardev through qemu:commandline. KD becomes COM2. Use 'debugport:2'
+in bcdedit.
 
 <domain xmlns:qemu=\"http://libvirt.org/schemas/domain/qemu/1.0\" type=\"kvm\">
   ...
@@ -242,28 +247,28 @@ chardev via qemu:commandline. KD ends up as COM2, so use
   </qemu:commandline>
 </domain>
 
-Once the guest is booting (or already booted and waiting for the
-debugger), run:
+When the guest starts to boot, or when it has booted and waits for
+the debugger, run:
 
 ntoseye --connect /tmp/ntoseye-kd.sock
 
-ntoseye waits 8 seconds for the initial KD handshake by default.
-For unusually slow guests, override it with:
+By default, ntoseye waits 8 seconds for the first KD handshake.
+For a very slow guest, set a different time:
 
 NTOSEYE_KD_TIMEOUT=20 ntoseye
 
-macOS (UTM): UTM sandboxes QEMU (even the unsigned build), so the
-socket must live inside UTM's QEMUHelper container instead of /tmp.
-In the VM settings, add to 'Arguments (QEMU)':
+macOS (UTM): UTM runs QEMU in a sandbox, also the unsigned build.
+So the socket must be in the QEMUHelper container of UTM, not in
+/tmp. In the VM settings, add this to 'Arguments (QEMU)':
 
 -chardev socket,id=kd,path=/Users/YOU/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock,server=on,wait=off -serial chardev:kd
 
-then connect to that path as root:
+Then connect to that path as root:
 
 sudo ntoseye --backend kd --connect \"$HOME/Library/Containers/com.utmapp.QEMUHelper/Data/tmp/ntoseye-kd.sock\"
 
-Windows ARM64 is supported (machine 0xAA64). Secure Boot must be
-disabled for bcdedit /debug on to work.";
+ntoseye supports Windows ARM64 (machine 0xAA64). Disable Secure Boot,
+or bcdedit /debug on does not work.";
 
 pub fn main() {
     std::process::exit(run_with_args(std::env::args_os()));

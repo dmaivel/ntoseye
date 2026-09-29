@@ -17,7 +17,7 @@ use crate::view;
 use crate::view::shape::Typed;
 
 /// A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
-/// `dbg.physical`.
+/// or `dbg.physical`.
 #[pyclass(module = "ntoseye")]
 pub struct Memory {
     pub owner: Owner,
@@ -119,7 +119,8 @@ fn check_search_len(length: usize) -> PyResult<()> {
 
 #[pymethods]
 impl Memory {
-    /// Read `n` bytes; virtual reads mask this debugger's breakpoint opcodes.
+    /// Read `n` bytes. A virtual read hides the breakpoint opcodes of this
+    /// debugger.
     fn read<'py>(&self, py: Python<'py>, addr: u64, n: usize) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = self.read_bytes(py, addr, n)?;
         Ok(PyBytes::new(py, &bytes))
@@ -130,7 +131,7 @@ impl Memory {
         self.write_bytes(py, addr, data)
     }
 
-    /// Read one little-endian byte.
+    /// Read a little-endian byte.
     fn read_u8(&self, py: Python<'_>, addr: u64) -> PyResult<u8> {
         Ok(self.read_fixed::<1>(py, addr)?[0])
     }
@@ -170,7 +171,7 @@ impl Memory {
         self.write_bytes(py, addr, &value.to_le_bytes())
     }
 
-    /// The guest pointer width in bytes (`$ptrsize`).
+    /// The guest pointer width, in bytes (`$ptrsize`).
     #[getter]
     fn pointer_size(&self) -> PyResult<u64> {
         self.space.require_virtual()?;
@@ -213,9 +214,10 @@ impl Memory {
         Ok(utf16le_lossy(&bytes))
     }
 
-    /// Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits`
-    /// selects the layout: 32 for a WOW64 process's x86 descriptors, 64 for
-    /// native ones; by default the `.effmach` setting decides.
+    /// Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits` sets
+    /// the layout. Use 32 for the x86 descriptors of a WOW64 process and 64
+    /// for native descriptors. By default, the `.effmach` setting selects the
+    /// layout.
     #[pyo3(signature = (addr, bits = None))]
     fn read_unicode_string(
         &self,
@@ -227,16 +229,16 @@ impl Memory {
     }
 
     /// Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`). `bits`
-    /// selects the layout as for `read_unicode_string`.
+    /// sets the layout, as in `read_unicode_string`.
     #[pyo3(signature = (addr, bits = None))]
     fn read_ansi_string(&self, py: Python<'_>, addr: u64, bits: Option<u32>) -> PyResult<String> {
         self.read_descriptor(py, addr, StringDescriptor::Ansi, bits)
     }
 
-    /// Find overlapping matches and include symbol/module/VAD context. In a
-    /// virtual space unreadable pages are skipped, this session's own
-    /// breakpoints read as the code they replaced, and at most 4096 matches
-    /// are returned.
+    /// Find matches, overlapping matches included, with symbol/module/VAD
+    /// context. In a virtual space, the search skips pages that it cannot
+    /// read. The breakpoints of this session read as the code that they
+    /// replaced. The search returns a maximum of 4096 matches.
     fn search<'py>(
         &self,
         py: Python<'py>,
@@ -308,7 +310,7 @@ impl Memory {
         Typed::new(py, matches)
     }
 
-    /// Translate a virtual address through this space's page tables (`!vtop`).
+    /// Translate a virtual address with the page tables of this space (`!vtop`).
     fn translate(&self, py: Python<'_>, addr: u64) -> PyResult<Option<u64>> {
         self.space.require_virtual()?;
         let context = self.space.context();
@@ -320,7 +322,7 @@ impl Memory {
         })
     }
 
-    /// The full page-table walk and final translation (`!pte` + `!vtop`).
+    /// Get the full page-table walk and the final translation (`!pte` + `!vtop`).
     fn translation<'py>(
         &self,
         py: Python<'py>,
@@ -334,7 +336,8 @@ impl Memory {
         Typed::new(py, view::mm::vtop(&detail))
     }
 
-    /// Reverse-map a physical address through this space's page tables (`!ptov`).
+    /// Map a physical address back to virtual addresses with the page tables of
+    /// this space (`!ptov`).
     fn ptov<'py>(
         &self,
         py: Python<'py>,
@@ -349,7 +352,7 @@ impl Memory {
         Typed::new(py, view::mm::ptov(&detail))
     }
 
-    /// The directory-table base used by this space.
+    /// The directory-table base that this space uses.
     #[getter]
     fn dtb(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.with_in(py, &self.space.context(), |session| {
@@ -358,8 +361,8 @@ impl Memory {
     }
 
     /// Make `addr` resident with the guest debugger worker (`.pagein`). The
-    /// worker resumes the guest and returns with it stopped at its completion;
-    /// that stop is reflected by `dbg.stop`.
+    /// worker resumes the guest. When the worker completes, the guest stops
+    /// and the method returns. `dbg.stop` shows that stop.
     fn page_in(&self, py: Python<'_>, addr: u64) -> PyResult<bool> {
         self.space.require_virtual()?;
         let context = self.space.context();
@@ -381,7 +384,8 @@ impl Memory {
         })
     }
 
-    /// Describe the loaded module, kernel region, or process VAD containing `addr`.
+    /// Describe the loaded module, kernel region, or process VAD that contains
+    /// `addr`.
     fn describe<'py>(
         &self,
         py: Python<'py>,
@@ -417,7 +421,7 @@ impl Memory {
         )
     }
 
-    /// Disassemble the runtime function containing `addr` (`uf`).
+    /// Disassemble the runtime function that contains `addr` (`uf`).
     fn disassemble_function<'py>(
         &self,
         py: Python<'py>,
@@ -436,8 +440,8 @@ impl Memory {
         )
     }
 
-    /// The function-table entry and unwind info (AMD64 or ARM64) of the
-    /// function containing `addr`, chained parents included (`.fnent`).
+    /// Get the function-table entry and unwind info (AMD64 or ARM64) of the
+    /// function that contains `addr`, with the chained parents (`.fnent`).
     fn function_entry<'py>(
         &self,
         py: Python<'py>,
@@ -451,7 +455,7 @@ impl Memory {
         Typed::new(py, view::execution::function_entry(&detail))
     }
 
-    /// Disassemble the `count` instructions ending at `addr` (`ub`).
+    /// Disassemble the `count` instructions that end at `addr` (`ub`).
     fn disassemble_back<'py>(
         &self,
         py: Python<'py>,

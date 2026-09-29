@@ -14,8 +14,8 @@ repl_command! {
     cmd_shell -> Flow;
     names: [".shell"],
     usage: ".shell [-ci \"<debugger commands>\"] <host command>",
-    summary: "Run a host command, optionally piping debugger output into it.",
-    details: "Runs <host command> with the host's shell (sh -c) and prints what it writes to standard output and standard error, then its exit status when that is not zero; the debugger waits for it to exit. With -ci, the quoted debugger commands (`;`-separated) run first and their output is the host command's standard input, so `.shell -ci \"lm\" grep nt` filters the module list and `.shell -ci \"!process 0 0\" sort` sorts the process list; errors from those commands are shown, not piped. Without -ci the command reads an empty standard input. The rest of the line, `;` included, is the host command. Only the interactive prompt runs it: a line from MCP, DAP, the Python SDK, a GDB client's monitor command, a breakpoint action, or an exception command is refused, since none of those may start host programs.",
+    summary: "Run a host command, and optionally send debugger output to it.",
+    details: "The command runs <host command> with the shell of the host (sh -c). It shows what the host command writes to standard output and standard error. Then it shows the exit status if the status is not zero. The debugger waits until the host command exits. With -ci, the quoted debugger commands (separated by `;`) run first. Their output becomes the standard input of the host command. For example, `.shell -ci \"lm\" grep nt` filters the module list, and `.shell -ci \"!process 0 0\" sort` sorts the process list. ntoseye shows errors from the debugger commands and does not send them to the host command. Without -ci, the host command reads an empty standard input. The rest of the line, `;` included, is the host command. Only the interactive prompt can run .shell. ntoseye does not permit it in a line from MCP, DAP, the Python SDK, a GDB client monitor command, a breakpoint action, or an exception command, because none of these can start host programs.",
     style: RawTail,
 }
 

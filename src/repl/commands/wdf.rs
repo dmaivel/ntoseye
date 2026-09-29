@@ -20,7 +20,7 @@ repl_command! {
     names: ["!wdfkd.wdfldr"],
     usage: "!wdfkd.wdfldr",
     summary: "List the KMDF client drivers.",
-    details: "Walks Wdf01000!FxLibraryGlobals.FxDriverGlobalsList: for each client driver its name, the KMDF version it bound to (WdfBindInfo), its _FX_DRIVER_GLOBALS, WDFDRIVER handle, and DRIVER_OBJECT, and whether it has an In-Flight Recorder log. Needs Wdf01000's PDB. The list is followed while each entry's Blink points back at the one before it. A client with an empty DriverName (one bound to KMDF with no FxDriver created) is listed by its DRIVER_OBJECT's name, which also names it to !wdfkd.wdfdriverinfo and !wdfkd.wdflogdump; a client whose name is not printable, or whose FxDriver does not check out (its type, owner, or handle), is listed with the problem.",
+    details: "Walks the list at Wdf01000!FxLibraryGlobals.FxDriverGlobalsList. For each client driver, it shows the name, the KMDF version that the driver bound to (WdfBindInfo), the _FX_DRIVER_GLOBALS, the WDFDRIVER handle, and the DRIVER_OBJECT. It also shows if the driver has an In-Flight Recorder log. This command needs the PDB for Wdf01000. The walk continues only while the Blink of each entry points back to the entry before it. A client has an empty DriverName if it bound to KMDF but did not create an FxDriver. The command then lists the client by the name of its DRIVER_OBJECT. Use this name also with !wdfkd.wdfdriverinfo and !wdfkd.wdflogdump. Some client names are not printable. The FxDriver of a client can also fail the checks of its type, owner, or handle. In these cases, the command lists the client with the problem.",
 }
 
 repl_command! {
@@ -28,7 +28,7 @@ repl_command! {
     names: ["!wdfkd.wdfdriverinfo"],
     usage: "!wdfkd.wdfdriverinfo <driver-name>",
     summary: "Show a KMDF client driver and its WDF devices.",
-    details: "The driver is named as !wdfkd.wdfldr lists it (without case; `.sys` is optional). Shows its DRIVER_OBJECT, FxDriver and WDFDRIVER handle, _FX_DRIVER_GLOBALS, KMDF version, registry path, and image, then every device object on the driver object's DeviceObject/NextDevice chain with the WDFDEVICE behind it (kind and PnP state). A device object leads to its WDFDEVICE through its DeviceExtension, which KMDF points at the device's first context; a device object whose link does not check out (the context header, the object's type and owner, and the FxDevice's own device object) is listed with the reason.",
+    details: "Give the driver name as !wdfkd.wdfldr lists it. The name is not case-sensitive, and `.sys` is optional. The command shows the DRIVER_OBJECT, the FxDriver, the WDFDRIVER handle, the _FX_DRIVER_GLOBALS, the KMDF version, the registry path, and the image. Then it shows each device object on the DeviceObject/NextDevice chain of the driver object. For each device object, it shows the related WDFDEVICE with its kind and PnP state. A device object links to its WDFDEVICE through its DeviceExtension. KMDF sets the DeviceExtension to point to the first context of the device. The command checks the context header, the type and owner of the object, and the device object of the FxDevice. If a check fails, the command lists the device object with the reason.",
     completion: Driver,
 }
 
@@ -36,8 +36,8 @@ repl_command! {
     cmd_wdfkd_wdfhandle;
     names: ["!wdfkd.wdfhandle"],
     usage: "!wdfkd.wdfhandle <handle>",
-    summary: "Decode a WDF handle and show the object it names.",
-    details: "A handle is its object's address XORed with ~7; an offset handle (bit 0 set) points at a WDFOBJECT_OFFSET inside the object to subtract. Shows the FxObject, its type (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags, owning driver, parent, and each context (type name, size, address). A value that does not decode to a kernel address, or an object whose type, state, size, context header, or owning driver does not check out, is refused rather than shown.",
+    summary: "Decode a WDF handle and show its object.",
+    details: "A handle is the address of its object, XORed with ~7. An offset handle has bit 0 set. It points to a WDFOBJECT_OFFSET value inside the object. The command subtracts this value from the address that the handle points to. The command shows the FxObject, its type (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags, owning driver, and parent. It also shows each context with its type name, size, and address. If the value does not decode to a kernel address, the command shows an error. The command also shows an error if the type, state, size, context header, or owning driver of the object is not valid.",
     completion: Expression,
 }
 
@@ -45,8 +45,8 @@ repl_command! {
     cmd_wdfkd_wdfdevice;
     names: ["!wdfkd.wdfdevice"],
     usage: "!wdfkd.wdfdevice <WDFDEVICE>",
-    summary: "Show a WDFDEVICE: its device objects, state machines, and queues.",
-    details: "Shows the device's kind (FDO, filter, PDO, or control), its WDM device object, the device object it is attached to, and the stack's PDO; its PnP, power, and power policy state machines' current states (_WDF_DEVICE_PNP_STATE, _WDF_DEVICE_POWER_STATE, _WDF_DEVICE_POWER_POLICY_STATE) and device and system power states; a PDO's parent device, an FDO's child lists; and each queue of its I/O package (dispatch type, power management, pending and driver-owned request counts), marking the default queue.",
+    summary: "Show a WDFDEVICE and its device objects, state machines, and queues.",
+    details: "Shows the kind of the device (FDO, filter, PDO, or control), its WDM device object, the device object that it is attached to, and the PDO of the stack. It also shows the current states of the PnP, power, and power policy state machines (_WDF_DEVICE_PNP_STATE, _WDF_DEVICE_POWER_STATE, _WDF_DEVICE_POWER_POLICY_STATE). It shows the device and system power states too. For a PDO, it shows the parent device. For an FDO, it shows the child lists. For each queue of the I/O package, it shows the dispatch type, the power management, and the counts of pending and driver-owned requests. The command marks the default queue.",
     completion: Expression,
 }
 
@@ -54,8 +54,8 @@ repl_command! {
     cmd_wdfkd_wdfqueue;
     names: ["!wdfkd.wdfqueue"],
     usage: "!wdfkd.wdfqueue <WDFQUEUE>",
-    summary: "Show a WDFQUEUE: its configuration, state, callbacks, and requests.",
-    details: "Shows the queue's dispatch type, state bits (_FX_IO_QUEUE_STATE), power state and management, execution level and synchronization scope, request counts, the Evt callbacks the driver set, and the requests on its lists: waiting in the queue, marked cancelable by the driver, and presented to the driver (WDFREQUEST handle, FxRequest, and IRP). A request that does not check out ends its list, with the reason.",
+    summary: "Show a WDFQUEUE and its configuration, state, callbacks, and requests.",
+    details: "Shows the dispatch type of the queue, the state bits (_FX_IO_QUEUE_STATE), the power state, and the power management. It also shows the execution level, the synchronization scope, the request counts, and the Evt callbacks that the driver set. Then it shows the requests on three lists. The lists are the requests that wait in the queue, the requests that the driver marked cancelable, and the requests presented to the driver. For each request, it shows the WDFREQUEST handle, the FxRequest, and the IRP. If a request is not valid, the command stops that list at the request and shows the reason.",
     completion: Expression,
 }
 
@@ -63,8 +63,8 @@ repl_command! {
     cmd_wdfkd_wdflogdump;
     names: ["!wdfkd.wdflogdump"],
     usage: "!wdfkd.wdflogdump <driver-name>",
-    summary: "Print a KMDF driver's In-Flight Recorder log, oldest record first.",
-    details: "Reads the driver's IFR log (_FX_DRIVER_GLOBALS.WdfLogHeader) and walks its records from the newest back along PrevOffset, stopping at the first record written or at records newer ones overwrote. Each record prints as its sequence number, UTC time (when the log keeps timestamps), function, and message, formatted from the trace message format (TMF) annotations in Wdf01000's PDB. A record whose message no loaded PDB declares, or whose arguments do not fit it, prints its message GUID and number and its argument bytes. The header (its GUID, base, and size) and each record (signature, length, position, and sequence) are checked; the walk stops at the first that fails, and says why.",
+    summary: "Show the In-Flight Recorder log of a KMDF driver, oldest record first.",
+    details: "Reads the IFR log of the driver (_FX_DRIVER_GLOBALS.WdfLogHeader). The command walks the records back from the newest record along PrevOffset. It stops at the first record written, or at records that newer records overwrote. For each record, it shows the sequence number, the UTC time, the function, and the message. It shows the UTC time only when the log keeps timestamps. The command formats the message from the trace message format (TMF) annotations in the PDB for Wdf01000. A record can have a message that no loaded PDB declares, or arguments that do not fit the message. For such a record, the command shows the message GUID, the message number, and the argument bytes. The command checks the header (its GUID, base, and size) and each record (signature, length, position, and sequence). The walk stops at the first item that fails a check, and the command shows the reason.",
     completion: Driver,
 }
 

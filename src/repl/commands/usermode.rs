@@ -17,8 +17,8 @@ repl_command! {
     cmd_peb;
     names: ["!peb", "peb"],
     usage: "!peb [address]",
-    summary: "Decode the attached process environment block and parameters.",
-    details: "Without an address, uses the attached process's EPROCESS.Peb. Process parameters are decoded from their PDB layouts; use !dlls to list loader modules.",
+    summary: "Decode the process environment block and process parameters of the attached process.",
+    details: "If you do not give an address, the command uses EPROCESS.Peb of the attached process. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
     completion: Expression,
 }
 
@@ -27,7 +27,7 @@ repl_command! {
     names: ["!teb", "teb"],
     usage: "!teb [address]",
     summary: "Decode a thread environment block.",
-    details: "Without an address, uses the current thread's teb pseudo-register.",
+    details: "If you do not give an address, the command uses the teb pseudo-register of the current thread.",
     completion: Expression,
 }
 
@@ -35,8 +35,8 @@ repl_command! {
     cmd_dlls;
     names: ["!dlls", "dlls"],
     usage: "!dlls [-c <address>]",
-    summary: "List modules from the attached process loader lists.",
-    details: "The optional -c address limits the output to the module containing that address. Module traversal is bounded and cycle-safe.",
+    summary: "List the modules in the loader lists of the attached process.",
+    details: "With -c <address>, the command shows only the module that contains that address. The module walk has a limit. The walk also stops if it finds a cycle in a list.",
     completion: [None, Expression],
 }
 
@@ -44,7 +44,7 @@ repl_command! {
     cmd_gle();
     names: ["!gle", "gle"],
     usage: "!gle",
-    summary: "Display the current thread's last Win32 and NT status values.",
+    summary: "Show the last Win32 error value and the last NT status value of the current thread.",
     completion: None,
 }
 
@@ -52,8 +52,8 @@ repl_command! {
     cmd_chkimg;
     names: ["!chkimg", "chkimg"],
     usage: "!chkimg [-d] [-v] [-nospec] <module>",
-    summary: "Compare executable module sections with the cached on-disk image.",
-    details: "Compares .text, PAGE*, and INIT executable sections after applying DIR64/HIGHLOW relocations. Discardable or paged-out sections are skipped. Known kernel self-patches (import optimization, retpoline, KiPatchSelf retargets, and the addresses of kernel VA regions the kernel moves at boot) are counted separately unless -nospec is given, which drops that breakdown and reports them as ordinary mismatches. -d prints bounded byte diffs; -v prints per-section results.",
+    summary: "Compare the executable sections of a module with the cached on-disk image.",
+    details: "Compares the .text, PAGE*, and INIT executable sections. Before the comparison, the command applies the DIR64/HIGHLOW relocations. It skips discardable and paged-out sections. It counts known kernel self-patches separately. These are import optimization, retpoline, KiPatchSelf retargets, and the addresses of the kernel VA regions that the kernel moves at boot. With -nospec, the command does not show this breakdown and reports the self-patches as ordinary mismatches. -d prints byte diffs, up to a limit. -v prints the results for each section.",
     completion: [None, None, None, Symbol],
 }
 

@@ -37,18 +37,19 @@ const SIGNAL_POLL: Duration = Duration::from_millis(100);
 // command's) is only valid on the REPL's thread for the command's span. An
 // owned session's single-instance lock is released when the debugger is
 // dropped, not by `close()`.
-/// A live debugging session. As a context manager, leaving the `with` block
-/// closes it (`close()`): every breakpoint is removed, the target resumes, and
-/// the session ends.
+/// A live debugging session. You can use it as a context manager. When the
+/// `with` block ends, the debugger closes (`close()`). This removes all
+/// breakpoints, resumes the target, and ends the session.
 ///
-/// Usable from any Python thread: calls are serialized on the session's own
-/// thread, and a call that waits (`run()`, `wait()`) releases the GIL. Ctrl+C
-/// (`KeyboardInterrupt`) during a call ends a wait, step, or trace early and
-/// raises; during a resuming `command()` it breaks in, as in the REPL. Between
-/// calls the session keeps servicing the guest, resuming wrong-process and
-/// false-condition breakpoint hits so the guest never sits frozen. A debugger
-/// handed to a REPL custom command is valid only on the REPL's thread, for
-/// that command.
+/// You can use it from any Python thread. The session thread runs the calls one
+/// at a time. A call that waits (`run()`, `wait()`) releases the GIL. Ctrl+C
+/// (`KeyboardInterrupt`) during a call stops a wait, step, or trace early and
+/// raises the exception. During a `command()` that resumes the target, Ctrl+C
+/// breaks in, as in the REPL. Between calls, the session continues to service
+/// the guest. It resumes breakpoint hits in the wrong process and hits with a
+/// false condition. So the guest does not stay frozen. A debugger that
+/// ntoseye gives to a REPL custom command is valid only on the REPL thread, and
+/// only for that command.
 #[pyclass(frozen, module = "ntoseye")]
 pub struct Debugger {
     inner: SessionHandle,

@@ -12,14 +12,14 @@ shapes! {
     /// A descriptor-table register (IDTR/GDTR).
     DescriptorRegister {
         base: VirtAddr,
-        /// The table's limit: its size in bytes, minus one.
+        /// The table limit: the table size in bytes, minus one.
         limit: u64,
     }
 
-    /// Where `_KSPECIAL_REGISTERS` sits in a processor state.
+    /// The location of `_KSPECIAL_REGISTERS` in a processor state.
     SpecialRegistersArea {
         address: VirtAddr,
-        /// Bytes of the structure.
+        /// The size of the structure in bytes.
         size: u64,
         /// The type name.
         name: String,
@@ -28,17 +28,17 @@ shapes! {
     /// The `_KPROCESSOR_STATE` embedded in a `_KPRCB`.
     ProcessorStateArea {
         address: VirtAddr,
-        /// Bytes of the structure.
+        /// The size of the structure in bytes.
         size: u64,
         /// The type name.
         name: String,
-        /// Address of the `_CONTEXT` embedded in the processor state.
+        /// The address of the `_CONTEXT` embedded in the processor state.
         context_frame: Diag<VirtAddr>,
         special_registers: Diag<SpecialRegistersArea>,
     }
 
-    /// A processor's KPCR and KPRCB essentials (`!pcr`). Fields that can fail
-    /// to read on their own are diagnostics.
+    /// The main KPCR and KPRCB data of a processor (`!pcr`). A field is a
+    /// diagnostic if its read can fail separately from the other reads.
     Pcr {
         /// The processor number.
         processor: u16,
@@ -58,13 +58,13 @@ shapes! {
         current_thread: Diag<VirtAddr>,
         /// The `_KTHREAD` selected to run next.
         next_thread: Diag<VirtAddr>,
-        /// The processor's idle `_KTHREAD`.
+        /// The idle `_KTHREAD` of the processor.
         idle_thread: Diag<VirtAddr>,
         /// The interrupt descriptor table register.
         idtr: Diag<DescriptorRegister>,
         /// The global descriptor table register.
         gdtr: Diag<DescriptorRegister>,
-        /// The task state segment's address.
+        /// The address of the task state segment.
         tss_base: Diag<VirtAddr>,
     }
 
@@ -80,7 +80,7 @@ shapes! {
         current_thread: Diag<VirtAddr>,
         /// The `_KTHREAD` selected to run next.
         next_thread: Diag<VirtAddr>,
-        /// The processor's idle `_KTHREAD`.
+        /// The idle `_KTHREAD` of the processor.
         idle_thread: Diag<VirtAddr>,
         /// `_KPRCB.DpcRoutineActive`.
         dpc_routine_active: Diag<u64>,
@@ -89,7 +89,7 @@ shapes! {
         processor_state: Diag<ProcessorStateArea>,
     }
 
-    /// A processor's current IRQL (`!irql`).
+    /// The current IRQL of a processor (`!irql`).
     Irql {
         /// The processor number.
         processor: u16,
@@ -97,20 +97,21 @@ shapes! {
         value: Diag<u64>,
         /// The Windows name of the level (`DISPATCH_LEVEL`, ...).
         level_name: Diag<String>,
-        /// At a KD break-in, the IRQL the debugger observes, which can differ
-        /// from the level active just before the break-in.
+        /// A note about KD break-ins. At a KD break-in, `value` is the IRQL
+        /// that the debugger sees. It can be different from the level
+        /// immediately before the break-in.
         note: String,
     }
 
     /// One decoded AMD64 IDT gate.
     IdtGate {
         vector: u16,
-        /// The gate's address in the table.
+        /// The address of the gate in the table.
         address: VirtAddr,
-        /// The interrupt handler the gate points at.
+        /// The interrupt handler that the gate points to.
         handler: Diag<VirtAddr>,
-        /// The handler's symbol; the diagnostic's value is None when none
-        /// resolved.
+        /// The symbol of the handler. The diagnostic value is None if no
+        /// symbol resolved.
         symbol: Diag<Option<String>>,
         /// The code segment selector.
         selector: Diag<u16>,
@@ -123,37 +124,39 @@ shapes! {
         /// The descriptor privilege level.
         dpl: Diag<u8>,
         present: Diag<bool>,
-        /// Whether the handler lies in a module other than NT's.
+        /// Whether the handler is in a module other than NT.
         non_nt_hook: Diag<bool>,
-        /// For a handler inside `KiIsrThunk` (a chained interrupt), its offset
-        /// there and where `_KINTERRUPT.DispatchCode` sits; the diagnostic's
-        /// value is None for other handlers.
+        /// For a handler in `KiIsrThunk` (a chained interrupt), the offset of
+        /// the handler in `KiIsrThunk` and the location of
+        /// `_KINTERRUPT.DispatchCode`. The diagnostic value is None for other
+        /// handlers.
         ki_isr_thunk: Diag<Option<String>>,
     }
 
-    /// A processor's IDT: one vector, or the bounded full table (`!idt`).
+    /// The IDT of a processor (`!idt`). It contains one vector or the bounded
+    /// full table.
     Idt {
         /// The processor number.
         processor: u16,
-        /// The table's address.
+        /// The address of the table.
         base: VirtAddr,
-        /// The table's limit: its size in bytes, minus one.
+        /// The table limit: the table size in bytes, minus one.
         limit: u64,
-        /// The one vector asked for, or None for the full table.
+        /// The requested vector, or None for the full table.
         vector: Option<u16>,
         /// Whether the descriptor is shorter than the full table.
         truncated: bool,
         entries: Vec<IdtGate>,
     }
 
-    /// One decoded GDT descriptor. A system descriptor spans two slots.
+    /// One decoded GDT descriptor. A system descriptor uses two slots.
     GdtDescriptor {
         /// The slot index.
         index: u64,
-        /// The descriptor's raw 8 bytes.
+        /// The 8 raw bytes of the descriptor.
         raw: Diag<Hex>,
-        /// A system descriptor's second slot; the diagnostic's value is None
-        /// for other descriptors.
+        /// The second slot of a system descriptor. The diagnostic value is
+        /// None for other descriptors.
         high_raw: Diag<Option<Hex>>,
         /// The segment base.
         base: Diag<VirtAddr>,
@@ -170,21 +173,22 @@ shapes! {
         long_mode: Diag<bool>,
         /// The D/B bit: 32-bit default operand size.
         default_size: Diag<bool>,
-        /// The G bit: the limit counts 4 KiB pages.
+        /// The G bit: the limit is in 4 KiB pages.
         granularity: Diag<bool>,
     }
 
-    /// A processor's GDT and its bounded descriptors (`!gdt`).
+    /// The GDT of a processor and its bounded descriptors (`!gdt`).
     Gdt {
         /// The processor number.
         processor: u16,
-        /// The table's address.
+        /// The address of the table.
         base: VirtAddr,
-        /// The table's limit: its size in bytes, minus one.
+        /// The table limit: the table size in bytes, minus one.
         limit: u64,
-        /// Slots the limit describes, which can exceed the entries decoded.
+        /// The number of slots that the limit describes. This number can be
+        /// larger than the number of decoded entries.
         entry_count: u64,
-        /// Whether the table exceeds the 256-slot bound.
+        /// Whether the table has more than 256 slots.
         truncated: bool,
         entries: Vec<GdtDescriptor>,
     }
@@ -196,7 +200,8 @@ shapes! {
         value: Diag<Hex>,
     }
 
-    /// The dump's triage PRCB metadata, used when the KPRCB is unreadable.
+    /// The triage PRCB metadata of the dump. ntoseye uses it if it cannot
+    /// read the KPRCB.
     CpuTriageFallback {
         processor_number: u16,
         vendor: String,
@@ -205,14 +210,14 @@ shapes! {
         mhz: u32,
     }
 
-    /// A processor's vendor, family, model, speed, and feature bits
+    /// The vendor, family, model, speed, and feature bits of a processor
     /// (`!cpuinfo`).
     CpuInfo {
         /// The processor number.
         processor: u16,
         /// The `_KPRCB` address.
         kprcb: Diag<VirtAddr>,
-        /// Where the values came from: `_KPRCB` or `triage-dump PRCB metadata`.
+        /// The source of the values: `_KPRCB` or `triage-dump PRCB metadata`.
         source: String,
         /// The vendor string (`GenuineIntel`, ...).
         vendor: Diag<String>,
@@ -224,7 +229,7 @@ shapes! {
         /// The processor speed, in MHz.
         mhz: Diag<u64>,
         feature_bits: Vec<CpuFeatureBits>,
-        /// Triage metadata, present when the KPRCB could not be found.
+        /// The triage metadata. Present if ntoseye could not find the KPRCB.
         triage_fallback: Option<CpuTriageFallback>,
     }
 }

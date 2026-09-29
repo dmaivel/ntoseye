@@ -29,7 +29,7 @@ repl_command! {
     names: ["rdmsr"],
     usage: "rdmsr [/p <processor>] <msr>",
     summary: "Read a model-specific register from a halted processor.",
-    details: "Reads one model-specific register on the selected processor. Use /p to select another processor; dump and memory backends report MSR access as unavailable.",
+    details: "Reads one model-specific register on the selected processor. Use /p to select a different processor. The dump and memory backends show that MSR access is unavailable.",
     completion: [None, Expression, Expression],
     run_state: Halted,
 }
@@ -39,7 +39,7 @@ repl_command! {
     names: ["wrmsr"],
     usage: "wrmsr <msr> <value>",
     summary: "Write a model-specific register on the current processor.",
-    details: "Writes one model-specific register on the current processor. Common IA32_* names are accepted in place of the numeric MSR.",
+    details: "Writes one model-specific register on the current processor. You can use a common IA32_* name in place of the numeric MSR.",
     completion: [Expression, Expression],
     run_state: Halted,
 }
@@ -48,8 +48,8 @@ repl_command! {
     cmd_pcr;
     names: ["!pcr", "pcr"],
     usage: "!pcr [processor]",
-    summary: "Display the selected processor's KPCR essentials.",
-    details: "Shows KPCR and KPRCB addresses, thread pointers, descriptor registers, TSS, and available IRQL fields. On AMD64 Windows, kernel GS normally addresses the KPCR; backend GS-base registers are optional.",
+    summary: "Show the main KPCR data of the selected processor.",
+    details: "Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor registers, the TSS, and the available IRQL fields. On AMD64 Windows, kernel GS usually points to the KPCR. Backend GS-base registers are optional.",
     completion: Expression,
 }
 
@@ -57,8 +57,8 @@ repl_command! {
     cmd_prcb;
     names: ["!prcb", "prcb"],
     usage: "!prcb [processor]",
-    summary: "Display the selected processor's KPRCB essentials.",
-    details: "Shows the selected KPRCB's processor number, thread pointers, DPC and interrupt counters, and available ProcessorState metadata.",
+    summary: "Show the main KPRCB data of the selected processor.",
+    details: "Shows the processor number, the thread pointers, the DPC and interrupt counters, and the available ProcessorState metadata of the selected KPRCB.",
     completion: Expression,
 }
 
@@ -66,8 +66,8 @@ repl_command! {
     cmd_irql;
     names: ["!irql", "irql"],
     usage: "!irql [processor]",
-    summary: "Display the current IRQL for a processor.",
-    details: "Shows the selected processor's current IRQL and Windows level name. At a KD break-in, this is the debugger's observed IRQL and may differ from the level before the break-in.",
+    summary: "Show the current IRQL of a processor.",
+    details: "Shows the current IRQL and the Windows level name of the selected processor. At a KD break-in, this is the IRQL that the debugger sees. It can be different from the level before the break-in.",
     completion: Expression,
 }
 
@@ -76,7 +76,7 @@ repl_command! {
     names: ["!idt", "idt"],
     usage: "!idt [vector]",
     summary: "Decode one IDT entry or the bounded 256-entry IDT.",
-    details: "Shows one IDT vector or all 256 entries with handler, selector, gate type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints.",
+    details: "Shows one IDT vector or all 256 entries. For each entry, shows the handler, selector, gate type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints.",
     completion: Expression,
 }
 
@@ -84,16 +84,16 @@ repl_command! {
     cmd_gdt;
     names: ["!gdt", "gdt"],
     usage: "!gdt",
-    summary: "Decode the current processor's bounded GDT.",
-    details: "Shows the selected processor's bounded GDT entries with base, limit, privilege, mode, and presence.",
+    summary: "Decode the bounded GDT of the current processor.",
+    details: "Shows the bounded GDT entries of the selected processor. For each entry, shows the base, limit, privilege, mode, and presence.",
 }
 
 repl_command! {
     cmd_dg;
     names: ["dg"],
     usage: "dg <first-selector> [last-selector]",
-    summary: "Decode segment selectors from the current processor's GDT.",
-    details: "Shows each selector from first through last, in steps of 8 as WinDbg does, with its descriptor's base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. A selector naming an LDT (bit 2 set) is reported rather than decoded: 64-bit Windows has none.",
+    summary: "Decode segment selectors from the GDT of the current processor.",
+    details: "Shows each selector from the first to the last, in steps of 8 as WinDbg does. For each selector, shows the descriptor base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. If a selector refers to an LDT (bit 2 set), dg reports this and does not decode the selector. 64-bit Windows has no LDT.",
     completion: [Expression, Expression],
 }
 
@@ -101,8 +101,8 @@ repl_command! {
     cmd_cpuinfo;
     names: ["!cpuinfo", "cpuinfo"],
     usage: "!cpuinfo",
-    summary: "Display vendor, family, model, stepping, speed, and feature bits.",
-    details: "Shows processor number, vendor, family, model and stepping, speed, and feature bits when available; triage-dump metadata fills unavailable fields.",
+    summary: "Show processor identification, speed, and feature bits.",
+    details: "Shows the processor number, vendor, family, model, stepping, speed, and feature bits if they are available. If a field is not available, ntoseye uses the triage-dump metadata for it.",
 }
 
 repl_command! {
@@ -110,7 +110,7 @@ repl_command! {
     names: ["~", "vcpus"],
     usage: "~",
     summary: "List vCPU contexts and their RIP values.",
-    details: "A vCPU halted in the Windows hypervisor (VBS) also shows where its VTL0 left off, from the hypervisor's saved state; `~Ns` on it selects that context, and `.cxr` the hypervisor's registers.",
+    details: "If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped. This data comes from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers.",
     run_state: Halted,
 }
 
