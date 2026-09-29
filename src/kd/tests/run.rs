@@ -377,3 +377,40 @@ fn an_arm64_step_on_another_processor_fails_without_resuming() {
 
     assert!(worker.join().unwrap().is_empty());
 }
+
+/// The wake report and the repeated report of a switched step each delete
+/// the breakpoint-table entries in their windows, so the step's stop must
+/// report those sites as dropped, or they stay unarmed for good.
+#[test]
+fn a_switched_step_reports_the_sites_its_extra_reports_dropped() {
+    const WAKE_PC: u64 = 0xffff_f800_0000_2000;
+    const OWNER_PC: u64 = 0xffff_f800_0000_1001;
+    const STEP_PC: u64 = 0xffff_f800_0000_5000;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let worker = serve_state_changes(
+        kernel,
+        vec![
+            processor_report(2, STATUS_WAKE_SYSTEM_DEBUGGER, WAKE_PC, 0x400),
+            processor_report(0, STATUS_BREAKPOINT, OWNER_PC, 0x400),
+        ],
+    );
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.processor_count = 4;
+    backend.bp_handles.insert(OWNER_PC, 1);
+    backend.bp_handles.insert(WAKE_PC + 4, 2);
+    backend.bp_handles.insert(0xffff_f800_0000_9000, 3);
+    backend.set_current_thread("p1.3").unwrap();
+
+    backend.single_step().unwrap();
+    let step =
+        parse_state_change(&processor_report(2, STATUS_SINGLE_STEP, STEP_PC, 0x400)).unwrap();
+    backend.record_stop(&step);
+
+    let mut dropped = backend.sites_dropped_by_stop();
+    dropped.sort_unstable();
+    assert_eq!(dropped, vec![OWNER_PC, WAKE_PC + 4]);
+    drop(backend);
+    worker.join().unwrap();
+}

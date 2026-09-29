@@ -325,6 +325,7 @@ impl KdBackend {
 
     pub(super) fn resume_with(&mut self, disposition: ContinueDisposition) -> Result<()> {
         let resume_processor = self.last_stop_processor;
+        self.switch_report_pcs.clear();
         self.skip_hardcoded_breakpoint(resume_processor)?;
         // The pump absorbs the re-break a stale break-in byte causes right
         // after resume; it needs to know where we resumed from and which
@@ -373,6 +374,7 @@ impl KdBackend {
                 thread_id_for(owner)
             )));
         }
+        self.switch_report_pcs.clear();
         // A raw int3 stop still points at the int3; resuming from there would
         // only execute it again and report the same stop.
         self.skip_hardcoded_breakpoint(owner)?;
@@ -410,8 +412,9 @@ impl KdBackend {
     }
 
     /// Receive the state change `processor` reports while the target stays
-    /// halted, and adopt its register report. A report from any other
-    /// processor is recorded as the stop, and the step fails.
+    /// halted, adopt its register report, and note its PC: the report
+    /// deleted the breakpoint-table entries in its window. A report from
+    /// any other processor is recorded as the stop, and the step fails.
     fn adopt_report_from(&mut self, processor: u16) -> Result<()> {
         let arch = self.arch;
         let debug_log = self.debug_log.clone();
@@ -437,6 +440,7 @@ impl KdBackend {
                 thread_id_for(stop.processor)
             )));
         }
+        self.switch_report_pcs.push(stop.program_counter);
         self.registers.stopped(processor, stop.control_report);
         Ok(())
     }

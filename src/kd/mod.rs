@@ -316,6 +316,11 @@ pub struct KdBackend {
     last_stop_processor: u16,
     last_exception_code: u32,
     last_rip: u64,
+    /// The PCs of the extra reports the last step's processor switch put on
+    /// the wire (see `single_step`). Each deleted the breakpoint-table
+    /// entries in its window, as the stop's own report does; see
+    /// [`DebugBackend::sites_dropped_by_stop`].
+    switch_report_pcs: Vec<u64>,
     reconnect_assist_after_continue: Option<Duration>,
     bp_handles: HashMap<u64, u32>,
     managed_bp_addresses: HashSet<u64>,
@@ -697,12 +702,17 @@ impl DebugBackend for KdBackend {
     /// table entry there is gone (and its handle dead) once the stop is on
     /// the wire. The full window is reported even when the stream was cut
     /// short by a page end: rewriting a surviving entry only churns it.
+    /// A step on another processor puts two more reports on the wire, and
+    /// their windows count too.
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
-        let window = self.last_rip..self.last_rip.saturating_add(api::DBGKD_MAXSTREAM);
+        let windows: Vec<_> = std::iter::once(self.last_rip)
+            .chain(self.switch_report_pcs.iter().copied())
+            .map(|pc| pc..pc.saturating_add(api::DBGKD_MAXSTREAM))
+            .collect();
         self.bp_handles
             .keys()
             .copied()
-            .filter(|addr| window.contains(addr))
+            .filter(|addr| windows.iter().any(|window| window.contains(addr)))
             .collect()
     }
 

@@ -199,6 +199,7 @@ impl KdBackend {
             last_stop_processor: initial_stop.processor,
             last_exception_code: initial_stop.exception_code,
             last_rip: initial_stop.program_counter,
+            switch_report_pcs: Vec::new(),
             bp_handles: HashMap::new(),
             managed_bp_addresses: HashSet::new(),
             retired_bp_addresses: HashSet::new(),
