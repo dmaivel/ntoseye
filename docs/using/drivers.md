@@ -10,7 +10,7 @@ If the guest uses VBS, turn it off unless you test the driver with Memory integr
 
 Build the driver on the machine that has the toolchain:
 
-- **In the guest**: Use Visual Studio and the WDK, as on any Windows machine. The PDB stays in the guest. See [Symbols](#symbols).
+- **In the guest**: Use Visual Studio and the WDK, as on any Windows machine. The PDB stays in the guest.
 - **On the host**: Use this option for a driver that does not need the WDK headers or libraries. A `no_std` Rust driver with no imports links with `rust-lld`:
 
   ```toml
