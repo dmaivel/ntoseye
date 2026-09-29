@@ -89,7 +89,10 @@ pub fn run(spec: TargetSpec, listen: &str) -> Result<()> {
         Ok(None) => eprintln!("ntoseye-gdbserver: fetching the kernel image in the background"),
         Err(error) => eprintln!("ntoseye-gdbserver: kernel image unavailable: {error}"),
     }
-    let cancel = Arc::new(AtomicBool::new(false));
+    // The session's own interrupt request: a single step waits on that
+    // request alone, so a termination signal must raise it to end a step
+    // whose stop never arrives.
+    let cancel = Arc::clone(&session.target.interrupt);
     let terminating = termination::install(&cancel);
     eprintln!("ntoseye-gdbserver: listening on {addr}");
     serve(&mut session, &listener, &cancel, &terminating)?;

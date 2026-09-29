@@ -187,6 +187,7 @@ struct Server {
     /// end of stream, so a blocking run gives up promptly. Cleared only where
     /// the pause is consumed (`pause` itself and the stop report), never by
     /// run control: a `pause` read before a step began still cancels it.
+    /// It is also the session's interrupt request ([`share_cancel`]).
     cancel: Arc<AtomicBool>,
     lines_start_at_1: bool,
     columns_start_at_1: bool,
@@ -256,11 +257,14 @@ pub fn run(spec: Option<TargetSpec>, port: Option<u16>) -> Result<()> {
 
 impl Server {
     fn new(
-        session: Option<Session>,
+        mut session: Option<Session>,
         out: Box<dyn Write>,
         rx: Receiver<ClientMessage>,
         cancel: Arc<AtomicBool>,
     ) -> Self {
+        if let Some(session) = session.as_mut() {
+            share_cancel(session, &cancel);
+        }
         Self {
             session,
             repl: None,
@@ -566,8 +570,9 @@ impl Server {
             return Ok(None);
         }
         let spec = target_spec(args)?;
-        let session = Session::open_with_progress(&spec, &mut |line| eprintln!("{line}"))
+        let mut session = Session::open_with_progress(&spec, &mut |line| eprintln!("{line}"))
             .map_err(|error| error.to_string())?;
+        share_cancel(&mut session, &self.cancel);
         self.session = Some(session);
         self.repl = None;
         self.debug_seq = 0;
@@ -714,6 +719,14 @@ fn capabilities() -> Value {
         "supportsRestartRequest": false,
         "supportsStepBack": false,
     })
+}
+
+/// Make the server's cancel flag the session's interrupt request. A single
+/// step waits on that request alone, so without this a `pause`, a
+/// `disconnect`, or a termination signal would not end a step whose stop
+/// never arrives.
+fn share_cancel(session: &mut Session, cancel: &Arc<AtomicBool>) {
+    session.target.interrupt = Arc::clone(cancel);
 }
 
 /// Build a target spec from `launch`/`attach` arguments. Kernel debugging has
