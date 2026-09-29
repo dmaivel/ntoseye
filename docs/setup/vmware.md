@@ -1,19 +1,12 @@
 # VMware Workstation
 
-Use `ntoseye configure` to select a registered VMware VM and configure it automatically. The command does these steps:
+Use `ntoseye configure` to select a registered VMware VM and configure it automatically. It keeps the existing serial devices, uses the next free guest COM port, makes a backup of the `.vmx` file, and shows the guest instructions for this configuration.
 
-- It keeps the existing serial devices.
-- It uses the next free guest COM port.
-- It makes a backup of the `.vmx` file.
-- It shows the guest instructions for this configuration.
-
-Before you run `ntoseye configure`, power off the VM. When you use `ntoseye`, keep only one VMware VM powered on.
-
-To configure the VM manually, follow the sections below.
+Power off the VM before you run `ntoseye configure`, and keep only one VMware VM powered on while you use `ntoseye`. To configure the VM manually, follow the sections below.
 
 ## KD over a serial socket
 
-1. In the guest, open a shell as Administrator. Run these commands to enable kernel debugging:
+1. In the guest, open a shell as Administrator and run these commands to enable kernel debugging:
 
    ```
    bcdedit /debug on
@@ -34,34 +27,29 @@ To configure the VM manually, follow the sections below.
 
 4. Run `ntoseye` to connect.
 
-If another virtual serial device uses COM1, configure the next `serialN` entry. Then use `debugport:N+1` in the `bcdedit /dbgsettings` command.
+If another virtual serial device uses COM1, configure the next `serialN` entry and use `debugport:N+1` in the `bcdedit /dbgsettings` command.
 
 ## KDNET
 
-KDNET uses the virtual NIC of the guest and does not need a serial device.
-
-1. Choose a host IP address that the guest can reach through its VMware network. The network can be bridged, NAT, or host-only.
-2. Follow the [KDNET guide](kdnet.md).
+KDNET uses the guest's virtual NIC and does not need a serial device. Choose a host IP address that the guest can reach through its bridged, NAT, or host-only VMware network, then follow the [KDNET guide](kdnet.md).
 
 ## GDB stub
 
-VMware Workstation has its own GDB remote stub. To use it:
+VMware Workstation has its own GDB remote stub. To use it, add these lines to the VM's `.vmx` file:
 
-1. Add these lines to the `.vmx` file of the VM:
+```ini
+debugStub.listen.guest64 = "TRUE"
+debugStub.port.guest64 = "1234"
+```
 
-   ```ini
-   debugStub.listen.guest64 = "TRUE"
-   debugStub.port.guest64 = "1234"
-   ```
-
-2. Start ntoseye with `--backend gdb`.
+Then start ntoseye with `--backend gdb`.
 
 :::{warning}
-Do not enable kernel debug mode in the guest. For the reason, see the [GDB backend warning](kvm-qemu.md#gdb-stub).
+Do not enable kernel debug mode in the guest. The [GDB backend warning](kvm-qemu.md#gdb-stub) explains why.
 :::
 
-ntoseye does not support legacy VMware stubs that do not give an AMD64 XML target description. With these stubs, use KD or the `memory` backend.
+ntoseye does not support legacy VMware stubs that do not give an AMD64 XML target description, so use KD or the `memory` backend with them.
 
 ## Memory introspection
 
-The `memory` backend needs no host or guest configuration. For what the `memory` backend can do and what it cannot do, see [Choosing a backend](backends.md).
+The `memory` backend needs no host or guest configuration. For what it can and cannot do, see [Choosing a backend](backends.md).

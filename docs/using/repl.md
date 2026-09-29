@@ -1,6 +1,6 @@
 # Using the REPL
 
-Command names follow WinDbg. The first name is the canonical name. These friendly aliases also work:
+Command names follow WinDbg. The first name is the canonical name, and these friendly aliases also work:
 
 - {command}`ps`
 - {command}`threads`
@@ -11,9 +11,9 @@ Command names follow WinDbg. The first name is the canonical name. These friendl
 - {command}`ni`
 - {command}`finish`
 
-The [command reference](../reference/commands/index.md) lists every command. To show the same help in the REPL, type `.hh <command>`. The [expression reference](../reference/expressions.md) describes expressions, registers, and symbol syntax. You can put several commands on one line. Separate the commands with semicolons.
+The [command reference](../reference/commands/index.md) lists every command, and `.hh <command>` shows the same help in the REPL. The [expression reference](../reference/expressions.md) describes expressions, registers, and symbol syntax. You can put several commands on one line if you separate them with semicolons.
 
-With `--plain-repl`, ntoseye reads commands line by line. This mode has no completion and no history. So you can send a command file to ntoseye through a pipe.
+With `--plain-repl`, ntoseye reads commands line by line without completion or history, so you can pipe a command file into it.
 
 ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text.
 
@@ -25,7 +25,7 @@ To make an alias, use `alias <name> <expansion>`. In the expansion, you can use 
 - `${2}` is the second argument.
 - `${*}` is all the alias arguments, separated by spaces.
 
-ntoseye does not replace other `${...}` forms, for example a `.foreach` variable or `${@#ModuleName}` in `!for_each_module`. The command that uses the form replaces it. An alias expansion can contain a list of commands, separated by semicolons.
+ntoseye leaves other `${...}` forms, for example a `.foreach` variable or `${@#ModuleName}` in `!for_each_module`, in place for the command that uses them to replace. An alias expansion can contain a list of commands separated by semicolons.
 
 ```text
 alias ubp bp ${1}; g
@@ -33,4 +33,4 @@ alias pe dt _EPROCESS poi(nt!PsInitialSystemProcess) ${1}
 unalias ubp
 ```
 
-ntoseye saves aliases in `~/.ntoseye/aliases`. The {command}`reload-scripts` command loads the aliases and the custom Python commands again.
+ntoseye saves aliases in `~/.ntoseye/aliases`, and the {command}`reload-scripts` command loads the aliases and the custom Python commands again.

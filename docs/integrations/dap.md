@@ -1,12 +1,12 @@
 # Editor integration (DAP)
 
-`ntoseye dap` makes a debugger session available over the [Debug Adapter Protocol](https://github.com/microsoft/debug-adapter-protocol). The editor gives source and disassembly views, breakpoints, stacks, registers, and watches. The Debug Console accepts inspection commands. To step and continue, use the controls of the editor.
+`ntoseye dap` makes a debugger session available over the [Debug Adapter Protocol](https://github.com/microsoft/debug-adapter-protocol). The editor gives source and disassembly views, breakpoints, stacks, registers, and watches, and its Debug Console accepts inspection commands. To step and continue, use the editor's controls.
 
 ## Quickstart
 
-Configure the VM as [Choosing a backend](../setup/backends.md) describes. Use one client for each target.
+Configure the VM as [Choosing a backend](../setup/backends.md) describes, and use one client for each target.
 
-You can name the target on the command line or in the launch configuration of the client.
+You can name the target on the command line or in the client's launch configuration.
 
 ```bash
 ntoseye dap # stdio, spawned by the client
@@ -15,9 +15,9 @@ ntoseye dap --port 4711
 
 ### VS Code
 
-VS Code needs an extension to register the debug type. To set up VS Code:
+VS Code needs an extension to register the debug type. To set it up:
 
-1. Create `~/.vscode/extensions/ntoseye-dap/package.json`. Set `program` to the path of your ntoseye binary:
+1. Create `~/.vscode/extensions/ntoseye-dap/package.json` and set `program` to the path of your ntoseye binary:
 
    ```json
    {
@@ -40,8 +40,7 @@ VS Code needs an extension to register the debug type. To set up VS Code:
    }
    ```
 
-2. Reload VS Code.
-3. Add a configuration to `launch.json`:
+2. Reload VS Code, then add a configuration to `launch.json`:
 
    ```json
    {
@@ -60,33 +59,29 @@ VS Code needs an extension to register the debug type. To set up VS Code:
    }
    ```
 
-To debug the adapter:
+To debug the adapter itself, run `ntoseye dap --port 4711` in a terminal and add `"debugServer": 4711` to the configuration:
 
-1. In a terminal, run `ntoseye dap --port 4711`.
-2. Add `"debugServer": 4711` to the configuration:
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Windows kernel (ntoseye)",
+      "type": "ntoseye",
+      "request": "attach",
+      "debugServer": 4711,
+      "backend": "kd",
+      "connect": "/tmp/ntoseye-kd.sock"
+    }
+  ]
+}
+```
 
-   ```json
-   {
-     "version": "0.2.0",
-     "configurations": [
-       {
-         "name": "Windows kernel (ntoseye)",
-         "type": "ntoseye",
-         "request": "attach",
-         "debugServer": 4711,
-         "backend": "kd",
-         "connect": "/tmp/ntoseye-kd.sock"
-       }
-     ]
-   }
-   ```
-
-VS Code then connects to that adapter process and does not start a new one. The stderr output of the adapter stays visible.
+VS Code then connects to that adapter process instead of starting a new one, and the adapter's stderr output stays visible.
 
 ### Emacs ([dape](https://github.com/svaante/dape))
 
-1. Install `dape` with `M-x package-install`.
-2. Add this to your Emacs configuration:
+1. Install `dape` with `M-x package-install`, then add this to your Emacs configuration:
 
    ```emacs-lisp
    (with-eval-after-load 'dape
@@ -102,11 +97,10 @@ VS Code then connects to that adapter process and does not start a new one. The 
                     :connect "/tmp/ntoseye-kd.sock")))
    ```
 
-   If necessary, add `:symbolPath` and `:sourcePath` entries. Use the formats in [Attach arguments](#attach-arguments).
+   Add `:symbolPath` and `:sourcePath` entries as needed, using the formats in [Attach arguments](#attach-arguments).
 
-3. If `ntoseye` is not on the `exec-path` of Emacs, set `command` to the absolute path of `ntoseye`.
-4. Run `M-x dape`.
-5. Select `ntoseye`. dape starts the adapter over stdio.
+2. If `ntoseye` is not on Emacs's `exec-path`, set `command` to its absolute path.
+3. Run `M-x dape` and select `ntoseye`. dape starts the adapter over stdio.
 
 ### [nvim-dap](https://github.com/mfussenegger/nvim-dap)
 
@@ -132,35 +126,23 @@ dap.configurations.c = {
 
 ## Attach arguments
 
-Kernel debugging does not start a process. So `launch` and `attach` do the same thing. Both requests accept the same target options as the command line.
+Kernel debugging does not start a process, so `launch` and `attach` do the same thing, and both accept the same target options as the command line.
 
 | Argument | Meaning |
 | --- | --- |
 | `backend` | `kd` (default), `kdnet`, `gdb`, or `memory`. |
 | `connect` | KD socket path, KDNET listen address, or GDB address. |
 | `kdnetKey` | KDNET encryption key (four base-36 components). |
-| `memorySource` | `auto` (default), `host`, or `kd`. Only for KD and KDNET. |
-| `dump` | Opens a crash dump and does not attach to a live VM. This argument has priority over the live options. |
-| `symbolPath` | Directories or symbol servers that ntoseye adds to the end of the symbol path, in {command}`.sympath` syntax. |
-| `sourcePath` | Source-path mappings that ntoseye adds to the end of the source path, in {command}`.srcpath` syntax. |
+| `memorySource` | `auto` (default), `host`, or `kd`, for KD and KDNET only. |
+| `dump` | Opens a crash dump instead of attaching to a live VM, and has priority over the live options. |
+| `symbolPath` | Directories or symbol servers to add to the end of the symbol path, in {command}`.sympath` syntax. |
+| `sourcePath` | Source-path mappings to add to the end of the source path, in {command}`.srcpath` syntax. |
 
-`symbolPath` accepts these values:
+`symbolPath` accepts a local directory, a symbol server (`https://...`, `srv*a*b`), a `;`-separated list, or a JSON array. ntoseye adds the entries after the managed cache and the Microsoft server, and loads the symbols again when it attaches.
 
-- a local directory
-- a symbol server (`https://...`, `srv*a*b`)
-- a `;`-separated list
-- a JSON array
+`sourcePath` accepts the local directory that contains the source tree, which ntoseye matches as {command}`.srcpath` describes, or a mapping `<prefix-recorded-in-the-pdb>=<local-root>`. It also accepts the same `;`-separated list and JSON array forms as `symbolPath`. If the driver was not built on this host, a source view needs `sourcePath`.
 
-ntoseye adds the entries after the managed cache and the Microsoft server. ntoseye loads the symbols again when it attaches.
-
-`sourcePath` accepts these values:
-
-- The local directory that contains the source tree. ntoseye matches it as {command}`.srcpath` describes.
-- A mapping `<prefix-recorded-in-the-pdb>=<local-root>`.
-
-`sourcePath` also accepts the same `;`-separated list and JSON array forms as `symbolPath`. If the driver was not built on this host, a source view needs `sourcePath`.
-
-If the command line already sets a target (`ntoseye dap --dump crash.dmp`), the attach request uses that session. The attach request then ignores its own target arguments. `symbolPath` and `sourcePath` still apply.
+If the command line already sets a target (`ntoseye dap --dump crash.dmp`), the attach request uses that session and ignores its own target arguments, but `symbolPath` and `sourcePath` still apply.
 
 ## Feature mapping
 
@@ -177,7 +159,7 @@ If the command line already sets a target (`ntoseye dap --dump crash.dmp`), the 
 | Function breakpoints | `bu <symbol>` |
 | Instruction breakpoints | `bp <address>` |
 | Data breakpoints | {command}`ba` hardware watchpoints |
-| Exception breakpoints | none. Use {command}`sx` in the console. |
+| Exception breakpoints | none (use {command}`sx` in the console) |
 | Condition and hit count | breakpoint condition and WinDbg pass count |
 | Log points | a `.printf "..."; gc` breakpoint action |
 | Step over and into | one source line, or one instruction |
@@ -186,117 +168,104 @@ If the command line already sets a target (`ntoseye dap --dump crash.dmp`), the 
 | Variable writes | in-place scalar writes |
 | Memory view | virtual reads and writes |
 | Modules view | {command}`lm` |
-| Exception info | the NTSTATUS of the stop, or the bugcheck code and its four parameters |
+| Exception info | the stop's NTSTATUS, or the bugcheck code and its four parameters |
 | Output console | guest `DbgPrint` output over KD and KDNET, shown when it arrives |
 
 ### Threads and stacks
 
 DAP threads are backend execution contexts (vCPUs), as {command}`~` lists them. A stop halts the whole target and sets `allThreadsStopped`. To examine Windows threads, use {command}`!process`, {command}`!stacks`, and {command}`!thread`. You cannot step or resume a parked `_ETHREAD`.
 
-The call stack uses {command}`k`, with source lines from private PDBs. For each frame, the frame name and the source lines use the address space that ntoseye used to recover that frame. This includes the process address space of a parked thread.
+The call stack uses {command}`k`, with source lines from private PDBs. Each frame's name and source lines use the address space that ntoseye recovered that frame from, including the process address space of a parked thread.
 
-The stack of the current vCPU starts from the console context. These commands select the console context:
+The stack of the current vCPU starts from the console context, which these commands select:
 
 - `.thread <ethread>` selects the saved context of a parked Windows thread. If the vCPU of the thread is halted in the Windows hypervisor, `.thread` selects the VTL0 state that the hypervisor saved.
 - {command}`.cxr` selects a context record.
 - {command}`.trap` selects a trap frame.
 
-The stacks of other vCPUs start from the registers of those vCPUs. When the editor shows these stacks, the console context does not change. If you select a frame from one of these stacks, the console switches to that vCPU.
+The stacks of other vCPUs start from their own registers, and showing them in the editor does not change the console context. If you select a frame from one of these stacks, the console switches to that vCPU.
 
-Clients that support `supportsInvalidatedEvent` refresh their panes automatically. With other clients, refresh the panes manually.
+Clients that support `supportsInvalidatedEvent` refresh their panes automatically. With other clients, you refresh the panes manually.
 
 ### Locals, registers, and watches
 
-The compiler can inline a call. ntoseye shows an inlined call as a frame named `[Inline Frame] module!function`, as Visual Studio does. This frame is at the source line of the inlined function. The frame that contains the inlined call is at the line of the call.
+When the compiler inlines a call, ntoseye shows it as a frame named `[Inline Frame] module!function`, as Visual Studio does. That frame is at the source line of the inlined function, and the frame that contains the inlined call is at the line of the call.
 
-Locals and parameters use PDB locations, as in {command}`dv`. An inline frame shows the locals and parameters of the inlined function. The frame that contains the inlined call shows the locals and parameters of its own procedure.
+Locals and parameters use PDB locations, as in {command}`dv`. An inline frame shows the locals and parameters of the inlined function, and the frame that contains the inlined call shows those of its own procedure.
 
-Caller frames contain only the registers that ntoseye recovers when it unwinds the stack. Other values are not available.
+Caller frames contain only the registers that ntoseye recovers when it unwinds the stack, and other values are not available.
 
-ntoseye gets the locals of a frame, their values, and their children from the address space in which it recovered the stack. So the frames of a parked thread show the locals of the process of that thread. The {command}`.process` selection does not change this.
+ntoseye reads a frame's locals, their values, and their children from the address space in which it recovered the stack. As a result, the frames of a parked thread show the locals of that thread's process, whatever {command}`.process` selects.
 
-ntoseye uses {command}`dt` decoding to expand structs, unions, arrays, and pointers. Null pointers, unresolved types, and zero-sized types do not expand. To see the raw layout, use {command}`dt` in the console.
+ntoseye expands structs, unions, arrays, and pointers with {command}`dt` decoding. Null pointers, unresolved types, and zero-sized types do not expand. To see the raw layout, use {command}`dt` in the console.
 
-The Registers scope uses {command}`r`. Frame 0 shows the live register file, and you can write to it. The inline frames at the address of frame 0 share its registers, so you can also write to them. Caller frames show the sparse recovered context.
+The Registers scope uses {command}`r`. Frame 0 shows the live register file and is writable, as are the inline frames at its address, which share its registers. Caller frames show the sparse recovered context.
 
-In a stack that ntoseye walks from a saved context, every frame is recovered. So you cannot write to the registers of any frame in that stack. These are saved contexts:
+When ntoseye walks a stack from a saved context (a parked thread, a {command}`.cxr` context record, or the VTL0 state that the hypervisor saved), every frame is recovered, so you cannot write to the registers of any frame in that stack.
 
-- a parked thread
-- a {command}`.cxr` context record
-- the VTL0 state that the hypervisor saved
-
-Watch and hover use [core expressions](../reference/expressions.md). These expressions can contain:
+Watch and hover use [core expressions](../reference/expressions.md), which can contain:
 
 - locals (`index`, `Irp->IoStatus.Status`)
 - addresses (`poi(nt!PsInitialSystemProcess)`)
 - registers (`@rip`)
 - casts (`(_IRP*)@rcx`)
 
-The console radix (`n 10`) applies to these expressions. An expression uses the registers of the selected frame. Like the locals, it reads the address space in which ntoseye recovered the stack of that frame. The Debug Console uses the inspection context of the console. So a {command}`.process` scope applies in the Debug Console.
+The console radix (`n 10`) applies to these expressions. An expression uses the registers of the selected frame and, like the locals, reads the address space in which ntoseye recovered that frame's stack. The Debug Console uses the console's inspection context instead, so a {command}`.process` scope applies there.
 
-Locals need private PDBs and a location that ntoseye can recover in the selected frame. To make sure that a name resolves to a local, use `$!name`. To get the storage address of a local, use `&`. Typed structs, arrays, and pointers expand into children.
+Locals need private PDBs and a location that ntoseye can recover in the selected frame. Use `$!name` to make sure that a name resolves to a local, and `&` to get the storage address of a local. Typed structs, arrays, and pointers expand into children.
 
-You can write in place to scalar registers, locals, struct fields, and array elements. For bitfields and for values wider than 8 bytes, use console commands such as {command}`eb` or {command}`ed`.
+You can write in place to scalar registers, locals, struct fields, and array elements. Bitfields and values wider than 8 bytes need console commands such as {command}`eb` or {command}`ed`.
 
 ### Breakpoints
 
-Source breakpoints use `bu file:line`. A breakpoint on an unresolved line stays unverified until its module loads. When the module loads, a `breakpoint` event updates the client. You can edit breakpoints while the target runs. The adapter then pauses and resumes the target.
+Source breakpoints use `bu file:line`. A breakpoint on an unresolved line stays unverified until its module loads, and then a `breakpoint` event updates the client. You can edit breakpoints while the target runs, in which case the adapter pauses and resumes the target.
 
-Function breakpoints use `bu <symbol>`, but they skip the prologue. So the parameters are available when the breakpoint stops. {command}`bu` in the console stops at the symbol.
+Function breakpoints use `bu <symbol>` but skip the prologue, so the parameters are available when the breakpoint stops. {command}`bu` in the console stops at the symbol itself.
 
-You set instruction breakpoints from the disassembly view. They use `bp <address>`.
+Instruction breakpoints, which you set from the disassembly view, use `bp <address>`.
 
-Data breakpoints use {command}`ba` on variable storage, which includes fields and array elements. Locals in registers and bitfields do not have a separate address that ntoseye can watch. Only KD and KDNET support data breakpoints.
+Data breakpoints use {command}`ba` on variable storage, including fields and array elements. Locals held in registers and bitfields have no separate address that ntoseye can watch. Only KD and KDNET support data breakpoints.
 
-ntoseye does not support exception breakpoints. To configure the exception policy, use {command}`sx` commands in the console. If `sxe ld` causes a stop at a module load, the adapter reports the stop with the reason `module load`. The console shows the `ModLoad:` line of that stop.
+ntoseye does not support exception breakpoints, so configure the exception policy with {command}`sx` commands in the console. When `sxe ld` causes a stop at a module load, the adapter reports it with the reason `module load`, and the console shows the stop's `ModLoad:` line.
 
-All breakpoint types accept conditions and hit counts. `hitCondition` must be a decimal pass count. Values such as `>5` or `0x10` are not valid. Breakpoint conditions in the editor also use decimal literals. Breakpoint conditions in the console use the session radix.
+All breakpoint types accept conditions and hit counts. `hitCondition` must be a decimal pass count, so values such as `>5` or `0x10` are not valid. Breakpoint conditions in the editor also use decimal literals, while conditions in the console use the session radix.
 
 ### Log points
 
-A log point is a breakpoint with the action `.printf "..."; gc`. This action prints a message and continues. A `{...}` placeholder contains a core expression, for example a local such as `{index}`. The placeholder shows the value of the expression in hexadecimal. The text around the placeholders is literal.
+A log point is a breakpoint with the action `.printf "..."; gc`, which prints a message and continues. Each `{...}` placeholder contains a core expression, for example a local such as `{index}`, and shows its value in hexadecimal. The text around the placeholders is literal.
 
-Log placeholders cannot contain quotes or semicolons. ntoseye removes whitespace from the placeholders, because {command}`.printf` uses whitespace to separate arguments. If a log action succeeds, the target continues and the client does not stop. Conditions and hit counts still apply.
+Log placeholders cannot contain quotes or semicolons, and ntoseye removes whitespace from them because {command}`.printf` uses whitespace to separate arguments. When a log action succeeds, the target continues without stopping the client. Conditions and hit counts still apply.
 
 ### Stepping
 
-If line records exist, step over and step into go forward one source line. If no line records exist, they go forward one instruction. With `instruction` granularity, a step is always one instruction. A step covers a range of straight-line instructions in one run.
+Step over and step into go forward one source line when line records exist, or one instruction when they do not. With `instruction` granularity, a step is always one instruction. A step covers a range of straight-line instructions in one run.
 
-Step out uses {command}`gu`. It stops at the return address for all granularities.
+Step out uses {command}`gu` and stops at the return address for all granularities.
 
 The disassembly view uses {command}`u` to scroll forward and {command}`ub` to scroll backward.
 
 ### Memory
 
-The memory view reads and writes virtual memory in the current process context. When ntoseye reads memory, it replaces the bytes of its own breakpoints with the original opcodes. So the view does not show an `int3` that ntoseye put in memory.
+The memory view reads and writes virtual memory in the current process context. When ntoseye reads memory, it replaces the bytes of its own breakpoints with the original opcodes, so the view does not show an `int3` that ntoseye put in memory.
 
-A write can cross into a page that ntoseye cannot translate. In this case, ntoseye writes the bytes before that page. If the request sets `allowPartial`, the response gives the number of bytes written. If not, the write fails and gives that number.
+If a write crosses into a page that ntoseye cannot translate, ntoseye writes the bytes before that page. When the request sets `allowPartial`, the response gives the number of bytes written. Otherwise, the write fails and gives that number.
 
 ### Paging
 
-Stack and variable requests support paging:
+Stack requests support paging with `startFrame` and `levels`, and variable requests with `start` and `count`.
 
-- Stack requests use `startFrame` and `levels`.
-- Variable requests use `start` and `count`.
-
-ntoseye decodes arrays one window at a time, with a maximum of 1024 elements for each request. For each stop, ntoseye does one stack walk with a limit, and each stack page is a part of this walk. By default, {command}`dt` in the console shows 16 elements. To see more elements, use `dt -a` or {command}`dq`.
+ntoseye decodes arrays one window at a time, up to 1024 elements for each request. It does one bounded stack walk for each stop, and each stack page is a slice of that walk. {command}`dt` in the console shows 16 elements by default; to see more, use `dt -a` or {command}`dq`.
 
 ## Resume and step from the editor
 
-The Debug Console uses the same remote dispatch context as MCP. The Debug Console does not accept commands that resume the target, for example {command}`g`, {command}`p`, {command}`gu`, {command}`wt`, and {command}`.reboot`. To step and continue, use the controls of the editor.
+The Debug Console uses the same remote dispatch context as MCP and does not accept commands that resume the target, such as {command}`g`, {command}`p`, {command}`gu`, {command}`wt`, and {command}`.reboot`. To step and continue, use the editor's controls.
 
-Breakpoint actions still run. For example, you can create a breakpoint with `bp nt!NtCreateFile do "k; gc"`. At each hit, this breakpoint runs its action and prints the output in the console. If the action ends in `gc`, the target continues.
+Breakpoint actions still run. For example, a breakpoint created with `bp nt!NtCreateFile do "k; gc"` runs its action at each hit and prints the output in the console, and because the action ends in `gc`, the target continues.
 
-Pause also interrupts a step over a call that runs for a long time.
+Pause also interrupts a step over a long-running call.
 
-These events detach the adapter as `qd` does:
-
-- disconnect
-- terminate
-- `SIGTERM`, `SIGHUP`, and `SIGINT`
-
-When the adapter detaches, it removes the installed breakpoints and resumes the guest. The adapter does this cleanup before it sends the disconnect response, because a client can kill the adapter immediately. If the target cannot halt for the cleanup, the adapter reports the failure and does not resume the target.
+Disconnect, terminate, `SIGTERM`, `SIGHUP`, and `SIGINT` detach the adapter as `qd` does, which removes the installed breakpoints and resumes the guest. The adapter does this cleanup before it sends the disconnect response, because a client can kill the adapter immediately. If the target cannot halt for the cleanup, the adapter reports the failure and does not resume the target.
 
 :::{warning}
-`SIGKILL` stops the adapter before it can do the cleanup. The breakpoint entries then stay installed. For more information, see [breakpoint recovery](../using/breakpoints.md).
+`SIGKILL` stops the adapter before it can do the cleanup, so the breakpoint entries stay installed. For more information, see [breakpoint recovery](../using/breakpoints.md).
 :::

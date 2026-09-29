@@ -1,8 +1,8 @@
 # Bugchecks
 
-When Windows crashes, it stops with a *bugcheck*. This is the blue screen. A bugcheck has a code and four arguments that tell what went wrong. If a debugger is attached, the crash stops in the debugger first. At that time, all the data is still in memory.
+When Windows crashes, it stops with a *bugcheck*, the blue screen. A bugcheck has a code and four arguments that tell what went wrong. If a debugger is attached, the crash stops in the debugger first, while all the data is still in memory.
 
-This page shows one crash as an example. The crash is the high-IRQL fault of Sysinternals NotMyFault. The command for this crash is `notmyfaultc64 -accepteula crash 0x01`. The target is a Windows 11 VM, and the backend is `kdnet`.
+This page follows one example crash, the high-IRQL fault of Sysinternals NotMyFault (`notmyfaultc64 -accepteula crash 0x01`), on a Windows 11 VM with the `kdnet` backend.
 
 ## How the crash is caught
 
@@ -15,9 +15,9 @@ This page shows one crash as an example. The crash is the high-IRQL fault of Sys
 
 With KD, the crash comes to `ntoseye` as a separate stop.
 
-The `gdb` backend cannot get a notification of the crash. So it sets a breakpoint at the first instruction of `nt!KeBugCheckEx`. When it attaches, it shows the message `armed a bugcheck trap at nt!KeBugCheckEx`. It reads the bugcheck code and arguments from the call to `nt!KeBugCheckEx`.
+The `gdb` backend cannot get a notification of the crash, so when it attaches, it sets a breakpoint at the first instruction of `nt!KeBugCheckEx` and shows the message `armed a bugcheck trap at nt!KeBugCheckEx`. At a bugcheck, it reads the bugcheck code and arguments from the call to `nt!KeBugCheckEx`.
 
-If a session ends without cleanup, this breakpoint can stay in the guest. At the next bugcheck, the breakpoint would crash Windows a second time. The next attach, over any backend, puts back the original instruction and reports it.
+If a session ends without cleanup, this breakpoint can stay in the guest, where it would crash Windows a second time at the next bugcheck. The next attach, over any backend, puts back the original instruction and reports it.
 
 [Choosing a backend](../setup/backends.md) compares the backends.
 
@@ -60,7 +60,7 @@ disasm
 kdnet:p1.4>
 ```
 
-Windows writes the first lines, and the debugger prints them. The `BUGCHECK` block is the `ntoseye` interpretation of these lines. It shows:
+Windows writes the first lines, and the debugger prints them. The `BUGCHECK` block is the `ntoseye` interpretation of these lines, and shows:
 
 - the name and the code of the bugcheck
 - the module and the address where the fault occurred
@@ -69,18 +69,13 @@ Windows writes the first lines, and the debugger prints them. The `BUGCHECK` blo
 
 In this example, a driver, `myfault.sys`, read memory that it must not access at IRQL 2.
 
-The `BREAK` header shows the processor and the thread. It shows the stop at the fault, `myfault+0x1730`. But Windows is actually stopped in `nt!DbgBreakPointWithStatus`. In this function, Windows gives control to the debugger.
+The `BREAK` header shows the processor and the thread, and puts the stop at the fault, `myfault+0x1730`. Windows is actually stopped in `nt!DbgBreakPointWithStatus`, where it gives control to the debugger.
 
-The disassembly starts at the fault. The code is a loop that reads a dword and then moves forward by one page. The registers and the stack are those of the processor at the time it stopped.
+The disassembly starts at the fault, in a loop that reads a dword and then moves forward by one page. The registers and the stack are those of the processor at the time it stopped.
 
 ## Analyze it
 
-{command}`!analyze` gives the result of the analysis. It shows:
-
-- the bugcheck
-- a failure signature, which you can use to compare crashes
-- the culprit module, with a confidence level
-
+{command}`!analyze` shows the bugcheck, a failure signature that you can use to compare crashes, and the culprit module with a confidence level.
 
 ```text
 kdnet:p1.4> !analyze
@@ -109,9 +104,9 @@ loaded modules
 - all loaded modules
 - the trap frame that Windows made when the driver faulted
 
-In this example, `nt!KiPageFault` made the trap frame. `!analyze -v` prints the registers that the fault saved. The frame of a page fault does not hold `rbx`, `rsi`, or `rdi`, so these registers show `-`. The faulting context in the output shows `myfault+0x1730` and the address of the trap frame.
+In this example, `nt!KiPageFault` made the trap frame, and `!analyze -v` prints the registers that the fault saved. The frame of a page fault does not hold `rbx`, `rsi`, or `rdi`, so these registers show `-`. The faulting context in the output shows `myfault+0x1730` and the address of the trap frame.
 
-To select the trap frame, give its address to {command}`.trap`. Then {command}`k` and the register commands start at the fault. Otherwise they start at `nt!DbgBreakPointWithStatus`.
+To select the trap frame, give its address to {command}`.trap`. {command}`k` and the register commands then start at the fault instead of at `nt!DbgBreakPointWithStatus`.
 
 {command}`k` shows how the driver got to the fault. Read the stack from the bottom up:
 
@@ -150,7 +145,7 @@ kdnet:p1.4> k
  25 000000cd0b18f7f8  00007ff9a7e4caec  ntdll!RtlUserThreadStart+0x2c
 ```
 
-The `myfault` frames show `module+offset`. The reason is that the Microsoft symbol server has no PDB for `myfault`. {command}`lm` shows this:
+The `myfault` frames show `module+offset` because the Microsoft symbol server has no PDB for `myfault`, as {command}`lm` shows:
 
 ```text
 kdnet:p1.4> lm m myfault
@@ -158,17 +153,13 @@ Start             End               Module   Version  Symbols  Source  Image
 fffff808bb460000  fffff808bb46b000  myfault  -        failed   -       myfault.sys
 ```
 
-For your own driver, give `ntoseye` its PDB. Then these frames show names and source lines. [Symbols](symbols.md) tells how to do this.
+For your own driver, give `ntoseye` its PDB so that these frames show names and source lines. [Symbols](symbols.md) tells how to do this.
 
-You can examine the rest of the target as at all other stops:
-
-- Use {command}`!thread` to examine the thread that crashed.
-- Use {command}`dt` and the `d*` commands to examine memory.
+You can examine the rest of the target as at any other stop, for example the thread that crashed with {command}`!thread`, and memory with {command}`dt` and the `d*` commands.
 
 ## Decode a code without a crash
 
-`!analyze -show` decodes a bugcheck code and arguments that you got from a different source. Examples are a photo of a blue screen or an event log entry.
-
+`!analyze -show` decodes a bugcheck code and arguments that you got from a different source, such as a photo of a blue screen or an event log entry.
 
 ```text
 kdnet:p1.1> !analyze -show 0x50
@@ -183,12 +174,7 @@ kdnet:p1.1> !analyze -show 0x50
 
 ## After the bugcheck
 
-The crashed system cannot continue to run. But it has not written its crash dump yet. When you enter {command}`g`, these events occur:
-
-1. Windows writes the dump.
-2. Windows reboots.
-3. `ntoseye` follows the reboot. It stops at the first boot notification of the new kernel.
-
+The crashed system cannot continue to run, but it has not written its crash dump yet. When you enter {command}`g`, Windows writes the dump and reboots, and `ntoseye` follows the reboot and stops at the first boot notification of the new kernel.
 
 ```text
 kdnet:p1.4> g
@@ -206,12 +192,12 @@ To keep the memory as it was at the stop, write a dump with {command}`.dump` bef
 
 ## Forcing a crash
 
-{command}`.crash` crashes the target on purpose with `MANUALLY_INITIATED_CRASH` (0xE2). Use it to test the dump configuration. You can also use it to capture a system that is hung but did not crash.
+{command}`.crash` crashes the target on purpose with `MANUALLY_INITIATED_CRASH` (0xE2). Use it to test the dump configuration, or to capture a system that is hung but did not crash.
 
-For a crash inside a driver, as in the example on this page, use [NotMyFault](https://learn.microsoft.com/sysinternals/downloads/notmyfault). Its command-line form is `notmyfaultc64 -accepteula crash 0x01`.
+For a crash inside a driver, as in the example on this page, use [NotMyFault](https://learn.microsoft.com/sysinternals/downloads/notmyfault) with the command line `notmyfaultc64 -accepteula crash 0x01`.
 
 ## From scripts
 
-In the [Python SDK](../scripting/sdk.md), a bugcheck comes as a `Stop.Bugcheck`. Its `info` holds the code, the arguments, and the culprit. `dbg.inspect.bugcheck()` returns the same data for the current stop. `dbg.inspect.triage()` returns the full `!analyze` report.
+In the [Python SDK](../scripting/sdk.md), a bugcheck comes as a `Stop.Bugcheck` whose `info` holds the code, the arguments, and the culprit. `dbg.inspect.bugcheck()` returns the same data for the current stop, and `dbg.inspect.triage()` returns the full `!analyze` report.
 
 With [MCP](../integrations/mcp.md), `!analyze` with `format: "json"` returns the report as structured data.
