@@ -361,8 +361,11 @@ impl KdBackend {
         let processor = self.current_processor;
         let owner = self.last_stop_processor;
         // An ARM64 target accepts the switch and the trace flag, but the
-        // processor it switched to never takes the step: the target runs on
-        // and no stop arrives.
+        // processor it switched to never takes the step, and no stop
+        // arrives. Windows reports a frozen ARM64 processor as its own state
+        // inside nt!KiFreezeTargetExecution, with debug exceptions masked
+        // (PSTATE.D), not as the code the freeze interrupted, so the trace
+        // flag is set in a state where no step can occur.
         if processor != owner && self.arch == Arch::Arm64 {
             return Err(Error::Kd(format!(
                 "{} stopped the target, and on ARM64 only that processor can step; select it \
