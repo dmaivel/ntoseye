@@ -15,6 +15,8 @@ Run `ntoseye status` at any time to inspect configured transports, assigned gues
 
 For any other target, follow the [KDNET guide](../setup/kdnet.md) instead; `configure` is not needed.
 
+If the guest runs VBS, turn it off for debugging drivers and the kernel unless the work needs it: [Should VBS be on?](../platforms/vbs.md#should-vbs-be-on)
+
 ## Choosing a backend
 
 See the [backend comparison table](../setup/backends.md).

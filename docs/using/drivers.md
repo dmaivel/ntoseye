@@ -1,6 +1,6 @@
 # Developing drivers from a Linux host
 
-A driver's edit-build-load-debug loop can run from the Linux host that runs the Windows VM. The guest still needs a kernel debugger configured ([KDNET](../setup/kdnet.md) or [KD over serial](../setup/kvm-qemu.md#kd-over-a-serial-socket)) for the steps below that serve files or load unsigned code; the GDB stub is enough for debugging a driver that already loads.
+A driver's edit-build-load-debug loop can run from the Linux host that runs the Windows VM. The guest still needs a kernel debugger configured ([KDNET](../setup/kdnet.md) or [KD over serial](../setup/kvm-qemu.md#kd-over-a-serial-socket)) for the steps below that serve files or load unsigned code; the GDB stub is enough for debugging a driver that already loads. If the guest runs VBS, turn it off unless you are testing the driver under Memory integrity ([Should VBS be on?](../platforms/vbs.md#should-vbs-be-on)).
 
 ## Build
 

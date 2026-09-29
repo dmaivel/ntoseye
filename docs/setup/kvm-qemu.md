@@ -91,7 +91,7 @@ No host or guest configuration needed; see [Choosing a backend](backends.md) for
 
 ## Virtualization-based security (VBS)
 
-[Secure-kernel inspection](../platforms/vbs.md) needs VBS running in the guest, which needs nested virtualization (`vmx`) exposed to the VM. `msinfo32` in the guest reports whether VBS is running. Memory integrity (HVCI) is not required.
+[Secure-kernel inspection](../platforms/vbs.md) needs VBS running in the guest, which needs nested virtualization (`vmx`) exposed to the VM. Other debugging goes better without it ([Should VBS be on?](../platforms/vbs.md#should-vbs-be-on)). `msinfo32` in the guest reports whether VBS is running. Memory integrity (HVCI) is not required.
 
 On the tested Core i9-14900F host with a Windows 11 guest, the guest's hypervisor failed to boot under `<cpu mode="host-passthrough"/>`. A custom Skylake model with `vmx` added works, keeping the existing Hyper-V enlightenments and CPU topology, with Secure Boot off:
 

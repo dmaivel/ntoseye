@@ -3,6 +3,24 @@
 With virtualization-based security (VBS) running, Windows runs a second kernel, `securekernel.exe`, in Virtual Trust Level 1 alongside isolated user-mode processes (trustlets such as `LsaIso.exe`). `ntoseye` can inspect that memory on an AMD64 guest whose memory it reads directly from the host.
 The Python SDK exposes the same views as [`dbg.secure_kernel`](../scripting/sdk.md#secure-kernel-vtl1).
 
+## Should VBS be on?
+
+VBS can run only when the VM exposes nested virtualization to the guest: VMware's "Virtualize Intel VT-x/EPT" option, or a KVM/QEMU CPU with `vmx` (UTM under Apple's hypervisor has none). Windows 11 then turns it on by default where the hardware allows, and Hyper-V or WSL2 in the guest start the hypervisor as well. `msinfo32` in the guest shows whether it is running. For debugging drivers and the kernel, turn it off unless the work needs it. With it on:
+
+- Windows refuses KD's writes to user-mode code, so a user-mode breakpoint over KD takes one of the four hardware slots ({command}`ba` `e1`).
+- The `gdb` backend cannot single-step with the trap flag: it runs the vCPU alone to the next instruction, and a step occasionally ends early, in an interrupt handler or another thread ([how](../internals/vbs.md#stepping-without-the-trap-flag)).
+- A vCPU can stop inside the Windows hypervisor, where nothing can be stepped until the guest resumes.
+
+Keep it on to research VBS and the secure kernel (the rest of this page), to test a driver under Memory integrity (HVCI) before release, since a production driver has to load with it on, or to debug something that happens only with it on.
+
+To turn it off, run this in an elevated prompt in the guest and reboot:
+
+```text
+bcdedit /set hypervisorlaunchtype off
+```
+
+That stops the Windows hypervisor, and with it Hyper-V, WSL2, and Windows Sandbox in the guest. `bcdedit /set hypervisorlaunchtype auto` and a reboot turn it back on.
+
 :::{important}
 Everything on this page needs an **AMD64 guest**; ARM64 guests are not supported. The host CPU matters too:
 
