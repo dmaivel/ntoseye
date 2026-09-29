@@ -181,7 +181,8 @@ impl Session {
         // it again; that hit is this event, not a new one.
         if matches!(stepped, Ok(RunPast::Diverted)) {
             self.module_trap_interrupted =
-                interrupted_on(&self.target, &self.register_map, &regs, rip, cr3);
+                interrupted_on(&self.target, &self.register_map, &regs, rip, cr3)
+                    .map(|stack| (event, stack));
         }
         stepped.map(Some)
     }

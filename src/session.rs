@@ -537,10 +537,10 @@ pub struct Session {
     /// loads and unloads, while one is waited on. Only backends that report
     /// no module events themselves get them; see [`Self::sync_module_traps`].
     module_traps: Vec<ModuleTrap>,
-    /// The stack pointer of a thread that took an interrupt on a module trap
-    /// while being run past it, before executing it: its next hit there is
-    /// the same event, not a new one.
-    module_trap_interrupted: Option<u64>,
+    /// The event and stack pointer of a thread that took an interrupt on a
+    /// module trap while being run past it, before executing it: its next
+    /// hit on that event's trap is the same event, not a new one.
+    module_trap_interrupted: Option<(ModuleEvent, u64)>,
     /// Whether a detected reload has not yet been surfaced to the host: the
     /// guest-state rebuild failed at the detection stop, so no
     /// [`ContinueOutcome::TargetReloaded`] went out. While set, the eventual

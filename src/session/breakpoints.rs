@@ -231,7 +231,9 @@ impl Session {
             }
         }
         self.module_traps = kept;
-        self.module_trap_interrupted = None;
+        // The other event's trap stays planted, and so does its marker.
+        self.module_trap_interrupted
+            .take_if(|(interrupted, _)| *interrupted == event);
     }
 
     /// Set an `sx* ld` or `sx* ud` filter.

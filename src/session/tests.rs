@@ -1994,6 +1994,37 @@ fn a_resume_keeps_a_module_trap_only_while_its_event_is_awaited() {
     assert_eq!(resumed(ModuleEvent::Unload, None, true), (false, true));
 }
 
+/// A thread interrupted while run past the load trap comes back to it as
+/// the same load. Lifting the unload traps meanwhile, because their filter
+/// went away, must not make that return count as a new load.
+#[test]
+fn lifting_the_unload_traps_keeps_the_load_traps_interrupted_hit() {
+    let (mut session, _, _, _) = session_at_module_trap(ModuleEvent::Load);
+    session
+        .module_traps
+        .push(module_trap(ModuleEvent::Unload, UNLOAD_TRAP));
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
+        Some("driver".into()),
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    let regs = session.backend.read_registers().unwrap();
+    let stack = session.register_map.read_u64("rsp", &regs).unwrap();
+    session.module_trap_interrupted = Some((ModuleEvent::Load, stack));
+
+    session.arm_traps();
+    assert!(!has_module_trap(&session, ModuleEvent::Unload));
+
+    let resolution = session
+        .classify_stop_event(breakpoint_event(LOAD_TRAP))
+        .unwrap();
+    assert!(
+        matches!(resolution, StopResolution::ModulesChanged),
+        "the returning thread was reported as a new load: {resolution:?}"
+    );
+}
+
 /// A `sxe ld:<module>` filter naming the image stops at the load with the
 /// module listed and its deferred breakpoint armed; resuming from that stop
 /// steps past the trap before continuing.

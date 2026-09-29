@@ -562,7 +562,7 @@ impl Session {
             .or_else(|| self.target.register_value("sp"));
         let repeated = self
             .module_trap_interrupted
-            .take_if(|interrupted| Some(*interrupted) == stack)
+            .take_if(|(event, interrupted)| *event == kind && Some(*interrupted) == stack)
             .is_some();
         self.unreported_module_change = self.refresh_modules_on_stop();
         let argument = match self.target.arch() {
