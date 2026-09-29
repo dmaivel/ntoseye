@@ -2025,6 +2025,31 @@ fn lifting_the_unload_traps_keeps_the_load_traps_interrupted_hit() {
     );
 }
 
+/// A breakpoint the user set on the function a module trap sits on still
+/// stops when no filter surfaces the module event.
+#[test]
+fn a_users_breakpoint_on_a_module_trap_stops_without_a_filter() {
+    for (event, address) in [
+        (ModuleEvent::Load, LOAD_TRAP),
+        (ModuleEvent::Unload, UNLOAD_TRAP),
+    ] {
+        let (mut session, _, _, continues) = session_at_module_trap(event);
+        session
+            .breakpoints
+            .insert_for_test(90, VirtAddr(address), true, None);
+
+        let resolution = session
+            .classify_stop_event(breakpoint_event(address))
+            .unwrap();
+
+        assert!(
+            matches!(&resolution, StopResolution::Breakpoint { breakpoint, .. } if breakpoint.id == 90),
+            "{event:?}: {resolution:?}"
+        );
+        assert_eq!(continues.load(Ordering::Relaxed), 0, "{event:?}");
+    }
+}
+
 /// A `sxe ld:<module>` filter naming the image stops at the load with the
 /// module listed and its deferred breakpoint armed; resuming from that stop
 /// steps past the trap before continuing.

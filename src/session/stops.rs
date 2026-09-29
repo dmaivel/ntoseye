@@ -407,7 +407,7 @@ impl Session {
             .find(|trap| trap.site.address.0 == rip)
             .map(|trap| trap.event)
         {
-            return self.classify_module_trap_hit(kind, event, rip);
+            return self.classify_module_trap_hit(kind, event, rip, cr3);
         }
 
         let resolution = match self.resolve_breakpoint_stop(rip, cr3)? {
@@ -547,14 +547,16 @@ impl Session {
     /// the image base in its second argument. The event is a module change
     /// like KD's notification: the module list is refreshed and deferred
     /// breakpoints reconciled. A `sxe ld`/`sxe ud` filter naming the image
-    /// surfaces the stop; otherwise the thread is stepped past the trap and
-    /// resumed. A thread returning to the trap after an interrupt diverted it
-    /// is the same event, resumed again.
+    /// surfaces the stop; otherwise a breakpoint of the manager's at the same
+    /// address takes the hit as usual, and without one the thread is stepped
+    /// past the trap and resumed. A thread returning to the trap after an
+    /// interrupt diverted it is the same event, resumed again.
     fn classify_module_trap_hit(
         &mut self,
         kind: ModuleEvent,
         event: StopEvent,
         rip: u64,
+        cr3: u64,
     ) -> Result<StopResolution> {
         let stack = self
             .target
@@ -578,6 +580,27 @@ impl Session {
             let resolution = module_event_resolution(kind, module, event, rip);
             self.record_visible_stop(&resolution);
             return Ok(resolution);
+        }
+        if self.breakpoints.breakpoint_id_at_address(rip).is_some() {
+            // A load may have resolved the last breakpoint waiting on one.
+            self.arm_traps();
+            match self.resolve_breakpoint_stop(rip, cr3)? {
+                BreakpointStopAction::Hit {
+                    breakpoint,
+                    condition_error,
+                } => {
+                    let resolution = StopResolution::Breakpoint {
+                        breakpoint: Box::new(breakpoint),
+                        event,
+                        rip,
+                        condition_error,
+                    };
+                    self.record_visible_stop(&resolution);
+                    return Ok(resolution);
+                }
+                BreakpointStopAction::Resumed => return Ok(StopResolution::ModulesChanged),
+                BreakpointStopAction::NotBreakpoint => {}
+            }
         }
         self.backend.set_current_thread(&self.current_thread)?;
         self.step_over_site_at_pc()?;
