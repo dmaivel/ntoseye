@@ -139,10 +139,12 @@ pub(super) fn remap_source_file(
         if let Some(relative) = relatives.last() {
             missing.get_or_insert_with(|| root.join(relative));
         }
-        let exact = relatives.iter().map(|relative| Some(root.join(relative)));
+        let exact = relatives
+            .iter()
+            .map(|relative| find_on_disk(root, relative, false));
         let folded = relatives
             .iter()
-            .map(|relative| find_ignoring_case(root, relative));
+            .map(|relative| find_on_disk(root, relative, true));
         for candidate in exact.chain(folded).flatten() {
             if !source_candidate_is_contained_file(root, &candidate) {
                 continue;
@@ -168,30 +170,39 @@ pub(super) fn remap_source_file(
         }))
 }
 
-/// `root/relative` found component by component ignoring ASCII case, when
-/// each component matches exactly one directory entry.
-fn find_ignoring_case(root: &Path, relative: &Path) -> Option<PathBuf> {
+/// `root/relative` with each component spelled as its directory entry is.
+/// A component matches the entry of the same name, or with `fold`, the one
+/// entry that equals it ignoring ASCII case. The names come from the listing
+/// because on a case-insensitive filesystem (macOS by default) a path in the
+/// recorded case exists too, and would be reported in that case.
+fn find_on_disk(root: &Path, relative: &Path, fold: bool) -> Option<PathBuf> {
+    // Most candidate suffixes name nothing; skip listing directories for them.
+    if !fold && !root.join(relative).exists() {
+        return None;
+    }
     let mut path = root.to_path_buf();
     for component in relative.components() {
         let name = component.as_os_str().to_str()?;
-        let exact = path.join(name);
-        if exact.exists() {
-            path = exact;
-            continue;
+        let mut exact = None;
+        let mut folded = Vec::new();
+        for entry in std::fs::read_dir(&path).ok()?.flatten() {
+            let entry_name = entry.file_name();
+            let Some(entry_name) = entry_name.to_str() else {
+                continue;
+            };
+            if entry_name == name {
+                exact = Some(entry.path());
+                break;
+            }
+            if fold && entry_name.eq_ignore_ascii_case(name) {
+                folded.push(entry.path());
+            }
         }
-        let mut matches = std::fs::read_dir(&path).ok()?.filter_map(|entry| {
-            let entry = entry.ok()?;
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|entry_name| entry_name.eq_ignore_ascii_case(name))
-                .then(|| entry.path())
-        });
-        let found = matches.next()?;
-        if matches.next().is_some() {
-            return None;
-        }
-        path = found;
+        path = match exact {
+            Some(found) => found,
+            None if folded.len() == 1 => folded.pop()?,
+            None => return None,
+        };
     }
     Some(path)
 }
