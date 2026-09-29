@@ -406,7 +406,7 @@ fn single_step_event() -> StopEvent {
         target_reloaded: false,
         target_kernel_base_hint: None,
         modules_changed: false,
-        loaded_image_base: None,
+        module_event: None,
         assisted_breakin: false,
     }
 }
@@ -424,7 +424,7 @@ pub fn breakpoint_event(pc: u64) -> StopEvent {
         target_reloaded: false,
         target_kernel_base_hint: None,
         modules_changed: false,
-        loaded_image_base: None,
+        module_event: None,
         assisted_breakin: false,
     }
 }
@@ -442,7 +442,7 @@ fn module_change_event() -> StopEvent {
         target_reloaded: false,
         target_kernel_base_hint: None,
         modules_changed: true,
-        loaded_image_base: None,
+        module_event: None,
         assisted_breakin: false,
     }
 }
@@ -1814,26 +1814,45 @@ fn exiting_takes_the_bugcheck_trap_back_out_of_the_guest() {
 
 /// Where the mock's `nt!DbgLoadImageSymbols` trap sits.
 const LOAD_TRAP: u64 = 0x1080;
+/// Where the mock's `nt!DbgUnLoadImageSymbolsUnicode` trap sits.
+const UNLOAD_TRAP: u64 = 0x10c0;
 
-/// A session over a stub (no load events) halted on its load trap as the
-/// kernel reports `driver.sys` loaded at 0x2000, with a deferred
-/// `driver!DeferredFn` breakpoint whose symbols the load made available.
+/// A module trap for `event` at `address`.
+fn module_trap(event: ModuleEvent, address: u64) -> ModuleTrap {
+    ModuleTrap {
+        event,
+        site: TrapSite {
+            address: VirtAddr(address),
+            original: vec![0x48],
+        },
+    }
+}
+
+/// Whether `session` holds a trap for `event`.
+fn has_module_trap(session: &Session, event: ModuleEvent) -> bool {
+    session.module_traps.iter().any(|trap| trap.event == event)
+}
+
+/// A session over a stub (no module events) halted on its trap for `event`
+/// as the kernel reports `driver.sys` at 0x2000 loading or unloading, with a
+/// deferred `driver!DeferredFn` breakpoint whose symbols are available.
 /// Returns it with the stub's site writes and continue count.
-fn session_at_load_trap() -> (Session, u32, SiteWrites, Arc<AtomicUsize>) {
+fn session_at_module_trap(event: ModuleEvent) -> (Session, u32, SiteWrites, Arc<AtomicUsize>) {
+    let address = match event {
+        ModuleEvent::Load => LOAD_TRAP,
+        ModuleEvent::Unload => UNLOAD_TRAP,
+    };
     let mut backend = MockBackend {
         allow_breakpoints: true,
         ..MockBackend::default()
     }
     .one_vcpu();
-    backend.set("rip", LOAD_TRAP);
+    backend.set("rip", address);
     backend.set("rdx", 0x2000);
     let sites = Arc::clone(&backend.site_writes);
     let continues = Arc::clone(&backend.continues);
     let mut session = session_with_mock(backend);
-    session.load_trap = Some(TrapSite {
-        address: VirtAddr(LOAD_TRAP),
-        original: vec![0x48],
-    });
+    session.module_traps = vec![module_trap(event, address)];
     session
         .target
         .set_kernel_modules_for_test(vec![ModuleInfo::new(
@@ -1863,11 +1882,14 @@ fn a_load_trap_hit_no_filter_names_arms_deferred_breakpoints_and_resumes() {
         ],
     ];
     for filters in configurations {
-        let (mut session, id, sites, continues) = session_at_load_trap();
+        let (mut session, id, sites, continues) = session_at_module_trap(ModuleEvent::Load);
         for &(module, mode) in filters {
-            session
-                .exception_policies
-                .set_module_load(module.map(str::to_string), mode, None);
+            session.exception_policies.set_module_event(
+                ModuleEvent::Load,
+                module.map(str::to_string),
+                mode,
+                None,
+            );
         }
 
         let resolution = session
@@ -1890,16 +1912,24 @@ fn a_load_trap_hit_no_filter_names_arms_deferred_breakpoints_and_resumes() {
             .find(|write| write.0 == LOAD_TRAP)
             .copied();
         assert_eq!(last, Some((LOAD_TRAP, !filters.is_empty())), "{filters:?}");
-        assert_eq!(session.load_trap.is_some(), !filters.is_empty());
+        assert_eq!(
+            has_module_trap(&session, ModuleEvent::Load),
+            !filters.is_empty()
+        );
     }
 }
 
-/// A resume keeps the load trap only while something waits on a load: an
-/// `sxn`/`sxe ld` filter or an unresolved breakpoint. With neither it is
-/// lifted before the guest runs.
+/// A resume keeps the load trap only while something waits on a load (an
+/// `sxn`/`sxe ld` filter or an unresolved breakpoint), and the unload trap
+/// only while an `sxn`/`sxe ud` filter waits on an unload. A trap nothing
+/// waits on is lifted before the guest runs.
 #[test]
-fn a_resume_keeps_the_load_trap_only_while_a_load_is_awaited() {
-    let resumed = |filter: Option<ExceptionPolicyMode>, deferred: bool| {
+fn a_resume_keeps_a_module_trap_only_while_its_event_is_awaited() {
+    let resumed = |event: ModuleEvent, filter: Option<ExceptionPolicyMode>, deferred: bool| {
+        let address = match event {
+            ModuleEvent::Load => LOAD_TRAP,
+            ModuleEvent::Unload => UNLOAD_TRAP,
+        };
         let mut backend = MockBackend {
             allow_breakpoints: true,
             ..MockBackend::default()
@@ -1908,34 +1938,40 @@ fn a_resume_keeps_the_load_trap_only_while_a_load_is_awaited() {
         backend.set("rip", 0x1000);
         let sites = Arc::clone(&backend.site_writes);
         let mut session = session_with_mock(backend);
-        session.load_trap = Some(TrapSite {
-            address: VirtAddr(LOAD_TRAP),
-            original: vec![0x48],
-        });
+        session.module_traps = vec![module_trap(event, address)];
         if let Some(mode) = filter {
-            session.exception_policies.set_module_load(None, mode, None);
+            session
+                .exception_policies
+                .set_module_event(event, None, mode, None);
         }
         if deferred {
             deferred_symbol_breakpoint(&mut session);
         }
         session.resume().unwrap();
-        let lifted = sites.lock().contains(&(LOAD_TRAP, false));
-        (session.load_trap.is_some(), lifted)
+        let lifted = sites.lock().contains(&(address, false));
+        (has_module_trap(&session, event), lifted)
     };
-    assert_eq!(resumed(None, false), (false, true));
-    assert_eq!(
-        resumed(Some(ExceptionPolicyMode::Ignore), false),
-        (false, true)
-    );
-    assert_eq!(
-        resumed(Some(ExceptionPolicyMode::Notify), false),
-        (true, false)
-    );
-    assert_eq!(
-        resumed(Some(ExceptionPolicyMode::Break), false),
-        (true, false)
-    );
-    assert_eq!(resumed(None, true), (true, false));
+    for event in [ModuleEvent::Load, ModuleEvent::Unload] {
+        assert_eq!(resumed(event, None, false), (false, true), "{event:?}");
+        assert_eq!(
+            resumed(event, Some(ExceptionPolicyMode::Ignore), false),
+            (false, true),
+            "{event:?}"
+        );
+        assert_eq!(
+            resumed(event, Some(ExceptionPolicyMode::Notify), false),
+            (true, false),
+            "{event:?}"
+        );
+        assert_eq!(
+            resumed(event, Some(ExceptionPolicyMode::Break), false),
+            (true, false),
+            "{event:?}"
+        );
+    }
+    assert_eq!(resumed(ModuleEvent::Load, None, true), (true, false));
+    // A breakpoint waiting for its module waits on a load, not an unload.
+    assert_eq!(resumed(ModuleEvent::Unload, None, true), (false, true));
 }
 
 /// A `sxe ld:<module>` filter naming the image stops at the load with the
@@ -1943,8 +1979,9 @@ fn a_resume_keeps_the_load_trap_only_while_a_load_is_awaited() {
 /// steps past the trap before continuing.
 #[test]
 fn a_load_trap_hit_a_break_filter_names_surfaces_the_module_load() {
-    let (mut session, id, sites, continues) = session_at_load_trap();
-    session.exception_policies.set_module_load(
+    let (mut session, id, sites, continues) = session_at_module_trap(ModuleEvent::Load);
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
         Some("driver".into()),
         ExceptionPolicyMode::Break,
         None,
@@ -1979,56 +2016,142 @@ fn a_load_trap_hit_a_break_filter_names_surfaces_the_module_load() {
     assert_eq!(writes[lifted + 1], (LOAD_TRAP, true));
 }
 
-/// On KD the load arrives as a load-symbols notification naming the image
-/// base: `sxe ld` stops at a load and lets an unload of the same image pass.
+/// A `sxe ud:<module>` filter naming the image stops at the unload trap with
+/// the module still listed; resuming from that stop steps past the trap. A
+/// load filter for the same image does not stop there.
 #[test]
-fn a_kd_load_notification_stops_for_sxe_ld_and_an_unload_does_not() {
-    let (mut session, id, _, continues) = session_at_load_trap();
-    session.load_trap = None;
-    session
-        .exception_policies
-        .set_module_load(None, ExceptionPolicyMode::Break, None);
+fn an_unload_trap_hit_a_break_filter_names_surfaces_the_module_unload() {
+    let (mut session, _, sites, continues) = session_at_module_trap(ModuleEvent::Unload);
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
+        Some("driver".into()),
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    session.exception_policies.set_module_event(
+        ModuleEvent::Unload,
+        Some("driver".into()),
+        ExceptionPolicyMode::Break,
+        None,
+    );
 
-    let mut unload = module_change_event();
-    unload.target_kernel_base_hint = Some(VirtAddr(0x2000));
+    let resolution = session
+        .classify_stop_event(breakpoint_event(UNLOAD_TRAP))
+        .unwrap();
+
+    let StopResolution::ModuleUnload { module, rip, .. } = resolution else {
+        panic!("expected a module-unload stop, got {resolution:?}");
+    };
+    assert_eq!(module.name, "driver.sys");
+    assert_eq!(module.base_address, VirtAddr(0x2000));
+    assert_eq!(rip, UNLOAD_TRAP);
     assert!(matches!(
-        session.classify_stop_event(unload).unwrap(),
+        session.current_stop(),
+        Some(ContinueOutcome::ModuleUnload { .. })
+    ));
+    assert_eq!(continues.load(Ordering::Relaxed), 0);
+
+    session.resume().unwrap();
+
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+    let writes = sites.lock().clone();
+    let lifted = writes
+        .iter()
+        .position(|&write| write == (UNLOAD_TRAP, false))
+        .expect("resuming lifts the trap to step past it");
+    assert_eq!(writes[lifted + 1], (UNLOAD_TRAP, true));
+}
+
+/// On KD a load or unload arrives as a load-symbols notification naming the
+/// image base. Each filter stops only at its own event: `sxe ld` at the load,
+/// `sxe ud` at the unload, with the unloading module still listed.
+#[test]
+fn a_kd_module_notification_stops_only_for_its_own_filter() {
+    let notification = |event| {
+        let mut stop = module_change_event();
+        stop.target_kernel_base_hint = Some(VirtAddr(0x2000));
+        stop.module_event = Some((event, VirtAddr(0x2000)));
+        stop
+    };
+
+    let (mut session, id, _, continues) = session_at_module_trap(ModuleEvent::Load);
+    session.module_traps.clear();
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
+        None,
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    assert!(matches!(
+        session
+            .classify_stop_event(notification(ModuleEvent::Unload))
+            .unwrap(),
         StopResolution::ModulesChanged
     ));
     assert_eq!(continues.load(Ordering::Relaxed), 1);
-
-    let mut load = module_change_event();
-    load.loaded_image_base = Some(VirtAddr(0x2000));
-    let resolution = session.classify_stop_event(load).unwrap();
-
+    let resolution = session
+        .classify_stop_event(notification(ModuleEvent::Load))
+        .unwrap();
     let StopResolution::ModuleLoad { module, .. } = resolution else {
         panic!("expected a module-load stop, got {resolution:?}");
     };
     assert_eq!(module.name, "driver.sys");
     assert_eq!(continues.load(Ordering::Relaxed), 1);
     assert!(breakpoint_by_id(&session, id).resolved);
+
+    let (mut session, _, _, continues) = session_at_module_trap(ModuleEvent::Unload);
+    session.module_traps.clear();
+    session.exception_policies.set_module_event(
+        ModuleEvent::Unload,
+        None,
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    assert!(matches!(
+        session
+            .classify_stop_event(notification(ModuleEvent::Load))
+            .unwrap(),
+        StopResolution::ModulesChanged
+    ));
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+    let resolution = session
+        .classify_stop_event(notification(ModuleEvent::Unload))
+        .unwrap();
+    let StopResolution::ModuleUnload { module, .. } = resolution else {
+        panic!("expected a module-unload stop, got {resolution:?}");
+    };
+    assert_eq!(module.name, "driver.sys");
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
 
-/// `sxn ld` reports the load as a notice and does not stop.
+/// `sxn ld` and `sxn ud` report the event as a notice and do not stop.
 #[test]
-fn a_load_trap_hit_a_notify_filter_names_reports_and_resumes() {
-    let (mut session, _, _, continues) = session_at_load_trap();
-    session
-        .exception_policies
-        .set_module_load(None, ExceptionPolicyMode::Notify, None);
-
-    let resolution = session
-        .classify_stop_event(breakpoint_event(LOAD_TRAP))
-        .unwrap();
-
-    assert!(matches!(resolution, StopResolution::ModulesChanged));
-    assert_eq!(continues.load(Ordering::Relaxed), 1);
-    assert!(
+fn a_module_trap_hit_a_notify_filter_names_reports_and_resumes() {
+    for (event, address, line) in [
+        (ModuleEvent::Load, LOAD_TRAP, "ModLoad: "),
+        (
+            ModuleEvent::Unload,
+            UNLOAD_TRAP,
+            "Unload module driver.sys at ",
+        ),
+    ] {
+        let (mut session, _, _, continues) = session_at_module_trap(event);
         session
-            .take_notices()
-            .iter()
-            .any(|notice| notice.starts_with("ModLoad: ") && notice.ends_with(" driver.sys"))
-    );
+            .exception_policies
+            .set_module_event(event, None, ExceptionPolicyMode::Notify, None);
+
+        let resolution = session
+            .classify_stop_event(breakpoint_event(address))
+            .unwrap();
+
+        assert!(matches!(resolution, StopResolution::ModulesChanged));
+        assert_eq!(continues.load(Ordering::Relaxed), 1);
+        let notices = session.take_notices();
+        assert!(
+            notices.iter().any(|notice| notice.starts_with(line)),
+            "{event:?}: {notices:?}"
+        );
+    }
 }
 
 #[test]

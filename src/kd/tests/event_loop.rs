@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::thread::spawn;
 use std::time::Instant;
 
+use crate::dbg_backend::ModuleEvent;
 use crate::kd::framing::{
     BREAKIN_BYTE, HEADER_SIZE, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
     PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_RESET, PACKET_TYPE_KD_STATE_CHANGE64,
@@ -109,9 +110,8 @@ fn parse_load_symbols_state_change_extracts_base_hint() {
     assert_eq!(s.kernel_base_hint, Some(VirtAddr(0xfffff80000000000)));
 }
 
-/// A load reports the image it maps; an unload of the same image (the
-/// `UnloadSymbols` flag at payload offset 64) is still a module change but
-/// names no loaded image, so no load filter applies to it.
+/// A load-symbols state change reports a load of the image at `BaseOfDll`,
+/// or with the `UnloadSymbols` flag at payload offset 64, its unload.
 #[test]
 fn load_symbols_unload_flag_separates_loads_from_unloads() {
     let mut payload = vec![0u8; 72];
@@ -121,12 +121,18 @@ fn load_symbols_unload_flag_separates_loads_from_unloads() {
 
     let load = stop_event(parse_state_change(&payload).unwrap());
     assert!(load.modules_changed);
-    assert_eq!(load.loaded_image_base, Some(VirtAddr(0xfffff807_12340000)));
+    assert_eq!(
+        load.module_event,
+        Some((ModuleEvent::Load, VirtAddr(0xfffff807_12340000)))
+    );
 
     payload[64] = 1;
     let unload = stop_event(parse_state_change(&payload).unwrap());
     assert!(unload.modules_changed);
-    assert_eq!(unload.loaded_image_base, None);
+    assert_eq!(
+        unload.module_event,
+        Some((ModuleEvent::Unload, VirtAddr(0xfffff807_12340000)))
+    );
     assert_eq!(
         unload.target_kernel_base_hint,
         Some(VirtAddr(0xfffff807_12340000))

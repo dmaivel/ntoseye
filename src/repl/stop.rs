@@ -3,14 +3,12 @@ use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
-use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::{
-    BugcheckInfo, DebugBackend, StopEvent, processor_index_from_backend_thread_id,
+    BugcheckInfo, ModuleEvent, StopEvent, processor_index_from_backend_thread_id,
 };
 use crate::error::Result;
-use crate::gdb::RegisterMap;
 use crate::guest::ModuleInfo;
-use crate::session::stops::module_load_line;
+use crate::session::stops::module_event_line;
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
@@ -131,28 +129,18 @@ pub fn print_async_stop_resolution(
                     cause.push_str(&format!(" ({})", ui::symbol(symbol)));
                 }
             }
-            print_break_context_at(
-                &mut *session.backend,
-                &session.register_map,
-                &mut session.target,
-                &session.breakpoints,
-                &session.current_thread,
-                None,
-                (!breakpoint.temporary).then_some(cause),
-            );
+            print_break_context_at(session, None, (!breakpoint.temporary).then_some(cause));
         }
-        StopResolution::ModuleLoad { module, .. } => print_module_load_stop(session, &module),
+        StopResolution::ModuleLoad { module, .. } => {
+            print_module_event_stop(session, ModuleEvent::Load, &module)
+        }
+        StopResolution::ModuleUnload { module, .. } => {
+            print_module_event_stop(session, ModuleEvent::Unload, &module)
+        }
         StopResolution::Bugcheck { event } => {
             print_bugcheck_summary(&session.target, event.bugcheck.as_ref());
             outln!();
-            print_break_context_for_bugcheck(
-                &mut *session.backend,
-                &session.register_map,
-                &mut session.target,
-                &session.breakpoints,
-                &session.current_thread,
-                event.bugcheck.as_ref(),
-            );
+            print_break_context_for_bugcheck(session, event.bugcheck.as_ref());
         }
         StopResolution::TargetReloaded { event, coherent } => {
             caches.clear_threads();
@@ -165,15 +153,7 @@ pub fn print_async_stop_resolution(
         }
         StopResolution::Stopped { event, .. } => {
             let cause = stop_exception_cause(event.exception_code, event.program_counter);
-            print_break_context_at(
-                &mut *session.backend,
-                &session.register_map,
-                &mut session.target,
-                &session.breakpoints,
-                &session.current_thread,
-                None,
-                cause,
-            );
+            print_break_context_at(session, None, cause);
         }
     }
 }
@@ -214,32 +194,21 @@ pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome:
                 }
                 cause
             });
-            print_break_context_at(
-                &mut *session.backend,
-                &session.register_map,
-                &mut session.target,
-                &session.breakpoints,
-                &session.current_thread,
-                None,
-                cause.filter(|_| !temporary),
-            );
+            print_break_context_at(session, None, cause.filter(|_| !temporary));
         }
         ContinueOutcome::ModuleLoad { module, .. } => {
             print_stop_separator();
-            print_module_load_stop(session, &module);
+            print_module_event_stop(session, ModuleEvent::Load, &module);
+        }
+        ContinueOutcome::ModuleUnload { module, .. } => {
+            print_stop_separator();
+            print_module_event_stop(session, ModuleEvent::Unload, &module);
         }
         ContinueOutcome::Bugcheck { info, .. } => {
             print_stop_separator();
             print_bugcheck_summary(&session.target, info.as_ref());
             outln!();
-            print_break_context_for_bugcheck(
-                &mut *session.backend,
-                &session.register_map,
-                &mut session.target,
-                &session.breakpoints,
-                &session.current_thread,
-                info.as_ref(),
-            );
+            print_break_context_for_bugcheck(session, info.as_ref());
         }
         ContinueOutcome::TargetReloaded { rip, coherent, .. } => {
             print_stop_separator();
@@ -253,43 +222,26 @@ pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome:
         } => {
             print_stop_separator();
             let cause = stop_exception_cause(exception_code, Some(rip));
-            print_break_context_at(
-                &mut *session.backend,
-                &session.register_map,
-                &mut session.target,
-                &session.breakpoints,
-                &session.current_thread,
-                None,
-                cause,
-            );
+            print_break_context_at(session, None, cause);
         }
         ContinueOutcome::Step { .. } => {
             print_stop_separator();
-            print_break_context(
-                &mut *session.backend,
-                &session.register_map,
-                &mut session.target,
-                &session.breakpoints,
-                &session.current_thread,
-            );
+            print_break_context(session);
         }
     }
 }
 
-/// Render a stop at a module load a `sxe ld` filter names: WinDbg's
-/// `ModLoad:` line, then the stop context like any other stop.
-pub fn print_module_load_stop(session: &mut Session, module: &ModuleInfo) {
-    outln!("{}", module_load_line(module));
-    let cause = format!("{} {}", ui::muted("module load"), module.name);
-    print_break_context_at(
-        &mut *session.backend,
-        &session.register_map,
-        &mut session.target,
-        &session.breakpoints,
-        &session.current_thread,
-        None,
-        Some(cause),
-    );
+/// Render a stop at a module load or unload a `sxe ld`/`sxe ud` filter
+/// names: WinDbg's `ModLoad:` or `Unload module` line, then the stop context
+/// like any other stop.
+pub fn print_module_event_stop(session: &mut Session, event: ModuleEvent, module: &ModuleInfo) {
+    outln!("{}", module_event_line(event, module));
+    let what = match event {
+        ModuleEvent::Load => "module load",
+        ModuleEvent::Unload => "module unload",
+    };
+    let cause = format!("{} {}", ui::muted(what), module.name);
+    print_break_context_at(session, None, Some(cause));
 }
 
 /// Announce a reboot the session has already rebuilt debugger state for, so
@@ -386,52 +338,19 @@ pub fn continue_exception_policy(session: &mut Session, event: &StopEvent) -> Re
 pub use crate::session::stepping::step_one_and_clear_tf;
 pub use crate::session::stepping::step_over_current_breakpoint;
 
-pub fn print_break_context(
-    client: &mut dyn DebugBackend,
-    register_map: &RegisterMap,
-    debugger: &mut Target,
-    breakpoints: &BreakpointManager,
-    thread_id: &str,
-) {
-    print_break_context_at(
-        client,
-        register_map,
-        debugger,
-        breakpoints,
-        thread_id,
-        None,
-        None,
-    );
+pub fn print_break_context(session: &mut Session) {
+    print_break_context_at(session, None, None);
 }
 
-pub fn print_break_context_for_bugcheck(
-    client: &mut dyn DebugBackend,
-    register_map: &RegisterMap,
-    debugger: &mut Target,
-    breakpoints: &BreakpointManager,
-    thread_id: &str,
-    info: Option<&BugcheckInfo>,
-) {
-    print_break_context_at(
-        client,
-        register_map,
-        debugger,
-        breakpoints,
-        thread_id,
-        info.and_then(bugcheck_fault_ip),
-        None,
-    );
+pub fn print_break_context_for_bugcheck(session: &mut Session, info: Option<&BugcheckInfo>) {
+    print_break_context_at(session, info.and_then(bugcheck_fault_ip), None);
 }
 
 /// The stop display for the saved VTL0 state selected at a stop in the
 /// Windows hypervisor: its registers (the hypervisor keeps no general-purpose
 /// ones there), the NT code it left off at, and its stack.
-fn print_saved_vtl0_context(
-    debugger: &Target,
-    register_map: &RegisterMap,
-    breakpoints: &BreakpointManager,
-    saved: &HashMap<String, u64>,
-) {
+fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
+    let debugger = &session.target;
     print_section("registers (saved VTL0)");
     print_sparse_registers(saved, None, 2);
     let rip = saved.get("rip").copied().unwrap_or(0);
@@ -440,10 +359,10 @@ fn print_saved_vtl0_context(
         .copied()
         .unwrap_or(0);
     let trace = resolve_thread_trace_context_at(debugger, cr3, rip);
-    print_disasm_context(debugger, breakpoints, &trace, rip);
+    print_disasm_context(session, &trace, rip);
     let stack = build_stacktrace_with_register_values(
         debugger,
-        register_map,
+        &session.register_map,
         saved,
         BREAK_STACKTRACE_PROBE_LIMIT,
     );
@@ -457,41 +376,41 @@ fn print_saved_vtl0_context(
 /// `cause` is an optional pre-styled tree child naming why execution stopped
 /// (e.g. `breakpoint #3`), rendered first.
 pub fn print_break_context_at(
-    client: &mut dyn DebugBackend,
-    register_map: &RegisterMap,
-    debugger: &mut Target,
-    breakpoints: &BreakpointManager,
-    thread_id: &str,
+    session: &mut Session,
     display_rip: Option<u64>,
     cause: Option<String>,
 ) {
-    debugger.selected_frame = None;
-    let regs = match client
-        .set_current_thread(thread_id)
-        .and_then(|()| client.read_registers())
+    session.target.selected_frame = None;
+    let thread_id = session.current_thread.clone();
+    let regs = match session
+        .backend
+        .set_current_thread(&thread_id)
+        .and_then(|()| session.backend.read_registers())
     {
         Ok(r) => r,
         Err(e) => {
-            debugger.registers = None;
+            session.target.registers = None;
             outln!(
                 "{}{}\n",
                 ui::badge("BREAK"),
                 ui::plate(&format!(
                     " {} (register context unavailable: {}) ",
-                    ui::thread_id(thread_id),
+                    ui::thread_id(&thread_id),
                     e
                 ))
             );
             return;
         }
     };
+    let register_map = &session.register_map;
+    let debugger = &mut session.target;
     debugger.registers = Some(register_map.to_hashmap(&regs));
 
     let cr3 = register_map
         .read_u64(debugger.arch().dtb_register(), &regs)
         .unwrap_or(0);
     let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
-    let windows_thread = refresh_windows_thread_context_for_backend_thread(debugger, thread_id);
+    let windows_thread = refresh_windows_thread_context_for_backend_thread(debugger, &thread_id);
     let trace = resolve_thread_trace_context_at(debugger, cr3, rip);
     let context_rip = display_rip.unwrap_or(rip);
     let symbol = format_symbol(debugger, &trace, context_rip);
@@ -501,7 +420,7 @@ pub fn print_break_context_at(
         ui::badge("BREAK"),
         ui::plate(&format!(
             " {} {} at {} ",
-            ui::thread_id(thread_id),
+            ui::thread_id(&thread_id),
             trace.description,
             ui::symbol(&symbol)
         ))
@@ -526,10 +445,10 @@ pub fn print_break_context_at(
     }
     // At a stop in the Windows hypervisor NT is what is inspected: where it
     // left off becomes the context, `.cxr` returns to the hypervisor's.
-    let saved_context = debugger.select_saved_vtl0(thread_id);
+    let saved_context = debugger.select_saved_vtl0(&thread_id);
     // Where NT left off on a vCPU the hypervisor holds.
     if trace.description == HYPERVISOR_CONTEXT {
-        let processor = processor_index_from_backend_thread_id(thread_id);
+        let processor = processor_index_from_backend_thread_id(&thread_id);
         match saved_vtls(debugger, cr3, processor) {
             Ok(saved) => children.extend(
                 saved
@@ -555,16 +474,16 @@ pub fn print_break_context_at(
             .as_ref()
             .map(|frame| frame.registers.clone())
     {
-        print_saved_vtl0_context(debugger, register_map, breakpoints, &saved);
+        print_saved_vtl0_context(session, &saved);
         outln!();
         return;
     }
 
-    print_registers(register_map, &regs, true);
-    print_disasm_context(debugger, breakpoints, &trace, context_rip);
+    print_registers(&session.register_map, &regs, true);
+    print_disasm_context(session, &trace, context_rip);
     print_stacktrace(
-        debugger,
-        register_map,
+        &session.target,
+        &session.register_map,
         &regs,
         BREAK_STACKTRACE_PROBE_LIMIT,
         BREAK_STACKTRACE_DISPLAY_LIMIT,

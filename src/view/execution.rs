@@ -359,13 +359,17 @@ shapes! {
         command: Option<String>,
     }
 
-    /// One module-load filter (`sx* ld[:<module>]`).
-    ModuleLoadPolicy {
+    /// One module load or unload filter (`sx* ld[:<module>]` or
+    /// `sx* ud[:<module>]`).
+    ModuleEventPolicy {
+        /// `ld` for a load filter, `ud` for an unload filter.
+        event: &'static str,
         /// The image-name glob that the filter matches, with or without
-        /// extension. None for all modules (bare `ld`).
+        /// extension. None for all modules (bare `ld` or `ud`).
         module: Option<String>,
-        /// `break` stops at the load, and `notify` reports it.
-        /// `second_chance` and `ignore` let the load continue with no output.
+        /// `break` stops at the event, and `notify` reports it.
+        /// `second_chance` and `ignore` let the load or unload continue with
+        /// no output.
         mode: &'static str,
         /// The commands that run at a `break` stop.
         command: Option<String>,
@@ -659,9 +663,10 @@ fn call_trace_frame(frame: &session::CallTraceFrame) -> CallTraceFrame {
     }
 }
 
-/// One module-load filter (`sx`).
-pub fn module_load_policy(policy: &exception_policy::ModuleLoadPolicy) -> ModuleLoadPolicy {
-    ModuleLoadPolicy {
+/// One module load or unload filter (`sx`).
+pub fn module_event_policy(policy: &exception_policy::ModuleEventPolicy) -> ModuleEventPolicy {
+    ModuleEventPolicy {
+        event: policy.event.filter_name(),
         module: policy.module.clone(),
         mode: policy.mode.name(),
         command: policy.command.clone(),

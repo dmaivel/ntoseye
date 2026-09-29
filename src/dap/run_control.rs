@@ -7,10 +7,12 @@ use std::sync::atomic::Ordering;
 
 use serde_json::json;
 
+use crate::dbg_backend::ModuleEvent;
 use crate::disasm::{fallthrough_run_end, instruction_length};
+use crate::guest::ModuleInfo;
 use crate::output;
 use crate::repl::{DispatchContext, ReplState, ReplStore};
-use crate::session::stops::module_load_line;
+use crate::session::stops::module_event_line;
 use crate::session::{ContinueOutcome, StepMode, StepStack};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
@@ -259,6 +261,24 @@ impl Server {
         self.report_stop_as(outcome, None);
     }
 
+    /// The stop a `sxe ld` or `sxe ud` filter surfaced, with WinDbg's
+    /// `ModLoad:` or `Unload module` line echoed to the console.
+    fn module_event_stop(&mut self, event: ModuleEvent, module: &ModuleInfo, rip: u64) -> StopInfo {
+        let line = module_event_line(event, module);
+        self.emit_output("console", format!("{line}\n"));
+        let reason = match event {
+            ModuleEvent::Load => "module load",
+            ModuleEvent::Unload => "module unload",
+        };
+        StopInfo {
+            reason,
+            description: format!("{reason} {} at {rip:#x}", module.name),
+            exception_id: None,
+            detail: Some(line),
+            breakpoint_id: None,
+        }
+    }
+
     /// Report a stop to the client. `forced_reason` overrides the DAP stop
     /// reason without touching the description or exception detail, for stops
     /// whose transport encoding hides the real cause (a break-in is delivered
@@ -328,15 +348,10 @@ impl Server {
                 breakpoint_id: None,
             },
             ContinueOutcome::ModuleLoad { module, rip } => {
-                let line = module_load_line(&module);
-                self.emit_output("console", format!("{line}\n"));
-                StopInfo {
-                    reason: "module load",
-                    description: format!("module load {} at {rip:#x}", module.name),
-                    exception_id: None,
-                    detail: Some(line),
-                    breakpoint_id: None,
-                }
+                self.module_event_stop(ModuleEvent::Load, &module, rip)
+            }
+            ContinueOutcome::ModuleUnload { module, rip } => {
+                self.module_event_stop(ModuleEvent::Unload, &module, rip)
             }
             ContinueOutcome::Halted { rip } => StopInfo {
                 reason: "entry",

@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::TargetSpec;
 use crate::breakpoints::{Breakpoint, BreakpointManager, StepFrame};
 use crate::dbg_backend::{
-    BackendCapability, BugcheckInfo, DebugBackend, DebugOutputPage, LastEvent, StopEvent,
+    BackendCapability, BugcheckInfo, DebugBackend, DebugOutputPage, LastEvent, ModuleEvent,
+    StopEvent,
 };
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
@@ -90,6 +91,11 @@ pub enum ContinueOutcome {
     /// breakpoints in it are armed, and its entry point has not run. `rip`
     /// is where the target stopped, inside the kernel's image-load path.
     ModuleLoad { module: Box<ModuleInfo>, rip: u64 },
+    /// A kernel image a `sxe ud` filter names is unloading: its driver's
+    /// unload routine has run, and the image is still in the module list
+    /// with its symbols. `rip` is where the target stopped, inside the
+    /// kernel's image-unload path.
+    ModuleUnload { module: Box<ModuleInfo>, rip: u64 },
     /// The guest rebooted (KD stream reset) and debugger state was rebuilt.
     /// Surfaced exactly once per reboot, as early as possible: normally at the
     /// earliest post-reboot stop where the new kernel is discoverable
@@ -350,6 +356,13 @@ pub enum StopResolution {
         event: StopEvent,
         rip: u64,
     },
+    /// A kernel image a `sxe ud` filter names is unloading (see
+    /// [`ContinueOutcome::ModuleUnload`]).
+    ModuleUnload {
+        module: Box<ModuleInfo>,
+        event: StopEvent,
+        rip: u64,
+    },
     /// The guest rebooted and target state was rebuilt.
     TargetReloaded { event: StopEvent, coherent: bool },
     /// A genuine non-breakpoint stop, including a user interrupt.
@@ -409,6 +422,15 @@ const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 pub struct TrapSite {
     pub address: VirtAddr,
     pub original: Vec<u8>,
+}
+
+/// A trap on a kernel function that reports a module `event`, planted for
+/// a backend that reports no module events itself. The image base is the
+/// function's second argument.
+#[derive(Debug, Clone)]
+pub struct ModuleTrap {
+    pub event: ModuleEvent,
+    pub site: TrapSite,
 }
 
 /// What [`Session::page_in`] observed once the target came back.
@@ -511,14 +533,14 @@ pub struct Session {
     /// that cannot report a bugcheck themselves get one; see
     /// [`Self::arm_bugcheck_trap`].
     bugcheck_trap: Option<TrapSite>,
-    /// The automatic `nt!DbgLoadImageSymbols` breakpoint, once armed. Only
-    /// backends that report no module loads themselves get one; see
-    /// [`Self::arm_load_trap`].
-    load_trap: Option<TrapSite>,
-    /// The stack pointer of a thread that took an interrupt on the load trap
+    /// The automatic breakpoints on the kernel functions that report module
+    /// loads and unloads, while one is waited on. Only backends that report
+    /// no module events themselves get them; see [`Self::sync_module_traps`].
+    module_traps: Vec<ModuleTrap>,
+    /// The stack pointer of a thread that took an interrupt on a module trap
     /// while being run past it, before executing it: its next hit there is
-    /// the same load, not a new one.
-    load_trap_interrupted: Option<u64>,
+    /// the same event, not a new one.
+    module_trap_interrupted: Option<u64>,
     /// Whether a detected reload has not yet been surfaced to the host: the
     /// guest-state rebuild failed at the detection stop, so no
     /// [`ContinueOutcome::TargetReloaded`] went out. While set, the eventual

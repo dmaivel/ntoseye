@@ -4,7 +4,7 @@ use owo_colors::OwoColorize;
 
 use crate::breakpoints::Breakpoint;
 use crate::breakpoints::StepFrame;
-use crate::dbg_backend::ContinueDisposition;
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -362,13 +362,13 @@ impl ReplState<'_> {
         }
     }
 
-    /// Run the `-c` commands of the `sxe ld` filter that stopped at the load
-    /// of `module`.
-    fn run_module_load_command(&mut self, module: &ModuleInfo) -> Result<()> {
+    /// Run the `-c` commands of the `sxe ld` or `sxe ud` filter that stopped
+    /// at `event` for `module`.
+    fn run_module_event_command(&mut self, event: ModuleEvent, module: &ModuleInfo) -> Result<()> {
         let command = self
             .ctx
             .exception_policies
-            .module_load_policy(&module.name)
+            .module_event_policy(event, &module.name)
             .and_then(|policy| policy.command.clone());
         self.run_exception_policy_command(command.as_deref())
     }
@@ -385,8 +385,14 @@ impl ReplState<'_> {
     /// outcome is applied afterward; command-free auto-continues were already
     /// completed by the helper.
     fn apply_buffered_exception_policy(&mut self) -> Result<()> {
-        if let Some(ContinueOutcome::ModuleLoad { module, .. }) = self.ctx.current_stop().cloned() {
-            return self.run_module_load_command(&module);
+        match self.ctx.current_stop().cloned() {
+            Some(ContinueOutcome::ModuleLoad { module, .. }) => {
+                return self.run_module_event_command(ModuleEvent::Load, &module);
+            }
+            Some(ContinueOutcome::ModuleUnload { module, .. }) => {
+                return self.run_module_event_command(ModuleEvent::Unload, &module);
+            }
+            _ => {}
         }
         let Some(event) = self.ctx.last_event.as_ref().map(|last| last.stop.clone()) else {
             return Ok(());
@@ -530,23 +536,27 @@ impl ReplState<'_> {
                                         ui::bp_id(breakpoint.id)
                                     )
                                 });
-                                print_break_context_at(
-                                    &mut *self.ctx.backend,
-                                    &self.ctx.register_map,
-                                    &mut self.ctx.target,
-                                    &self.ctx.breakpoints,
-                                    &self.ctx.current_thread,
-                                    None,
-                                    cause,
-                                );
+                                print_break_context_at(self.ctx, None, cause);
                             }
                             break;
                         }
                         StopResolution::ModuleLoad { module, .. } => {
                             print_stop_separator();
-                            print_module_load_stop(self.ctx, &module);
-                            if let Err(error) = self.run_module_load_command(&module) {
+                            print_module_event_stop(self.ctx, ModuleEvent::Load, &module);
+                            if let Err(error) =
+                                self.run_module_event_command(ModuleEvent::Load, &module)
+                            {
                                 error!("module load command failed: {error}");
+                            }
+                            break;
+                        }
+                        StopResolution::ModuleUnload { module, .. } => {
+                            print_stop_separator();
+                            print_module_event_stop(self.ctx, ModuleEvent::Unload, &module);
+                            if let Err(error) =
+                                self.run_module_event_command(ModuleEvent::Unload, &module)
+                            {
+                                error!("module unload command failed: {error}");
                             }
                             break;
                         }
@@ -554,14 +564,7 @@ impl ReplState<'_> {
                             print_stop_separator();
                             print_bugcheck_summary(&self.ctx.target, event.bugcheck.as_ref());
                             outln!();
-                            print_break_context_for_bugcheck(
-                                &mut *self.ctx.backend,
-                                &self.ctx.register_map,
-                                &mut self.ctx.target,
-                                &self.ctx.breakpoints,
-                                &self.ctx.current_thread,
-                                event.bugcheck.as_ref(),
-                            );
+                            print_break_context_for_bugcheck(self.ctx, event.bugcheck.as_ref());
                             break;
                         }
                         StopResolution::TargetReloaded { event, coherent } => {
@@ -634,15 +637,7 @@ impl ReplState<'_> {
                             print_stop_separator();
                             let cause =
                                 stop_exception_cause(event.exception_code, event.program_counter);
-                            print_break_context_at(
-                                &mut *self.ctx.backend,
-                                &self.ctx.register_map,
-                                &mut self.ctx.target,
-                                &self.ctx.breakpoints,
-                                &self.ctx.current_thread,
-                                None,
-                                cause,
-                            );
+                            print_break_context_at(self.ctx, None, cause);
                             break;
                         }
                     }
@@ -708,15 +703,7 @@ impl ReplState<'_> {
                 .map(|s| format!("  {}", ui::symbol(s)))
                 .unwrap_or_default()
         );
-        print_break_context_at(
-            &mut *self.ctx.backend,
-            &self.ctx.register_map,
-            &mut self.ctx.target,
-            &self.ctx.breakpoints,
-            &self.ctx.current_thread,
-            None,
-            Some(cause),
-        );
+        print_break_context_at(self.ctx, None, Some(cause));
     }
 
     fn single_step(&mut self) -> Result<()> {
@@ -734,13 +721,7 @@ impl ReplState<'_> {
             return Ok(());
         }
         print_stop_separator();
-        print_break_context(
-            &mut *self.ctx.backend,
-            &self.ctx.register_map,
-            &mut self.ctx.target,
-            &self.ctx.breakpoints,
-            &self.ctx.current_thread,
-        );
+        print_break_context(self.ctx);
 
         Ok(())
     }
@@ -896,13 +877,7 @@ impl ReplState<'_> {
 
     fn print_current_stop(&mut self) {
         print_stop_separator();
-        print_break_context(
-            &mut *self.ctx.backend,
-            &self.ctx.register_map,
-            &mut self.ctx.target,
-            &self.ctx.breakpoints,
-            &self.ctx.current_thread,
-        );
+        print_break_context(self.ctx);
     }
 
     fn step_until_flow(&mut self, wanted: ControlFlow, mode: StepMode) -> Result<()> {

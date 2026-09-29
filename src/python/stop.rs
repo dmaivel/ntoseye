@@ -69,6 +69,15 @@ pub enum Stop {
         module: Py<Module>,
         _context: Py<StopContext>,
     },
+    /// A kernel image is unloading, and a `"ud"` filter set to `"break"`
+    /// matched it (`dbg.exceptions.set("ud:<module>", "break")`, `sxe ud`).
+    /// The driver's unload routine has run, and the module is still in the
+    /// module list with its symbols.
+    ModuleUnload {
+        /// The unloading kernel module.
+        module: Py<Module>,
+        _context: Py<StopContext>,
+    },
     /// The guest is in a bugcheck (BSOD). `info` is the bugcheck analysis.
     Bugcheck {
         /// The bugcheck analysis: the code, the parameters, and the culprit from
@@ -96,6 +105,7 @@ impl Stop {
             | Self::Interrupt { _context }
             | Self::Step { _context }
             | Self::ModuleLoad { _context, .. }
+            | Self::ModuleUnload { _context, .. }
             | Self::Bugcheck { _context, .. }
             | Self::Reboot { _context, .. } => _context,
         }
@@ -109,6 +119,7 @@ impl Stop {
             Self::Interrupt { .. } => "Interrupt",
             Self::Step { .. } => "Step",
             Self::ModuleLoad { .. } => "ModuleLoad",
+            Self::ModuleUnload { .. } => "ModuleUnload",
             Self::Bugcheck { .. } => "Bugcheck",
             Self::Reboot { .. } => "Reboot",
         }
@@ -201,8 +212,9 @@ impl Stop {
             .unwrap_or_default();
         Ok(match self {
             Self::Exception { code, .. } => format!("<Stop.Exception code={code:#x}{location}>"),
-            Self::ModuleLoad { module, .. } => format!(
-                "<Stop.ModuleLoad module={}{location}>",
+            Self::ModuleLoad { module, .. } | Self::ModuleUnload { module, .. } => format!(
+                "<Stop.{} module={}{location}>",
+                self.kind(),
                 module.bind(py).borrow().info.name
             ),
             _ => format!("<Stop.{}{location}>", self.kind()),
@@ -263,7 +275,7 @@ impl Stop {
                 dict.set_item("kernel_base", kernel_base)?;
                 dict.set_item("coherent", coherent)?;
             }
-            Self::ModuleLoad { module, .. } => {
+            Self::ModuleLoad { module, .. } | Self::ModuleUnload { module, .. } => {
                 let module = module.bind(py).borrow();
                 let info = &module.info;
                 dict.set_item("module", &info.name)?;
@@ -308,7 +320,8 @@ pub fn from_outcome(
         }
         ContinueOutcome::Stopped { rip, .. }
         | ContinueOutcome::Step { rip }
-        | ContinueOutcome::ModuleLoad { rip, .. } => (Some(*rip), None, None),
+        | ContinueOutcome::ModuleLoad { rip, .. }
+        | ContinueOutcome::ModuleUnload { rip, .. } => (Some(*rip), None, None),
         ContinueOutcome::Running | ContinueOutcome::Halted { .. } => unreachable!(),
     };
     let exception_record_hint = match &outcome {
@@ -382,6 +395,10 @@ pub fn from_outcome(
         } => Stop::Interrupt { _context: context },
         ContinueOutcome::Step { .. } => Stop::Step { _context: context },
         ContinueOutcome::ModuleLoad { module, .. } => Stop::ModuleLoad {
+            module: Py::new(py, Module::new(owner, Space::Kernel, *module))?,
+            _context: context,
+        },
+        ContinueOutcome::ModuleUnload { module, .. } => Stop::ModuleUnload {
             module: Py::new(py, Module::new(owner, Space::Kernel, *module))?,
             _context: context,
         },

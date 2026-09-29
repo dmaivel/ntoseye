@@ -1,18 +1,19 @@
 //! Breakpoint and watchpoint management, deferred-breakpoint
 //! reconciliation, and the automatic `nt!KeBugCheckEx` trap.
 
+use std::mem::take;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::breakpoints::{
     Breakpoint, BreakpointConfig, BreakpointScope, ThreadScope, lift_target_site, plant_target_site,
 };
-use crate::dbg_backend::{BugcheckInfo, DebugCapability, WatchpointAccess};
+use crate::dbg_backend::{BugcheckInfo, DebugCapability, ModuleEvent, WatchpointAccess};
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::ModuleSymbolLoadReport;
-use crate::session::{Session, TrapSite};
+use crate::session::{ModuleTrap, Session, TrapSite};
 use crate::types::{Arch, VirtAddr};
 
 /// What [`Session::add_pattern_breakpoints`] set.
@@ -129,15 +130,15 @@ impl Session {
     }
 
     /// Arm the debugger's own kernel traps the backend needs: the bugcheck
-    /// trap ([`Self::arm_bugcheck_trap`]), and the module-load trap while
-    /// something waits on a load ([`Self::sync_load_trap`]). Called at
-    /// attach, where the operator can see them reported, and on every
-    /// resume: the sites need kernel symbols, which can arrive late and move
-    /// across a reboot, and the guest runs only after a resume, so that is
-    /// where whether the load trap is wanted is decided.
+    /// trap ([`Self::arm_bugcheck_trap`]), and the module traps while
+    /// something waits on a load or unload ([`Self::sync_module_traps`]).
+    /// Called at attach, where the operator can see them reported, and on
+    /// every resume: the sites need kernel symbols, which can arrive late and
+    /// move across a reboot, and the guest runs only after a resume, so that
+    /// is where whether the module traps are wanted is decided.
     pub fn arm_traps(&mut self) {
         self.arm_bugcheck_trap();
-        self.sync_load_trap();
+        self.sync_module_traps();
     }
 
     /// Whether the backend reports `capability` as supported.
@@ -167,81 +168,102 @@ impl Session {
         );
     }
 
-    /// Keep an automatic breakpoint on `nt!DbgLoadImageSymbols` exactly
-    /// while a load is waited on, when the backend reports no module loads
-    /// on its own: an `sxe`/`sxn ld` filter, or a breakpoint not resolved
-    /// yet (a `bu` on a driver that has not loaded).
+    /// Keep automatic breakpoints on the kernel functions that report a
+    /// module `event`, exactly while that event is waited on, when the
+    /// backend reports no module events on its own (see
+    /// [`module_trap_symbols`] and [`Self::module_event_awaited`]).
     ///
-    /// The kernel calls it for every kernel image it maps, with the image
-    /// listed in `PsLoadedModuleList` and before its entry point runs, whether
-    /// or not kernel debugging is enabled; it is where KD's load notification
-    /// comes from. A hit refreshes the module list, arms deferred breakpoints
-    /// in the new image, and applies the `sx* ld` filters (see
-    /// [`Self::classify_stop_event`]). It is not left in place otherwise:
-    /// every driver load runs it, and a trap a killed session leaves behind
-    /// stops the next load with no debugger to take it.
-    fn sync_load_trap(&mut self) {
+    /// A load trap hit refreshes the module list, arms deferred breakpoints
+    /// in the new image, and applies the `sx* ld` filters; an unload trap hit
+    /// applies the `sx* ud` filters (see [`Self::classify_stop_event`]). The
+    /// traps are not left in place otherwise: every driver load and unload
+    /// runs them, and a trap a killed session leaves behind stops the next
+    /// one with no debugger to take it.
+    fn sync_module_traps(&mut self) {
         if self.backend_supports(DebugCapability::ModuleLoadEvents) {
             return;
         }
-        match (&self.load_trap, self.load_awaited()) {
-            (None, true) => {
-                self.load_trap = self.plant_trap(
-                    "nt!DbgLoadImageSymbols",
-                    "a module-load trap",
-                    "reports no module loads by itself; it stays while a breakpoint waits \
-                     for its module or an sx ld filter is set",
-                );
-            }
-            (Some(trap), false) => {
-                let address = trap.address;
-                match lift_target_site(self.backend.as_mut(), &self.target, address) {
-                    Ok(()) => {
-                        self.load_trap = None;
-                        self.load_trap_interrupted = None;
+        for event in [ModuleEvent::Load, ModuleEvent::Unload] {
+            let planted = self.module_traps.iter().any(|trap| trap.event == event);
+            match (planted, self.module_event_awaited(event)) {
+                (false, true) => {
+                    let (what, needs) = match event {
+                        ModuleEvent::Load => (
+                            "a module-load trap",
+                            "reports no module loads by itself; it stays while a breakpoint \
+                             waits for its module or an sx ld filter is set",
+                        ),
+                        ModuleEvent::Unload => (
+                            "a module-unload trap",
+                            "reports no module unloads by itself; it stays while an sx ud \
+                             filter is set",
+                        ),
+                    };
+                    for symbol in module_trap_symbols(event) {
+                        if let Some(site) = self.plant_trap(symbol, what, needs) {
+                            self.module_traps.push(ModuleTrap { event, site });
+                        }
                     }
-                    Err(error) => self
-                        .notices
-                        .push(format!("failed to lift the module-load trap: {error}")),
                 }
+                (true, false) => self.lift_module_traps(event),
+                _ => {}
             }
-            _ => {}
         }
     }
 
-    /// Set an `sx* ld` filter.
-    /// One that makes a GDB stub's load trap wanted while the target runs
-    /// halts it briefly to plant the trap, so it applies to the next load
-    /// rather than only after the next resume.
-    pub fn set_module_load_filter(
+    /// Lift the traps for `event`. One that cannot be lifted stays, so a
+    /// later resume tries again.
+    fn lift_module_traps(&mut self, event: ModuleEvent) {
+        let mut kept = Vec::new();
+        for trap in take(&mut self.module_traps) {
+            if trap.event != event {
+                kept.push(trap);
+                continue;
+            }
+            if let Err(error) =
+                lift_target_site(self.backend.as_mut(), &self.target, trap.site.address)
+            {
+                self.notices.push(format!(
+                    "failed to lift the module-{} trap: {error}",
+                    event_word(event)
+                ));
+                kept.push(trap);
+            }
+        }
+        self.module_traps = kept;
+        self.module_trap_interrupted = None;
+    }
+
+    /// Set an `sx* ld` or `sx* ud` filter.
+    /// One that makes a GDB stub's module trap wanted while the target runs
+    /// halts it briefly to plant the trap, so it applies to the next load or
+    /// unload rather than only after the next resume.
+    pub fn set_module_event_filter(
         &mut self,
+        event: ModuleEvent,
         module: Option<String>,
         mode: ExceptionPolicyMode,
         command: Option<String>,
     ) -> Result<()> {
         self.exception_policies
-            .set_module_load(module, mode, command);
-        if self.load_trap.is_none()
-            && self.load_awaited()
+            .set_module_event(event, module, mode, command);
+        if !self.module_traps.iter().any(|trap| trap.event == event)
+            && self.module_event_awaited(event)
             && !self.backend_supports(DebugCapability::ModuleLoadEvents)
         {
             self.with_target_halted(|session| {
-                session.sync_load_trap();
+                session.sync_module_traps();
                 Ok(())
             })?;
         }
         Ok(())
     }
 
-    /// Whether something waits on a module load: an `sxe`/`sxn ld` filter,
-    /// or a breakpoint not resolved yet.
-    fn load_awaited(&self) -> bool {
-        self.exception_policies.module_load_entries().any(|filter| {
-            matches!(
-                filter.mode,
-                ExceptionPolicyMode::Break | ExceptionPolicyMode::Notify
-            )
-        }) || self.breakpoints.list().iter().any(|bp| !bp.resolved)
+    /// Whether something waits on a module `event`: an `sxe`/`sxn` filter
+    /// for it, or for a load, a breakpoint not resolved yet.
+    fn module_event_awaited(&self, event: ModuleEvent) -> bool {
+        self.exception_policies.module_event_awaited(event)
+            || (event == ModuleEvent::Load && self.breakpoints.list().iter().any(|bp| !bp.resolved))
     }
 
     /// Plant a debugger-owned breakpoint at the kernel `symbol`, reporting
@@ -401,12 +423,22 @@ impl Session {
         self.breakpoints.list().into_iter().find(|bp| bp.id == id)
     }
 
+    /// Put the original bytes of every debugger-owned site back into `buf`,
+    /// read at `start` in the address space `dtb`: the manager's breakpoints
+    /// and the session's own traps. Without this a view shows the debugger's
+    /// `int3` instead of the guest's code.
+    pub fn mask_code(&self, start: VirtAddr, buf: &mut [u8], dtb: u64) {
+        self.breakpoints
+            .mask_breakpoint_bytes(&self.target, start, buf, dtb);
+        self.mask_traps(start, buf);
+    }
+
     /// Put the traps' displaced instructions back into a read that covers
     /// them. The traps are not the manager's breakpoints, so the manager
-    /// cannot mask them, and without this `u nt!KeBugCheckEx` shows the
-    /// debugger's own trap instead of the guest's code.
-    pub fn mask_traps(&self, start: VirtAddr, buf: &mut [u8]) {
-        for trap in [&self.bugcheck_trap, &self.load_trap].into_iter().flatten() {
+    /// cannot mask them.
+    fn mask_traps(&self, start: VirtAddr, buf: &mut [u8]) {
+        let module_sites = self.module_traps.iter().map(|trap| &trap.site);
+        for trap in self.bugcheck_trap.iter().chain(module_sites) {
             if trap.original.is_empty() || trap.address.0 < start.0 {
                 continue;
             }
@@ -432,10 +464,10 @@ impl Session {
     pub fn has_installed_sites(&self) -> bool {
         !self.breakpoints.list().is_empty()
             || self.bugcheck_trap.is_some()
-            || self.load_trap.is_some()
+            || !self.module_traps.is_empty()
     }
 
-    /// Take the automatic bugcheck and module-load traps back out of the
+    /// Take the automatic bugcheck and module traps back out of the
     /// guest.
     ///
     /// Nothing else does while the session lives: they are not the manager's
@@ -447,11 +479,11 @@ impl Session {
             lift_target_site(self.backend.as_mut(), &self.target, trap.address)?;
             self.bugcheck_trap = None;
         }
-        if let Some(trap) = &self.load_trap {
-            lift_target_site(self.backend.as_mut(), &self.target, trap.address)?;
-            self.load_trap = None;
-            self.load_trap_interrupted = None;
+        while let Some(trap) = self.module_traps.last() {
+            lift_target_site(self.backend.as_mut(), &self.target, trap.site.address)?;
+            self.module_traps.pop();
         }
+        self.module_trap_interrupted = None;
         Ok(())
     }
 
@@ -520,5 +552,31 @@ impl Session {
     /// The report is private to the REPL's summary path.
     pub fn take_module_refresh_report(&mut self) -> Option<ModuleSymbolLoadReport> {
         self.module_refresh_report.take()
+    }
+}
+
+/// The kernel functions that report a module `event`, each taking the image
+/// base as its second argument. The kernel calls `DbgLoadImageSymbols` for
+/// every kernel image it maps, with the image listed in `PsLoadedModuleList`
+/// and before its entry point runs, whether or not kernel debugging is
+/// enabled; it is where KD's load notification comes from. An unload is
+/// reported by `DbgUnLoadImageSymbolsUnicode` (current builds) or
+/// `DbgUnLoadImageSymbols`, after the driver's unload routine and before the
+/// image leaves the module list.
+fn module_trap_symbols(event: ModuleEvent) -> &'static [&'static str] {
+    match event {
+        ModuleEvent::Load => &["nt!DbgLoadImageSymbols"],
+        ModuleEvent::Unload => &[
+            "nt!DbgUnLoadImageSymbols",
+            "nt!DbgUnLoadImageSymbolsUnicode",
+        ],
+    }
+}
+
+/// `load` or `unload`, for messages about the module traps.
+pub(super) fn event_word(event: ModuleEvent) -> &'static str {
+    match event {
+        ModuleEvent::Load => "load",
+        ModuleEvent::Unload => "unload",
     }
 }

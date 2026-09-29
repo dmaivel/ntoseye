@@ -152,9 +152,7 @@ impl Session {
         if self.target.symbols.is_secure_root(dtb) {
             return Ok(());
         }
-        self.breakpoints
-            .mask_breakpoint_bytes(&self.target, addr, buf, dtb);
-        self.mask_traps(addr, buf);
+        self.mask_code(addr, buf, dtb);
         Ok(())
     }
 

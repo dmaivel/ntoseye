@@ -84,7 +84,7 @@ The other load filter commands are:
 - {command}`sx` lists the filters.
 - {command}`sxr` clears the filters.
 
-A filter with a module name has priority over `ld` without a module name, so `sxe ld` together with `sxi ld:ksecdd` stops at every load except the `ksecdd` load. `ntoseye` does not support module unload (`ud`) filters.
+A filter with a module name has priority over `ld` without a module name, so `sxe ld` together with `sxi ld:ksecdd` stops at every load except the `ksecdd` load.
 
 ```text
 sxe ld:mydriver
@@ -103,9 +103,23 @@ The trap is in place only while something waits for a load, which is either an `
 
 If a session is killed while the trap is in place, the trap stays in the guest. The rules above keep this time as short as possible, and the [site journal](#the-site-journal) repairs the trap at the next attach.
 
-A GDB stub also does not report a reboot, so the trap does not stay in place across a reboot. `ntoseye` finds the new kernel at the first stop after the new kernel runs, and it does not stop for the loads during boot before that stop, although KD reports each of them.
+A GDB stub also does not report a reboot, so the trap does not stay in place across a reboot. `ntoseye` finds the new kernel at the first stop after the new kernel runs, and it does not stop for the loads during boot before that stop. This is expected, and the `gdb` backend does not support stopping at boot-time loads: the trap would have to be planted after the new kernel is in memory and before it loads its boot drivers, and without a reboot notification that is a race with the kernel that `ntoseye` would not win consistently. To debug a boot-start driver, use `kd` or `kdnet`, which report each load during boot.
 
 While the trap is in place, each load briefly halts the target so that `ntoseye` can refresh the module list, after which it resumes the target. If a filter stops at the load, `ntoseye` does not resume the target.
+
+## Stopping at a driver unload
+
+`sxe ud:<module>` stops the target when that kernel image unloads, and `sxe ud` without a module name stops at every unload. Module names match as they do for `ld`. The stop comes after the driver's unload routine has run and before the image leaves the module list, so the module is still listed with its symbols, and the stack shows the unload path (`nt!MiUnloadSystemImage`, called from `nt!IopDeleteDriver`). The stop shows the WinDbg line `Unload module <image> at <base>` above the usual stop context.
+
+`sxn ud[:<module>]` shows that line and continues, `sxd` and `sxi` let the unload continue and show nothing, and `sxe -c "<commands>" ud:<module>` runs the commands at the stop. Load and unload filters are separate, so `sxe ld:mydriver` does not stop at the unload of `mydriver`.
+
+```text
+sxe ud:mydriver
+g
+k
+```
+
+On the `gdb` backend, `ntoseye` plants an unload trap the same way as the load trap, at `nt!DbgUnLoadImageSymbols` and `nt!DbgUnLoadImageSymbolsUnicode`, the kernel functions that report an unload. The unload trap is in place only while an `sxe`/`sxn ud` filter is set, and a breakpoint that waits for its module does not keep it.
 
 ## User-mode breakpoints in shared pages
 

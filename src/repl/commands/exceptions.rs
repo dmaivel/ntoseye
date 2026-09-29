@@ -1,4 +1,4 @@
-use crate::dbg_backend::ContinueDisposition;
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::error::Result;
 use crate::repl::*;
 use crate::ui;
@@ -6,47 +6,47 @@ use crate::ui;
 repl_command! {
     cmd_sxe;
     names: ["sxe"],
-    usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
-    summary: "Break when an exception occurs or a kernel module loads.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxe ld` stops when a kernel image loads, and `sxe ld:<module>` stops when that module loads. The module name is case-insensitive, the extension is optional, and you can use `*`/`?` globs. The stop occurs after ntoseye lists the module and arms its deferred breakpoints, and before its entry point runs. `-c` works with `sxe ld`, but `-f` does not apply to ld. `sxn ld` prints a `ModLoad:` line and continues, and `sxd ld` and `sxi ld` continue with no output. A named filter has precedence over bare `ld`. ntoseye does not support module unload (`ud`) filters.",
+    usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
+    summary: "Break when an exception occurs or a kernel module loads or unloads.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxe ld` stops when a kernel image loads, and `sxe ld:<module>` stops when that module loads. The module name is case-insensitive, the extension is optional, and you can use `*`/`?` globs. The stop occurs after ntoseye lists the module and arms its deferred breakpoints, and before its entry point runs. `sxe ud` and `sxe ud:<module>` stop when a kernel image unloads, after its driver's unload routine has run and while the image is still in the module list. `-c` works with `sxe ld` and `sxe ud`, but `-f` does not apply to them. `sxn ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload module` line and continues, and `sxd` and `sxi` let the load or unload continue with no output. A named filter has precedence over bare `ld` or `ud`.",
 }
 
 repl_command! {
     cmd_sxd;
     names: ["sxd"],
-    usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
+    usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     summary: "Pass first-chance exceptions and break on second chance.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxd ld[:<module>]` lets the load continue with no output. See sxe.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxd ld[:<module>]` and `sxd ud[:<module>]` let the load or unload continue with no output. See sxe.",
 }
 
 repl_command! {
     cmd_sxn;
     names: ["sxn"],
-    usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
+    usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     summary: "Show a notification for exceptions and pass them without a break.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues. See sxe.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues, and `sxn ud[:<module>]` prints an `Unload module` line at the unload and continues. See sxe.",
 }
 
 repl_command! {
     cmd_sxi;
     names: ["sxi"],
-    usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]>",
+    usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     summary: "Pass exceptions without a break or a notification.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxi ld[:<module>]` lets the load continue with no output. See sxe.",
+    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxi ld[:<module>]` and `sxi ud[:<module>]` let the load or unload continue with no output. See sxe.",
 }
 
 repl_command! {
     cmd_sx();
     names: ["sx", "sxl"],
     usage: "sx or sxl",
-    summary: "List the configured exception policies and module-load filters.",
+    summary: "List the configured exception policies and module load and unload filters.",
 }
 
 repl_command! {
     cmd_sxr();
     names: ["sxr"],
     usage: "sxr",
-    summary: "Reset exception policies to the default break behavior, and clear module-load filters.",
+    summary: "Reset exception policies to the default break behavior, and clear module load and unload filters.",
 }
 
 repl_command! {
@@ -81,8 +81,8 @@ fn validate_exception_command(command: &str) -> std::result::Result<(), String> 
     Ok(())
 }
 
-/// What a module-load filter in `mode` does at a load.
-fn module_load_label(mode: ExceptionPolicyMode) -> &'static str {
+/// What a module load or unload filter in `mode` does at the event.
+fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
     match mode {
         ExceptionPolicyMode::Break => "break",
         ExceptionPolicyMode::Notify => "notify",
@@ -140,8 +140,8 @@ impl ReplState<'_> {
         };
         let code = match parse_event_filter(value) {
             Ok(EventFilter::Exception(code)) => code,
-            Ok(EventFilter::ModuleLoad(module)) => {
-                self.set_module_load_filter(module, mode, command, final_action);
+            Ok(EventFilter::Module(event, module)) => {
+                self.set_module_event_filter(event, module, mode, command, final_action);
                 return Ok(());
             }
             Err(err) => {
@@ -176,19 +176,21 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn set_module_load_filter(
+    fn set_module_event_filter(
         &mut self,
+        event: ModuleEvent,
         module: Option<String>,
         mode: ExceptionPolicyMode,
         command: Option<String>,
         final_action: Option<ExceptionPolicyFinalAction>,
     ) {
+        let name = event.filter_name();
         if final_action.is_some() {
-            error!("-f does not apply to ld: a module load either stops (sxe) or continues");
+            error!("-f does not apply to {name}: a module event either stops (sxe) or continues");
             return;
         }
         if command.is_some() && mode != ExceptionPolicyMode::Break {
-            error!("-c applies to ld only with sxe, where it runs at the stop");
+            error!("-c applies to {name} only with sxe, where it runs at the stop");
             return;
         }
         if let Some(event_command) = command.as_deref()
@@ -197,21 +199,24 @@ impl ReplState<'_> {
             error!("{err}");
             return;
         }
-        if let Err(err) = self.ctx.set_module_load_filter(module, mode, command) {
+        if let Err(err) = self
+            .ctx
+            .set_module_event_filter(event, module, mode, command)
+        {
             error!("{err}");
             return;
         }
         let policy = self
             .ctx
             .exception_policies
-            .module_load_entries()
+            .module_event_entries()
             .last()
             .expect("the filter was just set");
         outln!(
             "{} {}: {}\n",
             mode.command(),
             policy.event_name(),
-            module_load_label(mode)
+            module_event_label(mode)
         );
     }
 
@@ -233,14 +238,14 @@ impl ReplState<'_> {
 
     fn cmd_sx(&mut self) -> Result<()> {
         let entries: Vec<_> = self.ctx.exception_policies.entries().collect();
-        let module_loads: Vec<_> = self.ctx.exception_policies.module_load_entries().collect();
-        if entries.is_empty() && module_loads.is_empty() {
+        let module_events: Vec<_> = self.ctx.exception_policies.module_event_entries().collect();
+        if entries.is_empty() && module_events.is_empty() {
             outln!("No exception policies configured (ordinary exceptions break by default).\n");
             return Ok(());
         }
-        if !module_loads.is_empty() {
-            outln!("Module-load filters:");
-            for policy in module_loads {
+        if !module_events.is_empty() {
+            outln!("Module load and unload filters:");
+            for policy in module_events {
                 let command = policy
                     .command
                     .as_deref()
@@ -249,7 +254,7 @@ impl ReplState<'_> {
                 outln!(
                     "  {:<24} {:<8} ({}){command}",
                     policy.event_name(),
-                    module_load_label(policy.mode),
+                    module_event_label(policy.mode),
                     policy.mode.command()
                 );
             }
@@ -285,7 +290,7 @@ impl ReplState<'_> {
     fn cmd_sxr(&mut self) -> Result<()> {
         self.ctx.exception_policies.reset();
         outln!(
-            "Exception policies reset; ordinary exceptions break by default and module loads do not stop.\n"
+            "Exception policies reset; ordinary exceptions break by default and module loads and unloads do not stop.\n"
         );
         Ok(())
     }

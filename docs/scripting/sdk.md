@@ -224,7 +224,7 @@ These functions, and also `step(until=...)` and `step_over(until=...)`, have a `
 
 While the target is stopped, its stop stays current until the target moves again. `dbg.stop`, `wait()`, and `interrupt()` all return this stop, and reading it does not consume it.
 
-The stop kinds are `ntoseye.Stop.Breakpoint`, `.Exception`, `.Interrupt`, `.Step`, `.ModuleLoad`, `.Bugcheck`, and `.Reboot`. To examine the specific stop, use `isinstance`, which works on Python 3.9 and later. The shared fields include `rip`, `symbol`, `thread`, `process`, `cpu`, and `breakpoints`.
+The stop kinds are `ntoseye.Stop.Breakpoint`, `.Exception`, `.Interrupt`, `.Step`, `.ModuleLoad`, `.ModuleUnload`, `.Bugcheck`, and `.Reboot`. To examine the specific stop, use `isinstance`, which works on Python 3.9 and later. The shared fields include `rip`, `symbol`, `thread`, `process`, `cpu`, and `breakpoints`.
 
 For the other stop kinds, `stop.breakpoints` is empty, so `if bp in stop.breakpoints:` works without checking the stop type first. A crash dump that you open with `backend="dmp"` is stopped at its bugcheck, so its `dbg.stop` is a `Stop.Bugcheck`.
 
@@ -239,9 +239,9 @@ elif isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
 
 ### Exceptions and module loads
 
-`dbg.exceptions.set(code, mode)` sets an exception policy, for example `"av"` or `0xC0000005`, or a module-load filter, for example `"ld"` or `"ld:<module>"`, as the REPL's {command}`sx` commands do. `dbg.exceptions.module_loads` lists the filters.
+`dbg.exceptions.set(code, mode)` sets an exception policy, for example `"av"` or `0xC0000005`, or a module filter, as the REPL's {command}`sx` commands do: `"ld"` or `"ld:<module>"` for loads, `"ud"` or `"ud:<module>"` for unloads. `dbg.exceptions.module_events` lists the module filters, each with its `event` (`"ld"` or `"ud"`).
 
-With a `"break"` filter, the load of a matching kernel module stops the target as `Stop.ModuleLoad`, whose `module` field is the loaded `Module`. The stop occurs before the module's `DriverEntry` runs, and the deferred breakpoints in the module are already armed.
+With a `"break"` load filter, the load of a matching kernel module stops the target as `Stop.ModuleLoad`, whose `module` field is the loaded `Module`. The stop occurs before the module's `DriverEntry` runs, and the deferred breakpoints in the module are already armed. A `"break"` unload filter stops as `Stop.ModuleUnload` after the driver's unload routine has run, while the module is still listed.
 
 ```python
 dbg.exceptions.set("ld:mydriver", "break")

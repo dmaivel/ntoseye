@@ -633,12 +633,14 @@ impl Breakpoint {
 #[pymethods]
 impl Exceptions {
     /// Set the stop policy for an exception (`sxe`/`sxd`/`sxn`/`sxi`), or set a
-    /// module-load filter with `"ld"` for all kernel modules or `"ld:<module>"`
-    /// for one module. The module name is not case-sensitive, the extension is
-    /// optional, and `*`/`?` globs work. A `"break"` filter stops as
-    /// `Stop.ModuleLoad` before the module entry point runs, and a `"notify"`
-    /// filter adds a `ModLoad:` line to the queue in `dbg.notices()`.
-    /// `disposition` does not apply to `ld`.
+    /// module filter: `"ld"` or `"ld:<module>"` for loads, `"ud"` or
+    /// `"ud:<module>"` for unloads. The module name is not case-sensitive, the
+    /// extension is optional, and `*`/`?` globs work. A `"break"` load filter
+    /// stops as `Stop.ModuleLoad` before the module entry point runs, and a
+    /// `"break"` unload filter stops as `Stop.ModuleUnload` after the driver's
+    /// unload routine, while the module is still listed. A `"notify"` filter
+    /// adds a `ModLoad:` or `Unload module` line to the queue in
+    /// `dbg.notices()`. `disposition` does not apply to `ld` or `ud`.
     #[pyo3(signature = (code, mode, *, disposition=None))]
     fn set(
         &self,
@@ -660,33 +662,34 @@ impl Exceptions {
                     Ok(())
                 })
             }
-            EventFilter::ModuleLoad(module) => {
+            EventFilter::Module(event, module) => {
                 if disposition.is_some() {
                     return Err(PyValueError::new_err(
-                        "disposition does not apply to a module-load filter",
+                        "disposition does not apply to a module load or unload filter",
                     ));
                 }
                 self.owner.with(py, |session| {
                     session
-                        .set_module_load_filter(module, mode, None)
+                        .set_module_event_filter(event, module, mode, None)
                         .map_err(err)
                 })
             }
         }
     }
 
-    /// The module-load filters (`sx* ld[:<module>]`), in the order that you set
-    /// them. Iterating over `dbg.exceptions` gives only the exception policies.
+    /// The module load and unload filters (`sx* ld[:<module>]` and
+    /// `sx* ud[:<module>]`), in the order that you set them. Iterating over
+    /// `dbg.exceptions` gives only the exception policies.
     #[getter]
-    fn module_loads(
+    fn module_events(
         &self,
         py: Python<'_>,
-    ) -> PyResult<Vec<Py<view::execution::py::ModuleLoadPolicy>>> {
+    ) -> PyResult<Vec<Py<view::execution::py::ModuleEventPolicy>>> {
         let rows = self.owner.with(py, |session| {
             Ok(session
                 .exception_policies
-                .module_load_entries()
-                .map(view::execution::module_load_policy)
+                .module_event_entries()
+                .map(view::execution::module_event_policy)
                 .collect::<Vec<_>>())
         })?;
         rows.into_iter()

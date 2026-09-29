@@ -182,7 +182,7 @@ fn exit_classifies_stray_single_step_but_spares_real_stops() {
         target_reloaded: false,
         target_kernel_base_hint: None,
         modules_changed: false,
-        loaded_image_base: None,
+        module_event: None,
         assisted_breakin: false,
     };
 

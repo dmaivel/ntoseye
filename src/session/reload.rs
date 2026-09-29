@@ -139,8 +139,8 @@ impl Session {
             // The reboot invalidates the sites: the kernel is re-based and
             // the target's breakpoints are gone. The next resume re-arms them.
             self.bugcheck_trap = None;
-            self.load_trap = None;
-            self.load_trap_interrupted = None;
+            self.module_traps.clear();
+            self.module_trap_interrupted = None;
             let TargetReloadOutcome {
                 report,
                 hint,

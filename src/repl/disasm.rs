@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
-use crate::breakpoints::BreakpointManager;
 use crate::error::Error;
 use crate::gdb::RegisterMap;
 use crate::gdb::registers::repeats_another_register;
+use crate::session::Session;
 use crate::symbols::{LocalSourceState, SourceLocation};
 use crate::target::Target;
 use crate::types::{CodeMachine, VirtAddr};
@@ -368,13 +368,9 @@ fn decode_disasm_context(
     )
 }
 
-pub fn print_disasm_context(
-    debugger: &Target,
-    breakpoints: &BreakpointManager,
-    trace: &ThreadTraceContext,
-    rip: u64,
-) {
+pub fn print_disasm_context(session: &Session, trace: &ThreadTraceContext, rip: u64) {
     print_section("disasm");
+    let debugger = &session.target;
 
     let active_memory = debugger.address_space(trace.active_dtb);
     let code_dtb = preferred_code_dtb(trace, rip);
@@ -391,7 +387,7 @@ pub fn print_disasm_context(
         return;
     }
 
-    breakpoints.mask_breakpoint_bytes(debugger, VirtAddr(rip), &mut bytes, trace.active_dtb);
+    session.mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
     let rows = decode_disasm_context(&bytes, rip, debugger.code_machine(VirtAddr(rip)), resolve);

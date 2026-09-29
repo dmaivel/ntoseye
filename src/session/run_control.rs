@@ -55,6 +55,7 @@ impl Session {
                 StopResolution::Breakpoint { event, .. }
                 | StopResolution::Bugcheck { event }
                 | StopResolution::ModuleLoad { event, .. }
+                | StopResolution::ModuleUnload { event, .. }
                 | StopResolution::TargetReloaded { event, .. }
                 | StopResolution::Stopped { event, .. } => event,
                 StopResolution::Resumed | StopResolution::ModulesChanged => {
@@ -226,7 +227,7 @@ impl Session {
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
         self.target.selected_frame = None;
         self.module_refresh_report = None;
-        // A bugcheck or module load can only happen while the guest runs, so
+        // A bugcheck or module event can only happen while the guest runs, so
         // the traps have to be in place before it does. Arming on stop alone
         // would miss a crash or load provoked immediately after attach.
         self.arm_traps();
@@ -245,7 +246,7 @@ impl Session {
         // halted, so the next `continue` starts the pump with the reconnect-assist
         // poking already off, instead of resuming into another forced break-in.
         self.try_finish_rediscovery_from_memory();
-        if self.breakpoints.has_enabled_breakpoints() || self.load_trap.is_some() {
+        if self.breakpoints.has_enabled_breakpoints() || !self.module_traps.is_empty() {
             self.backend.set_current_thread(&self.current_thread)?;
             self.step_over_site_at_pc()?;
         }

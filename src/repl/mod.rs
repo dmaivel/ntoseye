@@ -730,14 +730,10 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     let has_register_context = supports_capability(&capabilities, DebugCapability::ReadRegisters);
 
     if has_register_context {
-        print_break_context(
-            &mut *client,
-            &ctx.register_map,
-            debugger,
-            &ctx.breakpoints,
-            &ctx.current_thread,
-        );
+        print_break_context(ctx);
     }
+    let debugger: &mut Target = &mut ctx.target;
+    let client: &mut dyn DebugBackend = ctx.backend.as_mut();
 
     let ide_menu = IdeMenu::default()
         .with_name("completion_menu")

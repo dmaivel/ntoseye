@@ -281,13 +281,7 @@ impl ReplState<'_> {
                 return Ok(());
             }
             print_stop_separator();
-            print_break_context(
-                &mut *self.ctx.backend,
-                &self.ctx.register_map,
-                &mut self.ctx.target,
-                &self.ctx.breakpoints,
-                &self.ctx.current_thread,
-            );
+            print_break_context(self.ctx);
         }
 
         Ok(())

@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::bytes;
-use crate::dbg_backend::{ContinueDisposition, StopEvent};
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::types::Arch;
@@ -41,9 +41,14 @@ pub(super) fn stop_event(stop: StateChange) -> StopEvent {
         target_reloaded: stop.target_reloaded,
         target_kernel_base_hint: stop.kernel_base_hint,
         modules_changed: load_symbols,
-        loaded_image_base: stop
-            .kernel_base_hint
-            .filter(|_| load_symbols && !stop.unload_symbols),
+        module_event: stop.kernel_base_hint.filter(|_| load_symbols).map(|base| {
+            let event = if stop.unload_symbols {
+                ModuleEvent::Unload
+            } else {
+                ModuleEvent::Load
+            };
+            (event, base)
+        }),
         assisted_breakin: stop.assisted_breakin,
     }
 }

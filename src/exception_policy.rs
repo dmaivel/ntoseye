@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::dbg_backend::{ContinueDisposition, StopEvent};
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
 use crate::symbols::glob_matches;
 
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
@@ -95,18 +95,19 @@ pub struct ExceptionPolicy {
     pub final_action: Option<ExceptionPolicyFinalAction>,
 }
 
-/// A module-load event filter (`sx* ld[:<module>]`). `module` is a
-/// case-insensitive `*`/`?` glob over the image name, with or without its
-/// extension; `None` (bare `ld`) matches every image. Only `Break` stops and
-/// only `Notify` reports; `command` runs at a `Break` stop.
+/// A module event filter (`sx* ld[:<module>]` or `sx* ud[:<module>]`).
+/// `module` is a case-insensitive `*`/`?` glob over the image name, with or
+/// without its extension; `None` (bare `ld`/`ud`) matches every image. Only
+/// `Break` stops and only `Notify` reports; `command` runs at a `Break` stop.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModuleLoadPolicy {
+pub struct ModuleEventPolicy {
+    pub event: ModuleEvent,
     pub module: Option<String>,
     pub mode: ExceptionPolicyMode,
     pub command: Option<String>,
 }
 
-impl ModuleLoadPolicy {
+impl ModuleEventPolicy {
     /// Whether this filter names the image `name` (a file name or path).
     pub fn matches(&self, name: &str) -> bool {
         let Some(pattern) = self.module.as_deref() else {
@@ -117,29 +118,31 @@ impl ModuleLoadPolicy {
         glob_matches(pattern, file, true) || glob_matches(pattern, stem, true)
     }
 
-    /// The filter as `sx` spells it: `ld` or `ld:<module>`.
+    /// The filter as `sx` spells it: `ld`, `ld:<module>`, `ud`, or
+    /// `ud:<module>`.
     pub fn event_name(&self) -> String {
+        let event = self.event.filter_name();
         match &self.module {
-            Some(module) => format!("ld:{module}"),
-            None => "ld".to_string(),
+            Some(module) => format!("{event}:{module}"),
+            None => event.to_string(),
         }
     }
 }
 
-/// What an `sx*` argument names: an exception code, or the module-load event
-/// with its optional module filter.
+/// What an `sx*` argument names: an exception code, or a module event with
+/// its optional module filter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventFilter {
     Exception(u32),
-    ModuleLoad(Option<String>),
+    Module(ModuleEvent, Option<String>),
 }
 
 #[derive(Default)]
 pub struct ExceptionPolicyTable {
     policies: BTreeMap<u32, ExceptionPolicy>,
-    /// In the order they were set; a module's latest setting replaces its
-    /// earlier one.
-    module_loads: Vec<ModuleLoadPolicy>,
+    /// In the order they were set; the latest setting for an event and
+    /// module replaces the earlier one.
+    module_events: Vec<ModuleEventPolicy>,
 }
 
 impl ExceptionPolicyTable {
@@ -166,7 +169,7 @@ impl ExceptionPolicyTable {
 
     pub fn reset(&mut self) {
         self.policies.clear();
-        self.module_loads.clear();
+        self.module_events.clear();
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (u32, &ExceptionPolicy)> + '_ {
@@ -177,44 +180,64 @@ impl ExceptionPolicyTable {
         self.policies.get(&code).map(|policy| policy.mode)
     }
 
-    /// Set the module-load filter for `module` (`None`: every module),
-    /// replacing an earlier one for the same module.
-    pub fn set_module_load(
+    /// Set the `event` filter for `module` (`None`: every module), replacing
+    /// an earlier one for the same event and module.
+    pub fn set_module_event(
         &mut self,
+        event: ModuleEvent,
         module: Option<String>,
         mode: ExceptionPolicyMode,
         command: Option<String>,
     ) {
-        let same = |policy: &ModuleLoadPolicy| match (&policy.module, &module) {
-            (Some(existing), Some(module)) => existing.eq_ignore_ascii_case(module),
-            (None, None) => true,
-            _ => false,
+        let same = |policy: &ModuleEventPolicy| {
+            policy.event == event
+                && match (&policy.module, &module) {
+                    (Some(existing), Some(module)) => existing.eq_ignore_ascii_case(module),
+                    (None, None) => true,
+                    _ => false,
+                }
         };
-        self.module_loads.retain(|policy| !same(policy));
-        self.module_loads.push(ModuleLoadPolicy {
+        self.module_events.retain(|policy| !same(policy));
+        self.module_events.push(ModuleEventPolicy {
+            event,
             module,
             mode,
             command,
         });
     }
 
-    pub fn module_load_entries(&self) -> impl Iterator<Item = &ModuleLoadPolicy> + '_ {
-        self.module_loads.iter()
+    pub fn module_event_entries(&self) -> impl Iterator<Item = &ModuleEventPolicy> + '_ {
+        self.module_events.iter()
     }
 
-    /// The filter that applies to a load of the image `name`: the most
-    /// recently set one naming it, else the bare `ld` filter.
-    pub fn module_load_policy(&self, name: &str) -> Option<&ModuleLoadPolicy> {
-        let named = self
-            .module_loads
+    /// Whether an `event` filter stops or reports: something waits on that
+    /// event.
+    pub fn module_event_awaited(&self, event: ModuleEvent) -> bool {
+        self.module_events.iter().any(|policy| {
+            policy.event == event
+                && matches!(
+                    policy.mode,
+                    ExceptionPolicyMode::Break | ExceptionPolicyMode::Notify
+                )
+        })
+    }
+
+    /// The filter that applies to `event` for the image `name`: the most
+    /// recently set one naming it, else the bare `ld`/`ud` filter.
+    pub fn module_event_policy(
+        &self,
+        event: ModuleEvent,
+        name: &str,
+    ) -> Option<&ModuleEventPolicy> {
+        let mut filters = self
+            .module_events
             .iter()
+            .filter(|policy| policy.event == event);
+        let named = filters
+            .clone()
             .rev()
             .find(|policy| policy.module.is_some() && policy.matches(name));
-        named.or_else(|| {
-            self.module_loads
-                .iter()
-                .find(|policy| policy.module.is_none())
-        })
+        named.or_else(|| filters.find(|policy| policy.module.is_none()))
     }
 
     /// Classify only ordinary target exceptions. Debugger-managed control stops
@@ -265,24 +288,30 @@ impl ExceptionPolicyTable {
     }
 }
 
-/// Parse an `sx*` event argument: `ld`, `ld:<module>`, or an exception code
-/// or alias. Module unload (`ud`) is refused.
+/// Parse an `sx*` event argument: `ld`, `ld:<module>`, `ud`, `ud:<module>`,
+/// or an exception code or alias.
 pub fn parse_event_filter(value: &str) -> Result<EventFilter, String> {
     let trimmed = value.trim();
     let (event, argument) = match trimmed.split_once(':') {
         Some((event, argument)) => (event, Some(argument.trim())),
         None => (trimmed, None),
     };
-    if event.eq_ignore_ascii_case("ld") {
+    let module_event = [ModuleEvent::Load, ModuleEvent::Unload]
+        .into_iter()
+        .find(|kind| event.eq_ignore_ascii_case(kind.filter_name()));
+    if let Some(module_event) = module_event {
         return match argument {
-            Some("") => Err(format!("'{value}' names no module (use ld or ld:<module>)")),
-            argument => Ok(EventFilter::ModuleLoad(argument.map(str::to_string))),
+            Some("") => {
+                let name = module_event.filter_name();
+                Err(format!(
+                    "'{value}' names no module (use {name} or {name}:<module>)"
+                ))
+            }
+            argument => Ok(EventFilter::Module(
+                module_event,
+                argument.map(str::to_string),
+            )),
         };
-    }
-    if event.eq_ignore_ascii_case("ud") {
-        return Err(format!(
-            "event '{value}' is not configurable: module unload filters are not supported"
-        ));
     }
     parse_exception_code(trimmed).map(EventFilter::Exception)
 }
@@ -348,7 +377,7 @@ mod tests {
             target_reloaded: false,
             target_kernel_base_hint: None,
             modules_changed: false,
-            loaded_image_base: None,
+            module_event: None,
             assisted_breakin: false,
         }
     }
@@ -455,27 +484,35 @@ mod tests {
     }
 
     #[test]
-    fn event_filters_parse_module_loads_and_refuse_unloads() {
+    fn event_filters_parse_module_loads_and_unloads() {
         assert_eq!(
             parse_event_filter("ld").unwrap(),
-            EventFilter::ModuleLoad(None)
+            EventFilter::Module(ModuleEvent::Load, None)
         );
         assert_eq!(
             parse_event_filter("LD:PdbProbe.sys").unwrap(),
-            EventFilter::ModuleLoad(Some("PdbProbe.sys".into()))
+            EventFilter::Module(ModuleEvent::Load, Some("PdbProbe.sys".into()))
+        );
+        assert_eq!(
+            parse_event_filter("ud").unwrap(),
+            EventFilter::Module(ModuleEvent::Unload, None)
+        );
+        assert_eq!(
+            parse_event_filter("UD:pdbprobe").unwrap(),
+            EventFilter::Module(ModuleEvent::Unload, Some("pdbprobe".into()))
         );
         assert_eq!(
             parse_event_filter("av").unwrap(),
             EventFilter::Exception(0xc000_0005)
         );
         assert!(parse_event_filter("ld:").is_err());
-        assert!(parse_event_filter("ud").is_err());
-        assert!(parse_event_filter("ud:pdbprobe").is_err());
+        assert!(parse_event_filter("ud:").is_err());
     }
 
     #[test]
-    fn module_load_filters_match_image_names_with_or_without_extension() {
-        let filter = |module: &str| ModuleLoadPolicy {
+    fn module_filters_match_image_names_with_or_without_extension() {
+        let filter = |module: &str| ModuleEventPolicy {
+            event: ModuleEvent::Load,
             module: Some(module.into()),
             mode: ExceptionPolicyMode::Break,
             command: None,
@@ -492,14 +529,22 @@ mod tests {
     }
 
     #[test]
-    fn a_named_module_load_filter_takes_precedence_over_bare_ld() {
+    fn a_named_module_filter_takes_precedence_over_the_bare_event() {
+        let load = ModuleEvent::Load;
         let mut policies = ExceptionPolicyTable::default();
-        assert_eq!(policies.module_load_policy("PdbProbe.sys"), None);
+        assert_eq!(policies.module_event_policy(load, "PdbProbe.sys"), None);
 
-        policies.set_module_load(None, ExceptionPolicyMode::Break, None);
-        policies.set_module_load(Some("pdbprobe".into()), ExceptionPolicyMode::Ignore, None);
+        policies.set_module_event(load, None, ExceptionPolicyMode::Break, None);
+        policies.set_module_event(
+            load,
+            Some("pdbprobe".into()),
+            ExceptionPolicyMode::Ignore,
+            None,
+        );
         let mode = |policies: &ExceptionPolicyTable, name| {
-            policies.module_load_policy(name).map(|policy| policy.mode)
+            policies
+                .module_event_policy(load, name)
+                .map(|policy| policy.mode)
         };
         assert_eq!(
             mode(&policies, "PdbProbe.sys"),
@@ -511,15 +556,20 @@ mod tests {
         );
 
         // Setting a module again replaces its filter, whatever its case.
-        policies.set_module_load(Some("PDBPROBE".into()), ExceptionPolicyMode::Notify, None);
-        assert_eq!(policies.module_load_entries().count(), 2);
+        policies.set_module_event(
+            load,
+            Some("PDBPROBE".into()),
+            ExceptionPolicyMode::Notify,
+            None,
+        );
+        assert_eq!(policies.module_event_entries().count(), 2);
         assert_eq!(
             mode(&policies, "PdbProbe.sys"),
             Some(ExceptionPolicyMode::Notify)
         );
 
         // Of two named filters for one image, the later one applies.
-        policies.set_module_load(Some("pdb*".into()), ExceptionPolicyMode::Break, None);
+        policies.set_module_event(load, Some("pdb*".into()), ExceptionPolicyMode::Break, None);
         assert_eq!(
             mode(&policies, "PdbProbe.sys"),
             Some(ExceptionPolicyMode::Break)
@@ -527,5 +577,49 @@ mod tests {
 
         policies.reset();
         assert_eq!(mode(&policies, "PdbProbe.sys"), None);
+    }
+
+    /// Load and unload filters are separate: one never applies to the other
+    /// event, and setting one does not replace the other.
+    #[test]
+    fn load_and_unload_filters_apply_to_their_own_event() {
+        let mut policies = ExceptionPolicyTable::default();
+        policies.set_module_event(
+            ModuleEvent::Load,
+            Some("pdbprobe".into()),
+            ExceptionPolicyMode::Break,
+            None,
+        );
+        assert_eq!(
+            policies.module_event_policy(ModuleEvent::Unload, "PdbProbe.sys"),
+            None
+        );
+        assert!(policies.module_event_awaited(ModuleEvent::Load));
+        assert!(!policies.module_event_awaited(ModuleEvent::Unload));
+
+        policies.set_module_event(
+            ModuleEvent::Unload,
+            Some("pdbprobe".into()),
+            ExceptionPolicyMode::Notify,
+            None,
+        );
+        assert_eq!(policies.module_event_entries().count(), 2);
+        let mode = |event| {
+            policies
+                .module_event_policy(event, "PdbProbe.sys")
+                .map(|policy| policy.mode)
+        };
+        assert_eq!(mode(ModuleEvent::Load), Some(ExceptionPolicyMode::Break));
+        assert_eq!(mode(ModuleEvent::Unload), Some(ExceptionPolicyMode::Notify));
+        assert!(policies.module_event_awaited(ModuleEvent::Unload));
+
+        policies.set_module_event(ModuleEvent::Unload, None, ExceptionPolicyMode::Ignore, None);
+        policies.set_module_event(
+            ModuleEvent::Unload,
+            Some("pdbprobe".into()),
+            ExceptionPolicyMode::Ignore,
+            None,
+        );
+        assert!(!policies.module_event_awaited(ModuleEvent::Unload));
     }
 }

@@ -3433,10 +3433,11 @@ class Exceptions:
         """
     def __repr__(self, /) -> str: ...
     @property
-    def module_loads(self, /) -> list[ModuleLoadPolicy]:
+    def module_events(self, /) -> list[ModuleEventPolicy]:
         """
-        The module-load filters (`sx* ld[:<module>]`), in the order that you set
-        them. Iterating over `dbg.exceptions` gives only the exception policies.
+        The module load and unload filters (`sx* ld[:<module>]` and
+        `sx* ud[:<module>]`), in the order that you set them. Iterating over
+        `dbg.exceptions` gives only the exception policies.
         """
     def reset(self, /) -> None:
         """
@@ -3446,12 +3447,14 @@ class Exceptions:
     def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"], *, disposition: Literal["handled", "not_handled"] |None = None) -> None:
         """
         Set the stop policy for an exception (`sxe`/`sxd`/`sxn`/`sxi`), or set a
-        module-load filter with `"ld"` for all kernel modules or `"ld:<module>"`
-        for one module. The module name is not case-sensitive, the extension is
-        optional, and `*`/`?` globs work. A `"break"` filter stops as
-        `Stop.ModuleLoad` before the module entry point runs, and a `"notify"`
-        filter adds a `ModLoad:` line to the queue in `dbg.notices()`.
-        `disposition` does not apply to `ld`.
+        module filter: `"ld"` or `"ld:<module>"` for loads, `"ud"` or
+        `"ud:<module>"` for unloads. The module name is not case-sensitive, the
+        extension is optional, and `*`/`?` globs work. A `"break"` load filter
+        stops as `Stop.ModuleLoad` before the module entry point runs, and a
+        `"break"` unload filter stops as `Stop.ModuleUnload` after the driver's
+        unload routine, while the module is still listed. A `"notify"` filter
+        adds a `ModLoad:` or `Unload module` line to the queue in
+        `dbg.notices()`. `disposition` does not apply to `ld` or `ud`.
         """
 
 @final
@@ -7497,6 +7500,36 @@ class Module:
         """
 
 @final
+class ModuleEventPolicy(BaseRecord):
+    """
+    One module load or unload filter (`sx* ld[:<module>]` or
+    `sx* ud[:<module>]`).
+    """
+    @property
+    def command(self, /) -> str |None:
+        """
+        The commands that run at a `break` stop.
+        """
+    @property
+    def event(self, /) -> str:
+        """
+        `ld` for a load filter, `ud` for an unload filter.
+        """
+    @property
+    def mode(self, /) -> str:
+        """
+        `break` stops at the event, and `notify` reports it.
+        `second_chance` and `ignore` let the load or unload continue with
+        no output.
+        """
+    @property
+    def module(self, /) -> str |None:
+        """
+        The image-name glob that the filter matches, with or without
+        extension. None for all modules (bare `ld` or `ud`).
+        """
+
+@final
 class ModuleImageInfo(BaseRecord):
     """
     The image identity of a module (`!lmi`), with the file-header identity,
@@ -7542,29 +7575,6 @@ class ModuleIterator:
     """
     def __iter__(self, /) -> ModuleIterator: ...
     def __next__(self, /) -> Module: ...
-
-@final
-class ModuleLoadPolicy(BaseRecord):
-    """
-    One module-load filter (`sx* ld[:<module>]`).
-    """
-    @property
-    def command(self, /) -> str |None:
-        """
-        The commands that run at a `break` stop.
-        """
-    @property
-    def mode(self, /) -> str:
-        """
-        `break` stops at the load, and `notify` reports it.
-        `second_chance` and `ignore` let the load continue with no output.
-        """
-    @property
-    def module(self, /) -> str |None:
-        """
-        The image-name glob that the filter matches, with or without
-        extension. None for all modules (bare `ld`).
-        """
 
 @final
 class ModuleSymbols(BaseRecord):
@@ -10571,6 +10581,23 @@ class Stop:
         def module(self, /) -> Module:
             """
             The loaded kernel module.
+            """
+    @final
+    class ModuleUnload(Stop):
+        """
+        A kernel image is unloading, and a `"ud"` filter set to `"break"`
+        matched it (`dbg.exceptions.set("ud:<module>", "break")`, `sxe ud`).
+        The driver's unload routine has run, and the module is still in the
+        module list with its symbols.
+        """
+        __match_args__: Final = ("module", "_context")
+        def __new__(cls, /, module: Module, _context: _StopContext) -> Stop.ModuleUnload: ...
+        @property
+        def _context(self, /) -> _StopContext: ...
+        @property
+        def module(self, /) -> Module:
+            """
+            The unloading kernel module.
             """
     @final
     class Reboot(Stop):

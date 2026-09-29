@@ -21,11 +21,13 @@ use crate::dbg_backend::{
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
+use crate::session::breakpoints::event_word;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::hits::stack_pointer;
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
-    PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode, StepStack,
+    ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
+    StepStack,
 };
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
@@ -123,21 +125,25 @@ impl Session {
     }
 
     /// Step the current thread past the debugger site its PC is on: one of
-    /// the manager's breakpoints, the module-load trap, or both at one
-    /// address; `None` when it is on neither. The trap is lifted for the step
-    /// and planted again, as a breakpoint is; one that cannot be planted
-    /// again is dropped, and the next resume arms it anew. Callers must have
-    /// selected the current thread on the backend.
+    /// the manager's breakpoints, a module trap, or both at one address;
+    /// `None` when it is on neither. The trap is lifted for the step and
+    /// planted again, as a breakpoint is; one that cannot be planted again is
+    /// dropped, and the next resume arms it anew. Callers must have selected
+    /// the current thread on the backend.
     pub fn step_over_site_at_pc(&mut self) -> Result<Option<RunPast>> {
-        let trap = match &self.load_trap {
-            Some(trap) => trap.clone(),
-            None => return self.step_over_breakpoint_at_pc(),
-        };
-        let regs = self.backend.read_registers()?;
-        let rip = self.register_map.read_u64("rip", &regs)?;
-        if rip != trap.address.0 {
+        if self.module_traps.is_empty() {
             return self.step_over_breakpoint_at_pc();
         }
+        let regs = self.backend.read_registers()?;
+        let rip = self.register_map.read_u64("rip", &regs)?;
+        let Some(index) = self
+            .module_traps
+            .iter()
+            .position(|trap| trap.site.address.0 == rip)
+        else {
+            return self.step_over_breakpoint_at_pc();
+        };
+        let ModuleTrap { event, site: trap } = self.module_traps[index].clone();
         let cr3 = self
             .register_map
             .read_u64(self.target.arch().dtb_register(), &regs)
@@ -161,14 +167,16 @@ impl Session {
         if let Err(error) =
             plant_target_site(self.backend.as_mut(), &self.target, trap.address, original)
         {
-            self.load_trap = None;
-            self.notices
-                .push(format!("failed to re-arm the module-load trap: {error}"));
+            self.module_traps.remove(index);
+            self.notices.push(format!(
+                "failed to re-arm the module-{} trap: {error}",
+                event_word(event)
+            ));
         }
         // Interrupted on the trap itself, the thread returns to it and hits
-        // it again; that hit is this load, not a new one.
+        // it again; that hit is this event, not a new one.
         if matches!(stepped, Ok(RunPast::Diverted)) {
-            self.load_trap_interrupted =
+            self.module_trap_interrupted =
                 interrupted_on(&self.target, &self.register_map, &regs, rip, cr3);
         }
         stepped.map(Some)
@@ -211,9 +219,7 @@ impl Session {
         let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
-        self.breakpoints
-            .mask_breakpoint_bytes(&self.target, VirtAddr(pc), &mut bytes, active_dtb);
-        self.mask_traps(VirtAddr(pc), &mut bytes);
+        self.mask_code(VirtAddr(pc), &mut bytes, active_dtb);
 
         if self.target.arch() == Arch::Arm64 {
             let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);

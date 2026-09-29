@@ -123,7 +123,7 @@ Each stop halts the full target. If the target stops on a breakpoint that the cl
 
 | Stop | Signal |
 | --- | --- |
-| Step, `STATUS_BREAKPOINT`, `monitor bp` hit, reboot, `sxe ld` module load | `SIGTRAP` |
+| Step, `STATUS_BREAKPOINT`, `monitor bp` hit, reboot, `sxe ld` module load, `sxe ud` module unload | `SIGTRAP` |
 | Access violation, in-page error | `SIGSEGV` |
 | Illegal or privileged instruction | `SIGILL` |
 | Integer or floating-point fault | `SIGFPE` |

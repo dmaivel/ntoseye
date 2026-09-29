@@ -108,7 +108,7 @@ Set the breakpoint before you load the driver:
 bu mydriver!DriverEntry
 ```
 
-The breakpoint stays deferred until the module loads, and `ntoseye` then arms it before `DriverEntry` runs, on both the KD and GDB backends. To stop when the driver loads, before you select breakpoints, use {command}`sxe` `ld:mydriver`.
+The breakpoint stays deferred until the module loads, and `ntoseye` then arms it before `DriverEntry` runs, on both the KD and GDB backends. To stop when the driver loads, before you select breakpoints, use {command}`sxe` `ld:mydriver`, and to stop when it unloads, after its unload routine, use {command}`sxe` `ud:mydriver`.
 
 The names come from the PDB, and C++ templates and Rust generics are part of the name, for example `bp mydriver!mydriver::impl$0::tally<u32>`. rustc writes paths in MSVC style:
 
