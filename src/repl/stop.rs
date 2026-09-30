@@ -449,15 +449,24 @@ pub fn print_break_context_at(
     // Where NT left off on a vCPU the hypervisor holds.
     if trace.description == HYPERVISOR_CONTEXT {
         let processor = processor_index_from_backend_thread_id(&thread_id);
-        match saved_vtls(debugger, cr3, processor) {
-            Ok(saved) => children.extend(
-                saved
-                    .iter()
-                    .filter(|saved| saved.summarized())
-                    .map(|saved| {
-                        format!("{} {}", ui::muted("saved"), ui::symbol(&saved.describe()))
-                    }),
-            ),
+        match saved_vtls(debugger, cr3, rip, processor) {
+            Ok(saved) => {
+                children.extend(
+                    saved
+                        .iter()
+                        .filter(|saved| saved.summarized())
+                        .map(|saved| {
+                            format!("{} {}", ui::muted("saved"), ui::symbol(&saved.describe()))
+                        }),
+                );
+                if saved.iter().any(|saved| saved.context.may_be_stale) {
+                    children.push(ui::muted(
+                        "stopped on the hypervisor's VM-exit entry: KVM writes the saved state when it \
+                         enters the hypervisor, so it may still describe the previous exit and is not \
+                         selected (.vtlcxr selects it anyway)",
+                    ));
+                }
+            }
             Err(error) => children.push(ui::muted(&format!("saved VTL state: {error}"))),
         }
         if saved_context {

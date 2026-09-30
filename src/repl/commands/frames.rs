@@ -302,7 +302,7 @@ impl ReplState<'_> {
             return Ok(());
         }
         let processor = processor_index_from_backend_thread_id(&self.ctx.current_thread);
-        let saved = match saved_vtls(target, cr3, processor) {
+        let saved = match saved_vtls(target, cr3, rip, processor) {
             Ok(saved) => saved,
             Err(error) => {
                 error!("{error}");
@@ -339,6 +339,16 @@ impl ReplState<'_> {
         let selected = SelectedFrame::from_registers(0, vtl0.context.registers());
         self.set_selected_frame(selected.clone());
         outln!("selected the VTL0 context the hypervisor saved");
+        if vtl0.context.may_be_stale {
+            outln!(
+                "{}",
+                ui::muted(
+                    "this vCPU is on the hypervisor's VM-exit entry, where the saved state may \
+                     still describe the previous exit; the guest's general-purpose registers are \
+                     the vCPU's own (.cxr)"
+                )
+            );
+        }
         self.print_selected_frame(&selected, false);
         Ok(())
     }

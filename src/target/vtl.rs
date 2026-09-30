@@ -58,6 +58,11 @@ pub enum ForeignModules {
 pub struct SavedVtlContext {
     pub vtl: u8,
     pub state: EvmcsState,
+    /// The vCPU is on the hypervisor's VM-exit entry point (`host_rip`), so
+    /// this state may describe the exit before the one in progress. KVM
+    /// writes the eVMCS when it enters the hypervisor, and a stop can fall
+    /// between an exit and that entry.
+    pub may_be_stale: bool,
 }
 
 impl SavedVtlContext {
@@ -178,8 +183,9 @@ impl Target {
     }
 
     /// The VTL states the Windows hypervisor saved for the virtual processor
-    /// a vCPU halted in the hypervisor runs: `cr3` is that vCPU's (the
-    /// hypervisor's root for the VP) and `processor` the NT processor it is.
+    /// a vCPU halted in the hypervisor runs: `cr3` and `rip` are that vCPU's
+    /// (the hypervisor's root for the VP, and where it is in the hypervisor)
+    /// and `processor` the NT processor it is.
     /// VTL0 first, then VTL1 when the secure kernel is already discovered.
     ///
     /// The states come from Enlightened VMCS pages, which exist only when the
@@ -190,9 +196,11 @@ impl Target {
     /// A state counts as VTL0 only in an NT root, and, in kernel mode, only
     /// with `processor`'s KPCR as its GS base; as VTL1 only in a secure-kernel
     /// root. States of other partitions' VPs sharing the root are skipped.
+    /// A vCPU on the pages' `host_rip` marks every state `may_be_stale`.
     pub fn saved_vtl_contexts(
         &self,
         cr3: u64,
+        rip: u64,
         processor: Option<u16>,
     ) -> Result<Vec<SavedVtlContext>> {
         if self.arch() != Arch::Amd64 {
@@ -214,7 +222,11 @@ impl Target {
         }
         let one = |states: Vec<EvmcsState>, vtl: u8| match states.as_slice() {
             [] => Ok(None),
-            [state] => Ok(Some(SavedVtlContext { vtl, state: *state })),
+            [state] => Ok(Some(SavedVtlContext {
+                vtl,
+                state: *state,
+                may_be_stale: rip == state.host_rip,
+            })),
             many => Err(Error::SavedVtlState(format!(
                 "{} eVMCS pages of this virtual processor hold VTL{vtl} state",
                 many.len()
@@ -249,8 +261,10 @@ impl Target {
             return None;
         }
         let processor = processor_index_from_backend_thread_id(vcpu);
-        let saved = self.saved_vtl_contexts(cr3, processor).ok()?;
-        let vtl0 = saved.into_iter().find(|context| context.vtl == 0)?;
+        let saved = self.saved_vtl_contexts(cr3, rip, processor).ok()?;
+        let vtl0 = saved
+            .into_iter()
+            .find(|context| context.vtl == 0 && !context.may_be_stale)?;
         Some(vtl0.registers())
     }
 

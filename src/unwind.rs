@@ -522,12 +522,18 @@ pub struct SavedVtl {
 }
 
 impl SavedVtl {
-    /// Where the state left off, as `VTL0 nt!HalProcessorIdle+0xf`.
+    /// Where the state left off, as `VTL0 nt!HalProcessorIdle+0xf`, marked
+    /// when it may describe the exit before the one in progress.
     pub fn describe(&self) -> String {
         let rip = self.context.state.rip;
-        match &self.symbol {
+        let place = match &self.symbol {
             Some(symbol) => format!("VTL{} {symbol}", self.context.vtl),
             None => format!("VTL{} {rip:#x}", self.context.vtl),
+        };
+        if self.context.may_be_stale {
+            format!("{place} (may be one exit behind)")
+        } else {
+            place
         }
     }
 
@@ -542,9 +548,14 @@ impl SavedVtl {
 /// The VTL states the Windows hypervisor saved for the virtual processor a
 /// vCPU halted in it runs, each with its symbol. `cr3` is the vCPU's and
 /// `processor` its NT processor, as in [`Target::saved_vtl_contexts`].
-pub fn saved_vtls(debugger: &Target, cr3: u64, processor: Option<u16>) -> Result<Vec<SavedVtl>> {
+pub fn saved_vtls(
+    debugger: &Target,
+    cr3: u64,
+    rip: u64,
+    processor: Option<u16>,
+) -> Result<Vec<SavedVtl>> {
     Ok(debugger
-        .saved_vtl_contexts(cr3, processor)?
+        .saved_vtl_contexts(cr3, rip, processor)?
         .into_iter()
         .map(|context| {
             let symbol = try_format_symbol_at(debugger, context.state.cr3, context.state.rip);

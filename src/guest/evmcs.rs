@@ -40,6 +40,7 @@ const MAX_PAGES: usize = 4096;
 
 const HOST_CR3: usize = 0x30;
 const HOST_RIP: usize = 0x50;
+const HOST_RSP: usize = 0x268;
 const GUEST_ES_SELECTOR: usize = 0x80;
 const GUEST_CS_SELECTOR: usize = 0x82;
 const GUEST_SS_SELECTOR: usize = 0x84;
@@ -53,6 +54,9 @@ const GUEST_CR3: usize = 0x228;
 const GUEST_CR4: usize = 0x230;
 const GUEST_DR7: usize = 0x238;
 const VM_EXIT_REASON: usize = 0x2b4;
+const VM_EXIT_INTR_INFO: usize = 0x2b8;
+const VM_EXIT_INSTRUCTION_LEN: usize = 0x2c8;
+const EXIT_QUALIFICATION: usize = 0x2d0;
 const GUEST_RSP: usize = 0x300;
 const GUEST_RFLAGS: usize = 0x308;
 const GUEST_RIP: usize = 0x330;
@@ -120,9 +124,22 @@ pub struct EvmcsState {
     /// The VP's assist page names this eVMCS current: the VTL the hypervisor
     /// last entered, or is about to enter.
     pub current: bool,
+    /// The hypervisor's root on the processor that runs this VP.
     pub host_cr3: u64,
+    /// The hypervisor's VM-exit entry point, and the stack it runs on.
+    pub host_rip: u64,
+    pub host_rsp: u64,
     /// Basic exit reason in bits 15:0 (Intel SDM Appendix C).
     pub exit_reason: u32,
+    /// VM-exit interruption information: the vector and type of the event
+    /// that caused an exception or interrupt exit (Intel SDM 25.9.2).
+    pub exit_interruption_info: u32,
+    /// Length of the instruction that caused the exit, for exits caused by
+    /// an instruction.
+    pub exit_instruction_length: u32,
+    /// Exit qualification: reason-specific detail, such as the access that
+    /// caused an EPT violation (Intel SDM 28.2.1).
+    pub exit_qualification: u64,
     pub rip: u64,
     pub rsp: u64,
     pub rflags: u64,
@@ -171,7 +188,12 @@ impl EvmcsState {
             address: 0,
             current: false,
             host_cr3: u64_at(page, HOST_CR3),
+            host_rip,
+            host_rsp: u64_at(page, HOST_RSP),
             exit_reason: u32_at(page, VM_EXIT_REASON),
+            exit_interruption_info: u32_at(page, VM_EXIT_INTR_INFO),
+            exit_instruction_length: u32_at(page, VM_EXIT_INSTRUCTION_LEN),
+            exit_qualification: u64_at(page, EXIT_QUALIFICATION),
             rip: u64_at(page, GUEST_RIP),
             rsp: u64_at(page, GUEST_RSP),
             rflags: u64_at(page, GUEST_RFLAGS),

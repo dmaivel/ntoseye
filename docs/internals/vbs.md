@@ -104,3 +104,5 @@ In a test on `nt!KiSwapContext` with the handler runs disabled, `ntoseye` absorb
 - The state is VTL1 only if it is in a secure-kernel address space.
 
 If a state fails these checks, `ntoseye` does not show it.
+
+A state that passes can still be one exit behind. KVM copies the guest state of a VM exit into the eVMCS on its way into the hypervisor, not when the exit happens, so a stop that falls between the two finds the vCPU on the hypervisor's `host_rip` and the page still holding the previous exit. `ntoseye` treats every state as possibly stale while the vCPU's RIP is the page's `host_rip`. On sampled stops under load, most hypervisor stops were on `host_rip`, and for an `rdmsr` exit 106 of 144 such pages already had RIP past the instruction, which a freshly written page cannot have.

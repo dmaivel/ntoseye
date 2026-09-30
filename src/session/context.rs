@@ -577,6 +577,7 @@ impl Session {
             saved_vtls(
                 &self.target,
                 dtb,
+                rip,
                 processor_index_from_backend_thread_id(id),
             )
             .unwrap_or_default()

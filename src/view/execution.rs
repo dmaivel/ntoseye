@@ -68,6 +68,25 @@ shapes! {
         /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
         /// common reason.
         exit_reason_name: Option<&'static str>,
+        /// Reason-specific detail of the last exit, such as the access that
+        /// caused an EPT violation (Intel SDM, exit qualification).
+        exit_qualification: Hex,
+        /// The vector and type of the event behind an exception or interrupt
+        /// exit (Intel SDM, VM-exit interruption information).
+        exit_interruption_info: Hex<u32>,
+        /// The length of the instruction that caused the exit, for exits that
+        /// an instruction caused.
+        exit_instruction_length: u32,
+        /// The hypervisor's VM-exit entry point.
+        host_rip: VirtAddr,
+        /// The stack the hypervisor's VM-exit entry point runs on.
+        host_rsp: VirtAddr,
+        /// The vCPU is stopped on `host_rip`. KVM writes the eVMCS when it
+        /// enters the hypervisor, and a stop can fall between a VM exit and
+        /// that entry, so this state may still describe the exit before the
+        /// one in progress. The guest's general-purpose registers are then
+        /// still in the vCPU's own registers.
+        may_be_stale: bool,
         /// The physical address of the eVMCS page that ntoseye read the state
         /// from.
         evmcs: Hex,
@@ -484,6 +503,12 @@ pub fn saved_vtl_state(saved: &unwind::SavedVtl) -> SavedVtlState {
         gs_base: VirtAddr(state.gs_base),
         exit_reason: state.exit_reason,
         exit_reason_name: state.exit_reason_name(),
+        exit_qualification: state.exit_qualification,
+        exit_interruption_info: state.exit_interruption_info,
+        exit_instruction_length: state.exit_instruction_length,
+        host_rip: VirtAddr(state.host_rip),
+        host_rsp: VirtAddr(state.host_rsp),
+        may_be_stale: saved.context.may_be_stale,
         evmcs: state.address,
     }
 }

@@ -9991,6 +9991,24 @@ class SavedVtlState(BaseRecord):
         from.
         """
     @property
+    def exit_instruction_length(self, /) -> int:
+        """
+        The length of the instruction that caused the exit, for exits that
+        an instruction caused.
+        """
+    @property
+    def exit_interruption_info(self, /) -> int:
+        """
+        The vector and type of the event behind an exception or interrupt
+        exit (Intel SDM, VM-exit interruption information).
+        """
+    @property
+    def exit_qualification(self, /) -> int:
+        """
+        Reason-specific detail of the last exit, such as the access that
+        caused an EPT violation (Intel SDM, exit qualification).
+        """
+    @property
     def exit_reason(self, /) -> int:
         """
         The VM-exit reason of the last exit from the VTL. Bits 15:0 hold the
@@ -10010,6 +10028,25 @@ class SavedVtlState(BaseRecord):
     def gs(self, /) -> int: ...
     @property
     def gs_base(self, /) -> int: ...
+    @property
+    def host_rip(self, /) -> int:
+        """
+        The hypervisor's VM-exit entry point.
+        """
+    @property
+    def host_rsp(self, /) -> int:
+        """
+        The stack the hypervisor's VM-exit entry point runs on.
+        """
+    @property
+    def may_be_stale(self, /) -> bool:
+        """
+        The vCPU is stopped on `host_rip`. KVM writes the eVMCS when it
+        enters the hypervisor, and a stop can fall between a VM exit and
+        that entry, so this state may still describe the exit before the
+        one in progress. The guest's general-purpose registers are then
+        still in the vCPU's own registers.
+        """
     @property
     def rflags(self, /) -> int: ...
     @property
