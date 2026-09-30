@@ -585,30 +585,41 @@ const MAX_VPS: u64 = 0x10000;
 
 /// `(array, capacity)` from the VP lookup `(partition, index)`: it bounds
 /// the index with an immediate and loads `partition->vps[index]`.
-/// The functions the VP hypercalls call, and those they call: where the VP
-/// lookup is.
-fn vp_lookup_candidates(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<Vec<u64>> {
-    let mut candidates = Vec::new();
+/// The traces of the functions the VP hypercalls call, and of those they
+/// call: where the VP lookup is. Each is walked once, in parallel.
+fn vp_lookup_traces(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<Vec<Trace>> {
+    use rayon::prelude::*;
+    let mut first = Vec::new();
     for code in [
         CALL_GET_VP_REGISTERS,
         CALL_SET_VP_REGISTERS,
         CALL_ENABLE_VP_VTL,
     ] {
-        let first = walk(image, handler(table, code)?, &[]).calls;
-        for &callee in &first {
-            candidates.push(callee);
-            candidates.extend(walk(image, callee, &[]).calls);
-        }
+        first.extend(walk(image, handler(table, code)?, &[]).calls);
     }
-    candidates.sort_unstable();
-    candidates.dedup();
-    Ok(candidates)
+    first.sort_unstable();
+    first.dedup();
+    let walk_all = |entries: &[u64]| -> Vec<Trace> {
+        entries
+            .par_iter()
+            .map(|&entry| walk(image, entry, &[]))
+            .collect()
+    };
+    let mut traces = walk_all(&first);
+    let mut second: Vec<u64> = traces
+        .iter()
+        .flat_map(|trace| trace.calls.iter().copied())
+        .filter(|call| first.binary_search(call).is_err())
+        .collect();
+    second.sort_unstable();
+    second.dedup();
+    traces.extend(walk_all(&second));
+    Ok(traces)
 }
 
-fn vp_array(image: &ImageView<'_>, candidates: &[u64]) -> Result<(i64, u32)> {
+fn vp_array(traces: &[Trace]) -> Result<(i64, u32)> {
     let mut found: Option<(i64, u32)> = None;
-    for &callee in candidates {
-        let trace = walk(image, callee, &[]);
+    for (candidate, trace) in traces.iter().enumerate() {
         // The index may be the argument or, on paths that resolve a
         // "self" index first, a field; either way the same value is bounded
         // and then scales into the partition's array.
@@ -632,7 +643,7 @@ fn vp_array(image: &ImageView<'_>, candidates: &[u64]) -> Result<(i64, u32)> {
                 }
                 Some(other) => {
                     return Err(layout_error(format!(
-                        "VP lookups disagree: {other:x?} and {:x?} at {callee:#x}",
+                        "VP lookups disagree: {other:x?} and {:x?} in candidate {candidate}",
                         (array, bound)
                     )));
                 }
@@ -705,10 +716,10 @@ fn current_vp(
 /// Where the processor block keeps its processor number: the dword from the
 /// block that the VP hypercalls scale by 8 to index per-processor arrays.
 /// Builds whose VP paths use no such array give none.
-fn processor_index(image: &ImageView<'_>, candidates: &[u64]) -> Option<i64> {
+fn processor_index(traces: &[Trace]) -> Option<i64> {
     let mut found = Vec::new();
-    for &callee in candidates {
-        for access in walk(image, callee, &[]).accesses {
+    for trace in traces {
+        for access in &trace.accesses {
             if let Some((Value::Load(base, offset, 4), 8)) = &access.index
                 && **base == Value::Gs
                 && !found.contains(offset)
@@ -806,12 +817,12 @@ pub fn derive(image: &ImageView<'_>) -> Result<PartitionLayout> {
             "partition ID at {id:#x} by the child walker, {stored_id:#x} by HvCallGetPartitionId"
         )));
     }
-    let candidates = vp_lookup_candidates(image, &table)?;
-    let (vps, max_vps) = vp_array(image, &candidates)?;
+    let traces = vp_lookup_traces(image, &table)?;
+    let (vps, max_vps) = vp_array(&traces)?;
     let (vp_current_vtl, vp_vtls, vtl_level) = vtl_fields(image, &table)?;
     let vp_enabled_vtls = enabled_vtls(image, &table)?;
     let current_vp = current_vp(image, &table, vp_current_vtl, vtl_level);
-    let processor_index = processor_index(image, &candidates);
+    let processor_index = processor_index(&traces);
     let vmcs = vmcs_candidates(image);
     Ok(PartitionLayout {
         current_partition,
