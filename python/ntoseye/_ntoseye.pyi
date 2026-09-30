@@ -2554,6 +2554,22 @@ class DisassembledInstruction(BaseRecord):
         """
     @property
     def ip(self, /) -> int: ...
+    @property
+    def length(self, /) -> int:
+        """
+        The instruction length in bytes.
+        """
+    @property
+    def mnemonic(self, /) -> str:
+        """
+        The lowercase mnemonic, without prefixes (`mov`, `ldr`). `.inst`
+        for an ARM64 word that encodes no instruction.
+        """
+    @property
+    def operands(self, /) -> list[Operand]:
+        """
+        The explicit operands, in instruction order.
+        """
 
 @final
 class Dpc(BaseRecord):
@@ -8004,6 +8020,74 @@ class ObjectSecurity(BaseRecord):
         """
     @property
     def object(self, /) -> int: ...
+
+@final
+class Operand(BaseRecord):
+    """
+    One explicit operand of a decoded instruction. Fields that do not apply
+    to its `kind` are None.
+    """
+    @property
+    def base(self, /) -> str |None:
+        """
+        A memory operand's base register, full and lowercase (`rip` when
+        RIP-relative).
+        """
+    @property
+    def displacement(self, /) -> int |None:
+        """
+        A memory operand's signed displacement: relative to the next
+        instruction when RIP-relative, and the writeback offset of an ARM64
+        post-indexed operand.
+        """
+    @property
+    def full_register(self, /) -> str |None:
+        """
+        The architectural register that `register` is part of (`r8` for
+        `r8d`, `x3` for `w3`; vector registers stay as written).
+        """
+    @property
+    def immediate(self, /) -> int |None:
+        """
+        An immediate operand's value (negative when the instruction
+        sign-extends it), or a branch operand's target address.
+        """
+    @property
+    def index(self, /) -> str |None:
+        """
+        A memory operand's index register, full and lowercase.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `register`, `memory`, `immediate`, `branch` (a branch or PC-relative
+        label target), or `other`.
+        """
+    @property
+    def register(self, /) -> str |None:
+        """
+        A register operand's register as written, lowercase (`r8d`, `w3`).
+        """
+    @property
+    def scale(self, /) -> int |None:
+        """
+        The scale of `index`.
+        """
+    @property
+    def segment(self, /) -> str |None:
+        """
+        A memory operand's x86 segment override (`gs`).
+        """
+    @property
+    def size(self, /) -> int |None:
+        """
+        A memory operand's access size in bytes, when known (x86 only).
+        """
+    @property
+    def text(self, /) -> str:
+        """
+        The operand as `asm` shows it.
+        """
 
 @final
 class PageLocation(BaseRecord):

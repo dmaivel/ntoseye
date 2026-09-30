@@ -413,12 +413,7 @@ impl Memory {
         let rows = self.owner.with_in(py, &context, |session| {
             session.disassemble(VirtAddr(addr), count).map_err(err)
         })?;
-        Typed::new(
-            py,
-            rows.iter()
-                .map(view::execution::disasm_row)
-                .collect::<Vec<_>>(),
-        )
+        Typed::new(py, view::execution::disasm_rows(&rows))
     }
 
     /// Disassemble the runtime function that contains `addr` (`uf`).
@@ -432,12 +427,7 @@ impl Memory {
         let (_, _, rows) = self.owner.with_in(py, &context, |session| {
             session.disassemble_function(VirtAddr(addr)).map_err(err)
         })?;
-        Typed::new(
-            py,
-            rows.iter()
-                .map(view::execution::disasm_row)
-                .collect::<Vec<_>>(),
-        )
+        Typed::new(py, view::execution::disasm_rows(&rows))
     }
 
     /// Get the function-table entry and unwind info (AMD64 or ARM64) of the
@@ -468,12 +458,7 @@ impl Memory {
         let rows = self.owner.with_in(py, &context, |session| {
             session.disassemble_back(VirtAddr(addr), count).map_err(err)
         })?;
-        Typed::new(
-            py,
-            rows.iter()
-                .map(view::execution::disasm_row)
-                .collect::<Vec<_>>(),
-        )
+        Typed::new(py, view::execution::disasm_rows(&rows))
     }
 }
 

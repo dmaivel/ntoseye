@@ -7,7 +7,7 @@ use super::shape::{Hex, shapes, unions};
 use super::symbols::source_location;
 use crate::types::VirtAddr;
 use crate::breakpoints::Breakpoint;
-use crate::disasm::DisasmRow;
+use crate::disasm::{DisasmOperand, DisasmRow, disasm_formatter};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
 use crate::session::{self, CallTraceEnd, VcpuInfo};
 use crate::unwind::{
@@ -177,6 +177,46 @@ shapes! {
         asm: String,
         /// The resolved branch or rip-relative target, if there is one.
         comment: Option<String>,
+        /// The instruction length in bytes.
+        length: usize,
+        /// The lowercase mnemonic, without prefixes (`mov`, `ldr`). `.inst`
+        /// for an ARM64 word that encodes no instruction.
+        mnemonic: String,
+        /// The explicit operands, in instruction order.
+        operands: Vec<Operand>,
+    }
+
+    /// One explicit operand of a decoded instruction. Fields that do not apply
+    /// to its `kind` are None.
+    Operand {
+        /// `register`, `memory`, `immediate`, `branch` (a branch or PC-relative
+        /// label target), or `other`.
+        kind: &'static str,
+        /// The operand as `asm` shows it.
+        text: String,
+        /// A register operand's register as written, lowercase (`r8d`, `w3`).
+        register: Option<String>,
+        /// The architectural register that `register` is part of (`r8` for
+        /// `r8d`, `x3` for `w3`; vector registers stay as written).
+        full_register: Option<String>,
+        /// A memory operand's base register, full and lowercase (`rip` when
+        /// RIP-relative).
+        base: Option<String>,
+        /// A memory operand's index register, full and lowercase.
+        index: Option<String>,
+        /// The scale of `index`.
+        scale: Option<u32>,
+        /// A memory operand's signed displacement: relative to the next
+        /// instruction when RIP-relative, and the writeback offset of an ARM64
+        /// post-indexed operand.
+        displacement: Option<i64>,
+        /// A memory operand's access size in bytes, when known (x86 only).
+        size: Option<u32>,
+        /// A memory operand's x86 segment override (`gs`).
+        segment: Option<String>,
+        /// An immediate operand's value (negative when the instruction
+        /// sign-extends it), or a branch operand's target address.
+        immediate: Option<i128>,
     }
 
     /// The function-table entry that covers an address, and the entry of each
@@ -509,13 +549,40 @@ pub fn stack_frames(frames: &[unwind::StackFrame]) -> Vec<StackFrame> {
     frames.iter().enumerate().map(|(index, frame)| stack_frame(index, frame)).collect()
 }
 
-/// One decoded instruction.
-pub fn disasm_row(row: &DisasmRow) -> DisassembledInstruction {
-    DisassembledInstruction {
-        ip: row.ip,
-        hex: row.hex.clone(),
-        asm: row.asm(),
-        comment: row.comment.clone(),
+/// Decoded instructions.
+pub fn disasm_rows(rows: &[DisasmRow]) -> Vec<DisassembledInstruction> {
+    let mut formatter = disasm_formatter();
+    rows.iter()
+        .map(|row| DisassembledInstruction {
+            ip: row.ip,
+            hex: row.hex.clone(),
+            asm: row.asm(),
+            comment: row.comment.clone(),
+            length: row.length,
+            mnemonic: row.mnemonic(&mut formatter),
+            operands: row
+                .operands(&mut formatter)
+                .into_iter()
+                .map(operand)
+                .collect(),
+        })
+        .collect()
+}
+
+/// One operand of a decoded instruction.
+fn operand(operand: DisasmOperand) -> Operand {
+    Operand {
+        kind: operand.kind.as_str(),
+        text: operand.text,
+        register: operand.register,
+        full_register: operand.full_register,
+        base: operand.base,
+        index: operand.index,
+        scale: operand.scale,
+        displacement: operand.displacement,
+        size: operand.size,
+        segment: operand.segment,
+        immediate: operand.immediate,
     }
 }
 

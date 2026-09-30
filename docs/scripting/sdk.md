@@ -99,6 +99,15 @@ If the value of a PDB enum field is a defined member, the field returns a cached
 
 To read or assign a field with no risk of a name collision, use `cursor["Field"]`, because the usual `cursor.Field` form can find a cursor member first. A `Struct` cursor reads live data and stays tied to its original address space.
 
+`memory.disassemble(address, count)` returns `DisassembledInstruction` records. Besides the text (`asm`), each one has its `length`, its `mnemonic`, and its `operands` in order. An `Operand` has a `kind` (`register`, `memory`, `immediate`, `branch`, or `other`) and the fields for that kind: the register as written and the full register it is part of (`r8d` and `r8`), the base, index, scale, displacement, size, and segment of a memory operand, or the value of an immediate or a branch target. So code that follows instructions does not have to parse `asm`:
+
+```python
+for ins in dbg.memory.disassemble(kernel_fn, 8):
+    for op in ins.operands:
+        if op.kind == "memory" and op.base == "rsp":
+            print(hex(ins.ip), ins.mnemonic, op.displacement, op.size)
+```
+
 ## Secure kernel (VTL1)
 
 :::{important}

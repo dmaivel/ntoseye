@@ -35,7 +35,7 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .and_then(|count| usize::from_str_radix(count, 16).ok())
                 .unwrap_or(8);
             let rows = args.state.ctx.disassemble(address, count)?;
-            Ok(View::list(rows.iter().map(view::execution::disasm_row)))
+            Ok(View::list(view::execution::disasm_rows(&rows)))
         }),
         "?" | "ev" if !args.raw_tail.is_empty() => args.eval(args.raw_tail).map(|value| {
             ExpressionValue {

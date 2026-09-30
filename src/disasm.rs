@@ -1,7 +1,7 @@
 use bad64::decode;
 use iced_x86::{
-    Code, Decoder, DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind,
-    Instruction, MemorySizeOptions, Mnemonic, NasmFormatter,
+    Code, Decoder, DecoderOptions, FlowControl, FormatMnemonicOptions, Formatter, FormatterOutput,
+    FormatterTextKind, Instruction, MemorySizeOptions, Mnemonic, NasmFormatter, OpKind, Register,
 };
 
 use std::fmt::Write as _;
@@ -185,12 +185,98 @@ impl FormatterOutput for TokenSink<'_> {
 
 /// One decoded instruction, ready to render: address, space-joined hex bytes,
 /// the asm as semantic [`AsmToken`]s, and an optional symbol comment for a
-/// branch / rip-relative target.
+/// branch / rip-relative target. [`Self::mnemonic`] and [`Self::operands`]
+/// describe the same instruction structurally, for callers that follow code
+/// instead of reading it.
 pub struct DisasmRow {
     pub ip: u64,
     pub hex: String,
+    /// Encoded length in bytes.
+    pub length: usize,
     pub tokens: Vec<AsmToken>,
     pub comment: Option<String>,
+    decoded: Decoded,
+}
+
+/// The instruction behind a row, kept so that only callers that want its
+/// structure pay for it.
+enum Decoded {
+    X86 {
+        instruction: Instruction,
+        bitness: u32,
+    },
+    /// Decoded again on demand, at the row's `ip`.
+    Arm64(u32),
+}
+
+/// What an instruction operand is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperandKind {
+    Register,
+    Memory,
+    Immediate,
+    /// A near/far branch or PC-relative label target.
+    Branch,
+    Other,
+}
+
+impl OperandKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::Memory => "memory",
+            Self::Immediate => "immediate",
+            Self::Branch => "branch",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// One explicit operand of a decoded instruction. Fields that do not apply to
+/// `kind` are `None`; register names are lowercase.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisasmOperand {
+    pub kind: OperandKind,
+    /// The operand as the formatted instruction text shows it.
+    pub text: String,
+    /// Register operand: the register as written (`r8d`, `w3`).
+    pub register: Option<String>,
+    /// Register operand: the architectural register it is part of (`r8`, `x3`).
+    pub full_register: Option<String>,
+    /// Memory operand: full base register (`rip` when RIP-relative).
+    pub base: Option<String>,
+    /// Memory operand: full index register.
+    pub index: Option<String>,
+    /// Memory operand: index scale, when there is an index.
+    pub scale: Option<u32>,
+    /// Memory operand: signed displacement (relative to the next instruction
+    /// when RIP-relative).
+    pub displacement: Option<i64>,
+    /// Memory operand: access size in bytes, when known.
+    pub size: Option<u32>,
+    /// Memory operand: x86 segment override (`gs`).
+    pub segment: Option<String>,
+    /// Immediate operand: its value, signed when the instruction sign-extends
+    /// it; branch operand: the target address.
+    pub immediate: Option<i128>,
+}
+
+impl DisasmOperand {
+    fn new(kind: OperandKind, text: String) -> Self {
+        Self {
+            kind,
+            text,
+            register: None,
+            full_register: None,
+            base: None,
+            index: None,
+            scale: None,
+            displacement: None,
+            size: None,
+            segment: None,
+            immediate: None,
+        }
+    }
 }
 
 fn mask_code_address(bitness: u32, address: u64) -> u64 {
@@ -207,6 +293,45 @@ impl DisasmRow {
     pub fn asm(&self) -> String {
         self.tokens.iter().map(|t| t.text.as_str()).collect()
     }
+
+    /// The lowercase mnemonic without prefixes, as `asm` shows it (`.inst`
+    /// for an ARM64 word that encodes no instruction). `formatter` is a
+    /// [`disasm_formatter`], for x86 rows.
+    pub fn mnemonic(&self, formatter: &mut NasmFormatter) -> String {
+        match &self.decoded {
+            Decoded::X86 { instruction, .. } => x86_mnemonic(instruction, formatter),
+            Decoded::Arm64(word) => match bad64::decode(*word, self.ip) {
+                Ok(instruction) => instruction.op().mnem().to_string(),
+                Err(_) => ".inst".to_string(),
+            },
+        }
+    }
+
+    /// The explicit operands, in instruction order, as `asm` shows them.
+    /// `formatter` is a [`disasm_formatter`], for x86 rows.
+    pub fn operands(&self, formatter: &mut NasmFormatter) -> Vec<DisasmOperand> {
+        match &self.decoded {
+            Decoded::X86 {
+                instruction,
+                bitness,
+            } => x86_operands(instruction, *bitness, formatter),
+            Decoded::Arm64(word) => bad64::decode(*word, self.ip)
+                .map(|instruction| {
+                    instruction
+                        .operands()
+                        .iter()
+                        .map(|op| {
+                            let text = arm64_operand_tokens(op)
+                                .iter()
+                                .map(|token| token.text.as_str())
+                                .collect();
+                            arm64_operand(op, text)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Instruction bytes as space-separated lowercase hex pairs.
@@ -219,6 +344,172 @@ fn hex_bytes(bytes: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+/// The explicit operands of a decoded x86 instruction, one per operand the
+/// formatter prints (so the list matches `asm`), in order.
+fn x86_operands(
+    instruction: &Instruction,
+    bitness: u32,
+    formatter: &mut NasmFormatter,
+) -> Vec<DisasmOperand> {
+    let count = formatter.operand_count(instruction);
+    let mut operands = Vec::with_capacity(count as usize);
+    for operand in 0..count {
+        let mut text = String::new();
+        if formatter
+            .format_operand(instruction, &mut text, operand)
+            .is_err()
+        {
+            continue;
+        }
+        let mut op = DisasmOperand::new(OperandKind::Other, text);
+        if let Ok(Some(index)) = formatter.get_instruction_operand(instruction, operand) {
+            x86_fill_operand(&mut op, instruction, index, bitness, formatter);
+        }
+        operands.push(op);
+    }
+    operands
+}
+
+/// Classify instruction operand `index` into `op`.
+fn x86_fill_operand(
+    op: &mut DisasmOperand,
+    instruction: &Instruction,
+    index: u32,
+    bitness: u32,
+    formatter: &mut NasmFormatter,
+) {
+    let mut name = |register: Register| {
+        (register != Register::None).then(|| formatter.format_register(register).to_string())
+    };
+    let immediate = |value: i128| (OperandKind::Immediate, Some(value));
+    let branch = |target: u64| (OperandKind::Branch, Some(i128::from(target)));
+    let (kind, value) = match instruction.op_kind(index) {
+        OpKind::Register => {
+            let register = instruction.op_register(index);
+            op.register = name(register);
+            op.full_register = name(x86_full_register(register, bitness));
+            (OperandKind::Register, None)
+        }
+        OpKind::NearBranch16 => branch(u64::from(instruction.near_branch16())),
+        OpKind::NearBranch32 => branch(u64::from(instruction.near_branch32())),
+        OpKind::NearBranch64 => branch(mask_code_address(bitness, instruction.near_branch64())),
+        OpKind::FarBranch16 => branch(u64::from(instruction.far_branch16())),
+        OpKind::FarBranch32 => branch(u64::from(instruction.far_branch32())),
+        OpKind::Immediate8 => immediate(instruction.immediate8().into()),
+        OpKind::Immediate8_2nd => immediate(instruction.immediate8_2nd().into()),
+        OpKind::Immediate16 => immediate(instruction.immediate16().into()),
+        OpKind::Immediate32 => immediate(instruction.immediate32().into()),
+        OpKind::Immediate64 => immediate(instruction.immediate64().into()),
+        OpKind::Immediate8to16 => immediate(instruction.immediate8to16().into()),
+        OpKind::Immediate8to32 => immediate(instruction.immediate8to32().into()),
+        OpKind::Immediate8to64 => immediate(instruction.immediate8to64().into()),
+        OpKind::Immediate32to64 => immediate(instruction.immediate32to64().into()),
+        OpKind::Memory => {
+            let base = instruction.memory_base();
+            let index_register = instruction.memory_index();
+            op.base = name(x86_full_register(base, bitness));
+            op.index = name(x86_full_register(index_register, bitness));
+            op.scale = (index_register != Register::None).then(|| instruction.memory_index_scale());
+            op.displacement = Some(x86_displacement(instruction, bitness));
+            op.segment = name(instruction.segment_prefix());
+            op.size = x86_memory_size(instruction);
+            (OperandKind::Memory, None)
+        }
+        // String-instruction operands: `[seg:si]` or `[es:di]` forms.
+        kind @ (OpKind::MemorySegSI
+        | OpKind::MemorySegESI
+        | OpKind::MemorySegRSI
+        | OpKind::MemorySegDI
+        | OpKind::MemorySegEDI
+        | OpKind::MemorySegRDI
+        | OpKind::MemoryESDI
+        | OpKind::MemoryESEDI
+        | OpKind::MemoryESRDI) => {
+            let base = match kind {
+                OpKind::MemorySegSI => Register::SI,
+                OpKind::MemorySegESI => Register::ESI,
+                OpKind::MemorySegRSI => Register::RSI,
+                OpKind::MemorySegDI | OpKind::MemoryESDI => Register::DI,
+                OpKind::MemorySegEDI | OpKind::MemoryESEDI => Register::EDI,
+                _ => Register::RDI,
+            };
+            op.base = name(x86_full_register(base, bitness));
+            op.displacement = Some(0);
+            // `es:di` is fixed; only the `seg:` forms take an override.
+            if !matches!(
+                kind,
+                OpKind::MemoryESDI | OpKind::MemoryESEDI | OpKind::MemoryESRDI
+            ) {
+                op.segment = name(instruction.segment_prefix());
+            }
+            op.size = x86_memory_size(instruction);
+            (OperandKind::Memory, None)
+        }
+    };
+    op.kind = kind;
+    op.immediate = value;
+}
+
+/// The register `register` is part of: the 64-bit GPR in 64-bit code (the
+/// 32-bit one in 32-bit code); vector registers stay as written (`xmm0`, not
+/// `zmm0`).
+fn x86_full_register(register: Register, bitness: u32) -> Register {
+    if register.is_gpr() {
+        if bitness == 64 {
+            register.full_register()
+        } else {
+            register.full_register32()
+        }
+    } else if register.is_vector_register() {
+        register
+    } else {
+        register.full_register()
+    }
+}
+
+/// The signed displacement of the memory operand. iced stores a RIP/EIP-
+/// relative operand's absolute address, so recover the offset from the next
+/// instruction that the text shows; otherwise sign-extend from the address size.
+fn x86_displacement(instruction: &Instruction, bitness: u32) -> i64 {
+    let displacement = instruction.memory_displacement64();
+    let base = instruction.memory_base();
+    if base == Register::RIP {
+        return displacement.wrapping_sub(instruction.next_ip()) as i64;
+    }
+    if base == Register::EIP {
+        return i64::from(
+            instruction
+                .memory_displacement32()
+                .wrapping_sub(instruction.next_ip32()) as i32,
+        );
+    }
+    let address_size = [base, instruction.memory_index()]
+        .into_iter()
+        .find(|register| *register != Register::None && register.is_gpr())
+        .map_or(bitness as usize / 8, Register::size);
+    match address_size {
+        2 => i64::from(displacement as u16 as i16),
+        4 => i64::from(displacement as u32 as i32),
+        _ => displacement as i64,
+    }
+}
+
+fn x86_memory_size(instruction: &Instruction) -> Option<u32> {
+    let size = instruction.memory_size().size();
+    (size != 0).then_some(size as u32)
+}
+
+/// The lowercase mnemonic of `instruction`, without prefixes, as `asm` shows it.
+fn x86_mnemonic(instruction: &Instruction, formatter: &mut NasmFormatter) -> String {
+    let mut mnemonic = String::new();
+    formatter.format_mnemonic_options(
+        instruction,
+        &mut mnemonic,
+        FormatMnemonicOptions::NO_PREFIXES,
+    );
+    mnemonic
 }
 
 /// Decode `bytes` (loaded at `start_addr`) into rows with the given x86
@@ -277,8 +568,13 @@ pub fn decode_rows(
         rows.push(DisasmRow {
             ip,
             hex,
+            length: instruction.len(),
             tokens,
             comment,
+            decoded: Decoded::X86 {
+                instruction,
+                bitness,
+            },
         });
     }
 
@@ -313,6 +609,7 @@ pub fn decode_rows_arm64(
                 rows.push(DisasmRow {
                     ip,
                     hex: hex_bytes(word),
+                    length: 4,
                     tokens: vec![
                         AsmToken {
                             text: ".inst".to_string(),
@@ -324,6 +621,7 @@ pub fn decode_rows_arm64(
                         },
                     ],
                     comment: None,
+                    decoded: Decoded::Arm64(value),
                 });
                 continue;
             }
@@ -343,8 +641,10 @@ pub fn decode_rows_arm64(
         rows.push(DisasmRow {
             ip,
             hex,
+            length: 4,
             tokens,
             comment,
+            decoded: Decoded::Arm64(instruction.opcode()),
         });
     }
     rows
@@ -377,6 +677,108 @@ fn arm64_row_tokens(instruction: &bad64::Instruction) -> Vec<AsmToken> {
         }),
     }
     tokens
+}
+
+/// Classify one bad64 operand. Post-indexed forms (`[x1], #8`) report the
+/// writeback offset as `displacement`/`index`, although the access uses the
+/// base alone.
+fn arm64_operand(op: &bad64::Operand, text: String) -> DisasmOperand {
+    use bad64::Operand;
+    let mut out = DisasmOperand::new(OperandKind::Other, text);
+    let full = |reg: bad64::Reg| Some(arm64_full_register(reg));
+    match *op {
+        Operand::Reg { reg, .. } | Operand::ShiftReg { reg, .. } | Operand::QualReg { reg, .. } => {
+            out.kind = OperandKind::Register;
+            out.register = Some(reg.name().to_string());
+            out.full_register = full(reg);
+        }
+        Operand::SysReg(sr) => {
+            out.kind = OperandKind::Register;
+            out.register = Some(sr.name().to_string());
+            out.full_register = out.register.clone();
+        }
+        Operand::Imm32 { imm, shift } | Operand::Imm64 { imm, shift } => {
+            let value = arm64_imm(imm);
+            let value = match shift {
+                None => Some(value),
+                Some(bad64::Shift::LSL(amount)) => Some(value << amount),
+                Some(bad64::Shift::MSL(amount)) => {
+                    Some((value << amount) | ((1i128 << amount) - 1))
+                }
+                Some(_) => None,
+            };
+            if let Some(value) = value {
+                out.kind = OperandKind::Immediate;
+                out.immediate = Some(value);
+            }
+        }
+        Operand::MemReg(reg) => {
+            out.kind = OperandKind::Memory;
+            out.base = full(reg);
+        }
+        Operand::MemOffset {
+            reg,
+            offset,
+            mul_vl,
+            ..
+        } => {
+            out.kind = OperandKind::Memory;
+            out.base = full(reg);
+            // `mul vl` scales the offset by the SVE vector length.
+            out.displacement = (!mul_vl).then(|| arm64_imm(offset) as i64);
+        }
+        Operand::MemPreIdx { reg, imm } | Operand::MemPostIdxImm { reg, imm } => {
+            out.kind = OperandKind::Memory;
+            out.base = full(reg);
+            out.displacement = Some(arm64_imm(imm) as i64);
+        }
+        Operand::MemPostIdxReg([base, index]) => {
+            out.kind = OperandKind::Memory;
+            out.base = full(base);
+            out.index = full(index);
+        }
+        Operand::MemExt { regs, shift, .. } => {
+            out.kind = OperandKind::Memory;
+            out.base = full(regs[0]);
+            out.index = full(regs[1]);
+            out.scale = Some(match shift {
+                Some(
+                    bad64::Shift::LSL(amount)
+                    | bad64::Shift::UXTW(amount)
+                    | bad64::Shift::SXTW(amount)
+                    | bad64::Shift::UXTX(amount)
+                    | bad64::Shift::SXTX(amount),
+                ) => 1 << amount,
+                _ => 1,
+            });
+        }
+        Operand::Label(imm) => {
+            out.kind = OperandKind::Branch;
+            out.immediate = Some(i128::from(arm64_imm(imm) as u64));
+        }
+        _ => {}
+    }
+    out
+}
+
+fn arm64_imm(imm: bad64::Imm) -> i128 {
+    match imm {
+        bad64::Imm::Signed(value) => value.into(),
+        bad64::Imm::Unsigned(value) => value.into(),
+    }
+}
+
+/// The X register a W register is the low half of (`w3` -> `x3`, `wzr` ->
+/// `xzr`, `wsp` -> `sp`); every other register is its own.
+fn arm64_full_register(reg: bad64::Reg) -> String {
+    let name = reg.name();
+    match name.strip_prefix('w') {
+        Some("sp") => "sp".to_string(),
+        Some(rest) if rest == "zr" || rest.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("x{rest}")
+        }
+        _ => name.to_string(),
+    }
 }
 
 /// Accumulates [`AsmToken`]s while reproducing bad64's spacing: a space is
@@ -760,6 +1162,163 @@ fn preceding_start_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the SDK sees of a row's structure.
+    struct Structure {
+        mnemonic: String,
+        length: usize,
+        operands: Vec<DisasmOperand>,
+    }
+
+    fn structure(row: &DisasmRow) -> Structure {
+        let mut formatter = disasm_formatter();
+        Structure {
+            mnemonic: row.mnemonic(&mut formatter),
+            length: row.length,
+            operands: row.operands(&mut formatter),
+        }
+    }
+
+    fn x64_row(bytes: &[u8]) -> Structure {
+        let mut formatter = disasm_formatter();
+        let rows = decode_rows(bytes, 0x1000, Some(1), 64, &mut formatter, |_| {
+            String::new()
+        });
+        assert_eq!(rows.len(), 1);
+        structure(&rows[0])
+    }
+
+    fn operand(kind: OperandKind, text: &str) -> DisasmOperand {
+        DisasmOperand::new(kind, text.to_string())
+    }
+
+    fn register(text: &str, full: &str) -> DisasmOperand {
+        DisasmOperand {
+            register: Some(text.to_string()),
+            full_register: Some(full.to_string()),
+            ..operand(OperandKind::Register, text)
+        }
+    }
+
+    fn immediate(text: &str, value: i128) -> DisasmOperand {
+        DisasmOperand {
+            immediate: Some(value),
+            ..operand(OperandKind::Immediate, text)
+        }
+    }
+
+    #[test]
+    fn x64_operands_describe_registers_memory_and_immediates() {
+        let row = x64_row(&[0x48, 0x89, 0x51, 0x10]);
+        assert_eq!((row.mnemonic.as_str(), row.length), ("mov", 4));
+        assert_eq!(
+            row.operands,
+            [
+                DisasmOperand {
+                    base: Some("rcx".into()),
+                    displacement: Some(0x10),
+                    size: Some(8),
+                    ..operand(OperandKind::Memory, "qword [rcx+0x10]")
+                },
+                register("rdx", "rdx"),
+            ]
+        );
+
+        let row = x64_row(&[0x44, 0x8b, 0xc6]);
+        assert_eq!((row.mnemonic.as_str(), row.length), ("mov", 3));
+        assert_eq!(
+            row.operands,
+            [register("r8d", "r8"), register("esi", "rsi")]
+        );
+
+        let row = x64_row(&[0x65, 0x80, 0x24, 0x25, 0x85, 0x00, 0x00, 0x00, 0xf9]);
+        assert_eq!((row.mnemonic.as_str(), row.length), ("and", 9));
+        assert_eq!(
+            row.operands,
+            [
+                DisasmOperand {
+                    displacement: Some(0x85),
+                    size: Some(1),
+                    segment: Some("gs".into()),
+                    ..operand(OperandKind::Memory, "byte [gs:0x85]")
+                },
+                immediate("0xF9", 0xf9),
+            ]
+        );
+
+        let row = x64_row(&[0x0f, 0x32]);
+        assert_eq!((row.mnemonic.as_str(), row.length), ("rdmsr", 2));
+        assert!(row.operands.is_empty());
+    }
+
+    #[test]
+    fn x64_branch_targets_and_rip_relative_displacements() {
+        let row = x64_row(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+        assert_eq!((row.mnemonic.as_str(), row.length), ("call", 5));
+        assert_eq!(
+            row.operands,
+            [DisasmOperand {
+                immediate: Some(0x1010),
+                ..operand(OperandKind::Branch, "0x0000000000001010")
+            }]
+        );
+
+        // mov rax, [rip-0x10]: the displacement is the encoded offset, not
+        // the absolute address iced keeps.
+        let row = x64_row(&[0x48, 0x8b, 0x05, 0xf0, 0xff, 0xff, 0xff]);
+        assert_eq!(row.operands[1].base.as_deref(), Some("rip"));
+        assert_eq!(row.operands[1].displacement, Some(-0x10));
+
+        // and rsp, -0x10: a sign-extended immediate is negative.
+        let row = x64_row(&[0x48, 0x83, 0xe4, 0xf0]);
+        assert_eq!(row.operands[1].immediate, Some(-0x10));
+    }
+
+    #[test]
+    fn arm64_operands_describe_registers_memory_and_labels() {
+        // ldr x0, [x1, #8]; add w3, w4, #1; bl +0x10; an undecodable word.
+        let bytes = [
+            0x20, 0x04, 0x40, 0xf9, 0x83, 0x04, 0x00, 0x11, 0x04, 0x00, 0x00, 0x94, 0x6c, 0x68,
+            0x14, 0x40,
+        ];
+        let rows: Vec<Structure> = decode_rows_arm64(&bytes, 0x1000, None, |_| String::new())
+            .iter()
+            .map(structure)
+            .collect();
+        let listed: Vec<_> = rows
+            .iter()
+            .map(|row| (row.mnemonic.as_str(), row.length))
+            .collect();
+        assert_eq!(listed, [("ldr", 4), ("add", 4), ("bl", 4), (".inst", 4)]);
+
+        assert_eq!(
+            rows[0].operands,
+            [
+                register("x0", "x0"),
+                DisasmOperand {
+                    base: Some("x1".into()),
+                    displacement: Some(8),
+                    ..operand(OperandKind::Memory, "[x1, #0x8]")
+                },
+            ]
+        );
+        assert_eq!(
+            rows[1].operands,
+            [
+                register("w3", "x3"),
+                register("w4", "x4"),
+                immediate("#0x1", 1),
+            ]
+        );
+        assert_eq!(
+            rows[2].operands,
+            [DisasmOperand {
+                immediate: Some(0x1018),
+                ..operand(OperandKind::Branch, "0x1018")
+            }]
+        );
+        assert!(rows[3].operands.is_empty());
+    }
 
     /// A data word among ARM64 code (the HAL's EL2 init slot, a literal)
     /// shows as the word and decoding carries on after it, so `u Ln` still

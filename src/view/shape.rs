@@ -110,6 +110,9 @@ scalars! {
     i16 => |v| View::Int(v.into()), "int";
     i32 => |v| View::Int(v.into()), "int";
     i64 => |v| View::Int(v), "int";
+    // Holds both signed values and full-width `u64` ones (an operand that is
+    // either an immediate or a branch target).
+    i128 => |v| i64::try_from(v).map_or(View::Num(v as u64), View::Int), "int";
     VirtAddr => |v| View::Hex(v.0), "int";
     bool => |v| View::Bool(v), "bool";
     String => |v| View::Str(v), "str";
