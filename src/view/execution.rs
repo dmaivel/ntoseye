@@ -153,7 +153,7 @@ shapes! {
         /// The instruction pointer when halted. None while the target runs.
         rip: Option<Hex>,
         /// The nearest symbol to `rip` when halted. For code outside NT, the
-        /// name identifies that code (`hvix64+0x3a6bde`).
+        /// name identifies that code (`hv+0x3a6bde`).
         symbol: Option<String>,
         /// For a vCPU halted in the Windows hypervisor, the VTL states that the
         /// hypervisor saved for the vCPU's virtual processor, VTL0 first.

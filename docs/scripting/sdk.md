@@ -186,7 +186,7 @@ Because ntoseye unwinds the NT thread on that vCPU from the saved VTL0 state, `b
 
 ```python
 for cpu in dbg.cpus:
-    print(cpu.id, cpu.symbol)                  # p01.01 hvix64+0x3a6bde
+    print(cpu.id, cpu.symbol)                  # p01.01 hv+0x3a6bde
     for saved in cpu.saved_vtl:
         print("   ", saved.vtl, saved.symbol, saved.exit_reason_name)  # 0 nt!HalProcessorIdle+0xf HLT
     if cpu.thread:

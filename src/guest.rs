@@ -111,6 +111,7 @@ impl ModuleInfo {
         let lowered = without_ext.to_lowercase();
         match lowered.as_str() {
             "ntoskrnl" | "ntkrnlmp" | "ntkrnlpa" | "ntkrpamp" => "nt".to_string(),
+            "hvix64" | "hvax64" | "hvaa64" => "hv".to_string(),
             _ => lowered,
         }
     }

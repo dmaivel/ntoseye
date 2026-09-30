@@ -37,7 +37,7 @@ The trailer takes one of two forms:
 
 In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, and `scope` is the {command}`.process` inspection scope that memory commands read through. The scope stays after the target resumes, so `process` and `scope` can differ.
 
-If a vCPU halted in the Windows hypervisor, the trailer shows `hvix64+<offset>` and adds the location where Windows stopped, for example `| saved VTL0 nt!HalProcessorIdle+0xf`. For more information, refer to [VBS](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
+If a vCPU halted in the Windows hypervisor, the trailer shows `hv+<offset>` and adds the location where Windows stopped, for example `| saved VTL0 nt!HalProcessorIdle+0xf`. For more information, refer to [VBS](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
 
 After a reboot, the target stops, and over KD it stops at the first boot notification of the new kernel. Until the kernel's module list exists, the trailer adds `boot in progress`. Kernel symbols and `bp nt!...` already work at this point, which makes it the place to set early-boot breakpoints, but the process and module lists do not work yet. {command}`g` lets the boot continue. While the target runs, wait for the next stop instead of enumerating the state, because that state is stale.
 

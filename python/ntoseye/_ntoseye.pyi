@@ -9868,7 +9868,7 @@ class RunStatus(BaseRecord):
     def symbol(self, /) -> str |None:
         """
         The nearest symbol to `rip` when halted. For code outside NT, the
-        name identifies that code (`hvix64+0x3a6bde`).
+        name identifies that code (`hv+0x3a6bde`).
         """
 
 @final

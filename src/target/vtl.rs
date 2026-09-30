@@ -456,7 +456,7 @@ impl Target {
         };
         let context = match &image {
             Some(image) => match image.short_name.as_str() {
-                "hvix64" | "hvax64" | "hvaa64" => HYPERVISOR_CONTEXT.to_string(),
+                "hv" => HYPERVISOR_CONTEXT.to_string(),
                 "securekernel" => "VTL1".to_string(),
                 _ if secure_root => "VTL1".to_string(),
                 name => name.to_string(),

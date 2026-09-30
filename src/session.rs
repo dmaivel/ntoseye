@@ -157,7 +157,7 @@ pub struct RunStatus {
     /// Current instruction pointer when halted (None while running).
     pub rip: Option<u64>,
     /// Nearest symbol to `rip` when halted; code outside NT is named for what
-    /// it is (`hvix64+0x3a6bde` in the Windows hypervisor).
+    /// it is (`hv+0x3a6bde` in the Windows hypervisor).
     pub symbol: Option<String>,
     /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
     /// for the vCPU's virtual processor.
