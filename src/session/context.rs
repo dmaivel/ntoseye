@@ -161,8 +161,11 @@ impl Session {
         self.set_current_thread(vcpu)?;
         self.target
             .set_current_windows_thread_context(thread.clone());
-        // Switching vCPUs drops any selection, so a selected context now is
-        // the saved VTL0 state the switch installed.
+        // Naming the thread drops the saved VTL0 state the switch selected
+        // and leaves that state's registers cached: select it again from
+        // the vCPU's own registers, so a selected context now is it.
+        self.restore_live_register_cache();
+        self.select_stop_context_default();
         Ok(if self.target.selected_frame.is_some() {
             ThreadContext::SavedVtl0(vcpu.to_string())
         } else {
