@@ -6,10 +6,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use super::handle::Owner;
-use super::raise;
 use super::record::PlainDict;
+use super::{err, raise};
 use crate::guest::ept::{Access, EptMapping as EptInfo, EptTranslation, differences};
-use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, privilege_names};
+use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
 
 /// A partition of the Windows hypervisor, as it was when listed.
 #[pyclass(module = "ntoseye", frozen)]
@@ -302,6 +302,24 @@ impl HypervisorVtl {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         Ok(PlainDict(vtl_dict(py, &self.info)?))
+    }
+
+    /// Every field of this VTL's eVMCS, read now, as a dict from its TLFS
+    /// name (`"guest_rip"`, `"msr_bitmap"`, ...) to its value, as `!hvvmcs`
+    /// shows them. Raises `NtoseyeError` without the VTL's eVMCS.
+    fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
+        let Some(page) = self.info.vmcs else {
+            return Err(raise("this VTL has no eVMCS"));
+        };
+        let mut vmcs = vec![0u8; 0x400];
+        self.owner.with(py, |session| {
+            session.target.read_physical(page, &mut vmcs).map_err(err)
+        })?;
+        let dict = PyDict::new(py);
+        for (name, _, _, value) in evmcs_fields::field_values(&vmcs) {
+            dict.set_item(name, value)?;
+        }
+        Ok(PlainDict(dict))
     }
 
     /// Translate a guest physical address through this VTL's EPT, as

@@ -2,7 +2,9 @@ use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
 use crate::guest::{
+    HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
+    evmcs_fields,
     hypercalls::tlfs_hypercall,
     privilege_names,
 };
@@ -67,6 +69,14 @@ repl_command! {
     details: "Reads the hypervisor's hypercall table and shows, for each call code, the name the Hyper-V TLFS gives it (when the TLFS documents it), whether it is a simple or a rep call (var marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler in the hv image. Codes that share the handler of the reserved code 0 are not implemented; -a lists them too. Needs the VM's hv-evmcs enlightenment or a vCPU stopped in the hypervisor.",
 }
 
+repl_command! {
+    cmd_hvvmcs;
+    names: ["!hvvmcs"],
+    usage: "!hvvmcs [-msr|-io] [partition-id [vp-index [vtl]]]",
+    summary: "Show the eVMCS of a VTL of a Windows hypervisor VP, or the MSRs and I/O ports it intercepts.",
+    details: "Reads the Enlightened VMCS of a VTL, the root partition's VP 0 and the VTL it runs in by default, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
+}
+
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
 type DifferenceKind = (Option<Access>, Option<Access>);
 
@@ -116,6 +126,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!hvept"
             | "!hveptdiff"
             | "!hvcalls"
+            | "!hvvmcs"
             | ".process"
             | "attach"
             | "detach"
@@ -476,13 +487,9 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
-        let mut values = Vec::with_capacity(arguments.len());
-        for text in arguments {
-            let Some(value) = self.eval_or_report(text) else {
-                return Ok(());
-            };
-            values.push(value.0);
-        }
+        let Some(values) = self.eval_all(arguments) else {
+            return Ok(());
+        };
         let gpa = if virtual_address {
             match self.ctx.target.virt_to_phys(None, VirtAddr(values[0])) {
                 Ok(Some(gpa)) => {
@@ -510,28 +517,8 @@ impl ReplState<'_> {
         } else {
             values[0]
         };
-        let partitions = match self.ctx.target.hypervisor_partitions() {
-            Ok(partitions) => partitions,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let partition = match values.get(1) {
-            Some(&id) => partitions.into_iter().find(|p| p.id == id),
-            None => partitions.into_iter().next(),
-        };
-        let Some(partition) = partition else {
-            error!("no partition with ID {:#x}", values[1]);
-            return Ok(());
-        };
-        let index = values.get(2).copied().unwrap_or(0);
-        let Some(vp) = partition
-            .virtual_processors
-            .iter()
-            .find(|vp| u64::from(vp.index) == index)
+        let Some((_, vp)) = self.hypervisor_vp(values.get(1).copied(), values.get(2).copied())
         else {
-            error!("partition {:#x} has no VP {index}", partition.id);
             return Ok(());
         };
         let mut table = Builder::default();
@@ -589,35 +576,11 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
-        let mut values = Vec::with_capacity(invocation.argv.len());
-        for text in &invocation.argv {
-            let Some(value) = self.eval_or_report(text) else {
-                return Ok(());
-            };
-            values.push(value.0);
-        }
-        let partitions = match self.ctx.target.hypervisor_partitions() {
-            Ok(partitions) => partitions,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let partition = match values.first() {
-            Some(&id) => partitions.into_iter().find(|p| p.id == id),
-            None => partitions.into_iter().next(),
-        };
-        let Some(partition) = partition else {
-            error!("no partition with ID {:#x}", values[0]);
+        let Some(values) = self.eval_all(&invocation.argv) else {
             return Ok(());
         };
-        let index = values.get(1).copied().unwrap_or(0);
-        let Some(vp) = partition
-            .virtual_processors
-            .iter()
-            .find(|vp| u64::from(vp.index) == index)
+        let Some((id, vp)) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
         else {
-            error!("partition {:#x} has no VP {index}", partition.id);
             return Ok(());
         };
         let states: Vec<_> = [0, 1]
@@ -631,8 +594,8 @@ impl ReplState<'_> {
             .collect();
         let (Some(vtl0), Some(vtl1)) = (states[0], states[1]) else {
             error!(
-                "VP {index} of partition {:#x} has no eVMCS state for both VTL0 and VTL1",
-                partition.id
+                "VP {} of partition {id:#x} has no eVMCS state for both VTL0 and VTL1",
+                vp.index
             );
             return Ok(());
         };
@@ -756,6 +719,175 @@ impl ReplState<'_> {
             table.len()
         );
         Ok(())
+    }
+
+    fn cmd_hvvmcs(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let view = match invocation.arg(0) {
+            Some("-msr" | "/msr") => "msr",
+            Some("-io" | "/io") => "io",
+            _ => "fields",
+        };
+        let arguments = &invocation.argv[usize::from(view != "fields")..];
+        if arguments.len() > 3 {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let Some(values) = self.eval_all(arguments) else {
+            return Ok(());
+        };
+        let Some((id, vp)) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
+        else {
+            return Ok(());
+        };
+        let level = values.get(2).map_or(vp.vtl, |&level| level as u8);
+        let Some(page) = vp
+            .vtls
+            .iter()
+            .find(|vtl| vtl.level == level)
+            .and_then(|vtl| vtl.vmcs)
+        else {
+            error!(
+                "VP {} of partition {id:#x} has no eVMCS for VTL{level}",
+                vp.index
+            );
+            return Ok(());
+        };
+        let mut vmcs = vec![0u8; 0x400];
+        if let Err(error) = self.ctx.target.read_physical(page, &mut vmcs) {
+            error!("{error}");
+            return Ok(());
+        }
+        outln!(
+            "{} {page:x}\n",
+            ui::muted(&format!(
+                "VP {} of partition {id:#x}, VTL{level}: eVMCS",
+                vp.index
+            ))
+        );
+        match view {
+            "msr" => self.print_msr_intercepts(&vmcs),
+            "io" => self.print_io_intercepts(&vmcs),
+            _ => {
+                let mut table = Builder::default();
+                table.push_record(["Field", "Offset", "Value"]);
+                for (name, offset, size, value) in evmcs_fields::field_values(&vmcs) {
+                    table.push_record([
+                        name.to_string(),
+                        format!("{offset:#05x}"),
+                        format!("{value:0width$x}", width = usize::from(size) * 2),
+                    ]);
+                }
+                print_padded_table(table);
+            }
+        }
+        Ok(())
+    }
+
+    /// The MSRs the eVMCS `vmcs` intercepts: through its MSR bitmap when the
+    /// primary controls use one (bit 28), else every MSR.
+    fn print_msr_intercepts(&mut self, vmcs: &[u8]) {
+        let controls = evmcs_fields::field(vmcs, "cpu_based_vm_exec_control").unwrap_or(0);
+        if controls & (1 << 28) == 0 {
+            outln!("every RDMSR and WRMSR exits: the controls use no MSR bitmap\n");
+            return;
+        }
+        let address = evmcs_fields::field(vmcs, "msr_bitmap").unwrap_or(0);
+        let mut bitmap = vec![0u8; 0x1000];
+        if let Err(error) = self.ctx.target.read_physical(address, &mut bitmap) {
+            error!("MSR bitmap {address:x}: {error}");
+            return;
+        }
+        let mut table = Builder::default();
+        table.push_record(["Access", "First MSR", "Last MSR"]);
+        // Read low, read high, write low, write high (Intel SDM 25.6.9).
+        for (index, access, base) in [
+            (0, "read", 0u32),
+            (1, "read", 0xc000_0000),
+            (2, "write", 0),
+            (3, "write", 0xc000_0000),
+        ] {
+            for (first, last) in evmcs_fields::set_ranges(&bitmap[index * 0x400..][..0x400], base) {
+                table.push_record([
+                    access.to_string(),
+                    format!("{first:#x}"),
+                    format!("{last:#x}"),
+                ]);
+            }
+        }
+        outln!("{} {address:x}", ui::muted("MSR bitmap"));
+        print_padded_table(table);
+    }
+
+    /// The I/O ports the eVMCS `vmcs` intercepts: through its I/O bitmaps A
+    /// (ports 0-0x7fff) and B when the primary controls use them (bit 25),
+    /// else every port or none (unconditional I/O exiting, bit 24).
+    fn print_io_intercepts(&mut self, vmcs: &[u8]) {
+        let controls = evmcs_fields::field(vmcs, "cpu_based_vm_exec_control").unwrap_or(0);
+        if controls & (1 << 25) == 0 {
+            if controls & (1 << 24) == 0 {
+                outln!("no I/O instruction exits: the controls use no I/O bitmaps\n");
+            } else {
+                outln!("every I/O instruction exits: the controls use no I/O bitmaps\n");
+            }
+            return;
+        }
+        let mut table = Builder::default();
+        table.push_record(["First port", "Last port"]);
+        for (field, base) in [("io_bitmap_a", 0u32), ("io_bitmap_b", 0x8000)] {
+            let address = evmcs_fields::field(vmcs, field).unwrap_or(0);
+            let mut bitmap = vec![0u8; 0x1000];
+            if let Err(error) = self.ctx.target.read_physical(address, &mut bitmap) {
+                error!("{field} {address:x}: {error}");
+                return;
+            }
+            for (first, last) in evmcs_fields::set_ranges(&bitmap, base) {
+                table.push_record([format!("{first:#x}"), format!("{last:#x}")]);
+            }
+        }
+        print_padded_table(table);
+    }
+
+    /// Each of `arguments` evaluated, or `None` after reporting the first
+    /// that does not evaluate.
+    fn eval_all(&mut self, arguments: &[std::borrow::Cow<'_, str>]) -> Option<Vec<u64>> {
+        arguments
+            .iter()
+            .map(|text| self.eval_or_report(text).map(|value| value.0))
+            .collect()
+    }
+
+    /// VP `index` (0 by default) of partition `id` (the root by default), with
+    /// its partition's ID, or `None` after reporting why there is none.
+    fn hypervisor_vp(
+        &mut self,
+        id: Option<u64>,
+        index: Option<u64>,
+    ) -> Option<(u64, HvVirtualProcessor)> {
+        let partitions = match self.ctx.target.hypervisor_partitions() {
+            Ok(partitions) => partitions,
+            Err(error) => {
+                error!("{error}");
+                return None;
+            }
+        };
+        let partition = match id {
+            Some(id) => partitions.into_iter().find(|p| p.id == id),
+            None => partitions.into_iter().next(),
+        };
+        let Some(partition) = partition else {
+            error!("no partition with ID {:#x}", id.unwrap_or_default());
+            return None;
+        };
+        let index = index.unwrap_or(0);
+        let Some(vp) = partition
+            .virtual_processors
+            .into_iter()
+            .find(|vp| u64::from(vp.index) == index)
+        else {
+            error!("partition {:#x} has no VP {index}", partition.id);
+            return None;
+        };
+        Some((partition.id, vp))
     }
 
     fn cmd_trustlets(&mut self) -> Result<()> {

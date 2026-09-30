@@ -5212,6 +5212,12 @@ class HypervisorVtl:
         The physical address of the VTL's eVMCS, or `None` when ntoseye did
         not find where the context keeps it (no `hv-evmcs`).
         """
+    def vmcs_fields(self, /) -> dict[str, Any]:
+        """
+        Every field of this VTL's eVMCS, read now, as a dict from its TLFS
+        name (`"guest_rip"`, `"msr_bitmap"`, ...) to its value, as `!hvvmcs`
+        shows them. Raises `NtoseyeError` without the VTL's eVMCS.
+        """
 
 @final
 class Idt(BaseRecord):

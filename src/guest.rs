@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
 mod discovery;
 pub mod ept;
 mod evmcs;
+pub mod evmcs_fields;
 mod exit_registers;
 pub mod hv_layout;
 pub mod hypercalls;

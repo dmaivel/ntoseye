@@ -276,6 +276,22 @@ def test_hypercall_table_matches_the_tlfs(halted: Debugger) -> None:
     assert not by_code[0]["implemented"]
 
 
+def test_vmcs_fields_agree_with_the_saved_state(halted: Debugger) -> None:
+    """The eVMCS fields read by name hold what ntoseye reads from the same page
+    for each VTL: its EPT pointer and the RIP where it left off."""
+    try:
+        vp = halted.hypervisor_partitions()[0].virtual_processors[0]
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
+    vtls = [vtl for vtl in vp.vtls.values() if vtl.vmcs is not None and vtl.rip is not None]
+    if not vtls:
+        pytest.skip("needs the hv-evmcs enlightenment")
+    for vtl in vtls:
+        fields = vtl.vmcs_fields()
+        assert fields["revision_id"] == 1
+        assert (fields["ept_pointer"], fields["guest_rip"]) == (vtl.ept_pointer, vtl.rip)
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")

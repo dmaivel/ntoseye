@@ -213,6 +213,23 @@ Start      End        Size    VTL0  VTL1
 
 Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute its data. The `r-x` ranges hold the code that NT can execute but not change, the `none` ranges the memory of the secure kernel and trustlets, and the `r--` ranges pages that NT can read but not write. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
 
+### VMCS and intercepts
+
+{command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, the root partition's VP 0 and the VTL that it runs in by default: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with `-io`, the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.
+
+```text
+mem:1> !hvvmcs -io
+VP 0 of partition 0x1, VTL0: eVMCS 1160e4000
+
+First port  Last port
+0x20        0x21
+0x64        0x64
+0xa0        0xa1
+0x605       0x605
+0xcf8       0xcf8
+...
+```
+
 ### Hypercalls
 
 {command}`!hvcalls` lists the hypercalls that the hypervisor implements, from its own hypercall table: the call code, the name that the Hyper-V TLFS gives it, whether it is a simple or a rep call (`+var` marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler. Codes that share the handler of the reserved code 0 are not implemented, and `-a` lists them too.
