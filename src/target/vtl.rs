@@ -230,7 +230,9 @@ impl Target {
     /// a vCPU halted in the hypervisor runs: `cr3` and `rip` are that vCPU's
     /// (the hypervisor's root for the VP, and where it is in the hypervisor)
     /// and `processor` the NT processor it is.
-    /// VTL0 first, then VTL1 when the secure kernel is already discovered.
+    /// VTL0 first, then VTL1. VTL1's roots are recognized by the secure
+    /// kernel's image, so the first state outside NT's address spaces looks
+    /// for the secure kernel, once per boot.
     ///
     /// The states come from Enlightened VMCS pages, which exist only when the
     /// VM exposes `hv-evmcs`. The first call of a boot scans host RAM for
@@ -261,13 +263,23 @@ impl Target {
             .as_ref()
             .filter(|stop| Some(stop.processor) == processor && stop.rip == rip);
         let (mut vtl0, mut vtl1) = (Vec::new(), Vec::new());
+        let mut outside_nt = Vec::new();
         for state in pages.states_for_root(&*self.phys, cr3, mask) {
             let root = state.cr3 & mask;
             if root == kernel || self.process_for_cr3(root).is_some() {
                 vtl0.push(state);
-            } else if self.recognize_secure_root(root) {
-                vtl1.push(state);
+            } else {
+                outside_nt.push(state);
             }
+        }
+        if !outside_nt.is_empty() {
+            self.guest()?
+                .secure_kernel_if_found(&self.phys, &self.symbols, &self.interrupt);
+            vtl1.extend(
+                outside_nt
+                    .into_iter()
+                    .filter(|state| self.recognize_secure_root(state.cr3 & mask)),
+            );
         }
         let one = |states: Vec<EvmcsState>, vtl: u8| match states.as_slice() {
             [] => Ok(None),

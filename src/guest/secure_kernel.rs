@@ -455,6 +455,28 @@ impl Guest {
             .clone()
     }
 
+    /// The secure kernel for code that can do without it: found on the
+    /// boot's first call, and not looked for again after that call fails,
+    /// unless it was interrupted. [`Self::secure_kernel`] retries and says why.
+    pub fn secure_kernel_if_found(
+        &self,
+        phys: &Arc<PhysMem>,
+        symbols: &Arc<SymbolStore>,
+        interrupt: &AtomicBool,
+    ) -> Option<Arc<SecureKernel>> {
+        if let Some(secure) = self.cached_secure_kernel() {
+            return Some(secure);
+        }
+        if self.secure_kernel_tried.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let found = self.secure_kernel(phys, symbols, interrupt);
+        if found.is_err() && interrupt.load(Ordering::Relaxed) {
+            self.secure_kernel_tried.store(false, Ordering::Release);
+        }
+        found.ok()
+    }
+
     pub fn secure_kernel(
         &self,
         phys: &Arc<PhysMem>,

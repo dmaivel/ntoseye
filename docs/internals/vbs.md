@@ -4,7 +4,7 @@ This page describes how [VBS inspection](../platforms/vbs.md) works: what `ntose
 
 ## Finding the secure kernel
 
-The first `.vtl 1` command finds the secure kernel by scanning guest RAM for its page tables, and it accepts an image only if the image's CodeView record names `securekernel.pdb`. `ntoseye` keeps the result for the session. If NT reports that VSM did not start (`nt!VslVsmEnabled` is 0), the command fails immediately without scanning.
+The first `.vtl 1` command, or the first stop in the Windows hypervisor that finds a saved state outside NT, finds the secure kernel by scanning guest RAM for its page tables, and it accepts an image only if the image's CodeView record names `securekernel.pdb`. `ntoseye` keeps the result for the session. If NT reports that VSM did not start (`nt!VslVsmEnabled` is 0), the command fails immediately without scanning.
 
 ## Trustlet enumeration
 

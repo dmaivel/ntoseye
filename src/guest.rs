@@ -11,7 +11,7 @@ use crate::{
     types::*,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
 
 mod discovery;
 mod evmcs;
@@ -179,6 +179,9 @@ pub struct Guest {
     pub ntoskrnl: Image,
     memo: Mutex<HaltMemo>,
     secure_kernel: Mutex<Option<Arc<SecureKernel>>>,
+    /// Whether saved VTL state already looked for the secure kernel, which
+    /// it does once per boot ([`Self::secure_kernel_if_found`]).
+    secure_kernel_tried: AtomicBool,
     /// Images found outside NT's address spaces (the Windows hypervisor), by
     /// root. They stay mapped for the boot, and this `Guest` is the boot's.
     foreign_images: Mutex<Vec<(Dtb, ModuleInfo)>>,
@@ -226,6 +229,7 @@ impl Guest {
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
             secure_kernel: Mutex::new(None),
+            secure_kernel_tried: AtomicBool::new(false),
             foreign_images: Mutex::new(Vec::new()),
             evmcs_pages: Mutex::new(EvmcsCache::default()),
             exit_register_layouts: Mutex::new(HashMap::new()),
