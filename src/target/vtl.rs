@@ -759,6 +759,46 @@ impl Target {
         )
     }
 
+    /// Read the memory of the guest whose VTL's saved state is `state`:
+    /// guest physical through its EPT, or, when `virtual_address`, guest
+    /// virtual through the VTL's page tables (its CR3), each of whose reads
+    /// goes through the EPT too. Read-only.
+    pub fn read_guest_partition(
+        &self,
+        state: &EvmcsState,
+        virtual_address: bool,
+        address: u64,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        let guest = ept::EptMemory::new(&*self.phys, state.ept_pointer, state.mode_based_execute());
+        if virtual_address {
+            AddressSpace::new(&guest, state.cr3 & self.arch().dtb_page_mask())
+                .read_bytes(VirtAddr(address), buf)
+        } else {
+            guest.read_bytes(address, buf)
+        }
+    }
+
+    /// The guest physical and host physical addresses of guest virtual
+    /// `address` in the VTL whose saved state is `state`, or `None` when its
+    /// page tables do not map it.
+    pub fn translate_guest_partition(
+        &self,
+        state: &EvmcsState,
+        address: u64,
+    ) -> Result<Option<(u64, u64)>> {
+        let guest = ept::EptMemory::new(&*self.phys, state.ept_pointer, state.mode_based_execute());
+        let Some(translation) = AddressSpace::new(&guest, state.cr3 & self.arch().dtb_page_mask())
+            .virt_to_phys(VirtAddr(address))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            translation.address,
+            guest.host_address(translation.address)?,
+        )))
+    }
+
     /// Every mapping of the EPT of a VTL whose saved state is `state`, in
     /// address order. `None` when a table is unreadable.
     pub fn guest_physical_mappings(&self, state: &EvmcsState) -> Option<Vec<ept::Leaf>> {

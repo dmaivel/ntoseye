@@ -292,6 +292,34 @@ def test_vmcs_fields_agree_with_the_saved_state(halted: Debugger) -> None:
         assert (fields["ept_pointer"], fields["guest_rip"]) == (vtl.ept_pointer, vtl.rip)
 
 
+def test_child_partition_memory_reads_agree_three_ways(halted: Debugger) -> None:
+    """Where a child partition's VP left off, its code reads the same through
+    its page tables, through its guest physical address, and at the host
+    physical address the EPT maps that to."""
+    try:
+        partitions = halted.hypervisor_partitions()
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
+    vtl = next(
+        (
+            vtl
+            for partition in partitions[1:]
+            for vp in partition.virtual_processors
+            for vtl in vp.vtls.values()
+            if vtl.level == vp.vtl and vtl.rip is not None
+        ),
+        None,
+    )
+    if vtl is None or vtl.rip is None:
+        pytest.skip("needs a running Hyper-V guest and the hv-evmcs enlightenment")
+    translated = vtl.translate_virtual(vtl.rip)
+    assert translated is not None
+    guest_physical, host_physical = translated
+    code = vtl.read(vtl.rip, 16)
+    assert vtl.read(guest_physical, 16, physical=True) == code
+    assert halted.physical.read(host_physical, 16) == code
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")

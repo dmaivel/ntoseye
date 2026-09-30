@@ -213,6 +213,21 @@ Start      End        Size    VTL0  VTL1
 
 Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute its data. The `r-x` ranges hold the code that NT can execute but not change, the `none` ranges the memory of the secure kernel and trustlets, and the `r--` ranges pages that NT can read but not write. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
 
+### Memory of a guest partition
+
+{command}`!hvd` `[-p] [-b|-d|-q] <partition-id> <vp-index> <address> [range]` shows the memory of the guest that a child partition runs, such as a Hyper-V VM, WSL2, or Windows Sandbox inside the target. It reads guest virtual memory through the page tables of the VTL that the VP runs in (the CR3 in its eVMCS), or guest physical memory with `-p`, and it translates both through that VTL's EPT. `-d` and `-q` show dwords and qwords, and the range works as for {command}`db`. Pages that are not mapped show as `??`. Here, a VM that sits in its firmware halted in the idle loop of its UEFI:
+
+```text
+mem:1> !hvvps 3
+VP  Address           VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
+0   ffffe80200231050  0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
+...
+mem:1> !hvd 3 0 0x1ff26110 L10
+000000001ff26110  fb c3 fb f4 c3 cc cc cc cc cc cc cc cc cc cc cc  ................
+```
+
+`sti; hlt` is at `0x1ff26112`, and the guest RIP is after the `hlt`. The memory is read-only, and ntoseye has no symbols or process list for the guest, so to inspect a guest in depth, attach ntoseye to it directly. A VP that has not started, such as a second VP that the firmware has not woken, has no state to read through.
+
 ### VMCS and intercepts
 
 {command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, the root partition's VP 0 and the VTL that it runs in by default: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with `-io`, the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.

@@ -2,6 +2,10 @@
 //! tables (EPT), the second-level address translation whose root the VTL's
 //! eVMCS names. The entry format is Intel's (SDM Vol. 3C, 29.3.2).
 
+use crate::backend::MemoryOps;
+use crate::error::{Error, Result};
+use crate::types::PhysAddr;
+
 /// Physical-address bits of an EPT pointer or entry.
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 const READ: u64 = 1 << 0;
@@ -262,6 +266,63 @@ pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<Difference> {
     out
 }
 
+/// The physical memory of a guest of the hypervisor, read through its EPT:
+/// each guest physical page is translated and read from host physical memory
+/// with `host`. Pages the EPT does not map are unreadable, and it is
+/// read-only.
+pub struct EptMemory<'a, B: MemoryOps<PhysAddr>> {
+    host: &'a B,
+    eptp: u64,
+    mode_based: bool,
+}
+
+impl<'a, B: MemoryOps<PhysAddr>> EptMemory<'a, B> {
+    pub fn new(host: &'a B, eptp: u64, mode_based: bool) -> Self {
+        Self {
+            host,
+            eptp,
+            mode_based,
+        }
+    }
+
+    /// The host physical address of guest physical `gpa`.
+    pub fn host_address(&self, gpa: u64) -> Result<u64> {
+        let translation = translate(self.eptp, gpa, self.mode_based, |address| {
+            self.host.read::<u64>(address).ok()
+        });
+        match translation {
+            Some(EptTranslation::Mapped(mapping)) if mapping.read => Ok(mapping.host_physical),
+            Some(_) => Err(Error::Hypervisor(format!(
+                "guest physical {gpa:#x} is not mapped"
+            ))),
+            None => Err(Error::Hypervisor(
+                "the EPT is unreadable or not a 4-level walk".to_string(),
+            )),
+        }
+    }
+}
+
+impl<B: MemoryOps<PhysAddr>> MemoryOps<PhysAddr> for EptMemory<'_, B> {
+    fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let gpa = addr + done as u64;
+            let in_page = (0x1000 - (gpa & 0xfff)) as usize;
+            let chunk = in_page.min(buf.len() - done);
+            self.host
+                .read_bytes(self.host_address(gpa)?, &mut buf[done..done + chunk])?;
+            done += chunk;
+        }
+        Ok(())
+    }
+
+    fn write_bytes(&self, _addr: PhysAddr, _buf: &[u8]) -> Result<()> {
+        Err(Error::Hypervisor(
+            "a guest partition's memory is read-only".to_string(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -439,5 +500,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Host physical memory for [`EptMemory`]: page tables from `tables`,
+    /// and every other byte its own address's low byte.
+    struct Host(HashMap<u64, u64>);
+
+    impl MemoryOps<PhysAddr> for Host {
+        fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+            if let Some(entry) = self.0.get(&addr) {
+                buf.copy_from_slice(&entry.to_le_bytes()[..buf.len()]);
+            } else {
+                for (index, byte) in buf.iter_mut().enumerate() {
+                    *byte = (addr + index as u64) as u8;
+                }
+            }
+            Ok(())
+        }
+
+        fn write_bytes(&self, _addr: PhysAddr, _buf: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn guest_memory_reads_each_page_where_the_ept_puts_it() {
+        let mut memory = tables(RWX, RWX);
+        // GPA 0x20_2000 goes to host 0x9_9000, not after 0x20_1000's 0x7_7000.
+        memory.insert(PT + 16, 0x9_9000 | RWX | WB);
+        let host = Host(memory);
+        let guest = EptMemory::new(&host, eptp(PML4), false);
+        let mut buf = [0u8; 4];
+        guest.read_bytes(0x20_1ffe, &mut buf).unwrap();
+        assert_eq!(buf, [0xfe, 0xff, 0x00, 0x01]);
+        assert_eq!(guest.host_address(0x20_2010).unwrap(), 0x9_9010);
+        assert!(guest.read_bytes(0x20_3000, &mut buf).is_err());
     }
 }

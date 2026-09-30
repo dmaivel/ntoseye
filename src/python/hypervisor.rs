@@ -3,11 +3,11 @@
 //! `!hvvps` list them. Each call walks and validates them again.
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict};
 
 use super::handle::Owner;
 use super::record::PlainDict;
-use super::{err, raise};
+use super::{MAX_READ_LEN, err, raise};
 use crate::guest::ept::{Access, EptMapping as EptInfo, EptTranslation, differences};
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
 
@@ -302,6 +302,50 @@ impl HypervisorVtl {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         Ok(PlainDict(vtl_dict(py, &self.info)?))
+    }
+
+    /// Read `size` bytes of the memory of this VTL's guest, as `!hvd` does:
+    /// guest virtual memory through the VTL's page tables (its saved CR3),
+    /// or with `physical=True` guest physical memory, both through the VTL's
+    /// EPT. Raises `NtoseyeError` without the VTL's eVMCS state or when a
+    /// page is not mapped. The memory is read-only.
+    #[pyo3(signature = (address, size, physical = false))]
+    fn read<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+        size: usize,
+        physical: bool,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let Some(state) = self.info.state else {
+            return Err(raise("this VTL has no eVMCS state"));
+        };
+        if size > MAX_READ_LEN {
+            return Err(raise(format!("read length {size} exceeds {MAX_READ_LEN}")));
+        }
+        let mut buf = vec![0u8; size];
+        self.owner.with(py, |session| {
+            session
+                .target
+                .read_guest_partition(&state, !physical, address, &mut buf)
+                .map_err(err)
+        })?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Translate a guest virtual address of this VTL's guest through its page
+    /// tables and its EPT: `(guest_physical, host_physical)`, or `None` when
+    /// the page tables do not map it.
+    fn translate_virtual(&self, py: Python<'_>, address: u64) -> PyResult<Option<(u64, u64)>> {
+        let Some(state) = self.info.state else {
+            return Err(raise("this VTL has no eVMCS state"));
+        };
+        self.owner.with(py, |session| {
+            session
+                .target
+                .translate_guest_partition(&state, address)
+                .map_err(err)
+        })
     }
 
     /// Every field of this VTL's eVMCS, read now, as a dict from its TLFS

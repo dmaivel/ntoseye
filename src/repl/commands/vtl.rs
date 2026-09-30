@@ -1,5 +1,6 @@
 use tabled::builder::Builder;
 
+use super::memory::MAX_DISPLAY_BYTES;
 use crate::error::{Error, Result};
 use crate::guest::{
     HvVirtualProcessor,
@@ -8,6 +9,7 @@ use crate::guest::{
     hypercalls::tlfs_hypercall,
     privilege_names,
 };
+use crate::repl::memory_view::{MemoryDisplayMode, display_memory_with_validity, eval_range};
 use crate::repl::*;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -77,6 +79,14 @@ repl_command! {
     details: "Reads the Enlightened VMCS of a VTL, the root partition's VP 0 and the VTL it runs in by default, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
 }
 
+repl_command! {
+    cmd_hvd;
+    names: ["!hvd"],
+    usage: "!hvd [-p] [-b|-d|-q] <partition-id> <vp-index> <address> [range]",
+    summary: "Display the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
+    details: "Reads the guest's memory through the EPT of the VTL its VP runs in, as its eVMCS names them: guest virtual memory through the VP's page tables (its CR3), or with -p guest physical memory. -b shows bytes (the default), -d dwords, and -q qwords. The range is L<count>, an end address, or a byte length, as for db. Unreadable pages show as ??. The memory is read-only, and ntoseye has no symbols for the guest. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
+}
+
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
 type DifferenceKind = (Option<Access>, Option<Access>);
 
@@ -127,6 +137,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!hveptdiff"
             | "!hvcalls"
             | "!hvvmcs"
+            | "!hvd"
             | ".process"
             | "attach"
             | "detach"
@@ -845,6 +856,80 @@ impl ReplState<'_> {
             }
         }
         print_padded_table(table);
+    }
+
+    fn cmd_hvd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let mut physical = false;
+        let (mut mode, mut item) = (MemoryDisplayMode::bytes(), 1);
+        let mut arguments = invocation.argv.as_slice();
+        while let Some(flag) = arguments.first().filter(|text| text.starts_with('-')) {
+            match flag.as_ref() {
+                "-p" => physical = true,
+                "-b" => (mode, item) = (MemoryDisplayMode::bytes(), 1),
+                "-d" => (mode, item) = (MemoryDisplayMode::dwords(), 4),
+                "-q" => (mode, item) = (MemoryDisplayMode::qwords(), 8),
+                _ => break,
+            }
+            arguments = &arguments[1..];
+        }
+        if !(3..=4).contains(&arguments.len()) {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let Some(values) = self.eval_all(&arguments[..3]) else {
+            return Ok(());
+        };
+        let start = VirtAddr(values[2]);
+        let range = match arguments.get(3) {
+            Some(text) => eval_range(text, &self.ctx.target, self.radix, start, item),
+            None => eval_range("L80", &self.ctx.target, NumberRadix::Hexadecimal, start, 1),
+        };
+        let range = match range {
+            Ok(range) if range.len() <= MAX_DISPLAY_BYTES => range,
+            Ok(_) => {
+                error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
+                return Ok(());
+            }
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let Some((id, vp)) = self.hypervisor_vp(Some(values[0]), Some(values[1])) else {
+            return Ok(());
+        };
+        let Some(state) = vp
+            .vtls
+            .iter()
+            .find(|vtl| vtl.level == vp.vtl)
+            .and_then(|vtl| vtl.state)
+        else {
+            error!(
+                "VP {} of partition {id:#x} has no eVMCS state; it may not have started",
+                vp.index
+            );
+            return Ok(());
+        };
+        // Page by page, so an unmapped page does not hide the rest.
+        let mut data = vec![0u8; range.len()];
+        let mut valid = vec![false; range.len()];
+        let mut offset = 0;
+        while offset < data.len() {
+            let address = range.start.0 + offset as u64;
+            let chunk = ((0x1000 - (address & 0xfff)) as usize).min(data.len() - offset);
+            let target = &mut data[offset..offset + chunk];
+            if self
+                .ctx
+                .target
+                .read_guest_partition(&state, !physical, address, target)
+                .is_ok()
+            {
+                valid[offset..offset + chunk].fill(true);
+            }
+            offset += chunk;
+        }
+        display_memory_with_validity(range.start, &data, Some(&valid), &mode);
+        Ok(())
     }
 
     /// Each of `arguments` evaluated, or `None` after reporting the first

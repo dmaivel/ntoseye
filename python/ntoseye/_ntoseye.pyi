@@ -5189,6 +5189,14 @@ class HypervisorVtl:
         """
         The VTL (0 for NT, 1 for the secure kernel).
         """
+    def read(self, /, address: int, size: int, physical: bool = False) -> bytes:
+        """
+        Read `size` bytes of the memory of this VTL's guest, as `!hvd` does:
+        guest virtual memory through the VTL's page tables (its saved CR3),
+        or with `physical=True` guest physical memory, both through the VTL's
+        EPT. Raises `NtoseyeError` without the VTL's eVMCS state or when a
+        page is not mapped. The memory is read-only.
+        """
     @property
     def rip(self, /) -> int |None:
         """
@@ -5205,6 +5213,12 @@ class HypervisorVtl:
         `!hvept` does. Returns `None` when no entry maps it, and raises
         `NtoseyeError` without the VTL's eVMCS state or when a table is
         unreadable.
+        """
+    def translate_virtual(self, /, address: int) -> tuple[int, int] |None:
+        """
+        Translate a guest virtual address of this VTL's guest through its page
+        tables and its EPT: `(guest_physical, host_physical)`, or `None` when
+        the page tables do not map it.
         """
     @property
     def vmcs(self, /) -> int |None:
