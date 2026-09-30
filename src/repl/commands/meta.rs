@@ -501,6 +501,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!hvvps", "processes and modules"),
     ("!hvept", "processes and modules"),
     ("!hveptdiff", "processes and modules"),
+    ("!hvcalls", "processes and modules"),
     ("!session", "processes and modules"),
     ("!sprocess", "processes and modules"),
     ("!thread", "processes and modules"),

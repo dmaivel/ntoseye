@@ -259,6 +259,23 @@ def test_vtl_ept_maps_nt_in_place_and_hides_the_secure_kernel_from_vtl0(halted: 
     assert (covering[0]["vtl0"] or "-").startswith("-") and covering[0]["vtl1"].startswith("r")
 
 
+def test_hypercall_table_matches_the_tlfs(halted: Debugger) -> None:
+    """The hypervisor's own table describes the calls as the TLFS does:
+    HvCallGetPartitionId returns an 8-byte ID, and HvCallGetVpRegisters is a
+    rep call of 4-byte register names in and 16-byte values out."""
+    try:
+        calls = halted.hypercalls()
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor on this target: {error}")
+    by_code = {call["code"]: call for call in calls}
+    get_id, get_registers = by_code[0x46], by_code[0x50]
+    assert get_id["name"] == "HvCallGetPartitionId" and get_id["implemented"]
+    assert (get_id["rep"], get_id["output_size"]) == (False, 8)
+    assert get_registers["implemented"] and get_registers["rep"]
+    assert (get_registers["input_element_size"], get_registers["output_element_size"]) == (4, 16)
+    assert not by_code[0]["implemented"]
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")

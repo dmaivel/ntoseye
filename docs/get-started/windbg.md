@@ -42,5 +42,5 @@
 - Ranges: if the second value of a range is less than its start, the second value is a length in bytes, for example `db nt 20`.
 - Target and session: {command}`status`, {command}`capabilities`, {command}`vcpu`, and convenience variables with {command}`set`, {command}`unset`, and {command}`vars`.
 - Symbols: {command}`.fetchimage` downloads the image of a module, and {command}`ld` forces the symbol load for one module.
-- VBS: {command}`.vtl`, {command}`!trustlets`, {command}`.vtlcxr`, {command}`!hvpartitions`, {command}`!hvvps`, {command}`!hvept`, and {command}`!hveptdiff` inspect the secure kernel and the Windows hypervisor. See [VBS and the Windows hypervisor](../platforms/vbs.md).
+- VBS: {command}`.vtl`, {command}`!trustlets`, {command}`.vtlcxr`, {command}`!hvpartitions`, {command}`!hvvps`, {command}`!hvept`, {command}`!hveptdiff`, and {command}`!hvcalls` inspect the secure kernel and the Windows hypervisor. See [VBS and the Windows hypervisor](../platforms/vbs.md).
 - Scripting: [custom REPL commands](../scripting/commands.md) in Python, which {command}`reload-scripts` reloads.

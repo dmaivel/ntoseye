@@ -213,6 +213,24 @@ Start      End        Size    VTL0  VTL1
 
 Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute its data. The `r-x` ranges hold the code that NT can execute but not change, the `none` ranges the memory of the secure kernel and trustlets, and the `r--` ranges pages that NT can read but not write. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
 
+### Hypercalls
+
+{command}`!hvcalls` lists the hypercalls that the hypervisor implements, from its own hypercall table: the call code, the name that the Hyper-V TLFS gives it, whether it is a simple or a rep call (`+var` marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler. Codes that share the handler of the reserved code 0 are not implemented, and `-a` lists them too.
+
+```text
+mem:1> !hvcalls
+Code    Name                                  Kind        Input   Rep in  Output  Rep out  Handler
+0x0000                                        simple                                       hv+0x2868a0
+0x0001  HvCallSwitchVirtualAddressSpace       simple      0x8                              hv+0x28fc70
+0x0003  HvCallFlushVirtualAddressList         rep         0x18    0x8                      hv+0x28dce0
+...
+0x0040  HvCallCreatePartition                 simple      0x38            0x8              hv+0x2831e0
+...
+221 of 306 codes implemented; code 0's handler serves the rest
+```
+
+The TLFS documents only some of the call codes, and the others have no name. With a vCPU stopped in the hypervisor and its context selected with {command}`.cxr`, {command}`u` `hv+<offset>` disassembles a handler, and {command}`ba` `e1 hv+<offset>` stops in it (with the `gdb` backend). A software breakpoint ({command}`bp`) does not work there, because ntoseye does not write the hypervisor's memory.
+
 The addresses are in the address space of the hypervisor. To read them with {command}`dq` and the other memory commands, first select the context of a vCPU that is stopped in the hypervisor with {command}`.cxr`.
 
 `ntoseye` reaches the objects from the hypervisor's per-processor blocks, whose addresses it takes from the eVMCS pages (their host GS base) and from the selected vCPU when that vCPU is stopped in the hypervisor. So the commands need the `hv-evmcs` enlightenment, as [where NT left off](#where-nt-left-off-under-the-hypervisor) does, or a `gdb` stop in the hypervisor, and they do not work on AMD hosts. `hvix64` has no public symbols, so `ntoseye` reads the offsets of these objects from the hypervisor's own code and checks every object before it shows it ([how](../internals/vbs.md#partitions-and-virtual-processors)). It recognizes every build that we examined, from 10.0.16299 to 10.0.28000. If it does not recognize a build, the commands give an error and do not guess.

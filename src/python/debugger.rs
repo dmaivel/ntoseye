@@ -5,7 +5,7 @@
 use std::sync::atomic::Ordering;
 
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyDict};
 use pyo3::{PyTraverseError, PyVisit};
 
 use super::args::{Disposition, Step, Until};
@@ -17,6 +17,7 @@ use super::inspect::Inspect;
 use super::memory::Memory;
 use super::module::{Drivers, Modules};
 use super::process::Processes;
+use super::record::PlainDict;
 use super::secure::SecureKernel;
 use super::stop::Stop;
 use super::symbols::Location;
@@ -26,6 +27,7 @@ use super::types::Types;
 use super::{err, raise, runcontrol, runner};
 use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
+use crate::guest::hypercalls::tlfs_hypercall;
 use crate::view;
 use crate::view::shape::Typed;
 
@@ -93,6 +95,38 @@ impl Debugger {
             .into_iter()
             .map(|info| HypervisorPartition::new(owner.clone_ref(py), info))
             .collect())
+    }
+
+    /// The Windows hypervisor's hypercall table, as `!hvcalls -a` lists it:
+    /// a dict for each call code with `code`, `name` (the TLFS name, or
+    /// `None`), `implemented` (its own handler, not the reserved code 0's),
+    /// `rep`, `variable_header`, `input_size`, `input_element_size`,
+    /// `output_size`, `output_element_size`, and `handler`. Needs the VM's
+    /// `hv-evmcs` enlightenment or a vCPU stopped in the hypervisor. This
+    /// feature is experimental.
+    fn hypercalls<'py>(slf: &Bound<'py, Self>) -> PyResult<Vec<PlainDict<'py>>> {
+        let py = slf.py();
+        let owner = namespace_owner(slf);
+        let (_, table) = owner.with(py, |session| session.target.hypercalls().map_err(err))?;
+        let unassigned = table.first().map(|entry| entry.handler);
+        table
+            .iter()
+            .enumerate()
+            .map(|(code, entry)| {
+                let dict = PyDict::new(py);
+                dict.set_item("code", code)?;
+                dict.set_item("name", tlfs_hypercall(code as u16).map(|(name, _)| name))?;
+                dict.set_item("implemented", Some(entry.handler) != unassigned)?;
+                dict.set_item("rep", entry.rep())?;
+                dict.set_item("variable_header", entry.variable_header())?;
+                dict.set_item("input_size", entry.input)?;
+                dict.set_item("input_element_size", entry.input_element)?;
+                dict.set_item("output_size", entry.output)?;
+                dict.set_item("output_element_size", entry.output_element)?;
+                dict.set_item("handler", entry.handler)?;
+                Ok(PlainDict(dict))
+            })
+            .collect()
     }
 
     /// Running processes, keyed by PID: `processes[4]`, `.find(name)`.

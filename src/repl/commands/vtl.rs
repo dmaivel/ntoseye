@@ -3,6 +3,7 @@ use tabled::builder::Builder;
 use crate::error::{Error, Result};
 use crate::guest::{
     ept::{self, Access, EptTranslation},
+    hypercalls::tlfs_hypercall,
     privilege_names,
 };
 use crate::repl::*;
@@ -58,6 +59,14 @@ repl_command! {
     details: "Walks the whole EPT of VTL0 and of VTL1 of a VP, the root partition's VP 0 by default, and lists each range of guest physical memory that the two map with different access, or that only one of them maps, with the access in each (r, w, x, and u for user-mode execute under mode-based execute control). Adjacent ranges that differ the same way are merged. These are the pages that the secure kernel and memory integrity (HVCI) protect from NT. The IDs use the current radix. Needs VBS and the VM's hv-evmcs enlightenment.",
 }
 
+repl_command! {
+    cmd_hvcalls;
+    names: ["!hvcalls"],
+    usage: "!hvcalls [-a]",
+    summary: "List the hypercalls the Windows hypervisor implements, from its hypercall table.",
+    details: "Reads the hypervisor's hypercall table and shows, for each call code, the name the Hyper-V TLFS gives it (when the TLFS documents it), whether it is a simple or a rep call (var marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler in the hv image. Codes that share the handler of the reserved code 0 are not implemented; -a lists them too. Needs the VM's hv-evmcs enlightenment or a vCPU stopped in the hypervisor.",
+}
+
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
 type DifferenceKind = (Option<Access>, Option<Access>);
 
@@ -106,6 +115,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!hvvps"
             | "!hvept"
             | "!hveptdiff"
+            | "!hvcalls"
             | ".process"
             | "attach"
             | "detach"
@@ -685,6 +695,65 @@ impl ReplState<'_> {
             "{} ranges differ, {} in all\n",
             differences.len(),
             size_text(total)
+        );
+        Ok(())
+    }
+
+    fn cmd_hvcalls(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let all = match invocation.argv.as_slice() {
+            [] => false,
+            [flag] if matches!(flag.as_ref(), "-a" | "/a") => true,
+            _ => {
+                outln!("{}\n", command_help(invocation.name));
+                return Ok(());
+            }
+        };
+        let (base, table) = match self.ctx.target.hypercalls() {
+            Ok(found) => found,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let unassigned = table[0].handler;
+        let mut table_out = Builder::default();
+        table_out.push_record([
+            "Code", "Name", "Kind", "Input", "Rep in", "Output", "Rep out", "Handler",
+        ]);
+        let mut implemented = 0;
+        for (code, entry) in table.iter().enumerate() {
+            let assigned = entry.handler != unassigned || code == 0;
+            implemented += usize::from(entry.handler != unassigned);
+            if !assigned && !all {
+                continue;
+            }
+            let name = tlfs_hypercall(code as u16).map_or("", |(name, _)| name);
+            let mut kind = if entry.rep() { "rep" } else { "simple" }.to_string();
+            if entry.variable_header() {
+                kind.push_str("+var");
+            }
+            let size = |bytes: u16| {
+                if bytes == 0 {
+                    String::new()
+                } else {
+                    format!("{bytes:#x}")
+                }
+            };
+            table_out.push_record([
+                format!("{code:#06x}"),
+                name.to_string(),
+                kind,
+                size(entry.input),
+                size(entry.input_element),
+                size(entry.output),
+                size(entry.output_element),
+                format!("hv+{:#x}", entry.handler - base),
+            ]);
+        }
+        print_padded_table(table_out);
+        outln!(
+            "{implemented} of {} codes implemented; code 0's handler serves the rest\n",
+            table.len()
         );
         Ok(())
     }

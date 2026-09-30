@@ -2129,6 +2129,16 @@ class Debugger:
         `StaleHandleError`, so keep this value with raw addresses to know when
         they become stale.
         """
+    def hypercalls(self, /) -> list[dict[str, Any]]:
+        """
+        The Windows hypervisor's hypercall table, as `!hvcalls -a` lists it:
+        a dict for each call code with `code`, `name` (the TLFS name, or
+        `None`), `implemented` (its own handler, not the reserved code 0's),
+        `rep`, `variable_header`, `input_size`, `input_element_size`,
+        `output_size`, `output_element_size`, and `handler`. Needs the VM's
+        `hv-evmcs` enlightenment or a vCPU stopped in the hypervisor. This
+        feature is experimental.
+        """
     def hypervisor_partitions(self, /) -> list[HypervisorPartition]:
         """
         The partitions of the Windows hypervisor, root first, with their

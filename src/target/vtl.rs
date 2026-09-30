@@ -17,7 +17,9 @@ use crate::{
         EXIT_GPRS, EvmcsState, Guest, HvMemory, HvPartition, ModuleInfo, ModuleSymbolLoadReport,
         PdbRecovery, SecureKernel, SessionSpace, TrustletInfo,
         ept::{self, EptTranslation},
-        hv_layout, hypervisor,
+        hv_layout,
+        hv_layout::HypercallEntry,
+        hypervisor,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
@@ -586,6 +588,15 @@ impl HvMemory for HypervisorMemory<'_> {
 /// `(start, end)` RVAs of an image's sections.
 type RvaRanges = Vec<(u32, u32)>;
 
+/// Where the Windows hypervisor is: its image, mapped in `memory`, the
+/// processor blocks it was reached from, and the eVMCS pages the scan found.
+struct HypervisorLocation<'a> {
+    memory: AddressSpace<'a, PhysMem>,
+    image: ModuleInfo,
+    processors: Vec<u64>,
+    known: std::collections::HashSet<u64>,
+}
+
 /// The hypervisor image at `image`, laid out by RVA from its sections as
 /// they are mapped in `memory`. Unmapped pages (discarded sections) read as
 /// zeros, which decode as no code and no table.
@@ -655,14 +666,13 @@ impl Target {
         })
     }
 
-    /// The Windows hypervisor's partitions and their virtual processors,
-    /// root first. Its processor blocks come from the eVMCS pages (their
-    /// host GS base) and from the selected vCPU when it is halted in the
-    /// hypervisor; the offsets are read off the hypervisor's own code.
-    pub fn hypervisor_partitions(&self) -> Result<Vec<HvPartition>> {
+    /// Find the Windows hypervisor: its processor blocks from the eVMCS pages
+    /// (their host GS base) and from the selected vCPU when it is halted in
+    /// the hypervisor, and its image through the first root that maps it.
+    fn locate_hypervisor(&self) -> Result<HypervisorLocation<'_>> {
         if self.arch() != Arch::Amd64 {
             return Err(Error::Hypervisor(
-                "partitions need an AMD64 target".to_string(),
+                "the Windows hypervisor needs an AMD64 target".to_string(),
             ));
         }
         let guest = self.guest()?;
@@ -713,8 +723,57 @@ impl Target {
                 Some((memory, image))
             })
             .ok_or_else(|| Error::Hypervisor("the hypervisor image was not found".to_string()))?;
+        let mut processors: Vec<u64> = sources.iter().map(|&(_, gs, _)| gs).collect();
+        processors.sort_unstable();
+        processors.dedup();
+        Ok(HypervisorLocation {
+            memory,
+            image,
+            processors,
+            known,
+        })
+    }
+
+    /// The Windows hypervisor's partitions and their virtual processors,
+    /// root first. Its processor blocks come from the eVMCS pages (their
+    /// host GS base) and from the selected vCPU when it is halted in the
+    /// hypervisor; the offsets are read off the hypervisor's own code.
+    pub fn hypervisor_partitions(&self) -> Result<Vec<HvPartition>> {
+        let guest = self.guest()?;
+        let HypervisorLocation {
+            memory,
+            image,
+            processors,
+            known,
+        } = self.locate_hypervisor()?;
+        self.walk_partitions(guest, memory, &image, &processors, &known)
+    }
+
+    /// The Windows hypervisor's hypercall table, indexed by call code, and
+    /// the base of its image.
+    pub fn hypercalls(&self) -> Result<(u64, Vec<HypercallEntry>)> {
+        let HypervisorLocation { memory, image, .. } = self.locate_hypervisor()?;
+        let (bytes, code, data) = hypervisor_image(&memory, &image)?;
+        let base = image.base_address.0;
+        let table = hv_layout::hypercall_table(&hv_layout::ImageView {
+            base,
+            bytes: &bytes,
+            code,
+            data,
+        })?;
+        Ok((base, table))
+    }
+
+    fn walk_partitions(
+        &self,
+        guest: &Guest,
+        memory: AddressSpace<'_, PhysMem>,
+        image: &ModuleInfo,
+        processors: &[u64],
+        known: &std::collections::HashSet<u64>,
+    ) -> Result<Vec<HvPartition>> {
         let layout = guest.partition_layout(image.base_address.0, || {
-            let (bytes, code, data) = hypervisor_image(&memory, &image)?;
+            let (bytes, code, data) = hypervisor_image(&memory, image)?;
             hv_layout::derive(&hv_layout::ImageView {
                 base: image.base_address.0,
                 bytes: &bytes,
@@ -722,11 +781,8 @@ impl Target {
                 data,
             })
         })?;
-        let mut processors: Vec<u64> = sources.iter().map(|&(_, gs, _)| gs).collect();
-        processors.sort_unstable();
-        processors.dedup();
         let mut partitions =
-            hypervisor::partitions(&layout, &HypervisorMemory(memory), &processors, &known)?;
+            hypervisor::partitions(&layout, &HypervisorMemory(memory), processors, known)?;
         for vtl in partitions
             .iter_mut()
             .flat_map(|partition| &mut partition.virtual_processors)

@@ -18,6 +18,7 @@ pub mod ept;
 mod evmcs;
 mod exit_registers;
 pub mod hv_layout;
+pub mod hypercalls;
 pub mod hypervisor;
 mod image;
 mod modules;
