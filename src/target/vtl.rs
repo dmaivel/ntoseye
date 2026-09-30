@@ -209,13 +209,20 @@ impl Target {
         self.symbols.is_secure_address(address)
     }
 
-    /// Whether `address` is the Windows hypervisor's: inspection is in the
-    /// hypervisor's address space (a stop in it, selected with `.cxr`), or
-    /// `address` lies in its image.
-    pub fn is_hypervisor_address(&self, address: VirtAddr) -> bool {
-        self.guest.as_ref().is_some_and(|guest| {
-            guest.is_hypervisor_address(self.normalize_dtb(self.current_dtb()), address)
-        })
+    /// Whether `address` lies in the Windows hypervisor's image, as a stop
+    /// found it in any root.
+    pub fn in_hypervisor_image(&self, address: VirtAddr) -> bool {
+        self.guest
+            .as_ref()
+            .is_some_and(|guest| guest.in_hypervisor_image(address))
+    }
+
+    /// Whether inspection is in the hypervisor's address space: a stop in it,
+    /// whose context `.cxr` selected.
+    pub fn in_hypervisor_address_space(&self) -> bool {
+        self.guest
+            .as_ref()
+            .is_some_and(|guest| guest.is_hypervisor_root(self.normalize_dtb(self.current_dtb())))
     }
 
     /// Return inspection to VTL0 without touching the process or register

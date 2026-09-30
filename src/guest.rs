@@ -221,13 +221,19 @@ struct HaltMemo {
     process_modules: HashMap<VirtAddr, Option<ProcessModulesDetail>>,
 }
 
-/// Whether `address` in root `dtb` is the Windows hypervisor's, given the
-/// images stops found outside NT (see [`Guest::is_hypervisor_address`]).
-fn hypervisor_covers(images: &[(Dtb, ModuleInfo)], dtb: Dtb, address: VirtAddr) -> bool {
+/// Whether `images`, those stops found outside NT with their roots, hold the
+/// Windows hypervisor's image in root `dtb`.
+fn hypervisor_root(images: &[(Dtb, ModuleInfo)], dtb: Dtb) -> bool {
     images
         .iter()
-        .filter(|(_, image)| image.short_name == "hv")
-        .any(|(root, image)| *root == dtb || image.contains_address(address))
+        .any(|(root, image)| image.short_name == "hv" && *root == dtb)
+}
+
+/// Whether `address` lies in the Windows hypervisor's image among `images`.
+fn hypervisor_image_contains(images: &[(Dtb, ModuleInfo)], address: VirtAddr) -> bool {
+    images
+        .iter()
+        .any(|(_, image)| image.short_name == "hv" && image.contains_address(address))
 }
 
 impl Guest {
@@ -308,11 +314,25 @@ impl Guest {
     /// hypervisor's: `dtb` is a root a stop found the `hv` image in, or
     /// `address` lies in that image, found in any root.
     pub fn is_hypervisor_address(&self, dtb: Dtb, address: VirtAddr) -> bool {
+        self.is_hypervisor_root(dtb) || self.in_hypervisor_image(address)
+    }
+
+    /// Whether a stop found the `hv` image in root `dtb`.
+    pub fn is_hypervisor_root(&self, dtb: Dtb) -> bool {
         let images = self
             .foreign_images
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        hypervisor_covers(&images, dtb, address)
+        hypervisor_root(&images, dtb)
+    }
+
+    /// Whether `address` lies in the `hv` image, found in any root.
+    pub fn in_hypervisor_image(&self, address: VirtAddr) -> bool {
+        let images = self
+            .foreign_images
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        hypervisor_image_contains(&images, address)
     }
 
     /// The names of the hypervisor image at `base`'s code, made by `name` the
@@ -569,33 +589,24 @@ mod tests {
     }
 
     #[test]
-    fn any_address_in_the_hypervisors_root_is_the_hypervisors() {
-        assert!(hypervisor_covers(
-            &images(),
-            HV_ROOT,
-            VirtAddr(0xffff_e800_0000_1000)
-        ));
+    fn the_root_a_stop_found_the_hypervisor_in_is_its_and_no_other() {
+        assert!(hypervisor_root(&images(), HV_ROOT));
+        assert!(!hypervisor_root(&images(), NT_ROOT));
+        assert!(!hypervisor_root(&images(), 0x460_0000));
     }
 
     #[test]
-    fn the_hypervisor_image_is_the_hypervisors_from_any_root() {
-        assert!(hypervisor_covers(
+    fn only_addresses_in_the_hypervisor_image_are_in_it() {
+        assert!(hypervisor_image_contains(
             &images(),
-            NT_ROOT,
             VirtAddr(0xffff_f840_b168_31e0)
         ));
-    }
-
-    #[test]
-    fn nt_memory_and_other_foreign_images_are_not() {
-        assert!(!hypervisor_covers(
+        assert!(!hypervisor_image_contains(
             &images(),
-            NT_ROOT,
             VirtAddr(0xffff_f805_9313_d130)
         ));
-        assert!(!hypervisor_covers(
+        assert!(!hypervisor_image_contains(
             &images(),
-            0x460_0000,
             VirtAddr(0xffff_f805_290d_4000)
         ));
     }

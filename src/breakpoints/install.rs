@@ -486,7 +486,12 @@ impl BreakpointManager {
     }
 
     fn require_patchable_address(debugger: &Target, address: VirtAddr) -> Result<()> {
-        if debugger.is_hypervisor_address(address) {
+        // NT addresses stay patchable from the hypervisor's context: the
+        // breakpoint is written through a vCPU in NT.
+        if debugger.in_hypervisor_image(address)
+            || (debugger.in_hypervisor_address_space()
+                && Self::find_kernel_module_containing_address(debugger, address).is_none())
+        {
             return Err(Error::Breakpoint(
                 "software breakpoints in the Windows hypervisor are refused because ntoseye does not write its memory; use a GDB hardware execution breakpoint (ba e1)".into(),
             ));
