@@ -584,8 +584,13 @@ impl Breakpoint {
         Ok(info.map(|info| Thread::from_owner(self.owner.derive(py), info)))
     }
 
-    /// Remove this breakpoint.
+    /// Remove this breakpoint. A breakpoint that is already gone, such as a
+    /// one-shot breakpoint after its hit, is left as it is.
     fn delete(&self, py: Python<'_>) -> PyResult<()> {
+        if self.snapshot(py)?.is_none() {
+            self.owner.dbg().get().conditions.lock().remove(&self.id);
+            return Ok(());
+        }
         self.mutate(py, "breakpoint.delete", |session| {
             session.remove_breakpoint(self.id).map_err(err)
         })?;

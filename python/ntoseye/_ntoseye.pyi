@@ -1188,7 +1188,8 @@ class Breakpoint:
         """
     def delete(self, /) -> None:
         """
-        Remove this breakpoint.
+        Remove this breakpoint. A breakpoint that is already gone, such as a
+        one-shot breakpoint after its hit, is left as it is.
         """
     @property
     def enabled(self, /) -> bool:
