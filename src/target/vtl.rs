@@ -482,6 +482,32 @@ impl Target {
             .unwrap_or(ForeignModules::None);
         Some(ForeignCode { context, modules })
     }
+
+    /// The base of `name` (`hv`), an image a stop found outside NT, for
+    /// expressions in the address space `dtb`: `None` when no stop found it,
+    /// and an error when it was found only in other address spaces, since
+    /// its address means nothing in this one.
+    pub fn foreign_image_base(&self, dtb: Dtb, name: &str) -> Result<Option<VirtAddr>> {
+        let Some(guest) = &self.guest else {
+            return Ok(None);
+        };
+        let dtb = self.normalize_dtb(dtb);
+        match guest.foreign_image_named(dtb, name) {
+            (Some(image), _) => {
+                let mut magic = [0u8; 2];
+                let mapped = self
+                    .address_space(dtb)
+                    .read_bytes(image.base_address, &mut magic)
+                    .is_ok()
+                    && magic == *b"MZ";
+                Ok(mapped.then_some(image.base_address))
+            }
+            (None, true) => Err(Error::DebugInfo(format!(
+                "{name} is mapped only in the address space of the Windows hypervisor; .cxr at a stop in it selects that space"
+            ))),
+            (None, false) => Ok(None),
+        }
+    }
 }
 
 /// The image mapped at `rip`, named by its CodeView PDB and found by walking

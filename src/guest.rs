@@ -261,6 +261,23 @@ impl Guest {
         Some(image)
     }
 
+    /// The image named `short_name` (`hv`) that a stop found in root `dtb`,
+    /// and whether one was found in any other root.
+    pub fn foreign_image_named(&self, dtb: Dtb, short_name: &str) -> (Option<ModuleInfo>, bool) {
+        let images = self
+            .foreign_images
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut named = images
+            .iter()
+            .filter(|(_, image)| image.short_name.eq_ignore_ascii_case(short_name));
+        let elsewhere = named.clone().any(|(root, _)| *root != dtb);
+        let here = named
+            .find(|(root, _)| *root == dtb)
+            .map(|(_, image)| image.clone());
+        (here, elsewhere)
+    }
+
     fn memo(&self) -> MutexGuard<'_, HaltMemo> {
         self.memo.lock().unwrap_or_else(PoisonError::into_inner)
     }

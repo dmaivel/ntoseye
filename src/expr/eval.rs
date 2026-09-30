@@ -218,6 +218,12 @@ impl Expr {
                 address: Some(value),
             });
         }
+        if let Some(value) = context.foreign_image_base(context.current_dtb(), name)? {
+            return Ok(ExprValue::Raw {
+                value,
+                address: Some(value),
+            });
+        }
         Err(Error::SymbolNotFound(name.to_string()))
     }
 

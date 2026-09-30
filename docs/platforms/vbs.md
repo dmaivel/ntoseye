@@ -118,7 +118,7 @@ ntoseye does not support these operations:
 
 ntoseye resolves the address of a hardware breakpoint once, so you must set the breakpoint again after a reboot. Do not keep the target stopped for a long time, because the full VM stays halted.
 
-Hardware execution breakpoints also work in the Windows hypervisor itself (`hvix64`), without a software code patch. To set one, use {command}`~` and {command}`vcpu` to select the register and address-space context of the hypervisor, and then use `ba e1 <address>`. These breakpoints use linear addresses and are not VTL-tagged breakpoints. They use the same four hardware slots, which all vCPUs share.
+Hardware execution breakpoints also work in the Windows hypervisor itself (`hvix64`), without a software code patch. To set one, use {command}`~` and {command}`vcpu` to select the register and address-space context of the hypervisor, and then use `ba e1 <address>` or `ba e1 hv+<offset>`. These breakpoints use linear addresses and are not VTL-tagged breakpoints. They use the same four hardware slots, which all vCPUs share.
 
 Hardware breakpoints do not write to integrity-sensitive code, but they can be visible and can have side effects. While host debugging is active, KVM controls the debug-register breakpoint state, and the upstream [nested VMX handling](https://github.com/torvalds/linux/blob/master/arch/x86/kvm/vmx/nested.c) documents an interaction with `KVM_GUESTDBG_USE_HW_BP` that can cause the loss of L1's own DR7 state. Do not assume that simultaneous guest and hypervisor hardware debugging keeps the state of both debuggers.
 
@@ -130,7 +130,7 @@ ntoseye does not list the modules that are loaded in a trustlet. The lists that 
 
 ## Stops in the Windows hypervisor
 
-When VBS runs, the GDB stub reports what each vCPU executed when it halted. An idle vCPU is usually inside the Windows hypervisor, with the hypervisor's own CR3. `ntoseye` names such a stop by the image in which the vCPU stopped. The context shows `hypervisor`, or `VTL1` for the secure kernel. As in WinDbg, the module name of the hypervisor image (`hvix64.exe`) is `hv`, so code and stack frames show `hv+0x…`.
+When VBS runs, the GDB stub reports what each vCPU executed when it halted. An idle vCPU is usually inside the Windows hypervisor, with the hypervisor's own CR3. `ntoseye` names such a stop by the image in which the vCPU stopped. The context shows `hypervisor`, or `VTL1` for the secure kernel. As in WinDbg, the module name of the hypervisor image (`hvix64.exe`) is `hv`, so code and stack frames show `hv+0x…`. While the context of the hypervisor is selected, expressions accept `hv` and `hv+<offset>` like any other module name.
 
 Microsoft does not publish symbols for this hypervisor build, and the address space of the hypervisor does not map its unwind data, so all hypervisor frames after the first frame are guesses from a stack scan (`[scan]`).
 
