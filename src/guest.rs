@@ -218,6 +218,15 @@ struct HaltMemo {
     process_modules: HashMap<VirtAddr, Option<ProcessModulesDetail>>,
 }
 
+/// Whether `address` in root `dtb` is the Windows hypervisor's, given the
+/// images stops found outside NT (see [`Guest::is_hypervisor_address`]).
+fn hypervisor_covers(images: &[(Dtb, ModuleInfo)], dtb: Dtb, address: VirtAddr) -> bool {
+    images
+        .iter()
+        .filter(|(_, image)| image.short_name == "hv")
+        .any(|(root, image)| *root == dtb || image.contains_address(address))
+}
+
 impl Guest {
     pub fn from_kernel(ntoskrnl: Image) -> Self {
         // Builds before the L1TF mitigation have no mask to undo.
@@ -289,6 +298,17 @@ impl Guest {
             .find(|(root, _)| *root == dtb)
             .map(|(_, image)| image.clone());
         (here, elsewhere)
+    }
+
+    /// Whether `address`, read through root `dtb`, is the Windows
+    /// hypervisor's: `dtb` is a root a stop found the `hv` image in, or
+    /// `address` lies in that image, found in any root.
+    pub fn is_hypervisor_address(&self, dtb: Dtb, address: VirtAddr) -> bool {
+        let images = self
+            .foreign_images
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        hypervisor_covers(&images, dtb, address)
     }
 
     fn memo(&self) -> MutexGuard<'_, HaltMemo> {
@@ -497,4 +517,65 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
         first_prototype_pte: vad.field_offset("FirstPrototypePte").ok()?,
         last_contiguous_pte: vad.field_offset("LastContiguousPte").ok()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HV_ROOT: Dtb = 0x1_1514_0000;
+    const NT_ROOT: Dtb = 0x1ae000;
+
+    fn images() -> Vec<(Dtb, ModuleInfo)> {
+        vec![
+            (
+                HV_ROOT,
+                ModuleInfo::new(
+                    "hvix64.exe".to_string(),
+                    VirtAddr(0xffff_f840_b140_0000),
+                    0x40_0000,
+                ),
+            ),
+            (
+                0x460_0000,
+                ModuleInfo::new(
+                    "securekernel.exe".to_string(),
+                    VirtAddr(0xffff_f805_290d_3000),
+                    0x20_0000,
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn any_address_in_the_hypervisors_root_is_the_hypervisors() {
+        assert!(hypervisor_covers(
+            &images(),
+            HV_ROOT,
+            VirtAddr(0xffff_e800_0000_1000)
+        ));
+    }
+
+    #[test]
+    fn the_hypervisor_image_is_the_hypervisors_from_any_root() {
+        assert!(hypervisor_covers(
+            &images(),
+            NT_ROOT,
+            VirtAddr(0xffff_f840_b168_31e0)
+        ));
+    }
+
+    #[test]
+    fn nt_memory_and_other_foreign_images_are_not() {
+        assert!(!hypervisor_covers(
+            &images(),
+            NT_ROOT,
+            VirtAddr(0xffff_f805_9313_d130)
+        ));
+        assert!(!hypervisor_covers(
+            &images(),
+            0x460_0000,
+            VirtAddr(0xffff_f805_290d_4000)
+        ));
+    }
 }

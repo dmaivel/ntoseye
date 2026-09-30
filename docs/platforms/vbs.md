@@ -229,7 +229,7 @@ Code    Name                                  Kind        Input   Rep in  Output
 221 of 306 codes implemented; code 0's handler serves the rest
 ```
 
-The TLFS documents only some of the call codes, and the others have no name. With a vCPU stopped in the hypervisor and its context selected with {command}`.cxr`, {command}`u` `hv+<offset>` disassembles a handler, and {command}`ba` `e1 hv+<offset>` stops in it (with the `gdb` backend). A software breakpoint ({command}`bp`) does not work there, because ntoseye does not write the hypervisor's memory.
+The TLFS documents only some of the call codes, and the others have no name. With a vCPU stopped in the hypervisor and its context selected with {command}`.cxr`, {command}`u` `hv+<offset>` disassembles a handler, and {command}`ba` `e1 hv+<offset>` stops in it (with the `gdb` backend). ntoseye refuses a software breakpoint ({command}`bp`) in the hypervisor's image or address space, because it does not write the hypervisor's memory.
 
 The addresses are in the address space of the hypervisor. To read them with {command}`dq` and the other memory commands, first select the context of a vCPU that is stopped in the hypervisor with {command}`.cxr`.
 

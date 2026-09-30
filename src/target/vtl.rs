@@ -209,6 +209,15 @@ impl Target {
         self.symbols.is_secure_address(address)
     }
 
+    /// Whether `address` is the Windows hypervisor's: inspection is in the
+    /// hypervisor's address space (a stop in it, selected with `.cxr`), or
+    /// `address` lies in its image.
+    pub fn is_hypervisor_address(&self, address: VirtAddr) -> bool {
+        self.guest.as_ref().is_some_and(|guest| {
+            guest.is_hypervisor_address(self.normalize_dtb(self.current_dtb()), address)
+        })
+    }
+
     /// Return inspection to VTL0 without touching the process or register
     /// selection, for a stop whose context now belongs to the halted vCPU.
     pub fn leave_secure_scope(&mut self) {
