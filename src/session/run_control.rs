@@ -200,6 +200,7 @@ impl Session {
         self.target.clear_context_dtb_override();
         self.target.clear_current_windows_thread_context();
         self.target.last_exception_code = None;
+        self.target.breakpoint_stop = None;
         self.parked_windows_thread = None;
         self.parked_stop = None;
         self.current_stop = None;
@@ -277,6 +278,7 @@ impl Session {
     pub(super) fn invalidate_running_context(&mut self) {
         self.target.selected_frame = None;
         self.target.registers = None;
+        self.target.breakpoint_stop = None;
         self.target.clear_context_dtb_override();
         self.target.clear_current_windows_thread_context();
         self.parked_windows_thread = None;

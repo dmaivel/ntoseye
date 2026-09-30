@@ -22,7 +22,7 @@ use crate::session::{
     BreakpointStopAction, ContinueOutcome, RunStatus, STATUS_BREAKPOINT, STATUS_SINGLE_STEP,
     Session, StopResolution, WatchpointStopAction,
 };
-use crate::target::ThreadInfo;
+use crate::target::{BreakpointStop, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::try_format_symbol_at;
 
@@ -65,6 +65,18 @@ impl Session {
         // Every host inspects the thread the stop landed on: `!thread`,
         // `.thread` and `$thread` read this selection, and resuming cleared it.
         refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
+        // An instruction breakpoint on the Windows hypervisor's VM-exit entry
+        // fires after KVM wrote the exit's eVMCS: its saved state is current.
+        self.target.breakpoint_stop = match resolution {
+            StopResolution::Breakpoint {
+                breakpoint, rip, ..
+            } if breakpoint.address.0 == *rip => {
+                self.target.registers.as_ref().and_then(|registers| {
+                    BreakpointStop::new(&self.current_thread, *rip, registers)
+                })
+            }
+            _ => None,
+        };
         self.select_stop_context_default();
         self.current_stop = Some(self.continue_outcome_from_resolution(resolution.clone()));
     }

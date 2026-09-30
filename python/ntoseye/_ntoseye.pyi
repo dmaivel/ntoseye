@@ -10031,7 +10031,8 @@ class SavedVtlState(BaseRecord):
         exit (`rax` to `r15`), read where the hypervisor's VM-exit entry
         code saved them. Experimental: where that is, is read off the
         entry code. None when they are not known: for a VTL that is not
-        the current one, while the vCPU is on `host_rip` or still saving
+        the current one, while the vCPU is on `host_rip` (unless it stopped
+        there on a breakpoint, when they are the vCPU's own) or still saving
         them, or when the entry code does not save them in one block.
         """
     @property
@@ -10051,11 +10052,12 @@ class SavedVtlState(BaseRecord):
     @property
     def may_be_stale(self, /) -> bool:
         """
-        The vCPU is stopped on `host_rip`. KVM writes the eVMCS when it
-        enters the hypervisor, and a stop can fall between a VM exit and
-        that entry, so this state may still describe the exit before the
-        one in progress. The guest's general-purpose registers are then
-        still in the vCPU's own registers.
+        The vCPU is stopped on `host_rip`, and not by a breakpoint there.
+        KVM writes the eVMCS when it enters the hypervisor, and a stop from
+        outside can fall between a VM exit and that entry, so this state
+        may still describe the exit before the one in progress. The
+        guest's general-purpose registers are then still in the vCPU's own
+        registers. A breakpoint on `host_rip` fires after the write.
         """
     @property
     def rflags(self, /) -> int: ...

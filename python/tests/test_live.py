@@ -208,7 +208,9 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
     """The registers ntoseye reads where the hypervisor's exit entry code
     saved them are the guest's at the exit: a hardware breakpoint on
     `host_rip` sees them live, and one on the entry code's first call (every
-    store is before it) sees what ntoseye then reads."""
+    store is before it) sees what ntoseye then reads. The breakpoint on
+    `host_rip` fires after KVM wrote the exit's eVMCS, so the state there is
+    already the one the first call sees."""
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
     cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
@@ -227,8 +229,8 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         assert isinstance(stop, Stop.Breakpoint)
         exiting = stop.cpu
         truth = {name: exiting.registers[name] for name in GPRS}
-        # On host_rip the exit's registers are not saved yet.
-        assert all(saved.may_be_stale and saved.general_registers is None for saved in exiting.saved_vtl)
+        at_entry = next(saved for saved in exiting.saved_vtl if saved.current)
+        assert not at_entry.may_be_stale and at_entry.general_registers is not None
         stored = halted.breakpoints.add(first_call, hardware=True, processor=exiting)
         try:
             stop = halted.run(timeout=10.0)
@@ -236,6 +238,7 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
             stored.delete()
         assert isinstance(stop, Stop.Breakpoint) and stop.cpu.id == exiting.id
         saved = next(saved for saved in stop.cpu.saved_vtl if saved.current)
+        assert (saved.vtl, saved.rip, saved.exit_reason) == (at_entry.vtl, at_entry.rip, at_entry.exit_reason)
         assert saved.general_registers is not None
         assert {name: getattr(saved.general_registers, name) for name in GPRS} == truth
 

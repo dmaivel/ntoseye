@@ -62,6 +62,7 @@ impl Session {
         // other advance paths clear it via `resume`; a bare single-step doesn't).
         self.parked_stop = None;
         self.current_stop = None;
+        self.target.breakpoint_stop = None;
         self.backend.set_current_thread(&self.current_thread)?;
         let stepped = match self.step_over_site_at_pc()? {
             Some(stepped) => stepped,

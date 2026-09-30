@@ -39,7 +39,7 @@ pub mod zombies;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
 pub use memory::{CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, SearchResult, SearchStop};
-pub use vtl::{ForeignCode, ForeignModules, HYPERVISOR_CONTEXT, SavedVtlContext};
+pub use vtl::{BreakpointStop, ForeignCode, ForeignModules, HYPERVISOR_CONTEXT, SavedVtlContext};
 
 use self::mm::AddressDescription;
 use crate::{
@@ -111,6 +111,10 @@ pub struct Target {
     /// WinDbg's `$exr_code`. Recorded by the session at the one stop-
     /// ingestion boundary so every host sees the same value.
     pub last_exception_code: Option<u32>,
+    /// The vCPU that stopped on an instruction breakpoint at the current
+    /// stop, recorded at the same boundary and dropped when the target
+    /// runs; see [`Self::saved_vtl_contexts`].
+    pub breakpoint_stop: Option<BreakpointStop>,
     /// Host interrupt flag. Long scans (pool, heap, list walks) stop early
     /// once it is raised; the host sets it (Ctrl-C in the REPL) and clears it
     /// before the next command.

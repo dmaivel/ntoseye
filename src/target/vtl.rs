@@ -14,8 +14,8 @@ use crate::{
     dbg_backend::processor_index_from_backend_thread_id,
     error::{Error, Result},
     guest::{
-        EvmcsState, Guest, ModuleInfo, ModuleSymbolLoadReport, PdbRecovery, SecureKernel,
-        SessionSpace, TrustletInfo,
+        EXIT_GPRS, EvmcsState, Guest, ModuleInfo, ModuleSymbolLoadReport, PdbRecovery,
+        SecureKernel, SessionSpace, TrustletInfo,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
@@ -58,16 +58,47 @@ pub enum ForeignModules {
 pub struct SavedVtlContext {
     pub vtl: u8,
     pub state: EvmcsState,
-    /// The vCPU is on the hypervisor's VM-exit entry point (`host_rip`), so
-    /// this state may describe the exit before the one in progress. KVM
-    /// writes the eVMCS when it enters the hypervisor, and a stop can fall
-    /// between an exit and that entry.
+    /// The vCPU is on the hypervisor's VM-exit entry point (`host_rip`) and
+    /// did not stop there on a breakpoint, so this state may describe the
+    /// exit before the one in progress. KVM writes the eVMCS when it enters
+    /// the hypervisor, and a stop from outside can fall between an exit and
+    /// that entry; a breakpoint fires only once the hypervisor runs.
     pub may_be_stale: bool,
     /// The general-purpose registers of the exit, where the hypervisor's
     /// exit entry code saved them (see [`crate::guest::ExitRegisterLayout`]),
     /// or why they are not known: only the current VTL's are, once the
-    /// vCPU is past the entry code's stores.
+    /// vCPU is past the entry code's stores, or, stopped on a breakpoint on
+    /// the entry, the vCPU's own.
     pub general_registers: std::result::Result<HashMap<&'static str, u64>, String>,
+}
+
+/// A vCPU that stopped on an instruction breakpoint at the current stop:
+/// its processor, where, and its general-purpose registers then. An
+/// instruction breakpoint fires only when the instruction runs, so one on
+/// the Windows hypervisor's `host_rip` means KVM has already written the
+/// eVMCS for the exit, and a VM exit loads only RSP and RIP, so the other
+/// registers are still the guest's at that exit.
+#[derive(Debug, Clone)]
+pub struct BreakpointStop {
+    processor: u16,
+    rip: u64,
+    general_registers: HashMap<&'static str, u64>,
+}
+
+impl BreakpointStop {
+    /// The stop of `vcpu`, whose live registers are `registers`, on an
+    /// instruction breakpoint at `rip`. `None` when `vcpu` names no
+    /// processor or a general-purpose register is missing.
+    pub fn new(vcpu: &str, rip: u64, registers: &HashMap<String, u64>) -> Option<Self> {
+        Some(Self {
+            processor: processor_index_from_backend_thread_id(vcpu)?,
+            rip,
+            general_registers: EXIT_GPRS
+                .iter()
+                .map(|name| Some((*name, *registers.get(*name)?)))
+                .collect::<Option<_>>()?,
+        })
+    }
 }
 
 impl SavedVtlContext {
@@ -209,7 +240,8 @@ impl Target {
     /// A state counts as VTL0 only in an NT root, and, in kernel mode, only
     /// with `processor`'s KPCR as its GS base; as VTL1 only in a secure-kernel
     /// root. States of other partitions' VPs sharing the root are skipped.
-    /// A vCPU on the pages' `host_rip` marks every state `may_be_stale`.
+    /// A vCPU on the pages' `host_rip` marks every state `may_be_stale`,
+    /// unless it stopped there on a breakpoint ([`Self::breakpoint_stop`]).
     pub fn saved_vtl_contexts(
         &self,
         cr3: u64,
@@ -224,6 +256,10 @@ impl Target {
             .guest()?
             .evmcs_pages(&self.phys, &self.interrupt, cr3, mask)?;
         let kernel = self.kernel_dtb() & mask;
+        let entered = self
+            .breakpoint_stop
+            .as_ref()
+            .filter(|stop| Some(stop.processor) == processor && stop.rip == rip);
         let (mut vtl0, mut vtl1) = (Vec::new(), Vec::new());
         for state in pages.states_for_root(&*self.phys, cr3, mask) {
             let root = state.cr3 & mask;
@@ -238,8 +274,8 @@ impl Target {
             [state] => Ok(Some(SavedVtlContext {
                 vtl,
                 state: *state,
-                may_be_stale: rip == state.host_rip,
-                general_registers: self.saved_general_registers(cr3 & mask, rip, state),
+                may_be_stale: rip == state.host_rip && entered.is_none(),
+                general_registers: self.saved_general_registers(cr3 & mask, rip, state, entered),
             })),
             many => Err(Error::SavedVtlState(format!(
                 "{} eVMCS pages of this virtual processor hold VTL{vtl} state",
@@ -265,21 +301,27 @@ impl Target {
     /// `rip` on the hypervisor root `root`: read where the hypervisor's exit
     /// entry code saved them. The block they are in belongs to the logical
     /// processor and holds the last exit from any VTL, so only the current
-    /// VTL's state has them, and only once the vCPU is past the stores.
+    /// VTL's state has them, and only once the vCPU is past the stores. A
+    /// vCPU that `entered` the hypervisor on a breakpoint on `host_rip` still
+    /// holds them itself.
     fn saved_general_registers(
         &self,
         root: u64,
         rip: u64,
         state: &EvmcsState,
+        entered: Option<&BreakpointStop>,
     ) -> std::result::Result<HashMap<&'static str, u64>, String> {
         if !state.current {
             return Err("the hypervisor last saved another VTL's registers".to_string());
         }
         if rip == state.host_rip {
-            return Err(
-                "the vCPU is on the VM-exit entry: the guest's registers are still its own"
-                    .to_string(),
-            );
+            return match entered {
+                Some(stop) => Ok(stop.general_registers.clone()),
+                None => Err(
+                    "the vCPU is on the VM-exit entry: the guest's registers are still its own"
+                        .to_string(),
+                ),
+            };
         }
         let guest = self.guest().map_err(|error| error.to_string())?;
         let memory = self.address_space(root);

@@ -463,7 +463,8 @@ pub fn print_break_context_at(
                     children.push(ui::muted(
                         "stopped on the hypervisor's VM-exit entry: KVM writes the saved state when it \
                          enters the hypervisor, so it may still describe the previous exit and is not \
-                         selected (.vtlcxr selects it anyway)",
+                         selected (.vtlcxr selects it anyway; a breakpoint on the entry sees the \
+                         current exit)",
                     ));
                 }
             }
