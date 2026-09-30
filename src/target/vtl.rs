@@ -844,6 +844,12 @@ impl Target {
                     sources.push((state.host_cr3 & mask, state.host_gs_base, state.host_rip));
                 }
             }
+            Err(_) if sources.is_empty() && self.phys.ram_runs().is_empty() => {
+                return Err(Error::Hypervisor(
+                    "reading the hypervisor's memory needs direct host RAM: the memory or gdb backend, or kd/kdnet with --memory-source host"
+                        .to_string(),
+                ));
+            }
             Err(error) if sources.is_empty() => return Err(error),
             Err(_) => {}
         }
