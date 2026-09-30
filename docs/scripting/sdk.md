@@ -50,6 +50,7 @@ A `Debugger` groups its API into namespaces instead of flat `inspect_*` methods.
 | `dbg.breakpoints`, `dbg.exceptions` | Breakpoint handles and exception policies |
 | `dbg.inspect`, `dbg.drivers` | System-wide reports and decoders, and driver objects |
 | `dbg.secure_kernel` | The VBS secure kernel and its trustlets (VTL1). Read-only. |
+| `dbg.hypervisor_partitions()` | The partitions and virtual processors of the Windows hypervisor. Read-only. |
 
 `dbg.processes` is keyed by PID. If no process has that PID, `dbg.processes[pid]` raises `KeyError` and `.get(pid)` returns `None`. `dbg.processes.find(name)` returns a list of the processes whose image name matches exactly, ignoring case.
 
@@ -193,6 +194,19 @@ for cpu in dbg.cpus:
         for frame in cpu.thread.backtrace(limit=5):
             print("   ", frame.symbol)              # nt!HalProcessorIdle+0xf, nt!PpmIdleDefaultExecute+0x2b, ...
 ```
+
+### Hypervisor partitions
+
+`dbg.hypervisor_partitions()` lists the partitions of the Windows hypervisor, root first, as {command}`!hvpartitions` and {command}`!hvvps` do. Each call walks them again. Each partition has `address`, `id`, `parent_id` (`None` for the root partition), `privileges`, `privilege_names` (the TLFS names of the set privileges), and `virtual_processors`. Each VP has `index`, `address`, `vtl` (the VTL that it runs or last ran in), and `vtls`, a `dict` from each VTL enabled on the VP to a `HypervisorVtl`. A `HypervisorVtl` has `level`, `context` (the hypervisor's context object), and, from the VTL's eVMCS, `vmcs` (its physical address), `ept_pointer`, `rip`, and `exit_reason`, which are `None` without `hv-evmcs` or for a VP that has not started. All of these have `to_dict()`.
+
+```python
+root = dbg.hypervisor_partitions()[0]
+for vp in root.virtual_processors:
+    for vtl in vp.vtls.values():
+        print(vp.index, vtl.level, hex(vtl.context), vtl.vmcs and hex(vtl.vmcs), vtl.ept_pointer and hex(vtl.ept_pointer))
+```
+
+This needs the `hv-evmcs` enlightenment or a vCPU that is stopped in the hypervisor, and an Intel host, and it raises `NtoseyeError` if ntoseye does not recognize the hypervisor build ([supported builds](../platforms/vbs.md#hypervisor-partitions-and-virtual-processors)). This feature is experimental.
 
 ### Memory of a vCPU
 

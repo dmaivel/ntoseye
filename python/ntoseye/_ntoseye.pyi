@@ -2129,6 +2129,15 @@ class Debugger:
         `StaleHandleError`, so keep this value with raw addresses to know when
         they become stale.
         """
+    def hypervisor_partitions(self, /) -> list[HypervisorPartition]:
+        """
+        The partitions of the Windows hypervisor, root first, with their
+        virtual processors, as `!hvpartitions` and `!hvvps` list them. Each
+        call walks them again. This needs the VM's `hv-evmcs` enlightenment or
+        a vCPU stopped in the hypervisor, and an Intel host. Raises
+        `NtoseyeError` if ntoseye does not recognize the layout of this
+        hypervisor build. This feature is experimental.
+        """
     @property
     def inspect(self, /) -> Inspect:
         """
@@ -5052,6 +5061,96 @@ class Heaps:
         Find the heap block that contains `addr` (`!heap -x`).
         """
     def get(self, /, index: int) -> Heap |None: ...
+
+@final
+class HypervisorPartition:
+    """
+    A partition of the Windows hypervisor, as it was when listed.
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def address(self, /) -> int:
+        """
+        The address of the hypervisor's partition object.
+        """
+    @property
+    def id(self, /) -> int:
+        """
+        The partition ID (the root partition's is 1).
+        """
+    @property
+    def parent_id(self, /) -> int |None:
+        """
+        The parent partition's ID, or `None` for the root partition.
+        """
+    @property
+    def privilege_names(self, /) -> list[str]:
+        """
+        The TLFS names of the privileges in `privileges`
+        (`["AccessVpRunTimeReg", ..., "CreatePartitions", ...]`). Set bits
+        that the TLFS lists as reserved have no name and are left out.
+        """
+    @property
+    def privileges(self, /) -> int:
+        """
+        The partition's privileges, as the TLFS `HV_PARTITION_PRIVILEGE_MASK`.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        Return the partition as a plain `dict` (`address`, `id`, `parent_id`,
+        `privileges`, `privilege_names`, and `virtual_processors`, a list of their dicts).
+        """
+    @property
+    def virtual_processors(self, /) -> list[VirtualProcessor]:
+        """
+        The partition's virtual processors, by index.
+        """
+
+@final
+class HypervisorVtl:
+    """
+    One VTL of a virtual processor: the hypervisor's context for it and, when
+    found, its eVMCS and the guest state saved there.
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def context(self, /) -> int:
+        """
+        The address of the hypervisor's context object for this VTL.
+        """
+    @property
+    def ept_pointer(self, /) -> int |None:
+        """
+        The VTL's EPT pointer, the root of its second-level address
+        translation, or `None` without the eVMCS.
+        """
+    @property
+    def exit_reason(self, /) -> int |None:
+        """
+        The basic reason (Intel SDM Appendix C) the VTL last left for the
+        hypervisor, or `None` without the eVMCS.
+        """
+    @property
+    def level(self, /) -> int:
+        """
+        The VTL (0 for NT, 1 for the secure kernel).
+        """
+    @property
+    def rip(self, /) -> int |None:
+        """
+        The guest RIP where the VTL left off, or `None` without the eVMCS.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        Return the VTL as a plain `dict` (`level`, `context`, `vmcs`,
+        `ept_pointer`, `rip`, `exit_reason`).
+        """
+    @property
+    def vmcs(self, /) -> int |None:
+        """
+        The physical address of the VTL's eVMCS, or `None` when ntoseye did
+        not find where the context keeps it (no `hv-evmcs`).
+        """
 
 @final
 class Idt(BaseRecord):
@@ -12558,6 +12657,39 @@ class VerifierSuspectDriver(BaseRecord):
     def unloads(self, /) -> int:
         """
         The number of times that the driver unloaded.
+        """
+
+@final
+class VirtualProcessor:
+    """
+    A virtual processor of a Windows hypervisor partition.
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def address(self, /) -> int:
+        """
+        The address of the hypervisor's VP object.
+        """
+    @property
+    def index(self, /) -> int:
+        """
+        The VP index in its partition.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        Return the VP as a plain `dict` (`index`, `address`, `vtl`, and `vtls`,
+        a dict from each VTL to its dict).
+        """
+    @property
+    def vtl(self, /) -> int:
+        """
+        The VTL that the VP runs, or last ran, in.
+        """
+    @property
+    def vtls(self, /) -> dict[int, HypervisorVtl]:
+        """
+        Each VTL enabled on the VP, keyed by VTL (`{0: ..., 1: ...}` under
+        VBS).
         """
 
 @final

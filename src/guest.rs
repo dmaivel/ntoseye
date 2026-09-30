@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
 mod discovery;
 mod evmcs;
 mod exit_registers;
+pub mod hv_layout;
+pub mod hypervisor;
 mod image;
 mod modules;
 pub mod pdb_recovery;
@@ -29,6 +31,7 @@ use discovery::{
 };
 pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState};
 pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout};
+pub use hypervisor::{HvMemory, HvPartition, HvVirtualProcessor, HvVtl, privilege_names};
 pub use image::{Image, SymbolRef};
 pub use secure_kernel::{SecureKernel, TrustletInfo};
 
@@ -191,6 +194,9 @@ pub struct Guest {
     /// general-purpose registers, by entry point (`host_rip`), or why that
     /// could not be read off the code.
     exit_register_layouts: Mutex<HashMap<u64, std::result::Result<ExitRegisterLayout, String>>>,
+    /// The Windows hypervisor's partition layout, by image base, or why it
+    /// could not be read off the code.
+    partition_layouts: Mutex<HashMap<u64, std::result::Result<hv_layout::PartitionLayout, String>>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -233,6 +239,7 @@ impl Guest {
             foreign_images: Mutex::new(Vec::new()),
             evmcs_pages: Mutex::new(EvmcsCache::default()),
             exit_register_layouts: Mutex::new(HashMap::new()),
+            partition_layouts: Mutex::new(HashMap::new()),
         }
     }
 

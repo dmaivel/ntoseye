@@ -31,6 +31,7 @@ pub mod context;
 pub mod debugger;
 pub mod embed;
 pub mod handle;
+pub mod hypervisor;
 pub mod inspect;
 pub mod iter;
 pub mod memory;
@@ -282,6 +283,8 @@ pub mod _ntoseye {
     use super::process::{Heap, Heaps, Process, Processes, Regions};
     #[pymodule_export]
     use super::record::{BaseRecord, Record};
+    #[pymodule_export]
+    use super::hypervisor::{HypervisorPartition, HypervisorVtl, VirtualProcessor};
     #[pymodule_export]
     use super::secure::{SecureKernel, Trustlet};
     #[pymodule_export]

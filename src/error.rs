@@ -100,6 +100,9 @@ pub enum Error {
     #[error("hypervisor-saved VTL state: {0}")]
     SavedVtlState(String),
 
+    #[error("Windows hypervisor: {0}")]
+    Hypervisor(String),
+
     #[error("PE view failed")]
     ViewFailed,
 

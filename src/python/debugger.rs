@@ -12,6 +12,7 @@ use super::args::{Disposition, Step, Until};
 use super::breakpoints::{Breakpoints, Exceptions};
 use super::context::Space;
 use super::handle::{Debugger, Owner, require_halted};
+use super::hypervisor::HypervisorPartition;
 use super::inspect::Inspect;
 use super::memory::Memory;
 use super::module::{Drivers, Modules};
@@ -74,6 +75,24 @@ impl Debugger {
     fn secure_kernel(slf: &Bound<'_, Self>) -> PyResult<SecureKernel> {
         let py = slf.py();
         SecureKernel::discover(py, namespace_owner(slf).derive(py))
+    }
+
+    /// The partitions of the Windows hypervisor, root first, with their
+    /// virtual processors, as `!hvpartitions` and `!hvvps` list them. Each
+    /// call walks them again. This needs the VM's `hv-evmcs` enlightenment or
+    /// a vCPU stopped in the hypervisor, and an Intel host. Raises
+    /// `NtoseyeError` if ntoseye does not recognize the layout of this
+    /// hypervisor build. This feature is experimental.
+    fn hypervisor_partitions(slf: &Bound<'_, Self>) -> PyResult<Vec<HypervisorPartition>> {
+        let py = slf.py();
+        let owner = namespace_owner(slf);
+        let partitions = owner.with(py, |session| {
+            session.target.hypervisor_partitions().map_err(err)
+        })?;
+        Ok(partitions
+            .into_iter()
+            .map(|info| HypervisorPartition::new(owner.clone_ref(py), info))
+            .collect())
     }
 
     /// Running processes, keyed by PID: `processes[4]`, `.find(name)`.

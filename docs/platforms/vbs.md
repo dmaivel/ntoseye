@@ -40,6 +40,7 @@ The VTL1 features on this page need an **AMD64 guest** and are not available on 
 | VTL1 breakpoints and stepping | `gdb` on QEMU/KVM | Supported | Untested |
 | Stepping NT while the Windows hypervisor runs | `gdb` | Supported | Untested |
 | [Where NT left off](#where-nt-left-off-under-the-hypervisor) under the hypervisor | `gdb` | Supported (needs `hv-evmcs`) | Not supported |
+| [Hypervisor partitions and virtual processors](#hypervisor-partitions-and-virtual-processors) | `memory`, `gdb`; `kd`/`kdnet` reading host memory | Supported (needs `hv-evmcs`, or a `gdb` vCPU stopped in the hypervisor) | Not supported |
 
 We tested all of these features on one host, a Core i9-14900F with QEMU/KVM, with Windows 11 guests (10.0.26100 and 10.0.26200) and memory integrity (HVCI) both off and on.
 
@@ -127,6 +128,45 @@ Hardware breakpoints do not write to integrity-sensitive code, but they can be v
 {command}`!trustlets` reads secure-kernel structures that the public symbols do not describe ([how](../internals/vbs.md#trustlet-enumeration)). It recognizes every build that we examined, from 10.0.19041 (Windows 10 20H1) to 10.0.28000. Older secure kernels do not have these routines with these names, so {command}`!trustlets` gives an error on them, but you can still inspect the secure kernel and its modules.
 
 ntoseye does not list the modules that are loaded in a trustlet. The lists that {command}`!trustlets` walks are live and are not atomic snapshots, so the walk can become incorrect if a process exits or a module unloads during it.
+
+## Hypervisor partitions and virtual processors
+
+The Windows hypervisor keeps a partition object for NT (the root partition) and one for each Hyper-V VM, WSL2 instance, or Windows Sandbox that runs in the guest, and a virtual processor (VP) object for each of their processors. `ntoseye` walks these objects:
+
+- {command}`!hvpartitions`: Show each partition, root first, with its partition object, partition ID, the parent's ID, the number of VPs, and its privilege mask (the TLFS `HV_PARTITION_PRIVILEGE_MASK`). Below the table, it shows the TLFS names of each partition's privileges, and the set bits that the TLFS lists as reserved as a hexadecimal value.
+- {command}`!hvvps` `[partition-id]`: Show the VPs of a partition, the root partition by default, with one row for each VTL that is enabled on a VP. `*` marks the VTL that the VP runs or last ran in. Each row shows the hypervisor's context object for the VTL, the physical address of the VTL's eVMCS, its EPT pointer, the guest RIP where the VTL left off, and why it last left for the hypervisor. The hypervisor also allocates contexts for VTLs that a partition does not enable, for example VTL1 in a VM without VBS, and the command does not show those.
+
+With a Hyper-V VM that runs in the guest:
+
+```text
+mem:1> !hvpartitions
+Partition         ID   Parent  VPs  Privileges
+ffffe80000001000  0x1  root    4    002bb9ff00003fff
+ffffe80200001000  0x2  0x1     2    003b803000002e7f
+0x1: AccessVpRunTimeReg ... CreatePartitions AccessPartitionId ... StartVirtualProcessor (+0x8a00800001000)
+0x2: AccessVpRunTimeReg ... PostMessages SignalEvents AccessVSM AccessVpRegisters EnableExtendedHypercalls StartVirtualProcessor (+0x8800000000000)
+
+mem:1> !hvvps
+VP  Address           VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
+0   ffffe8000026c050  0*   ffffe8000026d000  1160e3000  10155801e    fffff8028342950f  HLT
+                      1    ffffe8000026f000  1160e6000  10155b01e    fffff80213c70035  VMCALL
+1   ffffe80000389050  0*   ffffe80000390000  130a13000  10155801e    fffff8028342950f  HLT
+                      1    ffffe80000392000  130a16000  10155b01e    fffff80213c70035  VMCALL
+...
+
+mem:1> !hvvps 2
+VP  Address           VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
+0   ffffe80200231050  0*   ffffe80200232000  1baadc000  1baa3105e    000000001ff26114  HLT
+1   ffffe8020024b050  0*   ffffe8020024c000  1babe7000
+```
+
+The EPT pointer is the root of the VTL's second-level address translation (SLAT), which maps the guest's physical addresses to host physical addresses with read, write, and execute permissions. The VPs of a partition share one EPT for each VTL, and VTL0 and VTL1 have different ones: this is how the secure kernel and memory integrity (HVCI) set page permissions that NT cannot change. The root partition's EPT maps each address to itself, except the pages that the hypervisor keeps for itself. The eVMCS columns stay empty without the `hv-evmcs` enlightenment, and the state columns stay empty for a VP that has not started, such as the second VP of a VM still in its firmware.
+
+The addresses are in the address space of the hypervisor. To read them with {command}`dq` and the other memory commands, first select the context of a vCPU that is stopped in the hypervisor with {command}`.cxr`.
+
+`ntoseye` reaches the objects from the hypervisor's per-processor blocks, whose addresses it takes from the eVMCS pages (their host GS base) and from the selected vCPU when that vCPU is stopped in the hypervisor. So the commands need the `hv-evmcs` enlightenment, as [where NT left off](#where-nt-left-off-under-the-hypervisor) does, or a `gdb` stop in the hypervisor, and they do not work on AMD hosts. `hvix64` has no public symbols, so `ntoseye` reads the offsets of these objects from the hypervisor's own code and checks every object before it shows it ([how](../internals/vbs.md#partitions-and-virtual-processors)). It recognizes every build that we examined, from 10.0.16299 to 10.0.28000. If it does not recognize a build, the commands give an error and do not guess.
+
+The walk reads live memory and is not an atomic snapshot, so a partition that is created or deleted during the walk can make it fail.
 
 ## Stops in the Windows hypervisor
 

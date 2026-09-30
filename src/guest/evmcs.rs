@@ -40,7 +40,9 @@ const MAX_PAGES: usize = 4096;
 
 const HOST_CR3: usize = 0x30;
 const HOST_RIP: usize = 0x50;
+const HOST_GS_BASE: usize = 0x248;
 const HOST_RSP: usize = 0x268;
+const EPT_POINTER: usize = 0x270;
 const GUEST_ES_SELECTOR: usize = 0x80;
 const GUEST_CS_SELECTOR: usize = 0x82;
 const GUEST_SS_SELECTOR: usize = 0x84;
@@ -110,6 +112,23 @@ impl EvmcsPages {
         self.pages.is_empty()
     }
 
+    /// Every page that still holds an eVMCS, read now, whatever its root.
+    pub fn all_states(&self, phys: &impl MemoryOps<PhysAddr>) -> Vec<EvmcsState> {
+        self.pages
+            .iter()
+            .filter_map(|&(address, _)| {
+                let mut page = [0u8; EVMCS_BYTES];
+                phys.read_bytes(address, &mut page).ok()?;
+                let state = EvmcsState::parse(&page)?;
+                Some(EvmcsState {
+                    address,
+                    current: self.current.contains(&address),
+                    ..state
+                })
+            })
+            .collect()
+    }
+
     fn has_root(&self, host_root: u64, mask: u64) -> bool {
         self.pages
             .iter()
@@ -129,6 +148,12 @@ pub struct EvmcsState {
     /// The hypervisor's VM-exit entry point, and the stack it runs on.
     pub host_rip: u64,
     pub host_rsp: u64,
+    /// The hypervisor's per-processor block on the processor that runs
+    /// this VP.
+    pub host_gs_base: u64,
+    /// The EPT pointer: the root of the guest's second-level address
+    /// translation (SLAT) and its memory type and walk length.
+    pub ept_pointer: u64,
     /// Basic exit reason in bits 15:0 (Intel SDM Appendix C).
     pub exit_reason: u32,
     /// VM-exit interruption information: the vector and type of the event
@@ -170,6 +195,17 @@ fn u64_at(page: &[u8], offset: usize) -> u64 {
 }
 
 impl EvmcsState {
+    /// The eVMCS at `address`, read now; `None` when the page does not hold
+    /// one a 64-bit paged guest runs under.
+    pub fn read(phys: &impl MemoryOps<PhysAddr>, address: PhysAddr) -> Option<Self> {
+        let mut page = [0u8; EVMCS_BYTES];
+        phys.read_bytes(address, &mut page).ok()?;
+        Some(Self {
+            address,
+            ..Self::parse(&page)?
+        })
+    }
+
     /// An eVMCS of a hypervisor running a 64-bit paged guest: version 1, a
     /// host entry point in the upper half, and guest paging on. Anything
     /// else in RAM that starts with a 1 fails one of these.
@@ -190,6 +226,8 @@ impl EvmcsState {
             host_cr3: u64_at(page, HOST_CR3),
             host_rip,
             host_rsp: u64_at(page, HOST_RSP),
+            host_gs_base: u64_at(page, HOST_GS_BASE),
+            ept_pointer: u64_at(page, EPT_POINTER),
             exit_reason: u32_at(page, VM_EXIT_REASON),
             exit_interruption_info: u32_at(page, VM_EXIT_INTR_INFO),
             exit_instruction_length: u32_at(page, VM_EXIT_INSTRUCTION_LEN),
@@ -331,6 +369,30 @@ impl EvmcsCache {
 }
 
 impl Guest {
+    /// The eVMCS pages in host RAM, for no VP in particular: scanned on
+    /// first use and remembered for the boot, as in [`Self::evmcs_pages`].
+    pub fn any_evmcs_pages(
+        &self,
+        phys: &PhysMem,
+        interrupt: &AtomicBool,
+    ) -> Result<Arc<EvmcsPages>> {
+        if let Some(pages) = self.cached_evmcs_pages() {
+            return Ok(pages);
+        }
+        let runs = phys.ram_runs();
+        if runs.is_empty() {
+            return Err(Error::SavedVtlState(
+                "direct host RAM is required to read hypervisor memory".to_string(),
+            ));
+        }
+        let pages = Arc::new(scan(phys, &runs, interrupt)?);
+        let mut cache = self
+            .evmcs_pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Ok(Arc::clone(cache.pages.get_or_insert(pages)))
+    }
+
     /// The eVMCS pages in host RAM, for the VP whose hypervisor root is
     /// `host_root` (compared under `mask`). Scanned on first use and
     /// remembered for the boot, as is finding none (the VM does not expose

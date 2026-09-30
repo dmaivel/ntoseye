@@ -192,6 +192,42 @@ def test_hypervisor_memory_is_its_own_and_read_only(halted: Debugger) -> None:
         hypervisor.describe(cpu.rip)
 
 
+def test_hypervisor_partitions_mirror_the_vcpus(halted: Debugger) -> None:
+    """The root partition has one VP per vCPU, by index, and a VP whose vCPU
+    is halted in the hypervisor keeps its VTLs' eVMCS pages in their contexts
+    and runs the VTL that its current eVMCS holds: the partition walk and the
+    eVMCS scan are independent readings of the same processor."""
+    try:
+        partitions = halted.hypervisor_partitions()
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
+    root = partitions[0]
+    assert root.parent_id is None
+    assert "CreatePartitions" in root.privilege_names
+    ids = {partition.id for partition in partitions}
+    for child in partitions[1:]:
+        # A child was created by a partition in the tree and cannot create
+        # partitions itself; without VSM its VPs have only VTL0.
+        assert child.parent_id in ids and "CreatePartitions" not in child.privilege_names
+        if "AccessVSM" not in child.privilege_names:
+            assert all(set(vp.vtls) == {0} for vp in child.virtual_processors)
+    cpus = list(halted.cpus)
+    assert [vp.index for vp in root.virtual_processors] == list(range(len(cpus)))
+    compared = 0
+    for cpu, vp in zip(cpus, root.virtual_processors):
+        assert vp.vtl in vp.vtls
+        # The eVMCS scan found each saved state's page by its contents; the
+        # walk reaches the same page through the VP's VTL context.
+        for saved in cpu.saved_vtl:
+            assert vp.vtls[saved.vtl].vmcs == saved.evmcs
+        current = next((saved for saved in cpu.saved_vtl if saved.current), None)
+        if current is not None and not current.may_be_stale:
+            assert vp.vtl == current.vtl
+            compared += 1
+    if compared == 0:
+        pytest.skip("no vCPU halted in the hypervisor with a current saved state to compare")
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")

@@ -1,6 +1,7 @@
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
+use crate::guest::privilege_names;
 use crate::repl::*;
 use crate::ui;
 use crate::unwind::halted_in_windows_hypervisor;
@@ -21,6 +22,22 @@ repl_command! {
     details: "Reads SkpsProcessList through the page tables of the secure kernel. Each row shows the secure-kernel process object, the NT PID and image name, the trustlet ID, and the address-space root. If the internal layout is not supported, the command gives an error and does not guess offsets. The command does not change the scope.",
 }
 
+repl_command! {
+    cmd_hvpartitions();
+    names: ["!hvpartitions"],
+    usage: "!hvpartitions",
+    summary: "List the partitions of the Windows hypervisor, root first.",
+    details: "Walks the hypervisor's partition objects from its processor blocks, which come from the eVMCS pages (the VM's hv-evmcs enlightenment) or from a vCPU stopped in the hypervisor. Each row shows the partition object, its partition ID, the parent's ID, the number of virtual processors, and the privilege mask (HV_PARTITION_PRIVILEGE_MASK). hvix64 has no public symbols, so the offsets are read off the hypervisor's own code and each object is validated before it is shown; if the layout is not recognized, the command gives an error and does not guess offsets. Intel hosts only.",
+}
+
+repl_command! {
+    cmd_hvvps;
+    names: ["!hvvps"],
+    usage: "!hvvps [partition-id]",
+    summary: "List the virtual processors of a Windows hypervisor partition (the root by default).",
+    details: "Each row is one VTL enabled on a VP, and * marks the VTL the VP runs or last ran in. The row shows the hypervisor's context object for the VTL and, when found, the physical address of the VTL's eVMCS with the EPT pointer (the root of the VTL's second-level address translation), the guest RIP where the VTL left off, and why it last left for the hypervisor. The eVMCS columns need the VM's hv-evmcs enlightenment. The partition ID uses the current radix. See !hvpartitions for where the objects come from.",
+}
+
 /// Commands that only read memory through the current root or are
 /// debugger-local, so they mean the same in any VTL1 address space. No VTL0
 /// register file or mediated write may be interpreted as belonging to the
@@ -30,6 +47,8 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
         spec.names[0],
         ".vtl"
             | "!trustlets"
+            | "!hvpartitions"
+            | "!hvvps"
             | ".process"
             | "attach"
             | "detach"
@@ -276,6 +295,110 @@ impl ReplState<'_> {
         } else {
             outln!("VTL0 inspection: DTB {}\n", ui::addr(target.current_dtb()));
         }
+        Ok(())
+    }
+
+    fn cmd_hvpartitions(&mut self) -> Result<()> {
+        let partitions = match self.ctx.target.hypervisor_partitions() {
+            Ok(partitions) => partitions,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let mut table = Builder::default();
+        table.push_record(["Partition", "ID", "Parent", "VPs", "Privileges"]);
+        for partition in &partitions {
+            table.push_record([
+                ui::addr(partition.address),
+                format!("{:#x}", partition.id),
+                partition
+                    .parent
+                    .map_or_else(|| "root".to_string(), |id| format!("{id:#x}")),
+                partition.virtual_processors.len().to_string(),
+                format!("{:016x}", partition.privileges),
+            ]);
+        }
+        print_padded_table(table);
+        for partition in &partitions {
+            let (names, unnamed) = privilege_names(partition.privileges);
+            let mut line = names.join(" ");
+            if unnamed != 0 {
+                line.push_str(&format!(" (+{unnamed:#x})"));
+            }
+            outln!("{} {}", ui::muted(&format!("{:#x}:", partition.id)), line);
+        }
+        outln!();
+        Ok(())
+    }
+
+    fn cmd_hvvps(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.len() > 1 {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let id = match invocation.arg(0) {
+            Some(text) => match self.eval_or_report(text) {
+                Some(value) => Some(value.0),
+                None => return Ok(()),
+            },
+            None => None,
+        };
+        let partitions = match self.ctx.target.hypervisor_partitions() {
+            Ok(partitions) => partitions,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let partition = match id {
+            Some(id) => partitions.into_iter().find(|p| p.id == id),
+            None => partitions.into_iter().next(),
+        };
+        let Some(partition) = partition else {
+            error!("no partition with ID {:#x}", id.unwrap_or_default());
+            return Ok(());
+        };
+        let mut table = Builder::default();
+        table.push_record([
+            "VP",
+            "Address",
+            "VTL",
+            "Context",
+            "eVMCS",
+            "EPT pointer",
+            "Guest RIP",
+            "Last exit",
+        ]);
+        for vp in &partition.virtual_processors {
+            for (row, vtl) in vp.vtls.iter().enumerate() {
+                let current = if vtl.level == vp.vtl { "*" } else { "" };
+                let state = vtl.state.as_ref();
+                table.push_record([
+                    if row == 0 {
+                        vp.index.to_string()
+                    } else {
+                        String::new()
+                    },
+                    if row == 0 {
+                        ui::addr(vp.address)
+                    } else {
+                        String::new()
+                    },
+                    format!("{}{current}", vtl.level),
+                    ui::addr(vtl.context),
+                    vtl.vmcs
+                        .map_or_else(String::new, |page| format!("{page:x}")),
+                    state.map_or_else(String::new, |state| format!("{:x}", state.ept_pointer)),
+                    state.map_or_else(String::new, |state| ui::addr(state.rip)),
+                    state
+                        .and_then(|state| state.exit_reason_name())
+                        .unwrap_or_default()
+                        .to_string(),
+                ]);
+            }
+        }
+        print_padded_table(table);
         Ok(())
     }
 

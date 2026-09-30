@@ -14,11 +14,12 @@ use crate::{
     dbg_backend::processor_index_from_backend_thread_id,
     error::{Error, Result},
     guest::{
-        EXIT_GPRS, EvmcsState, Guest, ModuleInfo, ModuleSymbolLoadReport, PdbRecovery,
-        SecureKernel, SessionSpace, TrustletInfo,
+        EXIT_GPRS, EvmcsState, Guest, HvMemory, HvPartition, ModuleInfo, ModuleSymbolLoadReport,
+        PdbRecovery, SecureKernel, SessionSpace, TrustletInfo, hv_layout, hypervisor,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
+    phys::PhysMem,
     symbols::SymbolStore,
     types::{Arch, Dtb, PhysAddr, VirtAddr},
     unwind::halted_in_windows_hypervisor,
@@ -564,5 +565,145 @@ fn image_containing<B: MemoryOps<PhysAddr>>(
             return None;
         }
         page -= PAGE_SIZE as u64;
+    }
+}
+
+/// Reads of the Windows hypervisor's address space for the partition walk.
+struct HypervisorMemory<'a>(AddressSpace<'a, PhysMem>);
+
+impl HvMemory for HypervisorMemory<'_> {
+    fn u64_at(&self, address: u64) -> Option<u64> {
+        self.0.read::<u64>(VirtAddr(address)).ok()
+    }
+
+    fn u8_at(&self, address: u64) -> Option<u8> {
+        self.0.read::<u8>(VirtAddr(address)).ok()
+    }
+}
+
+/// `(start, end)` RVAs of an image's sections.
+type RvaRanges = Vec<(u32, u32)>;
+
+/// The hypervisor image at `image`, laid out by RVA from its sections as
+/// they are mapped in `memory`. Unmapped pages (discarded sections) read as
+/// zeros, which decode as no code and no table.
+fn hypervisor_image<B: MemoryOps<PhysAddr>>(
+    memory: &AddressSpace<'_, B>,
+    image: &ModuleInfo,
+) -> Result<(Vec<u8>, RvaRanges, RvaRanges)> {
+    let base = image.base_address.0;
+    let headers = read_pe_header_page(image.base_address, memory)?;
+    let view = PeView::from_bytes(&headers).map_err(|_| Error::ViewFailed)?;
+    let size = image.size as usize;
+    let mut bytes = vec![0u8; size];
+    let (mut code, mut data) = (Vec::new(), Vec::new());
+    for section in view.section_headers() {
+        let start = section.VirtualAddress as usize;
+        let end = (start + section.VirtualSize.max(section.SizeOfRawData) as usize).min(size);
+        let mut page = start;
+        while page < end {
+            let next = ((page / PAGE_SIZE) + 1) * PAGE_SIZE;
+            let chunk = &mut bytes[page..next.min(end)];
+            if memory
+                .read_bytes(VirtAddr(base + page as u64), chunk)
+                .is_err()
+            {
+                chunk.fill(0);
+            }
+            page = next;
+        }
+        let range = (start as u32, end as u32);
+        if section.Characteristics & 0x2000_0000 != 0 {
+            code.push(range);
+        } else {
+            data.push(range);
+        }
+    }
+    Ok((bytes, code, data))
+}
+
+impl Target {
+    /// The Windows hypervisor's partitions and their virtual processors,
+    /// root first. Its processor blocks come from the eVMCS pages (their
+    /// host GS base) and from the selected vCPU when it is halted in the
+    /// hypervisor; the offsets are read off the hypervisor's own code.
+    pub fn hypervisor_partitions(&self) -> Result<Vec<HvPartition>> {
+        if self.arch() != Arch::Amd64 {
+            return Err(Error::Hypervisor(
+                "partitions need an AMD64 target".to_string(),
+            ));
+        }
+        let guest = self.guest()?;
+        let mask = self.arch().dtb_page_mask();
+        // (hypervisor root, processor block, an address in the image)
+        let mut sources = Vec::new();
+        if let Some(registers) = &self.registers
+            && let (Some(&cr3), Some(&rip), Some(&gs)) = (
+                registers.get(self.arch().dtb_register()),
+                registers.get("rip"),
+                registers.get("gs_base"),
+            )
+            && halted_in_windows_hypervisor(self, cr3, rip)
+        {
+            sources.push((cr3 & mask, gs, rip));
+        }
+        let mut known = std::collections::HashSet::new();
+        match guest.any_evmcs_pages(&self.phys, &self.interrupt) {
+            Ok(pages) => {
+                for state in pages.all_states(&*self.phys) {
+                    known.insert(state.address);
+                    sources.push((state.host_cr3 & mask, state.host_gs_base, state.host_rip));
+                }
+            }
+            Err(error) if sources.is_empty() => return Err(error),
+            Err(_) => {}
+        }
+        if sources.is_empty() {
+            return Err(Error::Hypervisor(
+                "no processor block found: this needs the VM's hv-evmcs enlightenment or a vCPU stopped in the hypervisor"
+                    .to_string(),
+            ));
+        }
+        // A page left over from an earlier boot names a root that no longer
+        // maps the hypervisor; the first source whose root does is used.
+        let mut tried = Vec::new();
+        let (memory, image) = sources
+            .iter()
+            .filter(|&&(root, _, _)| {
+                let fresh = !tried.contains(&root);
+                tried.push(root);
+                fresh
+            })
+            .find_map(|&(root, _, rip)| {
+                let memory = self.address_space(root);
+                let image =
+                    image_containing(&memory, rip).filter(|image| image.short_name == "hv")?;
+                Some((memory, image))
+            })
+            .ok_or_else(|| Error::Hypervisor("the hypervisor image was not found".to_string()))?;
+        let layout = guest.partition_layout(image.base_address.0, || {
+            let (bytes, code, data) = hypervisor_image(&memory, &image)?;
+            hv_layout::derive(&hv_layout::ImageView {
+                base: image.base_address.0,
+                bytes: &bytes,
+                code,
+                data,
+            })
+        })?;
+        let mut processors: Vec<u64> = sources.iter().map(|&(_, gs, _)| gs).collect();
+        processors.sort_unstable();
+        processors.dedup();
+        let mut partitions =
+            hypervisor::partitions(&layout, &HypervisorMemory(memory), &processors, &known)?;
+        for vtl in partitions
+            .iter_mut()
+            .flat_map(|partition| &mut partition.virtual_processors)
+            .flat_map(|vp| &mut vp.vtls)
+        {
+            vtl.state = vtl
+                .vmcs
+                .and_then(|page| EvmcsState::read(&*self.phys, page));
+        }
+        Ok(partitions)
     }
 }
