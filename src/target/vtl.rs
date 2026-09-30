@@ -299,9 +299,8 @@ impl Target {
 
     /// The general-purpose registers of `state`'s last exit, for a vCPU at
     /// `rip` on the hypervisor root `root`: read where the hypervisor's exit
-    /// entry code saved them. The block they are in belongs to the logical
-    /// processor and holds the last exit from any VTL, so only the current
-    /// VTL's state has them, and only once the vCPU is past the stores. A
+    /// entry code saved them. The block they are in holds the last exit,
+    /// from whichever VTL made it, so only the current VTL's state has them, and only once the vCPU is past the stores. A
     /// vCPU that `entered` the hypervisor on a breakpoint on `host_rip` still
     /// holds them itself.
     fn saved_general_registers(
