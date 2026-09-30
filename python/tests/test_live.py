@@ -231,7 +231,8 @@ def test_hypervisor_partitions_mirror_the_vcpus(halted: Debugger) -> None:
 def test_vtl_ept_maps_nt_in_place_and_hides_the_secure_kernel_from_vtl0(halted: Debugger) -> None:
     """The root partition's EPT maps each guest physical address to itself in
     every VTL, and VSM keeps the secure kernel's pages out of VTL0's EPT
-    while VTL1 can read them."""
+    while VTL1 can read them, both through one address and in the comparison
+    of the whole EPTs."""
     try:
         vp = halted.hypervisor_partitions()[0].virtual_processors[0]
         sk = halted.secure_kernel
@@ -249,6 +250,13 @@ def test_vtl_ept_maps_nt_in_place_and_hides_the_secure_kernel_from_vtl0(halted: 
     assert hidden is None or not hidden.read
     visible = vp.vtls[1].translate(secure)
     assert visible is not None and visible.host_physical == secure and visible.read
+    # The comparison of the two EPTs finds the same page, in ranges that are
+    # in order and do not overlap.
+    differences = vp.ept_differences()
+    assert all(a["end"] <= b["start"] for a, b in zip(differences, differences[1:]))
+    covering = [d for d in differences if d["start"] <= secure < d["end"]]
+    assert len(covering) == 1
+    assert (covering[0]["vtl0"] or "-").startswith("-") and covering[0]["vtl1"].startswith("r")
 
 
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:

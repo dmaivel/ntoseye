@@ -641,6 +641,20 @@ impl Target {
         )
     }
 
+    /// Every mapping of the EPT of a VTL whose saved state is `state`, in
+    /// address order. `None` when a table is unreadable.
+    pub fn guest_physical_mappings(&self, state: &EvmcsState) -> Option<Vec<ept::Leaf>> {
+        ept::leaves(state.ept_pointer, state.mode_based_execute(), |table| {
+            let mut bytes = [0u8; PAGE_SIZE];
+            self.phys.read_bytes(table, &mut bytes).ok()?;
+            let mut entries = [0u64; 512];
+            for (entry, chunk) in entries.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                *entry = u64::from_le_bytes(*chunk);
+            }
+            Some(entries)
+        })
+    }
+
     /// The Windows hypervisor's partitions and their virtual processors,
     /// root first. Its processor blocks come from the eVMCS pages (their
     /// host GS base) and from the selected vCPU when it is halted in the

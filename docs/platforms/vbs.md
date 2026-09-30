@@ -189,7 +189,29 @@ VTL  EPT pointer  Host physical                  Access  User exec  Page  Type
 1    10155c01e    18ba000                        rwx                2M    WB
 ```
 
-In the SDK, translate a virtual address with `memory.translate()` first. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
+In the SDK, translate a virtual address with `memory.translate()` first.
+
+{command}`!hveptdiff` `[partition-id [vp-index]]` walks the whole EPT of VTL0 and of VTL1 of a VP and lists every range of guest physical memory that the two map differently. A summary of how they differ comes first, largest first. With memory integrity on:
+
+```text
+mem:1> !hveptdiff
+VTL0 EPT 10155901e: 9184 mappings, 10.1G
+VTL1 EPT 10155c01e: 6378 mappings, 8.9G
+
+VTL0  VTL1  Ranges  Size
+rw-   rwx   93      7.8G
+rw-   none  17      1.3G
+r-x   rwx   35      70.0M
+none  rwx   32      35.7M
+r--   rwx   14      24.8M
+...
+
+Start      End        Size    VTL0  VTL1
+...
+216 ranges differ, 9.2G in all
+```
+
+Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute its data. The `r-x` ranges hold the code that NT can execute but not change, the `none` ranges the memory of the secure kernel and trustlets, and the `r--` ranges pages that NT can read but not write. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
 
 The addresses are in the address space of the hypervisor. To read them with {command}`dq` and the other memory commands, first select the context of a vCPU that is stopped in the hypervisor with {command}`.cxr`.
 

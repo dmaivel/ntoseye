@@ -12721,6 +12721,15 @@ class VirtualProcessor:
         """
         The address of the hypervisor's VP object.
         """
+    def ept_differences(self, /) -> list[dict[str, Any]]:
+        """
+        The guest physical ranges that VTL0's and VTL1's EPTs map differently,
+        as `!hveptdiff` lists them: dicts with `start`, `end` (exclusive), and
+        `vtl0` and `vtl1`, each access as `"r-x"`-style text (with `u` for
+        user-mode execute under mode-based execute control) or `None` where
+        that VTL maps nothing. Raises `NtoseyeError` unless both VTLs have eVMCS
+        state and readable EPTs.
+        """
     @property
     def index(self, /) -> int:
         """

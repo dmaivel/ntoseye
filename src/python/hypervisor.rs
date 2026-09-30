@@ -8,7 +8,7 @@ use pyo3::types::PyDict;
 use super::handle::Owner;
 use super::raise;
 use super::record::PlainDict;
-use crate::guest::ept::{EptMapping as EptInfo, EptTranslation};
+use crate::guest::ept::{Access, EptMapping as EptInfo, EptTranslation, differences};
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, privilege_names};
 
 /// A partition of the Windows hypervisor, as it was when listed.
@@ -185,6 +185,46 @@ impl VirtualProcessor {
                 )
             })
             .collect())
+    }
+
+    /// The guest physical ranges that VTL0's and VTL1's EPTs map differently,
+    /// as `!hveptdiff` lists them: dicts with `start`, `end` (exclusive), and
+    /// `vtl0` and `vtl1`, each access as `"r-x"`-style text (with `u` for
+    /// user-mode execute under mode-based execute control) or `None` where
+    /// that VTL maps nothing. Raises `NtoseyeError` unless both VTLs have eVMCS
+    /// state and readable EPTs.
+    fn ept_differences<'py>(&self, py: Python<'py>) -> PyResult<Vec<PlainDict<'py>>> {
+        let state = |level: u8| {
+            self.info
+                .vtls
+                .iter()
+                .find(|vtl| vtl.level == level)
+                .and_then(|vtl| vtl.state)
+        };
+        let (Some(vtl0), Some(vtl1)) = (state(0), state(1)) else {
+            return Err(raise("this VP has no eVMCS state for both VTL0 and VTL1"));
+        };
+        let mappings = self.owner.with(py, |session| {
+            Ok((
+                session.target.guest_physical_mappings(&vtl0),
+                session.target.guest_physical_mappings(&vtl1),
+            ))
+        })?;
+        let (Some(first), Some(second)) = mappings else {
+            return Err(raise("an EPT is unreadable or not a 4-level walk"));
+        };
+        let text = |access: Option<Access>| access.map(|access| access.to_string());
+        differences(&first, &second)
+            .into_iter()
+            .map(|difference| {
+                let dict = PyDict::new(py);
+                dict.set_item("start", difference.start)?;
+                dict.set_item("end", difference.end)?;
+                dict.set_item("vtl0", text(difference.first))?;
+                dict.set_item("vtl1", text(difference.second))?;
+                Ok(PlainDict(dict))
+            })
+            .collect()
     }
 
     /// Return the VP as a plain `dict` (`index`, `address`, `vtl`, and `vtls`,

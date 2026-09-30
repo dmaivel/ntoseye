@@ -84,6 +84,184 @@ pub fn translate(
     None
 }
 
+/// The access an EPT walk allows, as the entry bits (`READ`, `WRITE`,
+/// `EXECUTE`, and `USER_EXECUTE` under mode-based execute control).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Access(u8);
+
+impl Access {
+    pub fn read(self) -> bool {
+        self.0 & READ as u8 != 0
+    }
+
+    pub fn write(self) -> bool {
+        self.0 & WRITE as u8 != 0
+    }
+
+    pub fn execute(self) -> bool {
+        self.0 & EXECUTE as u8 != 0
+    }
+
+    /// User-mode execute, under mode-based execute control.
+    pub fn user_execute(self) -> Option<bool> {
+        (self.0 & 0x80 != 0).then_some(self.0 & 0x40 != 0)
+    }
+
+    fn of(allowed: u64, mode_based: bool) -> Self {
+        let mut bits = (allowed & (READ | WRITE | EXECUTE)) as u8;
+        if mode_based {
+            bits |= 0x80 | if allowed & USER_EXECUTE != 0 { 0x40 } else { 0 };
+        }
+        Self(bits)
+    }
+}
+
+/// `rwx`, with `u` or `-` added for user-mode execute under mode-based
+/// execute control.
+impl std::fmt::Display for Access {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bit = |allowed: bool, letter: char| if allowed { letter } else { '-' };
+        write!(
+            f,
+            "{}{}{}",
+            bit(self.read(), 'r'),
+            bit(self.write(), 'w'),
+            bit(self.execute(), 'x')
+        )?;
+        match self.user_execute() {
+            Some(user) => write!(f, "{}", bit(user, 'u')),
+            None => Ok(()),
+        }
+    }
+}
+
+/// One leaf of an EPT: `size` bytes of guest physical memory at `gpa`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leaf {
+    pub gpa: u64,
+    pub size: u64,
+    pub access: Access,
+}
+
+/// Every leaf of the EPT that `eptp` roots, in address order, reading each
+/// 4 KiB table of host physical memory with `read_table`. `None` when a table
+/// is unreadable or the pointer does not describe a 4-level walk.
+pub fn leaves(
+    eptp: u64,
+    mode_based: bool,
+    mut read_table: impl FnMut(u64) -> Option<[u64; 512]>,
+) -> Option<Vec<Leaf>> {
+    fn visit(
+        table: u64,
+        level: u8,
+        base: u64,
+        allowed: u64,
+        mode_based: bool,
+        read_table: &mut dyn FnMut(u64) -> Option<[u64; 512]>,
+        out: &mut Vec<Leaf>,
+    ) -> Option<()> {
+        let shift = 12 + 9 * u32::from(level - 1);
+        for (index, entry) in read_table(table)?.into_iter().enumerate() {
+            if entry & (READ | WRITE | EXECUTE) == 0 {
+                continue;
+            }
+            let gpa = base | ((index as u64) << shift);
+            let allowed = allowed & entry;
+            if level == 1 || (entry & LARGE != 0 && level <= 3) {
+                out.push(Leaf {
+                    gpa,
+                    size: 1 << shift,
+                    access: Access::of(allowed, mode_based),
+                });
+            } else {
+                visit(
+                    entry & ADDRESS,
+                    level - 1,
+                    gpa,
+                    allowed,
+                    mode_based,
+                    read_table,
+                    out,
+                )?;
+            }
+        }
+        Some(())
+    }
+    if (eptp >> 3) & 7 != 3 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let all = READ | WRITE | EXECUTE | USER_EXECUTE;
+    visit(
+        eptp & ADDRESS,
+        4,
+        0,
+        all,
+        mode_based,
+        &mut read_table,
+        &mut out,
+    )?;
+    Some(out)
+}
+
+/// A range of guest physical memory, `start..end`, that two EPTs map
+/// differently: with different access, or in one of them only (`None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Difference {
+    pub start: u64,
+    pub end: u64,
+    pub first: Option<Access>,
+    pub second: Option<Access>,
+}
+
+/// The ranges where the leaves `first` and `second` (each in address order,
+/// as [`leaves`] gives them) differ, adjacent ranges that differ the same way
+/// merged.
+pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<Difference> {
+    let mut bounds: Vec<u64> = first
+        .iter()
+        .chain(second)
+        .flat_map(|leaf| [leaf.gpa, leaf.gpa + leaf.size])
+        .collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+    // The access of `leaves` over `start..`, advancing `cursor` past leaves
+    // that end at or before `start`.
+    fn at(leaves: &[Leaf], cursor: &mut usize, start: u64) -> Option<Access> {
+        while leaves
+            .get(*cursor)
+            .is_some_and(|leaf| leaf.gpa + leaf.size <= start)
+        {
+            *cursor += 1;
+        }
+        leaves
+            .get(*cursor)
+            .filter(|leaf| leaf.gpa <= start)
+            .map(|leaf| leaf.access)
+    }
+    let (mut a, mut b) = (0, 0);
+    let mut out: Vec<Difference> = Vec::new();
+    for pair in bounds.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let (first, second) = (at(first, &mut a, start), at(second, &mut b, start));
+        if first == second {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.end == start && last.first == first && last.second == second => {
+                last.end = end;
+            }
+            _ => out.push(Difference {
+                start,
+                end,
+                first,
+                second,
+            }),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -182,6 +360,84 @@ mod tests {
                 .get(&a)
                 .copied())
             .is_none()
+        );
+    }
+
+    /// Each table of `memory`, as 512 qwords.
+    fn table_of(memory: &HashMap<u64, u64>) -> impl FnMut(u64) -> Option<[u64; 512]> + '_ {
+        |table| {
+            let mut entries = [0u64; 512];
+            for (index, entry) in entries.iter_mut().enumerate() {
+                *entry = memory
+                    .get(&(table + 8 * index as u64))
+                    .copied()
+                    .unwrap_or(0);
+            }
+            Some(entries)
+        }
+    }
+
+    fn access(bits: u64) -> Access {
+        Access::of(bits, false)
+    }
+
+    #[test]
+    fn leaves_list_every_mapping_with_the_access_of_its_walk() {
+        let mut memory = tables(READ | EXECUTE, RWX);
+        memory.insert(PD + 16, 0x80_0000 | LARGE | RWX | WB);
+        let found = leaves(eptp(PML4), false, table_of(&memory)).unwrap();
+        assert_eq!(
+            found,
+            [
+                Leaf {
+                    gpa: 0x20_1000,
+                    size: 0x1000,
+                    access: access(READ | EXECUTE)
+                },
+                Leaf {
+                    gpa: 0x40_0000,
+                    size: 0x20_0000,
+                    access: access(READ | EXECUTE)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn differences_split_a_large_page_where_the_other_side_differs_and_merge_runs() {
+        let large = [Leaf {
+            gpa: 0x20_0000,
+            size: 0x20_0000,
+            access: access(RWX),
+        }];
+        let small: Vec<Leaf> = (0..0x200u64)
+            .filter(|page| *page != 7)
+            .map(|page| Leaf {
+                gpa: 0x20_0000 + page * 0x1000,
+                size: 0x1000,
+                access: access(if (3..5).contains(&page) {
+                    READ | EXECUTE
+                } else {
+                    RWX
+                }),
+            })
+            .collect();
+        assert_eq!(
+            differences(&large, &small),
+            [
+                Difference {
+                    start: 0x20_3000,
+                    end: 0x20_5000,
+                    first: Some(access(RWX)),
+                    second: Some(access(READ | EXECUTE)),
+                },
+                Difference {
+                    start: 0x20_7000,
+                    end: 0x20_8000,
+                    first: Some(access(RWX)),
+                    second: None
+                },
+            ]
         );
     }
 }

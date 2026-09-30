@@ -1,7 +1,10 @@
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
-use crate::guest::{ept::EptTranslation, privilege_names};
+use crate::guest::{
+    ept::{self, Access, EptTranslation},
+    privilege_names,
+};
 use crate::repl::*;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -47,6 +50,37 @@ repl_command! {
     details: "Walks the extended page tables that each enabled VTL's eVMCS names, for the root partition's VP 0 by default. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
 }
 
+repl_command! {
+    cmd_hveptdiff;
+    names: ["!hveptdiff"],
+    usage: "!hveptdiff [partition-id [vp-index]]",
+    summary: "List the guest physical ranges that VTL0's and VTL1's EPTs of a Windows hypervisor VP map differently.",
+    details: "Walks the whole EPT of VTL0 and of VTL1 of a VP, the root partition's VP 0 by default, and lists each range of guest physical memory that the two map with different access, or that only one of them maps, with the access in each (r, w, x, and u for user-mode execute under mode-based execute control). Adjacent ranges that differ the same way are merged. These are the pages that the secure kernel and memory integrity (HVCI) protect from NT. The IDs use the current radix. Needs VBS and the VM's hv-evmcs enlightenment.",
+}
+
+/// How two VTLs' access to a range differs: VTL0's, then VTL1's.
+type DifferenceKind = (Option<Access>, Option<Access>);
+
+/// `access` as `rwx`, or `none` for no mapping.
+fn access_text(access: Option<Access>) -> String {
+    access.map_or_else(|| "none".to_string(), |access| access.to_string())
+}
+
+/// `bytes` in the largest of K, M, and G it reaches, with one decimal when
+/// it is not a whole number of them.
+fn size_text(bytes: u64) -> String {
+    let (unit, name) = match bytes {
+        b if b >= 1 << 30 => (1u64 << 30, 'G'),
+        b if b >= 1 << 20 => (1 << 20, 'M'),
+        _ => (1 << 10, 'K'),
+    };
+    if bytes.is_multiple_of(unit) {
+        format!("{}{name}", bytes / unit)
+    } else {
+        format!("{:.1}{name}", bytes as f64 / unit as f64)
+    }
+}
+
 /// The name of an EPT memory type (Intel SDM 29.3.7).
 fn memory_type_name(memory_type: u8) -> &'static str {
     match memory_type {
@@ -71,6 +105,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!hvpartitions"
             | "!hvvps"
             | "!hvept"
+            | "!hveptdiff"
             | ".process"
             | "attach"
             | "detach"
@@ -536,6 +571,121 @@ impl ReplState<'_> {
             table.push_record(row);
         }
         print_padded_table(table);
+        Ok(())
+    }
+
+    fn cmd_hveptdiff(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.len() > 2 {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let mut values = Vec::with_capacity(invocation.argv.len());
+        for text in &invocation.argv {
+            let Some(value) = self.eval_or_report(text) else {
+                return Ok(());
+            };
+            values.push(value.0);
+        }
+        let partitions = match self.ctx.target.hypervisor_partitions() {
+            Ok(partitions) => partitions,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let partition = match values.first() {
+            Some(&id) => partitions.into_iter().find(|p| p.id == id),
+            None => partitions.into_iter().next(),
+        };
+        let Some(partition) = partition else {
+            error!("no partition with ID {:#x}", values[0]);
+            return Ok(());
+        };
+        let index = values.get(1).copied().unwrap_or(0);
+        let Some(vp) = partition
+            .virtual_processors
+            .iter()
+            .find(|vp| u64::from(vp.index) == index)
+        else {
+            error!("partition {:#x} has no VP {index}", partition.id);
+            return Ok(());
+        };
+        let states: Vec<_> = [0, 1]
+            .iter()
+            .map(|level| {
+                vp.vtls
+                    .iter()
+                    .find(|vtl| vtl.level == *level)
+                    .and_then(|vtl| vtl.state)
+            })
+            .collect();
+        let (Some(vtl0), Some(vtl1)) = (states[0], states[1]) else {
+            error!(
+                "VP {index} of partition {:#x} has no eVMCS state for both VTL0 and VTL1",
+                partition.id
+            );
+            return Ok(());
+        };
+        let mut mappings = Vec::new();
+        for (level, state) in [(0, &vtl0), (1, &vtl1)] {
+            let Some(leaves) = self.ctx.target.guest_physical_mappings(state) else {
+                error!("VTL{level}'s EPT is unreadable or not a 4-level walk");
+                return Ok(());
+            };
+            let bytes: u64 = leaves.iter().map(|leaf| leaf.size).sum();
+            outln!(
+                "{} EPT {:x}: {} mappings, {}",
+                ui::muted(&format!("VTL{level}")),
+                state.ept_pointer,
+                leaves.len(),
+                size_text(bytes)
+            );
+            mappings.push(leaves);
+        }
+        let differences = ept::differences(&mappings[0], &mappings[1]);
+        // How the VTLs differ, largest first, before the ranges themselves.
+        let mut kinds: Vec<(DifferenceKind, usize, u64)> = Vec::new();
+        for difference in &differences {
+            let kind = (difference.first, difference.second);
+            match kinds.iter_mut().find(|(seen, _, _)| *seen == kind) {
+                Some((_, ranges, bytes)) => {
+                    *ranges += 1;
+                    *bytes += difference.end - difference.start;
+                }
+                None => kinds.push((kind, 1, difference.end - difference.start)),
+            }
+        }
+        kinds.sort_by_key(|&(_, _, bytes)| std::cmp::Reverse(bytes));
+        let mut summary = Builder::default();
+        summary.push_record(["VTL0", "VTL1", "Ranges", "Size"]);
+        for ((first, second), ranges, bytes) in &kinds {
+            summary.push_record([
+                access_text(*first),
+                access_text(*second),
+                ranges.to_string(),
+                size_text(*bytes),
+            ]);
+        }
+        outln!();
+        print_padded_table(summary);
+        let mut table = Builder::default();
+        table.push_record(["Start", "End", "Size", "VTL0", "VTL1"]);
+        for difference in &differences {
+            table.push_record([
+                format!("{:x}", difference.start),
+                format!("{:x}", difference.end - 1),
+                size_text(difference.end - difference.start),
+                access_text(difference.first),
+                access_text(difference.second),
+            ]);
+        }
+        let total: u64 = differences.iter().map(|d| d.end - d.start).sum();
+        print_padded_table(table);
+        outln!(
+            "{} ranges differ, {} in all\n",
+            differences.len(),
+            size_text(total)
+        );
         Ok(())
     }
 
