@@ -6,7 +6,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use super::handle::Owner;
+use super::raise;
 use super::record::PlainDict;
+use crate::guest::ept::{EptMapping as EptInfo, EptTranslation};
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, privilege_names};
 
 /// A partition of the Windows hypervisor, as it was when listed.
@@ -262,6 +264,27 @@ impl HypervisorVtl {
         Ok(PlainDict(vtl_dict(py, &self.info)?))
     }
 
+    /// Translate a guest physical address through this VTL's EPT, as
+    /// `!hvept` does. Returns `None` when no entry maps it, and raises
+    /// `NtoseyeError` without the VTL's eVMCS state or when a table is
+    /// unreadable.
+    fn translate(&self, py: Python<'_>, gpa: u64) -> PyResult<Option<EptMapping>> {
+        let Some(state) = self.info.state else {
+            return Err(raise("this VTL has no eVMCS state"));
+        };
+        let translation = self.owner.with(py, |session| {
+            Ok(session.target.translate_guest_physical(&state, gpa))
+        })?;
+        match translation {
+            Some(EptTranslation::Mapped(info)) => Ok(Some(EptMapping {
+                owner: self.owner.clone_ref(py),
+                info,
+            })),
+            Some(EptTranslation::NotPresent { .. }) => Ok(None),
+            None => Err(raise("the EPT is unreadable or not a 4-level walk")),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "HypervisorVtl(level={}, context={:#x}, vmcs={})",
@@ -270,6 +293,85 @@ impl HypervisorVtl {
             self.info
                 .vmcs
                 .map_or_else(|| "None".to_string(), |page| format!("{page:#x}"))
+        )
+    }
+}
+
+/// Where a guest physical address goes through one VTL's EPT, and the access
+/// that every level of the walk allows.
+#[pyclass(module = "ntoseye", frozen)]
+pub struct EptMapping {
+    owner: Owner,
+    info: EptInfo,
+}
+
+#[pymethods]
+impl EptMapping {
+    /// The host physical address.
+    #[getter]
+    fn host_physical(&self, py: Python<'_>) -> PyResult<u64> {
+        self.owner.check(py)?;
+        Ok(self.info.host_physical)
+    }
+
+    /// The size of the mapping page: 4 KiB, 2 MiB, or 1 GiB.
+    #[getter]
+    fn page_size(&self, py: Python<'_>) -> PyResult<u64> {
+        self.owner.check(py)?;
+        Ok(self.info.page_size)
+    }
+
+    #[getter]
+    fn read(&self, py: Python<'_>) -> PyResult<bool> {
+        self.owner.check(py)?;
+        Ok(self.info.read)
+    }
+
+    #[getter]
+    fn write(&self, py: Python<'_>) -> PyResult<bool> {
+        self.owner.check(py)?;
+        Ok(self.info.write)
+    }
+
+    /// Execute access: supervisor-mode only when `user_execute` is not
+    /// `None`.
+    #[getter]
+    fn execute(&self, py: Python<'_>) -> PyResult<bool> {
+        self.owner.check(py)?;
+        Ok(self.info.execute)
+    }
+
+    /// User-mode execute access when the VTL uses mode-based execute
+    /// control, else `None`.
+    #[getter]
+    fn user_execute(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        self.owner.check(py)?;
+        Ok(self.info.user_execute)
+    }
+
+    /// The EPT memory type (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
+    #[getter]
+    fn memory_type(&self, py: Python<'_>) -> PyResult<u8> {
+        self.owner.check(py)?;
+        Ok(self.info.memory_type)
+    }
+
+    /// The entry of each level of the walk, from the PML4 down.
+    #[getter]
+    fn entries(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
+        self.owner.check(py)?;
+        Ok(self.info.entries.clone())
+    }
+
+    fn __repr__(&self) -> String {
+        let bit = |allowed: bool, letter: char| if allowed { letter } else { '-' };
+        format!(
+            "EptMapping(host_physical={:#x}, access='{}{}{}', page_size={:#x})",
+            self.info.host_physical,
+            bit(self.info.read, 'r'),
+            bit(self.info.write, 'w'),
+            bit(self.info.execute, 'x'),
+            self.info.page_size
         )
     }
 }

@@ -499,6 +499,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!trustlets", "processes and modules"),
     ("!hvpartitions", "processes and modules"),
     ("!hvvps", "processes and modules"),
+    ("!hvept", "processes and modules"),
     ("!session", "processes and modules"),
     ("!sprocess", "processes and modules"),
     ("!thread", "processes and modules"),

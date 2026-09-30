@@ -199,11 +199,17 @@ for cpu in dbg.cpus:
 
 `dbg.hypervisor_partitions()` lists the partitions of the Windows hypervisor, root first, as {command}`!hvpartitions` and {command}`!hvvps` do. Each call walks them again. Each partition has `address`, `id`, `parent_id` (`None` for the root partition), `privileges`, `privilege_names` (the TLFS names of the set privileges), and `virtual_processors`. Each VP has `index`, `address`, `vtl` (the VTL that it runs or last ran in), and `vtls`, a `dict` from each VTL enabled on the VP to a `HypervisorVtl`. A `HypervisorVtl` has `level`, `context` (the hypervisor's context object), and, from the VTL's eVMCS, `vmcs` (its physical address), `ept_pointer`, `rip`, and `exit_reason`, which are `None` without `hv-evmcs` or for a VP that has not started. All of these have `to_dict()`.
 
+`vtl.translate(gpa)` translates a guest physical address through the VTL's EPT, as {command}`!hvept` does. It returns an `EptMapping`, with `host_physical`, `page_size`, `read`, `write`, `execute`, `user_execute` (`None` without mode-based execute control), `memory_type`, and the `entries` of the walk, or `None` when no entry maps the address.
+
 ```python
 root = dbg.hypervisor_partitions()[0]
 for vp in root.virtual_processors:
     for vtl in vp.vtls.values():
         print(vp.index, vtl.level, hex(vtl.context), vtl.vmcs and hex(vtl.vmcs), vtl.ept_pointer and hex(vtl.ept_pointer))
+
+gpa = dbg.memory.translate(dbg.symbols["nt!KeBugCheckEx"])
+for vtl in root.virtual_processors[0].vtls.values():
+    print(vtl.level, vtl.translate(gpa))     # EptMapping(..., access='r-x', ...) in VTL0 under HVCI
 ```
 
 This needs the `hv-evmcs` enlightenment or a vCPU that is stopped in the hypervisor, and an Intel host, and it raises `NtoseyeError` if ntoseye does not recognize the hypervisor build ([supported builds](../platforms/vbs.md#hypervisor-partitions-and-virtual-processors)). This feature is experimental.

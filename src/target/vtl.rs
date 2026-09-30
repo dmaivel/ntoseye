@@ -15,7 +15,9 @@ use crate::{
     error::{Error, Result},
     guest::{
         EXIT_GPRS, EvmcsState, Guest, HvMemory, HvPartition, ModuleInfo, ModuleSymbolLoadReport,
-        PdbRecovery, SecureKernel, SessionSpace, TrustletInfo, hv_layout, hypervisor,
+        PdbRecovery, SecureKernel, SessionSpace, TrustletInfo,
+        ept::{self, EptTranslation},
+        hv_layout, hypervisor,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
@@ -623,6 +625,22 @@ fn hypervisor_image<B: MemoryOps<PhysAddr>>(
 }
 
 impl Target {
+    /// Translate `gpa` through the EPT of a VTL whose saved state is
+    /// `state`, reading the tables from host RAM. `None` when a table is
+    /// unreadable or the EPT pointer is not a 4-level walk.
+    pub fn translate_guest_physical(&self, state: &EvmcsState, gpa: u64) -> Option<EptTranslation> {
+        ept::translate(
+            state.ept_pointer,
+            gpa,
+            state.mode_based_execute(),
+            |address| {
+                let mut entry = [0u8; 8];
+                self.phys.read_bytes(address, &mut entry).ok()?;
+                Some(u64::from_le_bytes(entry))
+            },
+        )
+    }
+
     /// The Windows hypervisor's partitions and their virtual processors,
     /// root first. Its processor blocks come from the eVMCS pages (their
     /// host GS base) and from the selected vCPU when it is halted in the

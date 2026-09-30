@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
 
 mod discovery;
+pub mod ept;
 mod evmcs;
 mod exit_registers;
 pub mod hv_layout;

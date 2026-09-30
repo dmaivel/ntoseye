@@ -2887,6 +2887,50 @@ class DumpSystemInfo(BaseRecord):
         """
 
 @final
+class EptMapping:
+    """
+    Where a guest physical address goes through one VTL's EPT, and the access
+    that every level of the walk allows.
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def entries(self, /) -> list[int]:
+        """
+        The entry of each level of the walk, from the PML4 down.
+        """
+    @property
+    def execute(self, /) -> bool:
+        """
+        Execute access: supervisor-mode only when `user_execute` is not
+        `None`.
+        """
+    @property
+    def host_physical(self, /) -> int:
+        """
+        The host physical address.
+        """
+    @property
+    def memory_type(self, /) -> int:
+        """
+        The EPT memory type (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
+        """
+    @property
+    def page_size(self, /) -> int:
+        """
+        The size of the mapping page: 4 KiB, 2 MiB, or 1 GiB.
+        """
+    @property
+    def read(self, /) -> bool: ...
+    @property
+    def user_execute(self, /) -> bool |None:
+        """
+        User-mode execute access when the VTL uses mode-based execute
+        control, else `None`.
+        """
+    @property
+    def write(self, /) -> bool: ...
+
+@final
 class ErrorCode(BaseRecord):
     """
     A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
@@ -5144,6 +5188,13 @@ class HypervisorVtl:
         """
         Return the VTL as a plain `dict` (`level`, `context`, `vmcs`,
         `ept_pointer`, `rip`, `exit_reason`).
+        """
+    def translate(self, /, gpa: int) -> EptMapping |None:
+        """
+        Translate a guest physical address through this VTL's EPT, as
+        `!hvept` does. Returns `None` when no entry maps it, and raises
+        `NtoseyeError` without the VTL's eVMCS state or when a table is
+        unreadable.
         """
     @property
     def vmcs(self, /) -> int |None:

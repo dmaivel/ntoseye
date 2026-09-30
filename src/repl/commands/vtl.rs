@@ -1,7 +1,7 @@
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
-use crate::guest::privilege_names;
+use crate::guest::{ept::EptTranslation, privilege_names};
 use crate::repl::*;
 use crate::ui;
 use crate::unwind::halted_in_windows_hypervisor;
@@ -38,6 +38,26 @@ repl_command! {
     details: "Each row is one VTL enabled on a VP, and * marks the VTL the VP runs or last ran in. The row shows the hypervisor's context object for the VTL and, when found, the physical address of the VTL's eVMCS with the EPT pointer (the root of the VTL's second-level address translation), the guest RIP where the VTL left off, and why it last left for the hypervisor. The eVMCS columns need the VM's hv-evmcs enlightenment. The partition ID uses the current radix. See !hvpartitions for where the objects come from.",
 }
 
+repl_command! {
+    cmd_hvept;
+    names: ["!hvept"],
+    usage: "!hvept <guest-physical-address> [partition-id [vp-index]]",
+    summary: "Translate a guest physical address through each VTL's EPT (second-level address translation) of a Windows hypervisor VP.",
+    details: "Walks the extended page tables that each enabled VTL's eVMCS names, for the root partition's VP 0 by default. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
+}
+
+/// The name of an EPT memory type (Intel SDM 29.3.7).
+fn memory_type_name(memory_type: u8) -> &'static str {
+    match memory_type {
+        0 => "UC",
+        1 => "WC",
+        4 => "WT",
+        5 => "WP",
+        6 => "WB",
+        _ => "?",
+    }
+}
+
 /// Commands that only read memory through the current root or are
 /// debugger-local, so they mean the same in any VTL1 address space. No VTL0
 /// register file or mediated write may be interpreted as belonging to the
@@ -49,6 +69,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!trustlets"
             | "!hvpartitions"
             | "!hvvps"
+            | "!hvept"
             | ".process"
             | "attach"
             | "detach"
@@ -397,6 +418,93 @@ impl ReplState<'_> {
                         .to_string(),
                 ]);
             }
+        }
+        print_padded_table(table);
+        Ok(())
+    }
+
+    fn cmd_hvept(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.is_empty() || invocation.argv.len() > 3 {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let mut values = Vec::with_capacity(invocation.argv.len());
+        for text in &invocation.argv {
+            let Some(value) = self.eval_or_report(text) else {
+                return Ok(());
+            };
+            values.push(value.0);
+        }
+        let gpa = values[0];
+        let partitions = match self.ctx.target.hypervisor_partitions() {
+            Ok(partitions) => partitions,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let partition = match values.get(1) {
+            Some(&id) => partitions.into_iter().find(|p| p.id == id),
+            None => partitions.into_iter().next(),
+        };
+        let Some(partition) = partition else {
+            error!("no partition with ID {:#x}", values[1]);
+            return Ok(());
+        };
+        let index = values.get(2).copied().unwrap_or(0);
+        let Some(vp) = partition
+            .virtual_processors
+            .iter()
+            .find(|vp| u64::from(vp.index) == index)
+        else {
+            error!("partition {:#x} has no VP {index}", partition.id);
+            return Ok(());
+        };
+        let mut table = Builder::default();
+        table.push_record([
+            "VTL",
+            "EPT pointer",
+            "Host physical",
+            "Access",
+            "User exec",
+            "Page",
+            "Type",
+        ]);
+        for vtl in &vp.vtls {
+            let Some(state) = &vtl.state else {
+                table.push_record([vtl.level.to_string(), "no eVMCS state".to_string()]);
+                continue;
+            };
+            let mut row = vec![vtl.level.to_string(), format!("{:x}", state.ept_pointer)];
+            match self.ctx.target.translate_guest_physical(state, gpa) {
+                Some(EptTranslation::Mapped(mapping)) => {
+                    let bit = |allowed: bool, letter: char| if allowed { letter } else { '-' };
+                    row.extend([
+                        format!("{:x}", mapping.host_physical),
+                        [
+                            bit(mapping.read, 'r'),
+                            bit(mapping.write, 'w'),
+                            bit(mapping.execute, 'x'),
+                        ]
+                        .iter()
+                        .collect(),
+                        mapping
+                            .user_execute
+                            .map_or_else(String::new, |allowed| bit(allowed, 'x').to_string()),
+                        match mapping.page_size {
+                            0x1000 => "4K".to_string(),
+                            0x20_0000 => "2M".to_string(),
+                            _ => "1G".to_string(),
+                        },
+                        memory_type_name(mapping.memory_type).to_string(),
+                    ]);
+                }
+                Some(EptTranslation::NotPresent { level }) => {
+                    row.push(format!("not mapped (no level-{level} entry)"));
+                }
+                None => row.push("unreadable EPT".to_string()),
+            }
+            table.push_record(row);
         }
         print_padded_table(table);
         Ok(())

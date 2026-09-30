@@ -40,6 +40,7 @@ const MAX_PAGES: usize = 4096;
 
 const HOST_CR3: usize = 0x30;
 const HOST_RIP: usize = 0x50;
+const SECONDARY_CONTROLS: usize = 0x64;
 const HOST_GS_BASE: usize = 0x248;
 const HOST_RSP: usize = 0x268;
 const EPT_POINTER: usize = 0x270;
@@ -154,6 +155,8 @@ pub struct EvmcsState {
     /// The EPT pointer: the root of the guest's second-level address
     /// translation (SLAT) and its memory type and walk length.
     pub ept_pointer: u64,
+    /// Secondary processor-based VM-execution controls (Intel SDM 25.6.2).
+    pub secondary_controls: u32,
     /// Basic exit reason in bits 15:0 (Intel SDM Appendix C).
     pub exit_reason: u32,
     /// VM-exit interruption information: the vector and type of the event
@@ -195,6 +198,12 @@ fn u64_at(page: &[u8], offset: usize) -> u64 {
 }
 
 impl EvmcsState {
+    /// Whether the guest runs with mode-based execute control, under which
+    /// EPT entries allow supervisor and user execution separately.
+    pub fn mode_based_execute(&self) -> bool {
+        self.secondary_controls & (1 << 22) != 0
+    }
+
     /// The eVMCS at `address`, read now; `None` when the page does not hold
     /// one a 64-bit paged guest runs under.
     pub fn read(phys: &impl MemoryOps<PhysAddr>, address: PhysAddr) -> Option<Self> {
@@ -228,6 +237,7 @@ impl EvmcsState {
             host_rsp: u64_at(page, HOST_RSP),
             host_gs_base: u64_at(page, HOST_GS_BASE),
             ept_pointer: u64_at(page, EPT_POINTER),
+            secondary_controls: u32_at(page, SECONDARY_CONTROLS),
             exit_reason: u32_at(page, VM_EXIT_REASON),
             exit_interruption_info: u32_at(page, VM_EXIT_INTR_INFO),
             exit_instruction_length: u32_at(page, VM_EXIT_INSTRUCTION_LEN),

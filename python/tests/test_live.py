@@ -228,6 +228,29 @@ def test_hypervisor_partitions_mirror_the_vcpus(halted: Debugger) -> None:
         pytest.skip("no vCPU halted in the hypervisor with a current saved state to compare")
 
 
+def test_vtl_ept_maps_nt_in_place_and_hides_the_secure_kernel_from_vtl0(halted: Debugger) -> None:
+    """The root partition's EPT maps each guest physical address to itself in
+    every VTL, and VSM keeps the secure kernel's pages out of VTL0's EPT
+    while VTL1 can read them."""
+    try:
+        vp = halted.hypervisor_partitions()[0].virtual_processors[0]
+        sk = halted.secure_kernel
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no VTL1 or partitions on this target: {error}")
+    if 1 not in vp.vtls or vp.vtls[0].ept_pointer is None:
+        pytest.skip("needs VBS and the hv-evmcs enlightenment")
+    nt = halted.memory.translate(halted.symbols["nt!KeBugCheckEx"])
+    secure = sk.memory.translate(sk.base)
+    assert nt is not None and secure is not None
+    for vtl in vp.vtls.values():
+        mapped = vtl.translate(nt)
+        assert mapped is not None and mapped.host_physical == nt and mapped.read
+    hidden = vp.vtls[0].translate(secure)
+    assert hidden is None or not hidden.read
+    visible = vp.vtls[1].translate(secure)
+    assert visible is not None and visible.host_physical == secure and visible.read
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")

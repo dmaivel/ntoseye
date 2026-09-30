@@ -40,7 +40,7 @@ The VTL1 features on this page need an **AMD64 guest** and are not available on 
 | VTL1 breakpoints and stepping | `gdb` on QEMU/KVM | Supported | Untested |
 | Stepping NT while the Windows hypervisor runs | `gdb` | Supported | Untested |
 | [Where NT left off](#where-nt-left-off-under-the-hypervisor) under the hypervisor | `gdb` | Supported (needs `hv-evmcs`) | Not supported |
-| [Hypervisor partitions and virtual processors](#hypervisor-partitions-and-virtual-processors) | `memory`, `gdb`; `kd`/`kdnet` reading host memory | Supported (needs `hv-evmcs`, or a `gdb` vCPU stopped in the hypervisor) | Not supported |
+| [Hypervisor partitions, virtual processors, and VTL page permissions](#hypervisor-partitions-and-virtual-processors) | `memory`, `gdb`; `kd`/`kdnet` reading host memory | Supported (needs `hv-evmcs`, or a `gdb` vCPU stopped in the hypervisor) | Not supported |
 
 We tested all of these features on one host, a Core i9-14900F with QEMU/KVM, with Windows 11 guests (10.0.26100 and 10.0.26200) and memory integrity (HVCI) both off and on.
 
@@ -161,6 +161,29 @@ VP  Address           VTL  Context           eVMCS      EPT pointer  Guest RIP  
 ```
 
 The EPT pointer is the root of the VTL's second-level address translation (SLAT), which maps the guest's physical addresses to host physical addresses with read, write, and execute permissions. The VPs of a partition share one EPT for each VTL, and VTL0 and VTL1 have different ones: this is how the secure kernel and memory integrity (HVCI) set page permissions that NT cannot change. The root partition's EPT maps each address to itself, except the pages that the hypervisor keeps for itself. The eVMCS columns stay empty without the `hv-evmcs` enlightenment, and the state columns stay empty for a VP that has not started, such as the second VP of a VM still in its firmware.
+
+### Page permissions of each VTL
+
+{command}`!hvept` `<guest-physical-address> [partition-id [vp-index]]` translates a guest physical address through the EPT of each VTL of a VP, the root partition's VP 0 by default. Each row shows the host physical address, the access that every level of the walk allows, the page size, and the memory type. With memory integrity (HVCI) on, VTL0 can execute NT's code but not write it, and can write its data but not execute it, while VTL1 has full access. VTL0 has no access at all to the pages of the secure kernel:
+
+```text
+mem:1> !hvept 0x5efd130
+VTL  EPT pointer  Host physical  Access  User exec  Page  Type
+0    10155901e    5efd130        r-x                2M    WB
+1    10155c01e    5efd130        rwx                2M    WB
+
+mem:1> !hvept 0x1185c8c80
+VTL  EPT pointer  Host physical  Access  User exec  Page  Type
+0    10155901e    1185c8c80      rw-                2M    WB
+1    10155c01e    1185c8c80      rwx                2M    WB
+
+mem:1> !hvept 0x18ba000
+VTL  EPT pointer  Host physical                  Access  User exec  Page  Type
+0    10155901e    not mapped (no level-1 entry)
+1    10155c01e    18ba000                        rwx                2M    WB
+```
+
+The first address is the page of `nt!KeBugCheckEx`, the second that of `nt!KiProcessorBlock`, and the third the start of `securekernel.exe`. To get the guest physical address of a virtual address, use {command}`!vtop`, or `memory.translate()` in the SDK. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
 
 The addresses are in the address space of the hypervisor. To read them with {command}`dq` and the other memory commands, first select the context of a vCPU that is stopped in the hypervisor with {command}`.cxr`.
 
