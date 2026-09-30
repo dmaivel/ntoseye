@@ -24,6 +24,14 @@ const IDT_VECTOR_COUNT: u16 = 256;
 const MSR_SWITCH: &str = "/p";
 const MAX_PROCESSOR_SELECTION: usize = 256;
 
+/// What a `~` command names: one processor by number, one vCPU by the id
+/// `~` lists, or every processor (`~*`).
+enum TildeSelector {
+    Number(u64),
+    Id(String),
+    All,
+}
+
 repl_command! {
     cmd_rdmsr;
     names: ["rdmsr"],
@@ -110,7 +118,7 @@ repl_command! {
     names: ["~", "vcpus"],
     usage: "~",
     summary: "List vCPU contexts and their RIP values.",
-    details: "`~Ns` selects processor N (zero-based), and `t` and `p` then step that processor. Over `kd` and `kdnet` on an AMD64 target, the other processors run during the step, as in WinDbg. On an ARM64 target, only the processor that stopped the target can step over `kd` or `kdnet`. If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped, from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers.",
+    details: "`~Ns` selects processor N (zero-based), and `t` and `p` then step that processor. The vCPU id that the list shows also works in place of N (`~p01.03s`, `~p01.03k`). Over `kd` and `kdnet` on an AMD64 target, the other processors run during the step, as in WinDbg. On an ARM64 target, only the processor that stopped the target can step over `kd` or `kdnet`. If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped, from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers.",
     run_state: Halted,
 }
 
@@ -883,20 +891,32 @@ impl ReplState<'_> {
             self.cmd_vcpus()?;
             return Ok(Flow::Continue);
         }
+        // A processor is named by its number or by the vCPU id `~` lists
+        // (`p01.03`): hex digits and dots after the `p`, which no action
+        // letter is.
         let (selector, suffix) = if let Some(rest) = body.strip_prefix('*') {
-            (None, rest)
+            (TildeSelector::All, rest)
+        } else if body.starts_with(['p', 'P']) {
+            let length = 1 + body[1..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_hexdigit() || *ch == '.')
+                .count();
+            (
+                TildeSelector::Id(body[..length].to_string()),
+                &body[length..],
+            )
         } else {
             let digits = body.chars().take_while(|ch| ch.is_ascii_digit()).count();
             if digits == 0 {
                 error!(
-                    "invalid processor selector '{}'; expected ~, ~N[s|k|r], or ~*k",
+                    "invalid processor selector '{}'; expected ~, ~N[s|k|r], ~<vCPU id>[s|k|r], or ~*k",
                     line
                 );
                 return Ok(Flow::Continue);
             }
             let selector =
                 match Expr::eval_with_radix(&body[..digits], &self.ctx.target, self.radix) {
-                    Ok(value) => Some(value.0),
+                    Ok(value) => TildeSelector::Number(value.0),
                     Err(_) => {
                         error!("processor {} out of range", &body[..digits]);
                         return Ok(Flow::Continue);
@@ -917,7 +937,7 @@ impl ReplState<'_> {
         let trailing = actions.as_str();
         if !trailing.is_empty() {
             error!(
-                "unsupported processor command '{}{}'; expected ~, ~N[s|k|r], or ~*k",
+                "unsupported processor command '{}{}'; expected ~, ~N[s|k|r], ~<vCPU id>[s|k|r], or ~*k",
                 action, trailing
             );
             return Ok(Flow::Continue);
@@ -947,17 +967,26 @@ impl ReplState<'_> {
                         .and_then(|index| ids.get(index).cloned())
                 })
         };
-        let selected = if let Some(number) = selector {
-            if usize::try_from(number).map_or(true, |number| number >= ids.len()) {
-                error!("processor {} out of range", number);
-                return Ok(Flow::Continue);
+        let selected = match selector {
+            TildeSelector::Number(number) => {
+                if usize::try_from(number).map_or(true, |number| number >= ids.len()) {
+                    error!("processor {} out of range", number);
+                    return Ok(Flow::Continue);
+                }
+                resolve(number).into_iter().collect::<Vec<_>>()
             }
-            resolve(number).into_iter().collect::<Vec<_>>()
-        } else {
-            ids.iter()
+            TildeSelector::Id(wanted) => {
+                let Some(id) = ids.iter().find(|id| id.eq_ignore_ascii_case(&wanted)) else {
+                    error!("no vCPU {} (the vCPUs are {})", wanted, ids.join(", "));
+                    return Ok(Flow::Continue);
+                };
+                vec![id.clone()]
+            }
+            TildeSelector::All => ids
+                .iter()
                 .take(MAX_PROCESSOR_SELECTION)
                 .cloned()
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
         };
         if selected.is_empty() {
             error!("processor not found");
