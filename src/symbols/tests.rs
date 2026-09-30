@@ -1329,3 +1329,30 @@ fn a_header_only_inlined_code_names_has_its_checksum() {
         "{recorded:?}"
     );
 }
+
+/// A module ntoseye names itself has names for only some functions: an
+/// address past the end of a named function is not attributed to it, however
+/// near.
+#[test]
+fn a_synthetic_symbol_covers_only_its_function() {
+    let store = SymbolStore::new();
+    let base = VirtAddr(0xffff_f840_b140_0000);
+    let module = ModuleInfo::new("hvix64.exe".to_string(), base, 0x40_0000);
+    store.register_synthetic_module(
+        0x1000,
+        &module,
+        7,
+        &[("HvCallCreatePartition".to_string(), 0x2831e0)],
+        HashMap::from([(0x2831e0, 0x40)]),
+    );
+    let closest = |rva: u64| store.closest_symbol(7, base, base + rva);
+    assert_eq!(
+        closest(0x28321f),
+        Some(("HvCallCreatePartition".to_string(), 0x3f))
+    );
+    assert_eq!(closest(0x283220), None);
+    assert_eq!(
+        store.format_closest_symbol_for_address(0x1000, base + 0x2831e8u64),
+        Some("hv!HvCallCreatePartition+0x8".to_string())
+    );
+}

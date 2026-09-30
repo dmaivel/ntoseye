@@ -229,7 +229,7 @@ Code    Name                                  Kind        Input   Rep in  Output
 221 of 306 codes implemented; code 0's handler serves the rest
 ```
 
-The TLFS documents only some of the call codes, and the others have no name. With a vCPU stopped in the hypervisor and its context selected with {command}`.cxr`, {command}`u` `hv+<offset>` disassembles a handler, and {command}`ba` `e1 hv+<offset>` stops in it (with the `gdb` backend). ntoseye refuses a software breakpoint ({command}`bp`) in the hypervisor's image or address space, because it does not write the hypervisor's memory.
+The TLFS documents only some of the call codes, and the others have no name. Each handler is also a symbol in the hypervisor's context (see below), so with a vCPU stopped in the hypervisor and its context selected with {command}`.cxr`, {command}`u` `hv!HvCallCreatePartition` disassembles a handler, and {command}`ba` `e1 hv!HvCallCreatePartition` stops in it (with the `gdb` backend). ntoseye refuses a software breakpoint ({command}`bp`) in the hypervisor's image or address space, because it does not write the hypervisor's memory.
 
 The addresses are in the address space of the hypervisor. To read them with {command}`dq` and the other memory commands, first select the context of a vCPU that is stopped in the hypervisor with {command}`.cxr`.
 
@@ -240,6 +240,8 @@ The walk reads live memory and is not an atomic snapshot, so a partition that is
 ## Stops in the Windows hypervisor
 
 When VBS runs, the GDB stub reports what each vCPU executed when it halted. An idle vCPU is usually inside the Windows hypervisor, with the hypervisor's own CR3. `ntoseye` names such a stop by the image in which the vCPU stopped. The context shows `hypervisor`, or `VTL1` for the secure kernel. As in WinDbg, the module name of the hypervisor image (`hvix64.exe`) is `hv`, so code and stack frames show `hv+0x…`. While the context of the hypervisor is selected, expressions accept `hv` and `hv+<offset>` like any other module name.
+
+`hvix64` has no public symbols, but `ntoseye` names some of its code: each hypercall handler by the TLFS name of the lowest call code it serves (`hv!HvCallGetVpRegisters`), or `HvCall` and the code when the TLFS does not name it (`hv!HvCall0004`), the handler of every unimplemented code `hv!HvCallUnimplemented`, and the VM-exit entry point from the eVMCS pages `hv!VmExitEntry`. {command}`k`, {command}`u`, {command}`ln`, {command}`x` `hv!*`, and expressions use these names. A name covers only its own function, as the image's `.pdata` bounds it, so code in the other functions still shows `hv+0x…`.
 
 Microsoft does not publish symbols for this hypervisor build, and the address space of the hypervisor does not map its unwind data, so all hypervisor frames after the first frame are guesses from a stack scan (`[scan]`).
 

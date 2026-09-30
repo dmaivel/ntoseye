@@ -555,6 +555,16 @@ impl Session {
                         .format_closest_symbol_for_address(proc.dtb, VirtAddr(rip));
                     (proc.name.clone(), sym)
                 }
+                // The hypervisor's code has names too (hv!HvCall...), which
+                // must not make its root read as NT's.
+                None if self.target.guest.as_ref().is_some_and(|guest| {
+                    guest.is_hypervisor_address(dtb_masked, VirtAddr(rip))
+                }) =>
+                {
+                    let trace = resolve_thread_trace_context_at(&self.target, dtb, rip);
+                    let symbol = try_format_symbol(&self.target, &trace, rip);
+                    (trace.description, symbol)
+                }
                 None => match self
                     .target
                     .symbols

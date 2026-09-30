@@ -19,7 +19,7 @@ use crate::{
         ept::{self, EptTranslation},
         hv_layout,
         hv_layout::HypercallEntry,
-        hypervisor,
+        hypercalls, hypervisor,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
@@ -482,7 +482,10 @@ impl Target {
         };
         let context = match &image {
             Some(image) => match image.short_name.as_str() {
-                "hv" => HYPERVISOR_CONTEXT.to_string(),
+                "hv" => {
+                    self.register_hypervisor_symbols(dtb, image);
+                    HYPERVISOR_CONTEXT.to_string()
+                }
                 "securekernel" => "VTL1".to_string(),
                 _ if secure_root => "VTL1".to_string(),
                 name => name.to_string(),
@@ -507,6 +510,56 @@ impl Target {
             .or_else(|| image.map(ForeignModules::Image))
             .unwrap_or(ForeignModules::None);
         Some(ForeignCode { context, modules })
+    }
+
+    /// Name the hypervisor image's code in root `dtb` (see
+    /// [`hypercalls::hypervisor_symbols`]), once per root: its hypercall
+    /// handlers from its hypercall table and its VM-exit entry points from the
+    /// eVMCS pages, so `k`, `u`, `ln`, and `hv!` expressions use them.
+    fn register_hypervisor_symbols(&self, dtb: Dtb, image: &ModuleInfo) {
+        let Some(guest) = &self.guest else { return };
+        if self
+            .symbols
+            .find_module_for_address(dtb, image.base_address)
+            .is_some()
+        {
+            return;
+        }
+        let base = image.base_address.0;
+        let Some(names) = guest.hypervisor_symbols(base, || {
+            let memory = self.address_space(dtb);
+            let loaded = hypervisor_image(&memory, image).ok()?;
+            let table = hv_layout::hypercall_table(&loaded.view()).ok()?;
+            let mut entries: Vec<u64> = guest
+                .any_evmcs_pages(&self.phys, &self.interrupt)
+                .map(|pages| {
+                    pages
+                        .all_states(&*self.phys)
+                        .into_iter()
+                        .map(|state| state.host_rip)
+                        .collect()
+                })
+                .unwrap_or_default();
+            entries.sort_unstable();
+            entries.dedup();
+            let names = hypercalls::hypervisor_symbols(base, &table, &entries);
+            let extents = names
+                .iter()
+                .filter_map(|&(_, rva)| Some((rva, *loaded.functions.get(&rva)?)))
+                .collect();
+            Some(hypercalls::HypervisorSymbols { names, extents })
+        }) else {
+            return;
+        };
+        // "hv" in the high bytes keeps these keys apart from PDB GUIDs.
+        let guid = (0x6876u128 << 112) | u128::from(base);
+        self.symbols.register_synthetic_module(
+            dtb,
+            image,
+            guid,
+            &names.names,
+            names.extents.clone(),
+        );
     }
 
     /// The base of `name` (`hv`), an image a stop found outside NT, for
@@ -594,8 +647,27 @@ impl HvMemory for HypervisorMemory<'_> {
     }
 }
 
-/// `(start, end)` RVAs of an image's sections.
-type RvaRanges = Vec<(u32, u32)>;
+/// The hypervisor image as it is mapped, laid out by RVA.
+struct HypervisorImage {
+    base: u64,
+    bytes: Vec<u8>,
+    /// `(start, end)` RVAs of its executable sections, and of the others.
+    code: Vec<(u32, u32)>,
+    data: Vec<(u32, u32)>,
+    /// The length of each function, by the RVA it begins at (`.pdata`).
+    functions: HashMap<u32, u32>,
+}
+
+impl HypervisorImage {
+    fn view(&self) -> hv_layout::ImageView<'_> {
+        hv_layout::ImageView {
+            base: self.base,
+            bytes: &self.bytes,
+            code: self.code.clone(),
+            data: self.data.clone(),
+        }
+    }
+}
 
 /// Where the Windows hypervisor is: its image, mapped in `memory`, the
 /// processor blocks it was reached from, and the eVMCS pages the scan found.
@@ -612,7 +684,7 @@ struct HypervisorLocation<'a> {
 fn hypervisor_image<B: MemoryOps<PhysAddr>>(
     memory: &AddressSpace<'_, B>,
     image: &ModuleInfo,
-) -> Result<(Vec<u8>, RvaRanges, RvaRanges)> {
+) -> Result<HypervisorImage> {
     let base = image.base_address.0;
     let headers = read_pe_header_page(image.base_address, memory)?;
     let view = PeView::from_bytes(&headers).map_err(|_| Error::ViewFailed)?;
@@ -641,7 +713,26 @@ fn hypervisor_image<B: MemoryOps<PhysAddr>>(
             data.push(range);
         }
     }
-    Ok((bytes, code, data))
+    // The exception directory's RUNTIME_FUNCTIONs: begin, end, unwind RVAs.
+    let mut functions = HashMap::new();
+    if let Some(directory) = view.data_directory().get(3) {
+        let start = directory.VirtualAddress as usize;
+        let end = (start + directory.Size as usize).min(size);
+        for entry in bytes.get(start..end).unwrap_or(&[]).as_chunks::<12>().0 {
+            let begin = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+            let finish = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+            if finish > begin {
+                functions.insert(begin, finish - begin);
+            }
+        }
+    }
+    Ok(HypervisorImage {
+        base,
+        bytes,
+        code,
+        data,
+        functions,
+    })
 }
 
 impl Target {
@@ -762,15 +853,9 @@ impl Target {
     /// the base of its image.
     pub fn hypercalls(&self) -> Result<(u64, Vec<HypercallEntry>)> {
         let HypervisorLocation { memory, image, .. } = self.locate_hypervisor()?;
-        let (bytes, code, data) = hypervisor_image(&memory, &image)?;
-        let base = image.base_address.0;
-        let table = hv_layout::hypercall_table(&hv_layout::ImageView {
-            base,
-            bytes: &bytes,
-            code,
-            data,
-        })?;
-        Ok((base, table))
+        let loaded = hypervisor_image(&memory, &image)?;
+        let table = hv_layout::hypercall_table(&loaded.view())?;
+        Ok((loaded.base, table))
     }
 
     fn walk_partitions(
@@ -782,13 +867,7 @@ impl Target {
         known: &std::collections::HashSet<u64>,
     ) -> Result<Vec<HvPartition>> {
         let layout = guest.partition_layout(image.base_address.0, || {
-            let (bytes, code, data) = hypervisor_image(&memory, image)?;
-            hv_layout::derive(&hv_layout::ImageView {
-                base: image.base_address.0,
-                bytes: &bytes,
-                code,
-                data,
-            })
+            hv_layout::derive(&hypervisor_image(&memory, image)?.view())
         })?;
         let mut partitions =
             hypervisor::partitions(&layout, &HypervisorMemory(memory), processors, known)?;

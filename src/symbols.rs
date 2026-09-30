@@ -140,6 +140,9 @@ pub struct SymbolStore {
     symbol_rvas: DashMap<u128, HashMap<String, Vec<IndexedSymbol>>>,
     /// GUID -> the same records sorted by RVA, for address-to-symbol lookups.
     symbol_addresses: DashMap<u128, Vec<AddressEntry>>,
+    /// GUID -> the length of the function each symbol begins, by RVA, for
+    /// modules ntoseye names itself: an address past it is not the symbol's.
+    symbol_extents: DashMap<u128, HashMap<u32, u32>>,
     source_lines: DashMap<u128, Vec<SourceLineEntry>>,
     /// GUID -> the private procedures of its module streams, sorted by RVA:
     /// where [`Self::frame_locals`] and [`Self::inline_frames`] find the
@@ -744,6 +747,7 @@ impl SymbolStore {
             struct_defs: DashMap::new(),
             symbol_rvas: DashMap::new(),
             symbol_addresses: DashMap::new(),
+            symbol_extents: DashMap::new(),
             source_lines: DashMap::new(),
             procedures: DashMap::new(),
             source_checksums: DashMap::new(),
@@ -910,6 +914,57 @@ impl SymbolStore {
             .map(|secure| secure.kernel);
         root.and_then(|root| self.find_module_for_address(root, address))
             .is_some()
+    }
+
+    /// Register `module` in address space `dtb` with `symbols`, names at
+    /// RVAs, for an image with no PDB whose functions ntoseye names itself
+    /// (the Windows hypervisor's hypercall handlers). `extents` bounds each
+    /// symbol by the length of its function, since the image's other
+    /// functions have no names. `guid` keys the names; the same image
+    /// registered in several roots shares them.
+    pub fn register_synthetic_module(
+        &self,
+        dtb: Dtb,
+        module: &ModuleInfo,
+        guid: u128,
+        symbols: &[(String, u32)],
+        extents: HashMap<u32, u32>,
+    ) {
+        if !self.symbol_rvas.contains_key(&guid) {
+            self.symbol_extents.insert(guid, extents);
+            self.index.insert(
+                guid,
+                SymbolIndex::from_names(symbols.iter().map(|(name, _)| name.clone()).collect()),
+            );
+            self.publish_symbol_rvas(
+                guid,
+                symbols
+                    .iter()
+                    .map(|(name, rva)| {
+                        (
+                            name.clone(),
+                            vec![IndexedSymbol {
+                                rva: *rva,
+                                visibility: SymbolVisibility::Public,
+                                compiland: None,
+                            }],
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        self.modules.insert(
+            Self::module_key(dtb, module.base_address),
+            LoadedModule {
+                name: module.name.clone(),
+                short_name: module.short_name.clone(),
+                guid,
+                base_address: module.base_address,
+                size: module.size,
+                dtb,
+            },
+        );
+        self.load_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Whether `module` is visible from address space `dtb`: its own space, or

@@ -199,6 +199,9 @@ pub struct Guest {
     /// The Windows hypervisor's partition layout, by image base, or why it
     /// could not be read off the code.
     partition_layouts: Mutex<HashMap<u64, std::result::Result<hv_layout::PartitionLayout, String>>>,
+    /// The names ntoseye gives the Windows hypervisor's code, by image base,
+    /// or `None` when its hypercall table was not found.
+    hypervisor_symbols: Mutex<HashMap<u64, Option<Arc<hypercalls::HypervisorSymbols>>>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -251,6 +254,7 @@ impl Guest {
             evmcs_pages: Mutex::new(EvmcsCache::default()),
             exit_register_layouts: Mutex::new(HashMap::new()),
             partition_layouts: Mutex::new(HashMap::new()),
+            hypervisor_symbols: Mutex::new(HashMap::new()),
         }
     }
 
@@ -309,6 +313,23 @@ impl Guest {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         hypervisor_covers(&images, dtb, address)
+    }
+
+    /// The names of the hypervisor image at `base`'s code, made by `name` the
+    /// first time and remembered for the boot, as finding none is.
+    pub fn hypervisor_symbols(
+        &self,
+        base: u64,
+        name: impl FnOnce() -> Option<hypercalls::HypervisorSymbols>,
+    ) -> Option<Arc<hypercalls::HypervisorSymbols>> {
+        let mut symbols = self
+            .hypervisor_symbols
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        symbols
+            .entry(base)
+            .or_insert_with(|| name().map(Arc::new))
+            .clone()
     }
 
     fn memo(&self) -> MutexGuard<'_, HaltMemo> {

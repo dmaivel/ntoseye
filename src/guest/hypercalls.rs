@@ -3,6 +3,8 @@
 //! page for each hypercall, and HvCallGetPartitionId (0x0046), which the
 //! current pages name without a code, from TLFS 6.0b.
 
+use super::hv_layout::HypercallEntry;
+
 /// `(code, name, rep)`, in code order.
 pub const TLFS_HYPERCALLS: &[(u16, &str, bool)] = &[
     (0x0001, "HvCallSwitchVirtualAddressSpace", false),
@@ -71,4 +73,97 @@ pub fn tlfs_hypercall(code: u16) -> Option<(&'static str, bool)> {
         .binary_search_by_key(&code, |&(known, _, _)| known)
         .ok()
         .map(|index| (TLFS_HYPERCALLS[index].1, TLFS_HYPERCALLS[index].2))
+}
+
+/// The names ntoseye gives the Windows hypervisor's code, and the length of
+/// the function each begins, by RVA, where the image's `.pdata` gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HypervisorSymbols {
+    pub names: Vec<(String, u32)>,
+    pub extents: std::collections::HashMap<u32, u32>,
+}
+
+/// Names for the Windows hypervisor's code, as `(name, rva)` in the image at
+/// `base`: each hypercall handler by the lowest call code it serves (its TLFS
+/// name, or `HvCall` and the code when the TLFS does not name it), the
+/// handler of the reserved code 0 and of every unimplemented code
+/// `HvCallUnimplemented`, and each VM-exit entry point in `exit_entries`
+/// `VmExitEntry`, numbered after the first.
+pub fn hypervisor_symbols(
+    base: u64,
+    table: &[HypercallEntry],
+    exit_entries: &[u64],
+) -> Vec<(String, u32)> {
+    let rva = |address: u64| u32::try_from(address.checked_sub(base)?).ok();
+    let mut named: Vec<(String, u32)> = Vec::new();
+    let mut taken = std::collections::HashSet::new();
+    for (code, entry) in table.iter().enumerate() {
+        let Some(offset) = rva(entry.handler) else {
+            continue;
+        };
+        if !taken.insert(offset) {
+            continue;
+        }
+        let name = match (code, tlfs_hypercall(code as u16)) {
+            (0, _) => "HvCallUnimplemented".to_string(),
+            (_, Some((name, _))) => name.to_string(),
+            (_, None) => format!("HvCall{code:04X}"),
+        };
+        named.push((name, offset));
+    }
+    let mut entries = 0;
+    for entry in exit_entries {
+        let Some(offset) = rva(*entry) else { continue };
+        if taken.insert(offset) {
+            entries += 1;
+            let suffix = if entries == 1 {
+                String::new()
+            } else {
+                entries.to_string()
+            };
+            named.push((format!("VmExitEntry{suffix}"), offset));
+        }
+    }
+    named
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: u64 = 0xffff_f840_b140_0000;
+
+    fn entry(rva: u64) -> HypercallEntry {
+        HypercallEntry {
+            handler: BASE + rva,
+            flags: 0,
+            input: 0,
+            input_element: 0,
+            output: 0,
+            output_element: 0,
+        }
+    }
+
+    #[test]
+    fn handlers_take_the_name_of_the_first_code_they_serve() {
+        // Code 0 and the unimplemented 0x0004 share a handler; 0x0046 and
+        // 0x0047 share another, named for the lower code.
+        let mut table = vec![entry(0x100); 0x48];
+        table[0x0001] = entry(0x200);
+        table[0x0005] = entry(0x300);
+        table[0x0046] = entry(0x400);
+        table[0x0047] = entry(0x400);
+        let names = hypervisor_symbols(BASE, &table, &[BASE + 0x500, BASE + 0x100, BASE + 0x600]);
+        assert_eq!(
+            names,
+            [
+                ("HvCallUnimplemented".to_string(), 0x100),
+                ("HvCallSwitchVirtualAddressSpace".to_string(), 0x200),
+                ("HvCall0005".to_string(), 0x300),
+                ("HvCallGetPartitionId".to_string(), 0x400),
+                ("VmExitEntry".to_string(), 0x500),
+                ("VmExitEntry2".to_string(), 0x600),
+            ]
+        );
+    }
 }

@@ -365,6 +365,11 @@ impl SymbolStore {
         if offset > 8192 {
             return None;
         }
+        if let Some(extents) = self.symbol_extents.get(&guid)
+            && extents.get(&rva).is_some_and(|&length| offset >= length)
+        {
+            return None;
+        }
         let first = entries.partition_point(|entry| entry.rva < rva);
         Some((entries[first].name.clone(), offset))
     }
