@@ -159,6 +159,24 @@ impl VirtualProcessor {
         Ok(self.info.address)
     }
 
+    /// The processors whose current VP this is (the one that runs it, or ran
+    /// it last), as dicts with `number` (the processor number, or `None` on
+    /// builds before 10.0.19041) and `block` (its processor block).
+    #[getter]
+    fn processors<'py>(&self, py: Python<'py>) -> PyResult<Vec<PlainDict<'py>>> {
+        self.owner.check(py)?;
+        self.info
+            .processors
+            .iter()
+            .map(|processor| {
+                let dict = PyDict::new(py);
+                dict.set_item("number", processor.number)?;
+                dict.set_item("block", processor.block)?;
+                Ok(PlainDict(dict))
+            })
+            .collect()
+    }
+
     /// The VTL that the VP runs, or last ran, in.
     #[getter]
     fn vtl(&self, py: Python<'_>) -> PyResult<u8> {

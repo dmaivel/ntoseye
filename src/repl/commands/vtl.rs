@@ -3,7 +3,7 @@ use tabled::builder::Builder;
 use super::memory::MAX_DISPLAY_BYTES;
 use crate::error::{Error, Result};
 use crate::guest::{
-    HvVirtualProcessor,
+    HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
     evmcs_fields,
     hypercalls::tlfs_hypercall,
@@ -44,7 +44,7 @@ repl_command! {
     names: ["!hvvps"],
     usage: "!hvvps [partition-id]",
     summary: "List the virtual processors of a Windows hypervisor partition (the root by default).",
-    details: "Each row is one VTL enabled on a VP, and * marks the VTL the VP runs or last ran in. The row shows the hypervisor's context object for the VTL and, when found, the physical address of the VTL's eVMCS with the EPT pointer (the root of the VTL's second-level address translation), the guest RIP where the VTL left off, and why it last left for the hypervisor. The eVMCS columns need the VM's hv-evmcs enlightenment. The partition ID uses the current radix. See !hvpartitions for where the objects come from.",
+    details: "Each row is one VTL enabled on a VP, and * marks the VTL the VP runs or last ran in. CPU is the processor whose current VP it is (the one that runs it, or ran it last), by number, or by processor block on builds before 10.0.19041, which keep no number there. The row shows the hypervisor's context object for the VTL and, when found, the physical address of the VTL's eVMCS with the EPT pointer (the root of the VTL's second-level address translation), the guest RIP where the VTL left off, and why it last left for the hypervisor. The eVMCS columns need the VM's hv-evmcs enlightenment. The partition ID uses the current radix. See !hvpartitions for where the objects come from.",
 }
 
 repl_command! {
@@ -108,6 +108,19 @@ fn size_text(bytes: u64) -> String {
     } else {
         format!("{:.1}{name}", bytes as f64 / unit as f64)
     }
+}
+
+/// The processors whose current VP a VP is, by number, or by processor
+/// block where the build keeps no number.
+fn processors_text(processors: &[HvProcessor]) -> String {
+    processors
+        .iter()
+        .map(|processor| match processor.number {
+            Some(number) => number.to_string(),
+            None => format!("{:x}", processor.block),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The name of an EPT memory type (Intel SDM 29.3.7).
@@ -452,6 +465,7 @@ impl ReplState<'_> {
         table.push_record([
             "VP",
             "Address",
+            "CPU",
             "VTL",
             "Context",
             "eVMCS",
@@ -471,6 +485,11 @@ impl ReplState<'_> {
                     },
                     if row == 0 {
                         ui::addr(vp.address)
+                    } else {
+                        String::new()
+                    },
+                    if row == 0 {
+                        processors_text(&vp.processors)
                     } else {
                         String::new()
                     },

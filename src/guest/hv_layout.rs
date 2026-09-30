@@ -450,6 +450,10 @@ pub fn hypercall_table(image: &ImageView<'_>) -> Result<Vec<HypercallEntry>> {
 pub struct PartitionLayout {
     /// Values reaching the current partition from the processor block.
     pub current_partition: Vec<Value>,
+    /// Values reaching the VP the processor block runs, or last ran.
+    pub current_vp: Vec<Value>,
+    /// Where the processor block keeps its processor number (a dword).
+    pub processor_index: Option<i64>,
     pub id: i64,
     pub parent: i64,
     pub children: i64,
@@ -581,7 +585,9 @@ const MAX_VPS: u64 = 0x10000;
 
 /// `(array, capacity)` from the VP lookup `(partition, index)`: it bounds
 /// the index with an immediate and loads `partition->vps[index]`.
-fn vp_array(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<(i64, u32)> {
+/// The functions the VP hypercalls call, and those they call: where the VP
+/// lookup is.
+fn vp_lookup_candidates(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<Vec<u64>> {
     let mut candidates = Vec::new();
     for code in [
         CALL_GET_VP_REGISTERS,
@@ -596,8 +602,12 @@ fn vp_array(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<(i64, u32
     }
     candidates.sort_unstable();
     candidates.dedup();
+    Ok(candidates)
+}
+
+fn vp_array(image: &ImageView<'_>, candidates: &[u64]) -> Result<(i64, u32)> {
     let mut found: Option<(i64, u32)> = None;
-    for callee in candidates {
+    for &callee in candidates {
         let trace = walk(image, callee, &[]);
         // The index may be the argument or, on paths that resolve a
         // "self" index first, a field; either way the same value is bounded
@@ -662,6 +672,56 @@ fn enabled_vtls(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<i64> 
             _ => None,
         })
         .ok_or_else(|| layout_error("HvCallVtlCall reads no enabled-VTL mask"))
+}
+
+/// The values reaching the processor block's current VP: those whose
+/// current VTL's level the VP hypercalls read, `[[vp + current] + level]`.
+fn current_vp(
+    image: &ImageView<'_>,
+    table: &[HypercallEntry],
+    current: i64,
+    level: i64,
+) -> Vec<Value> {
+    let mut found = Vec::new();
+    for code in [CALL_GET_VP_REGISTERS, CALL_SET_VP_REGISTERS] {
+        let Ok(entry) = handler(table, code) else {
+            continue;
+        };
+        for access in walk(image, entry, &[]).accesses {
+            if access.offset == level
+                && access.size == 1
+                && let Some((vp, offset)) = load_of(&access.base)
+                && offset == current
+                && gs_rooted(vp)
+                && !found.contains(vp)
+            {
+                found.push(vp.clone());
+            }
+        }
+    }
+    found
+}
+
+/// Where the processor block keeps its processor number: the dword from the
+/// block that the VP hypercalls scale by 8 to index per-processor arrays.
+/// Builds whose VP paths use no such array give none.
+fn processor_index(image: &ImageView<'_>, candidates: &[u64]) -> Option<i64> {
+    let mut found = Vec::new();
+    for &callee in candidates {
+        for access in walk(image, callee, &[]).accesses {
+            if let Some((Value::Load(base, offset, 4), 8)) = &access.index
+                && **base == Value::Gs
+                && !found.contains(offset)
+            {
+                found.push(*offset);
+            }
+        }
+    }
+    // One number per processor: two candidates would be a guess.
+    match found.as_slice() {
+        [offset] => Some(*offset),
+        _ => None,
+    }
 }
 
 /// Instructions looked back over from a `vmptrld`.
@@ -746,12 +806,17 @@ pub fn derive(image: &ImageView<'_>) -> Result<PartitionLayout> {
             "partition ID at {id:#x} by the child walker, {stored_id:#x} by HvCallGetPartitionId"
         )));
     }
-    let (vps, max_vps) = vp_array(image, &table)?;
+    let candidates = vp_lookup_candidates(image, &table)?;
+    let (vps, max_vps) = vp_array(image, &candidates)?;
     let (vp_current_vtl, vp_vtls, vtl_level) = vtl_fields(image, &table)?;
     let vp_enabled_vtls = enabled_vtls(image, &table)?;
+    let current_vp = current_vp(image, &table, vp_current_vtl, vtl_level);
+    let processor_index = processor_index(image, &candidates);
     let vmcs = vmcs_candidates(image);
     Ok(PartitionLayout {
         current_partition,
+        current_vp,
+        processor_index,
         id,
         parent,
         children,
@@ -924,6 +989,10 @@ mod tests {
             let mut out = a.create_label();
             a.cmp(edx, capacity).unwrap();
             a.jae(out).unwrap();
+            // A per-processor count, indexed by the processor number.
+            a.mov(eax, dword_ptr(8u64).gs()).unwrap();
+            a.mov(r10, qword_ptr(rcx + 0x6a80)).unwrap();
+            a.mov(r11d, dword_ptr(r10 + rax * 8)).unwrap();
             a.mov(eax, edx).unwrap();
             a.mov(rax, qword_ptr(rcx + rax * 8 + array)).unwrap();
             a.mov(qword_ptr(r9), rax).unwrap();
@@ -978,6 +1047,18 @@ mod tests {
         });
     }
 
+    /// `HvCallSetVpRegisters` reading the calling VP's current VTL level, as
+    /// the VP hypercalls do when no VTL is named.
+    fn current_vtl_level(builder: &mut Builder) {
+        use iced_x86::code_asm::*;
+        builder.handler(CALL_SET_VP_REGISTERS, |a| {
+            a.mov(rax, qword_ptr(0x358u64).gs()).unwrap();
+            a.mov(rcx, qword_ptr(rax + 0x3c0)).unwrap();
+            a.mov(al, byte_ptr(rcx + 0x14)).unwrap();
+            a.ret().unwrap();
+        });
+    }
+
     /// Every handler, 10.0.26100's way.
     fn build_26100() -> Builder {
         let mut builder = Builder::new();
@@ -986,6 +1067,7 @@ mod tests {
         vp_lookup(&mut builder, CALL_GET_VP_REGISTERS, 0x1e0, 0x800);
         vtl_calls(&mut builder);
         vmcs_load(&mut builder);
+        current_vtl_level(&mut builder);
         builder
     }
 
@@ -997,6 +1079,8 @@ mod tests {
             layout,
             PartitionLayout {
                 current_partition: vec![Value::Load(Box::new(Value::Gs), 0x360, 8)],
+                current_vp: vec![Value::Load(Box::new(Value::Gs), 0x358, 8)],
+                processor_index: Some(8),
                 id: 0x4550,
                 parent: 0x4540,
                 children: 0x4720,

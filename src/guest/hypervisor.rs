@@ -36,6 +36,18 @@ pub struct HvVirtualProcessor {
     pub vtl: u8,
     /// Each VTL enabled on the VP, lowest first.
     pub vtls: Vec<HvVtl>,
+    /// The processors whose current VP this is: the one that runs it, or
+    /// ran it last.
+    pub processors: Vec<HvProcessor>,
+}
+
+/// A logical processor of the hypervisor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HvProcessor {
+    /// Its processor block (its GS base in the hypervisor).
+    pub block: u64,
+    /// Its processor number, where the layout names where the block keeps it.
+    pub number: Option<u32>,
 }
 
 /// One VTL of a virtual processor.
@@ -209,6 +221,7 @@ fn virtual_processor(
         address,
         vtl,
         vtls,
+        processors: Vec::new(),
     })
 }
 
@@ -299,6 +312,35 @@ fn attach_vmcs(
     }
 }
 
+/// Record on each VP the processor blocks among `processors` whose current VP
+/// it is: a block's current-VP value must land exactly on a VP the walk
+/// validated.
+fn attach_processors(
+    layout: &PartitionLayout,
+    memory: &impl HvMemory,
+    processors: &[u64],
+    partitions: &mut [HvPartition],
+) {
+    for &block in processors {
+        let current: Vec<u64> = layout
+            .current_vp
+            .iter()
+            .filter_map(|value| eval(value, block, memory))
+            .collect();
+        let number = layout
+            .processor_index
+            .and_then(|offset| memory.sized(field(block, offset), 4))
+            .map(|number| number as u32);
+        for vp in partitions
+            .iter_mut()
+            .flat_map(|partition| &mut partition.virtual_processors)
+            .filter(|vp| current.contains(&vp.address))
+        {
+            vp.processors.push(HvProcessor { block, number });
+        }
+    }
+}
+
 /// Every partition, root first, reached from the processor blocks
 /// `processors`: each block's current partition, up its parents to the
 /// root, then down every child list. `known` are the VMCS pages the eVMCS
@@ -355,6 +397,7 @@ pub fn partitions(
         pending.extend(children.into_iter().rev());
     }
     attach_vmcs(layout, memory, known, &mut result);
+    attach_processors(layout, memory, processors, &mut result);
     Ok(result)
 }
 
@@ -403,6 +446,8 @@ mod tests {
     fn layout() -> PartitionLayout {
         PartitionLayout {
             current_partition: vec![Value::Load(Box::new(Value::Gs), 0x360, 8)],
+            current_vp: vec![Value::Load(Box::new(Value::Gs), 0x358, 8)],
+            processor_index: Some(8),
             id: 0x4550,
             parent: 0x4540,
             children: 0x4720,
@@ -523,6 +568,24 @@ mod tests {
                 .flat_map(|vp| &vp.vtls)
                 .all(|vtl| vtl.vmcs.is_none())
         );
+    }
+
+    #[test]
+    fn a_vp_lists_the_processor_whose_current_vp_it_is() {
+        let mut ram = tree();
+        ram.insert(GS + 0x358, 0xffff_e800_0038_9050);
+        ram.insert(GS + 8, 3);
+        let found = partitions(&layout(), &Ram(ram), &[GS], &HashSet::new()).unwrap();
+        let processors: Vec<_> = found
+            .iter()
+            .flat_map(|p| &p.virtual_processors)
+            .map(|vp| (vp.index, vp.processors.clone()))
+            .collect();
+        let expected = HvProcessor {
+            block: GS,
+            number: Some(3),
+        };
+        assert_eq!(processors, [(0, vec![]), (1, vec![expected]), (0, vec![])]);
     }
 
     #[test]

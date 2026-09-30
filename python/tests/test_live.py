@@ -213,6 +213,15 @@ def test_hypervisor_partitions_mirror_the_vcpus(halted: Debugger) -> None:
             assert all(set(vp.vtls) == {0} for vp in child.virtual_processors)
     cpus = list(halted.cpus)
     assert [vp.index for vp in root.virtual_processors] == list(range(len(cpus)))
+    # A processor has one current VP, and its number is one of the target's.
+    numbers = [
+        processor["number"]
+        for partition in partitions
+        for vp in partition.virtual_processors
+        for processor in vp.processors
+        if processor["number"] is not None
+    ]
+    assert len(numbers) == len(set(numbers)) and all(0 <= n < len(cpus) for n in numbers)
     compared = 0
     for cpu, vp in zip(cpus, root.virtual_processors):
         assert vp.vtl in vp.vtls

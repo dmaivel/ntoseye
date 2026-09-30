@@ -12765,6 +12765,13 @@ class VirtualProcessor:
         """
         The VP index in its partition.
         """
+    @property
+    def processors(self, /) -> list[dict[str, Any]]:
+        """
+        The processors whose current VP this is (the one that runs it, or ran
+        it last), as dicts with `number` (the processor number, or `None` on
+        builds before 10.0.19041) and `block` (its processor block).
+        """
     def to_dict(self, /) -> dict[str, Any]:
         """
         Return the VP as a plain `dict` (`index`, `address`, `vtl`, and `vtls`,

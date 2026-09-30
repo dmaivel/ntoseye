@@ -134,7 +134,7 @@ ntoseye does not list the modules that are loaded in a trustlet. The lists that 
 The Windows hypervisor keeps a partition object for NT (the root partition) and one for each Hyper-V VM, WSL2 instance, or Windows Sandbox that runs in the guest, and a virtual processor (VP) object for each of their processors. `ntoseye` walks these objects:
 
 - {command}`!hvpartitions`: Show each partition, root first, with its partition object, partition ID, the parent's ID, the number of VPs, and its privilege mask (the TLFS `HV_PARTITION_PRIVILEGE_MASK`). Below the table, it shows the TLFS names of each partition's privileges, and the set bits that the TLFS lists as reserved as a hexadecimal value.
-- {command}`!hvvps` `[partition-id]`: Show the VPs of a partition, the root partition by default, with one row for each VTL that is enabled on a VP. `*` marks the VTL that the VP runs or last ran in. Each row shows the hypervisor's context object for the VTL, the physical address of the VTL's eVMCS, its EPT pointer, the guest RIP where the VTL left off, and why it last left for the hypervisor. The hypervisor also allocates contexts for VTLs that a partition does not enable, for example VTL1 in a VM without VBS, and the command does not show those.
+- {command}`!hvvps` `[partition-id]`: Show the VPs of a partition, the root partition by default, with one row for each VTL that is enabled on a VP. `*` marks the VTL that the VP runs or last ran in. `CPU` is the processor whose current VP it is, the one that runs it or ran it last, by number; builds before 10.0.19041 keep no number where ntoseye finds the current VP, so it shows the processor block instead. Each row shows the hypervisor's context object for the VTL, the physical address of the VTL's eVMCS, its EPT pointer, the guest RIP where the VTL left off, and why it last left for the hypervisor. The hypervisor also allocates contexts for VTLs that a partition does not enable, for example VTL1 in a VM without VBS, and the command does not show those.
 
 With a Hyper-V VM that runs in the guest:
 
@@ -147,18 +147,20 @@ ffffe80200001000  0x2  0x1     2    003b803000002e7f
 0x2: AccessVpRunTimeReg ... PostMessages SignalEvents AccessVSM AccessVpRegisters EnableExtendedHypercalls StartVirtualProcessor (+0x8800000000000)
 
 mem:1> !hvvps
-VP  Address           VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
-0   ffffe8000026c050  0*   ffffe8000026d000  1160e3000  10155801e    fffff8028342950f  HLT
-                      1    ffffe8000026f000  1160e6000  10155b01e    fffff80213c70035  VMCALL
-1   ffffe80000389050  0*   ffffe80000390000  130a13000  10155801e    fffff8028342950f  HLT
-                      1    ffffe80000392000  130a16000  10155b01e    fffff80213c70035  VMCALL
+VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
+0   ffffe8000026c050  0    0*   ffffe8000026d000  1160e4000  10155901e    fffff805932e950f  HLT
+                           1    ffffe8000026f000  1160e7000  10155c01e    fffff80523b40035  VMCALL
+1   ffffe80000389050  1    0*   ffffe80000390000  12ec0d000  10155901e    fffff805932e950f  HLT
+                           1    ffffe80000392000  12ec10000  10155c01e    fffff80523b40035  VMCALL
 ...
 
 mem:1> !hvvps 2
-VP  Address           VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
-0   ffffe80200231050  0*   ffffe80200232000  1baadc000  1baa3105e    000000001ff26114  HLT
-1   ffffe8020024b050  0*   ffffe8020024c000  1babe7000
+VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
+0   ffffe80200231050       0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
+1   ffffe8020024b050       0*   ffffe8020024c000  2053e7000
 ```
+
+The root partition's VPs are pinned to the processors with their numbers, and the child's VPs show no processor while every processor runs a root VP.
 
 The EPT pointer is the root of the VTL's second-level address translation (SLAT), which maps the guest's physical addresses to host physical addresses with read, write, and execute permissions. The VPs of a partition share one EPT for each VTL, and VTL0 and VTL1 have different ones: this is how the secure kernel and memory integrity (HVCI) set page permissions that NT cannot change. The root partition's EPT maps each address to itself, except the pages that the hypervisor keeps for itself. The eVMCS columns stay empty without the `hv-evmcs` enlightenment, and the state columns stay empty for a VP that has not started, such as the second VP of a VM still in its firmware.
 

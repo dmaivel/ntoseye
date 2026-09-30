@@ -34,7 +34,9 @@ use discovery::{
 };
 pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState};
 pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout};
-pub use hypervisor::{HvMemory, HvPartition, HvVirtualProcessor, HvVtl, privilege_names};
+pub use hypervisor::{
+    HvMemory, HvPartition, HvProcessor, HvVirtualProcessor, HvVtl, privilege_names,
+};
 pub use image::{Image, SymbolRef};
 pub use secure_kernel::{SecureKernel, TrustletInfo};
 
