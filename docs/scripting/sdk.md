@@ -176,6 +176,7 @@ Each `SavedVtlState` holds this data:
 - The last VM exit of the VTL: `exit_reason` and `exit_reason_name`, and its detail: `exit_qualification`, `exit_interruption_info`, and `exit_instruction_length`, as the Intel SDM defines them.
 - `current`, which shows if this is the current VTL: the VTL that the hypervisor was entered from, or is about to enter.
 - `host_rip` and `host_rsp`, the hypervisor's VM-exit entry point and the stack it runs on.
+- `general_registers`, the guest's RAX to R15 at the last exit (`saved.general_registers.rbx`, or `.to_dict()`), read where the hypervisor's entry code saved them. It is `None` except for the current VTL once the vCPU is past the entry code's stores, and when the entry code cannot be read. Experimental.
 - `may_be_stale`, which is `True` when the vCPU is stopped on `host_rip`. KVM writes the eVMCS when it enters the hypervisor, and a stop can fall between a VM exit and that entry, so the state may still describe the previous exit. The guest's general-purpose registers are then still in `cpu.registers`.
 - `evmcs`, the physical address of the Enlightened VMCS that ntoseye read the state from.
 

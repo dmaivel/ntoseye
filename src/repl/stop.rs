@@ -347,8 +347,8 @@ pub fn print_break_context_for_bugcheck(session: &mut Session, info: Option<&Bug
 }
 
 /// The stop display for the saved VTL0 state selected at a stop in the
-/// Windows hypervisor: its registers (the hypervisor keeps no general-purpose
-/// ones there), the NT code it left off at, and its stack.
+/// Windows hypervisor: its registers (the general-purpose ones only when
+/// they were recovered), the NT code it left off at, and its stack.
 fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
     let debugger = &session.target;
     print_section("registers (saved VTL0)");

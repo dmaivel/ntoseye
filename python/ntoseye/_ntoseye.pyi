@@ -9958,7 +9958,7 @@ class SavedVtlState(BaseRecord):
     """
     One VTL of a virtual processor, as the Windows hypervisor last saved it
     in the VTL's Enlightened VMCS. A VMCS holds no general-purpose register
-    other than `rsp`.
+    other than `rsp`; `general_registers` has the others when they are known.
     """
     @property
     def cr0(self, /) -> int: ...
@@ -10024,6 +10024,16 @@ class SavedVtlState(BaseRecord):
     def fs(self, /) -> int: ...
     @property
     def fs_base(self, /) -> int: ...
+    @property
+    def general_registers(self, /) -> Record |None:
+        """
+        The guest's general-purpose registers other than `rsp` at the last
+        exit (`rax` to `r15`), read where the hypervisor's VM-exit entry
+        code saved them. Experimental: where that is, is read off the
+        entry code. None when they are not known: for a VTL that is not
+        the current one, while the vCPU is on `host_rip` or still saving
+        them, or when the entry code does not save them in one block.
+        """
     @property
     def gs(self, /) -> int: ...
     @property

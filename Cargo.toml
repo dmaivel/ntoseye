@@ -16,7 +16,7 @@ repository = "https://github.com/dmaivel/ntoseye"
 readme = "README.md"
 keywords = [ "virtualization", "introspection", "memory", "windbg", "kvm" ]
 categories = [ "security", "os" ]
-exclude = [ "media/*", "docs/*" ]
+exclude = [ "media/*", "docs/*", "tools/*" ]
 
 [[bin]]
 name = "ntoseye"

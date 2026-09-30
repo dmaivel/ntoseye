@@ -63,15 +63,20 @@ pub struct SavedVtlContext {
     /// writes the eVMCS when it enters the hypervisor, and a stop can fall
     /// between an exit and that entry.
     pub may_be_stale: bool,
+    /// The general-purpose registers of the exit, where the hypervisor's
+    /// exit entry code saved them (see [`crate::guest::ExitRegisterLayout`]),
+    /// or why they are not known: only the current VTL's are, once the
+    /// vCPU is past the entry code's stores.
+    pub general_registers: std::result::Result<HashMap<&'static str, u64>, String>,
 }
 
 impl SavedVtlContext {
     /// The saved registers under the names the register display and the
-    /// unwinder use. A VMCS holds no general-purpose register but RSP: the
-    /// hypervisor keeps the rest in its own undocumented VP state.
+    /// unwinder use. A VMCS holds no general-purpose register but RSP; the
+    /// rest come from where the hypervisor saved them, when known.
     pub fn registers(&self) -> HashMap<String, u64> {
         let state = &self.state;
-        [
+        let mut registers: HashMap<String, u64> = [
             ("rip", state.rip),
             ("rsp", state.rsp),
             ("eflags", state.rflags),
@@ -90,7 +95,15 @@ impl SavedVtlContext {
         ]
         .into_iter()
         .map(|(name, value)| (name.to_string(), value))
-        .collect()
+        .collect();
+        if let Ok(general) = &self.general_registers {
+            registers.extend(
+                general
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), *value)),
+            );
+        }
+        registers
     }
 }
 
@@ -226,6 +239,7 @@ impl Target {
                 vtl,
                 state: *state,
                 may_be_stale: rip == state.host_rip,
+                general_registers: self.saved_general_registers(cr3 & mask, rip, state),
             })),
             many => Err(Error::SavedVtlState(format!(
                 "{} eVMCS pages of this virtual processor hold VTL{vtl} state",
@@ -247,9 +261,45 @@ impl Target {
         Ok(vtl0.into_iter().chain(one(vtl1, 1)?).collect())
     }
 
+    /// The general-purpose registers of `state`'s last exit, for a vCPU at
+    /// `rip` on the hypervisor root `root`: read where the hypervisor's exit
+    /// entry code saved them. The block they are in belongs to the logical
+    /// processor and holds the last exit from any VTL, so only the current
+    /// VTL's state has them, and only once the vCPU is past the stores.
+    fn saved_general_registers(
+        &self,
+        root: u64,
+        rip: u64,
+        state: &EvmcsState,
+    ) -> std::result::Result<HashMap<&'static str, u64>, String> {
+        if !state.current {
+            return Err("the hypervisor last saved another VTL's registers".to_string());
+        }
+        if rip == state.host_rip {
+            return Err(
+                "the vCPU is on the VM-exit entry: the guest's registers are still its own"
+                    .to_string(),
+            );
+        }
+        let guest = self.guest().map_err(|error| error.to_string())?;
+        let memory = self.address_space(root);
+        let layout = guest.exit_register_layout(state.host_rip, |code| {
+            memory.read_bytes(VirtAddr(state.host_rip), code)
+        })?;
+        if (state.host_rip..layout.stores_end).contains(&rip) {
+            return Err("the vCPU is saving them".to_string());
+        }
+        layout
+            .read(state.host_rsp, |address| {
+                memory.read::<u64>(VirtAddr(address)).ok()
+            })
+            .ok_or_else(|| "the block they are saved in is unreadable".to_string())
+    }
+
     /// The VTL0 state the Windows hypervisor saved for `vcpu`, whose registers
     /// are `registers`, when it is halted in the hypervisor and the state is
-    /// found and validates (see [`Self::saved_vtl_contexts`]).
+    /// found and validates (see [`Self::saved_vtl_contexts`]). A state that
+    /// may be one exit behind is not where NT is, so it is not returned.
     pub fn saved_vtl0_registers(
         &self,
         vcpu: &str,

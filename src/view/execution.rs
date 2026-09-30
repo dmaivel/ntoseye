@@ -3,7 +3,7 @@
 //! disassembly.
 
 use super::process::{ProcessIdentity, ThreadSummary, process, thread_summary};
-use super::shape::{Hex, shapes, unions};
+use super::shape::{Hex, Keyed, shapes, unions};
 use super::symbols::source_location;
 use crate::types::VirtAddr;
 use crate::breakpoints::Breakpoint;
@@ -36,7 +36,7 @@ shapes! {
 
     /// One VTL of a virtual processor, as the Windows hypervisor last saved it
     /// in the VTL's Enlightened VMCS. A VMCS holds no general-purpose register
-    /// other than `rsp`.
+    /// other than `rsp`; `general_registers` has the others when they are known.
     SavedVtlState {
         /// 0 or 1.
         vtl: u8,
@@ -87,6 +87,13 @@ shapes! {
         /// one in progress. The guest's general-purpose registers are then
         /// still in the vCPU's own registers.
         may_be_stale: bool,
+        /// The guest's general-purpose registers other than `rsp` at the last
+        /// exit (`rax` to `r15`), read where the hypervisor's VM-exit entry
+        /// code saved them. Experimental: where that is, is read off the
+        /// entry code. None when they are not known: for a VTL that is not
+        /// the current one, while the vCPU is on `host_rip` or still saving
+        /// them, or when the entry code does not save them in one block.
+        general_registers: Option<Keyed<Hex>>,
         /// The physical address of the eVMCS page that ntoseye read the state
         /// from.
         evmcs: Hex,
@@ -509,6 +516,12 @@ pub fn saved_vtl_state(saved: &unwind::SavedVtl) -> SavedVtlState {
         host_rip: VirtAddr(state.host_rip),
         host_rsp: VirtAddr(state.host_rsp),
         may_be_stale: saved.context.may_be_stale,
+        general_registers: saved.context.general_registers.as_ref().ok().map(|registers| {
+            crate::guest::EXIT_GPRS
+                .iter()
+                .filter_map(|name| Some((*name, *registers.get(name)?)))
+                .collect()
+        }),
         evmcs: state.address,
     }
 }

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 mod discovery;
 mod evmcs;
+mod exit_registers;
 mod image;
 mod modules;
 pub mod pdb_recovery;
@@ -27,6 +28,7 @@ use discovery::{
     find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_arm64, find_ntoskrnl_va_triage,
 };
 pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState};
+pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout};
 pub use image::{Image, SymbolRef};
 pub use secure_kernel::{SecureKernel, TrustletInfo};
 
@@ -181,6 +183,10 @@ pub struct Guest {
     foreign_images: Mutex<Vec<(Dtb, ModuleInfo)>>,
     /// Where the Windows hypervisor's eVMCS pages are, once scanned for.
     evmcs_pages: Mutex<EvmcsCache>,
+    /// Where the Windows hypervisor's exit entry code saves the guest's
+    /// general-purpose registers, by entry point (`host_rip`), or why that
+    /// could not be read off the code.
+    exit_register_layouts: Mutex<HashMap<u64, std::result::Result<ExitRegisterLayout, String>>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -221,6 +227,7 @@ impl Guest {
             secure_kernel: Mutex::new(None),
             foreign_images: Mutex::new(Vec::new()),
             evmcs_pages: Mutex::new(EvmcsCache::default()),
+            exit_register_layouts: Mutex::new(HashMap::new()),
         }
     }
 

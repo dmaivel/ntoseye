@@ -201,6 +201,45 @@ def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
         pytest.skip(f"no VTL1 on this target: {error}")
 
 
+GPRS = ["rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8, 16)]
+
+
+def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
+    """The registers ntoseye reads where the hypervisor's exit entry code
+    saved them are the guest's at the exit: a hardware breakpoint on
+    `host_rip` sees them live, and one on the entry code's first call (every
+    store is before it) sees what ntoseye then reads."""
+    if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
+        pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
+    cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
+    if cpu is None:
+        pytest.skip("no vCPU halted in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
+    current = next(saved for saved in cpu.saved_vtl if saved.current)
+    assert current.general_registers is not None or current.may_be_stale
+    host_rip = current.host_rip
+    first_call = next(ins.ip for ins in cpu.memory.disassemble(host_rip, 64) if ins.mnemonic == "call")
+    for _ in range(ATTEMPTS):
+        entry = halted.breakpoints.add(host_rip, hardware=True)
+        try:
+            stop = halted.run(timeout=10.0)
+        finally:
+            entry.delete()
+        assert isinstance(stop, Stop.Breakpoint)
+        exiting = stop.cpu
+        truth = {name: exiting.registers[name] for name in GPRS}
+        # On host_rip the exit's registers are not saved yet.
+        assert all(saved.may_be_stale and saved.general_registers is None for saved in exiting.saved_vtl)
+        stored = halted.breakpoints.add(first_call, hardware=True, processor=exiting)
+        try:
+            stop = halted.run(timeout=10.0)
+        finally:
+            stored.delete()
+        assert isinstance(stop, Stop.Breakpoint) and stop.cpu.id == exiting.id
+        saved = next(saved for saved in stop.cpu.saved_vtl if saved.current)
+        assert saved.general_registers is not None
+        assert {name: getattr(saved.general_registers, name) for name in GPRS} == truth
+
+
 def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
     sk = gdb_secure_kernel(halted)
     address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]

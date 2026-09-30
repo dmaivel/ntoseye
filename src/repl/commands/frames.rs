@@ -68,7 +68,7 @@ repl_command! {
     names: [".vtlcxr"],
     usage: ".vtlcxr",
     summary: "Select the VTL0 context that the Windows hypervisor saved for a vCPU halted in the hypervisor.",
-    details: "Use this command for a vCPU that stopped in the Windows hypervisor (VBS). It reads the saved state of each VTL of the virtual processor from the Enlightened VMCS page of that VTL, lists these states, and selects the VTL0 state, so that r, k, and u show where NT left off. The VM must expose hv-evmcs, and at the first use in each boot, the command scans host RAM for the pages. The context has RIP, RSP, flags, control registers, and segment registers, but no other general-purpose registers, because the hypervisor keeps them in undocumented state. The command lists the saved VTL1 state but does not select it. A stop in the hypervisor selects the VTL0 state automatically. .cxr goes back to the registers of the hypervisor, and .vtlcxr then selects the VTL0 state again. See 'Where NT left off under the hypervisor' in the VBS guide.",
+    details: "Use this command for a vCPU that stopped in the Windows hypervisor (VBS). It reads the saved state of each VTL of the virtual processor from the Enlightened VMCS page of that VTL, lists these states, and selects the VTL0 state, so that r, k, and u show where NT left off. The VM must expose hv-evmcs, and at the first use in each boot, the command scans host RAM for the pages. The context has RIP, RSP, flags, control registers, and segment registers from the Enlightened VMCS. For the current VTL it also has the other general-purpose registers, read where the hypervisor's VM-exit entry code saved them (experimental), and the command says why when they are missing. The command lists the saved VTL1 state but does not select it. A stop in the hypervisor selects the VTL0 state automatically. .cxr goes back to the registers of the hypervisor, and .vtlcxr then selects the VTL0 state again. See 'Where NT left off under the hypervisor' in the VBS guide.",
     run_state: Halted,
 }
 
@@ -339,6 +339,14 @@ impl ReplState<'_> {
         let selected = SelectedFrame::from_registers(0, vtl0.context.registers());
         self.set_selected_frame(selected.clone());
         outln!("selected the VTL0 context the hypervisor saved");
+        if let Err(reason) = &vtl0.context.general_registers {
+            outln!(
+                "{}",
+                ui::muted(&format!(
+                    "general-purpose registers other than rsp: unknown ({reason})"
+                ))
+            );
+        }
         if vtl0.context.may_be_stale {
             outln!(
                 "{}",
