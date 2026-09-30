@@ -713,6 +713,13 @@ impl Registers {
         Ok(sorted_registers(&self.values(py)?))
     }
 
+    /// The value of register `name`, or `default` when this file has no such
+    /// register (a recovered frame holds only what unwinding recovered).
+    #[pyo3(signature = (name, default = None))]
+    fn get(&self, py: Python<'_>, name: &str, default: Option<u128>) -> PyResult<Option<u128>> {
+        Ok(register_value(&self.values(py)?, name).or(default))
+    }
+
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
         Ok(self.values(py)?.len())
     }

@@ -9654,6 +9654,11 @@ class Registers:
     def __repr__(self, /) -> str: ...
     def __setattr__(self, name: str, value: Any, /) -> None: ...
     def __setitem__(self, name: str, value: int, /) -> None: ...
+    def get(self, /, name: str, default: int |None = None) -> int |None:
+        """
+        The value of register `name`, or `default` when this file has no such
+        register (a recovered frame holds only what unwinding recovered).
+        """
     def items(self, /) -> list[tuple[str, int]]:
         """
         `(name, value)` pairs, sorted by name.
