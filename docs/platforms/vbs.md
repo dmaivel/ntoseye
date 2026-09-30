@@ -164,26 +164,32 @@ The EPT pointer is the root of the VTL's second-level address translation (SLAT)
 
 ### Page permissions of each VTL
 
-{command}`!hvept` `<guest-physical-address> [partition-id [vp-index]]` translates a guest physical address through the EPT of each VTL of a VP, the root partition's VP 0 by default. Each row shows the host physical address, the access that every level of the walk allows, the page size, and the memory type. With memory integrity (HVCI) on, VTL0 can execute NT's code but not write it, and can write its data but not execute it, while VTL1 has full access. VTL0 has no access at all to the pages of the secure kernel:
+{command}`!hvept` `[-v] <address> [partition-id [vp-index]]` translates a guest physical address through the EPT of each VTL of a VP, the root partition's VP 0 by default. Each row shows the host physical address, the access that every level of the walk allows, the page size, and the memory type. With memory integrity (HVCI) on, VTL0 can execute NT's code but not write it, and can write its data but not execute it, while VTL1 has full access. VTL0 has no access at all to the pages of the secure kernel:
+
+With `-v`, the address is virtual, in the current address space ({command}`.process`, or the {command}`.vtl` `1` scope), and the command translates it through the guest's page tables first:
 
 ```text
-mem:1> !hvept 0x5efd130
+mem:1> !hvept -v nt!KeBugCheckEx
+virtual fffff8059313d130 -> guest physical 5efd130
 VTL  EPT pointer  Host physical  Access  User exec  Page  Type
 0    10155901e    5efd130        r-x                2M    WB
 1    10155c01e    5efd130        rwx                2M    WB
 
-mem:1> !hvept 0x1185c8c80
+mem:1> !hvept -v nt!KiProcessorBlock
+virtual fffff80593c08c80 -> guest physical 1185c8c80
 VTL  EPT pointer  Host physical  Access  User exec  Page  Type
 0    10155901e    1185c8c80      rw-                2M    WB
 1    10155c01e    1185c8c80      rwx                2M    WB
 
-mem:1> !hvept 0x18ba000
+mem:1> .vtl 1
+mem:1> !hvept -v securekernel
+virtual fffff805290d3000 -> guest physical 18ba000
 VTL  EPT pointer  Host physical                  Access  User exec  Page  Type
 0    10155901e    not mapped (no level-1 entry)
 1    10155c01e    18ba000                        rwx                2M    WB
 ```
 
-The first address is the page of `nt!KeBugCheckEx`, the second that of `nt!KiProcessorBlock`, and the third the start of `securekernel.exe`. To get the guest physical address of a virtual address, use {command}`!vtop`, or `memory.translate()` in the SDK. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
+In the SDK, translate a virtual address with `memory.translate()` first. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
 
 The addresses are in the address space of the hypervisor. To read them with {command}`dq` and the other memory commands, first select the context of a vCPU that is stopped in the hypervisor with {command}`.cxr`.
 

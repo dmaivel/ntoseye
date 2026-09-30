@@ -3,6 +3,7 @@ use tabled::builder::Builder;
 use crate::error::{Error, Result};
 use crate::guest::{ept::EptTranslation, privilege_names};
 use crate::repl::*;
+use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::halted_in_windows_hypervisor;
 
@@ -41,9 +42,9 @@ repl_command! {
 repl_command! {
     cmd_hvept;
     names: ["!hvept"],
-    usage: "!hvept <guest-physical-address> [partition-id [vp-index]]",
+    usage: "!hvept [-v] <address> [partition-id [vp-index]]",
     summary: "Translate a guest physical address through each VTL's EPT (second-level address translation) of a Windows hypervisor VP.",
-    details: "Walks the extended page tables that each enabled VTL's eVMCS names, for the root partition's VP 0 by default. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
+    details: "Walks the extended page tables that each enabled VTL's eVMCS names, for the root partition's VP 0 by default. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
 }
 
 /// The name of an EPT memory type (Intel SDM 29.3.7).
@@ -424,18 +425,46 @@ impl ReplState<'_> {
     }
 
     fn cmd_hvept(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.is_empty() || invocation.argv.len() > 3 {
+        let virtual_address = matches!(invocation.arg(0), Some("-v" | "/v"));
+        let arguments = &invocation.argv[usize::from(virtual_address)..];
+        if arguments.is_empty() || arguments.len() > 3 {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
-        let mut values = Vec::with_capacity(invocation.argv.len());
-        for text in &invocation.argv {
+        let mut values = Vec::with_capacity(arguments.len());
+        for text in arguments {
             let Some(value) = self.eval_or_report(text) else {
                 return Ok(());
             };
             values.push(value.0);
         }
-        let gpa = values[0];
+        let gpa = if virtual_address {
+            match self.ctx.target.virt_to_phys(None, VirtAddr(values[0])) {
+                Ok(Some(gpa)) => {
+                    outln!(
+                        "{} {} {} {:x}",
+                        ui::muted("virtual"),
+                        ui::addr(values[0]),
+                        ui::muted("-> guest physical"),
+                        gpa
+                    );
+                    gpa
+                }
+                Ok(None) => {
+                    error!(
+                        "{} is not mapped in the current address space",
+                        ui::addr(values[0])
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            }
+        } else {
+            values[0]
+        };
         let partitions = match self.ctx.target.hypervisor_partitions() {
             Ok(partitions) => partitions,
             Err(error) => {
