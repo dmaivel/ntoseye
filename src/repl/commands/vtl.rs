@@ -14,7 +14,8 @@ use crate::repl::memory_view::{MemoryDisplayMode, display_memory_with_validity, 
 use crate::repl::*;
 use crate::types::VirtAddr;
 use crate::ui;
-use crate::unwind::halted_in_windows_hypervisor;
+use crate::unwind::{halted_in_windows_hypervisor, try_format_symbol_at};
+use std::collections::HashSet;
 
 repl_command! {
     cmd_vtl;
@@ -36,8 +37,8 @@ repl_command! {
     cmd_hvpartitions();
     names: ["!hvpartitions"],
     usage: "!hvpartitions",
-    summary: "List the partitions of the Windows hypervisor, root first.",
-    details: "Walks the hypervisor's partition objects from its processor blocks, which come from the eVMCS pages (the VM's hv-evmcs enlightenment) or from a vCPU stopped in the hypervisor. Each row shows the partition object, its partition ID, the parent's ID, the number of virtual processors, and the privilege mask (HV_PARTITION_PRIVILEGE_MASK). hvix64 has no public symbols, so the offsets are read off the hypervisor's own code and each object is validated before it is shown; if the layout is not recognized, the command gives an error and does not guess offsets. Intel hosts only.",
+    summary: "Show the partitions of the Windows hypervisor as a tree, with their virtual processors.",
+    details: "Walks the hypervisor's partition objects from its processor blocks, which come from the eVMCS pages (the VM's hv-evmcs enlightenment) or from a vCPU stopped in the hypervisor. Each child partition is below its parent, with its partition ID and object, and below each partition are its privilege mask (HV_PARTITION_PRIVILEGE_MASK) with the TLFS names, then each VP: the processor whose current VP it is, the VTL it runs or last ran in (the other enabled VTLs after it), the guest RIP where that VTL left off, named from symbols for the root partition's VPs, and why it last left for the hypervisor. !hvvps shows each VTL of a partition's VPs in full. hvix64 has no public symbols, so the offsets are read off the hypervisor's own code and each object is validated before it is shown; if the layout is not recognized, the command gives an error and does not guess offsets. Intel hosts only.",
 }
 
 repl_command! {
@@ -470,30 +471,114 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let mut table = Builder::default();
-        table.push_record(["Partition", "ID", "Parent", "VPs", "Privileges"]);
+        // Each partition under its parent, once: the root, then any whose
+        // parent the walk did not find (or whose parents loop).
+        let mut seen = HashSet::new();
         for partition in &partitions {
-            table.push_record([
-                ui::addr(partition.address),
-                format!("{:#x}", partition.id),
-                partition
-                    .parent
-                    .map_or_else(|| "root".to_string(), |id| format!("{id:#x}")),
-                partition.virtual_processors.len().to_string(),
-                format!("{:016x}", partition.privileges),
-            ]);
-        }
-        print_padded_table(table);
-        for partition in &partitions {
-            let (names, unnamed) = privilege_names(partition.privileges);
-            let mut line = names.join(" ");
-            if unnamed != 0 {
-                line.push_str(&format!(" (+{unnamed:#x})"));
+            let orphan = partition
+                .parent
+                .is_none_or(|parent| !partitions.iter().any(|p| p.id == parent));
+            if orphan && !seen.contains(&partition.id) {
+                outln!(
+                    "{}",
+                    self.partition_tree(partition, &partitions, 0, &mut seen)
+                );
             }
-            outln!("{} {}", ui::muted(&format!("{:#x}:", partition.id)), line);
+        }
+        for partition in &partitions {
+            if !seen.contains(&partition.id) {
+                outln!(
+                    "{}",
+                    self.partition_tree(partition, &partitions, 0, &mut seen)
+                );
+            }
         }
         outln!();
         Ok(())
+    }
+
+    /// `partition` with its privileges, its VPs, and its child partitions
+    /// nested below it, as lines for a tree `depth` levels down. A partition
+    /// in `seen` is not shown again.
+    fn partition_tree(
+        &self,
+        partition: &HvPartition,
+        partitions: &[HvPartition],
+        depth: usize,
+        seen: &mut HashSet<u64>,
+    ) -> String {
+        seen.insert(partition.id);
+        let mut head = format!("{} {:#x}", ui::label("partition"), partition.id);
+        if partition.parent.is_none() {
+            head.push_str("  root");
+        }
+        head.push_str(&format!("  {}", ui::muted(&ui::addr(partition.address))));
+        let (names, unnamed) = privilege_names(partition.privileges);
+        let mut privileges = format!(
+            "privileges {:016x}: {}",
+            partition.privileges,
+            names.join(" ")
+        );
+        if unnamed != 0 {
+            privileges.push_str(&format!(" (+{unnamed:#x})"));
+        }
+        let mut children = vec![ui::muted(
+            &wrap_prose(&privileges, 3 * (depth + 1)).join("\n"),
+        )];
+        let root = partition.parent.is_none();
+        children.extend(
+            partition
+                .virtual_processors
+                .iter()
+                .map(|vp| self.vp_line(vp, root)),
+        );
+        for child in partitions {
+            if child.parent == Some(partition.id) && !seen.contains(&child.id) {
+                children.push(self.partition_tree(child, partitions, depth + 1, seen));
+            }
+        }
+        std::iter::once(head)
+            .chain(event_children_lines("", &children))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// One VP in a partition tree: its processor, the VTL it runs (the
+    /// other enabled ones after it), and where that VTL left off and why.
+    /// The root partition's are named from NT's and the secure kernel's
+    /// symbols.
+    fn vp_line(&self, vp: &HvVirtualProcessor, root: bool) -> String {
+        let mut line = format!("VP {}", vp.index);
+        let cpu = processors_text(&vp.processors);
+        if !cpu.is_empty() {
+            line.push_str(&format!("  CPU {cpu}"));
+        }
+        line.push_str(&format!("  VTL{}", vp.vtl));
+        let others: Vec<String> = vp
+            .vtls
+            .iter()
+            .filter(|vtl| vtl.level != vp.vtl)
+            .map(|vtl| format!("VTL{}", vtl.level))
+            .collect();
+        if !others.is_empty() {
+            line.push_str(&ui::muted(&format!(" (+{})", others.join(" "))));
+        }
+        let state = vp
+            .vtls
+            .iter()
+            .find(|vtl| vtl.level == vp.vtl)
+            .and_then(|vtl| vtl.state);
+        if let Some(state) = state {
+            let at = root
+                .then(|| try_format_symbol_at(&self.ctx.target, state.cr3, state.rip))
+                .flatten()
+                .map_or_else(|| ui::addr(state.rip), |symbol| ui::symbol(&symbol));
+            line.push_str(&format!("  {at}"));
+            if let Some(exit) = state.exit_reason_name() {
+                line.push_str(&ui::muted(&format!("  last exit {exit}")));
+            }
+        }
+        line
     }
 
     fn cmd_hvvps(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

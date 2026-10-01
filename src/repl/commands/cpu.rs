@@ -1048,25 +1048,33 @@ impl ReplState<'_> {
         let mut builder = Builder::default();
         builder.push_record(vec!["vCPU", "RIP", "Context", "Symbol"]);
         for vcpu in vcpus {
-            let (rip_cell, mut symbol_cell) = match vcpu.rip {
+            let (rip_cell, symbol_cell) = match vcpu.rip {
                 Some(rip) => (
                     ui::addr(rip),
                     vcpu.symbol.unwrap_or_else(|| format!("{rip:#x}")),
                 ),
                 None => (ui::muted("unavailable"), vcpu.error.unwrap_or_default()),
             };
-            for saved in vcpu.saved_vtl.iter().filter(|saved| saved.summarized()) {
-                symbol_cell.push_str(&ui::muted(&format!("  saved {}", saved.describe())));
-            }
-            if let Some(served) = &vcpu.serving {
-                symbol_cell.push_str(&ui::muted(&format!("  serving {}", served.label())));
-            }
             builder.push_record(vec![
                 vcpu.id.to_string(),
                 rip_cell.to_string(),
                 vcpu.context.to_string(),
                 symbol_cell,
             ]);
+            // Below a vCPU in the hypervisor: where NT left off, and the
+            // guest VP the processor serves, as the stop header has them.
+            let mut children: Vec<String> = vcpu
+                .saved_vtl
+                .iter()
+                .filter(|saved| saved.summarized())
+                .map(|saved| format!("saved {}", saved.describe()))
+                .collect();
+            if let Some(served) = &vcpu.serving {
+                children.push(format!("serving {}  {}", served.label(), served.describe()));
+            }
+            for line in event_children_lines("", &children) {
+                builder.push_record(vec![String::new(), String::new(), String::new(), line]);
+            }
         }
 
         print_padded_table(builder);

@@ -133,18 +133,23 @@ ntoseye does not list the modules that are loaded in a trustlet. The lists that 
 
 The Windows hypervisor keeps a partition object for NT (the root partition) and one for each Hyper-V VM, WSL2 instance, or Windows Sandbox that runs in the guest, and a virtual processor (VP) object for each of their processors. `ntoseye` walks these objects:
 
-- {command}`!hvpartitions`: Show each partition, root first, with its partition object, partition ID, the parent's ID, the number of VPs, and its privilege mask (the TLFS `HV_PARTITION_PRIVILEGE_MASK`). Below the table, it shows the TLFS names of each partition's privileges, and the set bits that the TLFS lists as reserved as a hexadecimal value.
+- {command}`!hvpartitions`: Show the partitions as a tree, each child partition below its parent, with its partition ID and partition object. Below each partition are its privilege mask (the TLFS `HV_PARTITION_PRIVILEGE_MASK`) with the TLFS names of its privileges, and the set bits that the TLFS lists as reserved as a hexadecimal value, then each of its VPs: the processor whose current VP it is, the VTL that it runs or last ran in with the other enabled VTLs after it, the guest RIP where that VTL left off, and why it last left for the hypervisor. A root partition VP's RIP is named from NT's and the secure kernel's symbols.
 - {command}`!hvvps` `[partition-id]`: Show the VPs of a partition, the root partition by default, with one row for each VTL that is enabled on a VP. `*` marks the VTL that the VP runs or last ran in. `CPU` is the processor whose current VP it is, the one that runs it or ran it last, by number; builds before 10.0.19041 keep no number where ntoseye finds the current VP, so it shows the processor block instead. Each row shows the hypervisor's context object for the VTL, the physical address of the VTL's eVMCS, its EPT pointer, the guest RIP where the VTL left off, and why it last left for the hypervisor. The hypervisor also allocates contexts for VTLs that a partition does not enable, for example VTL1 in a VM without VBS, and the command does not show those.
 
 With a Hyper-V VM that runs in the guest:
 
 ```text
 mem:1> !hvpartitions
-Partition         ID   Parent  VPs  Privileges
-ffffe80000001000  0x1  root    4    002bb9ff00003fff
-ffffe80200001000  0x2  0x1     2    003b803000002e7f
-0x1: AccessVpRunTimeReg ... CreatePartitions AccessPartitionId ... StartVirtualProcessor (+0x8a00800001000)
-0x2: AccessVpRunTimeReg ... PostMessages SignalEvents AccessVSM AccessVpRegisters EnableExtendedHypercalls StartVirtualProcessor (+0x8800000000000)
+partition 0x1  root  ffffe80000001000
+├─ privileges 002bb9ff00003fff: AccessVpRunTimeReg ... CreatePartitions AccessPartitionId ... StartVirtualProcessor (+0x8a00800001000)
+├─ VP 0  CPU 0  VTL0 (+VTL1)  nt!HalProcessorIdle+0xf  last exit HLT
+├─ VP 1  CPU 1  VTL0 (+VTL1)  nt!HalProcessorIdle+0xf  last exit HLT
+├─ VP 2  CPU 2  VTL0 (+VTL1)  nt!HalProcessorIdle+0xf  last exit HLT
+├─ VP 3  CPU 3  VTL0 (+VTL1)  nt!HalProcessorIdle+0xf  last exit HLT
+╰─ partition 0x2  ffffe80200001000
+   ├─ privileges 003b803000002e7f: AccessVpRunTimeReg ... PostMessages SignalEvents AccessVSM AccessVpRegisters EnableExtendedHypercalls StartVirtualProcessor (+0x8800000000000)
+   ├─ VP 0  VTL0  000000001ff26114  last exit HLT
+   ╰─ VP 1  VTL0
 
 mem:1> !hvvps
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
@@ -306,7 +311,7 @@ Step-until walks ({command}`pa`, {command}`ta`, {command}`pc`, {command}`tc`, an
 
 When a vCPU halts in the Windows hypervisor, the hypervisor keeps the state of that vCPU's VTLs in its own memory. `ntoseye` reads this state from Enlightened VMCS pages, whose layout the Hyper-V TLFS defines, so this method does not depend on a hypervisor build. The hypervisor uses these pages only if the VM gives the `hv-evmcs` enlightenment ([KVM/QEMU setup](../setup/kvm-qemu.md#virtualization-based-security-vbs)). A plain nested VMCS has a CPU-private format, and KVM keeps it out of guest memory.
 
-ntoseye then inspects a stop in the hypervisor at the point where VTL0 left off. The stop header shows this point (`saved VTL0 nt!HalProcessorIdle+0xf`) with its registers, code, and stack, and {command}`r`, {command}`k`, {command}`u`, memory reads, and expressions use the NT state on that processor. The same applies when you switch to such a vCPU with `~Ns` ({command}`~`) or with a bare {command}`.thread`, and when a DAP client gets the stack of each vCPU that is halted in the hypervisor.
+ntoseye then inspects a stop in the hypervisor at the point where VTL0 left off. The stop header shows this point (`saved VTL0 nt!HalProcessorIdle+0xf`) with its registers, code, and stack, {command}`~` shows it on a line below the vCPU, and {command}`r`, {command}`k`, {command}`u`, memory reads, and expressions use the NT state on that processor. The same applies when you switch to such a vCPU with `~Ns` ({command}`~`) or with a bare {command}`.thread`, and when a DAP client gets the stack of each vCPU that is halted in the hypervisor.
 
 {command}`.cxr` goes back to the registers, stack, and address space of the hypervisor, and {command}`.vtlcxr` selects the NT context again. {command}`.vtlcxr` also shows the saved state of each VTL and the reason why that VTL last entered the hypervisor (`HLT`, `VMCALL`, ...). For a `VMCALL` whose registers ntoseye has, it decodes the hypercall from RCX: its call code and TLFS name, and whether it is a fast or a rep call (`hypercall 0x000b HvCallSendSyntheticClusterIpi fast`). The stop header shows the same.
 

@@ -32,21 +32,32 @@ pub fn print_stop_separator() {
 /// Children may contain `\n` (see [`wrap_prose`]): continuation lines get a
 /// `│` gutter while the branch continues, bare spaces after the last child.
 pub fn print_event_children(indent: &str, children: &[String]) {
+    for line in event_children_lines(indent, children) {
+        outln!("{line}");
+    }
+}
+
+/// The lines [`print_event_children`] prints, for a subtree that is itself
+/// a child: join them with `\n` under its head line, and the parent's
+/// gutter continues past them.
+pub fn event_children_lines(indent: &str, children: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
     for (idx, child) in children.iter().enumerate() {
         let last = idx + 1 == children.len();
         let glyph = if last { "╰─" } else { "├─" };
         let mut lines = child.lines();
         if let Some(first) = lines.next() {
-            outln!("{indent}{} {}", ui::muted(glyph), first);
+            out.push(format!("{indent}{} {}", ui::muted(glyph), first));
         }
         for continuation in lines {
             if last {
-                outln!("{indent}   {continuation}");
+                out.push(format!("{indent}   {continuation}"));
             } else {
-                outln!("{indent}{}  {continuation}", ui::muted("│"));
+                out.push(format!("{indent}{}  {continuation}", ui::muted("│")));
             }
         }
     }
+    out
 }
 
 /// Wrap plain prose for display starting at terminal column `col`, capped at
