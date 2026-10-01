@@ -61,7 +61,7 @@ When VBS runs, Windows does not allow KD writes to user-mode code pages, physica
 
 - {command}`.vtl` `[0|1 [pid]]`: Show or select the inspection scope.
   - A bare {command}`.vtl` shows the current scope.
-  - `0` goes back to the NT kernel. At a stop in VTL1 or in the Windows hypervisor, `0` selects the vCPU's own address space, and you use {command}`.vtlcxr` or {command}`.thread` to select NT.
+  - `0` goes back to the NT kernel. After `1`, it returns to the view that the stop selected, which at a stop in the Windows hypervisor is where NT left off. Otherwise, at a stop in VTL1 or in the Windows hypervisor, `0` selects the vCPU's own address space, and you use {command}`.vtlcxr` or {command}`.thread` to select NT.
   - `1` selects the system address space of the secure kernel.
   - `1 <pid>` selects the address space of a trustlet by its NT PID, which is always decimal.
 - {command}`!trustlets`: Show a list of secure-kernel processes with the process object, the NT PID and image name, the trustlet ID, and the address-space root of each.

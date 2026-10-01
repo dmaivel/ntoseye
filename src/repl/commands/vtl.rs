@@ -20,7 +20,7 @@ repl_command! {
     names: [".vtl"],
     usage: ".vtl [0|1 [pid]]",
     summary: "Select NT (VTL0) or secure-kernel (VTL1) memory inspection, or show which one is active.",
-    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes the scope of reads and symbols, but does not change the VTL of the CPU. With no argument, `.vtl` shows the current scope. `.vtl 0` goes back to the NT kernel or, at a stop in VTL1 or in the Windows hypervisor, to the address space of the vCPU, where you use `.vtlcxr` or `.thread` to select NT. `.vtl 1` selects the system address space of the secure kernel, and `.vtl 1 <pid>` selects the address space of a trustlet by its NT PID, which is always decimal. The VTL1 scope is a read-only memory view. Registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends), and then resume with a plain `g`, which first goes back to the live context. A vCPU stopped in VTL1 shows its real registers, stack, and memory. With no argument, `.vtl` also shows whether reads follow such a live stop or the manual view.",
+    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes the scope of reads and symbols, but does not change the VTL of the CPU. With no argument, `.vtl` shows the current scope. `.vtl 0` goes back to the NT kernel. After `.vtl 1`, it returns to the view the stop selected, which at a stop in the Windows hypervisor is where NT left off; otherwise, at a stop in VTL1 or in the Windows hypervisor, it selects the address space of the vCPU, where you use `.vtlcxr` or `.thread` to select NT. `.vtl 1` selects the system address space of the secure kernel, and `.vtl 1 <pid>` selects the address space of a trustlet by its NT PID, which is always decimal. The VTL1 scope is a read-only memory view. Registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends), and then resume with a plain `g`, which first goes back to the live context. A vCPU stopped in VTL1 shows its real registers, stack, and memory. With no argument, `.vtl` also shows whether reads follow such a live stop or the manual view.",
 }
 
 repl_command! {
@@ -340,7 +340,15 @@ impl ReplState<'_> {
                 // A live VTL1 stop has no explicit scope to leave; its root
                 // follows the vCPU. Say how to read NT instead.
                 live_hint = !self.ctx.target.in_secure_scope();
+                let viewed = !live_hint;
                 self.leave_vtl1();
+                // Back where the stop left inspection: at a stop in the
+                // hypervisor that is the saved VTL0 state, not the
+                // hypervisor's registers, which map no NT memory.
+                if viewed {
+                    self.ctx.reset_to_stop_context();
+                    self.caches.refresh_symbol_context(&self.ctx.target);
+                }
             }
             (Some("1"), pid, count) if count <= 2 => {
                 let pid = pid
