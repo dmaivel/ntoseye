@@ -545,6 +545,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("bs", "breakpoints and events"),
     ("bsc", "breakpoints and events"),
     ("bu", "breakpoints and events"),
+    ("!hvbp", "breakpoints and events"),
     ("sx", "breakpoints and events"),
     ("sxd", "breakpoints and events"),
     ("sxe", "breakpoints and events"),

@@ -1,8 +1,10 @@
 //! Attributing a stop to a breakpoint or watchpoint, and absorbing hits
-//! that thread, processor, pass-count, or condition filters reject.
+//! that thread, processor, hypercall-caller, pass-count, or condition
+//! filters reject.
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, ThreadScope,
+    Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, HypercallFilter,
+    ThreadScope,
 };
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
@@ -47,6 +49,13 @@ impl Session {
                 if !self.stopped_thread_matches(bp.thread.as_ref())
                     || !stopped_processor_matches(bp.processor, &self.current_thread)
                     || !self.stopped_stack_reaches(bp.min_stack_pointer)
+                    || !stopped_hypercall_matches(
+                        &self.target,
+                        bp.hypercall.as_ref(),
+                        &self.current_thread,
+                        cr3,
+                        rip,
+                    )
                 {
                     self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
@@ -183,6 +192,26 @@ pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool 
         return true;
     };
     processor_index_from_backend_thread_id(stopped).is_none_or(|stopped| stopped == processor)
+}
+
+/// Whether a hit reported on `stopped`, at `rip` on root `cr3`, is the
+/// hypercall from the caller a hypercall breakpoint names (see
+/// [`HypercallFilter::matches`]). Resolved only for such a breakpoint, as
+/// it walks the hypervisor's partitions. A stop whose processor cannot be
+/// resolved has an unknown caller, so it matches.
+pub fn stopped_hypercall_matches(
+    target: &Target,
+    filter: Option<&HypercallFilter>,
+    stopped: &str,
+    cr3: u64,
+    rip: u64,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let caller = processor_index_from_backend_thread_id(stopped)
+        .and_then(|number| target.hypercall_caller(cr3, rip, number));
+    filter.matches(caller.as_ref())
 }
 
 /// The stack pointer in `registers` (`rsp`, or AArch64's `sp`).
@@ -440,6 +469,7 @@ pub fn resolve_watchpoint_stop(
     let scope_dtb = register_map
         .read_u64(target.arch().dtb_register(), &registers)
         .unwrap_or(0);
+    let rip = register_map.read_u64("rip", &registers).unwrap_or(0);
     let sp = stack_pointer(register_map, &registers);
     update_target_context_from_registers(target, register_map, Ok(registers));
     if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
@@ -457,6 +487,13 @@ pub fn resolve_watchpoint_stop(
         || breakpoint
             .min_stack_pointer
             .is_some_and(|min| sp.is_some_and(|sp| sp < min))
+        || !stopped_hypercall_matches(
+            target,
+            breakpoint.hypercall.as_ref(),
+            current_thread,
+            scope_dtb,
+            rip,
+        )
     {
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);

@@ -720,13 +720,20 @@ impl ReplState<'_> {
     /// while the BREAK banner shows where execution actually stopped.
     fn surface_hardware_breakpoint_hit(&mut self, bp: &Breakpoint) {
         print_stop_separator();
-        let access = bp
-            .hardware
-            .map(|hw| format!(" {}{}", hw.access.letter(), hw.len))
-            .unwrap_or_default();
+        // A hypercall breakpoint is named for what it stops on; the stop's
+        // children name the caller and its call.
+        let (kind, access) = match bp.hypercall {
+            Some(_) => ("hypercall breakpoint", String::new()),
+            None => (
+                "hardware breakpoint",
+                bp.hardware
+                    .map(|hw| format!(" {}{}", hw.access.letter(), hw.len))
+                    .unwrap_or_default(),
+            ),
+        };
         let cause = format!(
             "{} {}{}{}",
-            ui::muted("hardware breakpoint"),
+            ui::muted(kind),
             ui::bp_id(bp.id),
             access.bright_black(),
             bp.symbol

@@ -1,19 +1,24 @@
-//! Per-breakpoint configuration: the address-space, thread and processor
-//! filters a hit must pass, and its condition, pass count, one-shot flag
-//! and command action.
+//! Per-breakpoint configuration: the address-space, thread, processor and
+//! hypercall-caller filters a hit must pass, and its condition, pass count,
+//! one-shot flag and command action.
 
 use std::sync::Arc;
 
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, ThreadScope};
+use super::{
+    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HypercallFilter, ThreadScope,
+};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
-use crate::guest::ProcessInfo;
+use crate::guest::{
+    ProcessInfo,
+    hypercalls::{HypercallCaller, HypercallInput, tlfs_hypercall},
+};
 use crate::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
 
 impl Breakpoint {
     /// What this breakpoint is restricted to: its address space, plus
-    /// whichever of `/t` and `/c` narrowed it further.
+    /// whichever of `/t`, `/c` and a hypercall filter narrowed it further.
     pub fn scope_label(&self) -> String {
         let mut label = self.scope.label();
         if let Some(thread) = &self.thread {
@@ -21,6 +26,9 @@ impl Breakpoint {
         }
         if let Some(processor) = self.processor {
             label.push_str(&format!(", cpu {processor}"));
+        }
+        if let Some(hypercall) = &self.hypercall {
+            label.push_str(&format!(", {}", hypercall.label()));
         }
         label
     }
@@ -110,6 +118,50 @@ impl ThreadScope {
     }
 }
 
+impl HypercallFilter {
+    /// Whether a hit whose processor handles `caller`'s exit is this
+    /// filter's call from this filter's caller.
+    ///
+    /// What is not known does not decline a hit, as for the thread filter:
+    /// an unknown caller matches, and so does a caller whose partition and
+    /// VP match but whose registers are not known. A known exit that is not
+    /// a VMCALL declines it: the handler then runs for no hypercall of the
+    /// caller's.
+    pub fn matches(&self, caller: Option<&HypercallCaller>) -> bool {
+        let Some(caller) = caller else {
+            return true;
+        };
+        if self
+            .partition
+            .is_some_and(|partition| partition != caller.partition)
+            || self.vp.is_some_and(|vp| vp != caller.vp)
+        {
+            return false;
+        }
+        match caller.input {
+            HypercallInput::Known(input) => input & 0xffff == u64::from(self.code),
+            HypercallInput::NotHypercall => false,
+            HypercallInput::Unknown => true,
+        }
+    }
+
+    /// `hypercall 0x000b HvCallSendSyntheticClusterIpi from partition 0x3
+    /// VP 1`.
+    pub fn label(&self) -> String {
+        let mut label = format!("hypercall {:#06x}", self.code);
+        if let Some((name, _)) = tlfs_hypercall(self.code) {
+            label.push_str(&format!(" {name}"));
+        }
+        if let Some(partition) = self.partition {
+            label.push_str(&format!(" from partition {partition:#x}"));
+        }
+        if let Some(vp) = self.vp {
+            label.push_str(&format!(" VP {vp}"));
+        }
+        label
+    }
+}
+
 impl BreakpointManager {
     /// The compiled condition for a configuration. A host may hand over the
     /// condition already parsed or as text; leaving text uncompiled would
@@ -192,10 +244,69 @@ impl BreakpointManager {
 #[cfg(test)]
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
-    use crate::breakpoints::{BreakpointConfig, BreakpointManager, ThreadScope};
+    use crate::breakpoints::{BreakpointConfig, BreakpointManager, HypercallFilter, ThreadScope};
+    use crate::guest::hypercalls::{HypercallCaller, HypercallInput};
     use crate::session::session_over_memory;
     use crate::target::{ThreadInfo, sample_thread};
     use crate::types::VirtAddr;
+
+    /// NT's synthetic IPI, as RCX holds it live: fast, code 0x000b.
+    const SEND_IPI: u64 = 0x1_000b;
+
+    fn caller(partition: u64, vp: u32, input: HypercallInput) -> HypercallCaller {
+        HypercallCaller {
+            partition,
+            vp,
+            input,
+        }
+    }
+
+    /// The code is RCX's low 16 bits, so the fast and rep flags above them
+    /// do not hide a call; and the partition, then the VP, must match where
+    /// the filter names them, whether the caller is the root or a guest.
+    #[test]
+    fn a_hypercall_filter_takes_only_its_call_from_its_caller() {
+        let root_vp1 = caller(0x1, 1, HypercallInput::Known(SEND_IPI));
+        let guest_vp1 = caller(0x7, 1, HypercallInput::Known(SEND_IPI));
+        let any = HypercallFilter {
+            code: 0x000b,
+            partition: None,
+            vp: None,
+        };
+        let root = HypercallFilter {
+            partition: Some(0x1),
+            ..any
+        };
+        let guest_vp2 = HypercallFilter {
+            partition: Some(0x7),
+            vp: Some(2),
+            ..any
+        };
+        assert!(any.matches(Some(&root_vp1)) && any.matches(Some(&guest_vp1)));
+        assert!(root.matches(Some(&root_vp1)) && !root.matches(Some(&guest_vp1)));
+        assert!(!guest_vp2.matches(Some(&guest_vp1)));
+        assert!(guest_vp2.matches(Some(&caller(0x7, 2, HypercallInput::Known(SEND_IPI)))));
+        // Another call into a handler the codes share, such as
+        // HvCallUnimplemented's.
+        let other_code = caller(0x1, 1, HypercallInput::Known(0x1_000c));
+        assert!(!any.matches(Some(&other_code)));
+    }
+
+    /// What is not known does not decline a hit, so a filter never loses
+    /// one silently; what is known does, even with the call unknown, and an
+    /// exit that is no VMCALL is no hypercall of the caller's.
+    #[test]
+    fn a_hypercall_filter_stops_where_the_caller_or_its_call_is_unknown() {
+        let filter = HypercallFilter {
+            code: 0x000b,
+            partition: Some(0x7),
+            vp: None,
+        };
+        assert!(filter.matches(None));
+        assert!(filter.matches(Some(&caller(0x7, 0, HypercallInput::Unknown))));
+        assert!(!filter.matches(Some(&caller(0x1, 0, HypercallInput::Unknown))));
+        assert!(!filter.matches(Some(&caller(0x7, 0, HypercallInput::NotHypercall))));
+    }
 
     /// An exited thread's `_ETHREAD` can be given to a new thread: the new
     /// one is not the scope's, and the scope's thread is gone, as it is once

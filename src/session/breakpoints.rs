@@ -6,13 +6,16 @@ use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, BreakpointScope, ThreadScope, lift_target_site, plant_target_site,
+    Breakpoint, BreakpointConfig, BreakpointScope, HypercallFilter, ThreadScope, lift_target_site,
+    plant_target_site,
 };
-use crate::dbg_backend::{BugcheckInfo, DebugCapability, ModuleEvent, WatchpointAccess};
+use crate::dbg_backend::{
+    BugcheckInfo, DebugCapability, HwBreakpointAccess, ModuleEvent, WatchpointAccess,
+};
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
-use crate::guest::ModuleSymbolLoadReport;
+use crate::guest::{ModuleSymbolLoadReport, hypercalls};
 use crate::session::{ModuleTrap, Session, TrapSite};
 use crate::types::{Arch, VirtAddr};
 
@@ -393,6 +396,74 @@ impl Session {
             len,
             symbol,
             config,
+        )
+    }
+
+    /// Set a hypercall breakpoint (`!hvbp`): a hardware execute breakpoint on
+    /// the handler the Windows hypervisor's hypercall table gives
+    /// `filter.code`, whose hits stop only for that call from the caller
+    /// `filter` names (see [`HypercallFilter::matches`]); the others are
+    /// declined and the target resumed. Only a debug register the host
+    /// programs traps in the hypervisor. A partition or VP the hypervisor
+    /// does not have is refused, as a filter on it would never stop.
+    /// Returns the breakpoint id.
+    pub fn add_hypercall_breakpoint(
+        &mut self,
+        filter: HypercallFilter,
+        config: BreakpointConfig,
+    ) -> Result<u32> {
+        if !self.backend.hardware_breakpoints_trap_in_host() {
+            return Err(Error::Breakpoint(
+                "hypercall breakpoints need the gdb backend: only a debug register the host programs traps in the Windows hypervisor".into(),
+            ));
+        }
+        if filter.vp.is_some() && filter.partition.is_none() {
+            return Err(Error::InvalidArgument(
+                "a VP index names a VP of one partition; give the partition ID too".into(),
+            ));
+        }
+        let (_, table) = self.target.hypercalls()?;
+        let handler = table
+            .get(usize::from(filter.code))
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "hypercall {:#06x} is beyond the hypervisor's table of {} codes",
+                    filter.code,
+                    table.len()
+                ))
+            })?
+            .handler;
+        if let Some(id) = filter.partition {
+            let partitions = self.target.hypervisor_partitions()?;
+            let partition = partitions
+                .iter()
+                .find(|partition| partition.id == id)
+                .ok_or_else(|| {
+                    Error::InvalidArgument(format!("the hypervisor has no partition {id:#x}"))
+                })?;
+            if let Some(vp) = filter.vp
+                && !partition
+                    .virtual_processors
+                    .iter()
+                    .any(|candidate| candidate.index == vp)
+            {
+                return Err(Error::InvalidArgument(format!(
+                    "partition {id:#x} has no VP {vp}"
+                )));
+            }
+        }
+        let symbol = hypercalls::handler_name(&table, filter.code).map(|name| format!("hv!{name}"));
+        self.breakpoints.add_hardware_configured(
+            self.backend.as_mut(),
+            &self.target,
+            VirtAddr(handler),
+            HwBreakpointAccess::Execute,
+            1,
+            symbol,
+            BreakpointConfig {
+                hypercall: Some(filter),
+                ..config
+            },
         )
     }
 

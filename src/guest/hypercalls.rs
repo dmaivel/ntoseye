@@ -80,6 +80,65 @@ pub fn tlfs_hypercall(code: u16) -> Option<(&'static str, bool)> {
         .map(|index| (TLFS_HYPERCALLS[index].1, TLFS_HYPERCALLS[index].2))
 }
 
+/// The call code a name gives: the TLFS name (`HvCallPostMessage`) or the
+/// name `x hv!*` gives a code the TLFS does not name (`HvCall0004`), with
+/// or without `hv!`, in any case. `HvCallUnimplemented` names no single
+/// code, so it gives none.
+pub fn hypercall_code(name: &str) -> Option<u16> {
+    let name = name.strip_prefix("hv!").unwrap_or(name);
+    if let Some(&(code, _, _)) = TLFS_HYPERCALLS
+        .iter()
+        .find(|(_, known, _)| known.eq_ignore_ascii_case(name))
+    {
+        return Some(code);
+    }
+    let digits = name
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("HvCall"))
+        .and(name.get(6..))?;
+    (digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| u16::from_str_radix(digits, 16).ok())
+        .flatten()
+}
+
+/// The name ntoseye gives the handler of call code `code`: that of the
+/// lowest code it serves (see [`hypervisor_symbols`]).
+pub fn handler_name(table: &[HypercallEntry], code: u16) -> Option<String> {
+    let handler = table.get(usize::from(code))?.handler;
+    let lowest = table.iter().position(|entry| entry.handler == handler)?;
+    Some(code_name(lowest))
+}
+
+/// The name of the handler whose lowest call code is `code`.
+fn code_name(code: usize) -> String {
+    match (code, tlfs_hypercall(code as u16)) {
+        (0, _) => "HvCallUnimplemented".to_string(),
+        (_, Some((name, _))) => name.to_string(),
+        (_, None) => format!("HvCall{code:04X}"),
+    }
+}
+
+/// The virtual processor whose exit a processor in the Windows hypervisor
+/// handles, as a hypercall's caller: its partition, its index, and what its
+/// exit says of the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HypercallCaller {
+    pub partition: u64,
+    pub vp: u32,
+    pub input: HypercallInput,
+}
+
+/// What a VP's current exit says of the hypercall the hypervisor handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HypercallInput {
+    /// A VMCALL, with the caller's RCX: the TLFS hypercall input value.
+    Known(u64),
+    /// The exit is not a VMCALL, so the VP made no hypercall.
+    NotHypercall,
+    /// The exit's state or registers are not known.
+    Unknown,
+}
+
 /// A hypercall input value (the TLFS's, in RCX at a VMCALL), as
 /// `hypercall 0x0003 HvCallFlushVirtualAddressList rep 0/12`: the call code
 /// and its TLFS name, then `fast` (register input), a rep call's start index
@@ -182,12 +241,7 @@ pub fn hypervisor_symbols(
         if !taken.insert(offset) {
             continue;
         }
-        let name = match (code, tlfs_hypercall(code as u16)) {
-            (0, _) => "HvCallUnimplemented".to_string(),
-            (_, Some((name, _))) => name.to_string(),
-            (_, None) => format!("HvCall{code:04X}"),
-        };
-        named.push((name, offset));
+        named.push((code_name(code), offset));
     }
     let mut entries = 0;
     for entry in exit_entries {
@@ -358,6 +412,39 @@ mod tests {
                 ("VmExitEntry2".to_string(), 0x600),
             ]
         );
+    }
+
+    /// A name gives the code `x hv!*` names it for, so a code the TLFS does
+    /// not name is reached as `x` shows it; the handler many codes share
+    /// names none of them.
+    #[test]
+    fn a_hypercall_name_gives_its_call_code() {
+        assert_eq!(
+            hypercall_code("HvCallSendSyntheticClusterIpi"),
+            Some(0x000b)
+        );
+        assert_eq!(hypercall_code("hv!hvcallpostmessage"), Some(0x005c));
+        assert_eq!(hypercall_code("HvCall0004"), Some(0x0004));
+        assert_eq!(hypercall_code("hv!HvCall000b"), Some(0x000b));
+        assert_eq!(hypercall_code("HvCallUnimplemented"), None);
+        assert_eq!(hypercall_code("HvCall99"), None);
+        assert_eq!(hypercall_code("nt!NtClose"), None);
+    }
+
+    #[test]
+    fn a_code_s_handler_is_named_for_the_lowest_code_it_serves() {
+        let mut table = vec![entry(0x100); 0x48];
+        table[0x0046] = entry(0x400);
+        table[0x0047] = entry(0x400);
+        assert_eq!(
+            handler_name(&table, 0x47).as_deref(),
+            Some("HvCallGetPartitionId")
+        );
+        assert_eq!(
+            handler_name(&table, 0x30).as_deref(),
+            Some("HvCallUnimplemented")
+        );
+        assert_eq!(handler_name(&table, 0x48), None);
     }
 
     #[test]

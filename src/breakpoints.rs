@@ -78,6 +78,9 @@ pub struct Breakpoint {
     /// Lowest stack pointer a hit may have, if restricted: a step's run-to
     /// breakpoint (see [`StepFrame`]).
     pub min_stack_pointer: Option<u64>,
+    /// The hypercall and caller a hit must be handling (`!hvbp`), if
+    /// restricted.
+    pub hypercall: Option<HypercallFilter>,
     /// Whether `scope` was inferred from the resolved address and the process
     /// selected when this breakpoint was created. Explicit `/p` scopes remain
     /// fixed across symbol re-resolution.
@@ -125,6 +128,21 @@ pub struct StepFrame {
     pub min_stack_pointer: Option<u64>,
 }
 
+/// A hypercall breakpoint's filter (`!hvbp`): the call code a hit's caller
+/// made, and the partition, and VP index in it, the caller must be.
+///
+/// The breakpoint is on the call's handler, which the hypervisor runs for
+/// every caller and, for a handler several codes share, for each of them.
+/// Like the thread filter, the caller is known only once the hit arrives:
+/// the VP whose exit the processor handles, and the code in its RCX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HypercallFilter {
+    pub code: u16,
+    pub partition: Option<u64>,
+    /// Set only with `partition`: a VP index names a VP of one partition.
+    pub vp: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakpointHitDisposition {
     SkipPass,
@@ -146,6 +164,8 @@ pub struct BreakpointConfig {
     /// Restrict hits to the processor a stop is reported on (`/c`). Filtered
     /// the same way and for the same reason as `thread`.
     pub processor: Option<u16>,
+    /// Restrict hits to a hypercall and its caller. See [`HypercallFilter`].
+    pub hypercall: Option<HypercallFilter>,
     /// Resolve a symbol breakpoint past the function's prologue. See
     /// [`BreakpointSpec::Symbol`].
     pub skip_prologue: bool,

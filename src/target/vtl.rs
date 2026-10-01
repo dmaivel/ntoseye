@@ -20,7 +20,8 @@ use crate::{
         ept::{self, EptTranslation},
         hv_layout,
         hv_layout::HypercallEntry,
-        hypercalls, hypervisor,
+        hypercalls::{self, HypercallCaller, HypercallInput},
+        hypervisor,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{read_pe_header_page, size_of_image},
@@ -116,12 +117,26 @@ fn exit_detail(
     state: &EvmcsState,
     registers: Option<&HashMap<&'static str, u64>>,
 ) -> Option<String> {
+    match hypercall_input(state, registers) {
+        HypercallInput::Known(rcx) => Some(hypercalls::describe_hypercall_input(rcx)),
+        HypercallInput::NotHypercall | HypercallInput::Unknown => None,
+    }
+}
+
+/// What `state`'s exit says of a hypercall: the input in RCX of a VMCALL,
+/// from `registers`, the exit's general-purpose registers, when known.
+fn hypercall_input(
+    state: &EvmcsState,
+    registers: Option<&HashMap<&'static str, u64>>,
+) -> HypercallInput {
     const VMCALL: u32 = 18;
     if state.exit_reason & 0xffff != VMCALL {
-        return None;
+        return HypercallInput::NotHypercall;
     }
-    let rcx = *registers?.get("rcx")?;
-    Some(hypercalls::describe_hypercall_input(rcx))
+    match registers.and_then(|registers| registers.get("rcx")) {
+        Some(&rcx) => HypercallInput::Known(rcx),
+        None => HypercallInput::Unknown,
+    }
 }
 
 /// A guest partition's virtual processor that a processor runs, or last
@@ -1206,6 +1221,55 @@ impl Target {
             vtl,
             state,
             general_registers,
+        })
+    }
+
+    /// The VP whose exit processor `number`, a vCPU at `rip` halted in the
+    /// hypervisor on root `cr3`, handles, as a hypercall's caller: the guest
+    /// partition's VP it serves ([`Self::served_guest_vp`]), else the root
+    /// partition's VP on that processor, whose saved state is then the
+    /// loaded one. The call is known only from a current state: a served VP
+    /// found through its processor block alone has a state one exit behind
+    /// or more. `None` when the partitions cannot be walked, or the
+    /// processor serves no guest's VP and no state of its root VP is
+    /// current, which leaves the caller unknown.
+    pub fn hypercall_caller(&self, cr3: u64, rip: u64, number: u16) -> Option<HypercallCaller> {
+        let partitions = self.hypervisor_partitions().ok()?;
+        if let Some(served) = self.served_guest_vp_in(&partitions, cr3, rip, number) {
+            let input = match &served.state {
+                Some(state) if state.current => {
+                    hypercall_input(state, served.general_registers.as_ref().ok())
+                }
+                _ => HypercallInput::Unknown,
+            };
+            return Some(HypercallCaller {
+                partition: served.partition,
+                vp: served.vp,
+                input,
+            });
+        }
+        let current = self
+            .saved_vtl_contexts(cr3, rip, Some(number))
+            .ok()?
+            .into_iter()
+            .find(|saved| saved.state.current)?;
+        let root = partitions.first()?;
+        let number = u32::from(number);
+        // The root's VPs are pinned to the processors with their numbers,
+        // for a build whose processor blocks keep no number.
+        let vp = root
+            .virtual_processors
+            .iter()
+            .find(|vp| {
+                vp.processors
+                    .iter()
+                    .any(|processor| processor.number == Some(number))
+            })
+            .or_else(|| root.virtual_processors.iter().find(|vp| vp.index == number))?;
+        Some(HypercallCaller {
+            partition: root.id,
+            vp: vp.index,
+            input: hypercall_input(&current.state, current.general_registers.as_ref().ok()),
         })
     }
 

@@ -141,6 +141,7 @@ impl BreakpointManager {
                 thread: config.thread,
                 processor: config.processor,
                 min_stack_pointer: None,
+                hypercall: config.hypercall,
                 backend: BreakpointBackend::Hardware,
             },
         );

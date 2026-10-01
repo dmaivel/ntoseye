@@ -6,9 +6,10 @@ use super::process::{ProcessIdentity, ThreadSummary, process, thread_summary};
 use super::shape::{Hex, Keyed, shapes, unions};
 use super::symbols::source_location;
 use crate::types::VirtAddr;
-use crate::breakpoints::Breakpoint;
+use crate::breakpoints::{self, Breakpoint};
 use crate::disasm::{DisasmOperand, DisasmRow, disasm_formatter};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
+use crate::guest::hypercalls::tlfs_hypercall;
 use crate::session::{self, CallTraceEnd, VcpuInfo};
 use crate::unwind::{
     self, Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, UnwindDetail,
@@ -130,6 +131,9 @@ shapes! {
         /// The only processor that can report a hit (`/c`). None if there is no
         /// processor restriction.
         processor: Option<u16>,
+        /// The hypercall a hit must be handling, and from which caller, for a
+        /// hypercall breakpoint (`!hvbp`). None for any other breakpoint.
+        hypercall: Option<HypercallFilter>,
         /// The condition expression that a hit must satisfy.
         condition: Option<String>,
         /// The requested hit number. Both 0 and 1 break on the first hit.
@@ -147,6 +151,19 @@ shapes! {
         watch_access: Option<&'static str>,
         /// The watched width in bytes. None for a code breakpoint.
         watch_length: Option<u8>,
+    }
+
+    /// What a hypercall breakpoint (`!hvbp`) stops on: one call code, from
+    /// any caller or from one partition or VP of the Windows hypervisor.
+    HypercallFilter {
+        /// The call code: the low 16 bits of the caller's RCX.
+        code: Hex<u16>,
+        /// The TLFS name, or None for a code that the TLFS does not list.
+        name: Option<&'static str>,
+        /// The caller's partition ID. None for any caller.
+        partition: Option<u64>,
+        /// The caller's VP index in `partition`. None for any VP.
+        vp: Option<u32>,
     }
 
     /// Whether the target runs, and where it stopped.
@@ -532,6 +549,16 @@ pub fn saved_vtl_state(saved: &unwind::SavedVtl) -> SavedVtlState {
     }
 }
 
+/// What a hypercall breakpoint stops on.
+pub fn hypercall_filter(filter: &breakpoints::HypercallFilter) -> HypercallFilter {
+    HypercallFilter {
+        code: filter.code,
+        name: tlfs_hypercall(filter.code).map(|(name, _)| name),
+        partition: filter.partition,
+        vp: filter.vp,
+    }
+}
+
 /// One code-breakpoint/data-watchpoint row.
 pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
     BreakpointStatus {
@@ -545,6 +572,7 @@ pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
         scope: bp.scope.label(),
         thread: bp.thread.as_ref().map(|thread| thread.label()),
         processor: bp.processor,
+        hypercall: bp.hypercall.as_ref().map(hypercall_filter),
         condition: bp.condition.clone(),
         pass_count: bp.pass_count,
         hit_count: bp.hit_count,

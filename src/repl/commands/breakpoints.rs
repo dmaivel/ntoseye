@@ -8,11 +8,13 @@ use tabled::settings::Padding;
 use owo_colors::OwoColorize;
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec, ThreadScope,
+    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec,
+    HypercallFilter, ThreadScope,
 };
 use crate::dbg_backend::HwBreakpointAccess;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
+use crate::guest::hypercalls;
 use crate::target::decimal_pid_literal;
 use crate::ui;
 
@@ -58,6 +60,15 @@ repl_command! {
 }
 
 repl_command! {
+    cmd_hvbp;
+    names: ["!hvbp"],
+    usage: "!hvbp [/1] [/c <processor>] [/w \"<expr>\"] <code|name> [partition-id [vp-index]] [if <expr>] [do <commands>]",
+    summary: "Set a breakpoint that stops on a hypercall to the Windows hypervisor, optionally only from one partition or VP.",
+    details: "Sets a hardware execute breakpoint on the hypercall's handler, which the hypervisor's hypercall table gives (see !hvcalls), so it needs the gdb backend and a free debug register. The call is a call code, in the current radix, or its name: the TLFS name (HvCallPostMessage) or the name x hv!* shows (HvCall0004). Many codes share a handler, HvCallUnimplemented's for every code that is not implemented, so at each hit ntoseye reads the caller's call code from its RCX and resumes the target without a stop when it is another. The caller is the VP whose exit the processor handles: the guest partition's VP it serves, or the root partition's VP. With a partition ID, and a VP index in it, the breakpoint stops only for that caller; the IDs use the current radix, and ntoseye refuses a partition or VP that the hypervisor does not have. A hit whose caller ntoseye cannot tell, or whose caller matches but whose registers it cannot read, stops, so the filter does not hide a hit. /1, /c, /w, if, and do work as for ba; a condition sees the hypervisor's registers at the handler, not the caller's. The command takes no pass count: set it with bpp. bl shows the filter. Needs the VM's hv-evmcs enlightenment. Example: !hvbp HvCallSendSyntheticClusterIpi 3; g",
+    run_state: Halted,
+}
+
+repl_command! {
     cmd_bl();
     names: ["bl"],
     usage: "bl",
@@ -70,7 +81,7 @@ repl_command! {
     names: [".bpcmds"],
     usage: ".bpcmds",
     summary: "Print the commands that set the current breakpoints again.",
-    details: "The output has one line for each breakpoint, in ID order. An address breakpoint shows as `bp <address>`, a symbolic or source breakpoint as `bu <symbol>` (as `bm` creates it), and a hardware breakpoint as `ba <access><size> <address>`. Each line also has the /1, /p, /t, and /c options of the breakpoint, its condition (as /w), its pass count, and its command string. To set the same breakpoints again, run the lines, either by pasting them or by saving them to a file for `$$<`. WinDbg puts a breakpoint ID in each line, but these lines have none because the ntoseye bp command does not take one, so the new breakpoints get new IDs. A disabled breakpoint comes back enabled.",
+    details: "The output has one line for each breakpoint, in ID order. An address breakpoint shows as `bp <address>`, a symbolic or source breakpoint as `bu <symbol>` (as `bm` creates it), a hardware breakpoint as `ba <access><size> <address>`, and a hypercall breakpoint as `!hvbp <code> [partition-id [vp-index]]`, without its pass count, which !hvbp does not take. Each line also has the /1, /p, /t, and /c options of the breakpoint, its condition (as /w), its pass count, and its command string. To set the same breakpoints again, run the lines, either by pasting them or by saving them to a file for `$$<`. WinDbg puts a breakpoint ID in each line, but these lines have none because the ntoseye bp command does not take one, so the new breakpoints get new IDs. A disabled breakpoint comes back enabled.",
 }
 
 repl_command! {
@@ -191,37 +202,45 @@ fn parse_pid_text(value: &str, radix: NumberRadix) -> Result<u64> {
     }
 }
 
-fn parse_breakpoint_arguments(
+/// The options a breakpoint command starts with (`/1`, `/p`, `/t`, `/c`,
+/// `/w`).
+#[derive(Default)]
+struct BreakpointOptions {
+    one_shot: bool,
+    pid: Option<u64>,
+    thread: Option<u64>,
+    processor: Option<u16>,
+    /// The `/w` condition.
+    condition: Option<String>,
+}
+
+/// Parse the options `argv` starts with, and the index of the first
+/// argument after them.
+fn parse_breakpoint_options(
     argv: &[Cow<'_, str>],
     radix: NumberRadix,
     command: &str,
-    wants_access_spec: bool,
-) -> Result<ParsedBreakpointArgs> {
+) -> Result<(BreakpointOptions, usize)> {
     let mut index = 0;
-    let mut one_shot = false;
-    let mut pid = None;
-    let mut thread = None;
-    let mut processor = None;
-    let mut shorthand_condition = None;
-
+    let mut options = BreakpointOptions::default();
     while let Some(arg) = argv.get(index) {
         match arg.as_ref().to_ascii_lowercase().as_str() {
             "/1" => {
-                one_shot = true;
+                options.one_shot = true;
                 index += 1;
             }
             "/p" => {
                 let pid_text = argv.get(index + 1).ok_or_else(|| {
                     Error::InvalidArgument(format!("{command}: /p requires a PID"))
                 })?;
-                pid = Some(parse_pid_text(pid_text.as_ref(), radix)?);
+                options.pid = Some(parse_pid_text(pid_text.as_ref(), radix)?);
                 index += 2;
             }
             "/t" => {
                 let thread_text = argv.get(index + 1).ok_or_else(|| {
                     Error::InvalidArgument(format!("{command}: /t requires a thread id or ETHREAD"))
                 })?;
-                thread = Some(parse_radix_u64_text(thread_text.as_ref(), radix, "thread")?);
+                options.thread = Some(parse_radix_u64_text(thread_text.as_ref(), radix, "thread")?);
                 index += 2;
             }
             "/c" => {
@@ -229,7 +248,7 @@ fn parse_breakpoint_arguments(
                     Error::InvalidArgument(format!("{command}: /c requires a processor number"))
                 })?;
                 let value = parse_radix_u64_text(processor_text.as_ref(), radix, "processor")?;
-                processor = Some(u16::try_from(value).map_err(|_| {
+                options.processor = Some(u16::try_from(value).map_err(|_| {
                     Error::InvalidArgument(format!("{command}: processor {value} is out of range"))
                 })?);
                 index += 2;
@@ -238,13 +257,22 @@ fn parse_breakpoint_arguments(
                 let condition = argv.get(index + 1).ok_or_else(|| {
                     Error::InvalidArgument(format!("{command}: /w requires an expression"))
                 })?;
-                shorthand_condition = Some(condition.as_ref().to_string());
+                options.condition = Some(condition.as_ref().to_string());
                 index += 2;
             }
             _ => break,
         }
     }
+    Ok((options, index))
+}
 
+fn parse_breakpoint_arguments(
+    argv: &[Cow<'_, str>],
+    radix: NumberRadix,
+    command: &str,
+    wants_access_spec: bool,
+) -> Result<ParsedBreakpointArgs> {
+    let (options, mut index) = parse_breakpoint_options(argv, radix, command)?;
     let access_spec = if wants_access_spec {
         let access = argv
             .get(index)
@@ -270,8 +298,96 @@ fn parse_breakpoint_arguments(
         index += 1;
     }
 
-    let mut condition = shorthand_condition;
-    let tail = &argv[index..];
+    let (condition, action) = parse_breakpoint_tail(&argv[index..], options.condition)?;
+    Ok(ParsedBreakpointArgs {
+        target,
+        access_spec,
+        one_shot: options.one_shot,
+        pid: options.pid,
+        thread: options.thread,
+        processor: options.processor,
+        pass_count,
+        condition,
+        action,
+    })
+}
+
+/// A `!hvbp` command's arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedHypercallArgs {
+    /// The call code or name, as typed.
+    call: String,
+    partition: Option<u64>,
+    vp: Option<u64>,
+    one_shot: bool,
+    processor: Option<u16>,
+    condition: Option<String>,
+    action: Option<String>,
+}
+
+/// Parse `!hvbp`'s arguments: the options `ba` takes but `/p` and `/t`,
+/// the call, up to two IDs (the partition, then the VP index), then the
+/// condition and action. The IDs are positional, so it takes no pass count.
+fn parse_hypercall_arguments(
+    argv: &[Cow<'_, str>],
+    radix: NumberRadix,
+) -> Result<ParsedHypercallArgs> {
+    let (options, mut index) = parse_breakpoint_options(argv, radix, "!hvbp")?;
+    if options.pid.is_some() || options.thread.is_some() {
+        return Err(Error::InvalidArgument(
+            "!hvbp: /p and /t name NT processes and threads; a hypercall breakpoint names its caller by partition ID and VP index".into(),
+        ));
+    }
+    let call = argv
+        .get(index)
+        .ok_or_else(|| Error::InvalidArgument("!hvbp: missing hypercall code or name".into()))?
+        .to_string();
+    index += 1;
+    let mut ids = Vec::new();
+    while ids.len() < 2
+        && let Some(value) = argv.get(index)
+        && !value.as_ref().eq_ignore_ascii_case("if")
+        && !value.as_ref().eq_ignore_ascii_case("do")
+        && let Ok(id) = parse_radix_u64_text(value.as_ref(), radix, "ID")
+    {
+        ids.push(id);
+        index += 1;
+    }
+    let (condition, action) = parse_breakpoint_tail(&argv[index..], options.condition)?;
+    Ok(ParsedHypercallArgs {
+        call,
+        partition: ids.first().copied(),
+        vp: ids.get(1).copied(),
+        one_shot: options.one_shot,
+        processor: options.processor,
+        condition,
+        action,
+    })
+}
+
+/// The call code `!hvbp` names: a hypercall name (see
+/// [`hypercalls::hypercall_code`]), else a number in `radix`.
+fn hypercall_code_text(text: &str, radix: NumberRadix) -> Result<u16> {
+    if let Some(code) = hypercalls::hypercall_code(text) {
+        return Ok(code);
+    }
+    parse_number_literal_text(text, radix)
+        .ok()
+        .and_then(|code| u16::try_from(code).ok())
+        .ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "unknown hypercall '{text}': give a call code, its TLFS name, or the name x hv!* shows"
+            ))
+        })
+}
+
+/// The condition and command action a breakpoint command ends with: `if
+/// <expr>` or a bare expression, then `do <commands>` or one quoted
+/// argument. `condition` is the one `/w` gave, which `if` may not repeat.
+fn parse_breakpoint_tail(
+    tail: &[Cow<'_, str>],
+    mut condition: Option<String>,
+) -> Result<(Option<String>, Option<String>)> {
     let do_index = tail
         .iter()
         .position(|arg| arg.as_ref().eq_ignore_ascii_case("do"));
@@ -332,18 +448,7 @@ fn parse_breakpoint_arguments(
         }
         action = Some(action_text);
     }
-
-    Ok(ParsedBreakpointArgs {
-        target,
-        access_spec,
-        one_shot,
-        pid,
-        thread,
-        processor,
-        pass_count,
-        condition,
-        action,
-    })
+    Ok((condition, action))
 }
 
 fn join_breakpoint_args(args: &[Cow<'_, str>]) -> String {
@@ -391,6 +496,34 @@ fn breakpoint_command_line(command: &str, args: &ParsedBreakpointArgs) -> String
 fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpointArgs)> {
     if bp.temporary {
         return None;
+    }
+    if let Some(filter) = &bp.hypercall {
+        // `!hvbp` takes the call and its caller's IDs where `ba` takes its
+        // address, and no pass count after them.
+        let target = [
+            Some(u64::from(filter.code)),
+            filter.partition,
+            filter.vp.map(u64::from),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|value| format!("{value:#x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+        return Some((
+            "!hvbp",
+            ParsedBreakpointArgs {
+                target,
+                access_spec: None,
+                one_shot: bp.one_shot,
+                pid: None,
+                thread: None,
+                processor: bp.processor,
+                pass_count: 0,
+                condition: bp.condition.clone(),
+                action: bp.action.clone(),
+            },
+        ));
     }
     let (command, access_spec, target) = match (&bp.hardware, bp.specification()) {
         (Some(hw), _) => (
@@ -612,6 +745,7 @@ impl ReplState<'_> {
             scope,
             thread,
             processor,
+            hypercall: None,
             // `bu <symbol>` breaks at the symbol, as WinDbg does. Only a host
             // whose client expects arguments to be live (DAP) skips ahead.
             skip_prologue: false,
@@ -828,6 +962,59 @@ impl ReplState<'_> {
         }
 
         Ok(())
+    }
+
+    fn cmd_hvbp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let result = parse_hypercall_arguments(&invocation.argv, self.radix)
+            .and_then(|parsed| self.add_hypercall_breakpoint(parsed));
+        let id = match result {
+            Ok(id) => id,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        self.caches.refresh_breakpoints(&self.ctx.breakpoints);
+        if let Some(bp) = self.ctx.breakpoints.get(id) {
+            outln!(
+                "hypercall breakpoint {} set at {}{}{}\n",
+                ui::bp_id(id),
+                ui::addr(bp.address.0),
+                bp.symbol
+                    .as_ref()
+                    .map(|symbol| format!(" ({})", ui::symbol(symbol)))
+                    .unwrap_or_default(),
+                format!(" ({})", bp.scope_label()).bright_black(),
+            );
+        }
+        Ok(())
+    }
+
+    fn add_hypercall_breakpoint(&mut self, parsed: ParsedHypercallArgs) -> Result<u32> {
+        let code = hypercall_code_text(&parsed.call, self.radix)?;
+        let vp = parsed
+            .vp
+            .map(|vp| {
+                u32::try_from(vp)
+                    .map_err(|_| Error::InvalidArgument(format!("VP index {vp} is out of range")))
+            })
+            .transpose()?;
+        let config = BreakpointConfig {
+            condition_expr: compile_repl_condition(parsed.condition.as_deref(), self.radix)?,
+            condition: parsed.condition,
+            one_shot: parsed.one_shot,
+            action: parsed.action,
+            processor: self.breakpoint_processor_scope(parsed.processor)?,
+            ..BreakpointConfig::default()
+        };
+        self.ctx.add_hypercall_breakpoint(
+            HypercallFilter {
+                code,
+                partition: parsed.partition,
+                vp,
+            },
+            config,
+        )
     }
 
     /// `bp /p <pid> mod!sym` names the address space the symbol lives in, but
@@ -1320,5 +1507,71 @@ mod tests {
             // The line is one command, whatever `;` its strings hold.
             assert_eq!(split_command_list(&line).unwrap(), vec![line.as_str()]);
         }
+    }
+
+    /// `.bpcmds` writes a hypercall breakpoint as the `!hvbp` line that sets
+    /// the same filter, options, condition, and action, in any radix: the
+    /// IDs are not taken for a pass count or a condition, and no pass count
+    /// is written, which `!hvbp` would take for a condition.
+    #[test]
+    fn a_hypercall_breakpoint_bpcmds_line_sets_it_again() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(1, VirtAddr(0xffff_f847_98a8_68a0), true, None);
+        let mut bp = manager.get(1).unwrap().clone();
+        bp.hypercall = Some(HypercallFilter {
+            code: 0x000b,
+            partition: Some(0x17),
+            vp: Some(3),
+        });
+        bp.processor = Some(2);
+        bp.one_shot = true;
+        bp.pass_count = 5;
+        bp.condition = Some("@rdx != 0".to_string());
+        bp.action = Some("r rcx; gc".to_string());
+        let (command, args) = recreate_breakpoint(&bp).unwrap();
+        let line = breakpoint_command_line(command, &args);
+        let parsed = parse_command(&line).unwrap().unwrap();
+        assert_eq!(parsed.name, "!hvbp");
+        let invocation = parsed.invocation(CommandStyle::StructuredArgs).unwrap();
+        for radix in [NumberRadix::Decimal, NumberRadix::Hexadecimal] {
+            let reparsed = parse_hypercall_arguments(&invocation.argv, radix).unwrap();
+            assert_eq!(hypercall_code_text(&reparsed.call, radix).unwrap(), 0x000b);
+            assert_eq!(
+                reparsed,
+                ParsedHypercallArgs {
+                    call: reparsed.call.clone(),
+                    partition: Some(0x17),
+                    vp: Some(3),
+                    one_shot: true,
+                    processor: Some(2),
+                    condition: bp.condition.clone(),
+                    action: bp.action.clone(),
+                },
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn hvbp_takes_a_call_by_name_or_code_and_refuses_nt_filters() {
+        let parse = |line: &[&str]| {
+            let argv: Vec<Cow<'_, str>> = line.iter().map(|arg| Cow::from(*arg)).collect();
+            parse_hypercall_arguments(&argv, NumberRadix::Hexadecimal)
+        };
+        let any = parse(&["HvCallPostMessage", "if", "@rdx==0"]).unwrap();
+        assert_eq!((any.partition, any.vp), (None, None));
+        assert_eq!(any.condition.as_deref(), Some("@rdx==0"));
+        assert_eq!(
+            hypercall_code_text(&any.call, NumberRadix::Hexadecimal).unwrap(),
+            0x005c
+        );
+        assert_eq!(
+            hypercall_code_text("0n11", NumberRadix::Hexadecimal).unwrap(),
+            0x000b
+        );
+        assert!(hypercall_code_text("0x10000", NumberRadix::Hexadecimal).is_err());
+        assert!(hypercall_code_text("HvCallUnimplemented", NumberRadix::Hexadecimal).is_err());
+        assert!(parse(&["/p", "4", "HvCallPostMessage"]).is_err());
+        assert!(parse(&["/t", "4", "HvCallPostMessage"]).is_err());
     }
 }

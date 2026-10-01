@@ -6,7 +6,7 @@ use super::lifecycle::prepare_backend_after_cleanup;
 use super::stepping::{RunPast, site_successors, stack_floor, step_over_current_breakpoint};
 use super::*;
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, HardwareBreakpoint, StepFrame, ThreadScope,
+    Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, StepFrame, ThreadScope,
 };
 use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
@@ -1420,6 +1420,65 @@ fn a_hit_interrupted_on_its_site_is_reported_once() {
         returned(&mut session),
         BreakpointStopAction::Hit { .. }
     ));
+}
+
+/// A hypercall breakpoint's hit whose caller cannot be told (here no
+/// hypervisor can be walked) stops and is counted rather than being
+/// declined: a filter must never lose a hit silently.
+#[test]
+fn a_hypercall_breakpoint_stops_when_its_caller_is_unknown() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    let filter = HypercallFilter {
+        code: 0x000b,
+        partition: Some(0x7),
+        vp: Some(1),
+    };
+    let id = session
+        .add_breakpoint(
+            VirtAddr(0x1000),
+            None,
+            BreakpointConfig {
+                hypercall: Some(filter),
+                ..BreakpointConfig::default()
+            },
+        )
+        .unwrap();
+    session.current_thread = "p01.01".into();
+    match session.resolve_breakpoint_stop(0x1000, 0).unwrap() {
+        BreakpointStopAction::Hit { breakpoint, .. } => assert_eq!(breakpoint.id, id),
+        _ => panic!("the hit was declined"),
+    }
+    assert_eq!(session.breakpoint(id).unwrap().hit_count, 1);
+}
+
+/// A backend whose debug registers trap inside the guest (KD) cannot stop
+/// in the Windows hypervisor, so a hypercall breakpoint is refused there
+/// rather than set to never fire.
+#[test]
+fn a_hypercall_breakpoint_needs_debug_registers_the_host_programs() {
+    let backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    let filter = HypercallFilter {
+        code: 0x000b,
+        partition: None,
+        vp: None,
+    };
+    assert!(
+        session
+            .add_hypercall_breakpoint(filter, BreakpointConfig::default())
+            .is_err()
+    );
+    assert!(session.list_breakpoints().is_empty());
 }
 
 /// A hit the SDK's `when=` callback declines on another vCPU than a step's
