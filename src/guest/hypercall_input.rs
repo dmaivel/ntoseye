@@ -447,13 +447,16 @@ pub fn hypercall_registers(
 /// Decode a hypercall from the registers of its VMCALL exit, as
 /// [`hypercall_registers`] gives them: `value` is the hypercall input value,
 /// and `input` and `output` are the GPAs of the input and output
-/// parameters, or the input itself for a fast call. `read_input` reads the
-/// caller's guest physical memory, for an input in memory: from its GPA to
-/// the end of its page, which the input cannot cross.
+/// parameters, or the input itself for a fast call, whose input continues in
+/// `xmm`, the caller's XMM0 to XMM5 (or why they are not known), for an XMM
+/// fast call. `read_input` reads the caller's guest physical memory, for an
+/// input in memory: from its GPA to the end of its page, which the input
+/// cannot cross.
 pub fn decode_hypercall(
     value: u64,
     input: u64,
     output: u64,
+    xmm: std::result::Result<[u128; 6], String>,
     read_input: impl FnOnce(u64, &mut [u8]) -> std::result::Result<(), String>,
 ) -> DecodedHypercall {
     let control = HypercallControl::new(value);
@@ -475,11 +478,20 @@ pub fn decode_hypercall(
         return call;
     }
     let (bytes, short) = if control.fast {
-        (
-            [input.to_le_bytes(), output.to_le_bytes()].concat(),
-            "the input past RDX and R8 is in XMM0 to XMM5 (an XMM fast hypercall), which ntoseye \
-             does not recover",
-        )
+        let mut bytes = [input.to_le_bytes(), output.to_le_bytes()].concat();
+        // TLFS "XMM Fast Hypercalls": the input continues in XMM0 to XMM5,
+        // 112 bytes in all.
+        let short = match xmm {
+            Ok(registers) => {
+                bytes.extend(registers.iter().flat_map(|register| register.to_le_bytes()));
+                "the input runs past the 112 bytes that an XMM fast hypercall passes".to_string()
+            }
+            Err(reason) => format!(
+                "the input past RDX and R8 is in XMM0 to XMM5 (an XMM fast hypercall), whose \
+                 saved values are not known: {reason}"
+            ),
+        };
+        (bytes, short)
     } else {
         call.input_gpa = Some(input);
         call.output_gpa = Some(output);
@@ -490,20 +502,24 @@ pub fn decode_hypercall(
             ));
             return call;
         }
-        (page, "the input runs past the end of its page")
+        (page, "the input runs past the end of its page".to_string())
     };
     let mut reader = Input::new(&bytes);
     match layout {
         Some((fixed, _)) => decode_known(&mut reader, control, usize::from(fixed)),
         None => {
-            let count = if control.fast { 2 } else { RAW_QWORDS };
+            let count = if control.fast {
+                bytes.len() / 8
+            } else {
+                RAW_QWORDS
+            };
             for index in 0..count {
                 reader.plain(format!("Input[{index}]"), index * 8, 8);
             }
         }
     }
     if reader.short {
-        call.unavailable = Some(short.to_string());
+        call.unavailable = Some(short);
     }
     call.fields = reader.fields;
     call.elements = reader.elements;
@@ -1027,16 +1043,33 @@ mod tests {
     /// The call `value` with its input in memory at GPA `0x5000 + offset`,
     /// where `memory` is that page from `offset` on.
     fn slow(value: u64, offset: u64, memory: &[u8]) -> DecodedHypercall {
-        decode_hypercall(value, 0x5000 + offset, 0x6000, |gpa, buf| {
-            assert_eq!(gpa, 0x5000 + offset);
-            assert_eq!(buf.len(), PAGE_BYTES - offset as usize);
-            buf.copy_from_slice(&memory[..buf.len()]);
-            Ok(())
-        })
+        decode_hypercall(
+            value,
+            0x5000 + offset,
+            0x6000,
+            Err(String::new()),
+            |gpa, buf| {
+                assert_eq!(gpa, 0x5000 + offset);
+                assert_eq!(buf.len(), PAGE_BYTES - offset as usize);
+                buf.copy_from_slice(&memory[..buf.len()]);
+                Ok(())
+            },
+        )
     }
 
     fn fast(value: u64, rdx: u64, r8: u64) -> DecodedHypercall {
-        decode_hypercall(value | 1 << 16, rdx, r8, |_, _| {
+        fast_with(value, rdx, r8, Err("not saved".to_string()))
+    }
+
+    /// [`fast`] with the caller's saved XMM0 to XMM5, or why they are not
+    /// known.
+    fn fast_with(
+        value: u64,
+        rdx: u64,
+        r8: u64,
+        xmm: std::result::Result<[u128; 6], String>,
+    ) -> DecodedHypercall {
+        decode_hypercall(value | 1 << 16, rdx, r8, xmm, |_, _| {
             panic!("a fast call's input is not read from memory")
         })
     }
@@ -1233,8 +1266,8 @@ mod tests {
         assert!(call.unavailable.is_none());
     }
 
-    /// Past RDX and R8 a fast call's input is in XMM registers, which are
-    /// not recovered: what is left is said to be missing, not guessed.
+    /// Past RDX and R8 a fast call's input is in XMM registers: without
+    /// their saved values, what is left is said to be missing, not guessed.
     #[test]
     fn an_xmm_fast_call_shows_what_rdx_and_r8_hold_and_says_the_rest_is_missing() {
         let call = fast(value(SEND_SYNTHETIC_CLUSTER_IPI_EX, 1, 0, 0), 0x2f, 0);
@@ -1246,12 +1279,41 @@ mod tests {
                 ("ProcessorSet.Format", 8, 0, Some("sparse")),
             ]
         );
-        assert!(
-            call.unavailable
-                .as_deref()
-                .unwrap()
-                .contains("XMM0 to XMM5")
+        assert!(call.unavailable.as_deref().unwrap().contains("not saved"));
+    }
+
+    /// With the saved XMM0 to XMM5, an XMM fast call's input runs on past R8
+    /// in order: the sparse VP set's bank mask is XMM0's low qword and its
+    /// banks follow, as they would in an input page.
+    #[test]
+    fn an_xmm_fast_call_reads_on_into_the_saved_xmm_registers() {
+        let xmm0 = 0x21u128 << 64 | 0x5;
+        let call = fast_with(
+            value(SEND_SYNTHETIC_CLUSTER_IPI_EX, 0, 0, 0),
+            0x2f,
+            0,
+            Ok([xmm0, 0x4, 0, 0, 0, 0]),
         );
+        assert_eq!(
+            fields(&call.fields)[2..],
+            [
+                ("ProcessorSet.Format", 8, 0, Some("sparse")),
+                ("ProcessorSet.ValidBanksMask", 16, 5, Some("banks 0,2")),
+                (
+                    "ProcessorSet.BankContents[0]",
+                    24,
+                    0x21,
+                    Some("bank 0: VPs 0,5")
+                ),
+                (
+                    "ProcessorSet.BankContents[1]",
+                    32,
+                    0x4,
+                    Some("bank 2: VPs 130")
+                ),
+            ]
+        );
+        assert!(call.unavailable.is_none());
     }
 
     #[test]
@@ -1650,9 +1712,13 @@ mod tests {
 
     #[test]
     fn an_unreadable_input_page_keeps_the_call_and_says_why() {
-        let call = decode_hypercall(value(GET_VP_REGISTERS, 0, 0, 1), 0x9008, 0, |_, _| {
-            Err("not mapped".to_string())
-        });
+        let call = decode_hypercall(
+            value(GET_VP_REGISTERS, 0, 0, 1),
+            0x9008,
+            0,
+            Err(String::new()),
+            |_, _| Err("not mapped".to_string()),
+        );
         assert_eq!(call.name, Some("HvCallGetVpRegisters"));
         assert_eq!(call.input_gpa, Some(0x9008));
         assert!(call.fields.is_empty());
@@ -1663,9 +1729,13 @@ mod tests {
     /// are not their GPAs and nothing is read.
     #[test]
     fn a_call_without_parameters_reads_nothing() {
-        let call = decode_hypercall(value(VTL_CALL, 0, 0, 0), 0x1234, 0x5678, |_, _| {
-            panic!("read")
-        });
+        let call = decode_hypercall(
+            value(VTL_CALL, 0, 0, 0),
+            0x1234,
+            0x5678,
+            Err(String::new()),
+            |_, _| panic!("read"),
+        );
         assert_eq!(call.name, Some("HvCallVtlCall"));
         assert_eq!((call.input_gpa, call.output_gpa), (None, None));
         assert!(call.decoded && call.fields.is_empty() && call.unavailable.is_none());

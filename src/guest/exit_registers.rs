@@ -41,6 +41,18 @@ const EXIT_GPR_REGISTERS: [Register; 15] = [
     Register::R15,
 ];
 
+/// The XMM registers an XMM fast hypercall passes its input in, past RDX and
+/// R8 (TLFS "XMM Fast Hypercalls"), which the entry code saves beside the
+/// general-purpose registers before it clears them.
+const EXIT_XMM_REGISTERS: [Register; 6] = [
+    Register::XMM0,
+    Register::XMM1,
+    Register::XMM2,
+    Register::XMM3,
+    Register::XMM4,
+    Register::XMM5,
+];
+
 /// Bytes of entry code followed. Entry stubs save the registers within a few
 /// dozen instructions; past this the code is doing something else.
 pub const ENTRY_CODE_BYTES: usize = 0x200;
@@ -105,6 +117,10 @@ pub struct ExitRegisterLayout {
     /// The first instruction after the last store into the block. A vCPU
     /// between `host_rip` and this has not saved this exit's registers yet.
     pub stores_end: u64,
+    /// Offsets in the same block of the guest's XMM0 to XMM5, when the entry
+    /// code saves all six there before its first branch, and the first
+    /// instruction after the last of those stores.
+    pub xmm: Option<([i64; 6], u64)>,
 }
 
 impl ExitRegisterLayout {
@@ -124,6 +140,27 @@ impl ExitRegisterLayout {
             .zip(self.offsets)
             .map(|(name, offset)| Some((*name, read(block.wrapping_add_signed(offset))?)))
             .collect()
+    }
+
+    /// The saved XMM0 to XMM5 of the exit that `host_rsp` belongs to, when
+    /// the layout has them, reading qwords through `read`.
+    pub fn read_xmm(
+        &self,
+        host_rsp: u64,
+        mut read: impl FnMut(u64) -> Option<u64>,
+    ) -> Option<[u128; 6]> {
+        let (offsets, _) = self.xmm?;
+        let mut block = host_rsp;
+        for load in &self.block_loads {
+            block = read(block.wrapping_add_signed(*load))?;
+        }
+        let mut values = [0u128; 6];
+        for (value, offset) in values.iter_mut().zip(offsets) {
+            let low = read(block.wrapping_add_signed(offset))?;
+            let high = read(block.wrapping_add_signed(offset + 8))?;
+            *value = u128::from(high) << 64 | u128::from(low);
+        }
+        Some(values)
     }
 }
 
@@ -187,6 +224,10 @@ struct Walk {
     /// Addresses that hold a guest register, and the end of the store that
     /// put it there.
     memory: HashMap<Path, (usize, u64)>,
+    /// The same for the guest's XMM0 to XMM5, each 16 bytes.
+    xmm_memory: HashMap<Path, (usize, u64)>,
+    /// Which of XMM0 to XMM5 still hold the guest's value.
+    xmm_guest: [bool; 6],
     /// Addresses a pointer was loaded from, and whether anything written
     /// since may have overwritten them. A block reached through a slot that
     /// was rewritten is not where `read` would find it at a later stop.
@@ -210,6 +251,8 @@ impl Walk {
         Self {
             registers,
             memory: HashMap::new(),
+            xmm_memory: HashMap::new(),
+            xmm_guest: [true; 6],
             pointer_slots: HashMap::new(),
         }
     }
@@ -271,6 +314,7 @@ impl Walk {
             Target::Fixed => {}
             Target::Path(_) | Target::Unknown => {
                 self.memory.clear();
+                self.xmm_memory.clear();
                 self.pointer_slots
                     .values_mut()
                     .for_each(|rewritten| *rewritten = true);
@@ -282,6 +326,9 @@ impl Walk {
     /// and mark the pointer slots it overlaps as rewritten.
     fn overwrite(&mut self, address: &Path, size: usize) {
         self.memory.retain(|slot, _| !overlaps(slot, address, size));
+        self.xmm_memory.retain(|slot, _| {
+            !(overlaps(slot, address, size) || overlaps(&slot.plus(8), address, size))
+        });
         for (slot, rewritten) in &mut self.pointer_slots {
             if overlaps(slot, address, size) {
                 *rewritten = true;
@@ -355,6 +402,24 @@ impl Walk {
                 self.set(register(0), address.map(Value::Address));
                 return;
             }
+            Mnemonic::Movaps | Mnemonic::Movups | Mnemonic::Movdqa | Mnemonic::Movdqu
+                if op(0) == OpKind::Memory && op(1) == OpKind::Register =>
+            {
+                match self.memory_target(instruction) {
+                    Target::Path(address) if size == 16 => {
+                        self.overwrite(&address, 16);
+                        if let Some(index) = EXIT_XMM_REGISTERS
+                            .iter()
+                            .position(|xmm| *xmm == register(1))
+                            && self.xmm_guest[index]
+                        {
+                            self.xmm_memory.insert(address, (index, end));
+                        }
+                    }
+                    target => self.clobber(&target, size),
+                }
+                return;
+            }
             Mnemonic::Push if op(0) == OpKind::Register && register(0).is_gpr64() => {
                 if let Some(top) = self.address_in(Register::RSP).map(|rsp| rsp.plus(-8)) {
                     self.store(top.clone(), register(0), end);
@@ -418,6 +483,12 @@ impl Walk {
                     | OpAccess::ReadWrite
                     | OpAccess::ReadCondWrite
             ) {
+                if let Some(index) = EXIT_XMM_REGISTERS
+                    .iter()
+                    .position(|xmm| xmm.full_register() == used.register().full_register())
+                {
+                    self.xmm_guest[index] = false;
+                }
                 self.registers.remove(&used.register().full_register());
             }
         }
@@ -462,6 +533,7 @@ impl Walk {
                 block_loads: loads.clone(),
                 offsets: offsets.map(|offset| offset.unwrap_or_default()),
                 stores_end,
+                xmm: self.xmm_layout(loads),
             })
         });
         match (complete.next(), complete.next()) {
@@ -473,6 +545,21 @@ impl Walk {
                 "more than one block holds every general-purpose register",
             )),
         }
+    }
+
+    /// Where in the block reached through `loads` the guest's XMM0 to XMM5
+    /// were saved, each once, and the end of the last of those stores.
+    fn xmm_layout(&self, loads: &[i64]) -> Option<([i64; 6], u64)> {
+        let mut offsets = [None; 6];
+        let mut stores_end = 0;
+        for (path, (index, end)) in &self.xmm_memory {
+            if path.loads != loads || offsets[*index].replace(path.offset).is_some() {
+                return None;
+            }
+            stores_end = stores_end.max(*end);
+        }
+        let offsets = offsets.into_iter().collect::<Option<Vec<_>>>()?;
+        Some((offsets.try_into().ok()?, stores_end))
     }
 }
 
@@ -511,6 +598,13 @@ mod tests {
         let tail: &[&[u8]] = &[
             &[0x48, 0x8d, 0x41, 0x70],                      // lea rax, [rcx+0x70]
             &[0x0f, 0x29, 0x40, 0x10],                      // movaps [rax+0x10], xmm0
+            &[0x0f, 0x29, 0x48, 0x20],                      // movaps [rax+0x20], xmm1
+            &[0x0f, 0x29, 0x50, 0x30],                      // movaps [rax+0x30], xmm2
+            &[0x0f, 0x29, 0x58, 0x40],                      // movaps [rax+0x40], xmm3
+            &[0x0f, 0x29, 0x60, 0x50],                      // movaps [rax+0x50], xmm4
+            &[0x0f, 0x29, 0x68, 0x60],                      // movaps [rax+0x60], xmm5
+            &[0x66, 0x0f, 0xef, 0xc0],                      // pxor xmm0, xmm0
+            &[0x66, 0x0f, 0xef, 0xc9],                      // pxor xmm1, xmm1
             &[0x48, 0x8b, 0xe9],                            // mov rbp, rcx
             &[0x48, 0x8b, 0x4c, 0x24, 0x20],                // mov rcx, [rsp+0x20]
             &[0x33, 0xdb],                                  // xor ebx, ebx
@@ -536,6 +630,24 @@ mod tests {
             ]
         );
         assert_eq!(layout.stores_end, end);
+        // lea rax, [rcx+0x70] and the six 4-byte movaps after the stores.
+        assert_eq!(
+            layout.xmm,
+            Some(([0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0], end + 4 + 6 * 4))
+        );
+    }
+
+    /// An XMM register saved after the entry code changed it holds none of
+    /// the guest's input: with XMM0 cleared before its store, the XMM
+    /// registers are not known, while the general-purpose ones still are.
+    #[test]
+    fn an_xmm_register_stored_after_it_was_cleared_is_not_the_guests() {
+        let (mut code, end) = entry_26100();
+        let at = (end - IP) as usize + 4;
+        code.splice(at..at, [0x66, 0x0f, 0xef, 0xc0]);
+        let layout = derive(&code, IP).unwrap();
+        assert_eq!(layout.stores_end, end);
+        assert_eq!(layout.xmm, None);
     }
 
     #[test]
@@ -725,10 +837,11 @@ mod tests {
                 match derive(code, base + u64::from(rva)) {
                     Ok(layout) => {
                         println!(
-                            "{path} {rva:#x}: block {:x?}, offsets {:x?}, stores end +{:#x}",
+                            "{path} {rva:#x}: block {:x?}, offsets {:x?}, stores end +{:#x}, xmm {:x?}",
                             layout.block_loads,
                             layout.offsets,
-                            layout.stores_end - base - u64::from(rva)
+                            layout.stores_end - base - u64::from(rva),
+                            layout.xmm.map(|(offsets, _)| offsets)
                         );
                         accepted.push(layout);
                     }
@@ -742,8 +855,12 @@ mod tests {
             } else if accepted.iter().any(|layout| {
                 layout.block_loads != accepted[0].block_loads
                     || layout.offsets != accepted[0].offsets
+                    || layout.xmm.map(|(offsets, _)| offsets)
+                        != accepted[0].xmm.map(|(offsets, _)| offsets)
             }) {
                 failures.push(format!("{path}: entry points disagree on the block"));
+            } else if accepted[0].xmm.is_none() {
+                failures.push(format!("{path}: no XMM0 to XMM5 saved in the block"));
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");

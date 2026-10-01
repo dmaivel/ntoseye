@@ -266,9 +266,13 @@ mod tests {
 
     /// The call of a fast VMCALL whose RCX is `value`.
     fn known(value: u64) -> HypercallInput {
-        HypercallInput::Known(Box::new(decode_hypercall(value, 0, 0, |_, _| {
-            Err("no memory".to_string())
-        })))
+        HypercallInput::Known(Box::new(decode_hypercall(
+            value,
+            0,
+            0,
+            Err(String::new()),
+            |_, _| Err("no memory".to_string()),
+        )))
     }
 
     /// The code is RCX's low 16 bits, so the fast and rep flags above them

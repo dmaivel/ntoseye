@@ -302,18 +302,26 @@ The addresses are in the address space of the hypervisor. To read them with {com
 {command}`!hvcall` shows the hypercall that the current vCPU's processor handles, at a stop in the hypervisor such as a hit of {command}`!hvbp` or of {command}`ba` `e1 hv!HvCallFlushVirtualAddressList`. It finds the caller as {command}`!hvbp` does, and decodes the call from the caller's registers at its `VMCALL`: the call code and TLFS name, the flags (fast, the size of a variable header, nested), a rep call's start and count, the GPAs of the input and output, and each field of the input as the Hyper-V TLFS lays it out, then each element of a rep call's input list, with the elements before the rep start marked `done`. Fields that have names for their values show them: `HV_PARTITION_ID_SELF`, flags, the VPs of a processor mask or of a sparse processor set (`HV_VP_SET`), a VTL, the TLFS names of the common registers in `HvCallGetVpRegisters` and `HvCallSetVpRegisters`, and the pages of a GVA or GPA range. ntoseye decodes the flushes of virtual and guest physical address spaces and lists and their `Ex` forms, the synthetic IPIs, `HvCallNotifyLongSpinWait`, `HvCallPostMessage`, `HvCallSignalEvent`, the VP register calls, `HvCallModifyVtlProtectionMask`, `HvCallEnablePartitionVtl`, `HvCallEnableVpVtl`, `HvCallStartVirtualProcessor`, `HvCallGetVpIndexFromApicId`, and `HvCallRetargetDeviceInterrupt`. For another call, it shows the first eight qwords of the input, or RDX and R8 for a fast call. For example, a flush of two ranges of an address space on VPs 0 and 1, whose first range is done, shows as follows:
 
 ```text
-root partition VP 2 VTL0  hypercall 0x0003 HvCallFlushVirtualAddressList rep 1/2
-├─ input value 0x0001000200000003
-├─ input GPA 0x5000  output GPA 0x6000
-├─ AddressSpace   0x00000000001ad000
-├─ Flags          0x0000000000000000
-├─ ProcessorMask  0x0000000000000003  VPs 0-1
-└─ rep list 2 elements, 1 done
-   ├─ [0] GvaRange  0x0000000000001000  0x1000, 1 page  done
-   └─ [1] GvaRange  0x00007ff600000001  0x7ff600000000, 2 pages
+mem:1> !hvbp HvCallFlushVirtualAddressList
+mem:1> g
+...
+mem:1> !hvcall
+root partition VP 0 VTL0  hypercall 0x0003 HvCallFlushVirtualAddressList fast rep 0/4
+├─ input value 0x0000000400010003  fast
+├─ input in RDX and R8
+├─ AddressSpace   0x0000000000000000  ignored: HV_FLUSH_ALL_VIRTUAL_ADDRESS_SPACES
+├─ Flags          0x000000000000000f  HV_FLUSH_ALL_PROCESSORS | HV_FLUSH_ALL_VIRTUAL_ADDRESS_SPACES | HV_FLUSH_NON_GLOBAL_MAPPINGS_ONLY | HV_FLUSH_USE_EXTENDED_RANGE_FORMAT
+├─ ProcessorMask  0x0000000000000000  ignored: HV_FLUSH_ALL_PROCESSORS
+└─ rep list 4 elements
+   ├─ [0] GvaRange  0xffffa789d4012000
+   ├─ [1] GvaRange  0xffffa789d401b000
+   ├─ [2] GvaRange  0xffffa789d41a7000
+   └─ [3] GvaRange  0xffffa789d41bd000
 ```
 
-ntoseye reads a slow call's input at its GPA through the EPT of the calling VTL, which is the root partition's for its own calls, and the guest's for a guest partition's VP. A fast call passes its input in RDX and R8, and an XMM fast call passes the rest of it in XMM0 to XMM5, which ntoseye does not recover, so it shows what RDX and R8 hold and says that the rest is missing. The registers come from where the hypervisor's VM-exit entry code saved them ([below](#where-nt-left-off-under-the-hypervisor)), so when they are not known, for example while the vCPU is still on the entry, or when the caller's last exit was not a `VMCALL`, {command}`!hvcall` says so.
+NT made this call as an XMM fast hypercall: the ProcessorMask and the four ranges past RDX and R8 are in XMM0 to XMM2. The ranges show as raw values because the flags select the extended range format, which neither the TLFS nor Linux documents. A slow call shows the GPAs of its input and output instead of `input in RDX and R8`.
+
+ntoseye reads a slow call's input at its GPA through the EPT of the calling VTL, which is the root partition's for its own calls, and the guest's for a guest partition's VP. A fast call passes its input in RDX and R8, and an XMM fast call passes the rest of it in XMM0 to XMM5, which the hypervisor's VM-exit entry code saves beside the general-purpose registers before it clears them (every build from 10.0.16299 to 10.0.28000 does). The registers come from where that code saved them ([below](#where-nt-left-off-under-the-hypervisor)), so when they are not known, for example while the vCPU is still on the entry, or when the caller's last exit was not a `VMCALL`, {command}`!hvcall` says so.
 
 `ntoseye` reaches the objects from the hypervisor's per-processor blocks, whose addresses it takes from the eVMCS pages (their host GS base) and from the selected vCPU when that vCPU is stopped in the hypervisor. So the commands need the `hv-evmcs` enlightenment, as [where NT left off](#where-nt-left-off-under-the-hypervisor) does, or a `gdb` stop in the hypervisor, and they do not work on AMD hosts. `hvix64` has no public symbols, so `ntoseye` reads the offsets of these objects from the hypervisor's own code and checks every object before it shows it ([how](../internals/vbs.md#partitions-and-virtual-processors)). It recognizes every build that we examined, from 10.0.16299 to 10.0.28000. If it does not recognize a build, the commands give an error and do not guess.
 

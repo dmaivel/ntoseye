@@ -396,13 +396,14 @@ impl Target {
             [state] => {
                 let general_registers =
                     self.saved_general_registers(cr3 & mask, rip, state, any_current, entered);
+                let xmm = self.saved_xmm_registers(cr3 & mask, rip, state, &general_registers);
                 Ok(Some(SavedVtlContext {
                     vtl,
                     state: *state,
                     may_be_stale: rip == state.host_rip
                         && entered.is_none()
                         && (state.current || !any_current),
-                    hypercall: self.exit_hypercall(state, general_registers.as_ref()),
+                    hypercall: self.exit_hypercall(state, general_registers.as_ref(), xmm),
                     general_registers,
                 }))
             }
@@ -468,6 +469,45 @@ impl Target {
         }
         layout
             .read(state.host_rsp, |address| {
+                memory.read::<u64>(VirtAddr(address)).ok()
+            })
+            .ok_or_else(|| "the block they are saved in is unreadable".to_string())
+    }
+
+    /// The XMM0 to XMM5 of `state`'s last exit, which the hypervisor's exit
+    /// entry code saves beside its `general_registers` before it clears
+    /// them, for a vCPU at `rip` on the hypervisor root `root`: an XMM fast
+    /// hypercall's input past RDX and R8. Known only when the
+    /// general-purpose registers are, and once the vCPU is past their stores.
+    fn saved_xmm_registers(
+        &self,
+        root: u64,
+        rip: u64,
+        state: &EvmcsState,
+        general_registers: &std::result::Result<HashMap<&'static str, u64>, String>,
+    ) -> std::result::Result<[u128; 6], String> {
+        if let Err(reason) = general_registers {
+            return Err(reason.clone());
+        }
+        if rip == state.host_rip {
+            return Err("the vCPU is on the VM-exit entry, which has not saved them".to_string());
+        }
+        let guest = self.guest().map_err(|error| error.to_string())?;
+        let memory = self.address_space(root);
+        let layout = guest.exit_register_layout(state.host_rip, |code| {
+            memory.read_bytes(VirtAddr(state.host_rip), code)
+        })?;
+        let Some((_, stores_end)) = layout.xmm else {
+            return Err(
+                "this hypervisor build's VM-exit entry code does not save them where ntoseye finds them"
+                    .to_string(),
+            );
+        };
+        if (state.host_rip..stores_end).contains(&rip) {
+            return Err("the vCPU is saving them".to_string());
+        }
+        layout
+            .read_xmm(state.host_rsp, |address| {
                 memory.read::<u64>(VirtAddr(address)).ok()
             })
             .ok_or_else(|| "the block they are saved in is unreadable".to_string())
@@ -1252,12 +1292,16 @@ impl Target {
             (Some(_), None) => Err("no eVMCS is known loaded on the processor".to_string()),
             (None, _) => Err("the walk found no state for the VTL it runs".to_string()),
         };
+        let xmm = match &state {
+            Some(state) => self.saved_xmm_registers(cr3 & mask, rip, state, &general_registers),
+            None => Err("the walk found no state for the VTL it runs".to_string()),
+        };
         Some(ServedVp {
             partition,
             vp: vp.index,
             vtl,
             hypercall: match &state {
-                Some(state) => self.exit_hypercall(state, general_registers.as_ref()),
+                Some(state) => self.exit_hypercall(state, general_registers.as_ref(), xmm),
                 None => HypercallInput::Unknown(
                     "the partition walk found no saved state of the VP".to_string(),
                 ),
@@ -1271,11 +1315,14 @@ impl Target {
     /// general-purpose registers are known (`registers`, or why they are not),
     /// the call with its input decoded. An input in memory is read at its GPA
     /// through the EPT of the calling VTL, which `state` holds, whether the
-    /// VTL is the root partition's or a guest's.
+    /// VTL is the root partition's or a guest's; an XMM fast call's input
+    /// past RDX and R8 is in the exit's saved `xmm` registers, or why they
+    /// are not known.
     pub fn exit_hypercall(
         &self,
         state: &EvmcsState,
         registers: std::result::Result<&HashMap<&'static str, u64>, &String>,
+        xmm: std::result::Result<[u128; 6], String>,
     ) -> HypercallInput {
         if !state.is_vmcall() {
             return HypercallInput::NotHypercall;
@@ -1296,6 +1343,7 @@ impl Target {
             value,
             input,
             output,
+            xmm,
             |gpa, buf| {
                 self.read_guest_partition(state, false, gpa, buf)
                     .map_err(|error| error.to_string())
@@ -1579,7 +1627,9 @@ mod tests {
         };
         let target = &session.target;
         let space = registers(0x0002, CODE_GPA + CODE_OFFSET - 8);
-        let HypercallInput::Known(call) = target.exit_hypercall(&vmcall, Ok(&space)) else {
+        let no_xmm = || Err("not saved".to_string());
+        let HypercallInput::Known(call) = target.exit_hypercall(&vmcall, Ok(&space), no_xmm())
+        else {
             panic!("no call");
         };
         assert_eq!(call.input_gpa, Some(CODE_GPA + CODE_OFFSET - 8));
@@ -1594,7 +1644,8 @@ mod tests {
         assert!(call.unavailable.is_some(), "ProcessorMask is past the page");
 
         let unmapped = registers(0x0002, CODE_GPA + 0x1000);
-        let HypercallInput::Known(call) = target.exit_hypercall(&vmcall, Ok(&unmapped)) else {
+        let HypercallInput::Known(call) = target.exit_hypercall(&vmcall, Ok(&unmapped), no_xmm())
+        else {
             panic!("no call");
         };
         assert!(call.fields.is_empty() && call.unavailable.is_some());
@@ -1606,19 +1657,20 @@ mod tests {
         };
         let mut pairs = registers(0, 0);
         pairs.extend([("rax", 0x0001_0008), ("rdx", 0), ("rcx", 0x2a)]);
-        let HypercallInput::Known(call) = target.exit_hypercall(&protected, Ok(&pairs)) else {
+        let HypercallInput::Known(call) = target.exit_hypercall(&protected, Ok(&pairs), no_xmm())
+        else {
             panic!("no call");
         };
         assert_eq!((call.control.code, call.control.fast), (0x0008, true));
         assert_eq!(call.fields[0].value, 0x2a);
 
         assert_eq!(
-            target.exit_hypercall(&long, Ok(&space)),
+            target.exit_hypercall(&long, Ok(&space), no_xmm()),
             HypercallInput::NotHypercall
         );
         let reason = "the vCPU is saving them".to_string();
         assert_eq!(
-            target.exit_hypercall(&vmcall, Err(&reason)),
+            target.exit_hypercall(&vmcall, Err(&reason), no_xmm()),
             HypercallInput::Unknown(reason.clone())
         );
     }

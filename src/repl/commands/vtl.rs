@@ -81,7 +81,7 @@ repl_command! {
     names: ["!hvcall"],
     usage: "!hvcall",
     summary: "Decode the hypercall that the current vCPU's processor handles in the Windows hypervisor.",
-    details: "For a vCPU halted in the Windows hypervisor, for example on a breakpoint on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList), shows the hypercall of the VMCALL exit that its processor handles: the caller (a VTL of the root partition, or the guest partition's VP that the processor serves), the call code with its TLFS name, the flags (fast, variable header size, nested), a rep call's start and count, the GPAs of the input and output, and each field of the input as the Hyper-V TLFS lays it out, with names for special values, processor sets, flags, and the common register names, then each element of a rep call's input list. A slow call's input is read at its GPA through the EPT of the calling VTL. A fast call's input is RDX and R8; ntoseye does not recover the XMM registers of an XMM fast call, and says what is missing. A call whose layout ntoseye does not know shows its input as raw qwords. The command needs the general-purpose registers of the exit, which ntoseye reads where the hypervisor's VM-exit entry code saved them, so it explains why when the vCPU is still on the entry or the last exit was not a VMCALL. Needs the VM's hv-evmcs enlightenment.",
+    details: "For a vCPU halted in the Windows hypervisor, for example on a breakpoint on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList), shows the hypercall of the VMCALL exit that its processor handles: the caller (a VTL of the root partition, or the guest partition's VP that the processor serves), the call code with its TLFS name, the flags (fast, variable header size, nested), a rep call's start and count, the GPAs of the input and output, and each field of the input as the Hyper-V TLFS lays it out, with names for special values, processor sets, flags, and the common register names, then each element of a rep call's input list. A slow call's input is read at its GPA through the EPT of the calling VTL. A fast call's input is RDX and R8, then, for an XMM fast call, XMM0 to XMM5 as the hypervisor's VM-exit entry code saved them; when they are not known, it says what is missing. A call whose layout ntoseye does not know shows its input as raw qwords. The command needs the general-purpose registers of the exit, which ntoseye reads where the hypervisor's VM-exit entry code saved them, so it explains why when the vCPU is still on the entry or the last exit was not a VMCALL. Needs the VM's hv-evmcs enlightenment.",
     run_state: Halted,
 }
 
@@ -1640,7 +1640,7 @@ mod tests {
         for &(offset, qword) in parts {
             page[offset..offset + 8].copy_from_slice(&qword.to_le_bytes());
         }
-        let call = decode_hypercall(value, 0x5000, 0x6000, |_, buf| {
+        let call = decode_hypercall(value, 0x5000, 0x6000, Err(String::new()), |_, buf| {
             buf.copy_from_slice(&page[..buf.len()]);
             Ok(())
         });
