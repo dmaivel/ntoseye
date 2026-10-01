@@ -1041,9 +1041,10 @@ pub fn print_indexed_stacktrace(
         };
         let provenance = if columns.provenance {
             format!("  [{}]", frame.source.as_str())
-        } else if frame.source == FrameSource::Scan {
-            // A stack scan's guess is marked always, as the stop's stack is.
-            "  [scan]".to_string()
+        } else if matches!(frame.source, FrameSource::Scan | FrameSource::Prolog) {
+            // A guess, by a stack scan or by reading a prolog, is marked
+            // always, as the stop's stack marks it.
+            format!("  [{}]", frame.source.as_str())
         } else {
             String::new()
         };

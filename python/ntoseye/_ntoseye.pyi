@@ -11090,7 +11090,9 @@ class StackFrame(BaseRecord):
     @property
     def source(self, /) -> str:
         """
-        How ntoseye recovered the frame: `current`, `seed`, `unwind`, or `scan`.
+        How ntoseye recovered the frame: `current`, `seed`, `unwind`,
+        `prolog` (read off its function's prolog, for the Windows
+        hypervisor's code without its file), or `scan`.
         """
     @property
     def source_location(self, /) -> SourceLocation |None:
@@ -11510,6 +11512,12 @@ class Symbols:
     def get(self, /, name: str) -> int |None:
         """
         Get the address of a symbol, or `None` if the symbol is not found.
+        """
+    def import_image(self, /, path: str) -> str:
+        """
+        Copy a PE file into the symbol cache under the key in its own header, and
+        return its path in the cache (`.fetchimage /f`). Use it for an image that
+        no symbol server has, such as the Windows hypervisor's `hvix64.exe`.
         """
     def locals_at(self, /, addr: int) -> list[ProcedureLocal]:
         """

@@ -571,14 +571,13 @@ pub fn format_stack_frame(
     if frame.inline {
         annotations.push(inline_tag());
     }
-    if show_provenance {
+    // A guess, by a stack scan or a prolog read, is marked always.
+    if show_provenance || matches!(frame.source, FrameSource::Scan | FrameSource::Prolog) {
         annotations.push(
             format!("[{}]", frame.source.as_str())
                 .bright_black()
                 .to_string(),
         );
-    } else if frame.source == FrameSource::Scan {
-        annotations.push("[scan]".bright_black().to_string());
     }
     if let Some(location) = frame.source_location.as_ref() {
         annotations.push(format_source_location(location).bright_black().to_string());

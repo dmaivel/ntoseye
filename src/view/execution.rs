@@ -220,7 +220,9 @@ shapes! {
         /// after it, so the call has no stack frame of its own. `symbol` is the
         /// inlined function, and `ip` and `sp` are those of the physical frame.
         inline: bool,
-        /// How ntoseye recovered the frame: `current`, `seed`, `unwind`, or `scan`.
+        /// How ntoseye recovered the frame: `current`, `seed`, `unwind`,
+        /// `prolog` (read off its function's prolog, for the Windows
+        /// hypervisor's code without its file), or `scan`.
         source: &'static str,
         /// The source line of the frame, if line information resolves it. For
         /// an inline frame this is the line in the inlined function, and for a
