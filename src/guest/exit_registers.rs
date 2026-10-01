@@ -176,11 +176,21 @@ pub fn derive(code: &[u8], ip: u64) -> Result<ExitRegisterLayout> {
     walk.layout()
 }
 
+/// Whether a slot (a qword at `slot`) overlaps `size` bytes at `address`.
+fn overlaps(slot: &Path, address: &Path, size: usize) -> bool {
+    let distance = slot.offset.wrapping_sub(address.offset);
+    slot.loads == address.loads && distance > -8 && distance < size as i64
+}
+
 struct Walk {
     registers: HashMap<Register, Value>,
     /// Addresses that hold a guest register, and the end of the store that
     /// put it there.
     memory: HashMap<Path, (usize, u64)>,
+    /// Addresses a pointer was loaded from, and whether anything written
+    /// since may have overwritten them. A block reached through a slot that
+    /// was rewritten is not where `read` would find it at a later stop.
+    pointer_slots: HashMap<Path, bool>,
 }
 
 impl Walk {
@@ -200,6 +210,7 @@ impl Walk {
         Self {
             registers,
             memory: HashMap::new(),
+            pointer_slots: HashMap::new(),
         }
     }
 
@@ -258,16 +269,24 @@ impl Walk {
         match target {
             Target::Path(address) if size != 0 => self.overwrite(address, size),
             Target::Fixed => {}
-            Target::Path(_) | Target::Unknown => self.memory.clear(),
+            Target::Path(_) | Target::Unknown => {
+                self.memory.clear();
+                self.pointer_slots
+                    .values_mut()
+                    .for_each(|rewritten| *rewritten = true);
+            }
         }
     }
 
-    /// Forget the saved registers that `size` bytes at `address` overlap.
+    /// Forget the saved registers that `size` bytes at `address` overlap,
+    /// and mark the pointer slots it overlaps as rewritten.
     fn overwrite(&mut self, address: &Path, size: usize) {
-        self.memory.retain(|slot, _| {
-            let distance = slot.offset.wrapping_sub(address.offset);
-            slot.loads != address.loads || distance <= -8 || distance >= size as i64
-        });
+        self.memory.retain(|slot, _| !overlaps(slot, address, size));
+        for (slot, rewritten) in &mut self.pointer_slots {
+            if overlaps(slot, address, size) {
+                *rewritten = true;
+            }
+        }
     }
 
     /// Store the qword in `register` at `address`: remembered only when it
@@ -285,7 +304,12 @@ impl Walk {
     fn load(&mut self, register: Register, address: Option<Path>) {
         let value = address.map(|address| match self.memory.get(&address) {
             Some((index, _)) => Value::Guest(*index),
-            None => Value::Address(address.loaded()),
+            None => {
+                // A slot rewritten earlier stays rewritten: stores made
+                // through the pointer it held before went elsewhere.
+                self.pointer_slots.entry(address.clone()).or_insert(false);
+                Value::Address(address.loaded())
+            }
         });
         self.set(register, value);
     }
@@ -419,6 +443,18 @@ impl Walk {
                 }
             }
             if offsets.iter().any(Option::is_none) {
+                return None;
+            }
+            // Every slot on the way to the block must still hold the pointer
+            // the stores went through.
+            let rewritten = (0..loads.len()).any(|depth| {
+                let slot = Path {
+                    loads: loads[..depth].to_vec(),
+                    offset: loads[depth],
+                };
+                self.pointer_slots.get(&slot).copied().unwrap_or(true)
+            });
+            if rewritten {
                 return None;
             }
             let stores_end = slots.iter().map(|(_, _, end)| *end).max().unwrap_or(0);
@@ -557,6 +593,30 @@ mod tests {
             let code = [&code[..after_stores], write, &code[after_stores..]].concat();
             assert!(derive(&code, IP).is_err(), "{write:02x?}");
         }
+    }
+
+    #[test]
+    fn a_rewritten_pointer_slot_refuses_the_layout() {
+        let (code, _) = entry_26100();
+        // Just after the stores, ahead of `lea rax, [rcx+0x70]`.
+        let after_stores = code
+            .windows(3)
+            .position(|window| window == [0x48, 0x8d, 0x41])
+            .unwrap();
+        // mov [rsp+0x20], rbx: the holder slot itself.
+        let rewrite = [0x48, 0x89, 0x5c, 0x24, 0x20];
+        let holder = [&code[..after_stores], &rewrite[..], &code[after_stores..]].concat();
+        assert!(derive(&holder, IP).is_err());
+        // mov rdx, [rsp+0x20]; mov [rdx], rbx: the block pointer in the holder.
+        let inner = [
+            &code[..after_stores],
+            &[0x48, 0x8b, 0x54, 0x24, 0x20][..],
+            &[0x48, 0x89, 0x1a][..],
+            &code[after_stores..],
+        ]
+        .concat();
+        assert!(derive(&inner, IP).is_err());
+        assert!(derive(&code, IP).is_ok());
     }
 
     #[test]
