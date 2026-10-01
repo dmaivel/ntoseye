@@ -68,6 +68,8 @@ pub struct SavedVtlContext {
     /// exit before the one in progress. KVM writes the eVMCS when it enters
     /// the hypervisor, and a stop from outside can fall between an exit and
     /// that entry; a breakpoint fires only once the hypervisor runs.
+    /// Only the exiting VTL's eVMCS, the current one, is written by that
+    /// entry, so only it is marked, unless no state of the VP is current.
     pub may_be_stale: bool,
     /// The general-purpose registers of the exit, where the hypervisor's
     /// exit entry code saved them (see [`crate::guest::ExitRegisterLayout`]),
@@ -263,8 +265,9 @@ impl Target {
     /// A state counts as VTL0 only in an NT root, and, in kernel mode, only
     /// with `processor`'s KPCR as its GS base; as VTL1 only in a secure-kernel
     /// root. States of other partitions' VPs sharing the root are skipped.
-    /// A vCPU on the pages' `host_rip` marks every state `may_be_stale`,
-    /// unless it stopped there on a breakpoint ([`Self::breakpoint_stop`]).
+    /// A vCPU on the pages' `host_rip` marks the current state
+    /// `may_be_stale`, or every state when none is current, unless it
+    /// stopped there on a breakpoint ([`Self::breakpoint_stop`]).
     pub fn saved_vtl_contexts(
         &self,
         cr3: u64,
@@ -302,13 +305,22 @@ impl Target {
                     .filter(|state| self.recognize_secure_root(state.cr3 & mask)),
             );
         }
+        let any_current = vtl0.iter().chain(&vtl1).any(|state| state.current);
         let one = |states: Vec<EvmcsState>, vtl: u8| match states.as_slice() {
             [] => Ok(None),
             [state] => Ok(Some(SavedVtlContext {
                 vtl,
                 state: *state,
-                may_be_stale: rip == state.host_rip && entered.is_none(),
-                general_registers: self.saved_general_registers(cr3 & mask, rip, state, entered),
+                may_be_stale: rip == state.host_rip
+                    && entered.is_none()
+                    && (state.current || !any_current),
+                general_registers: self.saved_general_registers(
+                    cr3 & mask,
+                    rip,
+                    state,
+                    any_current,
+                    entered,
+                ),
             })),
             many => Err(Error::SavedVtlState(format!(
                 "{} eVMCS pages of this virtual processor hold VTL{vtl} state",
@@ -341,10 +353,17 @@ impl Target {
         root: u64,
         rip: u64,
         state: &EvmcsState,
+        any_current: bool,
         entered: Option<&BreakpointStop>,
     ) -> std::result::Result<HashMap<&'static str, u64>, String> {
-        if !state.current {
+        if !state.current && any_current {
             return Err("the hypervisor last saved another VTL's registers".to_string());
+        }
+        if !state.current {
+            return Err(
+                "the processor last ran another virtual processor, such as a guest partition's"
+                    .to_string(),
+            );
         }
         if rip == state.host_rip {
             return match entered {
