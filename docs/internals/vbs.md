@@ -70,7 +70,7 @@ In secure-kernel code, the temporary breakpoints are debug-register breakpoints 
 
 ### When the vCPU waits on a held vCPU
 
-If the vCPU does not get past the instruction in 100 ms, it is waiting on a held vCPU. It is then in the hypervisor, still on the instruction, or in the handler of an interrupt that it took first (from VTL1, this is NT's handler, in VTL0).
+If the vCPU does not get past the instruction in 30 ms, it is waiting on a held vCPU: in the measurements, every run alone that finished did so within 24 ms. It is then in the hypervisor, still on the instruction, or in the handler of an interrupt that it took first (from VTL1, this is NT's handler, in VTL0).
 
 `ntoseye` then breaks in on the vCPU and lets all vCPUs run 20 ms at a time, with the instruction also marked. The runs continue until one of these conditions occurs:
 

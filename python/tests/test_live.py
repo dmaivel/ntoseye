@@ -83,8 +83,12 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     require_single_step(halted)
     halted.breakpoints.add(HOT, when=lambda stop: False)
     # A hit en route is resumed like under run(); the step still completes.
-    assert isinstance(halted.step_over(until="call"), Stop.Step)
-    assert isinstance(halted.step_out(), Stop.Step)
+    # Every hit halts the guest while its predicate runs, so under a guest
+    # that switches threads constantly (a busy Hyper-V VM inside it) the
+    # stepped thread can go unscheduled for long: the timeout bounds the
+    # walk, which then ends as a Step where it is, never as the declined hit.
+    assert isinstance(halted.step_over(until="call", timeout=60.0), Stop.Step)
+    assert isinstance(halted.step_out(timeout=60.0), Stop.Step)
 
 
 def test_run_to_symbol_stops_there(halted: Debugger) -> None:

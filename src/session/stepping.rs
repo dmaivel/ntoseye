@@ -1041,8 +1041,9 @@ enum WalkStep {
 /// others are broken in on. Measured under VBS
 /// over 7761 run-pasts on hot kernel functions: every one that finished did
 /// so within 24 ms, and the rest (3-4%, waiting on a held vCPU) never
-/// finished alone.
-const RUN_PAST_TIMEOUT: Duration = Duration::from_millis(100);
+/// finished alone, so waiting longer only delays the release that frees
+/// them. Under a busy Hyper-V guest those waits come many times a second.
+const RUN_PAST_TIMEOUT: Duration = Duration::from_millis(30);
 
 /// How often a step's wait for its stop checks for Ctrl+C.
 const STEP_POLL_INTERVAL: Duration = Duration::from_millis(100);
