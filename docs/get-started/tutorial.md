@@ -25,7 +25,7 @@ target
   psmods ffffe70faa662830
 
  BREAK  p1.2 kernel at nt!DbgBreakPointWithStatus
- ╰─ thread System  state Running  ethread ffffe70fb1986040  pid 4  tid 588
+ └─ thread System  state Running  ethread ffffe70fb1986040  pid 4  tid 588
 ...
 kdnet:p1.2>
 ```
@@ -106,7 +106,7 @@ VM running, waiting for stop (Ctrl+C to pause)...
 
  BREAK  p1.1 svchost.exe (468) at nt!NtCreateFile
  ├─ breakpoint #0
- ╰─ thread svchost.exe  state Running  ethread ffffe70fb280f080  pid 468  tid 4076
+ └─ thread svchost.exe  state Running  ethread ffffe70fb280f080  pid 468  tid 4076
 
 registers
   rax fffff80797ac7930   rbx ffffe70fb280f080   rcx 000000ef8a37ee60

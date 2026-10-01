@@ -26,7 +26,7 @@ pub fn print_stop_separator() {
 }
 
 /// Print the detail lines attached to an event banner: muted `├─` for middle
-/// children, `╰─` for the last. `indent` is 1 space below a badge banner,
+/// children, `└─` for the last. `indent` is 1 space below a badge banner,
 /// 4 spaces for a nested level; it is never derived from the badge width.
 ///
 /// Children may contain `\n` (see [`wrap_prose`]): continuation lines get a
@@ -44,7 +44,7 @@ pub fn event_children_lines(indent: &str, children: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for (idx, child) in children.iter().enumerate() {
         let last = idx + 1 == children.len();
-        let glyph = if last { "╰─" } else { "├─" };
+        let glyph = if last { "└─" } else { "├─" };
         let mut lines = child.lines();
         if let Some(first) = lines.next() {
             out.push(format!("{indent}{} {}", ui::muted(glyph), first));

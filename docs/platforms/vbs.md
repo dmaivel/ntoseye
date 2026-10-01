@@ -146,10 +146,10 @@ partition 0x1  root  ffffe80000001000
 ├─ VP 1  CPU 1  VTL0 (+VTL1)  nt!HalProcessorIdle+0xf  last exit HLT
 ├─ VP 2  CPU 2  VTL0 (+VTL1)  nt!HalProcessorIdle+0xf  last exit HLT
 ├─ VP 3  CPU 3  VTL0 (+VTL1)  nt!HalProcessorIdle+0xf  last exit HLT
-╰─ partition 0x2  ffffe80200001000
+└─ partition 0x2  ffffe80200001000
    ├─ privileges 003b803000002e7f: AccessVpRunTimeReg ... PostMessages SignalEvents AccessVSM AccessVpRegisters EnableExtendedHypercalls StartVirtualProcessor (+0x8800000000000)
    ├─ VP 0  VTL0  000000001ff26114  last exit HLT
-   ╰─ VP 1  VTL0
+   └─ VP 1  VTL0
 
 mem:1> !hvvps
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit

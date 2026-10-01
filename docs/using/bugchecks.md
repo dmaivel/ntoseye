@@ -38,15 +38,15 @@ KDTARGET: Refreshing KD connection
  ├─ module myfault.sys
  ├─ fault  fffff808bb461730  myfault+0x1730
  ├─ reason An attempt was made to access a pageable (or completely invalid) address at an interrupt request level (IRQL) that is too high. This is usually caused by drivers using improper addresses. If kernel debugger is available get stack backtrace.
- ╰─ args
+ └─ args
     ├─ #1 ffffce06dc2dd010  memory referenced
     ├─ #2 0000000000000002  IRQL
     ├─ #3 0000000000000000  value 0 = read operation, 1 = write operation, 2 or 8 = execute operation
-    ╰─ #4 fffff808bb461730  address which referenced memory
+    └─ #4 fffff808bb461730  address which referenced memory
 
  BREAK  p1.4 notmyfaultc64. (2012) at myfault+0x1730
  ├─ stopped at nt!DbgBreakPointWithStatus
- ╰─ thread notmyfaultc64.  state Running  ethread ffffbe0ab9e42080  pid 2012  tid 2644
+ └─ thread notmyfaultc64.  state Running  ethread ffffbe0ab9e42080  pid 2012  tid 2644
 ...
 disasm
  > fffff808bb461730  8b 03                 mov  eax, dword [rbx]
@@ -165,11 +165,11 @@ You can examine the rest of the target as at any other stop, for example the thr
 kdnet:p1.1> !analyze -show 0x50
  BUGCHECK  PAGE_FAULT_IN_NONPAGED_AREA (0x00000050)
  ├─ reason Invalid system memory was referenced. This cannot be protected by try-except. Typically the address is just plain bad or it is pointing at freed memory.
- ╰─ args
+ └─ args
     ├─ #1 0000000000000000  memory address referenced
     ├─ #2 0000000000000000  access type (0 = read; 1 = write; 2 = execute; some builds report 0x10 for execute)
     ├─ #3 0000000000000000  address that referenced memory, if known
-    ╰─ #4 0000000000000000  page-fault subtype on newer Windows; reserved on older versions
+    └─ #4 0000000000000000  page-fault subtype on newer Windows; reserved on older versions
 ```
 
 ## After the bugcheck
@@ -181,7 +181,7 @@ kdnet:p1.4> g
 VM running, waiting for stop (Ctrl+C to pause)...
 
  BREAK  p1.1 kernel at nt!DebugService2+0x5
- ╰─ guest rebooted; kernel reloaded, module list not available yet (continue to finish)
+ └─ guest rebooted; kernel reloaded, module list not available yet (continue to finish)
 ```
 
 Enter {command}`g` again to let the boot finish.
