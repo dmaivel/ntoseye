@@ -116,6 +116,7 @@ mod tests {
             Breakpoint {
                 id: 0,
                 address: VirtAddr(0x1000),
+                serial: 0,
                 enabled: true,
                 symbol: None,
                 spec: None,
@@ -154,6 +155,7 @@ mod tests {
             Breakpoint {
                 id: 0,
                 address: VirtAddr(0x7ff7_1234_1000),
+                serial: 0,
                 enabled: true,
                 symbol: None,
                 spec: None,

@@ -57,6 +57,10 @@ pub enum BreakpointSpec {
 #[derive(Debug, Clone)]
 pub struct Breakpoint {
     pub id: u32,
+    /// Identity the manager never reuses, unlike `id`, which is handed out
+    /// again once the table empties. Handles that outlive their breakpoint
+    /// compare it to tell a new breakpoint with the same id from theirs.
+    pub serial: u64,
     /// Last resolved address. Use [`Self::resolved_address`] when deciding
     /// whether a backend breakpoint is currently installed.
     pub address: VirtAddr,
@@ -152,6 +156,8 @@ pub struct BreakpointManager {
     breakpoints: HashMap<u32, Breakpoint>,
     one_shot_hits: HashSet<u32>,
     next_id: u32,
+    /// Source of [`Breakpoint::serial`]; never reset.
+    next_serial: u64,
     /// Executions interrupted on a breakpoint's site while running past it,
     /// as `(id, stack pointer)`: returning to the site, they hit it again,
     /// and that hit is the one already reported.

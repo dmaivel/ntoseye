@@ -64,12 +64,16 @@ impl Exceptions {
 pub struct Breakpoint {
     owner: Owner,
     id: u32,
+    /// The core breakpoint's [`CoreBreakpoint::serial`]: a later breakpoint
+    /// that reuses `id` is not this one.
+    serial: u64,
 }
 
 impl Breakpoint {
     fn snapshot(&self, py: Python<'_>) -> PyResult<Option<CoreBreakpoint>> {
-        self.owner
-            .with(py, |session| Ok(session.breakpoints.get(self.id).cloned()))
+        self.owner.with(py, |session| {
+            Ok(session.breakpoints.get_exact(self.id, self.serial).cloned())
+        })
     }
 
     fn require_snapshot(&self, py: Python<'_>) -> PyResult<CoreBreakpoint> {
@@ -86,7 +90,11 @@ impl Breakpoint {
         reject_condition_mutation()?;
         self.owner.with(py, |session| {
             require_halted(session, operation)?;
-            if session.breakpoints.get(self.id).is_none() {
+            if session
+                .breakpoints
+                .get_exact(self.id, self.serial)
+                .is_none()
+            {
                 return Err(invalid_breakpoint(self.id));
             }
             change(session)
@@ -452,6 +460,7 @@ impl Breakpoint {
     /// attached, and `add()` also raises it if you give both.
     #[setter]
     fn set_condition(&self, py: Python<'_>, condition: Option<String>) -> PyResult<()> {
+        self.require_snapshot(py)?;
         if condition.is_some()
             && self
                 .owner
@@ -550,7 +559,7 @@ impl Breakpoint {
         let info = self.owner.with(py, |session| {
             let bp = session
                 .breakpoints
-                .get(self.id)
+                .get_exact(self.id, self.serial)
                 .ok_or_else(|| invalid_breakpoint(self.id))?;
             let BreakpointScope::Process { pid, .. } = &bp.scope else {
                 return Ok(None);
@@ -574,7 +583,7 @@ impl Breakpoint {
         let info = self.owner.with(py, |session| {
             let bp = session
                 .breakpoints
-                .get(self.id)
+                .get_exact(self.id, self.serial)
                 .ok_or_else(|| invalid_breakpoint(self.id))?;
             let Some(thread) = &bp.thread else {
                 return Ok(None);
@@ -588,7 +597,14 @@ impl Breakpoint {
     /// one-shot breakpoint after its hit, is left as it is.
     fn delete(&self, py: Python<'_>) -> PyResult<()> {
         if self.snapshot(py)?.is_none() {
-            self.owner.dbg().get().conditions.lock().remove(&self.id);
+            // The id's `when=` callback belongs to whichever breakpoint now
+            // holds the id, if one does.
+            let reused = self
+                .owner
+                .with(py, |session| Ok(session.breakpoints.get(self.id).is_some()))?;
+            if !reused {
+                self.owner.dbg().get().conditions.lock().remove(&self.id);
+            }
             return Ok(());
         }
         self.mutate(py, "breakpoint.delete", |session| {
@@ -625,13 +641,15 @@ impl Breakpoint {
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other
-            .extract::<PyRef<'_, Breakpoint>>()
-            .is_ok_and(|other| self.owner.same_debugger(&other.owner) && self.id == other.id)
+        other.extract::<PyRef<'_, Breakpoint>>().is_ok_and(|other| {
+            self.owner.same_debugger(&other.owner)
+                && self.id == other.id
+                && self.serial == other.serial
+        })
     }
 
     fn __hash__(&self) -> isize {
-        self.owner.identity_hash(self.id)
+        self.owner.identity_hash(self.serial)
     }
 }
 
@@ -750,6 +768,7 @@ pub fn handle(py: Python<'_>, dbg: &Py<Debugger>, bp: &CoreBreakpoint) -> PyResu
             Breakpoint {
                 owner: Owner::unstamped(py, dbg),
                 id: bp.id,
+                serial: bp.serial,
             },
         ),
     }
@@ -767,6 +786,7 @@ fn watchpoint_handle(
     let base = Breakpoint {
         owner: Owner::unstamped(py, dbg),
         id: bp.id,
+        serial: bp.serial,
     };
     let watchpoint = Watchpoint {
         access: access.name().to_string(),
@@ -893,9 +913,13 @@ fn add_hardware_execute(
 }
 
 fn store_condition(py: Python<'_>, dbg: &Py<Debugger>, id: u32, callback: Option<Py<PyAny>>) {
-    if let Some(callback) = callback {
-        dbg.bind(py).get().conditions.lock().insert(id, callback);
-    }
+    // A new breakpoint can reuse the id of one deleted outside the SDK
+    // (`bc` through `command()`), whose `when=` must not carry over.
+    let mut conditions = dbg.bind(py).get().conditions.lock();
+    match callback {
+        Some(callback) => conditions.insert(id, callback),
+        None => conditions.remove(&id),
+    };
 }
 
 fn make_handles(

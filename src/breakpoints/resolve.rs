@@ -185,6 +185,7 @@ impl BreakpointManager {
                 self.next_id += 1;
                 let mut bp = root.clone();
                 bp.id = id;
+                bp.serial = self.take_serial();
                 bp.address = VirtAddr(0);
                 bp.spec = BreakpointSpec::source(raw, address_index);
                 bp.resolved = false;

@@ -22,8 +22,17 @@ impl BreakpointManager {
             breakpoints: HashMap::new(),
             one_shot_hits: HashSet::new(),
             next_id: 0,
+            next_serial: 0,
             interrupted_hits: Vec::new(),
         }
+    }
+
+    /// A fresh [`Breakpoint::serial`], distinct from every one handed out by
+    /// this manager before.
+    pub fn take_serial(&mut self) -> u64 {
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        serial
     }
 
     /// Test-only: register a breakpoint directly, bypassing backend
@@ -43,10 +52,12 @@ impl BreakpointManager {
                 original: Some(BreakpointPatch::single(0x90)),
             },
         };
+        let serial = self.take_serial();
         self.breakpoints.insert(
             id,
             Breakpoint {
                 id,
+                serial,
                 address,
                 enabled,
                 symbol: None,
@@ -191,10 +202,12 @@ impl BreakpointManager {
         let pass_count = config.pass_count;
         let id = self.next_id;
         self.next_id += 1;
+        let serial = self.take_serial();
         self.breakpoints.insert(
             id,
             Breakpoint {
                 id,
+                serial,
                 address,
                 enabled: true,
                 symbol,
@@ -493,6 +506,12 @@ impl BreakpointManager {
         self.breakpoints.get(&id)
     }
 
+    /// The breakpoint numbered `id`, only if it is still the one created
+    /// with `serial` and not a later breakpoint that reused the id.
+    pub fn get_exact(&self, id: u32, serial: u64) -> Option<&Breakpoint> {
+        self.get(id).filter(|bp| bp.serial == serial)
+    }
+
     pub fn has_enabled_breakpoints(&self) -> bool {
         self.breakpoints
             .values()
@@ -628,6 +647,22 @@ mod tests {
         assert_eq!(manager.list().len(), 1);
         assert_eq!(manager.list()[0].id, 7);
         assert!(manager.has_enabled_hardware_breakpoints());
+    }
+
+    #[test]
+    fn reused_id_gets_a_new_serial() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(0, VirtAddr(0x1000), true, None);
+        let old = manager.get(0).unwrap().serial;
+        manager.remove_if_uninstalled(0, |_| Ok(())).unwrap();
+        assert_eq!(manager.next_id, 0);
+
+        manager.insert_for_test(0, VirtAddr(0x2000), true, None);
+        let new = manager.get(0).unwrap().serial;
+
+        assert_ne!(old, new);
+        assert!(manager.get_exact(0, old).is_none());
+        assert_eq!(manager.get_exact(0, new).unwrap().address, VirtAddr(0x2000));
     }
 
     #[test]

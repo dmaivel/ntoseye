@@ -115,11 +115,13 @@ impl BreakpointManager {
 
         let id = self.next_id;
         self.next_id += 1;
+        let serial = self.take_serial();
         let pass_count = config.pass_count;
         self.breakpoints.insert(
             id,
             Breakpoint {
                 id,
+                serial,
                 address,
                 enabled: true,
                 symbol,
