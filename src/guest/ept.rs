@@ -16,6 +16,12 @@ const LARGE: u64 = 1 << 7;
 /// control; bit 2 then covers supervisor mode only.
 const USER_EXECUTE: u64 = 1 << 10;
 
+/// The bits of which any being set makes an EPT entry present: user execute
+/// counts only under mode-based execute control (Intel SDM 29.3.2).
+fn present_mask(mode_based: bool) -> u64 {
+    READ | WRITE | EXECUTE | if mode_based { USER_EXECUTE } else { 0 }
+}
+
 /// Where a guest physical address goes through one EPT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EptTranslation {
@@ -62,11 +68,16 @@ pub fn translate(
     }
     let mut table = eptp & ADDRESS;
     let mut allowed = READ | WRITE | EXECUTE | USER_EXECUTE;
+    // A 4-level walk translates 48-bit addresses; higher bits would alias.
+    if gpa >> 48 != 0 {
+        return Some(EptTranslation::NotPresent { level: 4 });
+    }
+    let present = present_mask(mode_based);
     let mut entries = Vec::with_capacity(4);
     for (level, shift) in [(4u8, 39u32), (3, 30), (2, 21), (1, 12)] {
         let entry = read(table + ((gpa >> shift) & 0x1ff) * 8)?;
         entries.push(entry);
-        if entry & (READ | WRITE | EXECUTE) == 0 {
+        if entry & present == 0 {
             return Some(EptTranslation::NotPresent { level });
         }
         allowed &= entry;
@@ -118,6 +129,15 @@ impl Access {
         }
         Self(bits)
     }
+
+    /// The access in mode-based form: without mode-based execute control,
+    /// execute allows both supervisor and user mode.
+    fn normalized(self) -> Self {
+        match self.user_execute() {
+            Some(_) => self,
+            None => Self(self.0 | 0x80 | if self.execute() { 0x40 } else { 0 }),
+        }
+    }
 }
 
 /// `rwx`, with `u` or `-` added for user-mode execute under mode-based
@@ -166,7 +186,7 @@ pub fn leaves(
     ) -> Option<()> {
         let shift = 12 + 9 * u32::from(level - 1);
         for (index, entry) in read_table(table)?.into_iter().enumerate() {
-            if entry & (READ | WRITE | EXECUTE) == 0 {
+            if entry & present_mask(mode_based) == 0 {
                 continue;
             }
             let gpa = base | ((index as u64) << shift);
@@ -248,7 +268,7 @@ pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<Difference> {
     for pair in bounds.windows(2) {
         let (start, end) = (pair[0], pair[1]);
         let (first, second) = (at(first, &mut a, start), at(second, &mut b, start));
-        if first == second {
+        if first.map(Access::normalized) == second.map(Access::normalized) {
             continue;
         }
         match out.last_mut() {
@@ -306,7 +326,9 @@ impl<B: MemoryOps<PhysAddr>> MemoryOps<PhysAddr> for EptMemory<'_, B> {
     fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
         let mut done = 0;
         while done < buf.len() {
-            let gpa = addr + done as u64;
+            let gpa = addr.checked_add(done as u64).ok_or_else(|| {
+                Error::Hypervisor(format!("guest physical range at {addr:#x} wraps"))
+            })?;
             let in_page = (0x1000 - (gpa & 0xfff)) as usize;
             let chunk = in_page.min(buf.len() - done);
             self.host
@@ -535,5 +557,49 @@ mod tests {
         assert_eq!(buf, [0xfe, 0xff, 0x00, 0x01]);
         assert_eq!(guest.host_address(0x20_2010).unwrap(), 0x9_9010);
         assert!(guest.read_bytes(0x20_3000, &mut buf).is_err());
+    }
+
+    #[test]
+    fn user_execute_only_entries_are_present_only_under_mode_based_control() {
+        let memory = tables(USER_EXECUTE, USER_EXECUTE);
+        assert!(matches!(
+            walk(&memory, 0x20_1000, true),
+            Some(EptTranslation::Mapped(_))
+        ));
+        assert_eq!(
+            walk(&memory, 0x20_1000, false),
+            Some(EptTranslation::NotPresent { level: 4 })
+        );
+        let found = leaves(eptp(PML4), true, table_of(&memory)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].gpa, 0x20_1000);
+        assert!(
+            leaves(eptp(PML4), false, table_of(&memory))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn addresses_above_48_bits_are_not_present() {
+        let memory = tables(RWX, RWX);
+        assert_eq!(
+            walk(&memory, (1 << 48) | 0x20_1000, false),
+            Some(EptTranslation::NotPresent { level: 4 })
+        );
+    }
+
+    #[test]
+    fn differences_compare_execute_across_mode_based_forms() {
+        let leaf = |access| {
+            [Leaf {
+                gpa: 0x1000,
+                size: 0x1000,
+                access,
+            }]
+        };
+        let plain = leaf(Access::of(RWX, false));
+        assert!(differences(&plain, &leaf(Access::of(RWX | USER_EXECUTE, true))).is_empty());
+        assert_eq!(differences(&plain, &leaf(Access::of(RWX, true))).len(), 1);
     }
 }
