@@ -140,6 +140,7 @@ pub fn hypervisor_symbols(
 pub fn symbol_extents(
     names: &[(String, u32)],
     functions: &std::collections::HashMap<u32, u32>,
+    image: &[u8],
 ) -> std::collections::HashMap<u32, u32> {
     let mut begins: Vec<u32> = functions.keys().copied().collect();
     begins.sort_unstable();
@@ -148,11 +149,55 @@ pub fn symbol_extents(
         .filter_map(|&(_, rva)| {
             let length = match functions.get(&rva) {
                 Some(&length) => length,
-                None => begins.get(begins.partition_point(|&begin| begin <= rva))? - rva,
+                None => {
+                    let next = match begins.get(begins.partition_point(|&begin| begin <= rva)) {
+                        Some(&next) => next,
+                        None => u32::try_from(image.len()).ok()?,
+                    };
+                    let code = image.get(rva as usize..next as usize)?;
+                    leaf_length(code, u64::from(rva)).unwrap_or(next - rva)
+                }
             };
             Some((rva, length))
         })
         .collect()
+}
+
+/// The length of the leaf function (one with no `.pdata` entry) at the
+/// start of `code`, mapped at `ip`: through the first instruction that ends
+/// its control flow (`ret`, `jmp`, `int3`, `ud2`) past which no forward
+/// conditional branch of it jumps. Leaves are packed 16 bytes apart with no
+/// entry between them, so the next `.pdata` function can be several leaves
+/// away. An unconditional `jmp` forward is taken as a tail call, so a leaf
+/// laid out past one is cut short, which leaves the rest unnamed rather than
+/// misnamed. `None` when the code does not decode to such an end.
+fn leaf_length(code: &[u8], ip: u64) -> Option<u32> {
+    use iced_x86::{Decoder, DecoderOptions, FlowControl};
+    let mut decoder = Decoder::with_ip(64, code, ip, DecoderOptions::NONE);
+    let mut furthest = ip;
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        if instruction.is_invalid() {
+            return None;
+        }
+        let end = instruction.next_ip();
+        match instruction.flow_control() {
+            FlowControl::ConditionalBranch => {
+                furthest = furthest.max(instruction.near_branch_target());
+            }
+            FlowControl::Return
+            | FlowControl::UnconditionalBranch
+            | FlowControl::IndirectBranch
+            | FlowControl::Interrupt
+            | FlowControl::Exception
+                if end > furthest =>
+            {
+                return u32::try_from(end - ip).ok();
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -196,20 +241,26 @@ mod tests {
     }
 
     #[test]
-    fn a_leaf_function_ends_where_the_next_listed_function_begins() {
-        // 0x100 is in `.pdata`; the leaf at 0x400 is followed by an unnamed
-        // function at 0x420 and the one at 0x200 by another at 0x300.
+    fn a_leaf_function_ends_with_its_own_code() {
+        // 0x100, 0x300 and 0x420 are in `.pdata`. The leaf at 0x200 returns
+        // at once and another leaf follows it at 0x210, before 0x300; the
+        // one at 0x400 branches over its first return to a second.
         let functions =
             std::collections::HashMap::from([(0x100, 0x40), (0x300, 0x80), (0x420, 0x60)]);
+        let mut image = vec![0xccu8; 0x600];
+        image[0x200..0x206].copy_from_slice(&[0xb8, 2, 0, 0, 0, 0xc3]);
+        image[0x210..0x213].copy_from_slice(&[0x33, 0xc0, 0xc3]);
+        image[0x400..0x40d].copy_from_slice(&[
+            0x85, 0xc9, 0x74, 0x03, 0x33, 0xc0, 0xc3, 0xb8, 1, 0, 0, 0, 0xc3,
+        ]);
         let names = [
             ("HvCallSwitchVirtualAddressSpace".to_string(), 0x100),
             ("HvCallUnimplemented".to_string(), 0x200),
             ("HvCallGetPartitionId".to_string(), 0x400),
-            ("VmExitEntry".to_string(), 0x500),
         ];
         assert_eq!(
-            symbol_extents(&names, &functions),
-            std::collections::HashMap::from([(0x100, 0x40), (0x200, 0x100), (0x400, 0x20)])
+            symbol_extents(&names, &functions, &image),
+            std::collections::HashMap::from([(0x100, 0x40), (0x200, 6), (0x400, 0xd)])
         );
     }
 }

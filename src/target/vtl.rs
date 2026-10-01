@@ -575,7 +575,7 @@ impl Target {
             entries.sort_unstable();
             entries.dedup();
             let names = hypercalls::hypervisor_symbols(base, &table, &entries);
-            let extents = hypercalls::symbol_extents(&names, &loaded.functions);
+            let extents = hypercalls::symbol_extents(&names, &loaded.functions, &loaded.bytes);
             Ok(Some(hypercalls::HypervisorSymbols { names, extents }))
         }) else {
             return;
