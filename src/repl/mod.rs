@@ -881,6 +881,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 
                 log_input_line(command);
                 state.line = command.to_string();
+                // A Ctrl+C that ended the last command's step is spent.
+                state.ctx.target.interrupt.store(false, Ordering::SeqCst);
                 if state.dispatch_line(command)? == Flow::Quit {
                     break;
                 }
@@ -905,6 +907,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                         if !buffer.trim().is_empty() {
                             log_input_line(buffer.trim());
                             state.line = buffer.trim().to_string();
+                            // A Ctrl+C that ended the last command's step is spent.
+                            state.ctx.target.interrupt.store(false, Ordering::SeqCst);
                             match state.dispatch_line(&buffer)? {
                                 Flow::Quit => break,
                                 Flow::Continue | Flow::Denied | Flow::Jump(_) => {}
