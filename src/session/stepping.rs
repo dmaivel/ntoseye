@@ -841,7 +841,7 @@ impl Session {
         let watch = followed
             .as_ref()
             .and_then(|thread| self.watch_followed(thread, &temporary));
-        let outcome = self.wait_for_sites(followed.as_ref(), watch, &temporary, timeout, cancel);
+        let outcome = self.wait_for_sites(followed.as_ref(), watch.as_ref(), timeout, cancel);
 
         // A cancel or timeout leaves the VM running; halt it where it is (the
         // temp breakpoints' removal writes guest memory anyway).
@@ -849,7 +849,7 @@ impl Session {
             let _ = self.interrupt();
         }
         if let Some(watch) = watch {
-            self.remove_temporary(&[watch]);
+            self.end_follow_watch(watch);
         }
         self.remove_temporary(&temporary);
 
@@ -873,8 +873,7 @@ impl Session {
     fn wait_for_sites(
         &mut self,
         followed: Option<&ThreadScope>,
-        watch: Option<u32>,
-        sites: &[u32],
+        watch: Option<&FollowWatch>,
         timeout: Option<Duration>,
         cancel: &AtomicBool,
     ) -> Result<ContinueOutcome> {
@@ -891,14 +890,9 @@ impl Session {
             let outcome =
                 self.continue_until_break(Some(slice), cancel, ContinueDisposition::Handled)?;
             if let ContinueOutcome::Breakpoint { id, .. } = outcome
-                && Some(id) == watch
+                && let Some(watch) = watch.filter(|watch| watch.id == id)
             {
-                let now = self.target.thread_info_from_ethread(thread.ethread);
-                if now.as_ref().is_ok_and(|now| thread.exited(now)) {
-                    return Err(followed_thread_exited(thread));
-                }
-                let state = now.ok().and_then(|now| now.state);
-                self.arm_followed_sites(sites, about_to_run(state))?;
+                self.follow_watch_hit(watch)?;
                 continue;
             }
             if !matches!(outcome, ContinueOutcome::Running)
@@ -927,7 +921,7 @@ impl Session {
     /// little for a low-priority thread to be scheduled at all. `None`, the
     /// sites armed throughout, without the field's offset or a free debug
     /// register.
-    fn watch_followed(&mut self, thread: &ThreadScope, sites: &[u32]) -> Option<u32> {
+    pub fn watch_followed(&mut self, thread: &ThreadScope, sites: &[u32]) -> Option<FollowWatch> {
         if sites.is_empty() {
             return None;
         }
@@ -962,7 +956,29 @@ impl Session {
             let _ = self.arm_followed_sites(sites, true);
             return None;
         }
-        Some(watch)
+        Some(FollowWatch {
+            id: watch,
+            thread: thread.clone(),
+            sites: sites.to_vec(),
+        })
+    }
+
+    /// Take a stop on `watch`, a write to its thread's state: arm its sites
+    /// if the thread is about to run, or disarm them. An error when the
+    /// thread exited, which then never reaches them.
+    pub fn follow_watch_hit(&mut self, watch: &FollowWatch) -> Result<()> {
+        let now = self.target.thread_info_from_ethread(watch.thread.ethread);
+        if now.as_ref().is_ok_and(|now| watch.thread.exited(now)) {
+            return Err(followed_thread_exited(&watch.thread));
+        }
+        let state = now.ok().and_then(|now| now.state);
+        self.arm_followed_sites(&watch.sites, about_to_run(state))
+    }
+
+    /// Remove `watch`, leaving its sites as they are; the target must be
+    /// halted.
+    pub fn end_follow_watch(&mut self, watch: FollowWatch) {
+        self.remove_temporary(&[watch.id]);
     }
 
     /// Enable `sites` (`armed`) or disable them.
@@ -1237,6 +1253,16 @@ const STEP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// How often a run to a followed thread's sites checks that the thread has
 /// not exited (see [`Session::wait_for_sites`]).
 const FOLLOW_CHECK: Duration = Duration::from_secs(1);
+
+/// A watch on the `KTHREAD.State` of the thread a run's sites follow,
+/// which arms them only while the thread is about to run (see
+/// [`Session::watch_followed`]).
+pub struct FollowWatch {
+    /// The temporary write watchpoint's breakpoint id.
+    pub id: u32,
+    thread: ThreadScope,
+    sites: Vec<u32>,
+}
 
 /// Whether a thread in `state` is about to run, or runs: Standby or
 /// Running. A state that could not be read counts, so the sites stay armed.

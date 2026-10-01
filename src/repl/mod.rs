@@ -42,6 +42,7 @@ use crate::output::log_input_line;
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::session::Session;
+use crate::session::stepping::FollowWatch;
 use crate::symbols::ntoseye_home;
 #[cfg(all(unix, feature = "cli"))]
 use crate::target::InterruptRequester;
@@ -286,6 +287,9 @@ pub struct ReplState<'a> {
     /// keeps running and the host collects the stop on a later call with
     /// [`ReplState::collect_stop`].
     pub stop_wait: Option<StopWaitBudget>,
+    /// The watch on the thread a step's run-to site waits for, whose stops
+    /// the continue loop takes (see [`Session::watch_followed`]).
+    pub follow_watch: Option<FollowWatch>,
     /// Set once this dispatch rendered a stop the remote client has not seen
     /// (parked between calls, or collected while waiting for a halt), so a
     /// resume later on the same line is refused once rather than continuing
@@ -476,6 +480,7 @@ impl<'a> ReplState<'a> {
             source_cursor: store.source_cursor,
             disasm_search: store.disasm_search,
             stop_wait: None,
+            follow_watch: None,
             unseen_stop_rendered: false,
         }
     }
@@ -850,6 +855,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         source_cursor: None,
         disasm_search: DisasmSearch::default(),
         stop_wait: None,
+        follow_watch: None,
         unseen_stop_rendered: false,
     };
     // An error ends the prompt, not the cleanup below: breakpoints left

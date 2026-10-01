@@ -494,6 +494,33 @@ impl ReplState<'_> {
                         }
                     };
 
+                    // The thread a run-to waits for changed state: its site
+                    // is armed only while the thread is about to run.
+                    if let StopResolution::Breakpoint { breakpoint, .. } = &resolution
+                        && let Some(watch) = self
+                            .follow_watch
+                            .as_ref()
+                            .filter(|watch| watch.id == breakpoint.id)
+                    {
+                        if let Err(error) = self.ctx.follow_watch_hit(watch) {
+                            error!("{error}");
+                            break;
+                        }
+                        if interrupt_requested {
+                            print_stop_separator();
+                            print_break_context_at(self.ctx, None, None);
+                            break;
+                        }
+                        if let Err(error) = self
+                            .ctx
+                            .resume_with_disposition(ContinueDisposition::Handled)
+                        {
+                            error!("failed to continue: {error}");
+                            break;
+                        }
+                        continue;
+                    }
+
                     refresh_stop_caches_pre(self.ctx, &self.caches);
                     refresh_stop_caches_post(&self.ctx.target, &self.caches);
                     refresh_windows_thread_context_for_backend_thread(
@@ -767,6 +794,7 @@ impl ReplState<'_> {
             return Ok(self.current_ip() == Some(address.0));
         }
 
+        let followed = frame.as_ref().map(|frame| frame.thread.clone());
         let temp_id = match self.ctx.breakpoints.add_temporary_code(
             &mut *self.ctx.backend,
             &self.ctx.target,
@@ -783,14 +811,27 @@ impl ReplState<'_> {
                 return Ok(false);
             }
         };
+        if let Some(stale) = self.follow_watch.take() {
+            self.ctx.end_follow_watch(stale);
+        }
+        // The site is armed only while the stepping thread is about to run.
+        // Not for a bounded wait: it hands back a running target, and no
+        // stop is left to end the watch at.
+        self.follow_watch = followed
+            .filter(|_| self.stop_wait.is_none())
+            .and_then(|thread| self.ctx.watch_followed(&thread, &[temp_id]));
         self.caches.refresh_breakpoints(&self.ctx.breakpoints);
 
         let result = self.continue_vm_with_disposition(disposition);
 
         // A bounded wait that elapsed leaves the target running toward the
-        // temporary site; it is consumed by its own hit, so leave it armed.
+        // temporary site; it is consumed by its own hit, so leave it armed
+        // (and a watch to the continue loop, which takes its stops).
         if self.ctx.backend.is_running() {
             return result.map(|_| false);
+        }
+        if let Some(watch) = self.follow_watch.take() {
+            self.ctx.end_follow_watch(watch);
         }
 
         // Temporary sites are removed when the stop is consumed (a one-shot hit
