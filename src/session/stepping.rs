@@ -1075,7 +1075,9 @@ pub enum RunPast {
     /// Resumed alone past the instruction, it reached none of its successors
     /// within [`RUN_PAST_TIMEOUT`] and was broken in on elsewhere: it took
     /// an interrupt first, and the handler waits on a held vCPU (or, once the
-    /// held vCPUs were let run, the thread was switched out).
+    /// held vCPUs were let run, the thread was switched out). Or the vCPU
+    /// switched to another thread, which stopped on the kept site (see
+    /// [`keeper_slot`]).
     Diverted,
 }
 
@@ -1097,6 +1099,12 @@ enum WalkStep {
 /// finished alone, so waiting longer only delays the release that frees
 /// them. Under a busy Hyper-V guest those waits come many times a second.
 const RUN_PAST_TIMEOUT: Duration = Duration::from_millis(30);
+
+/// How many times a vCPU run alone past a kept site may stop on it again
+/// before the keeper is lifted. Each is an interrupt it took before the
+/// instruction, back on it without `RF`, or a target where `RF` does not
+/// get it past.
+const KEEPER_RETRIES: u32 = 3;
 
 /// How often a step's wait for its stop checks for Ctrl+C.
 const STEP_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -1120,7 +1128,10 @@ const RELEASE_BUDGET: Duration = if cfg!(test) {
 /// `rip` without a single step, which is unsafe on this backend (see
 /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]): plant temporary breakpoints on every
 /// address it can continue at, resume this vCPU alone, and take the stop.
-/// Other vCPUs stay held, so none can run through the lifted site.
+/// Other vCPUs stay held, but the vCPU itself can switch to another thread
+/// before it gets past, and that thread would run through the lifted site
+/// unseen; a debug-register keeper marks the site for it (see
+/// [`keeper_slot`]).
 fn run_past_site(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
@@ -1133,6 +1144,7 @@ fn run_past_site(
 ) -> Result<RunPast> {
     let successors = site_successors(debugger, register_map, thread, regs, rip, cr3)?;
     let sites = temporary_sites(backend, debugger, breakpoints, rip, cr3, &successors)?;
+    let keeper = keeper_slot(backend, breakpoints, &sites, successors.len());
     run_past(
         backend,
         register_map,
@@ -1141,7 +1153,46 @@ fn run_past_site(
         regs,
         &successors,
         &sites,
+        keeper,
     )
+}
+
+/// The debug-register slot that keeps the lifted site of a run past it
+/// marked: the one [`TemporarySites::Hardware`] holds for the instruction
+/// itself, or for software sites any slot no breakpoint holds. `None`
+/// without one; the site then goes unmarked while its vCPU runs alone.
+///
+/// A debug register traps on every vCPU, the stepping one too, so that one
+/// resumes with `RF` set (see [`pass_keeper`]). Another thread the vCPU
+/// switches to stops on the site before executing it, as on the planted
+/// breakpoint, which takes its hit once the run is over.
+fn keeper_slot(
+    backend: &dyn DebugBackend,
+    breakpoints: &BreakpointManager,
+    sites: &TemporarySites,
+    successors: usize,
+) -> Option<u8> {
+    match sites {
+        TemporarySites::Software => breakpoints.free_execute_slots(backend).first().copied(),
+        TemporarySites::Hardware(slots) => slots.get(successors).copied(),
+    }
+}
+
+/// Set `RF` on the selected vCPU when it stands on `rip`, where a keeper
+/// would otherwise trap it before it executes the instruction: an execute
+/// breakpoint is a fault, and `RF` suppresses it for one instruction.
+fn pass_keeper(backend: &mut dyn DebugBackend, register_map: &RegisterMap, rip: u64) -> Result<()> {
+    const RF: u64 = 1 << 16;
+    let mut regs = backend.read_registers()?;
+    if register_map.read_u64("rip", &regs)? != rip {
+        return Ok(());
+    }
+    let eflags = register_map.read_u64("eflags", &regs)?;
+    if eflags & RF == 0 {
+        register_map.write_u64("eflags", &mut regs, eflags | RF)?;
+        backend.write_registers(&regs)?;
+    }
+    Ok(())
 }
 
 /// A single step where the trap flag is unsafe: run the vCPU alone past the
@@ -1170,6 +1221,7 @@ fn step_without_trap(
         &regs,
         &successors,
         &sites,
+        None,
     )
 }
 
@@ -1265,8 +1317,9 @@ fn lift_site(backend: &mut dyn DebugBackend, address: u64, slot: Option<u8>) -> 
     }
 }
 
-/// Plant `sites` on every successor, run the vCPU alone past the instruction
-/// at its PC in `regs`, and lift them again whatever happened.
+/// Plant `sites` on every successor, and the `keeper` slot on the
+/// instruction at its PC in `regs`, run the vCPU alone past it, and lift
+/// them again whatever happened.
 fn run_past(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
@@ -1275,6 +1328,7 @@ fn run_past(
     regs: &[u8],
     successors: &[u64],
     sites: &TemporarySites,
+    keeper: Option<u8>,
 ) -> Result<RunPast> {
     let mut planted = Vec::with_capacity(successors.len());
     let result = run_to_successors(
@@ -1285,6 +1339,7 @@ fn run_past(
         regs,
         successors,
         sites,
+        keeper,
         &mut planted,
     );
     for (address, slot) in planted {
@@ -1304,6 +1359,7 @@ fn run_to_successors(
     regs: &[u8],
     successors: &[u64],
     sites: &TemporarySites,
+    keeper: Option<u8>,
     planted: &mut Vec<(u64, Option<u8>)>,
 ) -> Result<RunPast> {
     let rip = register_map.read_u64("rip", regs)?;
@@ -1311,13 +1367,30 @@ fn run_to_successors(
         let slot = sites.plant(backend, index, address)?;
         planted.push((address, slot));
     }
+    let rsp = register_map.read_u64("rsp", regs).ok();
+    // Best effort: without the keeper the site goes unmarked, as it did.
+    let mut keeper = keeper.filter(|&slot| {
+        backend
+            .set_hardware_breakpoint(slot, rip, HwBreakpointAccess::Execute, 1)
+            .is_ok()
+    });
+    if let Some(slot) = keeper {
+        planted.push((rip, Some(slot)));
+    }
+    let nt_thread = keeper.and_then(|_| nt_thread_on(debugger, thread));
+    // Stops of the same execution back on the instruction, each resumed
+    // with `RF` set again; one that keeps faulting there gets no keeper.
+    let mut kept_back = 0;
     let mut release = Release {
         rip,
-        rsp: register_map.read_u64("rsp", regs).ok(),
+        rsp,
         nt_thread: None,
         started: None,
     };
     loop {
+        if keeper.is_some() {
+            pass_keeper(backend, register_map, rip)?;
+        }
         backend.continue_current_thread()?;
         let (event, timed_out) = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
             Some(event) => (event, false),
@@ -1331,6 +1404,24 @@ fn run_to_successors(
         let now_regs = backend.read_registers()?;
         let now = register_map.read_u64("rip", &now_regs)?;
         if !timed_out || successors.contains(&now) {
+            if now == rip
+                && let Some(slot) = keeper
+            {
+                let same = nt_thread_on(debugger, thread) == nt_thread
+                    && register_map.read_u64("rsp", &now_regs).ok() == rsp;
+                if !same {
+                    // Another execution reached the site, which the
+                    // planted breakpoint takes once the run is over.
+                    return Ok(RunPast::Diverted);
+                }
+                kept_back += 1;
+                if kept_back > KEEPER_RETRIES {
+                    lift_site(backend, rip, Some(slot))?;
+                    planted.retain(|&site| site != (rip, Some(slot)));
+                    keeper = None;
+                }
+                continue;
+            }
             if now == rip {
                 return Err(Error::DebugInfo(format!(
                     "{thread} could not execute the instruction at {rip:#x}: resumed alone, it \
@@ -1355,7 +1446,15 @@ fn run_to_successors(
                      the Windows hypervisor); resume with g, disabling any breakpoint there first"
                 )));
             }
-            match release.run(backend, register_map, debugger, thread, successors, sites)? {
+            match release.run(
+                backend,
+                register_map,
+                debugger,
+                thread,
+                successors,
+                sites,
+                keeper.is_some(),
+            )? {
                 Released::Reached => return Ok(RunPast::Reached),
                 Released::Diverted => return Ok(RunPast::Diverted),
                 Released::Back => break,
@@ -1419,14 +1518,16 @@ impl Release {
         thread: &str,
         successors: &[u64],
         sites: &TemporarySites,
+        kept: bool,
     ) -> Result<Released> {
         self.started.get_or_insert_with(Instant::now);
         let nt_thread = *self
             .nt_thread
             .get_or_insert_with(|| nt_thread_on(debugger, thread));
-        // Without a slot left for it, the instruction goes unmarked: a vCPU
-        // returning to it runs it, and stops on a successor.
-        let site = if successors.contains(&self.rip) || !sites.has_room(successors.len()) {
+        // A keeper marks the instruction already. Without one, or a slot
+        // left for it, it goes unmarked: a vCPU returning to it runs it,
+        // and stops on a successor.
+        let site = if kept || successors.contains(&self.rip) || !sites.has_room(successors.len()) {
             None
         } else {
             Some(sites.plant(backend, successors.len(), self.rip)?)

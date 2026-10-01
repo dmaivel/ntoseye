@@ -96,6 +96,8 @@ pub struct MockBackend {
     step_landings: VecDeque<Landing>,
     /// Where runs of every vCPU stop on a breakpoint, before `released_to`.
     schedule: VecDeque<Landing>,
+    /// Where runs of the lone vCPU stop on a breakpoint, before `landings`.
+    alone_schedule: VecDeque<Landing>,
 }
 
 /// Where processor 0 stands after a mock step or run: its IP and stack
@@ -139,6 +141,7 @@ impl Default for MockBackend {
             threads: Arc::new(Mutex::new(HashMap::new())),
             step_landings: VecDeque::new(),
             schedule: VecDeque::new(),
+            alone_schedule: VecDeque::new(),
         }
     }
 }
@@ -295,11 +298,15 @@ impl DebugBackend for MockBackend {
     fn halts_in_windows_hypervisor(&self) -> bool {
         self.single_step_unsafe
     }
-    /// The lone vCPU reaches `landings`, then `lands_at`, and reports a
-    /// breakpoint there.
+    /// The lone vCPU reaches `alone_schedule`, then `landings`, then
+    /// `lands_at`, and reports a breakpoint there.
     fn continue_current_thread(&mut self) -> Result<()> {
         self.running = true;
-        if let Some(address) = self.landings.pop_front().or(self.lands_at) {
+        if let Some(landing) = self.alone_schedule.pop_front() {
+            self.land(landing);
+            self.interrupt_events
+                .push_back(breakpoint_event(landing.rip));
+        } else if let Some(address) = self.landings.pop_front().or(self.lands_at) {
             self.set("rip", address);
             self.interrupt_events.push_back(breakpoint_event(address));
         }
@@ -1593,6 +1600,61 @@ fn a_walk_step_that_reached_its_successor_on_another_stack_is_followed() {
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
     assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A hit stepped over where single steps are unsafe runs its vCPU alone
+/// with the site lifted, at `rip` 0x1000 in [`WALKED`] on stack 0x2000. A
+/// debug-register keeper marks the site meanwhile.
+fn kept_step_over(alone: &[Landing]) -> (Session, HardwareWrites) {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        one_vcpu: true,
+        lands_at: Some(0x1001),
+        alone_schedule: alone.iter().copied().collect(),
+        ..MockBackend::default()
+    };
+    backend.land(Landing {
+        rip: 0x1000,
+        rsp: 0x2000,
+        ethread: WALKED,
+    });
+    let (hardware, threads) = (backend.hardware_writes.clone(), backend.threads.clone());
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    session.target.test_current_threads = Some(threads);
+    session.current_thread = "p01.01".into();
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    (session, hardware)
+}
+
+/// Another thread the stepping vCPU switches to stops on the lifted site,
+/// rather than running through it unseen: the step-over ends there, and
+/// that thread's hit is the planted breakpoint's once it is back.
+#[test]
+fn a_thread_that_reaches_a_site_while_it_is_stepped_over_stops_there() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, hardware) = kept_step_over(&[at(0x1000, 0x8000, OTHER)]);
+
+    let stepped = session.step_over_site_at_pc().unwrap();
+    assert_eq!(stepped, Some(RunPast::Diverted));
+    assert_eq!(*hardware.lock(), [(0, Some(0x1000)), (0, None)]);
+}
+
+/// The stepping execution back on the kept site (it took an interrupt
+/// first) is resumed past it with `RF` set, not taken for another thread.
+#[test]
+fn a_step_over_back_on_its_kept_site_goes_on_past_it() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, hardware) = kept_step_over(&[at(0x1000, 0x2000, WALKED)]);
+
+    let stepped = session.step_over_site_at_pc().unwrap();
+    assert_eq!(stepped, Some(RunPast::Reached));
+    assert_eq!(*hardware.lock(), [(0, Some(0x1000)), (0, None)]);
+    let registers = session.backend.read_registers().unwrap();
+    let eflags = session.register_map.read_u64("eflags", &registers).unwrap();
+    assert_ne!(eflags & (1 << 16), 0, "resumed on the kept site without RF");
 }
 
 /// A walk whose step ended on a breakpoint in another thread surfaces it;

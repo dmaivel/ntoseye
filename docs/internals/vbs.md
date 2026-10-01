@@ -66,6 +66,8 @@ Some instructions, for example `sysenter`, `xabort`, and `rsm`, have no successo
 
 In secure-kernel code, the temporary breakpoints are debug-register breakpoints in free slots, so `ntoseye` does not write VTL1 code. A VTL1 step needs one free slot for each successor, and if one more slot is free, the step also uses it to mark the instruction while the held vCPUs run.
 
+To resume from a breakpoint, `ntoseye` takes the breakpoint out for the run. The vCPU can switch to another thread before it gets past the instruction, and that thread would then run through the site unseen. So while the run lasts, a debug-register breakpoint in a free slot marks the site, and the vCPU resumes with `RF` set so that it executes the instruction itself. Another thread that gets to the site stops there and ends the run, and its hit is reported when the breakpoint is back in place. Without a free slot, the site is unmarked during the run.
+
 `ntoseye` does not step a `syscall`, `int`, `ud2`, or hypercall in VTL1 and gives an error, because the secure kernel enters these instructions through its own entry and IDT, which NT's entry and IDT do not describe.
 
 ### When the vCPU waits on a held vCPU
