@@ -5243,6 +5243,19 @@ class HypervisorVtl:
         """
         The address of the hypervisor's context object for this VTL.
         """
+    def disassemble(self, /, address: int, count: int, physical: bool = False) -> list[DisassembledInstruction]:
+        """
+        Disassemble `count` instructions of this VTL's guest at `address`, as
+        `!hvu` does: read as `read` reads it (guest virtual, or with
+        `physical=True` guest physical), and decoded in the mode the VTL left
+        off in, 64-bit in IA-32e mode with a 64-bit code segment, else
+        32-bit. Branch and RIP-relative comments are addresses: there are no
+        symbols for a guest. The listing stops at the first unreadable page,
+        so it can hold fewer than `count` instructions. Raises `NtoseyeError`
+        when the first instruction is unreadable, without the VTL's eVMCS
+        state, for real-mode or 16-bit code, and for a virtual address
+        unless the guest is in 4-level long-mode paging.
+        """
     @property
     def ept_pointer(self, /) -> int |None:
         """
