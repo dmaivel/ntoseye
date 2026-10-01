@@ -1204,6 +1204,12 @@ class Breakpoint:
         The number of physical hits.
         """
     @property
+    def hypercall(self, /) -> HypercallFilter |None:
+        """
+        What a hypercall breakpoint stops on: its call code and the caller's
+        partition and VP, if restricted. `None` for any other breakpoint.
+        """
+    @property
     def id(self, /) -> int:
         """
         The breakpoint ID, which does not change.
@@ -1312,6 +1318,12 @@ class BreakpointStatus(BaseRecord):
     @property
     def hit_count(self, /) -> int: ...
     @property
+    def hypercall(self, /) -> HypercallFilter |None:
+        """
+        The hypercall a hit must be handling, and from which caller, for a
+        hypercall breakpoint (`!hvbp`). None for any other breakpoint.
+        """
+    @property
     def id(self, /) -> int: ...
     @property
     def one_shot(self, /) -> bool:
@@ -1406,6 +1418,18 @@ class Breakpoints:
         reboot. The secure kernel (VTL1) accepts only this kind of breakpoint,
         for example `add(dbg.secure_kernel.symbols["securekernel!Func"],
         hardware=True)`.
+        """
+    def add_hypercall(self, /, call: int |str, partition: int |None = None, vp: int |None = None, *, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
+        """
+        Add a hypercall breakpoint, as `!hvbp` does: a debug-register execute
+        breakpoint on the Windows hypervisor's handler of `call`, a call code
+        or a name (`"HvCallPostMessage"`, or `"HvCall0004"` as `x hv!*` names
+        a code the TLFS does not), that stops only when the caller made that
+        call, and, with `partition` (a partition ID) and `vp` (a VP index in
+        it), only when the caller is that partition or VP. ntoseye resumes
+        the other hits without a stop, before any `when=` callback runs. A
+        hit whose caller ntoseye cannot tell stops. Needs the gdb backend and
+        the VM's hv-evmcs enlightenment. This feature is experimental.
         """
     def add_pattern(self, /, pattern: str, condition: str |None = None, *, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None, limit: int = 256) -> list[Breakpoint]:
         """
@@ -5168,6 +5192,33 @@ class Hypercall(BaseRecord):
     def variable_header(self, /) -> bool:
         """
         Whether the call takes a variable-size header.
+        """
+
+@final
+class HypercallFilter(BaseRecord):
+    """
+    What a hypercall breakpoint (`!hvbp`) stops on: one call code, from
+    any caller or from one partition or VP of the Windows hypervisor.
+    """
+    @property
+    def code(self, /) -> int:
+        """
+        The call code: the low 16 bits of the caller's RCX.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The TLFS name, or None for a code that the TLFS does not list.
+        """
+    @property
+    def partition(self, /) -> int |None:
+        """
+        The caller's partition ID. None for any caller.
+        """
+    @property
+    def vp(self, /) -> int |None:
+        """
+        The caller's VP index in `partition`. None for any VP.
         """
 
 @final
