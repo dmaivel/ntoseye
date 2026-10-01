@@ -749,6 +749,30 @@ fn last_write(window: &[Instruction], register: Register) -> Option<usize> {
     })
 }
 
+/// Copies of a register followed back from a `vmptrld`: the compiler may
+/// move the VMCS object between registers before loading from it.
+const MAX_COPIES: usize = 3;
+
+/// The instruction in `window` that last wrote `register`, followed back
+/// through register-to-register copies.
+fn object_load(window: &[Instruction], mut register: Register) -> Option<usize> {
+    let mut end = window.len();
+    for _ in 0..=MAX_COPIES {
+        let write = last_write(&window[..end], register)?;
+        let instruction = &window[write];
+        if instruction.mnemonic() == Mnemonic::Mov
+            && instruction.op1_kind() == OpKind::Register
+            && instruction.op1_register().is_gpr64()
+        {
+            register = instruction.op1_register().full_register();
+            end = write;
+            continue;
+        }
+        return Some(write);
+    }
+    None
+}
+
 /// `[base + displacement]` with no index, segment, or stack base.
 fn plain_memory(instruction: &Instruction) -> Option<(Register, i64)> {
     let base = instruction.memory_base();
@@ -782,7 +806,7 @@ fn vmcs_candidates(image: &ImageView<'_>) -> Vec<(i64, i64)> {
         for instruction in &mut decoder {
             if instruction.mnemonic() == Mnemonic::Vmptrld
                 && let Some((object, address)) = plain_memory(&instruction)
-                && let Some(load) = last_write(&window, object)
+                && let Some(load) = object_load(&window, object)
                 && window[load].mnemonic() == Mnemonic::Mov
                 && window[load].op1_kind() == OpKind::Memory
                 && let Some((base, mut offset)) = plain_memory(&window[load])
@@ -1127,6 +1151,21 @@ mod tests {
                 .contains(&load(load(gs(0x38), 0), 0x408))
         );
         assert_eq!(layout.privileges, 0x1f0);
+    }
+
+    #[test]
+    fn a_vmcs_object_moved_between_registers_is_still_found() {
+        use iced_x86::code_asm::*;
+        let mut builder = build_26100();
+        builder.function(|a| {
+            a.mov(rdx, qword_ptr(rax + 0x13e8)).unwrap();
+            a.mov(r8, rdx).unwrap();
+            a.mov(rcx, r8).unwrap();
+            a.vmptrld(qword_ptr(rcx + 0x188)).unwrap();
+            a.ret().unwrap();
+        });
+        let vmcs = derive(&builder.image()).unwrap().vmcs;
+        assert!(vmcs.contains(&(0x13e8, 0x188)), "{vmcs:x?}");
     }
 
     #[test]

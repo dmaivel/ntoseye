@@ -507,6 +507,19 @@ impl ReplState<'_> {
             }
         }
         print_padded_table(table);
+        let unlinked = partition
+            .virtual_processors
+            .iter()
+            .flat_map(|vp| &vp.vtls)
+            .all(|vtl| vtl.vmcs.is_none());
+        if unlinked && self.ctx.target.evmcs_found() == Some(true) {
+            outln!(
+                "{}\n",
+                ui::muted(
+                    "eVMCS pages were found, but not where this hypervisor build's VTL contexts keep theirs"
+                )
+            );
+        }
         Ok(())
     }
 
