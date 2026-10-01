@@ -465,7 +465,12 @@ pub fn print_break_context_at(
                             format!("{} {}", ui::muted("saved"), ui::symbol(&saved.describe()))
                         }),
                 );
-                if saved.iter().any(|saved| saved.context.may_be_stale) {
+                // The note explains why VTL0 is not selected; a stale VTL1
+                // is marked on its own line.
+                if saved
+                    .iter()
+                    .any(|saved| saved.context.vtl == 0 && saved.context.may_be_stale)
+                {
                     children.push(ui::muted(
                         "stopped on the hypervisor's VM-exit entry: KVM writes the saved state when it \
                          enters the hypervisor, so it may still describe the previous exit and is not \

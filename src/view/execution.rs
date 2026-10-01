@@ -89,6 +89,8 @@ shapes! {
         /// may still describe the exit before the one in progress. The
         /// guest's general-purpose registers are then still in the vCPU's own
         /// registers. A breakpoint on `host_rip` fires after the write.
+        /// Only the current state, the exiting VTL's, can be behind; when no
+        /// state of the VP is current, every state is marked.
         may_be_stale: bool,
         /// The guest's general-purpose registers other than `rsp` at the last
         /// exit (`rax` to `r15`), read where the hypervisor's VM-exit entry

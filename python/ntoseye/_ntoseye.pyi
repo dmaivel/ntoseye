@@ -10312,6 +10312,8 @@ class SavedVtlState(BaseRecord):
         may still describe the exit before the one in progress. The
         guest's general-purpose registers are then still in the vCPU's own
         registers. A breakpoint on `host_rip` fires after the write.
+        Only the current state, the exiting VTL's, can be behind; when no
+        state of the VP is current, every state is marked.
         """
     @property
     def rflags(self, /) -> int: ...
