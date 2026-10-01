@@ -238,6 +238,8 @@ Instruction breakpoints, which you set from the disassembly view, use `bp <addre
 
 Data breakpoints use {command}`ba` on variable storage, including fields and array elements. Locals held in registers and bitfields have no separate address that ntoseye can watch. Only KD and KDNET support data breakpoints.
 
+No DAP breakpoint type names a hypercall's caller, so set a [hypercall breakpoint](../using/breakpoints.md#hypercall-breakpoints) with {command}`!hvbp` in the Debug Console. The client's continue honors its filter, and its hit is reported as a breakpoint stop.
+
 ntoseye does not support exception breakpoints, so configure the exception policy with {command}`sx` commands in the console. When `sxe ld` causes a stop at a module load, the adapter reports it with the reason `module load`, and the console shows the stop's `ModLoad:` line. A stop from `sxe ud` has the reason `module unload`, with its `Unload module` line.
 
 All breakpoint types accept conditions and hit counts. `hitCondition` must be a decimal pass count, so values such as `>5` or `0x10` are not valid. Breakpoint conditions in the editor also use decimal literals, while conditions in the console use the session radix.

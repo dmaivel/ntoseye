@@ -57,6 +57,24 @@ No target sets a breakpoint for one thread. A software site is a byte in a page 
 
 If the guest does not have that processor, `ntoseye` gives an error when you set the breakpoint, because the filter can never match and the breakpoint can never stop.
 
+## Hypercall breakpoints
+
+{command}`!hvbp` `<code|name> [partition-id [vp-index]]` stops when a partition calls a hypercall of the Windows hypervisor, which runs under VBS, Hyper-V, and WSL2. It sets a hardware execute breakpoint on the call's handler in the hypervisor, so it needs the `gdb` backend and a free debug register, and the hypervisor's partitions need the VM's `hv-evmcs` enlightenment ([VBS](../platforms/vbs.md#hypercalls)). The call is a call code or a name, either the TLFS name (`HvCallPostMessage`) or the name that `x hv!*` gives a code that the TLFS does not name (`HvCall0004`). It takes the options `/1`, `/c`, and `/w`, and `if` and `do`, as {command}`ba` does, but not `/p` and `/t`, which name NT processes and threads, and not a pass count, because the IDs take its place. Set a pass count with {command}`bpp`.
+
+The filter works like `/t`: the hypervisor runs the handler for every caller, and for every code that shares the handler, so `ntoseye` checks each hit and resumes the target past the ones that do not match, without showing a stop. The caller is the virtual processor whose exit the processor handles: the guest partition's VP that it serves, or else the root partition's VP on that processor. The call code is the low 16 bits of that VP's RCX at its `VMCALL`. Without IDs, the breakpoint stops for that call from any caller. With a partition ID, and a VP index in it, it stops only for that caller. The IDs use the current radix, and `ntoseye` gives an error for a partition or VP that the hypervisor does not have.
+
+If `ntoseye` cannot tell the caller of a hit, or the caller matches but `ntoseye` cannot read its registers, it reports the hit, so a filter does not hide a stop from you. Each declined hit costs a walk of the hypervisor's partitions and a resume, so a filter on a call that the whole system makes often slows the session down.
+
+A condition is evaluated at the handler, with the registers of the hypervisor, not of the caller.
+
+{command}`bl` shows the filter in the Process/Thread column (`hypercall 0x000b HvCallSendSyntheticClusterIpi from partition 0x3 VP 1`), the stop names the breakpoint as a hypercall breakpoint, and the stop header names the caller and its call: `serving partition 0x3 VP 1` for a guest partition's VP, or the saved VTL state of the root partition's VP, each with the decoded hypercall. The filter applies wherever the target resumes: {command}`g`, the SDK's run control (`dbg.breakpoints.add_hypercall()`), a DAP client's continue, and the MCP `command` tool. A DAP client sets one with `!hvbp` in the Debug Console.
+
+```text
+!hvbp HvCallSendSyntheticClusterIpi 3
+!hvbp /1 HvCallPostMessage 1 0
+g
+```
+
 ## The KD breakpoint table
 
 KD has a software-breakpoint table with a fixed size of 32 entries. If you kill a session with `SIGKILL`, its entries stay installed and can prevent later breakpoints at the same addresses.
