@@ -1361,6 +1361,9 @@ impl Target {
     /// processor serves no guest's VP and no state of its root VP is
     /// current, which leaves the caller unknown.
     pub fn hypercall_caller(&self, cr3: u64, rip: u64, number: u16) -> Option<HypercallCaller> {
+        if let Some(caller) = self.loaded_hypercall_caller(cr3, rip, number) {
+            return Some(caller);
+        }
         let partitions = self.hypervisor_partitions().ok()?;
         if let Some(served) = self.served_guest_vp_in(&partitions, cr3, rip, number) {
             let input = match &served.state {
@@ -1413,6 +1416,36 @@ impl Target {
         let loaded = hypervisor_image(&memory, &image)?;
         let table = hv_layout::hypercall_table(&loaded.view())?;
         Ok((loaded.base, table))
+    }
+
+    /// [`Self::hypercall_caller`] without a partition walk, for each hit of
+    /// a hypercall breakpoint: the caller is the VP and VTL whose eVMCS the
+    /// processor's assist page names loaded, found in the eVMCS pages the
+    /// last walk named (see [`Guest::vp_slot`]); its registers are those
+    /// that eVMCS's exit saved. `None` when no eVMCS is known loaded there,
+    /// or no walk names it, which leaves the caller to the walk.
+    fn loaded_hypercall_caller(&self, cr3: u64, rip: u64, number: u16) -> Option<HypercallCaller> {
+        let guest = self.guest().ok()?;
+        let mask = self.arch().dtb_page_mask();
+        let loaded = guest
+            .cached_evmcs_pages()?
+            .loaded_for_root(&*self.phys, cr3, mask)?;
+        let slot = guest.vp_slot(loaded.address, loaded.ept_pointer, || {
+            Some(hypervisor::vp_slots(&self.hypervisor_partitions().ok()?))
+        })?;
+        let entered = self
+            .breakpoint_stop
+            .as_ref()
+            .filter(|stop| stop.processor == number && stop.rip == rip);
+        let registers = self.saved_general_registers(cr3 & mask, rip, &loaded, true, entered);
+        let xmm = self.saved_xmm_registers(cr3 & mask, rip, &loaded, &registers);
+        Some(HypercallCaller {
+            partition: slot.partition,
+            root: slot.root,
+            vp: slot.vp,
+            vtl: slot.vtl,
+            input: self.exit_hypercall(&loaded, registers.as_ref(), xmm),
+        })
     }
 
     fn walk_partitions(

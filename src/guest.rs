@@ -207,6 +207,10 @@ pub struct Guest {
     /// (its low bit set for names made with the image's file), or `None`
     /// when its hypercall table was not found.
     hypervisor_symbols: Mutex<HashMap<u64, Option<Arc<hypercalls::HypervisorSymbols>>>>,
+    /// The VP and VTL each eVMCS page belongs to, by its address, from the
+    /// last partition walk: a hypercall breakpoint's hit names its caller by
+    /// the eVMCS loaded on its processor without walking again.
+    vp_slots: Mutex<HashMap<u64, hypervisor::VpSlot>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -282,6 +286,7 @@ impl Guest {
             exit_register_layouts: Mutex::new(HashMap::new()),
             partition_layouts: Mutex::new(HashMap::new()),
             hypervisor_symbols: Mutex::new(HashMap::new()),
+            vp_slots: Mutex::new(HashMap::new()),
         }
     }
 
@@ -371,6 +376,17 @@ impl Guest {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         remembered(&mut symbols, key, name)
+    }
+
+    /// [`hypervisor::slot_for`] in the slots of the last partition walk.
+    pub fn vp_slot(
+        &self,
+        address: u64,
+        ept_pointer: u64,
+        walk: impl FnOnce() -> Option<HashMap<u64, hypervisor::VpSlot>>,
+    ) -> Option<hypervisor::VpSlot> {
+        let mut slots = self.vp_slots.lock().unwrap_or_else(PoisonError::into_inner);
+        hypervisor::slot_for(&mut slots, address, ept_pointer, walk)
     }
 
     fn memo(&self) -> MutexGuard<'_, HaltMemo> {

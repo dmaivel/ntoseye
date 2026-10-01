@@ -63,7 +63,7 @@ If the guest does not have that processor, `ntoseye` gives an error when you set
 
 The filter works like `/t`: the hypervisor runs the handler for every caller, and for every code that shares the handler, so `ntoseye` checks each hit and resumes the target past the ones that do not match, without showing a stop. The caller is the virtual processor whose exit the processor handles: the guest partition's VP that it serves, or else the root partition's VP on that processor. The call code is the low 16 bits of that VP's RCX at its `VMCALL`. Without IDs, the breakpoint stops for that call from any caller. With a partition ID, and a VP index in it, it stops only for that caller. The IDs use the current radix, and `ntoseye` gives an error for a partition or VP that the hypervisor does not have.
 
-If `ntoseye` cannot tell the caller of a hit, or the caller matches but `ntoseye` cannot read its registers, it reports the hit, so a filter does not hide a stop from you. Each declined hit costs a walk of the hypervisor's partitions and a resume, so a filter on a call that the whole system makes often slows the session down.
+If `ntoseye` cannot tell the caller of a hit, or the caller matches but `ntoseye` cannot read its registers, it reports the hit, so a filter does not hide a stop from you. A declined hit costs a resume and a few reads: `ntoseye` names the caller by the eVMCS loaded on the hit's processor, which it maps to its partition and VP with the last walk of the hypervisor's partitions, and walks again only when a partition is new. A filter on a call that the whole system makes often still halts the target at every hit.
 
 A condition is evaluated at the handler, with the registers of the hypervisor, not of the caller.
 

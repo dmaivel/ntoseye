@@ -4,7 +4,7 @@
 //! ring whose children name it as parent, and each VP's current VTL must be
 //! the entry of its VTL array that its level selects.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::EvmcsState;
 use super::hv_layout::{PartitionLayout, Value};
@@ -401,6 +401,66 @@ pub fn partitions(
     Ok(result)
 }
 
+/// The VP and VTL an eVMCS page belongs to, with the EPT pointer its state
+/// held when the partitions were walked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VpSlot {
+    pub partition: u64,
+    /// The partition is the root partition.
+    pub root: bool,
+    pub vp: u32,
+    pub vtl: u8,
+    pub ept_pointer: u64,
+}
+
+/// Every eVMCS page `partitions` name, by address, with its VP and VTL.
+pub fn vp_slots(partitions: &[HvPartition]) -> HashMap<u64, VpSlot> {
+    partitions
+        .iter()
+        .flat_map(|partition| {
+            partition.virtual_processors.iter().flat_map(move |vp| {
+                vp.vtls.iter().filter_map(move |vtl| {
+                    let state = vtl.state?;
+                    Some((
+                        vtl.vmcs?,
+                        VpSlot {
+                            partition: partition.id,
+                            root: partition.parent.is_none(),
+                            vp: vp.index,
+                            vtl: vtl.level,
+                            ept_pointer: state.ept_pointer,
+                        },
+                    ))
+                })
+            })
+        })
+        .collect()
+}
+
+/// The VP and VTL whose eVMCS is at `address`, now under the EPT
+/// `ept_pointer`, from `slots` (the last walk's), or from a walk that `walk`
+/// makes, which replaces them, when they do not know the page or knew it
+/// under another EPT: a page freed with its partition and reused by a new
+/// one has a new partition's EPT.
+pub fn slot_for(
+    slots: &mut HashMap<u64, VpSlot>,
+    address: u64,
+    ept_pointer: u64,
+    walk: impl FnOnce() -> Option<HashMap<u64, VpSlot>>,
+) -> Option<VpSlot> {
+    let known = |slots: &HashMap<u64, VpSlot>| {
+        slots
+            .get(&address)
+            .filter(|slot| slot.ept_pointer == ept_pointer)
+            .copied()
+    };
+    if let Some(slot) = known(slots) {
+        return Some(slot);
+    }
+    *slots = walk()?;
+    known(slots)
+}
+
 /// What a vCPU on processor `number` runs when that is a guest partition's
 /// VP (a Hyper-V VM or WSL2 inside the target), such as `partition 0x3 VP 1`.
 /// The vCPU then shows that guest's registers, so its root is none of NT's.
@@ -780,5 +840,46 @@ mod tests {
         assert_eq!(served(Some(0x6000)), Some((8, 1, 0, Some(true))));
         assert_eq!(served(Some(0x2000)), None, "the root's VTL1");
         assert_eq!(served(None), Some((8, 0, 0, Some(false))));
+    }
+
+    /// A hit's caller comes from the last walk's slots without walking
+    /// again; a page the walk did not know, or knew under another EPT (freed
+    /// with a deleted partition and reused by a new one), walks again, and
+    /// the new walk's slots replace the old.
+    #[test]
+    fn an_evmcs_names_its_vp_until_its_ept_changes() {
+        let slot = |partition, ept_pointer| VpSlot {
+            partition,
+            root: false,
+            vp: 1,
+            vtl: 0,
+            ept_pointer,
+        };
+        let mut slots = HashMap::from([(0x5000, slot(4, 0xa01e))]);
+        let walked = std::cell::Cell::new(0);
+        let walk = |result: HashMap<u64, VpSlot>| {
+            walked.set(walked.get() + 1);
+            Some(result)
+        };
+
+        assert_eq!(
+            slot_for(&mut slots, 0x5000, 0xa01e, || walk(HashMap::new())),
+            Some(slot(4, 0xa01e))
+        );
+        assert_eq!(walked.get(), 0, "known: no walk");
+
+        let reused = HashMap::from([(0x5000, slot(5, 0xb01e))]);
+        assert_eq!(
+            slot_for(&mut slots, 0x5000, 0xb01e, || walk(reused)),
+            Some(slot(5, 0xb01e))
+        );
+        assert_eq!(walked.get(), 1, "another EPT: walked again");
+
+        assert_eq!(
+            slot_for(&mut slots, 0x9000, 0xb01e, || walk(HashMap::new())),
+            None
+        );
+        assert_eq!(walked.get(), 2, "unknown page: walked again");
+        assert!(slots.is_empty(), "the new walk's slots replace the old");
     }
 }
